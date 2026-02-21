@@ -1,14 +1,20 @@
-<!-- Copyright (c) 2026 Hal Hildebrand. All rights reserved. -->
-
 # Nexus — Claude Code Directives
 
-## Copyright
+## License & Copyright
 
-All source files in this repository must include the following header as the first line:
+This repo is **AGPL-3.0** — see `LICENSE`. The license file covers all files; you do not need to annotate every file.
 
-- **Python**: `# Copyright (c) 2026 Hal Hildebrand. All rights reserved.`
-- **Markdown / command / skill files**: `<!-- Copyright (c) 2026 Hal Hildebrand. All rights reserved. -->`
-- **YAML / TOML / Shell**: `# Copyright (c) 2026 Hal Hildebrand. All rights reserved.`
+For Python source files, use the short SPDX form where conventional:
+```python
+# SPDX-License-Identifier: AGPL-3.0-or-later
+```
+Add a copyright line below for substantial new modules (not boilerplate):
+```python
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+```
+
+**Agent files, skill files, command `.md` files, config files**: no header needed — omit to save tokens.
 
 ## Project Overview
 
