@@ -359,7 +359,7 @@ When multiple `--corpus` flags are used, each corpus is queried separately (they
 
 Resolution strategy:
 1. Each corpus queried independently using its own embedding function
-2. Top-k results retrieved per corpus (proportional to `--max-results`)
+2. Top-k results retrieved per corpus: each corpus fetches `max(5, (max_results // num_corpora) * 2)` results. Over-fetching is harmless since reranking follows; the multiplier ensures sufficient candidates for the reranker even with many corpora.
 3. Combined result set reranked using `voyageai.Client().rerank(query=query, documents=[c.text for c in combined], model="rerank-2.5", top_k=max_results)` to produce a unified ranked list. `rerank-2.5` verified against voyageai.com/docs/pricing 2026-02-21 ($0.05/1M tokens; 200M free). `rerank-2.5-lite` ($0.02/1M) is a lower-cost alternative configurable via `embeddings.rerankerModel`.
 4. `--no-rerank` skips step 3 and interleaves results round-robin instead
 
@@ -435,7 +435,7 @@ nx scratch promote <id> --project BFDB_active --title findings.md   # → T2
 ```
 
 - Uses `DefaultEmbeddingFunction` (local ONNX, no API call) — fast, no network dependency
-- Session ID determined from `CLAUDE_SESSION_ID` env var (set by SessionStart hook)
+- Session ID determined from `CLAUDE_SESSION_ID` env var (provided by Claude Code at session start — the hook reads it, does not set it)
 - On crash: T1 is in-memory; data is lost by design — scratch is ephemeral
 
 ## Memory Bank Replacement
@@ -519,7 +519,7 @@ nx pm status [--project myrepo]
 # Phase management
 nx pm phase 2                          # retrieve phase-2 context doc
 nx pm phase next                       # transition to next phase:
-                                       #   1. reads current N from any doc tagged phase:N
+                                       #   1. reads current N as MAX(phase tag integer) across all docs tagged phase:N in the project
                                        #   2. creates new T2 entry title=phases/phase-{N+1}/context.md,
                                        #      tags=pm,phase:{N+1},context, ttl=permanent
                                        #   3. updates CONTINUATION.md to reference phase N+1
@@ -717,6 +717,7 @@ Global config: `~/.config/nexus/config.yml`.
 
 Key settings: `server.port`, `server.ignorePatterns`, `embeddings.codeModel` (default: `voyage-code-3`),
 `embeddings.docsModel` (default: `voyage-4`), `embeddings.rerankerModel` (default: `rerank-2.5`),
+`pm.archiveTtl` (default: `90`, days; overridable via `NX_PM_ARCHIVE_TTL` env var),
 `chromadb.tenant`, `chromadb.database`, `client.host`, `server.headPollInterval` (default: `10`).
 
 Required env vars (not stored in config files): `CHROMA_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`.
