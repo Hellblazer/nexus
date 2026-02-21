@@ -165,7 +165,7 @@ WHERE ttl IS NOT NULL
 - **Repo registry**: `~/.config/nexus/repos.json` — list of registered repo paths with per-repo state
 - `nx index code <path>` adds the path to the registry and triggers initial indexing
 - Each repo has its own T3 collection (`code::{repo-name}`) and ripgrep line cache file
-- HEAD polling runs per-repo every 30 seconds; stale repos are re-indexed automatically
+- HEAD polling runs per-repo every 10 seconds (configurable via `server.headPollInterval`); stale repos are re-indexed automatically
 - Optional: `nx install claude-code` sets a post-commit hook as an additional trigger alongside polling
 - `nx serve status` shows each repo's indexing state and estimated accuracy (SeaGOAT sigmoid pattern)
 
@@ -173,13 +173,17 @@ WHERE ttl IS NOT NULL
 
 1. `nx index code <path>` registers the repo with the persistent `nx serve` process
 2. `git log` to compute frecency scores per file: `sum(exp(-0.01 * days_passed))`
-3. Files chunked: AST-first for Python/JS/TS/Java/Go/Rust (tree-sitter); line-based fallback for others. Target ~150 lines per chunk; no overlap at function/class boundaries; 15% overlap for line-based fallback.
+3. Files chunked: AST-first via `llama_index.core.node_parser.CodeSplitter` (which wraps `tree-sitter-language-pack` internally) for 30+ languages including Python, JS/TS, Java, Go, Rust, C, C++, C#, PHP, Ruby, Kotlin, Scala, Swift, and more — line-based fallback for unsupported extensions. Target ~150 lines per chunk; no overlap at function/class boundaries; 15% overlap for line-based fallback. Install: `pip install llama-index-core tree-sitter-language-pack`.
 4. Chunks embedded via **Voyage AI** using `VoyageAIEmbeddingFunction(model_name="voyage-code-3")`
 5. Upserted into T3 ChromaDB collection `code::{repo-name}`
 6. Ripgrep line cache built locally: flat `path:line:content\n` text file, memory-mapped for hybrid search — 500MB cap (SeaGOAT pattern)
-7. `nx serve` polls HEAD hash every 30 seconds; re-indexes on change
+7. `nx serve` polls HEAD hash every 10 seconds (default, matching SeaGOAT's `SECONDS_BETWEEN_MAINTENANCE`); re-indexes on change. Configurable via `server.headPollInterval` in `~/.config/nexus/config.yml`.
 
 ChromaDB natively supports `VoyageAIEmbeddingFunction` (`pip install voyageai`; env var: `VOYAGE_API_KEY`).
+
+**Frecency score staleness**: `frecency_score` is computed and stored at index time. If a file has not changed (no content reindex) but other files in the repo have recent commits, its relative frecency score becomes stale. Known limitation: frecency-only reindex (updating scores without re-embedding) is not implemented in v1. Stable files may rank lower than their true recency warrants until the next content change triggers reindex.
+
+**Ripgrep 500MB line cache**: The 500MB cap is a soft limit (matching SeaGOAT's `MAX_MMAP_SIZE`). When the cache file exceeds the cap, low-frecency files written last are omitted with a logged warning — they remain searchable via semantic search but not via ripgrep hybrid. This is not enforced as a hard error.
 
 > **Model name verification**: Verify `voyage-code-3` and `voyage-4` against the current Voyage AI model
 > catalog before use. The ChromaDB `VoyageAIEmbeddingFunction` default is `"voyage-large-2"` — names must
@@ -194,10 +198,7 @@ ChromaDB natively supports `VoyageAIEmbeddingFunction` (`pip install voyageai`; 
 4. Chunks embedded via `VoyageAIEmbeddingFunction(model_name="voyage-4")`
 5. Upserted into T3 collection `docs::{corpus-name}`
 
-Arcaneum's extraction and chunking logic (PDFExtractor, PDFChunker, OCREngine) ports directly. Arcaneum's
-storage layer (Qdrant `PointStruct`, `upload_points`, scroll-based sync) is **not** used — replaced with
-ChromaDB `collection.upsert()`. Arcaneum's embedding layer (`fastembed` local ONNX) is **not** used —
-replaced with `VoyageAIEmbeddingFunction`.
+Arcaneum's extraction and chunking logic (PDFExtractor, PDFChunker, OCREngine) is **ported** — not imported as a library. The storage layer calls (Qdrant `PointStruct`, `upload_points`, scroll-based sync) must be rewritten as ChromaDB `collection.upsert()` calls. The embedding layer (`fastembed` local ONNX) is replaced with `VoyageAIEmbeddingFunction`. The extraction and chunking logic itself (PyMuPDF4LLM calls, pdfplumber fallback, OCR orchestration) ports with minimal changes.
 
 Since ChromaDB stores the chunk text (`documents` field), result display and `--content` work without
 re-reading the source file. Re-indexing (`nx index pdf <path>` again) requires the source path to still
@@ -292,14 +293,27 @@ content_hash         str   git object ID (for staleness detection)
 ```
 source_agent         str   Agent name that stored this (e.g. "codebase-deep-analyzer")
 session_id           str   Claude Code session ID
-title                str   Human-provided title
+title                str   Human-provided title (e.g. "Archive: myrepo" for pm-archive chunks)
 category             str   e.g. "security", "architecture", "planning"
 tags                 str   Comma-separated tags
-store_type           str   "knowledge"
-indexed_at           str   ISO 8601 timestamp
+store_type           str   "knowledge" | "pm-archive"
+indexed_at           str   ISO 8601 timestamp of indexing
 expires_at           str   ISO 8601 expiry timestamp; empty string = permanent
 ttl_days             int   TTL in days at store time; 0 = permanent
+
+# Additional fields set only when store_type = "pm-archive"
+project              str   Repository/project name (e.g. "myrepo")
+status               str   "completed" | "paused" | "cancelled"
+archived_at          str   ISO 8601 timestamp of archive operation (same value as indexed_at for pm-archive)
+phase_count          int   Number of phases reached at archive time
 ```
+
+#### TTL sentinel translation (`nx memory promote`)
+
+T2 SQLite uses `NULL` for permanent TTL. T3 knowledge:: uses `ttl_days=0` and `expires_at=""` for permanent. When `nx memory promote` copies a T2 entry to T3:
+- T2 `ttl IS NULL` → T3 `ttl_days=0, expires_at=""`
+- T2 `ttl = N` → T3 `ttl_days=N, expires_at=<ISO 8601 computed from timestamp + N days>`
+- CLI keywords `permanent` and `never` both map to the NULL / 0 / "" sentinel.
 
 ## Search
 
@@ -325,6 +339,7 @@ Core flags (all env-overridable, e.g. `NX_ANSWER=1`):
 | `--vimgrep` | off | `path:line:col:content` format for editor integration |
 | `--json` | off | Emit JSON for scripting |
 | `--files` | off | Return unique file paths only, not individual lines |
+| `--where <field>=<value>` | — | Filter results by ChromaDB metadata field; repeatable; maps to `where={field: value}` in the ChromaDB query. Examples: `--where store_type=pm-archive`, `--where status=completed`. Multiple flags are ANDed. |
 
 `[path]` positional argument scopes results to files under that path (equivalent to Mixedbread's `starts_with` metadata filter).
 
@@ -345,8 +360,10 @@ When multiple `--corpus` flags are used, each corpus is queried separately (they
 Resolution strategy:
 1. Each corpus queried independently using its own embedding function
 2. Top-k results retrieved per corpus (proportional to `--max-results`)
-3. Combined result set reranked using Voyage AI's reranker to produce a unified ranked list
+3. Combined result set reranked using `voyageai.Client().rerank(query=query, documents=[c.text for c in combined], model="voyage-rerank-2", top_k=max_results)` to produce a unified ranked list. Verify `voyage-rerank-2` against current Voyage AI catalog; reranker pricing is billed separately from embeddings.
 4. `--no-rerank` skips step 3 and interleaves results round-robin instead
+
+`min_max_normalize` in hybrid scoring is computed over the **combined result set** after per-corpus retrieval, not per-corpus windows. This preserves relative quality differences across corpora (e.g., high-confidence code results vs lower-confidence doc results remain distinguishable after normalization).
 
 ### Search output format
 
@@ -363,13 +380,17 @@ Vimgrep format: `path:line:0:content`
 ### Hybrid search scoring (code)
 
 ```
-# Per-chunk score combining vector similarity and file frecency
-vector_norm   = min_max_normalize(cosine_similarity, result_window)   # → [0, 1]
-frecency_norm = min_max_normalize(file_frecency_score, result_window)  # unbounded → [0, 1]
+# Per-chunk score combining vector similarity and file frecency (code:: corpora only)
+vector_norm   = min_max_normalize(cosine_similarity, combined_result_window)   # → [0, 1]
+frecency_norm = min_max_normalize(file_frecency_score, combined_result_window)  # unbounded → [0, 1]
 score = 0.7 * vector_norm + 0.3 * frecency_norm
 
+# For docs:: and knowledge:: chunks: frecency_score is undefined (not in their metadata schema).
+# --hybrid is silently ignored for non-code corpora; their score = 1.0 * vector_norm.
+# This means --hybrid --corpus code --corpus docs applies frecency only to code results.
+
 # min_max_normalize(x, window): (x - min) / (max - min + ε)
-#   computed over the current query result window, not a global corpus statistic
+#   computed over the COMBINED result window across all corpora (not per-corpus)
 # frecency_score is per-file; all chunks from the same file share the file's frecency score
 # Ripgrep exact-match chunks: vector_norm is set to 1.0 before the weighted sum
 ```
@@ -484,6 +505,9 @@ PM projects use the `{repo}_pm` namespace in T2. Tags follow the pattern `pm,pha
 
 ```bash
 # Scaffold standard PM docs (replaces project-management-setup agent writing .pm/ files)
+# --project is optional; auto-detected via: basename $(git rev-parse --show-toplevel)
+# Falls back to basename of cwd for non-git directories.
+# If auto-detection is ambiguous (e.g. monorepo), --project must be supplied explicitly.
 nx pm init [--project myrepo]
 
 # Session resumption — outputs CONTINUATION.md content for session injection
@@ -493,8 +517,13 @@ nx pm resume [--project myrepo]
 nx pm status [--project myrepo]
 
 # Phase management
-nx pm phase 2                          # retrieve phase-2 context
-nx pm phase next                       # transition to next phase (increments phase tag)
+nx pm phase 2                          # retrieve phase-2 context doc
+nx pm phase next                       # transition to next phase:
+                                       #   1. reads current N from any doc tagged phase:N
+                                       #   2. creates new T2 entry title=phases/phase-{N+1}/context.md,
+                                       #      tags=pm,phase:{N+1},context, ttl=permanent
+                                       #   3. updates CONTINUATION.md to reference phase N+1
+                                       #   (does NOT mass-update tags on existing docs)
 
 # FTS5 keyword search scoped to PM docs (no API call)
 nx pm search "what did we decide about caching"
@@ -509,20 +538,7 @@ nx pm expire                           # remove TTL-expired phase docs
 
 ### SessionStart hook — PM-aware behavior
 
-When `nx install claude-code` sets up the SessionStart hook, it auto-detects PM projects and adjusts context injection:
-
-```
-Nexus ready. T1 scratch initialized (session: {session_id}).
-
-# PM project detected ({repo}_pm/CONTINUATION.md exists):
-{CONTINUATION.md content — injected directly, replaces manual `cat .pm/CONTINUATION.md`}
-
-# No PM project → generic fallback:
-Recent memory ({project}, last 10 entries):
-  - {title} ({agent}, {N}d ago)
-```
-
-Content cap: 2000 chars for CONTINUATION.md injection (same 500-char-per-entry bound as generic summary, scaled for a single document).
+The canonical SessionStart hook definition is in the "Agent integration installers" section under Management Commands. Summary: PM detection runs a T2 SQL query (not a filesystem check); if `{repo}_pm/CONTINUATION.md` exists in T2, its content is injected (2000 char cap); otherwise the generic 10-entry memory summary is printed.
 
 ### Slash commands
 
@@ -551,11 +567,26 @@ Active ──── nx pm archive ──── Archived (T2, 90d decay) + Synthe
 
 **Active**: T2 `{repo}_pm` namespace, permanent TTL — hot path, fully editable.
 
-**Archive**: `nx pm archive` does two things atomically:
-1. **Synthesize → T3**: Haiku reads all PM docs (CONTINUATION.md, phase files, AGENT_INSTRUCTIONS.md) and produces a single compact synthesis chunk stored in `knowledge::pm::{repo}`. This becomes the permanent institutional memory reference.
-2. **Decay T2**: Re-tags all `{repo}_pm` docs as `pm-archived`, bumps TTL to 90 days (configurable via `NX_PM_ARCHIVE_TTL`). Raw docs remain queryable during the decay window; auto-expired after.
+**Archive**: `nx pm archive` is a two-phase operation (T2 SQLite and T3 ChromaDB cloud have no shared transaction coordinator — true atomicity is impossible):
 
-**Restore**: `nx pm restore <project>` re-activates archived T2 docs within the decay window. After TTL expiry it fails gracefully ("raw docs expired — use `nx pm reference {project}` to access the archived synthesis").
+1. **Synthesize → T3 first**: Haiku reads all PM docs from T2 (CONTINUATION.md, phase files, AGENT_INSTRUCTIONS.md), capped at the 100 most recently written docs or 100K total characters (whichever is smaller). Produces a structured synthesis chunk stored in `knowledge::pm::{repo}`. The T3 `title` field is set to `"Archive: {repo}"`.
+   - If Haiku synthesis **fails** (API error, rate limit, content policy): the archive is aborted. T2 is left untouched. The error is printed; the user can retry. This is the safe failure mode — raw PM docs remain accessible.
+   - If T3 **write fails** after synthesis: same abort behavior.
+2. **Decay T2 second**: Only after T3 write succeeds. Runs as a single SQLite transaction: `UPDATE memory SET ttl = {NX_PM_ARCHIVE_TTL}, tags = replace(tags, 'pm,', 'pm-archived,') WHERE project = '{repo}_pm'`. If this T2 update fails after T3 succeeds: the T3 chunk is orphaned but not harmful — a retry of `nx pm archive` checks for an existing T3 chunk with `title = "Archive: {repo}"` before synthesizing (idempotent; skips re-synthesis if chunk exists and was written within the last 5 minutes, otherwise re-synthesizes).
+
+`NX_PM_ARCHIVE_TTL` accepts an **integer number of days** (e.g. `90`). Default: `90`. Same unit as the T2 `ttl` column.
+
+**Restore**: `nx pm restore <project>` reverses step 2 within the decay window:
+```sql
+UPDATE memory
+   SET ttl = NULL,
+       tags = replace(tags, 'pm-archived,', 'pm,')
+ WHERE project = '{repo}_pm'
+```
+- Does **not** delete the T3 synthesis chunk (it remains as a reference point).
+- If some but not all docs have already TTL-expired (partial decay): restores surviving docs; prints a warning listing the expired titles. Does not abort.
+- If all docs have expired: fails with "raw docs fully expired — use `nx pm reference {project}` to access the synthesis". Suggests re-running `nx pm init` if the project is being restarted.
+- Re-archiving a restored project creates a new T3 synthesis chunk (no deduplication — the older chunk is not deleted automatically).
 
 #### Archive synthesis format
 
@@ -583,7 +614,7 @@ Final Phase: N of M
 - [concrete, reusable takeaways]
 ```
 
-Target size: 300–600 chars — one ChromaDB chunk. Semantically rich so vector search finds it on topical queries even without knowing the project name.
+Target size: **400–800 tokens, hard cap 1200 tokens** — aim for one ChromaDB chunk. The Haiku prompt instructs it to use brief bullets (one line per item). If the synthesis exceeds 1200 tokens, it is split at section boundaries into at most 3 chunks (Key Decisions + Architecture, Challenges + Outcome, Lessons Learned), each stored as a separate T3 document with an additional `chunk_index` metadata field. Semantically rich so vector search finds it on topical queries even without knowing the project name.
 
 T3 metadata: `store_type="pm-archive"`, `project="{repo}"`, `status="completed|paused|cancelled"`, `archived_at` (ISO 8601), `phase_count` (int), `ttl_days=0` (permanent).
 
@@ -591,21 +622,26 @@ T3 metadata: `store_type="pm-archive"`, `project="{repo}"`, `status="completed|p
 
 ```bash
 # Archive current project (synthesize → T3 + start T2 decay)
+# --status defaults to "completed" if omitted
 nx pm archive [--project myrepo] [--status completed|paused|cancelled]
 
-# Archive + mark complete (alias)
+# Archive + mark complete (alias for: nx pm archive --status completed)
 nx pm close [--project myrepo]
 
 # Restore from archived T2 docs (within decay window only)
 nx pm restore <project>
 
 # Query institutional memory — semantic search across all archived syntheses
-nx pm reference                      # interactive: "find projects about auth patterns"
-nx pm reference "caching decisions"  # direct semantic query → nx search knowledge::pm::*
-nx pm reference myrepo               # retrieve specific project's synthesis
+nx pm reference                      # prompts for query; searches knowledge::* --where store_type=pm-archive
+nx pm reference "caching decisions"  # direct semantic query
+nx pm reference myrepo               # retrieve specific project's synthesis by name
 ```
 
-`nx pm reference` without a project name fans out to `nx search --corpus knowledge --corpus-filter store_type=pm-archive` — leveraging T3 semantic search across all archived projects. This is the institutional memory query point: *"how did we handle rate limiting in past projects?"* finds the right synthesis even without knowing which project to look in.
+`nx pm reference` is equivalent to:
+```bash
+nx search <query> --corpus knowledge --where store_type=pm-archive
+```
+The `--where` flag (defined in the search flags table) maps to a ChromaDB `where={"store_type": "pm-archive"}` filter, scoping results to pm-archive chunks within the `knowledge::*` namespace. This is the institutional memory query point: *"how did we handle rate limiting in past projects?"* finds the right synthesis even without knowing which project to look in.
 
 #### Why raw PM docs don't go to T3
 
@@ -652,6 +688,8 @@ nx serve status              # show indexed repos, accuracy %, uptime
 nx serve logs
 ```
 
+`nx serve start` daemonizes using `subprocess.Popen(..., start_new_session=True)` — no double-fork, no external process manager required. PID is written to `~/.config/nexus/server.pid`. On start, if a stale PID file exists, the process is checked via `kill(pid, 0)` — if not running the stale file is removed; if running the start is a no-op. `nx serve stop` sends `SIGTERM` to the PID and removes the file.
+
 Accuracy display while indexing (SeaGOAT pattern):
 ```
 Warning: Nexus is still analyzing your repository.
@@ -678,14 +716,19 @@ Per-repo config: `.nexus.yml` (same merge pattern as SeaGOAT's `.seagoat.yml`).
 Global config: `~/.config/nexus/config.yml`.
 
 Key settings: `server.port`, `server.ignorePatterns`, `embeddings.codeModel`,
-`embeddings.docsModel`, `chromadb.url`, `client.host`, `server.headPollInterval`.
+`embeddings.docsModel`, `chromadb.tenant`, `chromadb.database`, `client.host`, `server.headPollInterval`.
+
+Required env vars (not stored in config files): `CHROMA_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`.
 
 ### Health check
 
 ```bash
-nx doctor    # verify: nx serve running, ChromaDB reachable, Voyage API key valid,
+nx doctor    # verify: nx serve running, ChromaDB cloud reachable (CHROMA_API_KEY set),
+             #         Voyage API key valid (VOYAGE_API_KEY set),
+             #         Anthropic API key valid (ANTHROPIC_API_KEY set),
              #         ripgrep on PATH, git available,
-             #         Mixedbread SDK authenticated (only when --mxbai has been used)
+             #         Mixedbread SDK authenticated (only when --mxbai has been used;
+             #           if --mxbai is used without SDK auth: warning printed, mxbai results silently skipped)
 ```
 
 ### Agent integration installers
@@ -697,18 +740,30 @@ nx install codex            # future integrations
 ```
 
 `nx install claude-code` writes:
-- `~/.claude/skills/nexus/SKILL.md` — agent usage guide (how to use `nx search`, `nx memory`, `nx store`, `nx scratch`)
-- SessionStart hook entry in `~/.claude/settings.json`: initialize T1 scratch, print T2 memory summary
+- `~/.claude/skills/nexus/SKILL.md` — agent usage guide (how to use `nx search`, `nx memory`, `nx store`, `nx scratch`, `nx pm`)
+- SessionStart hook entry in `~/.claude/settings.json`: initialize T1 scratch; PM-aware context injection (see below)
 - SessionEnd hook entry: flush flagged T1 scratch entries to T2, run `nx memory expire`
 
-SessionStart hook output (printed to Claude context at session start):
+**SessionStart hook — canonical behavior** (single definition; the `nx pm` section references this):
+
+PM detection is a T2 SQL query, not a filesystem check:
+```sql
+SELECT 1 FROM memory WHERE project = '{repo}_pm' AND title = 'CONTINUATION.md' LIMIT 1
+```
+where `{repo}` is auto-detected from `git rev-parse --show-toplevel | xargs basename`.
+
 ```
 Nexus ready. T1 scratch initialized (session: {session_id}).
+
+# If {repo}_pm CONTINUATION.md found in T2 (PM project):
+{CONTINUATION.md content, capped at 2000 chars}
+
+# Otherwise (non-PM project):
 Recent memory ({project}, last 10 entries):
   - {title} ({agent}, {N}d ago)
   ...
+  [capped at 10 entries × 500 chars each]
 ```
-Capped at 10 entries, 500 chars each, to bound context consumption.
 
 ## Claude Code Integration
 
@@ -729,7 +784,6 @@ Capped at 10 entries, 500 chars each, to bound context consumption.
 /nx:index code <path>           — index a code repo (registers with nx serve)
 /nx:index pdf <path>            — index PDFs
 /nx:scratch <content>           — write to T1 (session only)
-/nx:watch <path>                — watch for file changes, sync on save
 /nx:doctor                      — health check
 /nx:pm resume                   — inject PM CONTINUATION.md into session context
 /nx:pm status                   — show current phase, last-agent, open blockers
@@ -750,34 +804,37 @@ Capped at 10 entries, 500 chars each, to bound context consumption.
 - **mgrep `--sync` / file upload model** — replaced by `nx index` pipelines
 - **Real-time collaboration / multi-user** — single-user local tool
 - **Collection export/import** — future if needed; out of scope v1
+- **`nx watch` / file-watch mode** — out of scope v1; `nx index` with HEAD polling covers the auto-reindex use case for code; inotify/FSEvents file watching for markdown/PDFs is future work
 
 ## Technologies
 
 - **Python 3.12+** — CLI, server, indexing pipelines, SeaGOAT frecency logic
-- **ChromaDB** — T1 (`chromadb.EphemeralClient` + `DefaultEmbeddingFunction`) and T3 (`chromadb.HttpClient` → cloud + `VoyageAIEmbeddingFunction`)
+- **ChromaDB** — T1 (`chromadb.EphemeralClient` + `DefaultEmbeddingFunction`) and T3 (`chromadb.CloudClient(tenant=..., database=..., api_key=CHROMA_API_KEY)` → ChromaDB cloud + `VoyageAIEmbeddingFunction`)
 - **SQLite + FTS5** — T2 memory bank (stdlib `sqlite3`, WAL mode, no ORM)
-- **Voyage AI** — embedding API: `voyage-code-3` for code, `voyage-4` for docs/PDFs
-  - Verify model names against current Voyage AI catalog before use; ChromaDB wrapper default is `"voyage-large-2"`
-  - Verify free tier quota at voyageai.com/pricing before relying on this; spec written assuming 200M tokens/month free
+- **Voyage AI** — embedding API: `voyage-code-3` for code, `voyage-4` for docs/PDFs; reranker: `voyage-rerank-2` for cross-corpus result merging
+  - Verify all model names (`voyage-code-3`, `voyage-4`, `voyage-rerank-2`) against current Voyage AI catalog before use; ChromaDB wrapper default is `"voyage-large-2"`; SDK accepts any string and fails at first API call with an invalid name
+  - Verify free tier quota at voyageai.com/pricing before relying on this; spec written assuming 200M tokens/month free (embedding only — verify separately)
   - ~$0.18/1M tokens (code), ~$0.06/1M tokens (docs) beyond free tier; env var: `VOYAGE_API_KEY`
-  - Native `VoyageAIEmbeddingFunction` in ChromaDB (`pip install voyageai`) — no custom glue
+  - Reranker pricing is separate from embedding pricing; verify at voyageai.com/pricing; `voyageai.Client().rerank(query=..., documents=[chunk.text, ...], model="voyage-rerank-2", top_k=max_results)`
+  - Native `VoyageAIEmbeddingFunction` in ChromaDB (`pip install voyageai`); `VoyageAIEmbeddingFunction` checks `VOYAGE_API_KEY` env var first, then `CHROMA_VOYAGE_API_KEY` — no custom glue
 - **Claude Haiku** (`claude-3-5-haiku-20241022`) — Q&A synthesis via `anthropic` Python SDK
 - **Mixedbread SDK** — read-only fan-out for existing Mixedbread-indexed collections (`--mxbai` flag)
 - **ripgrep** — full-text code search via flat mmap line cache (local, 500MB cap)
 - **Git** — frecency computation from commit history
 - **Flask + Waitress** — persistent `nx serve` process (SeaGOAT pattern)
 - **PyMuPDF4LLM + pdfplumber + Tesseract/EasyOCR** — PDF extraction (ported from Arcaneum)
-- **tree-sitter** — AST-based code chunking for supported languages
+- **tree-sitter + llama-index-core** — AST-based code chunking; uses `llama_index.core.node_parser.CodeSplitter` as the interface (which wraps `tree-sitter-language-pack` internally); installing bare `tree-sitter` alone is not sufficient
+- **Environment variables**: `VOYAGE_API_KEY` (embeddings + reranker), `CHROMA_API_KEY` (ChromaDB cloud auth — required for all T3 operations), `ANTHROPIC_API_KEY` (Haiku synthesis)
 
 ## Decisions Log
 
 | # | Decision | Rationale |
 |---|---|---|
-| 1 | Voyage AI embedding API (not local ONNX) | Eliminates ~2GB model downloads and GPU setup complexity; free tier covers normal usage (verify quota at voyageai.com/pricing) |
+| 1 | Voyage AI embedding API (not local ONNX) | Eliminates ~2GB model downloads and GPU setup complexity. **Assumption**: free tier covers normal usage (spec assumes 200M tokens/month — verify at voyageai.com/pricing before finalizing; free tier terms have changed historically). If free tier is insufficient, the cost argument for Voyage AI over local ONNX weakens and should be re-evaluated. |
 | 2 | Persistent `nx serve` process | Faster repeated queries; ripgrep line cache stays warm; HEAD polling for auto-reindex |
 | 3 | SQLite T2 = memory bank only | Don't over-engineer; T3 ChromaDB handles knowledge storage naturally |
 | 4 | Mixedbread fan-out via `--mxbai` flag on `nx search` | Opt-in so normal searches stay fully local; `nx ask` is not a separate command — answer synthesis is `-a` on `nx search` |
-| 5 | HEAD detection via 30s polling in `nx serve` | Post-commit hook is an optional additional trigger installed by `nx install`; polling is the guaranteed baseline; inotify/FSEvents is out of scope v1 |
+| 5 | HEAD detection via 10s polling in `nx serve` | Default matches SeaGOAT's `SECONDS_BETWEEN_MAINTENANCE = 10`; configurable via `server.headPollInterval`. Post-commit hook is an optional additional trigger installed by `nx install`; polling is the guaranteed baseline; inotify/FSEvents is out of scope v1 |
 | 6 | Single `nx serve` manages multiple repos | Per-repo registry in `~/.config/nexus/repos.json`; each repo has its own T3 collection and ripgrep line cache; `--corpus` routes queries |
 | 7 | T1 uses `DefaultEmbeddingFunction` (local ONNX) | Session scratch doesn't need Voyage AI's semantic fidelity; a network call on every scratch search defeats the purpose of an in-memory store |
 | 8 | Cross-corpus: separate retrieval + reranking | `voyage-code-3` and `voyage-4` produce incomparable similarity scores; independent retrieval per corpus followed by reranking is the correct merge strategy |
