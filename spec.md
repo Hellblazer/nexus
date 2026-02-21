@@ -3,9 +3,11 @@
 ## Vision
 
 Nexus is a self-hosted semantic search and knowledge system that replaces expensive cloud ingest
-(Mixedbread) with local-first indexing, while keeping ChromaDB in the cloud as the permanent
-knowledge store. It synthesizes the best of mgrep, SeaGOAT, and Arcaneum into a single,
-integrated tool for Claude Code agents.
+(Mixedbread) with a locally-controlled indexing pipeline, while keeping ChromaDB in the cloud as
+the permanent knowledge store. Embeddings and long-term storage are cloud-backed (Voyage AI,
+ChromaDB cloud); the ingest, chunking, and retrieval logic run locally — no raw content leaves the
+machine. It synthesizes the best of mgrep, SeaGOAT, and Arcaneum into a single, integrated tool
+for Claude Code agents.
 
 **North star**: Agents should be able to index, search, remember, and synthesize — cheaply,
 without vendor lock-in, without a Swiss army knife.
@@ -147,13 +149,13 @@ WHERE ttl IS NOT NULL
 ```
 
 - Large analysis docs (300–500+ lines) store fine in SQLite TEXT
-- For semantic search across large analysis docs, use T3 ChromaDB `knowledge::` collections instead (via `nx store` or `nx memory promote`)
+- For semantic search across large analysis docs, use T3 ChromaDB `knowledge__` collections instead (via `nx store` or `nx memory promote`)
 
 ### T3 — Cloud ChromaDB (permanent knowledge)
 
 - Already running in the cloud — no new infra
 - Stores: indexed code repos, indexed PDFs, long-term agent knowledge
-- Collections namespaced by type: `code::{repo}`, `docs::{corpus}`, `knowledge::{topic}`
+- Collections namespaced by type: `code__{repo}`, `docs__{corpus}`, `knowledge__{topic}`
 - Accessed via `nx search`, `nx store`, `nx index`
 
 ## Indexing Pipelines
@@ -164,7 +166,7 @@ WHERE ttl IS NOT NULL
 
 - **Repo registry**: `~/.config/nexus/repos.json` — list of registered repo paths with per-repo state
 - `nx index code <path>` adds the path to the registry and triggers initial indexing
-- Each repo has its own T3 collection (`code::{repo-name}`) and ripgrep line cache file
+- Each repo has its own T3 collection (`code__{repo-name}`) and ripgrep line cache file
 - HEAD polling runs per-repo every 10 seconds (configurable via `server.headPollInterval`); stale repos are re-indexed automatically
 - Optional: `nx install claude-code` sets a post-commit hook as an additional trigger alongside polling
 - `nx serve status` shows each repo's indexing state and estimated accuracy (SeaGOAT sigmoid pattern)
@@ -173,9 +175,9 @@ WHERE ttl IS NOT NULL
 
 1. `nx index code <path>` registers the repo with the persistent `nx serve` process
 2. `git log` to compute frecency scores per file: `sum(exp(-0.01 * days_passed))`
-3. Files chunked: AST-first via `llama_index.core.node_parser.CodeSplitter` (which wraps `tree-sitter-language-pack` internally) for 30+ languages including Python, JS/TS, Java, Go, Rust, C, C++, C#, PHP, Ruby, Kotlin, Scala, Swift, and more — line-based fallback for unsupported extensions. Target ~150 lines per chunk; no overlap at function/class boundaries; 15% overlap for line-based fallback. Install: `pip install llama-index-core tree-sitter-language-pack`.
+3. Files chunked: AST-first via `llama_index.core.node_parser.CodeSplitter` (which wraps `tree-sitter-language-pack` internally) for 30+ languages including Python, JS/TS, Java, Go, Rust, C, C++, C#, PHP, Ruby, Kotlin, Scala, Swift, and more — line-based fallback for unsupported extensions. Target ~150 lines per chunk; no overlap at function/class boundaries; 15% overlap for line-based fallback. Install: `pip install llama-index-core tree-sitter-language-pack`. **Version pinning required**: known breaking incompatibilities exist between these packages at certain version combinations (see llama_index issues #13521, #17567); pin to a verified-good pair in `pyproject.toml` and test before upgrading.
 4. Chunks embedded via **Voyage AI** using `VoyageAIEmbeddingFunction(model_name="voyage-code-3")`
-5. Upserted into T3 ChromaDB collection `code::{repo-name}`
+5. Upserted into T3 ChromaDB collection `code__{repo-name}`
 6. Ripgrep line cache built locally: flat `path:line:content\n` text file, memory-mapped for hybrid search — 500MB cap (SeaGOAT pattern)
 7. `nx serve` polls HEAD hash every 10 seconds (default, matching SeaGOAT's `SECONDS_BETWEEN_MAINTENANCE`); re-indexes on change. Configurable via `server.headPollInterval` in `~/.config/nexus/config.yml`.
 
@@ -186,7 +188,7 @@ ChromaDB natively supports `VoyageAIEmbeddingFunction` (`pip install voyageai`; 
 **Ripgrep 500MB line cache**: The 500MB cap is a soft limit (matching SeaGOAT's `MAX_MMAP_SIZE`). When the cache file exceeds the cap, low-frecency files written last are omitted with a logged warning — they remain searchable via semantic search but not via ripgrep hybrid. This is not enforced as a hard error.
 
 > **Model name verification**: Verify `voyage-code-3` and `voyage-4` against the current Voyage AI model
-> catalog before use. The ChromaDB `VoyageAIEmbeddingFunction` default is `"voyage-large-2"` — names must
+> catalog before use. The ChromaDB `VoyageAIEmbeddingFunction` default is `"voyage-01"` — names must
 > be set explicitly. The SDK does not enumerate valid names at import time; an invalid name fails at the
 > first API call.
 
@@ -196,7 +198,7 @@ ChromaDB natively supports `VoyageAIEmbeddingFunction` (`pip install voyageai`; 
 2. Text extracted and chunked in-process using **ported Arcaneum extraction logic**: PyMuPDF4LLM → markdown (primary), pdfplumber (complex tables fallback), Tesseract/EasyOCR (scanned fallback)
 3. **Only the extracted text chunks + embeddings + metadata are stored in T3 ChromaDB** — raw PDF bytes never leave the machine
 4. Chunks embedded via `VoyageAIEmbeddingFunction(model_name="voyage-4")`
-5. Upserted into T3 collection `docs::{corpus-name}`
+5. Upserted into T3 collection `docs__{corpus-name}`
 
 Arcaneum's extraction and chunking logic (PDFExtractor, PDFChunker, OCREngine) is **ported** — not imported as a library. The storage layer calls (Qdrant `PointStruct`, `upload_points`, scroll-based sync) must be rewritten as ChromaDB `collection.upsert()` calls. The embedding layer (`fastembed` local ONNX) is replaced with `VoyageAIEmbeddingFunction`. The extraction and chunking logic itself (PyMuPDF4LLM calls, pdfplumber fallback, OCR orchestration) ports with minimal changes.
 
@@ -205,7 +207,7 @@ re-reading the source file. Re-indexing (`nx index pdf <path>` again) requires t
 be accessible — same as mgrep's `--sync`.
 
 > **Re-embedding note**: Raw content is not stored locally. Re-embedding with a future model version
-> requires re-reading the source files (acceptable for PDFs; they remain accessible). For `knowledge::`
+> requires re-reading the source files (acceptable for PDFs; they remain accessible). For `knowledge__`
 > chunks from agent outputs (no source file), re-embedding is not possible without re-running the agent.
 
 ### Markdown / Notes
@@ -213,7 +215,7 @@ be accessible — same as mgrep's `--sync`.
 1. `nx index md <path>` with YAML frontmatter extraction
 2. Semantic chunking preserving document structure (ported from Arcaneum's SemanticMarkdownChunker)
 3. Incremental sync via SHA256 content hashing
-4. Chunks embedded via `VoyageAIEmbeddingFunction(model_name="voyage-4")`, upserted into T3 `docs::{corpus-name}`
+4. Chunks embedded via `VoyageAIEmbeddingFunction(model_name="voyage-4")`, upserted into T3 `docs__{corpus-name}`
 
 ## ChromaDB Metadata Schema
 
@@ -222,7 +224,7 @@ All structural parse context ("high context") from the extraction pipeline is pr
 as flat metadata fields alongside each chunk. This replicates the richness of Mixedbread's
 `generated_metadata` and means search results carry full structural provenance.
 
-### Document chunks (`docs::*` collections)
+### Document chunks (`docs__*` collections)
 
 ```
 # Source identity
@@ -252,7 +254,7 @@ indexed_at           str   ISO 8601 timestamp of indexing
 content_hash         str   SHA256 of source file at index time (for change detection)
 ```
 
-### Code chunks (`code::*` collections)
+### Code chunks (`code__*` collections)
 
 ```
 # Source identity
@@ -288,13 +290,13 @@ indexed_at           str   ISO 8601 timestamp
 content_hash         str   git object ID (for staleness detection)
 ```
 
-### Knowledge / agent memory chunks (`knowledge::*` collections)
+### Knowledge / agent memory chunks (`knowledge__*` collections)
 
 ```
 source_agent         str   Agent name that stored this (e.g. "codebase-deep-analyzer")
 session_id           str   Claude Code session ID
 title                str   Human-provided title (e.g. "Archive: myrepo" for pm-archive chunks)
-category             str   e.g. "security", "architecture", "planning"
+category             str   e.g. "security", "architecture", "planning" — caller-provided via `--category <value>` on `nx store`; optional (empty string if omitted)
 tags                 str   Comma-separated tags
 store_type           str   "knowledge" | "pm-archive"
 indexed_at           str   ISO 8601 timestamp of indexing
@@ -306,11 +308,12 @@ project              str   Repository/project name (e.g. "myrepo")
 status               str   "completed" | "paused" | "cancelled"
 archived_at          str   ISO 8601 timestamp of archive operation (same value as indexed_at for pm-archive)
 phase_count          int   Number of phases reached at archive time
+chunk_index          int   Only present when synthesis exceeds 1200 tokens and is split; 0-based index among split siblings
 ```
 
 #### TTL sentinel translation (`nx memory promote`)
 
-T2 SQLite uses `NULL` for permanent TTL. T3 knowledge:: uses `ttl_days=0` and `expires_at=""` for permanent. When `nx memory promote` copies a T2 entry to T3:
+T2 SQLite uses `NULL` for permanent TTL. T3 knowledge__ uses `ttl_days=0` and `expires_at=""` for permanent. When `nx memory promote` copies a T2 entry to T3:
 - T2 `ttl IS NULL` → T3 `ttl_days=0, expires_at=""`
 - T2 `ttl = N` → T3 `ttl_days=N, expires_at=<ISO 8601 computed from timestamp + N days>`
 - CLI keywords `permanent` and `never` both map to the NULL / 0 / "" sentinel.
@@ -346,16 +349,16 @@ Core flags (all env-overridable, e.g. `NX_ANSWER=1`):
 ### --corpus resolution
 
 `--corpus <name>` uses **prefix matching** against collection names:
-- `--corpus code` → all `code::*` collections
-- `--corpus docs` → all `docs::*` collections
-- `--corpus knowledge` → all `knowledge::*` collections
-- `--corpus code::myrepo` → exactly the `code::myrepo` collection (fully-qualified)
+- `--corpus code` → all `code__*` collections
+- `--corpus docs` → all `docs__*` collections
+- `--corpus knowledge` → all `knowledge__*` collections
+- `--corpus code__myrepo` → exactly the `code__myrepo` collection (fully-qualified)
 
 When multiple `--corpus` flags are used, each corpus is queried separately (they may use different embedding models), results are combined, then reranked — see Cross-corpus search.
 
 ### Cross-corpus search
 
-`code::*` collections use `voyage-code-3`; `docs::*` and `knowledge::*` use `voyage-4`. These embedding spaces are not directly comparable — similarity scores across models are meaningless when combined naively.
+`code__*` collections use `voyage-code-3`; `docs__*` and `knowledge__*` use `voyage-4`. These embedding spaces are not directly comparable — similarity scores across models are meaningless when combined naively.
 
 Resolution strategy:
 1. Each corpus queried independently using its own embedding function
@@ -380,14 +383,16 @@ Vimgrep format: `path:line:0:content`
 ### Hybrid search scoring (code)
 
 ```
-# Per-chunk score combining vector similarity and file frecency (code:: corpora only)
+# Per-chunk score combining vector similarity and file frecency (code__ corpora only)
 vector_norm   = min_max_normalize(cosine_similarity, combined_result_window)   # → [0, 1]
 frecency_norm = min_max_normalize(file_frecency_score, combined_result_window)  # unbounded → [0, 1]
 score = 0.7 * vector_norm + 0.3 * frecency_norm
 
-# For docs:: and knowledge:: chunks: frecency_score is undefined (not in their metadata schema).
-# --hybrid is silently ignored for non-code corpora; their score = 1.0 * vector_norm.
-# This means --hybrid --corpus code --corpus docs applies frecency only to code results.
+# For docs__ and knowledge__ chunks: frecency_score is undefined (not in their metadata schema).
+# --hybrid is ignored for non-code corpora; their score = 1.0 * vector_norm.
+# If --hybrid is used but NO code__ corpus is in the search scope, a warning is printed:
+#   "Warning: --hybrid has no effect — no code corpus in scope."
+# --hybrid --corpus code --corpus docs applies frecency only to code results (no warning printed).
 
 # min_max_normalize(x, window): (x - min) / (max - min + ε)
 #   computed over the COMBINED result window across all corpora (not per-corpus)
@@ -419,7 +424,27 @@ session management <cite i="1-2">.
 
 ### Agentic mode (`--agentic`)
 
-Multi-step: Nexus issues multiple queries, refines based on intermediate results, then synthesizes final ranked list. Pairs with `--answer` for best results.
+Multi-step query refinement loop (max 3 iterations) powered by Haiku:
+1. Initial query → retrieve top results
+2. Haiku reads results, responds with JSON `{"done": true}` (sufficient) or `{"query": "<refined query>"}` (continue)
+3. Refined query → retrieve additional results → merge + deduplicate → repeat up to 3 total iterations
+4. Final combined result set returned (reranked if applicable)
+
+Uses `ANTHROPIC_API_KEY` via the `anthropic` Python SDK. Pairs with `--answer` for synthesis after retrieval.
+
+### Mixedbread fan-out (`--mxbai`)
+
+Fan-out to existing Mixedbread-indexed collections (read-only). Python SDK implementation:
+
+```python
+from mixedbread import Mixedbread
+client = Mixedbread(api_key=os.environ["MXBAI_API_KEY"])
+# Per store (from mxbai.stores config list):
+results = client.stores.search(store_id=store_id, query=query, top_k=per_corpus_k)
+# Result format: results.chunks[i].content.text, results.chunks[i].score
+```
+
+Mxbai results are converted to Nexus result objects and included in the combined result set before the Voyage AI reranker step. Multiple stores (from `mxbai.stores` config) are queried with the same `per_corpus_k` over-fetch. If `MXBAI_API_KEY` is unset: print warning `"Warning: MXBAI_API_KEY not set — skipping Mixedbread fan-out"` and skip. `nx doctor` verifies Mixedbread SDK auth when `--mxbai` has been configured.
 
 ## Session Scratch (`nx scratch`)
 
@@ -427,18 +452,20 @@ T1 in-memory ChromaDB, cleared at session end:
 
 ```bash
 nx scratch put "content" --tags "hypothesis,phase1"
-nx scratch put "content" --tags "finding" --persist   # flag for auto-flush to T2 on SessionEnd
+nx scratch put "content" --tags "finding" --persist   # flag for auto-flush to T2 on SessionEnd (auto-destination)
+nx scratch put "content" --tags "finding" --persist --project BFDB_active --title findings.md   # explicit T2 destination
 nx scratch get <id>
 nx scratch search "query"
 nx scratch list
-nx scratch flag <id>                       # mark existing entry for SessionEnd auto-flush
-nx scratch unflag <id>                     # unmark
+nx scratch flag <id>                                          # mark for SessionEnd flush; destination: project=scratch_sessions, title={session_id}_{id}
+nx scratch flag <id> --project BFDB_active --title findings.md  # explicit T2 destination
+nx scratch unflag <id>                     # unmark (clears destination)
 nx scratch clear                           # explicit clear; also happens automatically on SessionEnd
 nx scratch promote <id> --project BFDB_active --title findings.md   # → T2 immediately (manual)
 ```
 
 - Uses `DefaultEmbeddingFunction` (local ONNX, no API call) — fast, no network dependency
-- Session ID determined from `CLAUDE_SESSION_ID` env var (provided by Claude Code at session start — the hook reads it, does not set it)
+- Session ID: generated as a UUID4 by the SessionStart hook and written to `~/.config/nexus/current_session`; read from there by all nx subcommands. `CLAUDE_SESSION_ID` does **not** exist in Claude Code (open feature requests #13733, #17188 — unresolved as of 2026-02). T1 is a shared EphemeralClient; session ID is stored as metadata on each T1 document, enabling per-session filtering. When flagged entries are flushed to T2 with no explicit destination, they go to project `scratch_sessions`, title `{session_id}_{id}`.
 - On crash: T1 is in-memory; data is lost by design — scratch is ephemeral
 
 ## Memory Bank Replacement
@@ -448,6 +475,7 @@ nx scratch promote <id> --project BFDB_active --title findings.md   # → T2 imm
 ```bash
 # Write — named file within a project (maps to memory bank's project+filename key)
 nx memory put "content" --project BFDB_active --title active-context.md --tags "phase1" --ttl 30d
+echo "# Findings..." | nx memory put - --project BFDB_active --title findings.md  # stdin (requires --title)
 
 # Read by name (primary access pattern — deterministic)
 nx memory get --project BFDB_active --title active-context.md
@@ -474,7 +502,7 @@ nx memory expire          # clean up TTL-expired entries
 - Schema key is `(project, title)` for deterministic retrieval — mirrors current memory bank's project + filename pattern
 - Agent name, session ID, timestamp captured automatically
 - Content can be any size; 30–500+ line markdown docs all store fine
-- For semantic search across large analysis docs, `nx store` (or `nx memory promote`) persists to T3 ChromaDB `knowledge::` collections
+- For semantic search across large analysis docs, `nx store` (or `nx memory promote`) persists to T3 ChromaDB `knowledge__` collections
 
 ## Project Management Infrastructure (`nx pm`)
 
@@ -488,7 +516,7 @@ The `.pm/` directory is a named-file project workspace — exactly the model `nx
 - **Cross-project search**: `nx memory search "database schema"` finds decisions across every project's PM namespace
 - **TTL management**: phase docs can auto-expire when a project closes
 - **Agent provenance**: every write records which agent and session produced the content
-- **On-demand semantic search**: `nx pm promote` pushes PM docs to T3 `knowledge::pm::*` for cross-project semantic queries
+- **On-demand semantic search**: `nx pm promote` pushes PM docs to T3 `knowledge__pm__*` for cross-project semantic queries
 
 T1 (in-memory) is not used — PM docs must survive restarts. T3 is opt-in via `nx pm promote`, not default.
 
@@ -513,11 +541,12 @@ PM projects use the `{repo}_pm` namespace in T2. Tags follow the pattern `pm,pha
 # If auto-detection is ambiguous (e.g. monorepo), --project must be supplied explicitly.
 #
 # Documents created (all: ttl=permanent, tags=pm):
-#   CONTINUATION.md          — session resumption context (from embedded template)
-#   METHODOLOGY.md           — engineering discipline and workflow (from embedded template)
-#   AGENT_INSTRUCTIONS.md    — instructions for spawned agents (from embedded template)
-#   CONTEXT_PROTOCOL.md      — context management rules (from embedded template)
-#   phases/phase-1/context.md — initial phase context (tags=pm,phase:1,context)
+#   CONTINUATION.md          — "# Continuation\n\nProject: {repo}\nCreated: {date}\n\n## Current State\n(Fill in)\n\n## Next Action\n(Fill in)"
+#   METHODOLOGY.md           — engineering methodology and workflow (standard content embedded in binary)
+#   AGENT_INSTRUCTIONS.md    — "# Agent Instructions\n\nRead CONTINUATION.md first. Use nx pm commands for all PM operations. ..."
+#   CONTEXT_PROTOCOL.md      — "# Context Protocol\n\n## Storage Hierarchy\n1. Beads — task tracking ..."
+#   phases/phase-1/context.md — "# Phase 1 Context\n\n(Describe phase goals and current state here.)" (tags=pm,phase:1,context)
+# Templates are embedded in the nx binary; no external template files are required.
 #
 # The phase-1 doc ensures MAX(phase tag integer) = 1 on a fresh project so that
 # `nx pm phase next` works immediately after init without returning NULL.
@@ -529,7 +558,8 @@ nx pm resume [--project myrepo]
 # Human-readable status: current phase, last-updated agent, open blockers
 # - Current phase: MAX(phase tag integer) across pm-tagged docs
 # - Last-updated agent: agent field on most recently written T2 entry in the project
-# - Open blockers: bullet list from {repo}_pm/BLOCKERS.md in T2 (empty = none)
+# - Open blockers: bullet list from {repo}_pm/BLOCKERS.md in T2
+#     missing BLOCKERS.md → "none" (treat absent as zero blockers, same as empty)
 nx pm status [--project myrepo]
 
 # Blocker management (appends bullet to BLOCKERS.md; creates it if absent)
@@ -542,12 +572,14 @@ nx pm phase next                       # transition to next phase:
                                        #   1. reads current N as MAX(phase tag integer) across all docs tagged phase:N in the project
                                        #   2. creates new T2 entry title=phases/phase-{N+1}/context.md,
                                        #      tags=pm,phase:{N+1},context, ttl=permanent
+                                       #      initial content: "# Phase {N+1} Context\n\n(Describe phase goals and current state here.)\n\nPrevious phase: {N}"
                                        #   3. updates CONTINUATION.md to reference phase N+1
                                        #   (does NOT mass-update tags on existing docs)
 
 # FTS5 keyword search scoped to PM docs (no API call)
-# Without --project: searches all T2 entries WHERE project LIKE '%_pm'
+# Without --project: searches all T2 entries WHERE project GLOB '*_pm'
 #   (PM namespaces only — does not bleed into BFDB_active or other non-PM projects)
+#   Note: GLOB not LIKE — SQLite LIKE's `_` matches any single char; GLOB's `_` is literal.
 # With --project: adds AND project = '{repo}_pm'
 nx pm search "what did we decide about caching"
 nx pm search "auth" --project myrepo   # scoped to one project
@@ -592,7 +624,7 @@ Active ──── nx pm archive ──── Archived (T2, 90d decay) + Synthe
 
 **Archive**: `nx pm archive` is a two-phase operation (T2 SQLite and T3 ChromaDB cloud have no shared transaction coordinator — true atomicity is impossible):
 
-1. **Synthesize → T3 first**: Haiku reads all PM docs from T2 (CONTINUATION.md, phase files, AGENT_INSTRUCTIONS.md), capped at the 100 most recently written docs or 100K total characters (whichever is smaller). Produces a structured synthesis chunk stored in `knowledge::pm::{repo}`. The T3 `title` field is set to `"Archive: {repo}"`.
+1. **Synthesize → T3 first**: Haiku reads all PM docs from T2. Selection: always include the 5 standard init docs (CONTINUATION.md, METHODOLOGY.md, AGENT_INSTRUCTIONS.md, CONTEXT_PROTOCOL.md, phases/phase-1/context.md), then fill remaining capacity with other docs sorted by most-recently-written. Overall cap: 100 docs or 100K total characters (whichever is smaller). Produces a structured synthesis chunk stored in `knowledge__pm__{repo}`. The T3 `title` field is set to `"Archive: {repo}"`.
    - If Haiku synthesis **fails** (API error, rate limit, content policy): the archive is aborted. T2 is left untouched. The error is printed; the user can retry. This is the safe failure mode — raw PM docs remain accessible.
    - If T3 **write fails** after synthesis: same abort behavior.
 2. **Decay T2 second**: Only after T3 write succeeds. Runs as a single SQLite transaction: `UPDATE memory SET ttl = {NX_PM_ARCHIVE_TTL}, tags = replace(tags, 'pm,', 'pm-archived,') WHERE project = '{repo}_pm'`. If this T2 update fails after T3 succeeds: the T3 chunk is orphaned but not harmful — a retry of `nx pm archive` checks for an existing T3 chunk with `title = "Archive: {repo}"` before synthesizing. Idempotency check: query T3 for `title="Archive: {repo}"` ordered by `indexed_at DESC LIMIT 1`; if the most recent chunk was written within the last 5 minutes, skip re-synthesis and proceed directly to the T2 decay step.
@@ -609,7 +641,7 @@ UPDATE memory
 - Does **not** delete the T3 synthesis chunk (it remains as a reference point).
 - If some but not all docs have already TTL-expired (partial decay): restores surviving docs; prints a warning listing the expired titles. Does not abort.
 - If all docs have expired: fails with "raw docs fully expired — use `nx pm reference {project}` to access the synthesis". Suggests re-running `nx pm init` if the project is being restarted.
-- Re-archiving a restored project creates a new T3 synthesis chunk (no deduplication — the older chunk is not deleted automatically).
+- Re-archiving a restored project creates a new T3 synthesis chunk. Older synthesis chunks for the same project accumulate as historical records (no automatic deduplication). To inspect: `nx pm reference {project}` (bare-identifier dispatch lists all synthesis chunks). To wipe all syntheses for a project: `nx collection delete knowledge__pm__{project} --confirm` (nuclear option — no undo).
 
 #### Archive synthesis format
 
@@ -665,7 +697,7 @@ nx pm reference myrepo               # retrieve by project name (uses --where pr
 `nx pm reference` dispatch rules:
 - **No argument**: prompts interactively, then runs semantic query
 - **Quoted string or contains spaces/`?`**: treated as semantic query → `nx search <query> --corpus knowledge --where store_type=pm-archive`
-- **Bare identifier (no spaces, no `?`)**: treated as project name → `nx search "" --corpus knowledge --where store_type=pm-archive --where project=<arg>` (metadata-only lookup, no embedding call needed)
+- **Bare identifier (no spaces, no `?`)**: treated as project name → metadata-only lookup via `collection.get(where={"store_type": "pm-archive", "project": "<arg>"})` — no embedding call, no `query_texts` parameter
 
 The `--where` flag maps to ChromaDB `where={"store_type": "pm-archive", ...}` filters. This is the institutional memory query point: *"how did we handle rate limiting in past projects?"* finds the right synthesis even without knowing which project to look in.
 
@@ -693,7 +725,12 @@ echo "# Findings..." | nx store - --collection knowledge --title "Auth Analysis"
 nx search "security vulnerabilities" --corpus knowledge
 
 # Lifecycle management
-nx store expire           # remove knowledge:: chunks whose expires_at has passed
+nx store expire           # remove knowledge__ chunks whose expires_at has passed
+                          # Implementation: collection.get(where={"$and": [{"ttl_days": {"$gt": 0}},
+                          #   {"expires_at": {"$lt": <current ISO time>}}]})
+                          # Required guard: expires_at="" for permanent entries sorts BEFORE any ISO
+                          # timestamp lexicographically — an unguarded query deletes permanent entries.
+                          # Automated: nx serve schedules this daily; also run by SessionEnd hook.
 ```
 
 - `--ttl` format: `Nd`, `Nw`, or `permanent` (default: `permanent` for `nx store`; `30d` for `nx memory`)
@@ -711,7 +748,7 @@ This replaces the current pattern of agents manually writing to memory bank file
 nx serve start [--port N]    # start persistent server (background)
 nx serve stop
 nx serve status              # show indexed repos, accuracy %, uptime
-nx serve logs
+nx serve logs                # tail log file: ~/.config/nexus/serve.log
 ```
 
 `nx serve start` daemonizes using `subprocess.Popen(..., start_new_session=True)` — no double-fork, no external process manager required. PID is written to `~/.config/nexus/server.pid`. On start, if a stale PID file exists, the process is checked via `kill(pid, 0)` — if not running the stale file is removed; if running the start is a no-op. `nx serve stop` sends `SIGTERM` to the PID and removes the file.
@@ -748,6 +785,7 @@ Key settings: `server.port`, `server.ignorePatterns`, `embeddings.codeModel` (de
 `chromadb.tenant`, `chromadb.database`, `client.host`, `server.headPollInterval` (default: `10`).
 
 Required env vars (not stored in config files): `CHROMA_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`.
+Optional env var: `MXBAI_API_KEY` (required only when `--mxbai` is used; if unset, `--mxbai` prints a warning and skips fan-out).
 
 ### Health check
 
@@ -771,7 +809,7 @@ nx install codex            # future integrations
 `nx install claude-code` writes:
 - `~/.claude/skills/nexus/SKILL.md` — agent usage guide (how to use `nx search`, `nx memory`, `nx store`, `nx scratch`, `nx pm`)
 - SessionStart hook entry in `~/.claude/settings.json`: initialize T1 scratch; PM-aware context injection (see below)
-- SessionEnd hook entry: flush T1 scratch entries flagged with `--persist` or `nx scratch flag` to T2, run `nx memory expire`
+- SessionEnd hook entry: flush T1 scratch entries that have a T2 destination (explicit project+title, or auto-destination `scratch_sessions/{session_id}_{id}`) to T2; run `nx memory expire` and `nx store expire`
 
 **SessionStart hook — canonical behavior** (single definition; the `nx pm` section references this):
 
@@ -841,7 +879,7 @@ Recent memory ({project}, last 10 entries):
 - **ChromaDB** — T1 (`chromadb.EphemeralClient` + `DefaultEmbeddingFunction`) and T3 (`chromadb.CloudClient(tenant=..., database=..., api_key=CHROMA_API_KEY)` → ChromaDB cloud + `VoyageAIEmbeddingFunction`)
 - **SQLite + FTS5** — T2 memory bank (stdlib `sqlite3`, WAL mode, no ORM)
 - **Voyage AI** — embedding API: `voyage-code-3` for code, `voyage-4` for docs/PDFs; reranker: `rerank-2.5` for cross-corpus result merging (verified against voyageai.com/docs/pricing 2026-02-21)
-  - **Verified model names**: `voyage-code-3` ✓, `voyage-4` ✓, `rerank-2.5` ✓ (also available: `rerank-2.5-lite` at lower cost/quality). ChromaDB wrapper default is `"voyage-large-2"` — names must be set explicitly; SDK accepts any string and fails at first API call with an invalid name.
+  - **Verified model names**: `voyage-code-3` ✓, `voyage-4` ✓, `rerank-2.5` ✓ (also available: `rerank-2.5-lite` at lower cost/quality). ChromaDB wrapper default is `"voyage-01"` — names must be set explicitly; SDK accepts any string and fails at first API call with an invalid name.
   - **Free tier**: 200M tokens/month for all current-gen models including rerankers (verified 2026-02-21). Applies to `voyage-4`, `voyage-code-3`, `rerank-2.5`, and `rerank-2.5-lite`.
   - **Pricing beyond free tier**: `voyage-code-3` $0.18/1M tokens; `voyage-4` $0.06/1M tokens; `rerank-2.5` $0.05/1M tokens; `rerank-2.5-lite` $0.02/1M tokens. Batch API gives 33% discount.
   - Env var: `VOYAGE_API_KEY`; native `VoyageAIEmbeddingFunction` in ChromaDB (`pip install voyageai`); checks `VOYAGE_API_KEY` first, then `CHROMA_VOYAGE_API_KEY` — no custom glue
@@ -851,7 +889,7 @@ Recent memory ({project}, last 10 entries):
 - **Git** — frecency computation from commit history
 - **Flask + Waitress** — persistent `nx serve` process (SeaGOAT pattern)
 - **PyMuPDF4LLM + pdfplumber + Tesseract/EasyOCR** — PDF extraction (ported from Arcaneum)
-- **tree-sitter + llama-index-core** — AST-based code chunking; uses `llama_index.core.node_parser.CodeSplitter` as the interface (which wraps `tree-sitter-language-pack` internally); installing bare `tree-sitter` alone is not sufficient
+- **tree-sitter + llama-index-core** — AST-based code chunking; uses `llama_index.core.node_parser.CodeSplitter` as the interface (which wraps `tree-sitter-language-pack` internally); installing bare `tree-sitter` alone is not sufficient. **Version pinning required** in `pyproject.toml` — known breaking incompatibilities exist between package versions (issues #13521, #17567 in llama_index repo)
 - **Environment variables**: `VOYAGE_API_KEY` (embeddings + reranker), `CHROMA_API_KEY` (ChromaDB cloud auth — required for all T3 operations), `ANTHROPIC_API_KEY` (Haiku synthesis)
 
 ## Decisions Log
@@ -868,3 +906,4 @@ Recent memory ({project}, last 10 entries):
 | 8 | Cross-corpus: separate retrieval + reranking | `voyage-code-3` and `voyage-4` produce incomparable similarity scores; independent retrieval per corpus followed by reranking is the correct merge strategy |
 | 9 | `nx pm` uses T2 (not a new storage tier) | PM docs are a named-file project workspace — exactly T2's model. No new infrastructure; FTS5 covers keyword search needs; T3 is opt-in via `nx pm promote` for cross-project semantic queries |
 | 10 | Archive synthesizes to T3 rather than dumping raw PM docs | Raw phase docs are drafts/iterations — noisy, redundant, pollute semantic search. Haiku synthesis at archive time extracts signal (decisions, challenges, outcome) into one semantically rich chunk per project. T2 raw docs decay over 90d for restore flexibility; after that, the T3 synthesis is the permanent reference. |
+| 11 | T3 = ChromaDB CloudClient (not Qdrant, not self-hosted Chroma) | Already running in the existing Claude Code toolchain (same ChromaDB instance used by current agents); no new infrastructure required. `chromadb.CloudClient` provides tenant+database isolation. Qdrant rejected (Arcaneum port only; would require new infra). Self-hosted Chroma rejected (adds operational burden, defeats "already running" benefit). |
