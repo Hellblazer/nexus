@@ -360,7 +360,7 @@ When multiple `--corpus` flags are used, each corpus is queried separately (they
 Resolution strategy:
 1. Each corpus queried independently using its own embedding function
 2. Top-k results retrieved per corpus (proportional to `--max-results`)
-3. Combined result set reranked using `voyageai.Client().rerank(query=query, documents=[c.text for c in combined], model="voyage-rerank-2", top_k=max_results)` to produce a unified ranked list. Verify `voyage-rerank-2` against current Voyage AI catalog; reranker pricing is billed separately from embeddings.
+3. Combined result set reranked using `voyageai.Client().rerank(query=query, documents=[c.text for c in combined], model="rerank-2.5", top_k=max_results)` to produce a unified ranked list. `rerank-2.5` verified against voyageai.com/docs/pricing 2026-02-21 ($0.05/1M tokens; 200M free). `rerank-2.5-lite` ($0.02/1M) is a lower-cost alternative configurable via `embeddings.rerankerModel`.
 4. `--no-rerank` skips step 3 and interleaves results round-robin instead
 
 `min_max_normalize` in hybrid scoring is computed over the **combined result set** after per-corpus retrieval, not per-corpus windows. This preserves relative quality differences across corpora (e.g., high-confidence code results vs lower-confidence doc results remain distinguishable after normalization).
@@ -715,8 +715,9 @@ nx config set server.port 7890
 Per-repo config: `.nexus.yml` (same merge pattern as SeaGOAT's `.seagoat.yml`).
 Global config: `~/.config/nexus/config.yml`.
 
-Key settings: `server.port`, `server.ignorePatterns`, `embeddings.codeModel`,
-`embeddings.docsModel`, `chromadb.tenant`, `chromadb.database`, `client.host`, `server.headPollInterval`.
+Key settings: `server.port`, `server.ignorePatterns`, `embeddings.codeModel` (default: `voyage-code-3`),
+`embeddings.docsModel` (default: `voyage-4`), `embeddings.rerankerModel` (default: `rerank-2.5`),
+`chromadb.tenant`, `chromadb.database`, `client.host`, `server.headPollInterval` (default: `10`).
 
 Required env vars (not stored in config files): `CHROMA_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`.
 
@@ -811,12 +812,11 @@ Recent memory ({project}, last 10 entries):
 - **Python 3.12+** — CLI, server, indexing pipelines, SeaGOAT frecency logic
 - **ChromaDB** — T1 (`chromadb.EphemeralClient` + `DefaultEmbeddingFunction`) and T3 (`chromadb.CloudClient(tenant=..., database=..., api_key=CHROMA_API_KEY)` → ChromaDB cloud + `VoyageAIEmbeddingFunction`)
 - **SQLite + FTS5** — T2 memory bank (stdlib `sqlite3`, WAL mode, no ORM)
-- **Voyage AI** — embedding API: `voyage-code-3` for code, `voyage-4` for docs/PDFs; reranker: `voyage-rerank-2` for cross-corpus result merging
-  - Verify all model names (`voyage-code-3`, `voyage-4`, `voyage-rerank-2`) against current Voyage AI catalog before use; ChromaDB wrapper default is `"voyage-large-2"`; SDK accepts any string and fails at first API call with an invalid name
-  - Verify free tier quota at voyageai.com/pricing before relying on this; spec written assuming 200M tokens/month free (embedding only — verify separately)
-  - ~$0.18/1M tokens (code), ~$0.06/1M tokens (docs) beyond free tier; env var: `VOYAGE_API_KEY`
-  - Reranker pricing is separate from embedding pricing; verify at voyageai.com/pricing; `voyageai.Client().rerank(query=..., documents=[chunk.text, ...], model="voyage-rerank-2", top_k=max_results)`
-  - Native `VoyageAIEmbeddingFunction` in ChromaDB (`pip install voyageai`); `VoyageAIEmbeddingFunction` checks `VOYAGE_API_KEY` env var first, then `CHROMA_VOYAGE_API_KEY` — no custom glue
+- **Voyage AI** — embedding API: `voyage-code-3` for code, `voyage-4` for docs/PDFs; reranker: `rerank-2.5` for cross-corpus result merging (verified against voyageai.com/docs/pricing 2026-02-21)
+  - **Verified model names**: `voyage-code-3` ✓, `voyage-4` ✓, `rerank-2.5` ✓ (also available: `rerank-2.5-lite` at lower cost/quality). ChromaDB wrapper default is `"voyage-large-2"` — names must be set explicitly; SDK accepts any string and fails at first API call with an invalid name.
+  - **Free tier**: 200M tokens/month for all current-gen models including rerankers (verified 2026-02-21). Applies to `voyage-4`, `voyage-code-3`, `rerank-2.5`, and `rerank-2.5-lite`.
+  - **Pricing beyond free tier**: `voyage-code-3` $0.18/1M tokens; `voyage-4` $0.06/1M tokens; `rerank-2.5` $0.05/1M tokens; `rerank-2.5-lite` $0.02/1M tokens. Batch API gives 33% discount.
+  - Env var: `VOYAGE_API_KEY`; native `VoyageAIEmbeddingFunction` in ChromaDB (`pip install voyageai`); checks `VOYAGE_API_KEY` first, then `CHROMA_VOYAGE_API_KEY` — no custom glue
 - **Claude Haiku** (`claude-3-5-haiku-20241022`) — Q&A synthesis via `anthropic` Python SDK
 - **Mixedbread SDK** — read-only fan-out for existing Mixedbread-indexed collections (`--mxbai` flag)
 - **ripgrep** — full-text code search via flat mmap line cache (local, 500MB cap)
@@ -830,7 +830,7 @@ Recent memory ({project}, last 10 entries):
 
 | # | Decision | Rationale |
 |---|---|---|
-| 1 | Voyage AI embedding API (not local ONNX) | Eliminates ~2GB model downloads and GPU setup complexity. **Assumption**: free tier covers normal usage (spec assumes 200M tokens/month — verify at voyageai.com/pricing before finalizing; free tier terms have changed historically). If free tier is insufficient, the cost argument for Voyage AI over local ONNX weakens and should be re-evaluated. |
+| 1 | Voyage AI embedding API (not local ONNX) | Eliminates ~2GB model downloads and GPU setup complexity. **Verified** (2026-02-21): free tier is 200M tokens/month for all current-gen models (`voyage-4`, `voyage-code-3`, `rerank-2.5`, `rerank-2.5-lite`). Beyond free tier: $0.18/1M (code), $0.06/1M (docs), $0.05/1M (reranker). Re-verify at voyageai.com/docs/pricing if significant time has passed — free tier terms have changed historically. |
 | 2 | Persistent `nx serve` process | Faster repeated queries; ripgrep line cache stays warm; HEAD polling for auto-reindex |
 | 3 | SQLite T2 = memory bank only | Don't over-engineer; T3 ChromaDB handles knowledge storage naturally |
 | 4 | Mixedbread fan-out via `--mxbai` flag on `nx search` | Opt-in so normal searches stay fully local; `nx ask` is not a separate command — answer synthesis is `-a` on `nx search` |
