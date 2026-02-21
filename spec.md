@@ -427,11 +427,14 @@ T1 in-memory ChromaDB, cleared at session end:
 
 ```bash
 nx scratch put "content" --tags "hypothesis,phase1"
+nx scratch put "content" --tags "finding" --persist   # flag for auto-flush to T2 on SessionEnd
 nx scratch get <id>
 nx scratch search "query"
 nx scratch list
+nx scratch flag <id>                       # mark existing entry for SessionEnd auto-flush
+nx scratch unflag <id>                     # unmark
 nx scratch clear                           # explicit clear; also happens automatically on SessionEnd
-nx scratch promote <id> --project BFDB_active --title findings.md   # → T2
+nx scratch promote <id> --project BFDB_active --title findings.md   # → T2 immediately (manual)
 ```
 
 - Uses `DefaultEmbeddingFunction` (local ONNX, no API call) — fast, no network dependency
@@ -508,13 +511,30 @@ PM projects use the `{repo}_pm` namespace in T2. Tags follow the pattern `pm,pha
 # --project is optional; auto-detected via: basename $(git rev-parse --show-toplevel)
 # Falls back to basename of cwd for non-git directories.
 # If auto-detection is ambiguous (e.g. monorepo), --project must be supplied explicitly.
+#
+# Documents created (all: ttl=permanent, tags=pm):
+#   CONTINUATION.md          — session resumption context (from embedded template)
+#   METHODOLOGY.md           — engineering discipline and workflow (from embedded template)
+#   AGENT_INSTRUCTIONS.md    — instructions for spawned agents (from embedded template)
+#   CONTEXT_PROTOCOL.md      — context management rules (from embedded template)
+#   phases/phase-1/context.md — initial phase context (tags=pm,phase:1,context)
+#
+# The phase-1 doc ensures MAX(phase tag integer) = 1 on a fresh project so that
+# `nx pm phase next` works immediately after init without returning NULL.
 nx pm init [--project myrepo]
 
 # Session resumption — outputs CONTINUATION.md content for session injection
 nx pm resume [--project myrepo]
 
 # Human-readable status: current phase, last-updated agent, open blockers
+# - Current phase: MAX(phase tag integer) across pm-tagged docs
+# - Last-updated agent: agent field on most recently written T2 entry in the project
+# - Open blockers: bullet list from {repo}_pm/BLOCKERS.md in T2 (empty = none)
 nx pm status [--project myrepo]
+
+# Blocker management (appends bullet to BLOCKERS.md; creates it if absent)
+nx pm block "waiting on ChromaDB cloud credentials"
+nx pm unblock 1              # remove blocker by line number (as shown by nx pm status)
 
 # Phase management
 nx pm phase 2                          # retrieve phase-2 context doc
@@ -526,6 +546,9 @@ nx pm phase next                       # transition to next phase:
                                        #   (does NOT mass-update tags on existing docs)
 
 # FTS5 keyword search scoped to PM docs (no API call)
+# Without --project: searches all T2 entries WHERE project LIKE '%_pm'
+#   (PM namespaces only — does not bleed into BFDB_active or other non-PM projects)
+# With --project: adds AND project = '{repo}_pm'
 nx pm search "what did we decide about caching"
 nx pm search "auth" --project myrepo   # scoped to one project
 
@@ -572,7 +595,7 @@ Active ──── nx pm archive ──── Archived (T2, 90d decay) + Synthe
 1. **Synthesize → T3 first**: Haiku reads all PM docs from T2 (CONTINUATION.md, phase files, AGENT_INSTRUCTIONS.md), capped at the 100 most recently written docs or 100K total characters (whichever is smaller). Produces a structured synthesis chunk stored in `knowledge::pm::{repo}`. The T3 `title` field is set to `"Archive: {repo}"`.
    - If Haiku synthesis **fails** (API error, rate limit, content policy): the archive is aborted. T2 is left untouched. The error is printed; the user can retry. This is the safe failure mode — raw PM docs remain accessible.
    - If T3 **write fails** after synthesis: same abort behavior.
-2. **Decay T2 second**: Only after T3 write succeeds. Runs as a single SQLite transaction: `UPDATE memory SET ttl = {NX_PM_ARCHIVE_TTL}, tags = replace(tags, 'pm,', 'pm-archived,') WHERE project = '{repo}_pm'`. If this T2 update fails after T3 succeeds: the T3 chunk is orphaned but not harmful — a retry of `nx pm archive` checks for an existing T3 chunk with `title = "Archive: {repo}"` before synthesizing (idempotent; skips re-synthesis if chunk exists and was written within the last 5 minutes, otherwise re-synthesizes).
+2. **Decay T2 second**: Only after T3 write succeeds. Runs as a single SQLite transaction: `UPDATE memory SET ttl = {NX_PM_ARCHIVE_TTL}, tags = replace(tags, 'pm,', 'pm-archived,') WHERE project = '{repo}_pm'`. If this T2 update fails after T3 succeeds: the T3 chunk is orphaned but not harmful — a retry of `nx pm archive` checks for an existing T3 chunk with `title = "Archive: {repo}"` before synthesizing. Idempotency check: query T3 for `title="Archive: {repo}"` ordered by `indexed_at DESC LIMIT 1`; if the most recent chunk was written within the last 5 minutes, skip re-synthesis and proceed directly to the T2 decay step.
 
 `NX_PM_ARCHIVE_TTL` accepts an **integer number of days** (e.g. `90`). Default: `90`. Same unit as the T2 `ttl` column.
 
@@ -616,7 +639,9 @@ Final Phase: N of M
 
 Target size: **400–800 tokens, hard cap 1200 tokens** — aim for one ChromaDB chunk. The Haiku prompt instructs it to use brief bullets (one line per item). If the synthesis exceeds 1200 tokens, it is split at section boundaries into at most 3 chunks (Key Decisions + Architecture, Challenges + Outcome, Lessons Learned), each stored as a separate T3 document with an additional `chunk_index` metadata field. Semantically rich so vector search finds it on topical queries even without knowing the project name.
 
-T3 metadata: `store_type="pm-archive"`, `project="{repo}"`, `status="completed|paused|cancelled"`, `archived_at` (ISO 8601), `phase_count` (int), `ttl_days=0` (permanent).
+T3 metadata: `store_type="pm-archive"`, `project="{repo}"`, `status="completed|paused|cancelled"`, `archived_at` (ISO 8601, same as `indexed_at`), `phase_count` (int), `ttl_days=0` (permanent).
+
+Template variable `{started_at}` in the Haiku prompt is computed as `MIN(timestamp) WHERE project = '{repo}_pm'` from T2 — the timestamp of the oldest PM doc in the project.
 
 #### Archive and restore commands
 
@@ -632,16 +657,17 @@ nx pm close [--project myrepo]
 nx pm restore <project>
 
 # Query institutional memory — semantic search across all archived syntheses
-nx pm reference                      # prompts for query; searches knowledge::* --where store_type=pm-archive
+nx pm reference                      # prompts for query; semantic search across all pm-archives
 nx pm reference "caching decisions"  # direct semantic query
-nx pm reference myrepo               # retrieve specific project's synthesis by name
+nx pm reference myrepo               # retrieve by project name (uses --where project=, not semantic)
 ```
 
-`nx pm reference` is equivalent to:
-```bash
-nx search <query> --corpus knowledge --where store_type=pm-archive
-```
-The `--where` flag (defined in the search flags table) maps to a ChromaDB `where={"store_type": "pm-archive"}` filter, scoping results to pm-archive chunks within the `knowledge::*` namespace. This is the institutional memory query point: *"how did we handle rate limiting in past projects?"* finds the right synthesis even without knowing which project to look in.
+`nx pm reference` dispatch rules:
+- **No argument**: prompts interactively, then runs semantic query
+- **Quoted string or contains spaces/`?`**: treated as semantic query → `nx search <query> --corpus knowledge --where store_type=pm-archive`
+- **Bare identifier (no spaces, no `?`)**: treated as project name → `nx search "" --corpus knowledge --where store_type=pm-archive --where project=<arg>` (metadata-only lookup, no embedding call needed)
+
+The `--where` flag maps to ChromaDB `where={"store_type": "pm-archive", ...}` filters. This is the institutional memory query point: *"how did we handle rate limiting in past projects?"* finds the right synthesis even without knowing which project to look in.
 
 #### Why raw PM docs don't go to T3
 
@@ -718,6 +744,7 @@ Global config: `~/.config/nexus/config.yml`.
 Key settings: `server.port`, `server.ignorePatterns`, `embeddings.codeModel` (default: `voyage-code-3`),
 `embeddings.docsModel` (default: `voyage-4`), `embeddings.rerankerModel` (default: `rerank-2.5`),
 `pm.archiveTtl` (default: `90`, days; overridable via `NX_PM_ARCHIVE_TTL` env var),
+`mxbai.stores` (list of Mixedbread store identifiers to query when `--mxbai` is used, e.g. `["art", "docs"]`; required for `--mxbai` — if unset, `--mxbai` prints a warning and skips fan-out),
 `chromadb.tenant`, `chromadb.database`, `client.host`, `server.headPollInterval` (default: `10`).
 
 Required env vars (not stored in config files): `CHROMA_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`.
@@ -744,7 +771,7 @@ nx install codex            # future integrations
 `nx install claude-code` writes:
 - `~/.claude/skills/nexus/SKILL.md` — agent usage guide (how to use `nx search`, `nx memory`, `nx store`, `nx scratch`, `nx pm`)
 - SessionStart hook entry in `~/.claude/settings.json`: initialize T1 scratch; PM-aware context injection (see below)
-- SessionEnd hook entry: flush flagged T1 scratch entries to T2, run `nx memory expire`
+- SessionEnd hook entry: flush T1 scratch entries flagged with `--persist` or `nx scratch flag` to T2, run `nx memory expire`
 
 **SessionStart hook — canonical behavior** (single definition; the `nx pm` section references this):
 
