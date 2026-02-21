@@ -475,7 +475,7 @@ nx memory expire          # clean up TTL-expired entries
 
 ## Project Management Infrastructure (`nx pm`)
 
-`nx pm` provides first-class support for the structured `.pm/` project management infrastructure used by Claude Code agents. It is a thin ergonomic layer over T2 (`nx memory`), storing PM documents under the `{repo}_pm` project namespace. No new storage tier is introduced.
+`nx pm` provides first-class support for the structured `.pm/` project management infrastructure used by Claude Code agents. Active PM documents live in T2 (`nx memory`), under the `{repo}_pm` project namespace — no new storage tier for day-to-day use. However, three commands touch T3 (ChromaDB cloud): `nx pm archive` (writes synthesis chunk), `nx pm reference` (queries archived syntheses), and `nx pm promote` (elevates PM docs to semantic search). T3 access requires `CHROMA_API_KEY` and a live network connection; the T2-only commands (`init`, `resume`, `status`, `phase`, `search`, `expire`, `restore`) work fully offline.
 
 ### Why T2 is the natural fit
 
@@ -548,7 +548,7 @@ The canonical SessionStart hook definition is in the "Agent integration installe
 /nx:pm phase next      — advance to next phase
 /nx:pm search <query>  — FTS5 search across PM docs
 /nx:pm archive         — archive current project (synthesize → T3, decay T2)
-/nx:pm close           — archive + mark completed
+/nx:pm close           — alias for /nx:pm archive --status completed
 /nx:pm restore <proj>  — restore archived project (within decay window)
 /nx:pm reference <q>   — semantic search across all archived project syntheses
 ```
