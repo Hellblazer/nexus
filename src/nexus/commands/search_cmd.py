@@ -7,6 +7,7 @@ import click
 from nexus.config import load_config
 from nexus.corpus import resolve_corpus
 from nexus.commands.store import _t3
+from nexus.ripgrep_cache import search_ripgrep
 from nexus.search_engine import (
     SearchResult,
     answer_mode,
@@ -22,6 +23,34 @@ from nexus.search_engine import (
 )
 
 _CONTENT_MAX_CHARS: int = 200
+
+# Directory where ripgrep cache files are stored (overridable in tests via monkeypatch)
+_CONFIG_DIR: Path = Path.home() / ".config" / "nexus"
+
+
+def _find_rg_cache_paths() -> list[Path]:
+    """Return all ripgrep cache files in the nexus config directory."""
+    return list(_CONFIG_DIR.glob("*.cache"))
+
+
+def _rg_hit_to_result(hit: dict) -> SearchResult:
+    """Convert a ripgrep hit dict to a SearchResult for hybrid scoring."""
+    file_path = hit["file_path"]
+    line_number = hit["line_number"]
+    return SearchResult(
+        id=f"rg:{file_path}:{line_number}",
+        content=hit["line_content"],
+        distance=0.0,
+        collection="rg__cache",
+        metadata={
+            "file_path": file_path,
+            "source_path": file_path,
+            "line_start": line_number,
+            "frecency_score": hit.get("frecency_score", 0.5),
+            "source": "ripgrep",
+        },
+        hybrid_score=0.0,
+    )
 
 
 @click.command("search")
@@ -109,6 +138,10 @@ def search_cmd(
             per_k = max(5, (n // num) * 2)
             mxbai_results = fetch_mxbai_results(q, stores=stores, per_k=per_k)
             raw.extend(mxbai_results)
+        if hybrid:
+            for cache_path in _find_rg_cache_paths():
+                rg_hits = search_ripgrep(q, cache_path, n_results=n * 2)
+                raw.extend(_rg_hit_to_result(h) for h in rg_hits)
         return raw
 
     # Retrieval (agentic or direct)
