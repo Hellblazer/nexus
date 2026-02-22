@@ -27,8 +27,7 @@ def search_cmd(query: str, corpus: tuple[str, ...], n: int) -> None:
         target_collections.extend(matched)
 
     # deduplicate while preserving order
-    seen: set[str] = set()
-    target_collections = [x for x in target_collections if not (x in seen or seen.add(x))]  # type: ignore[func-returns-value]
+    target_collections = list(dict.fromkeys(target_collections))
 
     if not target_collections:
         click.echo("No matching collections found.")

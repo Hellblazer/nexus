@@ -24,6 +24,10 @@ def _t3() -> T3Database:
         raise click.ClickException(
             "CHROMA_API_KEY is not set. T3 operations require ChromaDB Cloud credentials."
         )
+    if not voyage_api_key:
+        raise click.ClickException(
+            "VOYAGE_API_KEY is not set. T3 operations require Voyage AI credentials."
+        )
     if not tenant or not database:
         raise click.ClickException(
             "ChromaDB tenant/database not configured. "
@@ -70,8 +74,6 @@ def put_cmd(
         if not title:
             raise click.ClickException("--title is required when reading from stdin (-)")
         content = sys.stdin.read()
-        if not title:
-            title = "stdin"
     else:
         path = Path(source)
         if not path.exists():

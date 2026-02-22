@@ -28,15 +28,14 @@ class T3Database:
         api_key: str,
         voyage_api_key: str = "",
     ) -> None:
-        self._api_key = api_key
-        self._voyage_api_key = voyage_api_key or os.environ.get("VOYAGE_API_KEY", "")
+        self._voyage_api_key = voyage_api_key
         self._client = chromadb.CloudClient(
             tenant=tenant, database=database, api_key=api_key
         )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _embedding_fn(self, collection_name: str):
+    def _embedding_fn(self, collection_name: str) -> chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction:
         model = embedding_model_for_collection(collection_name)
         return chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
             model_name=model, api_key=self._voyage_api_key
@@ -44,7 +43,7 @@ class T3Database:
 
     # ── Collection access ─────────────────────────────────────────────────────
 
-    def get_or_create_collection(self, name: str):
+    def get_or_create_collection(self, name: str) -> chromadb.Collection:
         """Get or create a T3 collection with the appropriate embedding function."""
         return self._client.get_or_create_collection(
             name, embedding_function=self._embedding_fn(name)
@@ -158,7 +157,11 @@ class T3Database:
     # ── Collection management ─────────────────────────────────────────────────
 
     def list_collections(self) -> list[dict]:
-        """Return all T3 collections with their document counts."""
+        """Return all T3 collections with their document counts.
+
+        Note: makes N+1 API calls (1 list + 1 count per collection).
+        Optimize if the ChromaDB CloudClient exposes batched counts.
+        """
         result: list[dict] = []
         for name in self._client.list_collections():
             col = self._client.get_collection(name)
