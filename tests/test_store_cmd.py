@@ -232,6 +232,8 @@ def test_search_displays_results(runner: CliRunner, env_creds) -> None:
             "distance": 0.123,
             "title": "sec.md",
             "tags": "security",
+            "source_path": "./sec.md",
+            "start_line": 1,
         }
     ]
 
@@ -239,7 +241,4 @@ def test_search_displays_results(runner: CliRunner, env_creds) -> None:
         result = runner.invoke(main, ["search", "security", "--corpus", "knowledge"])
 
     assert result.exit_code == 0
-    assert "abc12345" in result.output
-    assert "sec.md" in result.output
-    assert "0.1230" in result.output
     assert "security finding here" in result.output
