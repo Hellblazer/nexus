@@ -271,27 +271,25 @@ def test_pm_restore_reverses_decay(db) -> None:
         assert "pm-archived," not in (row["tags"] or "")
 
 
-def test_pm_restore_partial_expiry_warns(db, capsys) -> None:
+def test_pm_restore_partial_expiry_warns(db, caplog) -> None:
     """pm_restore warns (not fails) when only some docs have expired."""
+    import logging
     pm_init(db, project="myrepo")
-    # Keep only CONTINUATION.md (simulate others expired — just delete them)
+    # Keep only CONTINUATION.md (simulate others expired — delete via db.delete()
+    # so FTS5 triggers fire correctly)
     for entry in db.list_entries(project="myrepo_pm"):
         if entry["title"] != "CONTINUATION.md":
-            db.conn.execute(
-                "DELETE FROM memory WHERE project = ? AND title = ?",
-                ("myrepo_pm", entry["title"]),
-            )
-            db.conn.commit()
+            db.delete("myrepo_pm", entry["title"])
     # Mark remaining as archived
     row = db.get(project="myrepo_pm", title="CONTINUATION.md")
     assert row is not None
     db.put("myrepo_pm", "CONTINUATION.md", row["content"],
            tags="pm-archived,phase:1,context", ttl=90)
 
-    pm_restore(db, project="myrepo")  # should not raise
+    with caplog.at_level(logging.WARNING):
+        pm_restore(db, project="myrepo")  # should not raise
 
-    out = capsys.readouterr().out
-    assert "warn" in out.lower() or "expired" in out.lower()
+    assert "expired" in caplog.text.lower()
 
 
 def test_pm_restore_fails_if_all_expired(db) -> None:

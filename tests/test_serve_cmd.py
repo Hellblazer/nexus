@@ -1,5 +1,6 @@
 """AC1: nx serve start/stop/status/logs — PID file lifecycle and stale PID detection."""
 import signal
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -185,3 +186,18 @@ def test_serve_logs_shows_tail(runner: CliRunner, serve_home: Path) -> None:
     assert "log line 95" in result.output
     # Should NOT show early lines
     assert "log line 0\n" not in result.output
+
+
+# ── start: command args ────────────────────────────────────────────────────────
+
+def test_serve_start_spawns_server_main_module(runner: CliRunner, serve_home: Path) -> None:
+    """start_cmd spawns nexus.server_main via python -m."""
+    mock_proc = MagicMock()
+    mock_proc.pid = 42
+
+    with patch("nexus.commands.serve.subprocess.Popen", return_value=mock_proc) as mock_popen:
+        runner.invoke(main, ["serve", "start"])
+
+    assert mock_popen.called
+    cmd = mock_popen.call_args.args[0]
+    assert cmd == [sys.executable, "-m", "nexus.server_main"]

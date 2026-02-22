@@ -7,7 +7,9 @@ Archive synthesis lives in T3 ``knowledge__pm__{repo}`` (permanent, ttl=0).
 """
 from __future__ import annotations
 
+import logging
 import os
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +38,8 @@ _STANDARD_DOCS: dict[str, str] = {
         "# Phase 1 Context\n\n(Describe phase goals and current state here.)"
     ),
 }
+
+_log = logging.getLogger(__name__)
 
 _PM_SUFFIX = "_pm"
 
@@ -126,21 +130,19 @@ def _split_synthesis(text: str) -> list[str]:
     if len(text) <= CHAR_LIMIT:
         return [text]
 
-    # Split at section boundaries into at most 3 chunks
-    sections = [
-        ("## Key Decisions", "## Architecture Choices"),
-        ("## Challenges", "## Outcome"),
-        ("## Lessons Learned", None),
-    ]
+    # Split at any ## section boundary — robust against header name variations
+    parts = re.split(r"(?=^## )", text, flags=re.MULTILINE)
+    if len(parts) <= 1:
+        return [text[:CHAR_LIMIT]]
+
+    # Group parts into at most 3 evenly-distributed chunks
+    n = len(parts)
+    chunk_size = max(1, (n + 2) // 3)  # ceiling division by 3
     chunks: list[str] = []
-    for start_marker, end_marker in sections:
-        start = text.find(start_marker)
-        if start == -1:
-            continue
-        end = text.find(end_marker) if end_marker else len(text)
-        chunk = text[:start] + text[start:end] if not chunks else text[start:end]
-        if chunk.strip():
-            chunks.append(chunk.strip())
+    for i in range(0, n, chunk_size):
+        chunk = "".join(parts[i : i + chunk_size]).strip()
+        if chunk:
+            chunks.append(chunk)
 
     return chunks[:3] if chunks else [text[:CHAR_LIMIT]]
 
@@ -172,15 +174,13 @@ def pm_resume(db: "T2Database", project: str) -> str | None:
 def pm_status(db: "T2Database", project: str) -> dict[str, Any]:
     """Return status dict with phase, agent, and blockers."""
     ns = _project_ns(project)
-    entries = db.list_entries(project=ns)
+    all_rows = db.get_all(ns)  # single query replaces N+1 list_entries + get pattern
 
     # Determine current phase: MAX phase tag across all docs
     phase = 1
     last_agent = None
-    for entry in entries:
-        row = db.get(project=ns, title=entry["title"])
-        if row is None:
-            continue
+    blockers_row = None
+    for row in all_rows:
         tags = row.get("tags") or ""
         for tag in tags.split(","):
             tag = tag.strip()
@@ -193,9 +193,10 @@ def pm_status(db: "T2Database", project: str) -> dict[str, Any]:
                     pass
         if last_agent is None and row.get("agent"):
             last_agent = row["agent"]
+        if row["title"] == "BLOCKERS.md":
+            blockers_row = row
 
     # Blockers from BLOCKERS.md
-    blockers_row = db.get(project=ns, title="BLOCKERS.md")
     if blockers_row and blockers_row.get("content"):
         blocker_lines = [
             line.lstrip("- ").strip()
@@ -395,9 +396,10 @@ def pm_restore(db: "T2Database", project: str) -> None:
     standard_titles = set(_STANDARD_DOCS.keys())
     missing = standard_titles - set(surviving)
     if missing:
-        print(
-            f"Warning: {len(missing)} doc(s) expired before restore: "
-            + ", ".join(sorted(missing))
+        _log.warning(
+            "%d doc(s) expired before restore: %s",
+            len(missing),
+            ", ".join(sorted(missing)),
         )
 
 
