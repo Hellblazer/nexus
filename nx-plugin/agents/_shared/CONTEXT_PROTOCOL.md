@@ -119,7 +119,7 @@ nx store list --collection knowledge
 ```
 
 ### Metadata
-nx store uses `--tags` for categorization (comma-separated strings). Tags replace ChromaDB metadata fields.
+nx store uses `--tags` for categorization (comma-separated strings).
 
 ## nx Memory Organization
 

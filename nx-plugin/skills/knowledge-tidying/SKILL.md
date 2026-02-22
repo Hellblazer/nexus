@@ -58,7 +58,7 @@ echo "# content" | nx store put - --collection knowledge --title "decision-compo
 echo "# content" | nx store put - --collection knowledge --title "pattern-name" --tags "pattern"
 ```
 
-**Title conventions** (replaces old ChromaDB ID `::` notation):
+**Title conventions**:
 - `research-{topic}` - Research findings
 - `debug-{component}-{issue-type}` - Debugging insights
 - `architecture-{project}-{component}` - Architecture documentation

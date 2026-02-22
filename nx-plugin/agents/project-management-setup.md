@@ -58,7 +58,7 @@ Store PM phase documents in T2 via `nx memory put`. Use a consistent key scheme:
 Examples:
 - `pm::nexus::overview` — Project overview and goals
 - `pm::nexus::phase-1` — Phase 1 details and success criteria
-- `pm::nexus::continuation` — Continuation context (equivalent to old CONTINUATION.md)
+- `pm::nexus::continuation` — Continuation context for resuming work across sessions
 - `pm::nexus::hypotheses` — Architectural decisions and validations
 - `pm::nexus::learnings` — Accumulated knowledge and insights
 - `pm::nexus::blockers` — Current blockers

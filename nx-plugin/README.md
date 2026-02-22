@@ -126,8 +126,6 @@ Defined in `registry.yaml`:
 
 **PM commands**: `/pm-new`, `/pm-status`, `/pm-list`, `/pm-archive`, `/pm-restore`, `/pm-close`
 
-**Q commands** (FPF reasoning): `/q0-init`, `/q1-hypothesize`, `/q1-add`, `/q2-verify`, `/q3-validate`, `/q4-audit`, `/q5-decide`, `/q-query`, `/q-status`, `/q-reset`, `/q-decay`, `/q-actualize`
-
 ## Key Concepts
 
 ### Agent Relay Format

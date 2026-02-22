@@ -84,7 +84,6 @@ done
 
 ## Version Management
 
-- **v1.0**: Legacy (no longer used)
 - **v2.0**: Standard version with shared Context Protocol reference
 - **v2.1**: Enhanced version (currently: strategic-planner)
 
