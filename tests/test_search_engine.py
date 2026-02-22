@@ -96,7 +96,7 @@ def test_rerank_results_returns_unified_ranking():
             MagicMock(index=1, relevance_score=0.3),
         ]
     )
-    with patch("nexus.search_engine._voyage_client", return_value=mock_client):
+    with patch("nexus.scoring._voyage_client", return_value=mock_client):
         reranked = rerank_results(results, query="test", model="rerank-2.5", top_k=3)
     assert reranked[0].id == "3"
     assert reranked[1].id == "1"
@@ -232,7 +232,7 @@ def test_answer_mode_produces_cite_tags():
     mock_response = MagicMock()
     mock_response.content = [MagicMock(text='Auth uses <cite i="0"> and session <cite i="1">.')]
 
-    with patch("nexus.search_engine._haiku_answer", return_value='Auth uses <cite i="0"> and session <cite i="1">.'):
+    with patch("nexus.answer._haiku_answer", return_value='Auth uses <cite i="0"> and session <cite i="1">.'):
         output = answer_mode(query="how does auth work?", results=results)
 
     assert '<cite i="0">' in output
@@ -246,7 +246,7 @@ def test_answer_mode_includes_citation_footer():
                      collection="code__r",
                      metadata={"source_path": "./foo.py", "line_start": 1}),
     ]
-    with patch("nexus.search_engine._haiku_answer", return_value='Result <cite i="0">.'):
+    with patch("nexus.answer._haiku_answer", return_value='Result <cite i="0">.'):
         output = answer_mode(query="foo", results=results)
 
     lines = output.splitlines()
