@@ -126,6 +126,10 @@ def stop_cmd() -> None:
         )
         sys.exit(1)
     _pid_path().unlink(missing_ok=True)
+    if _process_running(pid):
+        raise click.ClickException(
+            f"Server (PID {pid}) did not exit within the grace period."
+        )
     click.echo(f"Server stopped (PID {pid}).")
 
 

@@ -11,6 +11,18 @@ from typing import Any
 _log = logging.getLogger(__name__)
 
 
+def _collection_name(repo: Path) -> str:
+    """Return a unique ChromaDB collection name for *repo*.
+
+    The collection name is ``code__{basename}-{hash8}`` where *hash8* is the
+    first 8 hex characters of the SHA-256 digest of the full absolute path.
+    This guarantees uniqueness even when two repos share the same leaf name
+    (e.g. ``/work/a/repo`` and ``/work/b/repo`` both named ``repo``).
+    """
+    path_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+    return f"code__{repo.name}-{path_hash}"
+
+
 class RepoRegistry:
     """Thread-safe registry of indexed repositories stored as JSON."""
 
@@ -31,12 +43,10 @@ class RepoRegistry:
         """Register *repo*, initialising collection name and head_hash."""
         key = str(repo)
         name = repo.name
-        _path_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
-        collection = f"code__{name}-{_path_hash}"
         with self._lock:
             self._data["repos"][key] = {
                 "name": name,
-                "collection": collection,
+                "collection": _collection_name(repo),
                 "head_hash": "",
                 "status": "registered",
             }
