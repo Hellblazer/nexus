@@ -105,6 +105,35 @@ def test_session_start_prints_ready_message(runner: CliRunner, fake_home: Path) 
     assert "session" in result.output.lower()
 
 
+# ── Behavior 4: hook and CLI use the same getsid(0) anchor ───────────────────
+
+def test_hook_and_cli_use_same_getsid_anchor(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """session_start() and read_session_id() both resolve to the same session file.
+
+    If the SessionStart hook writes the session file using getsid(0)=X as the
+    filename anchor, a CLI command that calls read_session_id() with the same
+    getsid(0)=X must find the same file and recover the same session ID.
+    """
+    from nexus.hooks import session_start
+    from nexus.session import read_session_id
+
+    monkeypatch.delenv("NX_SESSION_PID", raising=False)
+
+    with patch("nexus.session.os.getsid", return_value=98765):
+        with patch("nexus.hooks._open_t2", return_value=MagicMock(get=lambda **kw: None, list_entries=lambda **kw: [])):
+            session_start()
+        recovered = read_session_id()
+
+    assert recovered is not None
+    import re
+    assert re.match(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        recovered,
+    ), f"Recovered session ID is not a UUID4: {recovered!r}"
+
+
 # ── AC3: SessionStart PM detection ────────────────────────────────────────────
 
 def test_session_start_pm_detection_injects_continuation(

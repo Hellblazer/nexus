@@ -1,5 +1,6 @@
 """AC2-AC6: T1 scratch operations."""
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -165,3 +166,138 @@ def test_scratch_put_persist_explicit_destination(t1: T1Database) -> None:
     assert entry["flagged"] is True
     assert entry["flush_project"] == "p"
     assert entry["flush_title"] == "f.md"
+
+
+# ── Behavior 5: cross-session isolation via metadata ─────────────────────────
+
+_SESSION_B = "test-session-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+@pytest.fixture
+def two_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Two T1Database instances sharing the same scratch directory."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    db_a = T1Database(session_id=_SESSION)
+    db_b = T1Database(session_id=_SESSION_B)
+    db_a.clear()
+    db_b.clear()
+    yield db_a, db_b
+    db_a.clear()
+    db_b.clear()
+
+
+def test_list_entries_scoped_to_session(two_sessions) -> None:
+    """list_entries() returns only entries belonging to its own session."""
+    db_a, db_b = two_sessions
+    db_a.put("session A entry one")
+    db_a.put("session A entry two")
+    db_b.put("session B entry only")
+
+    a_entries = db_a.list_entries()
+    b_entries = db_b.list_entries()
+
+    assert len(a_entries) == 2
+    assert all(e["session_id"] == _SESSION for e in a_entries)
+    assert len(b_entries) == 1
+    assert b_entries[0]["session_id"] == _SESSION_B
+
+
+def test_clear_does_not_delete_other_session_entries(two_sessions) -> None:
+    """clear() removes only this session's entries; another session's entries survive."""
+    db_a, db_b = two_sessions
+    db_a.put("session A entry")
+    db_b.put("session B survives")
+    db_b.put("session B survives too")
+
+    deleted = db_a.clear()
+
+    assert deleted == 1
+    assert db_a.list_entries() == []
+    b_entries = db_b.list_entries()
+    assert len(b_entries) == 2
+
+
+# ── Behavior 6: search is unscoped across sessions ────────────────────────────
+
+def test_search_is_unscoped_across_sessions(two_sessions) -> None:
+    """search() returns entries from ALL sessions, not just the calling session.
+
+    This is intentional design: scratch search is a broad similarity lookup
+    across the shared collection, regardless of which session stored the entry.
+    """
+    db_a, db_b = two_sessions
+    db_a.put("neural network gradient descent training")
+    db_b.put("convolutional neural network image classification")
+
+    # Search from db_a — should surface db_b's entry too
+    results = db_a.search("neural network machine learning", n_results=10)
+    session_ids_in_results = {r["session_id"] for r in results}
+    assert _SESSION in session_ids_in_results
+    assert _SESSION_B in session_ids_in_results
+
+
+# ── Behavior 7: flagged_entries scoped to this session ────────────────────────
+
+def test_flagged_entries_scoped_to_session(two_sessions) -> None:
+    """flagged_entries() only returns flagged entries belonging to this session."""
+    db_a, db_b = two_sessions
+    id_a1 = db_a.put("session A flagged entry")
+    db_a.put("session A unflagged entry")
+    id_b1 = db_b.put("session B flagged entry")
+    db_a.flag(id_a1)
+    db_b.flag(id_b1)
+
+    flagged_a = db_a.flagged_entries()
+    flagged_b = db_b.flagged_entries()
+
+    assert len(flagged_a) == 1
+    assert flagged_a[0]["id"] == id_a1
+    assert len(flagged_b) == 1
+    assert flagged_b[0]["id"] == id_b1
+
+
+# ── Behavior 8: SessionEnd orphan recovery ────────────────────────────────────
+
+def test_session_end_orphan_recovery(two_sessions) -> None:
+    """When session A ends (clear), session B's entries in the shared store survive."""
+    db_a, db_b = two_sessions
+    db_a.put("session A will be cleared")
+    db_b.put("session B orphan survives one")
+    db_b.put("session B orphan survives two")
+
+    # Simulate session A ending: clear its entries
+    db_a.clear()
+
+    # Session B's entries are unaffected
+    b_entries = db_b.list_entries()
+    assert len(b_entries) == 2
+    assert all(e["session_id"] == _SESSION_B for e in b_entries)
+    # Session A has nothing left
+    assert db_a.list_entries() == []
+
+
+# ── Behavior 9: _t1() auto-create session ────────────────────────────────────
+
+def test_t1_auto_create_session_when_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_t1() generates a new session ID and writes it when no session file exists.
+
+    A second call within the same process (same getsid anchor) reads the same
+    file and returns a T1Database with the same session_id.
+    """
+    from nexus.commands.scratch import _t1
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("NX_SESSION_PID", raising=False)
+
+    with patch("nexus.session.os.getsid", return_value=12300):
+        first = _t1()
+        second = _t1()
+
+    assert first._session_id == second._session_id
+
+    # The session file must now exist on disk
+    session_file = tmp_path / ".config" / "nexus" / "sessions" / "12300.session"
+    assert session_file.exists()
+    assert session_file.read_text().strip() == first._session_id
