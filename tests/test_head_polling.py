@@ -125,3 +125,31 @@ def test_pending_credentials_status_is_not_skipped(registry) -> None:
             check_and_reindex(repo, registry)
 
     mock_index.assert_called_once_with(repo, registry)
+
+
+# ── nexus-1ui: polling.py logs warning on git rev-parse errors ───────────────
+
+def test_current_head_warns_on_nonzero_returncode(capsys) -> None:
+    """_current_head logs a warning when git rev-parse returns non-zero."""
+    from nexus.polling import _current_head
+
+    with patch("nexus.polling.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=128, stdout="")
+        result = _current_head(Path("/no/git/repo"))
+
+    assert result == ""
+    captured = capsys.readouterr()
+    assert "warning" in (captured.out + captured.err).lower() or "rev-parse" in (captured.out + captured.err).lower()
+
+
+def test_current_head_warns_on_timeout(capsys) -> None:
+    """_current_head logs a warning when git rev-parse times out."""
+    import subprocess
+    from nexus.polling import _current_head
+
+    with patch("nexus.polling.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
+        result = _current_head(Path("/repo"))
+
+    assert result == ""
+    captured = capsys.readouterr()
+    assert "timeout" in (captured.out + captured.err).lower() or "rev-parse" in (captured.out + captured.err).lower()

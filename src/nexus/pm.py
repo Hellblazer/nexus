@@ -8,11 +8,12 @@ Archive synthesis lives in T3 ``knowledge__pm__{repo}`` (permanent, ttl=0).
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 if TYPE_CHECKING:
     from nexus.db.t2 import T2Database
@@ -40,7 +41,7 @@ _STANDARD_DOCS: dict[str, str] = {
     ),
 }
 
-_log = logging.getLogger(__name__)
+_log = structlog.get_logger()
 
 _PM_SUFFIX = "_pm"
 

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """HEAD polling: detect hash changes and trigger re-indexing."""
-import logging
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-_log = logging.getLogger(__name__)
+import structlog
+
+_log = structlog.get_logger()
 
 if TYPE_CHECKING:
     from nexus.registry import RepoRegistry
@@ -13,14 +14,19 @@ if TYPE_CHECKING:
 
 def _current_head(repo: Path) -> str:
     """Return the current HEAD commit hash for *repo*, or '' on error."""
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        _log.warning("git rev-parse timed out", repo=str(repo))
+        return ""
     if result.returncode != 0:
+        _log.warning("git rev-parse failed", repo=str(repo), returncode=result.returncode)
         return ""
     return result.stdout.strip()
 

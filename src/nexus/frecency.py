@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Git frecency scoring: sum(exp(-0.01 * days_since_commit)) per file."""
-import logging
 import math
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-_log = logging.getLogger(__name__)
+import structlog
+
+_log = structlog.get_logger()
 
 
 def _git_commit_timestamps(repo: Path, file: Path) -> list[float]:

@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Flask server for the Nexus persistent background service."""
-import logging
 import subprocess
 import threading
 import time
 from pathlib import Path
 
+import structlog
 from flask import Flask, jsonify, request
 
 from nexus.registry import RepoRegistry
 
 app = Flask(__name__)
 
-_log = logging.getLogger(__name__)
+_log = structlog.get_logger()
 
 _poll_interval = 10  # seconds
 

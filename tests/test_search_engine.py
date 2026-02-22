@@ -55,16 +55,15 @@ def test_hybrid_score_ripgrep_exact_vector_norm_one():
 
 # ── AC2: --hybrid warns when no code corpus ───────────────────────────────────
 
-def test_hybrid_no_code_corpus_warning(caplog):
+def test_hybrid_no_code_corpus_warning(capsys):
     """hybrid_score_results logs a warning when no code__ collections in scope."""
-    import logging
     results = [
         SearchResult(id="1", content="text", distance=0.1,
                      collection="docs__papers", metadata={}),
     ]
-    with caplog.at_level(logging.WARNING, logger="nexus.search_engine"):
-        se_mod.apply_hybrid_scoring(results, hybrid=True)
-    assert any("no code corpus" in r.message.lower() for r in caplog.records)
+    se_mod.apply_hybrid_scoring(results, hybrid=True)
+    captured = capsys.readouterr()
+    assert "no code corpus" in (captured.out + captured.err).lower()
 
 
 def test_hybrid_mixed_corpus_no_warning(capsys):
@@ -137,13 +136,12 @@ def test_cross_corpus_overfetch():
 
 # ── AC4: Mixedbread graceful degradation ──────────────────────────────────────
 
-def test_mxbai_missing_key_warns_and_returns_empty(caplog, monkeypatch):
+def test_mxbai_missing_key_warns_and_returns_empty(capsys, monkeypatch):
     """When MXBAI_API_KEY is unset, logs a warning and returns empty results."""
-    import logging
     monkeypatch.delenv("MXBAI_API_KEY", raising=False)
-    with caplog.at_level(logging.WARNING, logger="nexus.search_engine"):
-        results = se_mod.fetch_mxbai_results(query="test", stores=["art"], per_k=5)
-    assert any("MXBAI_API_KEY" in r.message for r in caplog.records)
+    results = se_mod.fetch_mxbai_results(query="test", stores=["art"], per_k=5)
+    captured = capsys.readouterr()
+    assert "MXBAI_API_KEY" in (captured.out + captured.err)
     assert results == []
 
 

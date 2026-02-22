@@ -206,6 +206,54 @@ def test_serve_start_spawns_server_main_module(runner: CliRunner, serve_home: Pa
 
 # ── nexus-hzk: port comes from config ─────────────────────────────────────────
 
+# ── nexus-5dh: serve status shows per-repo indexing state ─────────────────────
+
+def test_serve_status_shows_per_repo_state(runner: CliRunner, serve_home: Path) -> None:
+    """When server is running, status fetches /repos and shows per-repo status."""
+    import json
+    pid_path = _pid_path(serve_home)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("12345")
+
+    repos_payload = json.dumps({
+        "repos": {
+            "/home/user/project": {"status": "ready", "collection": "code__project"},
+            "/home/user/other": {"status": "indexing", "collection": "code__other"},
+        }
+    }).encode()
+
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = repos_payload
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("nexus.commands.serve._process_running", return_value=True):
+        with patch("nexus.commands.serve.urllib.request.urlopen", return_value=mock_resp):
+            result = runner.invoke(main, ["serve", "status"])
+
+    assert result.exit_code == 0
+    assert "ready" in result.output
+    assert "indexing" in result.output
+    assert "/home/user/project" in result.output
+
+
+def test_serve_status_handles_server_unreachable(runner: CliRunner, serve_home: Path) -> None:
+    """If /repos is unreachable, status shows a graceful message."""
+    import urllib.error
+    pid_path = _pid_path(serve_home)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("12345")
+
+    with patch("nexus.commands.serve._process_running", return_value=True):
+        with patch("nexus.commands.serve.urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("connection refused")):
+            result = runner.invoke(main, ["serve", "status"])
+
+    assert result.exit_code == 0
+    assert "12345" in result.output  # PID still shown
+    assert "unavailable" in result.output.lower() or "unreachable" in result.output.lower()
+
+
 def test_serve_start_passes_port_from_config(runner: CliRunner, serve_home: Path) -> None:
     """start_cmd reads server.port from load_config and passes it to server_main."""
     import yaml

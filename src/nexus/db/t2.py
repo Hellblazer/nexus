@@ -7,9 +7,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import logging
+import structlog
 
-_log = logging.getLogger(__name__)
+_log = structlog.get_logger()
 
 # ── Schema SQL ────────────────────────────────────────────────────────────────
 

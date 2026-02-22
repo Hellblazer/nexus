@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-_log = logging.getLogger(__name__)
+import structlog
+
+_log = structlog.get_logger()
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _RERANK_MODEL = "rerank-2.5"
