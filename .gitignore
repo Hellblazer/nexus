@@ -11,3 +11,7 @@ htmlcov/
 *.log
 .pm/
 .pm-archives/
+.DS_Store
+.nexus.yml
+.mypy_cache/
+.ruff_cache/
