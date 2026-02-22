@@ -248,9 +248,8 @@ def promote_cmd(title: str, project: str | None, collection: str | None, ttl_day
 
 
 @pm.command("expire")
-@click.option("--project", default=None)
-def expire_cmd(project: str | None) -> None:
-    """Remove TTL-expired PM docs from T2."""
+def expire_cmd() -> None:
+    """Remove TTL-expired PM docs from T2 (all projects)."""
     with T2Database(_default_db_path()) as db:
         count = db.expire()
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")

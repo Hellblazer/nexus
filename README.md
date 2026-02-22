@@ -2,7 +2,7 @@
 
 Self-hosted semantic search and knowledge management for Claude Code agents.
 
-Nexus indexes your code, PDFs, and notes into ChromaDB cloud using Voyage AI embeddings, then gives you (and your agents) a single CLI for search, memory, and project management. Raw content never leaves your machine — only vectors and chunk text are stored in the cloud.
+Nexus indexes your code, PDFs, and notes into ChromaDB cloud using Voyage AI embeddings, then gives you (and your agents) a single CLI for search, memory, and project management. Raw content (source files, PDFs) never leaves your machine — chunk text and embeddings are sent to Voyage AI for embedding and stored in ChromaDB cloud.
 
 ## What it does
 
@@ -68,6 +68,7 @@ Install session hooks and a SKILL.md so agents can use Nexus automatically:
 
 ```bash
 nx install claude-code
+nx uninstall claude-code   # remove SKILL.md and session hooks
 ```
 
 This writes `~/.claude/skills/nexus/SKILL.md` and adds SessionStart/SessionEnd hooks to
@@ -102,6 +103,9 @@ nx search "retry logic" --corpus code__myrepo
 # Synthesize a cited answer via Haiku
 nx search "how does session management work" -a
 
+# Haiku-driven multi-step query refinement
+nx search "token validation" --agentic
+
 # Hybrid: semantic + ripgrep frecency weighting (code corpora only)
 nx search "token validation" --hybrid
 
@@ -112,6 +116,9 @@ nx search "validate_token" --files      # unique file paths only
 
 # Context lines around results
 nx search "parse_request" -C 3
+
+# Show matched text inline (truncated at 200 chars)
+nx search "parse_request" -c
 
 # Multi-corpus search (independent retrieval + Voyage reranker merge)
 nx search "auth flow" --corpus code --corpus docs
@@ -190,7 +197,7 @@ nx memory expire             # remove TTL-expired entries
 nx memory promote <id> --collection knowledge
 ```
 
-TTL format: `30d`, `4w`, `permanent`. Default: `30d`.
+TTL format: `30d`, `4w`, `permanent` (or `never`). Default: `30d`.
 
 ### T3 — Permanent knowledge (ChromaDB cloud)
 
@@ -218,8 +225,14 @@ nx pm unblock 1
 # Phase transitions
 nx pm phase next
 
+# Retrieve a specific phase context doc
+nx memory get --project myrepo_pm --title phases/phase-2/context.md
+
 # Keyword search across all PM docs (FTS5, no API call)
 nx pm search "what did we decide about caching"
+
+# Promote a PM doc to T3 for cross-project semantic search
+nx pm promote phases/phase-2/context.md --collection knowledge --tags "decision,architecture"
 
 # Archive: synthesize to T3 via Haiku, start T2 decay
 nx pm archive
@@ -239,16 +252,18 @@ nx pm reference myrepo   # retrieve by project name
 nx collection list                          # all T3 collections with doc counts
 nx collection info <name>                   # details for a single collection
 nx collection verify <name>                 # existence check + doc count
+nx collection verify <name> --deep          # existence check + embedding probe
 nx collection delete <name> --confirm       # irreversible
 ```
 
 ## Server management
 
 ```bash
-nx serve start [--port 7890]
+nx serve start           # start server (port set via NX_SERVER_PORT or config.yml server.port)
 nx serve stop
-nx serve status          # show indexed repos, indexing progress
-nx serve logs            # tail ~/.config/nexus/serve.log
+nx serve status          # show server uptime and per-repo indexing state
+nx serve logs            # show recent server log output (last 20 lines)
+nx serve logs -n 50      # show last N lines
 ```
 
 ## Configuration
@@ -256,23 +271,37 @@ nx serve logs            # tail ~/.config/nexus/serve.log
 ```bash
 nx config list                          # show all credentials and settings
 nx config get <key>
-nx config set server.port 7891
-nx config set embeddings.rerankerModel rerank-2.5-lite   # lower cost
+nx config set chroma_api_key sk-...     # set a credential
+```
+
+`nx config set` stores credentials only (flat keys like `chroma_api_key`, `voyage_api_key`).
+To change settings, use environment variables or edit the config file directly:
+
+```bash
+# Environment variables (highest precedence)
+NX_SERVER_PORT=7891 nx serve start
+NX_EMBEDDINGS_RERANKER_MODEL=rerank-2.5-lite nx search "query"
+
+# Or edit ~/.config/nexus/config.yml directly:
+# server:
+#   port: 7891
+# embeddings:
+#   rerankerModel: rerank-2.5-lite
 ```
 
 Global config file: `~/.config/nexus/config.yml`.
 Per-repo config: `.nexus.yml` (merged over global).
 
-Key settings:
+Key settings (YAML path / env var override):
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `server.port` | `7890` | HTTP port for `nx serve` |
-| `server.headPollInterval` | `10` | Seconds between HEAD checks per repo |
-| `embeddings.codeModel` | `voyage-code-3` | Voyage model for code collections |
-| `embeddings.docsModel` | `voyage-4` | Voyage model for docs/knowledge |
-| `embeddings.rerankerModel` | `rerank-2.5` | Voyage reranker for cross-corpus merge |
-| `pm.archiveTtl` | `90` | Days before archived PM docs decay from T2 |
+| Setting | Env var | Default | Description |
+|---------|---------|---------|-------------|
+| `server.port` | `NX_SERVER_PORT` | `7890` | HTTP port for `nx serve` |
+| `server.headPollInterval` | `NX_SERVER_HEAD_POLL_INTERVAL` | `10` | Seconds between HEAD checks per repo |
+| `embeddings.codeModel` | `NX_EMBEDDINGS_CODE_MODEL` | `voyage-code-3` | Voyage model for code collections |
+| `embeddings.docsModel` | `NX_EMBEDDINGS_DOCS_MODEL` | `voyage-4` | Voyage model for docs/knowledge |
+| `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | Voyage reranker for cross-corpus merge |
+| `pm.archiveTtl` | `NX_PM_ARCHIVE_TTL` | `90` | Days before archived PM docs decay from T2 |
 
 ## Development
 

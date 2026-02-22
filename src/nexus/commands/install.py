@@ -54,9 +54,10 @@ nx memory expire                                   # remove TTL-expired entries
 ## Knowledge Store (T3 ChromaDB cloud)
 
 ```bash
-nx store put "content" --collection knowledge --title "My Finding"
-nx store search "query" --collection knowledge
-nx store list
+echo "# My Finding..." | nx store put - --collection knowledge --title "My Finding"  # stdin
+nx store put analysis.md --collection knowledge --tags "arch"                         # file
+nx store expire                                                                       # remove expired
+nx search "query" --corpus knowledge                                                  # search stored knowledge
 ```
 
 ## Scratch (T1 in-memory — cleared at session end)

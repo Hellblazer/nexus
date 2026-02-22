@@ -100,7 +100,7 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
 @click.option("--no-color", is_flag=True, default=False,
               help="Disable colour output")
 @click.option("-c", "--content", "show_content", is_flag=True, default=False,
-              help="Show matched text inline under each result.")
+              help="Show matched text inline under each result (truncated at 200 chars).")
 @click.option("--where", "where_pairs", multiple=True, metavar="KEY=VALUE",
               help="Filter by metadata field (repeatable; multiple flags are ANDed)")
 @click.option("-A", "lines_after", default=0, type=int, metavar="N",

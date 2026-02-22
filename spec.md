@@ -335,8 +335,8 @@ Core flags (all env-overridable, e.g. `NX_ANSWER=1`):
 | `--mxbai` | off | Fan out to existing Mixedbread-indexed collections (read-only) |
 | `--agentic` | off | Multi-step query refinement before returning results |
 | `--no-rerank` | off | Disable result reranking |
-| `-B N` | 3 | Lines of context above each result |
-| `-A N` | 3 | Lines of context below each result |
+| `-B N` | 0 | Lines of context above each result |
+| `-A N` | 0 | Lines of context below each result |
 | `-C N` | — | Lines of context above and below (shorthand for `-A N -B N`) |
 | `-r, --reverse` | off | Reverse result order (most relevant at bottom) |
 | `--no-color` | auto | Disable color/highlighting (auto-off in pipes) |
@@ -466,7 +466,7 @@ nx scratch promote <id> --project BFDB_active --title findings.md   # → T2 imm
 ```
 
 - Uses `DefaultEmbeddingFunction` (local ONNX, no API call) — fast, no network dependency
-- Session ID: generated as a UUID4 by the SessionStart hook and written to `~/.config/nexus/sessions/{ppid}.session` (PID-scoped, where `ppid` is the Claude Code process PID obtained via `os.getppid()` in the hook subprocess). `nx` subcommands discover their session by reading `~/.config/nexus/sessions/{os.getppid()}.session`. Using a per-PID path prevents concurrent Claude Code windows from overwriting each other's session ID (a shared `current_session` file would cause window B's hook to overwrite window A's ID, corrupting T1 metadata and potentially triggering deletion of the wrong window's scratch entries). Orphaned session files are cleaned up by the SessionEnd hook. `CLAUDE_SESSION_ID` does **not** exist in Claude Code (open feature requests #13733, #17188 — unresolved as of 2026-02). T1 is a shared EphemeralClient; session ID is stored as metadata on each T1 document, enabling per-session filtering. When flagged entries are flushed to T2 with no explicit destination, they go to project `scratch_sessions`, title `{session_id}_{id}`.
+- Session ID: generated via `os.getsid(0)` (session group leader PID) by the SessionStart hook and written to `~/.config/nexus/sessions/{getsid}.session`. `nx` subcommands discover their session by reading `~/.config/nexus/sessions/{os.getsid(0)}.session`. Using a per-session-group-PID path prevents concurrent Claude Code windows from overwriting each other's session ID (a shared `current_session` file would cause window B's hook to overwrite window A's ID, corrupting T1 metadata and potentially triggering deletion of the wrong window's scratch entries). Orphaned session files are cleaned up by the SessionEnd hook. `CLAUDE_SESSION_ID` does **not** exist in Claude Code (open feature requests #13733, #17188 — unresolved as of 2026-02). T1 is a shared EphemeralClient; session ID is stored as metadata on each T1 document, enabling per-session filtering. When flagged entries are flushed to T2 with no explicit destination, they go to project `scratch_sessions`, title `{session_id}_{id}`.
 - On crash: T1 is in-memory; data is lost by design — scratch is ephemeral
 
 ## Memory Bank Replacement
@@ -568,7 +568,7 @@ nx pm block "waiting on ChromaDB cloud credentials"
 nx pm unblock 1              # remove blocker by line number (as shown by nx pm status)
 
 # Phase management
-nx pm phase 2                          # retrieve phase-2 context doc
+nx memory get --project {repo}_pm --title phases/phase-2/context.md  # retrieve phase-2 context doc
 nx pm phase next                       # transition to next phase:
                                        #   1. reads current N as MAX(phase tag integer) across all docs tagged phase:N in the project
                                        #   2. creates new T2 entry title=phases/phase-{N+1}/context.md,
@@ -586,7 +586,7 @@ nx pm search "what did we decide about caching"
 nx pm search "auth" --project myrepo   # scoped to one project
 
 # Promote PM docs to T3 for cross-project semantic search
-nx pm promote --collection knowledge --tags "decision,architecture"
+nx pm promote phases/phase-2/context.md --collection knowledge --tags "decision,architecture"
 
 # Lifecycle cleanup
 nx pm expire                           # remove TTL-expired phase docs
@@ -748,9 +748,9 @@ This replaces the current pattern of agents manually writing to memory bank file
 ### Server lifecycle
 
 ```bash
-nx serve start [--port N]    # start persistent server (background)
+nx serve start               # start persistent server (background; port via NX_SERVER_PORT or config.yml)
 nx serve stop
-nx serve status              # show indexed repos, accuracy %, uptime
+nx serve status              # show server uptime and per-repo indexing state
 nx serve logs                # tail log file: ~/.config/nexus/serve.log
 ```
 

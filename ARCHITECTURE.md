@@ -189,6 +189,36 @@ src/nexus/
     +-- git_hooks.py               # post-commit hook for nx serve notification
 ```
 
+### [v1-actual] Module Responsibility Summary
+
+| Module | Responsibility |
+|--------|---------------|
+| `db/t1.py` | In-memory ChromaDB scratch (T1) |
+| `db/t2.py` | SQLite + FTS5 memory bank (T2) |
+| `db/t3.py` | ChromaDB cloud knowledge store (T3) |
+| `indexer.py` | Code repo indexing pipeline (tree-sitter AST chunking + frecency) |
+| `doc_indexer.py` | PDF and markdown indexing pipeline |
+| `pdf_extractor.py` / `pdf_chunker.py` | PDF text extraction and chunking |
+| `md_chunker.py` | Semantic markdown chunking |
+| `search_engine.py` | Semantic, hybrid, cross-corpus, agentic search + reranking |
+| `answer.py` | Haiku answer synthesis with citations |
+| `scoring.py` | Frecency + hybrid score computation |
+| `formatters.py` | Plain, vimgrep, JSON output formatting |
+| `pm.py` | Project management lifecycle (T2 + T3) |
+| `server.py` / `server_main.py` | Flask server + daemonization entry point |
+| `registry.py` / `polling.py` | Repo registry and HEAD polling |
+| `session.py` | Session ID management (`os.getsid(0)`) |
+| `config.py` | Config loading, credential management, env var overrides |
+| `corpus.py` | Collection name resolution and namespacing |
+| `chunker.py` | Base code chunking via tree-sitter |
+| `frecency.py` | Git-based frecency score computation |
+| `ripgrep_cache.py` | Ripgrep index cache for hybrid search |
+| `hooks.py` | SessionStart / SessionEnd hook logic |
+| `ttl.py` | TTL string parsing (`30d`, `4w`, `permanent`, `never`) |
+| `types.py` | Shared dataclasses and type definitions |
+| `errors.py` | Custom exception hierarchy |
+| `commands/` | Click CLI command definitions (one file per command group) |
+
 ### [v2-planned] Module Responsibility Summary
 
 This table reflects the aspirational hierarchical layout. In the v1-actual flat layout,
@@ -512,7 +542,7 @@ flat modules `src/nexus/server.py` (Flask app factory + routes) and
 `src/nexus/registry.py` and `src/nexus/polling.py` respectively.
 
 ```
-nx serve start [--port N]
+nx serve start
      |
      v
 server_main.py (daemonization)   [v1-actual: server_main.py]
