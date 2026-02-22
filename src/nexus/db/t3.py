@@ -19,23 +19,36 @@ class T3Database:
 
     Each collection is namespaced by type: ``code__{repo}``, ``docs__{corpus}``,
     ``knowledge__{topic}``.
+
+    The ``_client`` and ``_ef_override`` keyword arguments are injection points
+    for testing — pass an ``EphemeralClient`` and ``DefaultEmbeddingFunction``
+    to run the full code path without any API keys.
     """
 
     def __init__(
         self,
-        tenant: str,
-        database: str,
-        api_key: str,
+        tenant: str = "",
+        database: str = "",
+        api_key: str = "",
         voyage_api_key: str = "",
+        *,
+        _client=None,
+        _ef_override=None,
     ) -> None:
         self._voyage_api_key = voyage_api_key
-        self._client = chromadb.CloudClient(
-            tenant=tenant, database=database, api_key=api_key
-        )
+        self._ef_override = _ef_override
+        if _client is not None:
+            self._client = _client
+        else:
+            self._client = chromadb.CloudClient(
+                tenant=tenant, database=database, api_key=api_key
+            )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _embedding_fn(self, collection_name: str) -> chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction:
+    def _embedding_fn(self, collection_name: str):
+        if self._ef_override is not None:
+            return self._ef_override
         model = embedding_model_for_collection(collection_name)
         return chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
             model_name=model, api_key=self._voyage_api_key
@@ -143,24 +156,26 @@ class T3Database:
 
         Returns the total number of deleted documents.
         """
+        # ChromaDB only supports numeric $lt/$gt, so we filter by ttl_days > 0
+        # (int comparison) then check expires_at in Python (ISO 8601 strings are
+        # lexicographically ordered, so string comparison is correct).
         now_iso = datetime.now(UTC).isoformat()
-        where: dict = {
-            "$and": [
-                {"ttl_days": {"$gt": 0}},
-                {"expires_at": {"$ne": ""}},
-                {"expires_at": {"$lt": now_iso}},
-            ]
-        }
+        ttl_where: dict = {"ttl_days": {"$gt": 0}}
         total = 0
-        for name in self._client.list_collections():
+        for col_or_name in self._client.list_collections():
+            name = col_or_name if isinstance(col_or_name, str) else col_or_name.name
             if not name.startswith("knowledge__"):
                 continue
             col = self._client.get_collection(name)
-            result = col.get(where=where)
-            ids = result["ids"]
-            if ids:
-                col.delete(ids=ids)
-            total += len(ids)
+            result = col.get(where=ttl_where, include=["metadatas"])
+            expired_ids = [
+                doc_id
+                for doc_id, meta in zip(result["ids"], result["metadatas"])
+                if meta.get("expires_at", "") and meta["expires_at"] < now_iso
+            ]
+            if expired_ids:
+                col.delete(ids=expired_ids)
+            total += len(expired_ids)
         return total
 
     # ── Collection management ─────────────────────────────────────────────────
@@ -172,7 +187,8 @@ class T3Database:
         Optimize if the ChromaDB CloudClient exposes batched counts.
         """
         result: list[dict] = []
-        for name in self._client.list_collections():
+        for col_or_name in self._client.list_collections():
+            name = col_or_name if isinstance(col_or_name, str) else col_or_name.name
             col = self._client.get_collection(name)
             result.append({"name": name, "count": col.count()})
         return result

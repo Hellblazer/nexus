@@ -123,10 +123,11 @@ def test_store_put_with_ttl_metadata(mock_chromadb: tuple) -> None:
 # ── AC4: expire guards permanent entries ──────────────────────────────────────
 
 def test_expire_guards_permanent_entries(mock_chromadb: tuple) -> None:
-    """expire() where filter includes both permanent-entry guards."""
+    """expire() filters by ttl_days > 0 in ChromaDB; permanent entries have empty expires_at."""
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
-    mock_col.get.return_value = {"ids": []}
+    # No TTL entries returned — permanent entries don't match ttl_days > 0
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_client.list_collections.return_value = ["knowledge__security"]
     mock_client.get_collection.return_value = mock_col
 
@@ -135,20 +136,21 @@ def test_expire_guards_permanent_entries(mock_chromadb: tuple) -> None:
 
     assert count == 0
     where = mock_col.get.call_args.kwargs["where"]
-    conds = where["$and"]
-    # Must guard: ttl_days > 0
-    assert {"ttl_days": {"$gt": 0}} in conds
-    # Must guard: expires_at != "" (permanent sentinel)
-    assert {"expires_at": {"$ne": ""}} in conds
-    # Must include the time comparison
-    assert any("expires_at" in c and "$lt" in c.get("expires_at", {}) for c in conds)
+    # Must filter by ttl_days > 0 (numeric, so ChromaDB supports it)
+    assert where == {"ttl_days": {"$gt": 0}}
+    # No delete called — nothing expired
+    mock_col.delete.assert_not_called()
 
 
 def test_expire_deletes_expired_entries(mock_chromadb: tuple) -> None:
-    """expire() deletes entries that have passed their expires_at."""
+    """expire() deletes entries whose expires_at is in the past."""
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
-    mock_col.get.return_value = {"ids": ["id-1", "id-2"]}
+    past = "2020-01-01T00:00:00+00:00"
+    mock_col.get.return_value = {
+        "ids": ["id-1", "id-2"],
+        "metadatas": [{"expires_at": past}, {"expires_at": past}],
+    }
     mock_client.list_collections.return_value = ["knowledge__security"]
     mock_client.get_collection.return_value = mock_col
 
@@ -163,7 +165,11 @@ def test_expire_skips_non_knowledge_collections(mock_chromadb: tuple) -> None:
     """expire() only processes knowledge__ collections."""
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
-    mock_col.get.return_value = {"ids": ["stale-id"]}
+    past = "2020-01-01T00:00:00+00:00"
+    mock_col.get.return_value = {
+        "ids": ["stale-id"],
+        "metadatas": [{"expires_at": past}],
+    }
     mock_client.list_collections.return_value = [
         "code__myrepo", "docs__papers", "knowledge__sec"
     ]
