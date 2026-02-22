@@ -51,28 +51,29 @@ Verify success with `nx pm status`. If the repo does not have a git root, note t
 
 ## Phase 3: PM Document Creation
 
-Store PM phase documents in T2 via `nx memory put`. Use a consistent key scheme:
+Store PM phase documents in T2 via `nx memory put`. Use consistent naming:
 
-**Key scheme**: `pm::<project-name>::<doc-type>`
+**Project**: `--project <name>_active`
+**Title convention**: `<doc-type>.md`
 
 Examples:
-- `pm::nexus::overview` — Project overview and goals
-- `pm::nexus::phase-1` — Phase 1 details and success criteria
-- `pm::nexus::continuation` — Continuation context for resuming work across sessions
-- `pm::nexus::hypotheses` — Architectural decisions and validations
-- `pm::nexus::learnings` — Accumulated knowledge and insights
-- `pm::nexus::blockers` — Current blockers
+- `--title overview.md` — Project overview and goals
+- `--title phase-1.md` — Phase 1 details and success criteria
+- `--title continuation.md` — Continuation context for resuming work across sessions
+- `--title hypotheses.md` — Architectural decisions and validations
+- `--title learnings.md` — Accumulated knowledge and insights
+- `--title blockers.md` — Current blockers
 
 ### Core Documents to Create
 
-**Overview document** (`pm::<name>::overview`):
+**Overview document** (`overview.md`):
 - Project name, type, duration
 - Technology stack
 - Success criteria (quantitative where possible)
 - Key stakeholders
 - Integration points
 
-**Continuation document** (`pm::<name>::continuation`):
+**Continuation document** (`continuation.md`):
 - Current phase and status
 - Recent learnings (top 3)
 - Active hypotheses
@@ -82,7 +83,7 @@ Examples:
 
 This document is what `nx pm resume` injects into session context — make it dense and actionable.
 
-**Phase documents** (`pm::<name>::phase-N`):
+**Phase documents** (`phase-N.md`):
 - Phase number and name
 - Objectives
 - Success criteria (testable)
@@ -92,18 +93,18 @@ This document is what `nx pm resume` injects into session context — make it de
 
 **Create each document using**:
 ```bash
-nx memory put "<content>" --project <name>_active --title continuation.md
+nx memory put "<content>" --project <name>_active --title <doc>.md
 ```
 
 ### Project-Type-Specific Documents
 
-*Software Projects*: Add `pm::<name>::architecture` with key design decisions and patterns.
+*Software Projects*: Add `architecture.md` with key design decisions and patterns.
 
-*ML/Data Projects*: Add `pm::<name>::experiments` with experiment tracking schema and `pm::<name>::datasets` with dataset version notes.
+*ML/Data Projects*: Add `experiments.md` with experiment tracking schema and `datasets.md` with dataset version notes.
 
-*Infrastructure Projects*: Add `pm::<name>::services` with deployment status and SLA targets.
+*Infrastructure Projects*: Add `services.md` with deployment status and SLA targets.
 
-*Research Projects*: Add `pm::<name>::literature` with key references and `pm::<name>::theory` with validation criteria.
+*Research Projects*: Add `literature.md` with key references and `theory.md` with validation criteria.
 
 ## Beads Integration
 
@@ -114,7 +115,7 @@ Beads must be self-contained. An agent picking up a bead should start work immed
 ### Bead Grooming Requirements
 
 Every bead design field MUST include:
-- **Context links**: `nx pm resume` for continuation, `nx memory get pm::<name>::<doc>` for specific docs, nx store titles, source file paths
+- **Context links**: `nx pm resume` for continuation, `nx memory get --project <name>_active --title <doc>.md` for specific docs, nx store titles, source file paths
 - **Success criteria**: Testable, specific, with thresholds
 - **Files to modify**: Source and test files
 - **Patterns to follow**: Link to examples in codebase
@@ -128,8 +129,8 @@ Use `bd dep add <this> <blocker>` for all dependencies. Never use markdown TODOs
 
 Context:
 - Continuation: nx pm resume
-- Phase doc: nx memory get pm::<project>::phase-N
-- Architecture: nx memory get pm::<project>::architecture
+- Phase doc: nx memory get --project <project>_active --title phase-N.md
+- Architecture: nx memory get --project <project>_active --title architecture.md
 - nx store: <doc-title if applicable>
 
 Success criteria:
@@ -164,13 +165,13 @@ Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **T2 PM Documents**: Created via `nx memory put` with `pm::<name>::*` keys
+- **T2 PM Documents**: Created via `nx memory put --project <name>_active --title <doc>.md`
 - **nx pm init**: Initialized project management for the git repo
 - **Groomed Beads**: Epic/phase beads with context links, success criteria, file paths, patterns
 - **T3 Promotion (optional)**: For architectural decisions worth long-term preservation, use `nx pm promote`
 
 Store using these naming conventions:
-- **T2 Key**: `pm::<project-name>::<doc-type>` (e.g., `pm::nexus::phase-1`)
+- **nx memory title**: `<doc-type>.md` (e.g., `phase-1.md`, `continuation.md`, `architecture.md`)
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: `--project {project}_active --title {phase}.md` (e.g., `--project ART_active --title phase2-implementation.md`)
 - **Bead Description**: Include `Context: nx pm resume` line
@@ -186,7 +187,7 @@ Store using these naming conventions:
 
 Before delivering, validate:
 
-1. **Completeness Check**: `nx pm status` returns meaningful output, all phase documents created in T2 via `nx memory get pm::<name>::*`, continuation document enables seamless resumption.
+1. **Completeness Check**: `nx pm status` returns meaningful output, all phase documents retrievable via `nx memory list --project <name>_active`, continuation document enables seamless resumption.
 
 2. **Validity Check**: All T2 documents are well-formed markdown, key scheme is consistent, bead descriptions include context links.
 
@@ -197,7 +198,7 @@ Before delivering, validate:
 ## Quality Standards
 
 ### Resumability
-- `pm::<name>::continuation` must contain enough context to resume after weeks/months
+- The continuation document (`continuation.md`) must contain enough context to resume after weeks/months
 - Last checkpoint must be clearly identified
 - Recent learnings must be summarized
 - Active hypotheses must be listed
@@ -212,7 +213,7 @@ Before delivering, validate:
 ### Actionability
 - Phase documents must be complete and ready to use
 - Next actions must be specific and clear
-- Retrieval pattern documented: `nx memory get pm::<name>::<doc>`
+- Retrieval pattern documented: `nx memory get --project <name>_active --title <doc>.md`
 
 ## Success Criteria
 

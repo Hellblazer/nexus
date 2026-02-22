@@ -53,12 +53,12 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 
 The project-management-setup agent creates (stored in Nexus T2 via `nx memory put`):
 
-- `pm::<name>::overview` — Project overview and goals
-- `pm::<name>::continuation` — Session resumption context (`nx pm resume` injects this)
-- `pm::<name>::phase-N` — Phase-specific objectives, tasks, success criteria
-- `pm::<name>::architecture` — Key design decisions (software projects)
+- `overview.md` — Project overview and goals
+- `continuation.md` — Session resumption context (`nx pm resume` injects this)
+- `phase-N.md` — Phase-specific objectives, tasks, success criteria
+- `architecture.md` — Key design decisions (software projects)
 
-Access via `nx pm resume` or `nx memory get pm::<name>::<doc>`.
+Access via `nx pm resume` or `nx memory get --project <name>_active --title <doc>.md`.
 
 ## Success Criteria
 
