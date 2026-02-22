@@ -6,6 +6,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 # ── Schema SQL ────────────────────────────────────────────────────────────────
 
 _SCHEMA_SQL = """\
@@ -58,10 +62,9 @@ _COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "ti
 
 def _read_session_id() -> str | None:
     """Read session ID from the PID-scoped session file written by the SessionStart hook."""
-    ppid = os.getppid()
-    session_file = Path.home() / ".config" / "nexus" / "sessions" / f"{ppid}.session"
+    from nexus.session import session_file_path
     try:
-        return session_file.read_text().strip() or None
+        return session_file_path().read_text().strip() or None
     except FileNotFoundError:
         return None
 
@@ -149,27 +152,30 @@ class T2Database:
 
     def search(self, query: str, project: str | None = None) -> list[dict[str, Any]]:
         """FTS5 keyword search. Returns rows ordered by relevance."""
-        if project:
-            sql = """
-                SELECT m.id, m.project, m.title, m.session, m.agent,
-                       m.content, m.tags, m.timestamp, m.ttl
-                FROM memory m
-                JOIN memory_fts ON memory_fts.rowid = m.id
-                WHERE memory_fts MATCH ?
-                  AND m.project = ?
-                ORDER BY rank
-            """
-            rows = self.conn.execute(sql, (query, project)).fetchall()
-        else:
-            sql = """
-                SELECT m.id, m.project, m.title, m.session, m.agent,
-                       m.content, m.tags, m.timestamp, m.ttl
-                FROM memory m
-                JOIN memory_fts ON memory_fts.rowid = m.id
-                WHERE memory_fts MATCH ?
-                ORDER BY rank
-            """
-            rows = self.conn.execute(sql, (query,)).fetchall()
+        try:
+            if project:
+                sql = """
+                    SELECT m.id, m.project, m.title, m.session, m.agent,
+                           m.content, m.tags, m.timestamp, m.ttl
+                    FROM memory m
+                    JOIN memory_fts ON memory_fts.rowid = m.id
+                    WHERE memory_fts MATCH ?
+                      AND m.project = ?
+                    ORDER BY rank
+                """
+                rows = self.conn.execute(sql, (query, project)).fetchall()
+            else:
+                sql = """
+                    SELECT m.id, m.project, m.title, m.session, m.agent,
+                           m.content, m.tags, m.timestamp, m.ttl
+                    FROM memory m
+                    JOIN memory_fts ON memory_fts.rowid = m.id
+                    WHERE memory_fts MATCH ?
+                    ORDER BY rank
+                """
+                rows = self.conn.execute(sql, (query,)).fetchall()
+        except sqlite3.OperationalError as exc:
+            raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def list_entries(
@@ -202,7 +208,10 @@ class T2Database:
               AND m.project GLOB ?
             ORDER BY rank
         """
-        rows = self.conn.execute(sql, (query, project_glob)).fetchall()
+        try:
+            rows = self.conn.execute(sql, (query, project_glob)).fetchall()
+        except sqlite3.OperationalError as exc:
+            raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def decay_project(self, project: str, ttl: int) -> None:

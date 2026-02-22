@@ -115,6 +115,8 @@ def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> 
         max_tokens=1200,
         messages=[{"role": "user", "content": prompt}],
     )
+    if not message.content:
+        raise RuntimeError("Haiku returned empty response during archive synthesis")
     return message.content[0].text
 
 
@@ -272,7 +274,7 @@ def pm_phase_next(db: "T2Database", project: str) -> int:
     if cont_row:
         existing = cont_row["content"] or ""
         updated = existing + f"\n\n## Phase Transition\nNow in phase-{new_phase}.\n"
-        db.put(ns, "CONTINUATION.md", updated, tags="pm,phase:1,context", ttl=None)
+        db.put(ns, "CONTINUATION.md", updated, tags=f"pm,phase:{new_phase},context", ttl=None)
 
     return new_phase
 
@@ -338,48 +340,35 @@ def pm_archive(
     phase_count = max(phase_tags) if phase_tags else 1
 
     chunks = _split_synthesis(synthesis_text)
+    col = t3.get_or_create_collection(collection)
     for i, chunk in enumerate(chunks):
-        extra: dict[str, Any] = {}
-        if len(chunks) > 1:
-            extra["chunk_index"] = i
-        t3.put(
+        chunk_title = (
+            f"Archive: {project}"
+            if len(chunks) == 1
+            else f"Archive: {project} (part {i + 1})"
+        )
+        doc_id = t3.put(
             collection=collection,
             content=chunk,
-            title=f"Archive: {project}",
+            title=chunk_title,
             tags=f"pm-archive,{project}",
             store_type="pm-archive",
             ttl_days=0,  # permanent
-            **{
-                "session_id": "",
-                "source_agent": "nx-pm-archive",
-                "category": "pm-archive",
-            },
+            session_id="",
+            source_agent="nx-pm-archive",
+            category="pm-archive",
         )
-        # Add extra metadata via direct collection access
-        col = t3.get_or_create_collection(collection)
-        # Metadata is set on the upsert; we need to add pm-specific fields
-        # T3.put doesn't accept arbitrary extra metadata, so we update via col directly
-        # Re-query last inserted to get its ID and update
-        results = col.get(
-            where={"$and": [
-                {"store_type": {"$eq": "pm-archive"}},
-                {"title": {"$eq": f"Archive: {project}"}},
-            ]},
-            include=["metadatas"],
-        )
-        if results["ids"]:
-            last_id = results["ids"][-1]
-            update_meta = {
-                "project": project,
-                "status": status,
-                "archived_at": archived_at,
-                "phase_count": phase_count,
-                "pm_doc_count": doc_count,
-                "pm_latest_timestamp": max_ts,
-            }
-            if len(chunks) > 1:
-                update_meta["chunk_index"] = i
-            col.update(ids=[last_id], metadatas=[update_meta])
+        update_meta: dict[str, Any] = {
+            "project": project,
+            "status": status,
+            "archived_at": archived_at,
+            "phase_count": phase_count,
+            "pm_doc_count": doc_count,
+            "pm_latest_timestamp": max_ts,
+        }
+        if len(chunks) > 1:
+            update_meta["chunk_index"] = i
+        col.update(ids=[doc_id], metadatas=[update_meta])
 
     # Phase 2: Decay T2 (only after T3 write succeeds)
     db.decay_project(ns, archive_ttl)

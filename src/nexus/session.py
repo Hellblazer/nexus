@@ -18,8 +18,11 @@ def _stable_pid() -> int:
        in the same interactive terminal session, whether invoked from the
        SessionStart hook or directly from the CLI.
     """
-    if env_pid := os.environ.get("NX_SESSION_PID"):
-        return int(env_pid)
+    if raw := os.environ.get("NX_SESSION_PID"):
+        try:
+            return int(raw)
+        except ValueError:
+            pass  # fall through to getsid
     return os.getsid(0)
 
 

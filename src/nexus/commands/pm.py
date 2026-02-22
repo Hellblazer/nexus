@@ -154,7 +154,7 @@ def archive_cmd(project: str | None, archive_status: str) -> None:
     try:
         pm_archive(db, project=proj, status=archive_status, archive_ttl=ttl)
         click.echo(f"Archived project '{proj}' (status={archive_status}).")
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         click.echo(f"Archive failed: {exc}", err=True)
         raise SystemExit(1)
 
@@ -170,7 +170,7 @@ def close_cmd(project: str | None) -> None:
     try:
         pm_archive(db, project=proj, status="completed", archive_ttl=ttl)
         click.echo(f"Closed project '{proj}'.")
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         click.echo(f"Close failed: {exc}", err=True)
         raise SystemExit(1)
 

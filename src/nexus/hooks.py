@@ -100,16 +100,18 @@ def session_end() -> str:
 
     if session_id:
         t1 = _open_t1(session_id)
-        for entry in t1.flagged_entries():
-            db.put(
-                project=entry["flush_project"],
-                title=entry["flush_title"],
-                content=entry["content"],
-                tags=entry.get("tags", ""),
-                ttl=None,
-            )
-            flushed += 1
-        t1.clear()
+        try:
+            for entry in t1.flagged_entries():
+                db.put(
+                    project=entry["flush_project"],
+                    title=entry["flush_title"],
+                    content=entry["content"],
+                    tags=entry.get("tags", ""),
+                    ttl=None,
+                )
+                flushed += 1
+        finally:
+            t1.clear()
 
     expired = db.expire()
 

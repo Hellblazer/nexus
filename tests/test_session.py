@@ -62,3 +62,13 @@ def test_stable_pid_falls_back_to_getsid(monkeypatch: pytest.MonkeyPatch) -> Non
         result = _stable_pid()
     assert result == 55555
     mock_getsid.assert_called_once_with(0)
+
+
+# ── Behavior 3: _stable_pid() invalid env var falls back ─────────────────────
+
+def test_stable_pid_invalid_env_var_falls_back_to_getsid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When NX_SESSION_PID is non-integer, _stable_pid() silently falls back to getsid(0)."""
+    monkeypatch.setenv("NX_SESSION_PID", "not-a-number")
+    with patch("nexus.session.os.getsid", return_value=44444):
+        result = _stable_pid()
+    assert result == 44444
