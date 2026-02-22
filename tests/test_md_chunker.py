@@ -92,6 +92,61 @@ def test_chunk_multiple_headings_no_index_error():
     assert any("Gamma" in t for t in titles)
 
 
+# ── nexus-zmu: pre-heading content must not be silently dropped ───────────────
+
+def test_chunk_pre_heading_content_is_not_dropped():
+    """Content before the first heading is preserved as its own chunk."""
+    chunker = SemanticMarkdownChunker(chunk_size=512)
+    text = "Preamble text before any heading.\n\n# First Section\n\nSection content."
+    chunks = chunker.chunk(text, {})
+    combined = " ".join(c.text for c in chunks)
+    assert "Preamble" in combined, "Pre-heading content was silently dropped"
+
+
+def test_chunk_only_pre_heading_content_returns_one_chunk():
+    """A document with no headings at all returns its content as a single chunk."""
+    chunker = SemanticMarkdownChunker(chunk_size=512)
+    text = "Just some plain content with no headings.\n\nAnother paragraph."
+    chunks = chunker.chunk(text, {})
+    assert len(chunks) >= 1
+    combined = " ".join(c.text for c in chunks)
+    assert "plain content" in combined
+
+
+# ── nexus-9ar: semantic chunker must write chunk_start_char/chunk_end_char ────
+
+def test_semantic_chunk_start_char_is_not_all_zero():
+    """Every semantic chunk must have chunk_start_char set in its metadata."""
+    chunker = SemanticMarkdownChunker(chunk_size=512)
+    text = "# Alpha\n\nContent for alpha.\n\n# Beta\n\nContent for beta."
+    chunks = chunker.chunk(text, {})
+    assert len(chunks) >= 2, "Expected at least 2 chunks"
+    for c in chunks:
+        assert "chunk_start_char" in c.metadata, "chunk_start_char missing from metadata"
+        assert "chunk_end_char" in c.metadata, "chunk_end_char missing from metadata"
+
+
+def test_semantic_chunk_offsets_are_monotonically_increasing():
+    """chunk_start_char offsets across sections should be non-decreasing."""
+    chunker = SemanticMarkdownChunker(chunk_size=512)
+    text = "# Section One\n\nContent one.\n\n# Section Two\n\nContent two.\n\n# Section Three\n\nContent three."
+    chunks = chunker.chunk(text, {})
+    starts = [c.metadata.get("chunk_start_char", 0) for c in chunks]
+    for a, b in zip(starts, starts[1:]):
+        assert a <= b, f"chunk_start_char decreased: {a} → {b}"
+
+
+def test_semantic_chunk_end_char_greater_than_start():
+    """For non-empty sections, chunk_end_char should be > chunk_start_char."""
+    chunker = SemanticMarkdownChunker(chunk_size=512)
+    text = "# Alpha\n\nSome alpha content here.\n\n# Beta\n\nSome beta content here."
+    chunks = chunker.chunk(text, {})
+    for c in chunks:
+        start = c.metadata.get("chunk_start_char", 0)
+        end = c.metadata.get("chunk_end_char", 0)
+        assert end >= start, f"chunk_end_char ({end}) < chunk_start_char ({start})"
+
+
 # ── nexus-9vp: oversized part is truncated in _split_large_section ───────────
 
 def test_split_large_section_truncates_oversized_part():

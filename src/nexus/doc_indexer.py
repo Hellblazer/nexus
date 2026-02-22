@@ -59,12 +59,7 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
     if existing["metadatas"] and existing["metadatas"][0].get("content_hash") == content_hash:
         return 0
 
-    # Remove stale chunks for this file (different hash)
-    stale = col.get(where={"source_path": str(pdf_path)}, include=[])
-    if stale["ids"]:
-        col.delete(ids=stale["ids"])
-
-    # Extract → chunk → upsert
+    # Extract → chunk → upsert (idempotent: chunk IDs are deterministic)
     result = PDFExtractor().extract(pdf_path)
     chunks = PDFChunker().chunk(result.text, result.metadata)
     if not chunks:
@@ -101,7 +96,15 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
         documents.append(chunk.text)
         metadatas.append(meta)
 
-    col.add(ids=ids, documents=documents, metadatas=metadatas)
+    col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+
+    # Prune stale chunks from a previous (larger) version of this file
+    current_ids_set = set(ids)
+    all_existing = col.get(where={"source_path": str(pdf_path)}, include=[])
+    stale_ids = [eid for eid in all_existing["ids"] if eid not in current_ids_set]
+    if stale_ids:
+        col.delete(ids=stale_ids)
+
     return len(chunks)
 
 
@@ -127,10 +130,6 @@ def index_markdown(md_path: Path, corpus: str) -> int:
     )
     if existing["metadatas"] and existing["metadatas"][0].get("content_hash") == content_hash:
         return 0
-
-    stale = col.get(where={"source_path": str(md_path)}, include=[])
-    if stale["ids"]:
-        col.delete(ids=stale["ids"])
 
     # Parse frontmatter then chunk
     raw_text = md_path.read_text(encoding="utf-8")
@@ -178,5 +177,13 @@ def index_markdown(md_path: Path, corpus: str) -> int:
         documents.append(chunk.text)
         metadatas.append(meta)
 
-    col.add(ids=ids, documents=documents, metadatas=metadatas)
+    col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+
+    # Prune stale chunks from a previous (larger) version of this file
+    current_ids_set = set(ids)
+    all_existing = col.get(where={"source_path": str(md_path)}, include=[])
+    stale_ids = [eid for eid in all_existing["ids"] if eid not in current_ids_set]
+    if stale_ids:
+        col.delete(ids=stale_ids)
+
     return len(chunks)
