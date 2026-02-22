@@ -227,7 +227,7 @@ class T3Database:
         try:
             self._client.get_collection(name)
             return True
-        except chromadb.errors.NotFoundError:
+        except _ChromaNotFoundError:
             return False
         except Exception as exc:
             _log.warning("collection_exists check failed", name=name, error=str(exc))
