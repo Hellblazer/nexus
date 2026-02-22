@@ -59,14 +59,28 @@ def start_cmd() -> None:
         _pid_path().unlink(missing_ok=True)
 
     _config_dir().mkdir(parents=True, exist_ok=True)
-    with _log_path().open("a") as log_fh:
+    pid_path = _pid_path()
+    # Exclusive create — claim PID slot before spawning (prevents TOCTOU race)
+    try:
+        pid_path.open("x").close()
+    except FileExistsError:
+        existing = _read_pid()
+        if existing and _process_running(existing):
+            click.echo(f"Server already running (PID {existing}).")
+        else:
+            click.echo("Server start already in progress.")
+        return
+    try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "nexus.server_main"],
-            stdout=log_fh,
-            stderr=log_fh,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-    _pid_path().write_text(str(proc.pid))
+        pid_path.write_text(str(proc.pid))
+    except Exception:
+        pid_path.unlink(missing_ok=True)
+        raise
     click.echo(f"Server started (PID {proc.pid}).")
 
 

@@ -258,6 +258,15 @@ class T2Database:
         ).fetchall()
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
+    def delete(self, project: str, title: str) -> bool:
+        """Delete an entry by (project, title). Returns True if a row was deleted."""
+        cursor = self.conn.execute(
+            "DELETE FROM memory WHERE project = ? AND title = ?",
+            (project, title),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
     def expire(self) -> int:
