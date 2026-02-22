@@ -232,11 +232,12 @@ class T2Database:
             )
             self.conn.commit()
 
-    def restore_project(self, project: str) -> tuple[list[str], list[str]]:
-        """Reverse decay: set ttl=NULL and restore pm, tags.
+    def restore_project(self, project: str) -> list[str]:
+        """Reverse decay: set ttl=NULL and restore pm tags.
 
-        Returns (restored_titles, missing_titles) where missing_titles are docs
-        that were in the project at archive time but have since been hard-deleted.
+        Returns the titles of all surviving entries in the project.
+        Note: entries hard-deleted during the decay window cannot be detected,
+        so only surviving titles are returned.
         """
         with self._lock:
             rows = self.conn.execute(
@@ -254,7 +255,7 @@ class T2Database:
                 (project,),
             )
             self.conn.commit()
-        return surviving, []
+        return surviving
 
     def get_all(self, project: str) -> list[dict[str, Any]]:
         """Return all entries for *project* with full column data."""

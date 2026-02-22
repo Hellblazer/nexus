@@ -24,8 +24,10 @@ def _configure_logging() -> None:
 
 def main() -> None:
     _configure_logging()
+    from nexus.config import _DEFAULTS
+    default_port: int = _DEFAULTS["server"]["port"]
     try:
-        port = int(sys.argv[1]) if len(sys.argv) > 1 else 7474
+        port = int(sys.argv[1]) if len(sys.argv) > 1 else default_port
     except ValueError:
         sys.stderr.write(f"Invalid port: {sys.argv[1]!r}\n")
         sys.exit(1)

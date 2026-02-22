@@ -191,7 +191,7 @@ def test_serve_logs_shows_tail(runner: CliRunner, serve_home: Path) -> None:
 # ── start: command args ────────────────────────────────────────────────────────
 
 def test_serve_start_spawns_server_main_module(runner: CliRunner, serve_home: Path) -> None:
-    """start_cmd spawns nexus.server_main via python -m."""
+    """start_cmd spawns nexus.server_main via python -m with port argument."""
     mock_proc = MagicMock()
     mock_proc.pid = 42
 
@@ -200,4 +200,26 @@ def test_serve_start_spawns_server_main_module(runner: CliRunner, serve_home: Pa
 
     assert mock_popen.called
     cmd = mock_popen.call_args.args[0]
-    assert cmd == [sys.executable, "-m", "nexus.server_main"]
+    assert cmd[:3] == [sys.executable, "-m", "nexus.server_main"]
+    assert len(cmd) == 4  # port is passed as 4th argument
+
+
+# ── nexus-hzk: port comes from config ─────────────────────────────────────────
+
+def test_serve_start_passes_port_from_config(runner: CliRunner, serve_home: Path) -> None:
+    """start_cmd reads server.port from load_config and passes it to server_main."""
+    import yaml
+
+    # Write a custom port to the config file
+    config_path = serve_home / ".config" / "nexus" / "config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump({"server": {"port": 9999}}))
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 42
+
+    with patch("nexus.commands.serve.subprocess.Popen", return_value=mock_proc) as mock_popen:
+        runner.invoke(main, ["serve", "start"])
+
+    cmd = mock_popen.call_args.args[0]
+    assert cmd[-1] == "9999", f"Expected port '9999' in cmd, got {cmd}"

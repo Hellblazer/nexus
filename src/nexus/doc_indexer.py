@@ -14,7 +14,11 @@ from nexus.pdf_extractor import PDFExtractor
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _make_t3() -> T3Database:
@@ -79,7 +83,7 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
             "source_author": "",
             "source_date": "",
             "corpus": corpus,
-            "store_type": "docs",
+            "store_type": "pdf",
             "page_count": result.metadata.get("page_count", 0),
             "page_number": chunk.metadata.get("page_number", 0),
             "section_title": "",
@@ -153,7 +157,7 @@ def index_markdown(md_path: Path, corpus: str) -> int:
             "source_author": str(frontmatter.get("author", "")),
             "source_date": str(frontmatter.get("date", "")),
             "corpus": corpus,
-            "store_type": "docs",
+            "store_type": "markdown",
             "page_count": 0,
             "page_number": chunk.metadata.get("page_number", 0),
             "section_title": chunk.metadata.get("header_path", ""),

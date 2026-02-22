@@ -4,7 +4,9 @@ from pathlib import Path
 
 import click
 
+from nexus.config import get_credential
 from nexus.db.t2 import T2Database
+from nexus.db.t3 import T3Database
 from nexus.ttl import parse_ttl
 
 
@@ -102,15 +104,45 @@ def expire_cmd() -> None:
 
 @memory.command("promote")
 @click.argument("id", type=int)
-@click.option("--collection", required=True, help="Target T3 collection name")
-@click.option("--tags", default="", help="Comma-separated tags for T3 storage")
-def promote_cmd(id: int, collection: str, tags: str) -> None:
-    """Promote a T2 entry to T3 ChromaDB for semantic search.
+@click.option("--collection", required=True, help="Target T3 collection name (e.g. knowledge__myproject)")
+@click.option("--tags", default="", help="Comma-separated tags (overrides T2 tags when provided)")
+@click.option("--remove", is_flag=True, default=False, help="Delete the entry from T2 after promoting.")
+def promote_cmd(id: int, collection: str, tags: str, remove: bool) -> None:
+    """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
+    db = T2Database(_default_db_path())
+    entry = db.get(id=id)
+    if entry is None:
+        raise click.ClickException(f"Entry {id} not found in T2 memory.")
 
-    Requires Phase 3 (nexus-odd) — T3 ChromaDB cloud not yet configured.
-    """
-    click.echo(
-        "T3 (ChromaDB cloud) not yet available — implement in Phase 3 (nexus-odd).",
-        err=True,
+    if not (get_credential("chroma_api_key") and get_credential("voyage_api_key")):
+        raise click.ClickException(
+            "T3 credentials not configured — set chroma_api_key and voyage_api_key."
+        )
+
+    # Translate TTL: T2 ttl=None (permanent) → T3 ttl_days=0; T2 ttl=N → T3 ttl_days=N
+    ttl_days: int = entry["ttl"] if entry["ttl"] is not None else 0  # type: ignore[assignment]
+    merged_tags = tags if tags else (entry.get("tags") or "")
+
+    t3 = T3Database(
+        tenant=get_credential("chroma_tenant"),
+        database=get_credential("chroma_database"),
+        api_key=get_credential("chroma_api_key"),
+        voyage_api_key=get_credential("voyage_api_key"),
     )
-    raise SystemExit(1)
+    doc_id = t3.put(
+        collection=collection,
+        content=entry["content"],
+        title=entry["title"],
+        tags=merged_tags,
+        ttl_days=ttl_days,
+    )
+
+    if remove:
+        db.delete(entry["project"], entry["title"])
+        click.echo(
+            f"Promoted and removed: {entry['project']}/{entry['title']} → {collection} (id={doc_id})"
+        )
+    else:
+        click.echo(
+            f"Promoted: {entry['project']}/{entry['title']} → {collection} (id={doc_id})"
+        )

@@ -1,6 +1,12 @@
 """AC3-AC5: nx memory put/get/search/expire behavior."""
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+import pytest
+from click.testing import CliRunner
+
+from nexus.cli import main
 from nexus.db.t2 import T2Database
 
 
@@ -144,3 +150,119 @@ def test_search_glob_raises_on_malformed_fts5_query(db: T2Database) -> None:
 
     with pytest.raises(ValueError, match="Invalid search query"):
         db.search_glob("NOT", "*_pm")
+
+
+# ── nexus-ft2: restore_project returns list[str], not tuple ──────────────────
+
+def test_restore_project_returns_list_of_titles(db: T2Database) -> None:
+    """restore_project returns a plain list[str], not a tuple."""
+    db.put(project="myproj", title="a.md", content="aaa", tags="pm-archived")
+    db.put(project="myproj", title="b.md", content="bbb", tags="pm-archived")
+
+    result = db.restore_project("myproj")
+
+    assert isinstance(result, list), f"Expected list, got {type(result)}"
+    assert set(result) == {"a.md", "b.md"}
+
+
+# ── nexus-206: nx memory promote ──────────────────────────────────────────────
+
+@pytest.fixture
+def runner() -> CliRunner:
+    return CliRunner()
+
+
+@pytest.fixture
+def mem_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect HOME to tmp_path so memory.db goes to a temp dir."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+def test_promote_cmd_no_credentials_raises(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """promote fails with helpful message when T3 credentials are absent."""
+    row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", return_value=""):
+            result = runner.invoke(
+                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
+            )
+
+    assert result.exit_code != 0
+    assert "credential" in result.output.lower() or "not configured" in result.output.lower()
+
+
+def test_promote_cmd_entry_not_found_exits(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """promote with non-existent id exits with error."""
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        result = runner.invoke(
+            main, ["memory", "promote", "9999", "--collection", "knowledge__p"]
+        )
+
+    assert result.exit_code != 0
+    assert "not found" in result.output.lower() or "9999" in result.output
+
+
+def test_promote_cmd_calls_t3_put(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """promote with valid id + credentials calls t3.put and echoes doc_id."""
+    row_id = db.put(project="proj", title="doc.md", content="the content", ttl=7, tags="ai")
+
+    mock_t3 = MagicMock()
+    mock_t3.put.return_value = "abc123"
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                result = runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
+                )
+
+    assert result.exit_code == 0, result.output
+    mock_t3.put.assert_called_once()
+    call_kwargs = mock_t3.put.call_args.kwargs
+    assert call_kwargs["collection"] == "knowledge__proj"
+    assert call_kwargs["content"] == "the content"
+    assert call_kwargs["title"] == "doc.md"
+    assert call_kwargs["ttl_days"] == 7
+    assert "abc123" in result.output
+
+
+def test_promote_cmd_permanent_entry_ttl_is_zero(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """Permanent T2 entry (ttl=None) → T3 ttl_days=0."""
+    row_id = db.put(project="proj", title="perm.md", content="forever", ttl=None)
+
+    mock_t3 = MagicMock()
+    mock_t3.put.return_value = "def456"
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
+                )
+
+    call_kwargs = mock_t3.put.call_args.kwargs
+    assert call_kwargs["ttl_days"] == 0
+
+
+def test_promote_cmd_remove_deletes_t2_entry(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """--remove flag deletes the T2 entry after promoting."""
+    row_id = db.put(project="proj", title="tmp.md", content="temp data", ttl=5)
+
+    mock_t3 = MagicMock()
+    mock_t3.put.return_value = "ghi789"
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                result = runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj", "--remove"],
+                )
+
+    assert result.exit_code == 0, result.output
+    assert db.get(project="proj", title="tmp.md") is None
+    assert "removed" in result.output.lower()

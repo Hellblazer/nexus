@@ -50,6 +50,9 @@ def serve() -> None:
 @serve.command("start")
 def start_cmd() -> None:
     """Start the Nexus server as a background process."""
+    from nexus.config import load_config
+    port: int = load_config()["server"]["port"]
+
     pid = _read_pid()
     if pid is not None:
         if _process_running(pid):
@@ -72,7 +75,7 @@ def start_cmd() -> None:
         return
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "nexus.server_main"],
+            [sys.executable, "-m", "nexus.server_main", str(port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

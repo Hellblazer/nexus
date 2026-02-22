@@ -394,7 +394,7 @@ def pm_restore(db: "T2Database", project: str) -> None:
     Raises if no docs remain. Warns (prints) if only some docs survived.
     """
     ns = _project_ns(project)
-    surviving, _ = db.restore_project(ns)
+    surviving = db.restore_project(ns)
 
     if not surviving:
         raise RuntimeError(
