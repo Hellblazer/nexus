@@ -429,18 +429,19 @@ def test_embed_with_fallback_calls_cce_for_docs_collection(monkeypatch):
     mock_client.contextualized_embed.return_value = mock_result
 
     with patch("voyageai.Client", return_value=mock_client):
-        result = _embed_with_fallback(
+        embeddings, actual_model = _embed_with_fallback(
             chunks=["chunk one", "chunk two"],
             model="voyage-context-3",
             api_key="vk_test",
         )
 
     mock_client.contextualized_embed.assert_called_once()
-    assert result == [[0.1, 0.2], [0.3, 0.4]]
+    assert embeddings == [[0.1, 0.2], [0.3, 0.4]]
+    assert actual_model == "voyage-context-3"
 
 
 def test_embed_with_fallback_skips_cce_for_single_chunk(monkeypatch):
-    """Single chunk -> uses embed() not contextualized_embed()."""
+    """Single chunk -> uses embed() not contextualized_embed(), returns voyage-4 model."""
     from unittest.mock import MagicMock, patch
     from nexus.doc_indexer import _embed_with_fallback
 
@@ -450,7 +451,7 @@ def test_embed_with_fallback_skips_cce_for_single_chunk(monkeypatch):
     mock_client.embed.return_value = mock_result
 
     with patch("voyageai.Client", return_value=mock_client):
-        result = _embed_with_fallback(
+        embeddings, actual_model = _embed_with_fallback(
             chunks=["only chunk"],
             model="voyage-context-3",
             api_key="vk_test",
@@ -458,11 +459,12 @@ def test_embed_with_fallback_skips_cce_for_single_chunk(monkeypatch):
 
     mock_client.contextualized_embed.assert_not_called()
     mock_client.embed.assert_called_once()
-    assert result == [[0.5, 0.6]]
+    assert embeddings == [[0.5, 0.6]]
+    assert actual_model == "voyage-4"
 
 
 def test_embed_with_fallback_falls_back_on_error(monkeypatch):
-    """contextualized_embed raises Exception -> falls back to embed()."""
+    """contextualized_embed raises Exception -> falls back to embed(), returns voyage-4 model."""
     from unittest.mock import MagicMock, patch
     from nexus.doc_indexer import _embed_with_fallback
 
@@ -473,7 +475,7 @@ def test_embed_with_fallback_falls_back_on_error(monkeypatch):
     mock_client.embed.return_value = mock_result
 
     with patch("voyageai.Client", return_value=mock_client):
-        result = _embed_with_fallback(
+        embeddings, actual_model = _embed_with_fallback(
             chunks=["chunk one", "chunk two"],
             model="voyage-context-3",
             api_key="vk_test",
@@ -481,7 +483,9 @@ def test_embed_with_fallback_falls_back_on_error(monkeypatch):
 
     mock_client.contextualized_embed.assert_called_once()
     mock_client.embed.assert_called_once()
-    assert result == [[0.1, 0.2], [0.3, 0.4]]
+    assert embeddings == [[0.1, 0.2], [0.3, 0.4]]
+    # Critical: fallback must report voyage-4 so callers store the correct model in metadata
+    assert actual_model == "voyage-4"
 
 
 def test_embed_with_fallback_skips_cce_for_large_input(monkeypatch):
@@ -498,7 +502,7 @@ def test_embed_with_fallback_skips_cce_for_large_input(monkeypatch):
     mock_client.embed.return_value = mock_result
 
     with patch("voyageai.Client", return_value=mock_client):
-        result = _embed_with_fallback(
+        embeddings, actual_model = _embed_with_fallback(
             chunks=[big_chunk, "second"],
             model="voyage-context-3",
             api_key="vk_test",
@@ -506,6 +510,39 @@ def test_embed_with_fallback_skips_cce_for_large_input(monkeypatch):
 
     mock_client.contextualized_embed.assert_not_called()
     mock_client.embed.assert_called_once()
+    assert actual_model == "voyage-4"
+
+
+def test_embed_with_fallback_metadata_reflects_actual_model(monkeypatch):
+    """When CCE fails and falls back to voyage-4, the returned model is voyage-4.
+
+    This is the companion test to Critical Issue C1: callers must use the returned
+    model name (not the requested target_model) when writing embedding_model metadata.
+    If this were incorrect, the staleness check would permanently skip re-indexing
+    even after the CCE error is resolved.
+    """
+    from unittest.mock import MagicMock, patch
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+    mock_client.contextualized_embed.side_effect = Exception("network error")
+    fallback_result = MagicMock()
+    fallback_result.embeddings = [[0.1, 0.2], [0.3, 0.4]]
+    mock_client.embed.return_value = fallback_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        embeddings, actual_model = _embed_with_fallback(
+            chunks=["a", "b"],
+            model="voyage-context-3",
+            api_key="vk_test",
+        )
+
+    # Embeddings come from standard path
+    assert embeddings == [[0.1, 0.2], [0.3, 0.4]]
+    # Model MUST reflect what was actually used — not the requested voyage-context-3
+    assert actual_model == "voyage-4", (
+        "Fallback must return 'voyage-4' so callers record the correct model in metadata"
+    )
 
 
 # ── nexus-370: index_pdf CCE integration ─────────────────────────────────────

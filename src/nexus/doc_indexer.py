@@ -39,27 +39,39 @@ def _embed_with_fallback(
     model: str,
     api_key: str,
     input_type: str = "document",
-) -> list[list[float]]:
-    """Embed chunks, falling back to voyage-4 if CCE fails."""
+) -> tuple[list[list[float]], str]:
+    """Embed chunks using CCE when possible, falling back to voyage-4 on failure.
+
+    Returns ``(embeddings, actual_model_used)`` so callers can record the model
+    that produced the stored vectors in metadata — critical for staleness checks.
+    """
+    _log = structlog.get_logger(__name__)
     import voyageai
-    if model == "voyage-context-3" and len(chunks) >= 2:
-        estimated = _estimate_tokens(chunks)
-        if estimated > 100_000:
-            # Too large for CCE — fall back to standard
+    if model == "voyage-context-3":
+        if len(chunks) < 2:
+            # CCE requires 2+ chunks; fall back to voyage-4 (the query-time model)
+            # so stored vectors are in the same embedding space as query vectors.
             model = "voyage-4"
         else:
-            try:
-                client = voyageai.Client(api_key=api_key)
-                result = client.contextualized_embed(
-                    inputs=[chunks], model=model, input_type=input_type
-                )
-                return result.embeddings[0]  # first (only) document's embeddings
-            except Exception:
-                model = "voyage-4"  # fall back to standard
+            estimated = _estimate_tokens(chunks)
+            if estimated > 100_000:
+                _log.warning("CCE skipped: estimated tokens exceed limit",
+                             estimated=estimated, limit=100_000)
+                model = "voyage-4"
+            else:
+                try:
+                    client = voyageai.Client(api_key=api_key)
+                    result = client.contextualized_embed(
+                        inputs=[chunks], model=model, input_type=input_type
+                    )
+                    return result.embeddings[0], model  # first (only) document's embeddings
+                except Exception as exc:
+                    _log.warning("CCE failed, falling back to voyage-4", error=str(exc))
+                    model = "voyage-4"
     # Standard embedding path
     client = voyageai.Client(api_key=api_key)
     result = client.embed(texts=chunks, model=model, input_type=input_type)
-    return result.embeddings
+    return result.embeddings, model
 
 
 def index_pdf(pdf_path: Path, corpus: str, t3: Any = None) -> int:
@@ -130,7 +142,10 @@ def index_pdf(pdf_path: Path, corpus: str, t3: Any = None) -> int:
     if target_model == "voyage-context-3":
         from nexus.config import get_credential
         voyage_key = get_credential("voyage_api_key")
-        embeddings = _embed_with_fallback(documents, target_model, voyage_key)
+        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
+        if actual_model != target_model:
+            for m in metadatas:
+                m["embedding_model"] = actual_model
         db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
     else:
         col.upsert(ids=ids, documents=documents, metadatas=metadatas)
@@ -222,7 +237,10 @@ def index_markdown(md_path: Path, corpus: str, t3: Any = None) -> int:
     if target_model == "voyage-context-3":
         from nexus.config import get_credential
         voyage_key = get_credential("voyage_api_key")
-        embeddings = _embed_with_fallback(documents, target_model, voyage_key)
+        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
+        if actual_model != target_model:
+            for m in metadatas:
+                m["embedding_model"] = actual_model
         db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
     else:
         col.upsert(ids=ids, documents=documents, metadatas=metadatas)
@@ -241,13 +259,13 @@ def batch_index_pdfs(
     paths: list[Path],
     corpus: str,
     t3: Any = None,
-    batch_size: int = 4,
 ) -> dict[str, str]:
-    """Index multiple PDFs, batching CCE calls for efficiency.
+    """Index multiple PDFs sequentially, returning per-file status.
 
-    Returns dict mapping path -> status ("indexed", "skipped", "failed").
+    Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"failed"``.
+    Failures are logged and do not abort the remaining paths.
     """
-    _log = structlog.get_logger()
+    _log = structlog.get_logger(__name__)
     results: dict[str, str] = {}
     for path in paths:
         try:
@@ -263,13 +281,13 @@ def batch_index_markdowns(
     paths: list[Path],
     corpus: str,
     t3: Any = None,
-    batch_size: int = 4,
 ) -> dict[str, str]:
-    """Index multiple Markdown files, batching CCE calls for efficiency.
+    """Index multiple Markdown files sequentially, returning per-file status.
 
-    Returns dict mapping path -> status ("indexed", "skipped", "failed").
+    Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"failed"``.
+    Failures are logged and do not abort the remaining paths.
     """
-    _log = structlog.get_logger()
+    _log = structlog.get_logger(__name__)
     results: dict[str, str] = {}
     for path in paths:
         try:
