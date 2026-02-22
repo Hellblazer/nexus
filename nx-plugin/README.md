@@ -162,7 +162,7 @@ All agent handoffs use the relay template from `agents/_shared/RELAY_TEMPLATE.md
 `hooks/scripts/permission-request-stdin.sh` auto-approves safe read-only operations:
 - `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
 - `git log`, `git diff`, `git status`, `git show`, `git branch -a`, `git remote -v`
-- `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx pm status/list`, `nx doctor`, `nx health`, `nx index`
+- `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx pm status`, `nx doctor`, `nx health`, `nx index`
 - `mvn help:*`, `mvn dependency:tree`, `mvn dependency:analyze`, `mvn versions:display`
 
 Dangerous commands (force-push, `bd delete`, deploys) are always denied.

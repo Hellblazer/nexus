@@ -55,6 +55,7 @@ T1 is session-scoped: all entries are wiped at SessionEnd unless flagged.
 **T1 CLI:**
 ```bash
 nx scratch put "<content>" [--tags TAG1,TAG2] [--persist] [--project PROJECT] [--title TITLE]
+# Note: --project/--title on 'put' pre-configure the T2 flush destination for flag/promote; they do NOT give cross-session access to the content.
 nx scratch get <id>
 nx scratch search "<query>" [--n N]
 nx scratch list
@@ -64,7 +65,7 @@ nx scratch promote <id> --project PROJECT --title TITLE    # immediate T2 copy
 nx scratch clear
 ```
 
-`nx hook session-end` auto-promotes flagged T1 items to T2 at session end.
+The SessionEnd hook (`nx hook session-end`) runs automatically at session close and auto-promotes flagged T1 items to T2. This is not user-callable; flagging items with `nx scratch flag` is how you opt in.
 
 **Promote to T2 when:**
 - Hypothesis validated (worth preserving across sessions)

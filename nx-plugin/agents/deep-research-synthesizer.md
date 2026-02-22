@@ -119,7 +119,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Round Artifacts**: Use T1 scratch to track findings per research round:
   ```bash
   # After each round of research
-  nx scratch put "# Round {N} findings\n{content}" --tags "research,round-{N}" --project {project}_active --title round-{N}.md
+  nx scratch put $'# Round {N} findings\n{content}' --tags "research,round-{N}" --project {project}_active --title round-{N}.md
   # If valuable, flag for T2 persistence
   nx scratch flag <id> --project {project}_active --title research-round-{N}.md
   ```
@@ -179,7 +179,7 @@ You will systematically:
 You will automatically:
 1. Store all significant findings in nx T3 store with appropriate categorization, tags, and version numbers:
    ```bash
-   echo "# Research: {topic}\n\n{content}" | nx store put - --collection knowledge --title "research-{topic}-{date}" --tags "research,{domain}"
+   printf "# Research: {topic}\n\n{content}\n" | nx store put - --collection knowledge --title "research-{topic}-{date}" --tags "research,{domain}"
    ```
 2. Create new documents in nx store when discovering substantial new topic areas
 3. Update existing documents with new insights while preserving version history

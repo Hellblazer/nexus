@@ -152,7 +152,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Per-Subtask Findings**: Use T1 scratch to track findings during parallel subtask analysis:
   ```bash
   # Store subtask finding
-  nx scratch put "# Subtask: {module}\n{findings}" --tags "analysis,subtask-{n}"
+  nx scratch put $'# Subtask: {module}\n{findings}' --tags "analysis,subtask-{n}"
   # At end of each subtask, promote to T2
   nx scratch promote <id> --project {project}_active --title subtask-{n}-findings.md
   # Final synthesis: promote all to T2

@@ -134,7 +134,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Hypothesis Chain**: Track hypotheses and evidence in T1 scratch during investigation:
   ```bash
   # Record hypothesis
-  nx scratch put "Hypothesis {N}: {description}\nEvidence: {evidence}\nStatus: testing" --tags "debug,hypothesis-{N}"
+  nx scratch put $'Hypothesis {N}: {description}\nEvidence: {evidence}\nStatus: testing' --tags "debug,hypothesis-{N}"
   # When root cause found, promote full chain to T2
   nx scratch promote <id> --project {project}_active --title debug-hypothesis-chain.md
   ```

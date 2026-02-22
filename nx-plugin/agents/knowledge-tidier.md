@@ -194,7 +194,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Review Artifacts**: Use T1 scratch to track review round findings:
   ```bash
   # After each review round
-  nx scratch put "# Review Round {N}: {N} issues found\n{issue-list}" --tags "review,round-{N}"
+  nx scratch put $'# Review Round {N}: {N} issues found\n{issue-list}' --tags "review,round-{N}"
   # Promote summary to T2 for cross-session continuity
   nx scratch promote <id> --project {project}_active --title review-round-{N}.md
   ```

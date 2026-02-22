@@ -159,7 +159,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Test Result Snapshots**: Use T1 scratch to capture test run state during analysis:
   ```bash
   # Capture test run result
-  nx scratch put "Test run {timestamp}: {N} passed, {M} failed\n{summary}" --tags "test-results"
+  nx scratch put $'Test run {timestamp}: {N} passed, {M} failed\n{summary}' --tags "test-results"
   # For multi-session validation, promote to T2
   nx scratch promote <id> --project {project}_active --title test-validation-{date}.md
   ```

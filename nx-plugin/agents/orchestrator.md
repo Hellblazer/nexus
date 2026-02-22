@@ -153,7 +153,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Routing Decisions**: Document in response; for significant routing patterns, store in T3:
   ```bash
-  echo "# Routing Pattern: {pattern}\n{rationale}" | nx store put - --collection knowledge --title "pattern-orchestrator-{routing-scenario}" --tags "routing,orchestration"
+  printf "# Routing Pattern: {pattern}\n{rationale}\n" | nx store put - --collection knowledge --title "pattern-orchestrator-{routing-scenario}" --tags "routing,orchestration"
   ```
 - **Pipeline Coordination**: Track via beads with dependencies
 - **Interim Routing Notes**: Use T1 scratch for working notes during complex pipeline analysis:

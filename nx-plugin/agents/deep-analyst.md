@@ -137,7 +137,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Recommendations**: Include in relay to downstream agent
 - **Analysis Chain**: Track hypothesis progression in T1 scratch during investigation:
   ```bash
-  nx scratch put "Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}" --tags "analysis,step-{N}"
+  nx scratch put $'Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}' --tags "analysis,step-{N}"
   # Promote chain to T2 for cross-session continuity
   nx scratch flag <id> --project {project}_active --title analysis-chain.md
   ```
