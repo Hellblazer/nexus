@@ -18,16 +18,18 @@ def _sha256(path: Path) -> str:
 
 
 def _make_t3() -> T3Database:
+    from nexus.config import get_credential
     return T3Database(
-        tenant=os.environ.get("CHROMA_TENANT", ""),
-        database=os.environ.get("CHROMA_DATABASE", ""),
-        api_key=os.environ.get("CHROMA_API_KEY", ""),
-        voyage_api_key=os.environ.get("VOYAGE_API_KEY", ""),
+        tenant=get_credential("chroma_tenant"),
+        database=get_credential("chroma_database"),
+        api_key=get_credential("chroma_api_key"),
+        voyage_api_key=get_credential("voyage_api_key"),
     )
 
 
 def _has_credentials() -> bool:
-    return bool(os.environ.get("VOYAGE_API_KEY") and os.environ.get("CHROMA_API_KEY"))
+    from nexus.config import get_credential
+    return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
 
 
 def index_pdf(pdf_path: Path, corpus: str) -> int:

@@ -14,7 +14,7 @@ def _default_db_path() -> Path:
 
 @click.group()
 def memory() -> None:
-    """T2 SQLite memory bank (memory bank replacement)."""
+    """Persistent per-project memory (survives across sessions)."""
 
 
 @memory.command("put")

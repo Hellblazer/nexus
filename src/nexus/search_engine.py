@@ -89,7 +89,8 @@ def apply_hybrid_scoring(
 def _voyage_client():
     """Return a voyageai.Client instance."""
     import voyageai
-    return voyageai.Client(api_key=os.environ.get("VOYAGE_API_KEY", ""))
+    from nexus.config import get_credential
+    return voyageai.Client(api_key=get_credential("voyage_api_key"))
 
 
 def rerank_results(
@@ -143,13 +144,14 @@ def round_robin_interleave(
 # ── Cross-corpus search ───────────────────────────────────────────────────────
 
 def _t3_for_search():
-    """Create a T3Database from environment credentials."""
+    """Create a T3Database from credentials."""
+    from nexus.config import get_credential
     from nexus.db.t3 import T3Database
     return T3Database(
-        tenant=os.environ.get("CHROMA_TENANT", ""),
-        database=os.environ.get("CHROMA_DATABASE", ""),
-        api_key=os.environ.get("CHROMA_API_KEY", ""),
-        voyage_api_key=os.environ.get("VOYAGE_API_KEY", ""),
+        tenant=get_credential("chroma_tenant"),
+        database=get_credential("chroma_database"),
+        api_key=get_credential("chroma_api_key"),
+        voyage_api_key=get_credential("voyage_api_key"),
     )
 
 
@@ -195,7 +197,8 @@ def fetch_mxbai_results(
     per_k: int,
 ) -> list[SearchResult]:
     """Fan-out to Mixedbread stores. Returns [] with a warning if key is unset."""
-    api_key = os.environ.get("MXBAI_API_KEY")
+    from nexus.config import get_credential
+    api_key = get_credential("mxbai_api_key")
     if not api_key:
         print("Warning: MXBAI_API_KEY not set — skipping Mixedbread fan-out")
         return []
@@ -231,7 +234,8 @@ def _haiku_refine(query: str, results: list[SearchResult]) -> dict:
         '{"done": true}  — if results are sufficient\n'
         '{"query": "<refined query>"}  — if results need improvement'
     )
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    from nexus.config import get_credential
+    client = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
     msg = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=64,
@@ -292,7 +296,8 @@ def _haiku_answer(query: str, results: list[SearchResult]) -> str:
         "Cite each source by index number. Use <cite i=\"N\"> for single source, "
         "<cite i=\"N-M\"> for a range of consecutive sources."
     )
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    from nexus.config import get_credential
+    client = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
     msg = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1024,

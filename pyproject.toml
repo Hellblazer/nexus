@@ -32,6 +32,9 @@ packages = ["src/nexus"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
+]
 
 [dependency-groups]
 dev = [

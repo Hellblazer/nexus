@@ -6,6 +6,17 @@ from typing import Any
 
 import yaml
 
+# ── Credential registry ───────────────────────────────────────────────────────
+# Maps config-file key → environment variable name
+CREDENTIALS: dict[str, str] = {
+    "chroma_api_key":    "CHROMA_API_KEY",
+    "chroma_tenant":     "CHROMA_TENANT",
+    "chroma_database":   "CHROMA_DATABASE",
+    "voyage_api_key":    "VOYAGE_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "mxbai_api_key":     "MXBAI_API_KEY",
+}
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 _DEFAULTS: dict[str, Any] = {
@@ -69,6 +80,38 @@ def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def _global_config_path() -> Path:
+    return Path.home() / ".config" / "nexus" / "config.yml"
+
+
+def get_credential(name: str) -> str:
+    """Return the credential value for *name*.
+
+    Precedence: environment variable > ``~/.config/nexus/config.yml``.
+    Returns ``""`` when not set in either location.
+    """
+    env_var = CREDENTIALS.get(name, name.upper())
+    env_val = os.environ.get(env_var, "")
+    if env_val:
+        return env_val
+    path = _global_config_path()
+    if path.exists():
+        data = yaml.safe_load(path.read_text()) or {}
+        return data.get("credentials", {}).get(name, "")
+    return ""
+
+
+def set_credential(name: str, value: str) -> None:
+    """Persist *name*=*value* under ``credentials`` in ``~/.config/nexus/config.yml``."""
+    path = _global_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data: dict[str, Any] = {}
+    if path.exists():
+        data = yaml.safe_load(path.read_text()) or {}
+    data.setdefault("credentials", {})[name] = value
+    path.write_text(yaml.dump(data, default_flow_style=False))
+
 
 def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     """Load and merge configuration.
