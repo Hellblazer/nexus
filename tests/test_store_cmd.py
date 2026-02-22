@@ -247,7 +247,7 @@ def test_search_displays_results(runner: CliRunner, env_creds) -> None:
             "title": "sec.md",
             "tags": "security",
             "source_path": "./sec.md",
-            "start_line": 1,
+            "line_start": 1,
         }
     ]
 

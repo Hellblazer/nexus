@@ -182,7 +182,7 @@ def test_format_vimgrep(local_t3: T3Database) -> None:
     results = [
         SearchResult(id="1", content="def foo():", distance=0.1,
                      collection="code__repo",
-                     metadata={"source_path": "src/main.py", "start_line": 42}),
+                     metadata={"source_path": "src/main.py", "line_start": 42}),
     ]
     lines = format_vimgrep(results)
     assert len(lines) == 1
@@ -214,7 +214,7 @@ def test_answer_mode_returns_synthesis_with_citations() -> None:
     results = [
         SearchResult(id="1", content="Nexus uses ChromaDB for storage.",
                      distance=0.1, collection="knowledge__test",
-                     metadata={"source_path": "arch.md", "start_line": 1}),
+                     metadata={"source_path": "arch.md", "line_start": 1}),
     ]
     canned = 'Nexus stores data in ChromaDB. <cite i="1">ChromaDB for storage</cite>'
 
