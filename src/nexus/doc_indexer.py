@@ -135,6 +135,9 @@ def index_markdown(md_path: Path, corpus: str) -> int:
     # Parse frontmatter then chunk
     raw_text = md_path.read_text(encoding="utf-8")
     frontmatter, body = parse_frontmatter(raw_text)
+    # Offset added to chunk char positions so they reference the original file,
+    # not the body-only text (frontmatter is stripped before chunking).
+    frontmatter_len = len(raw_text) - len(body)
 
     base_meta: dict = {
         "source_path": str(md_path),
@@ -165,8 +168,8 @@ def index_markdown(md_path: Path, corpus: str) -> int:
             "extraction_method": "markdown_chunker",
             "chunk_index": chunk.chunk_index,
             "chunk_count": len(chunks),
-            "chunk_start_char": chunk.metadata.get("chunk_start_char", 0),
-            "chunk_end_char": chunk.metadata.get("chunk_end_char", 0),
+            "chunk_start_char": chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
+            "chunk_end_char": chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
             "embedding_model": "voyage-4",
             "indexed_at": now_iso,
             "content_hash": content_hash,

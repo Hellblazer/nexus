@@ -61,13 +61,7 @@ _COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "ti
 
 # ── Session discovery ─────────────────────────────────────────────────────────
 
-def _read_session_id() -> str | None:
-    """Read session ID from the PID-scoped session file written by the SessionStart hook."""
-    from nexus.session import session_file_path
-    try:
-        return session_file_path().read_text().strip() or None
-    except FileNotFoundError:
-        return None
+from nexus.session import read_session_id as _read_session_id
 
 
 # ── Database ──────────────────────────────────────────────────────────────────

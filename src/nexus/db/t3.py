@@ -37,6 +37,7 @@ class T3Database:
     ) -> None:
         self._voyage_api_key = voyage_api_key
         self._ef_override = _ef_override
+        self._ef_cache: dict[str, object] = {}
         if _client is not None:
             self._client = _client
         else:
@@ -49,10 +50,14 @@ class T3Database:
     def _embedding_fn(self, collection_name: str):
         if self._ef_override is not None:
             return self._ef_override
-        model = embedding_model_for_collection(collection_name)
-        return chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
-            model_name=model, api_key=self._voyage_api_key
-        )
+        if collection_name not in self._ef_cache:
+            model = embedding_model_for_collection(collection_name)
+            self._ef_cache[collection_name] = (
+                chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
+                    model_name=model, api_key=self._voyage_api_key
+                )
+            )
+        return self._ef_cache[collection_name]
 
     # ── Collection access ─────────────────────────────────────────────────────
 

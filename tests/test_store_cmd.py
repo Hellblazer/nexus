@@ -256,3 +256,38 @@ def test_search_displays_results(runner: CliRunner, env_creds) -> None:
 
     assert result.exit_code == 0
     assert "security finding here" in result.output
+
+
+# ── nexus-ani: collection delete --yes flag ───────────────────────────────────
+
+def test_collection_delete_yes_skips_prompt(runner: CliRunner, env_creds) -> None:
+    """--yes flag skips interactive confirmation."""
+    mock_db = MagicMock()
+
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    mock_db.delete_collection.assert_called_once_with("knowledge__test")
+    assert "Deleted" in result.output
+
+
+def test_collection_delete_without_yes_prompts(runner: CliRunner, env_creds) -> None:
+    """Without --yes, a confirmation prompt is shown (user declines via 'n')."""
+    mock_db = MagicMock()
+
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
+
+    # User said no → aborted, collection NOT deleted
+    mock_db.delete_collection.assert_not_called()
+
+
+def test_collection_delete_confirm_flag_no_longer_exists(runner: CliRunner, env_creds) -> None:
+    """--confirm flag was removed (renamed to --yes); using it is an error."""
+    mock_db = MagicMock()
+
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--confirm"])
+
+    assert result.exit_code != 0  # no such option

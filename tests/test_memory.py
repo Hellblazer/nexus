@@ -266,3 +266,21 @@ def test_promote_cmd_remove_deletes_t2_entry(runner: CliRunner, mem_home: Path, 
     assert result.exit_code == 0, result.output
     assert db.get(project="proj", title="tmp.md") is None
     assert "removed" in result.output.lower()
+
+
+# ── nexus-28b: t2._read_session_id delegates to session.read_session_id ──────
+
+def test_t2_uses_session_module_for_session_id(db: T2Database) -> None:
+    """T2Database.put uses nexus.session.read_session_id, not a local re-implementation."""
+    import nexus.db.t2 as t2_mod
+    import nexus.session as sess_mod
+
+    # Verify the module-level alias points to the same function as session.read_session_id
+    assert t2_mod._read_session_id is sess_mod.read_session_id
+
+    # Functional: patch the name in t2's namespace (since it's a bound import)
+    with patch("nexus.db.t2._read_session_id", return_value="test-sid-xyz"):
+        row_id = db.put(project="p", title="t.md", content="x")
+
+    row = db.get(id=row_id)
+    assert row["session"] == "test-sid-xyz"

@@ -35,10 +35,10 @@ def info_cmd(name: str) -> None:
 
 @collection.command("delete")
 @click.argument("name")
-@click.option("--confirm", is_flag=True, help="Skip interactive confirmation")
-def delete_cmd(name: str, confirm: bool) -> None:
+@click.option("--yes", "-y", is_flag=True, help="Skip interactive confirmation prompt")
+def delete_cmd(name: str, yes: bool) -> None:
     """Delete a T3 collection (irreversible)."""
-    if not confirm:
+    if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
     _t3().delete_collection(name)
     click.echo(f"Deleted: {name}")

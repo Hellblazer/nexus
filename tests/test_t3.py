@@ -318,3 +318,44 @@ def test_put_id_is_deterministic_across_processes(mock_chromadb: tuple) -> None:
     id1 = db.put(collection="code__repo", content="same text", title="file.py:1-50")
     id2 = db.put(collection="code__repo", content="same text", title="file.py:1-50")
     assert id1 == id2
+
+
+# ── nexus-nmg: embedding function cache ──────────────────────────────────────
+
+def test_embedding_fn_cached_per_collection_name(mock_chromadb: tuple) -> None:
+    """_embedding_fn returns the same object on repeated calls for the same name."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.db.t3.chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction") as mock_ef_cls:
+        mock_ef_cls.return_value = MagicMock(name="ef_instance")
+        db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vk")
+
+        ef1 = db._embedding_fn("knowledge__topic")
+        ef2 = db._embedding_fn("knowledge__topic")
+
+    assert ef1 is ef2
+    assert mock_ef_cls.call_count == 1, "EmbeddingFunction should be constructed only once per name"
+
+
+def test_embedding_fn_different_names_not_confused(mock_chromadb: tuple) -> None:
+    """Different collection names get different (separately cached) embedding functions."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    ef_a = MagicMock(name="ef_code")
+    ef_b = MagicMock(name="ef_knowledge")
+
+    with patch("nexus.db.t3.chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction", side_effect=[ef_a, ef_b]) as mock_ef_cls:
+        db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vk")
+
+        r1 = db._embedding_fn("code__repo")
+        r2 = db._embedding_fn("knowledge__topic")
+        r3 = db._embedding_fn("code__repo")  # cache hit
+
+    assert r1 is ef_a
+    assert r2 is ef_b
+    assert r3 is ef_a
+    assert mock_ef_cls.call_count == 2  # only 2 constructions, not 3
