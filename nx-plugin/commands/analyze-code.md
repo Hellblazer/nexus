@@ -60,7 +60,7 @@ Use the **Task tool** to delegate to codebase-deep-analyzer:
 **Bead**: [Create analysis bead if multi-session or 'none']
 
 ### Input Artifacts
-- ChromaDB: [Search for existing architecture docs]
+- nx store: [Search for existing architecture docs]
 - nx memory: [project/title path or 'none']
 - Files: [Key entry points from structure above]
 

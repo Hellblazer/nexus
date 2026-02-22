@@ -146,12 +146,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Validation Reports**: Include in response
 - **Coverage Gaps**: Create task beads for missing tests
-- **Quality Metrics**: Store in Memory Bank as `{project}_active/test-metrics.md`
+- **Quality Metrics**: Store in nx memory as `{project}_active/test-metrics.md`
 - **Regression Risks**: Document in relay notes
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **Memory Bank**: `{project}_active/{phase}.md` (e.g., `ART_active/phase2-implementation.md`)
+- **nx memory**: `{project}_active/{phase}.md` (e.g., `ART_active/phase2-implementation.md`)
 - **Bead Description**: Include `Context: nx-plugin` line
 
 

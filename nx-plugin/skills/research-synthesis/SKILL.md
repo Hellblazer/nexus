@@ -57,7 +57,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 
 The agent uses sequential thinking:
 1. Form hypothesis about what information is needed
-2. Search ChromaDB for existing knowledge
+2. Search nx store for existing knowledge: `nx search "topic" --corpus knowledge`
 3. Search web resources for current information
 4. Analyze relevant code if applicable
 5. Synthesize findings from all sources
@@ -66,8 +66,8 @@ The agent uses sequential thinking:
 
 ## Success Criteria
 
-- [ ] All relevant sources consulted (ChromaDB, web, code)
+- [ ] All relevant sources consulted (nx store, web, code)
 - [ ] Key findings synthesized (not just listed)
 - [ ] Contradictions identified and resolved
 - [ ] Recommendations provided with supporting evidence
-- [ ] Findings persisted to ChromaDB via knowledge-tidier
+- [ ] Findings persisted to nx T3 store via knowledge-tidier

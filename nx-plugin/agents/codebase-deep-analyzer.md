@@ -136,7 +136,7 @@ Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Architecture Maps**: Store via `echo "..." | nx store put - --collection knowledge --title "architecture::{scope}::{date}" --tags "architecture"`
+- **Architecture Maps**: Store via `echo "..." | nx store put - --collection knowledge --title "architecture-{scope}-{date}" --tags "architecture"`
 - **Dependency Analysis**: Include in response
 - **Technical Debt**: Create chore beads for significant debt
 - **Pattern Catalog**: Store via `echo "..." | nx store put - --collection knowledge --title "pattern__codebase__{name}" --tags "pattern"`

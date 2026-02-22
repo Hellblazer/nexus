@@ -67,7 +67,7 @@ Use the **Task tool** to delegate to test-validator:
 **Bead**: [From active beads above]
 
 ### Input Artifacts
-- ChromaDB: [Search for test patterns]
+- nx store: [Search for test patterns]
 - nx memory: [project/title path or 'none']
 - Files: [Changed source files and their test files]
 

@@ -1,7 +1,7 @@
 ---
 name: pdf-processing
 description: >
-  Process PDF files into ChromaDB for semantic search. Triggers: user says "index PDF",
+  Process PDF files into nx store for semantic search. Triggers: user says "index PDF",
   importing technical documentation, PDFs need semantic indexing.
 allowed-tools: Task, Read, Glob, Grep, Bash
 # See ~/.claude/registry.yaml for full agent metadata
@@ -56,7 +56,7 @@ The pdf-chromadb-processor agent:
 2. Extracts text with layout preservation
 3. Chunks content for optimal semantic search
 4. Extracts metadata (title, author, date)
-5. Creates embeddings via ChromaDB
+5. Creates embeddings via nx store (T3)
 6. Verifies indexing success
 
 ## Success Criteria
@@ -65,5 +65,5 @@ The pdf-chromadb-processor agent:
 - [ ] Text properly extracted
 - [ ] Content chunked appropriately
 - [ ] Metadata preserved
-- [ ] Documents searchable in ChromaDB
+- [ ] Documents searchable in nx store
 - [ ] Sample queries return relevant results

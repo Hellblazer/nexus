@@ -116,7 +116,7 @@ Beads must be self-contained. An agent picking up a bead should start work immed
 ### Bead Grooming Requirements
 
 Every bead design field MUST include:
-- **Context links**: `nx pm resume` for continuation, `nx memory get pm::<name>::<doc>` for specific docs, ChromaDB doc IDs, source file paths
+- **Context links**: `nx pm resume` for continuation, `nx memory get pm::<name>::<doc>` for specific docs, nx store titles, source file paths
 - **Success criteria**: Testable, specific, with thresholds
 - **Files to modify**: Source and test files
 - **Patterns to follow**: Link to examples in codebase
@@ -132,7 +132,7 @@ Context:
 - Continuation: nx pm resume
 - Phase doc: nx memory get pm::<project>::phase-N
 - Architecture: nx memory get pm::<project>::architecture
-- ChromaDB: <doc-id if applicable>
+- nx store: <doc-title if applicable>
 
 Success criteria:
 - <specific measurable criterion>
@@ -156,7 +156,7 @@ After completing work, relay to `strategic-planner`.
 
 Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
 - Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx memory keys created, ChromaDB IDs, bead IDs)
+- Input Artifacts: Include your output (nx memory keys created, nx store titles, bead IDs)
 - Deliverable: What successor should produce
 - Quality Criteria: Checkboxes for successor's success
 

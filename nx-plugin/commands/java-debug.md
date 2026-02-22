@@ -67,7 +67,7 @@ Use the **Task tool** to delegate to java-debugger:
 **Bead**: [From active beads above or create bug bead]
 
 ### Input Artifacts
-- ChromaDB: [Search for prior debugging on similar issues]
+- nx store: [Search for prior debugging on similar issues]
 - nx memory: [project/title path or 'none']
 - Files: [Relevant source and test files]
 

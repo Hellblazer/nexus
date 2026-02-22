@@ -70,7 +70,7 @@ Use the **Task tool** to delegate to java-developer:
 **Bead**: [Task bead from active work - must be in_progress]
 
 ### Input Artifacts
-- ChromaDB: [Search for relevant patterns]
+- nx store: [Search for relevant patterns]
 - nx memory: [project/title path or 'none']
 - Files: [Existing files to modify or create location]
 

@@ -62,7 +62,7 @@ Use the **Task tool** to delegate to code-review-expert:
 **Bead**: [From active beads above or 'none']
 
 ### Input Artifacts
-- ChromaDB: [Search for prior reviews on these files]
+- nx store: [Search for prior reviews on these files]
 - nx memory: [project/title path or 'none']
 - Files: [List from git diff above]
 

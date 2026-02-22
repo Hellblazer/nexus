@@ -59,7 +59,7 @@ Use the **Task tool** to delegate to plan-auditor:
 **Bead**: [Epic bead ID from context]
 
 ### Input Artifacts
-- ChromaDB: [Search for architectural constraints]
+- nx store: [Search for architectural constraints]
 - nx memory: [project/title path or 'none']
 - Files: [Key files referenced in plan]
 

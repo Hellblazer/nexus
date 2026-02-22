@@ -56,7 +56,7 @@ Use the **Task tool** to delegate to strategic-planner:
 **Bead**: [Create epic bead for this work]
 
 ### Input Artifacts
-- ChromaDB: [Search for prior architectural decisions]
+- nx store: [Search for prior architectural decisions]
 - nx memory: [project/title path or 'none']
 - Files: [Relevant existing code for context]
 

@@ -61,7 +61,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 The agent uses sequential thinking:
 1. Establish context and purpose of artifact
 2. Identify criteria/specifications it should conform to
-3. Gather evidence from ChromaDB and related artifacts
+3. Gather evidence from nx store (`nx search --corpus knowledge`) and related artifacts
 4. Analyze structural integrity
 5. Analyze logical consistency
 6. Assess completeness

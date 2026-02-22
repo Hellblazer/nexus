@@ -68,4 +68,4 @@ The codebase-deep-analyzer uses sequential thinking:
 - [ ] Module/component map created
 - [ ] Key patterns identified and explained
 - [ ] Dependency relationships mapped
-- [ ] Findings stored in ChromaDB for future reference
+- [ ] Findings stored in nx store for future reference

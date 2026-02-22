@@ -12,16 +12,16 @@ description: Research topic using deep-research-synthesizer agent
 
   echo "### Available Knowledge Sources"
   echo ""
-  echo "- **ChromaDB**: Semantic search across stored knowledge"
+  echo "- **nx store**: Semantic search across stored knowledge"
   echo "- **Web**: Current information from web search"
   echo "- **Codebase**: Relevant code examples and patterns"
-  echo "- **Memory Bank**: Session context and prior work"
+  echo "- **nx memory**: Session context and prior work"
   echo ""
 
   # Check for existing research
   echo "### Tip"
   echo ""
-  echo "The agent will first search ChromaDB for existing research on this topic."
+  echo "The agent will first search nx store for existing research on this topic."
   echo "Prior findings will be incorporated into the synthesis."
 }
 
@@ -40,7 +40,7 @@ Use the **Task tool** to delegate to deep-research-synthesizer:
 **Bead**: [Create research bead if significant topic or 'none']
 
 ### Input Artifacts
-- ChromaDB: [Search for existing knowledge on topic]
+- nx store: [Search for existing knowledge on topic]
 - nx memory: [project/title path or 'none']
 - Files: [Relevant code if applicable]
 
@@ -51,11 +51,11 @@ $ARGUMENTS
 Comprehensive research synthesis with actionable recommendations
 
 ### Quality Criteria
-- [ ] All sources consulted (ChromaDB, web, code)
+- [ ] All sources consulted (nx store, web, code)
 - [ ] Findings synthesized (not just listed)
 - [ ] Contradictions resolved
 - [ ] Actionable recommendations provided
 - [ ] Sources cited
 
-**IMPORTANT**: After research completes, MUST delegate to knowledge-tidier to persist findings to ChromaDB.
+**IMPORTANT**: After research completes, MUST delegate to knowledge-tidier to persist findings to nx store.
 ```

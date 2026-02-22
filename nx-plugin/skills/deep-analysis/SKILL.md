@@ -70,4 +70,4 @@ The deep-analyst uses sequential thinking:
 - [ ] Root cause(s) identified with confidence
 - [ ] Conclusions supported by evidence
 - [ ] Recommendations are actionable
-- [ ] Findings stored in ChromaDB for future reference
+- [ ] Findings stored in nx store for future reference

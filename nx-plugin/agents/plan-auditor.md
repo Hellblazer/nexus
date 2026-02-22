@@ -251,7 +251,7 @@ Your goal is to ensure that when implementation begins, there are no surprises, 
 **Framework Error (Claude Code 2.1.27)**: This agent may fail with `classifyHandoffIfNeeded is not defined` during the completion phase. This is a **cosmetic error** in the Claude Code framework:
 
 - ✓ **Work completes successfully** - All audit outputs are produced before the error
-- ✓ **Data is persisted** - Memory Bank, ChromaDB, and file outputs are written
+- ✓ **Data is persisted** - nx memory, nx store, and file outputs are written
 - ✓ **Results are usable** - The error occurs during cleanup, not during auditing
 - ⚠️ **Error is expected** - Affects multiple agent types across all models
 
