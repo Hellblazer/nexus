@@ -22,7 +22,13 @@ def index() -> None:
 
 @index.command("code")
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
-def index_code_cmd(path: Path) -> None:
+@click.option(
+    "--frecency-only",
+    is_flag=True,
+    default=False,
+    help="Update frecency scores only; skip re-embedding (faster, for re-ranking refresh).",
+)
+def index_code_cmd(path: Path, frecency_only: bool) -> None:
     """Register and immediately index a code repository at PATH."""
     from nexus.indexer import index_repository
 
@@ -32,8 +38,8 @@ def index_code_cmd(path: Path) -> None:
         reg.add(path)
         click.echo(f"Registered {path}.")
 
-    click.echo(f"Indexing {path}…")
-    index_repository(path, reg)
+    click.echo(f"{'Updating frecency scores' if frecency_only else 'Indexing'} {path}…")
+    index_repository(path, reg, frecency_only=frecency_only)
     click.echo("Done.")
 
 

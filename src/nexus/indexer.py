@@ -65,15 +65,21 @@ def _should_ignore(rel_path: Path, patterns: list[str]) -> bool:
     return False
 
 
-def index_repository(repo: Path, registry: "RepoRegistry") -> None:
+def index_repository(repo: Path, registry: "RepoRegistry", *, frecency_only: bool = False) -> None:
     """Index all files in *repo* into the T3 code__ collection.
 
     Marks status as 'indexing' while running, 'ready' on success,
     'pending_credentials' when T3 credentials are absent.
+
+    *frecency_only* skips re-chunking and re-embedding; only updates the
+    ``frecency_score`` metadata field on existing T3 chunks.
     """
     registry.update(repo, status="indexing")
     try:
-        _run_index(repo, registry)
+        if frecency_only:
+            _run_index_frecency_only(repo, registry)
+        else:
+            _run_index(repo, registry)
         registry.update(repo, status="ready")
     except CredentialsMissingError:
         registry.update(repo, status="pending_credentials")
@@ -83,6 +89,44 @@ def index_repository(repo: Path, registry: "RepoRegistry") -> None:
     except Exception:
         registry.update(repo, status="error")
         raise
+
+
+def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
+    """Update frecency_score metadata on all indexed chunks without re-embedding."""
+    from nexus.config import get_credential
+    from nexus.frecency import batch_frecency
+    from nexus.db import make_t3
+
+    info = registry.get(repo)
+    if info is None:
+        return
+
+    collection_name = info["collection"]
+
+    voyage_key = get_credential("voyage_api_key")
+    chroma_key = get_credential("chroma_api_key")
+    if not voyage_key or not chroma_key:
+        raise CredentialsMissingError(
+            f"T3 credentials missing for frecency reindex of '{repo.name}'"
+        )
+
+    frecency_map = batch_frecency(repo)
+    db = make_t3()
+    col = db.get_or_create_collection(collection_name)
+
+    for file, score in frecency_map.items():
+        existing = col.get(
+            where={"source_path": str(file)},
+            include=["metadatas"],
+        )
+        if not existing["ids"]:
+            continue  # not yet indexed — needs full nx index code
+
+        updated_metadatas = [
+            {**m, "frecency_score": float(score)}
+            for m in existing["metadatas"]
+        ]
+        db.update_chunks(collection_name, ids=existing["ids"], metadatas=updated_metadatas)
 
 
 def _run_index(repo: Path, registry: "RepoRegistry") -> None:

@@ -171,6 +171,21 @@ class T3Database:
             metadatas=metadatas,
         )
 
+    def update_chunks(
+        self,
+        collection: str,
+        ids: list[str],
+        metadatas: list[dict],
+    ) -> None:
+        """Update chunk metadata without re-embedding.
+
+        Preserves original document text and embedding vectors.
+        Use for frecency-only reindex: update frecency_score without
+        triggering expensive re-embedding.
+        """
+        col = self.get_or_create_collection(collection)
+        col.update(ids=ids, metadatas=metadatas)
+
     # ── Read ──────────────────────────────────────────────────────────────────
 
     def search(
