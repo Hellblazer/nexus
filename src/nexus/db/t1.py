@@ -22,9 +22,16 @@ class T1Database:
 
     def __init__(self, session_id: str) -> None:
         import chromadb
+        from pathlib import Path
 
         self._session_id = session_id
-        self._client = chromadb.EphemeralClient()
+        # Use a PersistentClient keyed by session_id so data survives across
+        # separate CLI invocations within the same session (e.g., multiple
+        # `uv run nx scratch …` calls from the same terminal).  The directory
+        # is cleaned up by the SessionEnd hook or `nx scratch clear`.
+        scratch_dir = Path.home() / ".config" / "nexus" / "scratch" / session_id
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        self._client = chromadb.PersistentClient(path=str(scratch_dir))
         self._col = self._client.get_or_create_collection(_COLLECTION)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
