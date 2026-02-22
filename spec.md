@@ -886,7 +886,7 @@ Recent memory ({project}, last 10 entries):
   - **Free tier**: 200M tokens/month for all current-gen models including rerankers (verified 2026-02-21). Applies to `voyage-4`, `voyage-code-3`, `rerank-2.5`, and `rerank-2.5-lite`.
   - **Pricing beyond free tier**: `voyage-code-3` $0.18/1M tokens; `voyage-4` $0.06/1M tokens; `rerank-2.5` $0.05/1M tokens; `rerank-2.5-lite` $0.02/1M tokens. Batch API gives 33% discount.
   - Env var: `VOYAGE_API_KEY`; native `VoyageAIEmbeddingFunction` in ChromaDB (`pip install voyageai`); checks `VOYAGE_API_KEY` first, then `CHROMA_VOYAGE_API_KEY` — no custom glue
-- **Claude Haiku** (`claude-3-5-haiku-20241022`) — Q&A synthesis via `anthropic` Python SDK
+- **Claude Haiku** (`claude-haiku-4-5-20251001`) — Q&A synthesis via `anthropic` Python SDK
 - **Mixedbread SDK** — read-only fan-out for existing Mixedbread-indexed collections (`--mxbai` flag)
 - **ripgrep** — full-text code search via flat mmap line cache (local, 500MB cap)
 - **Git** — frecency computation from commit history
