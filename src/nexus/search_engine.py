@@ -5,28 +5,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import structlog
 
 from nexus.config import HAIKU_MODEL
+from nexus.types import SearchResult  # re-exported for backward compatibility
 
 _log = structlog.get_logger()
 
 _HAIKU_MODEL = HAIKU_MODEL
 _RERANK_MODEL = "rerank-2.5"
 
-# ── Data types ────────────────────────────────────────────────────────────────
-
-@dataclass
-class SearchResult:
-    id: str
-    content: str
-    distance: float
-    collection: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-    hybrid_score: float = 0.0
+__all__ = ["SearchResult"]
 
 
 # ── Normalization & scoring ────────────────────────────────────────────────────

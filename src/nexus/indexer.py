@@ -6,8 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 
-class CredentialsMissingError(RuntimeError):
-    """Raised when T3 credentials are absent; prevents marking repo as ready."""
+from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 
 if TYPE_CHECKING:
     from nexus.registry import RepoRegistry

@@ -61,7 +61,7 @@ def check_and_reindex(repo: Path, registry: "RepoRegistry") -> None:
     if current == info.get("head_hash", ""):
         return
 
-    from nexus.indexer import CredentialsMissingError
+    from nexus.errors import CredentialsMissingError
     try:
         index_repo(repo, registry)
         registry.update(repo, head_hash=current)
