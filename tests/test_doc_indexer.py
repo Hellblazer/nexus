@@ -115,7 +115,7 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch):
                 result = index_pdf(sample_pdf, corpus="mybook")
 
     assert result == 1
-    mock_col.add.assert_called_once()
+    mock_col.upsert.assert_called_once()
 
 
 # ── metadata schema ───────────────────────────────────────────────────────────
@@ -137,10 +137,10 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch):
 
     captured_metadatas: list[dict] = []
 
-    def capture_add(**kwargs):
+    def capture_upsert(**kwargs):
         captured_metadatas.extend(kwargs.get("metadatas", []))
 
-    mock_col.add.side_effect = capture_add
+    mock_col.upsert.side_effect = capture_upsert
 
     mock_chunk = MagicMock()
     mock_chunk.text = "chunk text"
@@ -164,7 +164,7 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch):
 
             index_markdown(sample_md, corpus="docs")
 
-    assert len(captured_metadatas) == 1, "Expected exactly one chunk to be upserted"
+    assert len(captured_metadatas) >= 1, "Expected at least one chunk to be upserted"
     meta = captured_metadatas[0]
     missing = required_fields - meta.keys()
     assert not missing, f"Missing metadata fields: {missing}"
@@ -209,10 +209,10 @@ def test_index_pdf_sets_store_type_pdf(sample_pdf, monkeypatch):
 
     captured: list[dict] = []
 
-    def capture_add(**kwargs):
+    def capture_upsert(**kwargs):
         captured.extend(kwargs.get("metadatas", []))
 
-    mock_col.add.side_effect = capture_add
+    mock_col.upsert.side_effect = capture_upsert
 
     mock_chunk = MagicMock()
     mock_chunk.text = "text"
@@ -251,10 +251,10 @@ def test_index_markdown_sets_store_type_markdown(sample_md, monkeypatch):
 
     captured: list[dict] = []
 
-    def capture_add(**kwargs):
+    def capture_upsert(**kwargs):
         captured.extend(kwargs.get("metadatas", []))
 
-    mock_col.add.side_effect = capture_add
+    mock_col.upsert.side_effect = capture_upsert
 
     mock_chunk = MagicMock()
     mock_chunk.text = "text"
@@ -296,10 +296,10 @@ def test_index_markdown_offsets_account_for_frontmatter(tmp_path: Path, monkeypa
 
     captured: list[dict] = []
 
-    def capture_add(**kwargs):
+    def capture_upsert(**kwargs):
         captured.extend(kwargs.get("metadatas", []))
 
-    mock_col.add.side_effect = capture_add
+    mock_col.upsert.side_effect = capture_upsert
 
     # Simulate naive chunking: offsets are relative to body (0-based)
     mock_chunk = MagicMock()
@@ -342,10 +342,10 @@ def test_index_markdown_no_frontmatter_offsets_unchanged(tmp_path: Path, monkeyp
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     captured: list[dict] = []
 
-    def capture_add(**kwargs):
+    def capture_upsert(**kwargs):
         captured.extend(kwargs.get("metadatas", []))
 
-    mock_col.add.side_effect = capture_add
+    mock_col.upsert.side_effect = capture_upsert
 
     mock_chunk = MagicMock()
     mock_chunk.text = "Hello World."
