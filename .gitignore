@@ -15,3 +15,4 @@ htmlcov/
 .nexus.yml
 .mypy_cache/
 .ruff_cache/
+.env
