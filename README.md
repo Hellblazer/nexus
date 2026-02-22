@@ -2,19 +2,29 @@
 
 Self-hosted semantic search and knowledge management for Claude Code agents.
 
-Nexus indexes your code, PDFs, and notes into ChromaDB cloud using Voyage AI embeddings, then gives you (and your agents) a single CLI for search, memory, and project management. Raw content (source files, PDFs) never leaves your machine — chunk text and embeddings are sent to Voyage AI for embedding and stored in ChromaDB cloud.
+Nexus indexes your code, PDFs, and notes, then gives you (and your agents) a single CLI for
+search, memory, and project management. Chunk text and embeddings are sent to Voyage AI and
+stored in ChromaDB cloud; raw source files never leave your machine.
 
-## What it does
+Nexus organises data across three tiers:
 
-| Command | Storage | Use |
-|---------|---------|-----|
-| `nx search` | T3 ChromaDB cloud | Semantic search across indexed code, docs, and knowledge |
-| `nx store` | T3 ChromaDB cloud | Persist agent outputs for future sessions |
-| `nx memory` | T2 SQLite (local) | Named per-project notes that survive restarts |
-| `nx scratch` | T1 in-memory | Session-scoped working state, wiped at session end |
+- **T1 — scratch**: in-memory ChromaDB, session-only, no API calls
+- **T2 — memory**: local SQLite + FTS5, survives restarts, no network dependency
+- **T3 — knowledge**: ChromaDB cloud + Voyage AI, permanent semantic search
+
+## Commands
+
+| Command | Tier | Use |
+|---------|------|-----|
+| `nx search` | T3 | Semantic search across indexed code, docs, and knowledge |
+| `nx store` | T3 | Persist agent outputs for future sessions |
 | `nx index` | → T3 | Index code repos, PDFs, and markdown files |
+| `nx memory` | T2 | Named per-project notes that survive restarts |
 | `nx pm` | T2 + T3 | Project management: phases, blockers, archive |
+| `nx scratch` | T1 | Session-scoped working state, wiped at session end |
 | `nx serve` | — | Background server for HEAD polling and auto-reindex |
+| `nx collection` | T3 | Inspect and manage cloud collections |
+| `nx config` | — | Manage credentials and settings |
 
 ## Prerequisites
 
@@ -72,8 +82,8 @@ nx uninstall claude-code   # remove SKILL.md and session hooks
 ```
 
 This writes `~/.claude/skills/nexus/SKILL.md` and adds SessionStart/SessionEnd hooks to
-`~/.claude/settings.json`. The SessionStart hook initializes T1 scratch and injects your
-project's `CONTINUATION.md` into context at the start of each session.
+`~/.claude/settings.json`. The SessionStart hook initialises in-memory scratch (T1) and
+injects your project's `CONTINUATION.md` into context at the start of each session.
 
 ## Quick start
 
@@ -84,11 +94,11 @@ nx serve start              # start the background server
 nx index code .             # index the current repo (registers it with the server)
 nx index code /path/to/other-repo
 
-# Refresh frecency scores only — skip re-embedding (fast, for re-ranking refresh)
+# Refresh frecency scores only — skip re-embedding (fast)
 nx index code . --frecency-only
 ```
 
-The server polls HEAD every 10 seconds and re-indexes on change.
+Once registered, the server polls each repo's git HEAD every 10 seconds and re-indexes on change.
 
 ### Search
 
@@ -96,14 +106,14 @@ The server polls HEAD every 10 seconds and re-indexes on change.
 # Semantic search across all indexed code, docs, and knowledge
 nx search "authentication token validation"
 
-# Scope to a specific collection type or repo
+# Scope to a specific corpus type or collection
 nx search "caching strategy" --corpus docs
 nx search "retry logic" --corpus code__myrepo
 
 # Synthesize a cited answer via Haiku
 nx search "how does session management work" -a
 
-# Haiku-driven multi-step query refinement
+# Multi-step Haiku query refinement
 nx search "token validation" --agentic
 
 # Hybrid: semantic + ripgrep frecency weighting (code corpora only)
@@ -123,11 +133,11 @@ nx search "parse_request" -c
 # Multi-corpus search (independent retrieval + Voyage reranker merge)
 nx search "auth flow" --corpus code --corpus docs
 
-# Metadata filter
+# Filter by metadata
 nx search "caching" --where store_type=pm-archive
 ```
 
-### Index and search PDFs and Markdown
+### Index PDFs and Markdown
 
 ```bash
 nx index pdf ~/papers/architecture.pdf --corpus my-papers
@@ -139,7 +149,7 @@ nx search "distributed consensus" --corpus docs__my-papers
 ### Persist agent outputs
 
 ```bash
-# Store a file permanently in T3
+# Store a file permanently in cloud knowledge
 nx store put analysis.md --collection knowledge --tags "security,audit"
 
 # Store from stdin (--title required)
@@ -148,7 +158,7 @@ echo "# Key insight..." | nx store put - --collection knowledge --title "Auth An
 # Store with a TTL
 nx store put temp-notes.md --collection knowledge --ttl 30d
 
-# Remove expired T3 entries
+# Remove expired entries
 nx store expire
 
 # Search stored knowledge
@@ -159,8 +169,8 @@ nx search "security vulnerabilities" --corpus knowledge
 
 ### T1 — Session scratch (in-memory)
 
-Fast, ephemeral, no API calls. Cleared when the session ends.
-Uses ChromaDB's bundled MiniLM-L6-v2 model (local ONNX, no network round-trip).
+Fast, ephemeral, zero API calls. Cleared when the session ends. Uses ChromaDB's bundled
+MiniLM-L6-v2 model (local ONNX, no network round-trip).
 
 ```bash
 nx scratch put "working hypothesis: the cache is stale"
@@ -169,7 +179,7 @@ nx scratch list
 nx scratch get <id>
 nx scratch flag <id>          # mark for auto-flush to T2 at session end
 nx scratch unflag <id>
-nx scratch promote <id> --project myrepo --title findings.md  # flush immediately
+nx scratch promote <id> --project myrepo --title findings.md  # flush to T2 immediately
 nx scratch clear
 ```
 
@@ -193,7 +203,7 @@ nx memory search "auth" --project myrepo
 nx memory list --project myrepo
 nx memory expire             # remove TTL-expired entries
 
-# Promote to T3 for semantic search
+# Promote to cloud knowledge for semantic search
 nx memory promote <id> --collection knowledge
 ```
 
@@ -201,14 +211,17 @@ TTL format: `30d`, `4w`, `permanent` (or `never`). Default: `30d`.
 
 ### T3 — Permanent knowledge (ChromaDB cloud)
 
-Semantic search via Voyage AI. Collections namespaced by type:
+Requires `CHROMA_API_KEY`, `CHROMA_TENANT`, `CHROMA_DATABASE`, and `VOYAGE_API_KEY`.
+Collections namespaced by type:
+
 - `code__<repo>` — indexed code repositories
 - `docs__<corpus>` — indexed PDFs and markdown
 - `knowledge__<topic>` — agent outputs and stored knowledge
 
 ## Project management
 
-`nx pm` provides structured project lifecycle management backed by T2.
+`nx pm` provides structured project lifecycle management stored in T2, with optional promotion
+and archival to T3.
 
 ```bash
 # Initialise PM docs for the current git repo
@@ -231,25 +244,28 @@ nx memory get --project myrepo_pm --title phases/phase-2/context.md
 # Keyword search across all PM docs (FTS5, no API call)
 nx pm search "what did we decide about caching"
 
-# Promote a PM doc to T3 for cross-project semantic search
+# Promote a PM doc to cloud knowledge for cross-project semantic search
 nx pm promote phases/phase-2/context.md --collection knowledge --tags "decision,architecture"
 
-# Archive: synthesize to T3 via Haiku, start T2 decay
+# Housekeeping
+nx pm expire                 # remove TTL-expired PM docs
+
+# Archive: synthesize to cloud knowledge via Haiku, start T2 decay
 nx pm archive
-nx pm close              # archive + mark completed
+nx pm close                  # archive + mark completed
 
 # Restore within the 90-day decay window
 nx pm restore myrepo
 
 # Search archived project syntheses (semantic, across all past projects)
 nx pm reference "how did we handle rate limiting"
-nx pm reference myrepo   # retrieve by project name
+nx pm reference myrepo       # retrieve by project name
 ```
 
 ## Collection management
 
 ```bash
-nx collection list                          # all T3 collections with doc counts
+nx collection list                          # all cloud collections with doc counts
 nx collection info <name>                   # details for a single collection
 nx collection verify <name>                 # existence check + doc count
 nx collection verify <name> --deep          # existence check + embedding probe
@@ -257,6 +273,8 @@ nx collection delete <name> --confirm       # irreversible
 ```
 
 ## Server management
+
+The `nx serve` daemon watches registered repos and re-indexes when the git HEAD changes.
 
 ```bash
 nx serve start           # start server (port set via NX_SERVER_PORT or config.yml server.port)
@@ -290,9 +308,9 @@ NX_EMBEDDINGS_RERANKER_MODEL=rerank-2.5-lite nx search "query"
 ```
 
 Global config file: `~/.config/nexus/config.yml`.
-Per-repo config: `.nexus.yml` (merged over global).
+Per-repo overrides: `.nexus.yml` at repo root (merged over global; gitignored).
 
-Key settings (YAML path / env var override):
+Key settings (YAML path / env var):
 
 | Setting | Env var | Default | Description |
 |---------|---------|---------|-------------|
@@ -307,13 +325,13 @@ Key settings (YAML path / env var override):
 
 ```bash
 uv sync
-uv run pytest               # 505 tests, no API keys required
-uv run pytest -m integration  # skip unless real keys are set
-uv run pytest --cov=nexus   # with coverage
+uv run pytest                 # 505 tests, no API keys required
+uv run pytest -m integration  # requires real API keys
+uv run pytest --cov=nexus     # with coverage
 ```
 
-Tests use `chromadb.EphemeralClient` + `DefaultEmbeddingFunction` (bundled ONNX) — no API keys
-needed for the full test suite.
+Tests use `chromadb.EphemeralClient` + `DefaultEmbeddingFunction` (bundled ONNX) — no API
+keys needed for the full test suite.
 
 ## Architecture
 
