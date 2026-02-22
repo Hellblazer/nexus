@@ -60,7 +60,7 @@ description: Validate tests using test-validator agent
     nx pm status 2>/dev/null || echo "No PM initialized"
     echo '```'
     echo ""
-    PROJECT=$(basename $(git rev-parse --show-toplevel 2>/dev/null) 2>/dev/null)
+    PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
     if [ -n "$PROJECT" ]; then
       echo "**T2 Memory (${PROJECT}_active):**"
       echo '```'

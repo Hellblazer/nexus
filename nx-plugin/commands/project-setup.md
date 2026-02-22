@@ -12,7 +12,7 @@ description: Create PM infrastructure for multi-week projects using project-mana
 
   # Git context
   if git rev-parse --git-dir > /dev/null 2>&1; then
-    echo "**Repo:** $(basename $(git rev-parse --show-toplevel 2>/dev/null) || echo 'unknown')"
+    echo "**Repo:** $(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo 'unknown')"
     echo "**Branch:** $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
     echo ""
   fi

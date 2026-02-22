@@ -36,9 +36,8 @@ def which(cmd: str) -> bool:
 def run_command(args: list[str], timeout: int, cwd: str | None = None) -> str | None:
     """
     Run a command and return its stdout, or None on failure.
-    Stderr is suppressed unless DEBUG is set.
+    Stderr is captured; printed to stderr only when DEBUG is set.
     """
-    stderr = None if DEBUG else subprocess.DEVNULL
     try:
         result = subprocess.run(
             args,
@@ -126,8 +125,8 @@ def main() -> None:
     else:
         debug("bd command not found")
 
-    # T1 scratch reminder
-    if which('nx'):
+    # T1 scratch reminder (only when other nx context was surfaced)
+    if which('nx') and output_lines:
         output_lines.append("## Session Scratch (T1)")
         output_lines.append("Session-scoped ephemeral scratch available: `nx scratch put/get/list/search`")
         output_lines.append("Flag important scratch entries before session ends: `nx scratch flag <id>`")

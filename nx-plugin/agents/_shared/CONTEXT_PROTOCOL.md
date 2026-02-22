@@ -59,6 +59,7 @@ nx scratch get <id>
 nx scratch search "<query>" [--n N]
 nx scratch list
 nx scratch flag <id> [--project PROJECT] [--title TITLE]   # mark for auto-flush to T2 at SessionEnd
+nx scratch unflag <id>                                     # remove the auto-flush marking
 nx scratch promote <id> --project PROJECT --title TITLE    # immediate T2 copy
 nx scratch clear
 ```
