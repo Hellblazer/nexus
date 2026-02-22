@@ -114,7 +114,12 @@ class SemanticMarkdownChunker:
                     "header_path": [h["text"] for h in header_stack],
                     "content_parts": [],
                 }
-                i += 3  # heading_open, inline, heading_close
+                # Advance past heading_close, searching forward in case
+                # the token stream has unexpected structure (e.g. empty heading).
+                i += 1
+                while i < len(tokens) and tokens[i].type != "heading_close":
+                    i += 1
+                i += 1  # step past heading_close
                 continue
             if current_section is not None:
                 content = self._token_content(token, source_text)

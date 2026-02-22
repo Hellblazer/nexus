@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Flask server for the Nexus persistent background service."""
 import logging
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -59,6 +60,15 @@ def add_repo():
     path = Path(path_str)
     if not path.exists():
         return jsonify({"error": "path not found"}), 404
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return jsonify({"error": "path is not a git repository"}), 400
     _get_registry().add(path)
     return jsonify({"added": str(path)}), 201
 

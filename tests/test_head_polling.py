@@ -63,6 +63,23 @@ def test_indexing_status_skips_reindex(registry) -> None:
     registry.update.assert_not_called()
 
 
+def test_index_failure_still_updates_head_hash(registry) -> None:
+    """When index_repo raises, head_hash is still updated to prevent infinite retry loops."""
+    repo = Path("/repo")
+    registry.get.return_value = {
+        "head_hash": "old_hash",
+        "status": "ready",
+        "collection": "code__repo",
+    }
+
+    with patch("nexus.polling._current_head", return_value="new_hash"):
+        with patch("nexus.polling.index_repo", side_effect=RuntimeError("index failed")):
+            with pytest.raises(RuntimeError, match="index failed"):
+                check_and_reindex(repo, registry)
+
+    registry.update.assert_called_once_with(repo, head_hash="new_hash")
+
+
 def test_missing_repo_in_registry_skips(registry) -> None:
     """If registry.get returns None, skip gracefully."""
     repo = Path("/repo")

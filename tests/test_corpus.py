@@ -1,5 +1,12 @@
 """AC2/AC6: Embedding model selection and --corpus prefix resolution."""
-from nexus.corpus import embedding_model_for_collection, resolve_corpus, t3_collection_name
+import pytest
+
+from nexus.corpus import (
+    embedding_model_for_collection,
+    resolve_corpus,
+    t3_collection_name,
+    validate_collection_name,
+)
 
 
 # ── Embedding model selection ─────────────────────────────────────────────────
@@ -60,3 +67,36 @@ def test_resolve_corpus_no_match_returns_empty() -> None:
 def test_resolve_corpus_docs_prefix() -> None:
     all_cols = ["docs__papers", "docs__books", "code__myrepo"]
     assert resolve_corpus("docs", all_cols) == ["docs__papers", "docs__books"]
+
+
+# ── validate_collection_name ──────────────────────────────────────────────────
+
+def test_validate_collection_name_valid() -> None:
+    validate_collection_name("code__myrepo")
+    validate_collection_name("knowledge__security")
+    validate_collection_name("abc")
+
+
+def test_validate_collection_name_too_short() -> None:
+    with pytest.raises(ValueError, match="3"):
+        validate_collection_name("ab")
+
+
+def test_validate_collection_name_too_long() -> None:
+    with pytest.raises(ValueError, match="63"):
+        validate_collection_name("a" * 64)
+
+
+def test_validate_collection_name_invalid_chars() -> None:
+    with pytest.raises(ValueError, match="alphanumeric"):
+        validate_collection_name("bad:name")
+
+
+def test_validate_collection_name_starts_with_hyphen() -> None:
+    with pytest.raises(ValueError, match="alphanumeric"):
+        validate_collection_name("-badstart")
+
+
+def test_validate_collection_name_ends_with_hyphen() -> None:
+    with pytest.raises(ValueError, match="alphanumeric"):
+        validate_collection_name("badend-")

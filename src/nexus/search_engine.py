@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+_log = logging.getLogger(__name__)
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _RERANK_MODEL = "rerank-2.5"
@@ -64,10 +66,7 @@ def apply_hybrid_scoring(
     has_code = any(r.collection.startswith("code__") for r in results)
 
     if hybrid and not has_code:
-        print(
-            "Warning: --hybrid has no effect — no code corpus in scope.",
-            file=sys.stderr,
-        )
+        _log.warning("--hybrid has no effect — no code corpus in scope")
 
     distances = [r.distance for r in results]
     frecencies = [
@@ -204,7 +203,7 @@ def fetch_mxbai_results(
     from nexus.config import get_credential
     api_key = get_credential("mxbai_api_key")
     if not api_key:
-        print("Warning: MXBAI_API_KEY not set — skipping Mixedbread fan-out")
+        _log.warning("MXBAI_API_KEY not set — skipping Mixedbread fan-out")
         return []
 
     client = _mxbai_client(api_key)
