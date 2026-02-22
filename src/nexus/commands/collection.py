@@ -28,8 +28,7 @@ def info_cmd(name: str) -> None:
     cols = _t3().list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
-        click.echo(f"Collection not found: {name}", err=True)
-        raise SystemExit(1)
+        raise click.ClickException(f"Collection not found: {name}")
     click.echo(f"Name:  {match['name']}")
     click.echo(f"Docs:  {match['count']}")
 
@@ -48,11 +47,10 @@ def delete_cmd(name: str, confirm: bool) -> None:
 @collection.command("verify")
 @click.argument("name")
 def verify_cmd(name: str) -> None:
-    """Spot-check embeddings health for a collection."""
+    """Verify a collection exists and report its document count."""
     db = _t3()
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
-        click.echo(f"Collection not found: {name}", err=True)
-        raise SystemExit(1)
+        raise click.ClickException(f"Collection not found: {name}")
     click.echo(f"Collection '{name}': {match['count']} documents — OK")
