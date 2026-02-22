@@ -212,7 +212,7 @@ def fetch_mxbai_results(
     for store_id in stores:
         response = client.stores.search(store_id=store_id, query=query, top_k=per_k)
         for chunk in response.chunks:
-            _digest = hashlib.sha256(chunk.content.text.encode()).hexdigest()[:12]
+            _digest = hashlib.sha256(chunk.content.text.encode()).hexdigest()[:16]
             results.append(SearchResult(
                 id=f"mxbai__{store_id}__{_digest}",
                 content=chunk.content.text,
