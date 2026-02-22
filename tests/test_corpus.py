@@ -3,6 +3,7 @@ import pytest
 
 from nexus.corpus import (
     embedding_model_for_collection,
+    index_model_for_collection,
     resolve_corpus,
     t3_collection_name,
     validate_collection_name,
@@ -100,3 +101,38 @@ def test_validate_collection_name_starts_with_hyphen() -> None:
 def test_validate_collection_name_ends_with_hyphen() -> None:
     with pytest.raises(ValueError, match="alphanumeric"):
         validate_collection_name("badend-")
+
+
+# ── index_model_for_collection ─────────────────────────────────────────────────
+
+def test_index_model_code_collection() -> None:
+    """code__ collections use voyage-code-3 at index time."""
+    assert index_model_for_collection("code__myrepo") == "voyage-code-3"
+
+
+def test_index_model_docs_collection() -> None:
+    """docs__ collections use voyage-context-3 (CCE) at index time."""
+    assert index_model_for_collection("docs__manual") == "voyage-context-3"
+
+
+def test_index_model_knowledge_collection() -> None:
+    """knowledge__ collections use voyage-context-3 (CCE) at index time."""
+    assert index_model_for_collection("knowledge__wiki") == "voyage-context-3"
+
+
+def test_index_model_scratch_collection_defaults_voyage4() -> None:
+    """Unrecognized prefix defaults to voyage-4 at index time."""
+    assert index_model_for_collection("scratch__anything") == "voyage-4"
+
+
+def test_index_model_bare_name_defaults_voyage4() -> None:
+    """Name with no __ separator defaults to voyage-4 at index time."""
+    assert index_model_for_collection("bare_name") == "voyage-4"
+
+
+def test_embedding_model_for_collection_regression() -> None:
+    """embedding_model_for_collection still returns correct values (regression)."""
+    assert embedding_model_for_collection("code__myrepo") == "voyage-code-3"
+    assert embedding_model_for_collection("knowledge__security") == "voyage-4"
+    assert embedding_model_for_collection("docs__papers") == "voyage-4"
+    assert embedding_model_for_collection("other__collection") == "voyage-4"

@@ -12,7 +12,7 @@ import chromadb.errors
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 import structlog
 
-from nexus.corpus import embedding_model_for_collection
+from nexus.corpus import embedding_model_for_collection, index_model_for_collection
 
 _log = structlog.get_logger(__name__)
 
@@ -145,6 +145,32 @@ class T3Database:
         col = self.get_or_create_collection(collection)
         col.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
+    def upsert_chunks_with_embeddings(
+        self,
+        collection_name: str,
+        ids: list[str],
+        documents: list[str],
+        embeddings: list[list[float]],
+        metadatas: list[dict],
+    ) -> None:
+        """Upsert chunks with pre-computed embeddings (bypasses ChromaDB's EF).
+
+        Use this when the caller has already obtained embeddings via the Voyage AI
+        Contextualized Chunk Embedding (CCE) API — for example, ``voyage-context-3``
+        for ``docs__`` and ``knowledge__`` collections — and wishes to store them
+        without triggering the collection's own embedding function.
+
+        ChromaDB accepts pre-computed embeddings when ``embeddings=`` is supplied
+        to ``col.upsert()``, even when the collection was created with an EF attached.
+        """
+        col = self.get_or_create_collection(collection_name)
+        col.upsert(
+            ids=ids,
+            documents=documents,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
+
     # ── Read ──────────────────────────────────────────────────────────────────
 
     def search(
@@ -253,3 +279,26 @@ class T3Database:
     def delete_collection(self, name: str) -> None:
         """Delete a T3 collection entirely."""
         self._client.delete_collection(name)
+
+    def delete_by_source(self, collection_name: str, source_path: str) -> int:
+        """Delete all chunks for a given source path. Returns count deleted."""
+        col = self._client.get_collection(collection_name)
+        existing = col.get(where={"source_path": source_path}, include=[])
+        ids = existing["ids"]
+        if ids:
+            col.delete(ids=ids)
+        return len(ids)
+
+    def collection_metadata(self, collection_name: str) -> dict:
+        """Return metadata dict for a collection.
+
+        Keys returned: ``name``, ``count``, ``embedding_model`` (query-time model),
+        ``index_model`` (index-time model, may differ for CCE collections).
+        """
+        col = self._client.get_collection(collection_name)
+        return {
+            "name": collection_name,
+            "count": col.count(),
+            "embedding_model": embedding_model_for_collection(collection_name),
+            "index_model": index_model_for_collection(collection_name),
+        }

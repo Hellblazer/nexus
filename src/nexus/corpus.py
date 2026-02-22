@@ -30,6 +30,21 @@ def embedding_model_for_collection(collection_name: str) -> str:
     return "voyage-4"
 
 
+def index_model_for_collection(collection_name: str) -> str:
+    """Return the Voyage AI model used at INDEX time for a T3 collection.
+
+    code__      → voyage-code-3    (same at index and query time)
+    docs__      → voyage-context-3 (CCE for richer cross-chunk context)
+    knowledge__ → voyage-context-3 (CCE for richer cross-chunk context)
+    all others  → voyage-4         (standard embedding)
+    """
+    if collection_name.startswith("code__"):
+        return "voyage-code-3"
+    if collection_name.startswith(("docs__", "knowledge__")):
+        return "voyage-context-3"
+    return "voyage-4"
+
+
 def t3_collection_name(user_arg: str) -> str:
     """Resolve a --collection argument to a T3 collection name.
 

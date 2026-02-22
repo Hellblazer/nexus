@@ -54,18 +54,16 @@ def test_index_markdown_skips_without_credentials(sample_md, monkeypatch):
 # ── SHA256 incremental sync ───────────────────────────────────────────────────
 
 def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch):
-    """If content_hash already in T3, extraction is skipped (no re-embedding)."""
+    """If content_hash AND embedding_model already match T3, extraction is skipped."""
     _set_credentials(monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
 
     mock_col = MagicMock()
     mock_col.get.return_value = {
         "ids": ["existing_chunk_id"],
-        "metadatas": [{"content_hash": content_hash}],
+        # docs__ collections target voyage-context-3; include both fields for skip
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
     }
-
-    mock_t3 = MagicMock()
-    mock_t3.get_or_create_collection.return_value = mock_col
 
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
@@ -80,7 +78,11 @@ def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch):
 # ── chunk upsert ──────────────────────────────────────────────────────────────
 
 def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch):
-    """New file: extracts, chunks, and upserts into T3 collection."""
+    """New file: extracts, chunks, and upserts into T3 collection.
+
+    With a single chunk, CCE is skipped (requires >= 2 chunks) and the
+    standard embed() path is used, which calls upsert_chunks_with_embeddings.
+    """
     _set_credentials(monkeypatch)
 
     mock_col = MagicMock()
@@ -94,31 +96,36 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch):
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    mock_t3 = MagicMock()
-    mock_t3.get_or_create_collection.return_value = mock_col
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
             with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
-                mock_extractor = MagicMock()
-                mock_extractor_class.return_value = mock_extractor
-                mock_extractor.extract.return_value = MagicMock(
-                    text="extracted text",
-                    metadata={
-                        "extraction_method": "pymupdf4llm_markdown",
-                        "page_count": 1,
-                        "format": "markdown",
-                        "page_boundaries": [],
-                    },
-                )
+                with patch("voyageai.Client", return_value=mock_voyage_client):
+                    mock_extractor = MagicMock()
+                    mock_extractor_class.return_value = mock_extractor
+                    mock_extractor.extract.return_value = MagicMock(
+                        text="extracted text",
+                        metadata={
+                            "extraction_method": "pymupdf4llm_markdown",
+                            "page_count": 1,
+                            "format": "markdown",
+                            "page_boundaries": [],
+                        },
+                    )
 
-                mock_chunker = MagicMock()
-                mock_chunker_class.return_value = mock_chunker
-                mock_chunker.chunk.return_value = [mock_chunk]
+                    mock_chunker = MagicMock()
+                    mock_chunker_class.return_value = mock_chunker
+                    mock_chunker.chunk.return_value = [mock_chunk]
 
-                result = index_pdf(sample_pdf, corpus="mybook")
+                    result = index_pdf(sample_pdf, corpus="mybook")
 
     assert result == 1
-    mock_col.upsert.assert_called_once()
+    # Single chunk → CCE skipped; standard embed used → upsert_chunks_with_embeddings called
+    mock_t3.upsert_chunks_with_embeddings.assert_called_once()
 
 
 # ── metadata schema ───────────────────────────────────────────────────────────
@@ -140,10 +147,8 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch):
 
     captured_metadatas: list[dict] = []
 
-    def capture_upsert(**kwargs):
-        captured_metadatas.extend(kwargs.get("metadatas", []))
-
-    mock_col.upsert.side_effect = capture_upsert
+    def capture_upsert_with_embeddings(collection, ids, documents, embeddings, metadatas):
+        captured_metadatas.extend(metadatas)
 
     mock_chunk = MagicMock()
     mock_chunk.text = "chunk text"
@@ -155,15 +160,22 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch):
         "header_path": "Hello",
     }
 
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[0.1, 0.2]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert_with_embeddings
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
-            mock_chunker = MagicMock()
-            mock_chunker_class.return_value = mock_chunker
-            mock_chunker.chunk.return_value = [mock_chunk]
+            with patch("voyageai.Client", return_value=mock_voyage_client):
+                mock_chunker = MagicMock()
+                mock_chunker_class.return_value = mock_chunker
+                mock_chunker.chunk.return_value = [mock_chunk]
 
-            index_markdown(sample_md, corpus="docs")
+                index_markdown(sample_md, corpus="docs")
 
     assert len(captured_metadatas) >= 1, "Expected at least one chunk to be upserted"
     meta = captured_metadatas[0]
@@ -210,32 +222,37 @@ def test_index_pdf_sets_store_type_pdf(sample_pdf, monkeypatch):
 
     captured: list[dict] = []
 
-    def capture_upsert(**kwargs):
-        captured.extend(kwargs.get("metadatas", []))
-
-    mock_col.upsert.side_effect = capture_upsert
+    def capture_upsert_with_embeddings(collection, ids, documents, embeddings, metadatas):
+        captured.extend(metadatas)
 
     mock_chunk = MagicMock()
     mock_chunk.text = "text"
     mock_chunk.chunk_index = 0
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 1}
 
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[0.1, 0.2]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert_with_embeddings
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
             with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
-                mock_extractor = MagicMock()
-                mock_extractor_class.return_value = mock_extractor
-                mock_extractor.extract.return_value = MagicMock(
-                    text="txt", metadata={"page_count": 1, "format": "pdf", "extraction_method": "x"}
-                )
+                with patch("voyageai.Client", return_value=mock_voyage_client):
+                    mock_extractor = MagicMock()
+                    mock_extractor_class.return_value = mock_extractor
+                    mock_extractor.extract.return_value = MagicMock(
+                        text="txt", metadata={"page_count": 1, "format": "pdf", "extraction_method": "x"}
+                    )
 
-                mock_chunker = MagicMock()
-                mock_chunker_class.return_value = mock_chunker
-                mock_chunker.chunk.return_value = [mock_chunk]
+                    mock_chunker = MagicMock()
+                    mock_chunker_class.return_value = mock_chunker
+                    mock_chunker.chunk.return_value = [mock_chunk]
 
-                index_pdf(sample_pdf, corpus="mybook")
+                    index_pdf(sample_pdf, corpus="mybook")
 
     assert captured, "No metadata captured"
     assert captured[0]["store_type"] == "pdf", f"Expected 'pdf', got {captured[0]['store_type']!r}"
@@ -250,25 +267,30 @@ def test_index_markdown_sets_store_type_markdown(sample_md, monkeypatch):
 
     captured: list[dict] = []
 
-    def capture_upsert(**kwargs):
-        captured.extend(kwargs.get("metadatas", []))
-
-    mock_col.upsert.side_effect = capture_upsert
+    def capture_upsert_with_embeddings(collection, ids, documents, embeddings, metadatas):
+        captured.extend(metadatas)
 
     mock_chunk = MagicMock()
     mock_chunk.text = "text"
     mock_chunk.chunk_index = 0
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 0, "header_path": "H"}
 
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[0.1, 0.2]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert_with_embeddings
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
-            mock_chunker = MagicMock()
-            mock_chunker_class.return_value = mock_chunker
-            mock_chunker.chunk.return_value = [mock_chunk]
+            with patch("voyageai.Client", return_value=mock_voyage_client):
+                mock_chunker = MagicMock()
+                mock_chunker_class.return_value = mock_chunker
+                mock_chunker.chunk.return_value = [mock_chunk]
 
-            index_markdown(sample_md, corpus="docs")
+                index_markdown(sample_md, corpus="docs")
 
     assert captured, "No metadata captured"
     assert captured[0]["store_type"] == "markdown", f"Expected 'markdown', got {captured[0]['store_type']!r}"
@@ -293,10 +315,8 @@ def test_index_markdown_offsets_account_for_frontmatter(tmp_path: Path, monkeypa
 
     captured: list[dict] = []
 
-    def capture_upsert(**kwargs):
-        captured.extend(kwargs.get("metadatas", []))
-
-    mock_col.upsert.side_effect = capture_upsert
+    def capture_upsert_with_embeddings(collection, ids, documents, embeddings, metadatas):
+        captured.extend(metadatas)
 
     # Simulate naive chunking: offsets are relative to body (0-based)
     mock_chunk = MagicMock()
@@ -309,15 +329,22 @@ def test_index_markdown_offsets_account_for_frontmatter(tmp_path: Path, monkeypa
         "header_path": "Hello",
     }
 
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[0.1, 0.2]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert_with_embeddings
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
-            mock_chunker = MagicMock()
-            mock_chunker_class.return_value = mock_chunker
-            mock_chunker.chunk.return_value = [mock_chunk]
+            with patch("voyageai.Client", return_value=mock_voyage_client):
+                mock_chunker = MagicMock()
+                mock_chunker_class.return_value = mock_chunker
+                mock_chunker.chunk.return_value = [mock_chunk]
 
-            index_markdown(md_path, corpus="docs")
+                index_markdown(md_path, corpus="docs")
 
     assert captured, "No metadata captured"
     # Offsets must be shifted by frontmatter_len
@@ -337,10 +364,8 @@ def test_index_markdown_no_frontmatter_offsets_unchanged(tmp_path: Path, monkeyp
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     captured: list[dict] = []
 
-    def capture_upsert(**kwargs):
-        captured.extend(kwargs.get("metadatas", []))
-
-    mock_col.upsert.side_effect = capture_upsert
+    def capture_upsert_with_embeddings(collection, ids, documents, embeddings, metadatas):
+        captured.extend(metadatas)
 
     mock_chunk = MagicMock()
     mock_chunk.text = "Hello World."
@@ -352,16 +377,338 @@ def test_index_markdown_no_frontmatter_offsets_unchanged(tmp_path: Path, monkeyp
         "header_path": "",
     }
 
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[0.1, 0.2]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert_with_embeddings
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
-            mock_chunker = MagicMock()
-            mock_chunker_class.return_value = mock_chunker
-            mock_chunker.chunk.return_value = [mock_chunk]
+            with patch("voyageai.Client", return_value=mock_voyage_client):
+                mock_chunker = MagicMock()
+                mock_chunker_class.return_value = mock_chunker
+                mock_chunker.chunk.return_value = [mock_chunk]
 
-            index_markdown(md_path, corpus="docs")
+                index_markdown(md_path, corpus="docs")
 
     assert captured, "No metadata captured"
     assert captured[0]["chunk_start_char"] == 5  # no shift
     assert captured[0]["chunk_end_char"] == 15
+
+
+# ── nexus-370: CCE helpers ────────────────────────────────────────────────────
+
+def test_estimate_tokens_returns_reasonable_value():
+    """400 chars of text should estimate to ~100 tokens."""
+    from nexus.doc_indexer import _estimate_tokens
+
+    chunks = ["a" * 400]
+    result = _estimate_tokens(chunks)
+    assert result == 100
+
+
+def test_estimate_tokens_multi_chunk():
+    """Estimate sums all chunk lengths then divides by 4."""
+    from nexus.doc_indexer import _estimate_tokens
+
+    chunks = ["a" * 200, "b" * 200]
+    assert _estimate_tokens(chunks) == 100
+
+
+def test_embed_with_fallback_calls_cce_for_docs_collection(monkeypatch):
+    """When model=voyage-context-3 and len(chunks) >= 2, contextualized_embed is called."""
+    from unittest.mock import MagicMock, patch
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+    mock_result = MagicMock()
+    mock_result.embeddings = [[[0.1, 0.2], [0.3, 0.4]]]
+    mock_client.contextualized_embed.return_value = mock_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        result = _embed_with_fallback(
+            chunks=["chunk one", "chunk two"],
+            model="voyage-context-3",
+            api_key="vk_test",
+        )
+
+    mock_client.contextualized_embed.assert_called_once()
+    assert result == [[0.1, 0.2], [0.3, 0.4]]
+
+
+def test_embed_with_fallback_skips_cce_for_single_chunk(monkeypatch):
+    """Single chunk -> uses embed() not contextualized_embed()."""
+    from unittest.mock import MagicMock, patch
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+    mock_result = MagicMock()
+    mock_result.embeddings = [[0.5, 0.6]]
+    mock_client.embed.return_value = mock_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        result = _embed_with_fallback(
+            chunks=["only chunk"],
+            model="voyage-context-3",
+            api_key="vk_test",
+        )
+
+    mock_client.contextualized_embed.assert_not_called()
+    mock_client.embed.assert_called_once()
+    assert result == [[0.5, 0.6]]
+
+
+def test_embed_with_fallback_falls_back_on_error(monkeypatch):
+    """contextualized_embed raises Exception -> falls back to embed()."""
+    from unittest.mock import MagicMock, patch
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+    mock_client.contextualized_embed.side_effect = RuntimeError("API error")
+    mock_result = MagicMock()
+    mock_result.embeddings = [[0.1, 0.2], [0.3, 0.4]]
+    mock_client.embed.return_value = mock_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        result = _embed_with_fallback(
+            chunks=["chunk one", "chunk two"],
+            model="voyage-context-3",
+            api_key="vk_test",
+        )
+
+    mock_client.contextualized_embed.assert_called_once()
+    mock_client.embed.assert_called_once()
+    assert result == [[0.1, 0.2], [0.3, 0.4]]
+
+
+def test_embed_with_fallback_skips_cce_for_large_input(monkeypatch):
+    """estimated_tokens > 100_000 -> falls back to standard embed, skips CCE."""
+    from unittest.mock import MagicMock, patch
+    from nexus.doc_indexer import _embed_with_fallback
+
+    # 4 chars per token * 100_001 tokens = 400_004 chars per chunk
+    big_chunk = "x" * 400_004
+
+    mock_client = MagicMock()
+    mock_result = MagicMock()
+    mock_result.embeddings = [[0.1, 0.2]]
+    mock_client.embed.return_value = mock_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        result = _embed_with_fallback(
+            chunks=[big_chunk, "second"],
+            model="voyage-context-3",
+            api_key="vk_test",
+        )
+
+    mock_client.contextualized_embed.assert_not_called()
+    mock_client.embed.assert_called_once()
+
+
+# ── nexus-370: index_pdf CCE integration ─────────────────────────────────────
+
+def _make_pdf_mocks():
+    """Helper: return (mock_chunk, mock_extractor_result) for PDF tests."""
+    mock_chunk = MagicMock()
+    mock_chunk.text = "chunk text content"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 18, "page_number": 1}
+
+    mock_extract_result = MagicMock()
+    mock_extract_result.text = "extracted text"
+    mock_extract_result.metadata = {
+        "extraction_method": "pymupdf4llm_markdown",
+        "page_count": 1,
+        "format": "markdown",
+        "page_boundaries": [],
+    }
+    return mock_chunk, mock_extract_result
+
+
+def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
+    """For docs__ collection, index_pdf calls t3.upsert_chunks_with_embeddings."""
+    _set_credentials(monkeypatch)
+
+    mock_chunk, mock_extract_result = _make_pdf_mocks()
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[[0.1, 0.2]]]
+    mock_voyage_client.contextualized_embed.return_value = mock_voyage_result
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
+                with patch("voyageai.Client", return_value=mock_voyage_client):
+                    mock_extractor_class.return_value.extract.return_value = mock_extract_result
+                    mock_chunker_class.return_value.chunk.return_value = [mock_chunk, mock_chunk]
+
+                    result = index_pdf(sample_pdf, corpus="mybook")
+
+    assert result == 2
+    mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+    mock_col.upsert.assert_not_called()
+
+
+def test_index_pdf_uses_standard_for_code_collection(sample_pdf, monkeypatch):
+    """For code__ collection, index_pdf uses upsert_chunks (standard path)."""
+    _set_credentials(monkeypatch)
+
+    mock_chunk, mock_extract_result = _make_pdf_mocks()
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
+                mock_extractor_class.return_value.extract.return_value = mock_extract_result
+                mock_chunker_class.return_value.chunk.return_value = [mock_chunk]
+
+                # index_pdf builds collection_name as f"docs__{corpus}"; pass a corpus
+                # that results in a non-cce model - we need to patch index_model_for_collection
+                with patch("nexus.doc_indexer.index_model_for_collection", return_value="voyage-code-3"):
+                    result = index_pdf(sample_pdf, corpus="mybook")
+
+    assert result == 1
+    mock_t3.upsert_chunks_with_embeddings.assert_not_called()
+    mock_col.upsert.assert_called_once()
+
+
+def test_index_pdf_rerenders_when_model_changes(sample_pdf, monkeypatch):
+    """Re-indexes when embedding_model in store differs from target model."""
+    _set_credentials(monkeypatch)
+    import hashlib as _hashlib
+    content_hash = _hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+
+    mock_chunk, mock_extract_result = _make_pdf_mocks()
+
+    mock_col = MagicMock()
+    # Existing entry: same hash but old model
+    mock_col.get.side_effect = [
+        # First call: staleness check
+        {"ids": ["old_id"], "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-4"}]},
+        # Second call: prune stale check
+        {"ids": ["old_id"]},
+    ]
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[[0.1, 0.2]]]
+    mock_voyage_client.contextualized_embed.return_value = mock_voyage_result
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
+                with patch("voyageai.Client", return_value=mock_voyage_client):
+                    mock_extractor_class.return_value.extract.return_value = mock_extract_result
+                    # Two chunks so CCE fires (needs >= 2)
+                    mock_chunker_class.return_value.chunk.return_value = [mock_chunk, mock_chunk]
+
+                    # Target model is voyage-context-3 (docs__ collection)
+                    result = index_pdf(sample_pdf, corpus="mybook")
+
+    # Should NOT be skipped — model changed
+    assert result == 2
+
+
+def test_index_pdf_skips_when_hash_and_model_match(sample_pdf, monkeypatch):
+    """Skips re-indexing when both content_hash and embedding_model match target."""
+    _set_credentials(monkeypatch)
+    import hashlib as _hashlib
+    content_hash = _hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+
+    mock_col = MagicMock()
+    # Same hash AND same model as target (voyage-context-3 for docs__)
+    mock_col.get.return_value = {
+        "ids": ["existing_id"],
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
+    }
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
+            result = index_pdf(sample_pdf, corpus="mybook")
+
+    assert result == 0
+    mock_extractor_class.assert_not_called()
+
+
+# ── nexus-370: batch indexing ─────────────────────────────────────────────────
+
+def test_batch_index_pdfs_returns_status_dict(tmp_path, monkeypatch):
+    """batch_index_pdfs returns a dict mapping path -> status string."""
+    from nexus.doc_indexer import batch_index_pdfs
+
+    pdf1 = tmp_path / "a.pdf"
+    pdf1.write_bytes(b"fake pdf 1")
+    pdf2 = tmp_path / "b.pdf"
+    pdf2.write_bytes(b"fake pdf 2")
+
+    mock_t3 = MagicMock()
+
+    with patch("nexus.doc_indexer.index_pdf", return_value=3) as mock_index:
+        result = batch_index_pdfs([pdf1, pdf2], corpus="test", t3=mock_t3)
+
+    assert result[str(pdf1)] == "indexed"
+    assert result[str(pdf2)] == "indexed"
+    assert mock_index.call_count == 2
+
+
+def test_batch_index_markdowns_returns_status_dict(tmp_path, monkeypatch):
+    """batch_index_markdowns returns a dict mapping path -> status string."""
+    from nexus.doc_indexer import batch_index_markdowns
+
+    md1 = tmp_path / "a.md"
+    md1.write_text("# A\n\nContent.")
+    md2 = tmp_path / "b.md"
+    md2.write_text("# B\n\nContent.")
+
+    mock_t3 = MagicMock()
+
+    with patch("nexus.doc_indexer.index_markdown", return_value=2) as mock_index:
+        result = batch_index_markdowns([md1, md2], corpus="test", t3=mock_t3)
+
+    assert result[str(md1)] == "indexed"
+    assert result[str(md2)] == "indexed"
+    assert mock_index.call_count == 2
+
+
+def test_batch_index_pdfs_marks_failed_on_error(tmp_path, monkeypatch):
+    """If index_pdf raises, that path is marked 'failed' and others continue."""
+    from nexus.doc_indexer import batch_index_pdfs
+
+    pdf1 = tmp_path / "ok.pdf"
+    pdf1.write_bytes(b"good pdf")
+    pdf2 = tmp_path / "bad.pdf"
+    pdf2.write_bytes(b"bad pdf")
+
+    mock_t3 = MagicMock()
+
+    def _side_effect(path, corpus, t3=None):
+        if "bad" in str(path):
+            raise RuntimeError("extraction failed")
+        return 2
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_side_effect):
+        result = batch_index_pdfs([pdf1, pdf2], corpus="test", t3=mock_t3)
+
+    assert result[str(pdf1)] == "indexed"
+    assert result[str(pdf2)] == "failed"

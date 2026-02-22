@@ -495,3 +495,131 @@ def test_upsert_chunks_uses_correct_embedding_fn(mock_chromadb: tuple) -> None:
     mock_client.get_or_create_collection.assert_called_once()
     call_args = mock_client.get_or_create_collection.call_args
     assert call_args.args[0] == "docs__corpus"
+
+
+# ── nexus-370: delete_by_source ───────────────────────────────────────────────
+
+def test_delete_by_source_removes_correct_chunks(mock_chromadb: tuple) -> None:
+    """delete_by_source() removes all chunks for the given source_path, leaving others intact."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    # Source A has 3 chunks; source B check is separate
+    mock_col.get.return_value = {"ids": ["a1", "a2", "a3"]}
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    count = db.delete_by_source("code__myrepo", "src/foo.py")
+
+    mock_col.get.assert_called_once_with(
+        where={"source_path": "src/foo.py"}, include=[]
+    )
+    mock_col.delete.assert_called_once_with(ids=["a1", "a2", "a3"])
+    assert count == 3
+
+
+def test_delete_by_source_returns_count(mock_chromadb: tuple) -> None:
+    """delete_by_source() returns the number of deleted chunks."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": ["x1", "x2"]}
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    result = db.delete_by_source("knowledge__wiki", "notes/page.md")
+
+    assert result == 2
+
+
+def test_delete_by_source_missing_source_returns_zero(mock_chromadb: tuple) -> None:
+    """delete_by_source() returns 0 and does not call delete when no chunks match."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": []}
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    result = db.delete_by_source("code__myrepo", "nonexistent/file.py")
+
+    assert result == 0
+    mock_col.delete.assert_not_called()
+
+
+# ── nexus-370: collection_metadata ───────────────────────────────────────────
+
+def test_collection_metadata_returns_correct_fields(mock_chromadb: tuple) -> None:
+    """collection_metadata() returns name, count, embedding_model, index_model."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.count.return_value = 17
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    meta = db.collection_metadata("docs__corpus")
+
+    assert meta["name"] == "docs__corpus"
+    assert meta["count"] == 17
+    assert meta["embedding_model"] == "voyage-4"
+    assert meta["index_model"] == "voyage-context-3"
+
+
+def test_collection_metadata_code_collection(mock_chromadb: tuple) -> None:
+    """collection_metadata() for code__ returns voyage-code-3 for both models."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.count.return_value = 5
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    meta = db.collection_metadata("code__myrepo")
+
+    assert meta["embedding_model"] == "voyage-code-3"
+    assert meta["index_model"] == "voyage-code-3"
+
+
+# ── nexus-370: upsert_chunks_with_embeddings ─────────────────────────────────
+
+def test_upsert_chunks_with_embeddings_stores_and_retrieves(mock_chromadb: tuple) -> None:
+    """upsert_chunks_with_embeddings() passes pre-computed embeddings to col.upsert."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    embeddings = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+    ids = ["chunk-1", "chunk-2"]
+    documents = ["first chunk text", "second chunk text"]
+    metadatas = [{"source_path": "doc.pdf", "page": 1}, {"source_path": "doc.pdf", "page": 2}]
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    db.upsert_chunks_with_embeddings(
+        collection_name="docs__corpus",
+        ids=ids,
+        documents=documents,
+        embeddings=embeddings,
+        metadatas=metadatas,
+    )
+
+    mock_col.upsert.assert_called_once_with(
+        ids=ids,
+        documents=documents,
+        embeddings=embeddings,
+        metadatas=metadatas,
+    )
+
+
+def test_upsert_chunks_with_embeddings_uses_get_or_create(mock_chromadb: tuple) -> None:
+    """upsert_chunks_with_embeddings() routes through get_or_create_collection."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    db.upsert_chunks_with_embeddings(
+        collection_name="knowledge__wiki",
+        ids=["k1"],
+        documents=["some doc"],
+        embeddings=[[0.9, 0.1, 0.5]],
+        metadatas=[{"source_path": "wiki/page.md"}],
+    )
+
+    mock_client.get_or_create_collection.assert_called_once()
+    assert mock_client.get_or_create_collection.call_args.args[0] == "knowledge__wiki"

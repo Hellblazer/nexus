@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import structlog
+
+from nexus.corpus import index_model_for_collection
 from nexus.db import make_t3
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
@@ -25,28 +29,66 @@ def _has_credentials() -> bool:
     return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
 
 
-def index_pdf(pdf_path: Path, corpus: str) -> int:
+def _estimate_tokens(chunks: list[str]) -> int:
+    """Rough token estimate: 4 characters per token."""
+    return sum(len(c) for c in chunks) // 4
+
+
+def _embed_with_fallback(
+    chunks: list[str],
+    model: str,
+    api_key: str,
+    input_type: str = "document",
+) -> list[list[float]]:
+    """Embed chunks, falling back to voyage-4 if CCE fails."""
+    import voyageai
+    if model == "voyage-context-3" and len(chunks) >= 2:
+        estimated = _estimate_tokens(chunks)
+        if estimated > 100_000:
+            # Too large for CCE — fall back to standard
+            model = "voyage-4"
+        else:
+            try:
+                client = voyageai.Client(api_key=api_key)
+                result = client.contextualized_embed(
+                    inputs=[chunks], model=model, input_type=input_type
+                )
+                return result.embeddings[0]  # first (only) document's embeddings
+            except Exception:
+                model = "voyage-4"  # fall back to standard
+    # Standard embedding path
+    client = voyageai.Client(api_key=api_key)
+    result = client.embed(texts=chunks, model=model, input_type=input_type)
+    return result.embeddings
+
+
+def index_pdf(pdf_path: Path, corpus: str, t3: Any = None) -> int:
     """Index *pdf_path* into the T3 ``docs__{corpus}`` collection.
 
     Returns the number of chunks indexed, or 0 if skipped (no credentials or
-    content unchanged since last index).
+    content unchanged since last index with the same embedding model).
     """
     if not _has_credentials():
         return 0
 
     content_hash = _sha256(pdf_path)
     collection_name = f"docs__{corpus}"
-    db = make_t3()
+    db = t3 if t3 is not None else make_t3()
     col = db.get_or_create_collection(collection_name)
 
-    # Incremental sync: skip if file is already indexed with the same hash
+    target_model = index_model_for_collection(collection_name)
+
+    # Incremental sync: skip if file is already indexed with the same hash AND model
     existing = col.get(
         where={"source_path": str(pdf_path)},
         include=["metadatas"],
         limit=1,
     )
-    if existing["metadatas"] and existing["metadatas"][0].get("content_hash") == content_hash:
-        return 0
+    if existing["metadatas"]:
+        stored_hash = existing["metadatas"][0].get("content_hash", "")
+        stored_model = existing["metadatas"][0].get("embedding_model", "")
+        if stored_hash == content_hash and stored_model == target_model:
+            return 0
 
     # Extract → chunk → upsert (idempotent: chunk IDs are deterministic)
     result = PDFExtractor().extract(pdf_path)
@@ -77,7 +119,7 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
             "chunk_count": len(chunks),
             "chunk_start_char": chunk.metadata.get("chunk_start_char", 0),
             "chunk_end_char": chunk.metadata.get("chunk_end_char", 0),
-            "embedding_model": "voyage-4",
+            "embedding_model": target_model,
             "indexed_at": now_iso,
             "content_hash": content_hash,
         }
@@ -85,7 +127,13 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
         documents.append(chunk.text)
         metadatas.append(meta)
 
-    col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+    if target_model == "voyage-context-3":
+        from nexus.config import get_credential
+        voyage_key = get_credential("voyage_api_key")
+        embeddings = _embed_with_fallback(documents, target_model, voyage_key)
+        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+    else:
+        col.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
     # Prune stale chunks from a previous (larger) version of this file
     current_ids_set = set(ids)
@@ -97,7 +145,7 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
     return len(chunks)
 
 
-def index_markdown(md_path: Path, corpus: str) -> int:
+def index_markdown(md_path: Path, corpus: str, t3: Any = None) -> int:
     """Index *md_path* into the T3 ``docs__{corpus}`` collection.
 
     YAML frontmatter fields (title, author, date) are stored as metadata.
@@ -108,17 +156,22 @@ def index_markdown(md_path: Path, corpus: str) -> int:
 
     content_hash = _sha256(md_path)
     collection_name = f"docs__{corpus}"
-    db = make_t3()
+    db = t3 if t3 is not None else make_t3()
     col = db.get_or_create_collection(collection_name)
 
-    # Incremental sync
+    target_model = index_model_for_collection(collection_name)
+
+    # Incremental sync: skip if file is already indexed with same hash AND model
     existing = col.get(
         where={"source_path": str(md_path)},
         include=["metadatas"],
         limit=1,
     )
-    if existing["metadatas"] and existing["metadatas"][0].get("content_hash") == content_hash:
-        return 0
+    if existing["metadatas"]:
+        stored_hash = existing["metadatas"][0].get("content_hash", "")
+        stored_model = existing["metadatas"][0].get("embedding_model", "")
+        if stored_hash == content_hash and stored_model == target_model:
+            return 0
 
     # Parse frontmatter then chunk
     raw_text = md_path.read_text(encoding="utf-8")
@@ -158,7 +211,7 @@ def index_markdown(md_path: Path, corpus: str) -> int:
             "chunk_count": len(chunks),
             "chunk_start_char": chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
             "chunk_end_char": chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
-            "embedding_model": "voyage-4",
+            "embedding_model": target_model,
             "indexed_at": now_iso,
             "content_hash": content_hash,
         }
@@ -166,7 +219,13 @@ def index_markdown(md_path: Path, corpus: str) -> int:
         documents.append(chunk.text)
         metadatas.append(meta)
 
-    col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+    if target_model == "voyage-context-3":
+        from nexus.config import get_credential
+        voyage_key = get_credential("voyage_api_key")
+        embeddings = _embed_with_fallback(documents, target_model, voyage_key)
+        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+    else:
+        col.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
     # Prune stale chunks from a previous (larger) version of this file
     current_ids_set = set(ids)
@@ -176,3 +235,47 @@ def index_markdown(md_path: Path, corpus: str) -> int:
         col.delete(ids=stale_ids)
 
     return len(chunks)
+
+
+def batch_index_pdfs(
+    paths: list[Path],
+    corpus: str,
+    t3: Any = None,
+    batch_size: int = 4,
+) -> dict[str, str]:
+    """Index multiple PDFs, batching CCE calls for efficiency.
+
+    Returns dict mapping path -> status ("indexed", "skipped", "failed").
+    """
+    _log = structlog.get_logger()
+    results: dict[str, str] = {}
+    for path in paths:
+        try:
+            index_pdf(path, corpus, t3=t3)
+            results[str(path)] = "indexed"
+        except Exception as e:
+            _log.warning("batch_index_pdfs: failed", path=str(path), error=str(e))
+            results[str(path)] = "failed"
+    return results
+
+
+def batch_index_markdowns(
+    paths: list[Path],
+    corpus: str,
+    t3: Any = None,
+    batch_size: int = 4,
+) -> dict[str, str]:
+    """Index multiple Markdown files, batching CCE calls for efficiency.
+
+    Returns dict mapping path -> status ("indexed", "skipped", "failed").
+    """
+    _log = structlog.get_logger()
+    results: dict[str, str] = {}
+    for path in paths:
+        try:
+            index_markdown(path, corpus, t3=t3)
+            results[str(path)] = "indexed"
+        except Exception as e:
+            _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))
+            results[str(path)] = "failed"
+    return results
