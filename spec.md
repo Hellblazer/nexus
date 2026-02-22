@@ -790,6 +790,19 @@ Key settings: `server.port`, `server.ignorePatterns`, `embeddings.codeModel` (de
 Required env vars (not stored in config files): `CHROMA_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`.
 Optional env var: `MXBAI_API_KEY` (required only when `--mxbai` is used; if unset, `--mxbai` prints a warning and skips fan-out).
 
+Convenience env var overrides:
+
+| Variable | Effect |
+|---|---|
+| `NX_ANSWER` | Set to any non-empty value (e.g. `1`) to enable `--answer` mode globally for `nx search` |
+| `NX_PM_ARCHIVE_TTL` | Override PM archive TTL (integer days; default: `90`) |
+| `NX_SERVER_PORT` | Override server port (default: `7890`) |
+| `NX_SERVER_HEAD_POLL_INTERVAL` | Override head poll interval in seconds (default: `10`) |
+| `NX_EMBEDDINGS_CODE_MODEL` | Override code embedding model (default: `voyage-code-3`) |
+| `NX_EMBEDDINGS_DOCS_MODEL` | Override docs embedding model (default: `voyage-4`) |
+| `NX_EMBEDDINGS_RERANKER_MODEL` | Override reranker model (default: `rerank-2.5`) |
+| `NX_CLIENT_HOST` | Override client host for server connection (default: `localhost`) |
+
 ### Health check
 
 ```bash

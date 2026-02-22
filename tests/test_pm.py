@@ -1,4 +1,4 @@
-"""AC1–AC8: PM business logic — init, resume, status, phase, archive, restore, reference, search."""
+"""AC1–AC8+promote: PM business logic — init, resume, status, phase, archive, restore, reference, search, promote."""
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -10,6 +10,7 @@ from nexus.pm import (
     pm_block,
     pm_init,
     pm_phase_next,
+    pm_promote,
     pm_reference,
     pm_restore,
     pm_resume,
@@ -524,3 +525,92 @@ def test_pm_reference_returns_empty_when_collection_does_not_exist(db) -> None:
 
     assert results == []
     mock_t3.get_or_create_collection.assert_not_called()
+
+
+# ── AC9: pm_promote — promote T2 PM doc to T3 ────────────────────────────────
+
+def test_pm_promote_happy_path_returns_t3_doc_id(db) -> None:
+    """pm_promote fetches the T2 doc and writes it to T3, returning the doc ID."""
+    pm_init(db, project="myrepo")
+    db.put("myrepo_pm", "CONTINUATION.md", "# Continuation\n\nPromote me.", tags="pm,context", ttl=None)
+
+    mock_t3 = MagicMock()
+    mock_t3.put.return_value = "abc123def456789a"
+
+    doc_id = pm_promote(
+        db_t2=db,
+        db_t3=mock_t3,
+        project="myrepo",
+        title="CONTINUATION.md",
+        collection="knowledge__pm__myrepo",
+        ttl_days=0,
+    )
+
+    assert doc_id == "abc123def456789a"
+    mock_t3.put.assert_called_once()
+    call_kwargs = mock_t3.put.call_args.kwargs
+    assert call_kwargs["collection"] == "knowledge__pm__myrepo"
+    assert call_kwargs["title"] == "CONTINUATION.md"
+    assert "Promote me." in call_kwargs["content"]
+    assert call_kwargs["store_type"] == "pm-promoted"
+
+
+def test_pm_promote_missing_doc_raises(db) -> None:
+    """pm_promote raises KeyError (or similar) when the T2 document is not found."""
+    mock_t3 = MagicMock()
+
+    with pytest.raises((KeyError, ValueError, LookupError), match="not found|CONTINUATION"):
+        pm_promote(
+            db_t2=db,
+            db_t3=mock_t3,
+            project="myrepo",
+            title="CONTINUATION.md",
+            collection="knowledge__pm__myrepo",
+            ttl_days=0,
+        )
+
+    mock_t3.put.assert_not_called()
+
+
+def test_pm_promote_ttl_translation_permanent(db) -> None:
+    """T2 ttl=None (permanent) → T3 ttl_days=0, expires_at='' (permanent)."""
+    pm_init(db, project="myrepo")
+    db.put("myrepo_pm", "CONTINUATION.md", "# Content", tags="pm", ttl=None)
+
+    mock_t3 = MagicMock()
+    mock_t3.put.return_value = "someid"
+
+    pm_promote(
+        db_t2=db,
+        db_t3=mock_t3,
+        project="myrepo",
+        title="CONTINUATION.md",
+        collection="knowledge__pm__myrepo",
+        ttl_days=0,
+    )
+
+    call_kwargs = mock_t3.put.call_args.kwargs
+    assert call_kwargs["ttl_days"] == 0
+    assert call_kwargs["expires_at"] == ""
+
+
+def test_pm_promote_ttl_translation_with_ttl(db) -> None:
+    """T2 doc with ttl_days=30 → T3 ttl_days=30, expires_at non-empty."""
+    pm_init(db, project="myrepo")
+    db.put("myrepo_pm", "BLOCKERS.md", "- blocker one", tags="pm,blockers", ttl=30)
+
+    mock_t3 = MagicMock()
+    mock_t3.put.return_value = "someid"
+
+    pm_promote(
+        db_t2=db,
+        db_t3=mock_t3,
+        project="myrepo",
+        title="BLOCKERS.md",
+        collection="knowledge__pm__myrepo",
+        ttl_days=30,
+    )
+
+    call_kwargs = mock_t3.put.call_args.kwargs
+    assert call_kwargs["ttl_days"] == 30
+    assert call_kwargs["expires_at"] != ""

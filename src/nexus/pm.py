@@ -464,6 +464,54 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
         return items
 
 
+# ── AC9: pm_promote ───────────────────────────────────────────────────────────
+
+def pm_promote(
+    db_t2: "T2Database",
+    db_t3: "T3Database",
+    project: str,
+    title: str,
+    collection: str,
+    ttl_days: int = 0,
+) -> str:
+    """Promote a T2 PM document to T3 permanent knowledge storage.
+
+    Fetches *title* from the ``{project}_pm`` T2 namespace and writes it to
+    *collection* in T3.  Returns the T3 document ID.
+
+    TTL translation:
+    - T2 ``ttl=None`` (permanent) → T3 ``ttl_days=0, expires_at=""``
+    - T2 ``ttl=N`` with caller-supplied *ttl_days* > 0 → T3 ``ttl_days=N,
+      expires_at=<computed from doc timestamp + ttl_days>``
+
+    Raises ``KeyError`` if the document is not found in T2.
+    """
+    ns = _project_ns(project)
+    doc = db_t2.get(project=ns, title=title)
+    if doc is None:
+        raise KeyError(f"Document '{title}' not found in project '{project}' (namespace '{ns}').")
+
+    # TTL translation: caller-supplied ttl_days takes precedence over T2 ttl.
+    # When ttl_days=0 (permanent), expires_at is empty.
+    if ttl_days > 0:
+        base_ts = datetime.fromisoformat(doc["timestamp"].replace("Z", "+00:00"))
+        from datetime import timedelta as _timedelta
+        expires_at = (base_ts + _timedelta(days=ttl_days)).isoformat()
+    else:
+        expires_at = ""
+
+    doc_id = db_t3.put(
+        collection=collection,
+        content=doc["content"],
+        title=title,
+        tags=doc.get("tags") or "",
+        store_type="pm-promoted",
+        ttl_days=ttl_days,
+        expires_at=expires_at,
+    )
+    return doc_id
+
+
 # ── AC8: pm_search ────────────────────────────────────────────────────────────
 
 def pm_search(

@@ -89,6 +89,7 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
 @click.option("--agentic", is_flag=True, default=False,
               help="Multi-step Haiku query refinement before returning results")
 @click.option("-a", "--answer", "answer", is_flag=True, default=False,
+              envvar="NX_ANSWER",
               help="Synthesize cited answer via Haiku after retrieval")
 @click.option("--vimgrep", is_flag=True, default=False,
               help="Output in path:line:col:content format")

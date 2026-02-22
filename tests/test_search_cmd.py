@@ -491,3 +491,123 @@ def test_hybrid_without_cache_files_still_works(
 
     assert result.exit_code == 0, result.output
     assert "No results" not in result.output
+
+
+# ── NX_ANSWER env var override ────────────────────────────────────────────────
+
+
+def test_nx_answer_env_enables_answer_mode(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NX_ANSWER=1 activates answer mode without passing --answer / -a."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.setenv("NX_ANSWER", "1")
+
+    results_pool = [
+        _make_result("r1", "some content",
+                     metadata={"source_path": "foo.py", "line_start": 1}),
+    ]
+    answer_called: list[bool] = []
+
+    def fake_answer_mode(query, results):
+        answer_called.append(True)
+        return "Synthesized answer"
+
+    mock_t3 = _mock_t3()
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
+            with patch("nexus.commands.search_cmd.load_config",
+                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+                with patch("nexus.commands.search_cmd.answer_mode",
+                           side_effect=fake_answer_mode):
+                    result = runner.invoke(
+                        main,
+                        ["search", "query", "--corpus", "knowledge", "--no-rerank"],
+                    )
+
+    assert result.exit_code == 0, result.output
+    assert len(answer_called) == 1, (
+        "answer_mode() should be called when NX_ANSWER=1 is set, "
+        f"but was called {len(answer_called)} times. Output: {result.output}"
+    )
+
+
+def test_nx_answer_env_unset_does_not_enable_answer_mode(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without NX_ANSWER, answer mode is off (existing behaviour preserved)."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.delenv("NX_ANSWER", raising=False)
+
+    results_pool = [
+        _make_result("r1", "some content",
+                     metadata={"source_path": "foo.py", "line_start": 1}),
+    ]
+    answer_called: list[bool] = []
+
+    def fake_answer_mode(query, results):
+        answer_called.append(True)
+        return "Synthesized answer"
+
+    mock_t3 = _mock_t3()
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
+            with patch("nexus.commands.search_cmd.load_config",
+                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+                with patch("nexus.commands.search_cmd.answer_mode",
+                           side_effect=fake_answer_mode):
+                    result = runner.invoke(
+                        main,
+                        ["search", "query", "--corpus", "knowledge", "--no-rerank"],
+                    )
+
+    assert result.exit_code == 0, result.output
+    assert len(answer_called) == 0, (
+        "answer_mode() should NOT be called when NX_ANSWER is unset, "
+        f"but was called {len(answer_called)} times. Output: {result.output}"
+    )
+
+
+def test_nx_answer_empty_string_does_not_enable_answer_mode(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NX_ANSWER= (empty string) leaves answer mode off."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.setenv("NX_ANSWER", "")
+
+    results_pool = [
+        _make_result("r1", "some content",
+                     metadata={"source_path": "foo.py", "line_start": 1}),
+    ]
+    answer_called: list[bool] = []
+
+    def fake_answer_mode(query, results):
+        answer_called.append(True)
+        return "Synthesized answer"
+
+    mock_t3 = _mock_t3()
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
+            with patch("nexus.commands.search_cmd.load_config",
+                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+                with patch("nexus.commands.search_cmd.answer_mode",
+                           side_effect=fake_answer_mode):
+                    result = runner.invoke(
+                        main,
+                        ["search", "query", "--corpus", "knowledge", "--no-rerank"],
+                    )
+
+    assert result.exit_code == 0, result.output
+    assert len(answer_called) == 0, (
+        "answer_mode() should NOT be called when NX_ANSWER is empty string, "
+        f"but was called {len(answer_called)} times. Output: {result.output}"
+    )

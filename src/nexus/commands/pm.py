@@ -6,11 +6,13 @@ import click
 
 from nexus.config import load_config
 from nexus.db.t2 import T2Database
+from nexus.db import make_t3
 from nexus.pm import (
     pm_archive,
     pm_block,
     pm_init,
     pm_phase_next,
+    pm_promote,
     pm_reference,
     pm_restore,
     pm_resume,
@@ -206,6 +208,43 @@ def reference_cmd(query: str | None) -> None:
         click.echo(f"[{proj}] status={status} archived={archived_at}")
         preview = (r.get("content") or "")[:300].replace("\n", " ")
         click.echo(f"  {preview}")
+
+
+@pm.command("promote")
+@click.argument("title")
+@click.option("--project", default=None, help="Project name (defaults to repo name)")
+@click.option(
+    "--collection",
+    default=None,
+    help="Target T3 collection (defaults to knowledge__pm__{project})",
+)
+@click.option(
+    "--ttl",
+    "ttl_days",
+    type=int,
+    default=0,
+    show_default=True,
+    help="TTL in days for the T3 entry; 0 = permanent",
+)
+def promote_cmd(title: str, project: str | None, collection: str | None, ttl_days: int) -> None:
+    """Promote a PM document from T2 to T3 permanent knowledge storage."""
+    proj = project or _infer_project()
+    target_collection = collection or f"knowledge__pm__{proj}"
+    db = T2Database(_default_db_path())
+    t3 = make_t3()
+    try:
+        doc_id = pm_promote(
+            db_t2=db,
+            db_t3=t3,
+            project=proj,
+            title=title,
+            collection=target_collection,
+            ttl_days=ttl_days,
+        )
+        click.echo(doc_id)
+    except KeyError as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
 
 
 @pm.command("expire")
