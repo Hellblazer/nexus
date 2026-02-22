@@ -120,14 +120,14 @@ Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Root Cause Analysis**: Store via `echo "..." | nx store put - --collection knowledge --title "debug__finding__{issue}" --tags "debug"`
+- **Root Cause Analysis**: Store via `echo "..." | nx store put - --collection knowledge --title "debug-finding-{issue}" --tags "debug"`
 - **Hypothesis Trail**: Document in bead notes
 - **Fix Recommendations**: Include in relay to java-developer
-- **Prevention Patterns**: Store via `echo "..." | nx store put - --collection knowledge --title "pattern__prevention__{topic}" --tags "pattern,prevention"`
+- **Prevention Patterns**: Store via `echo "..." | nx store put - --collection knowledge --title "pattern-prevention-{topic}" --tags "pattern,prevention"`
 
 Store using these naming conventions:
-- **Nexus knowledge title**: `{domain}__{agent-type}__{topic}` (e.g., `decision__architect__cache-strategy`)
-- **Nexus memory**: `nx memory put "content" --project {project} --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
+- **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **Nexus memory**: `nx memory put "content" --project {project}_active --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
 - **Bead Description**: Include `Context: nx-plugin` line
 
 
