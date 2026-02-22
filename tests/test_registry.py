@@ -26,7 +26,10 @@ def test_registry_add_sets_collection_name(tmp_path: Path) -> None:
     info = reg.get(repo)
 
     assert info is not None
-    assert info["collection"] == "code__myrepo"
+    # Collection name is "code__{basename}-{hash8}" for path-uniqueness.
+    assert info["collection"].startswith("code__myrepo"), (
+        f"Expected collection to start with 'code__myrepo', got {info['collection']!r}"
+    )
     assert info["name"] == "myrepo"
 
 
@@ -160,11 +163,13 @@ def test_registry_get_returns_copy_not_reference(tmp_path: Path) -> None:
     entry = reg.get(repo)
     assert entry is not None
 
+    original_collection = entry["collection"]
+
     # Mutate the returned dict
     entry["collection"] = "code__MUTATED"
     entry["injected"] = True
 
     # Internal state must be unchanged
     fresh = reg.get(repo)
-    assert fresh["collection"] == "code__myrepo"
+    assert fresh["collection"] == original_collection
     assert "injected" not in fresh

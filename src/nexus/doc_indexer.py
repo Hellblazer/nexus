@@ -128,9 +128,12 @@ def index_markdown(md_path: Path, corpus: str) -> int:
     if existing["metadatas"] and existing["metadatas"][0].get("content_hash") == content_hash:
         return 0
 
-    stale = col.get(where={"source_path": str(md_path)}, include=[])
-    if stale["ids"]:
-        col.delete(ids=stale["ids"])
+    stale = col.get(where={"source_path": str(md_path)}, include=["documents", "metadatas"])
+    stale_ids: list[str] = stale["ids"]
+    stale_documents: list[str] = stale.get("documents") or []
+    stale_metadatas: list[dict] = stale.get("metadatas") or []
+    if stale_ids:
+        col.delete(ids=stale_ids)
 
     # Parse frontmatter then chunk
     raw_text = md_path.read_text(encoding="utf-8")
@@ -178,5 +181,12 @@ def index_markdown(md_path: Path, corpus: str) -> int:
         documents.append(chunk.text)
         metadatas.append(meta)
 
-    col.add(ids=ids, documents=documents, metadatas=metadatas)
+    try:
+        col.add(ids=ids, documents=documents, metadatas=metadatas)
+    except Exception:
+        # Restore the stale documents so the collection is not left empty on
+        # transient failures (e.g. embedding API errors).
+        if stale_ids:
+            col.add(ids=stale_ids, documents=stale_documents, metadatas=stale_metadatas)
+        raise
     return len(chunks)

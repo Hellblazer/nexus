@@ -1,10 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Repo registry: JSON persistence with atomic write and thread safety."""
+import hashlib
 import json
 import os
 import threading
 from pathlib import Path
 from typing import Any
+
+
+def _collection_name(repo: Path) -> str:
+    """Return a unique ChromaDB collection name for *repo*.
+
+    The collection name is ``code__{basename}-{hash8}`` where *hash8* is the
+    first 8 hex characters of the SHA-256 digest of the full absolute path.
+    This guarantees uniqueness even when two repos share the same leaf name
+    (e.g. ``/work/a/repo`` and ``/work/b/repo`` both named ``repo``).
+    """
+    path_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+    return f"code__{repo.name}-{path_hash}"
 
 
 class RepoRegistry:
@@ -15,7 +28,13 @@ class RepoRegistry:
         self._lock = threading.RLock()
         self._data: dict[str, dict[str, Any]] = {"repos": {}}
         if path.exists():
-            self._data = json.loads(path.read_text())
+            try:
+                self._data = json.loads(path.read_text())
+            except (json.JSONDecodeError, ValueError):
+                # Corrupt or truncated JSON — start with an empty registry
+                # rather than crashing.  The file will be overwritten on the
+                # next successful write.
+                self._data = {"repos": {}}
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -26,7 +45,7 @@ class RepoRegistry:
         with self._lock:
             self._data["repos"][key] = {
                 "name": name,
-                "collection": f"code__{name}",
+                "collection": _collection_name(repo),
                 "head_hash": "",
                 "status": "registered",
             }

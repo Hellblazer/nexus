@@ -117,8 +117,9 @@ def test_serve_stop_waits_for_process_exit(runner: CliRunner, serve_home: Path) 
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.write_text("12345")
 
-    # Simulate process still running on first check, gone on second
-    running_sequence = [True, False]
+    # Simulate process still running on first check, gone on second.
+    # The third False is for the final _process_running() check after the loop.
+    running_sequence = [True, False, False]
 
     with patch("nexus.commands.serve.os.kill"):
         with patch("nexus.commands.serve._process_running", side_effect=running_sequence):

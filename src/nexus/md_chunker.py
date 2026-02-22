@@ -226,11 +226,15 @@ class SemanticMarkdownChunker:
         chunk_index: int,
         base_metadata: dict,
         header_path: list[str],
+        start_char: int = 0,
+        end_char: int = 0,
     ) -> MarkdownChunk:
         meta = {
             **base_metadata,
             "chunk_index": chunk_index,
             "header_path": " > ".join(header_path) if header_path else "",
+            "chunk_start_char": start_char,
+            "chunk_end_char": end_char,
         }
         return MarkdownChunk(
             text=text,
