@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+
 def _config_dir() -> Path:
     return Path.home() / ".config" / "nexus"
 
@@ -57,13 +58,13 @@ def start_cmd() -> None:
         _pid_path().unlink(missing_ok=True)
 
     _config_dir().mkdir(parents=True, exist_ok=True)
-    log_fh = _log_path().open("a")
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "nexus.server_main"],
-        stdout=log_fh,
-        stderr=log_fh,
-        start_new_session=True,
-    )
+    with _log_path().open("a") as log_fh:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "nexus.server_main"],
+            stdout=log_fh,
+            stderr=log_fh,
+            start_new_session=True,
+        )
     _pid_path().write_text(str(proc.pid))
     click.echo(f"Server started (PID {proc.pid}).")
 
@@ -74,7 +75,12 @@ def stop_cmd() -> None:
     pid = _read_pid()
     if pid is None:
         raise click.ClickException("No server running (no PID file found).")
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        click.echo(f"Process {pid} not found (stale PID file). Cleaning up.")
+        _pid_path().unlink(missing_ok=True)
+        return
     _pid_path().unlink(missing_ok=True)
     click.echo(f"Server stopped (PID {pid}).")
 

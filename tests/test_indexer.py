@@ -1,0 +1,96 @@
+"""T1: indexer.py — status transitions, error path, credential skip, hidden file filter."""
+from pathlib import Path
+from unittest.mock import MagicMock, call, patch
+
+import pytest
+
+from nexus.indexer import index_repository
+
+
+@pytest.fixture
+def registry():
+    mock = MagicMock()
+    mock.get.return_value = {"collection": "code__repo", "status": "registered"}
+    return mock
+
+
+def test_index_sets_indexing_then_ready(tmp_path: Path, registry) -> None:
+    """Status transitions: registered → indexing → ready."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with patch("nexus.indexer._run_index"):
+        index_repository(repo, registry)
+
+    calls = registry.update.call_args_list
+    assert any(c == call(repo, status="indexing") for c in calls)
+    assert any(c == call(repo, status="ready") for c in calls)
+
+
+def test_index_sets_error_on_failure(tmp_path: Path, registry) -> None:
+    """If _run_index raises, status is set to 'error' and exception re-raised."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with patch("nexus.indexer._run_index", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError, match="boom"):
+            index_repository(repo, registry)
+
+    calls = registry.update.call_args_list
+    assert any(c == call(repo, status="indexing") for c in calls)
+    assert any(c == call(repo, status="error") for c in calls)
+    # 'ready' must NOT appear
+    assert not any(c == call(repo, status="ready") for c in calls)
+
+
+def test_run_index_skips_embedding_without_credentials(tmp_path: Path, monkeypatch) -> None:
+    """Without VOYAGE_API_KEY, _run_index returns early without touching T3."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "hello.py").write_text("print('hi')\n")
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+
+    with patch("nexus.frecency.compute_frecency", return_value=1.0):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.db.t3.T3Database") as mock_t3:
+                _run_index(repo, registry)
+
+    mock_t3.assert_not_called()
+
+
+def test_run_index_skips_hidden_files(tmp_path: Path, monkeypatch) -> None:
+    """Files inside hidden directories (e.g. .git/) are excluded."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    hidden_dir = repo / ".git"
+    hidden_dir.mkdir()
+    (hidden_dir / "config").write_text("git config\n")
+    (repo / "main.py").write_text("x = 1\n")
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+
+    seen: list[Path] = []
+
+    def fake_frecency(r: Path, f: Path) -> float:
+        seen.append(f)
+        return 1.0
+
+    with patch("nexus.frecency.compute_frecency", side_effect=fake_frecency):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            _run_index(repo, registry)
+
+    assert all(".git" not in str(p) for p in seen), f"Hidden files were not filtered: {seen}"
+    assert any("main.py" in str(p) for p in seen)

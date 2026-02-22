@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """AST-based code chunking with line-based fallback."""
+import logging
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 # Extensions supported by llama-index CodeSplitter / tree-sitter
 _AST_EXTENSIONS: dict[str, str] = {
@@ -105,7 +108,7 @@ def chunk_file(file: Path, content: str) -> list[dict[str, Any]]:
                     result.append(meta)
                 return result
         except Exception:
-            pass  # Fall through to line-based fallback
+            _log.debug("AST chunking failed for %s, falling back to line chunks", file, exc_info=True)
 
     # Line-based fallback
     raw_chunks = _line_chunk(content)

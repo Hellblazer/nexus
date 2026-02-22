@@ -41,11 +41,13 @@ class RepoRegistry:
 
     def get(self, repo: Path) -> dict[str, Any] | None:
         """Return registry entry for *repo*, or None if not registered."""
-        return self._data["repos"].get(str(repo))
+        with self._lock:
+            return self._data["repos"].get(str(repo))
 
     def all(self) -> list[str]:
         """Return list of all registered repo paths."""
-        return list(self._data["repos"].keys())
+        with self._lock:
+            return list(self._data["repos"].keys())
 
     def update(self, repo: Path, **kwargs: Any) -> None:
         """Update fields for *repo* (e.g. head_hash, status)."""

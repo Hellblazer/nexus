@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Flask server for the Nexus persistent background service."""
-import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -11,10 +11,31 @@ from nexus.registry import RepoRegistry
 
 app = Flask(__name__)
 
-_CONFIG_DIR = Path.home() / ".config" / "nexus"
-_REGISTRY_PATH = _CONFIG_DIR / "repos.json"
-_registry = RepoRegistry(_REGISTRY_PATH)
+_log = logging.getLogger(__name__)
+
 _poll_interval = 10  # seconds
+
+
+def _registry() -> RepoRegistry:
+    """Return the registry, using the current HOME at call time."""
+    registry_path = Path.home() / ".config" / "nexus" / "repos.json"
+    return RepoRegistry(registry_path)
+
+
+# Module-level registry instance for request handlers; initialised lazily
+# via _get_registry() so that Path.home() is evaluated at call time.
+_registry_instance: RepoRegistry | None = None
+_registry_lock = threading.Lock()
+
+
+def _get_registry() -> RepoRegistry:
+    """Return the shared registry instance, creating it on first call."""
+    global _registry_instance
+    if _registry_instance is None:
+        with _registry_lock:
+            if _registry_instance is None:
+                _registry_instance = _registry()
+    return _registry_instance
 
 
 @app.route("/health")
@@ -24,23 +45,32 @@ def health():
 
 @app.route("/repos", methods=["GET"])
 def list_repos():
-    return jsonify({"repos": _registry.all()})
+    return jsonify({"repos": _get_registry().all()})
 
 
 @app.route("/repos", methods=["POST"])
 def add_repo():
-    data = request.get_json(force=True)
-    path = Path(data.get("path", ""))
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "request body must be a JSON object"}), 400
+    path_str = data.get("path")
+    if not isinstance(path_str, str):
+        return jsonify({"error": "'path' must be a non-null string"}), 400
+    path = Path(path_str)
     if not path.exists():
         return jsonify({"error": "path not found"}), 404
-    _registry.add(path)
+    _get_registry().add(path)
     return jsonify({"added": str(path)}), 201
 
 
 @app.route("/repos/<path:repo_path>", methods=["DELETE"])
 def remove_repo(repo_path: str):
-    _registry.remove(Path("/" + repo_path))
-    return jsonify({"removed": "/" + repo_path})
+    full_path = Path("/" + repo_path)
+    reg = _get_registry()
+    if reg.get(full_path) is None:
+        return jsonify({"error": "repo not registered"}), 404
+    reg.remove(full_path)
+    return jsonify({"removed": str(full_path)})
 
 
 def _poll_loop() -> None:
@@ -48,11 +78,11 @@ def _poll_loop() -> None:
     from nexus.polling import check_and_reindex
 
     while True:
-        for repo_str in _registry.all():
+        for repo_str in _get_registry().all():
             try:
-                check_and_reindex(Path(repo_str), _registry)
-            except Exception:
-                pass
+                check_and_reindex(Path(repo_str), _get_registry())
+            except Exception as exc:
+                _log.warning("Poll error for %s: %s", repo_str, exc, exc_info=True)
         time.sleep(_poll_interval)
 
 

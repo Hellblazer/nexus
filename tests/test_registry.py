@@ -111,3 +111,38 @@ def test_registry_atomic_write_leaves_no_tmp(tmp_path: Path) -> None:
     reg.add(repo)
 
     assert not (tmp_path / "repos.json.tmp").exists()
+
+
+def test_registry_concurrent_reads_and_writes(tmp_path: Path) -> None:
+    """T5: Concurrent add() and get() calls do not raise or corrupt data."""
+    import threading
+
+    reg = RepoRegistry(tmp_path / "repos.json")
+    errors: list[Exception] = []
+
+    def writer(n: int) -> None:
+        try:
+            repo = tmp_path / f"repo{n}"
+            repo.mkdir(exist_ok=True)
+            reg.add(repo)
+        except Exception as e:
+            errors.append(e)
+
+    def reader() -> None:
+        try:
+            for _ in range(50):
+                reg.all()
+                reg.get(tmp_path / "repo0")
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(10)]
+    threads += [threading.Thread(target=reader) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"Concurrent access raised: {errors}"
+    # All writers completed — 10 repos should be registered
+    assert len(reg.all()) == 10

@@ -13,8 +13,8 @@ def build_cache(
     """Write a ripgrep-compatible line cache for *repo*.
 
     *files* is a list of (frecency_score, path) sorted by descending frecency.
-    Files are written in that order; once the cumulative size would exceed
-    MAX_CACHE_SIZE the remaining files are omitted.
+    Files are written in that order until the cumulative byte count after
+    completing a file exceeds MAX_CACHE_SIZE; no mid-file truncation occurs.
 
     Each line is formatted as ``/abs/path/to/file:lineno:content``.
     Binary files (non-UTF-8) are skipped silently.

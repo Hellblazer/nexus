@@ -13,6 +13,7 @@ def _git_commit_timestamps(repo: Path, file: Path) -> list[float]:
         cwd=repo,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     if result.returncode != 0 or not result.stdout.strip():
         return []

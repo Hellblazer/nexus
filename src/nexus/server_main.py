@@ -6,7 +6,11 @@ from nexus.server import start_server
 
 
 def main() -> None:
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 7474
+    try:
+        port = int(sys.argv[1]) if len(sys.argv) > 1 else 7474
+    except ValueError:
+        sys.stderr.write(f"Invalid port: {sys.argv[1]!r}\n")
+        sys.exit(1)
     start_server(port=port)
 
 
