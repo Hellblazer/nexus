@@ -169,3 +169,90 @@ def test_no_circular_imports():
         # Restore original sys.modules to avoid contaminating subsequent tests
         sys.modules.clear()
         sys.modules.update(saved_modules)
+
+
+# ── New bug-fix tests ─────────────────────────────────────────────────────────
+
+def test_format_json_metadata_does_not_shadow_canonical_fields():
+    """Metadata keys must not overwrite canonical fields (id, content, distance, collection)."""
+    import json as _json
+    from nexus.formatters import format_json
+
+    results = [
+        SearchResult(
+            id="canonical-id",
+            content="canonical-content",
+            distance=0.3,
+            collection="code__repo",
+            metadata={"id": "EVIL", "content": "EVIL", "distance": 999.0, "collection": "EVIL"},
+        )
+    ]
+    parsed = _json.loads(format_json(results))
+    item = parsed[0]
+    assert item["id"] == "canonical-id", f"id was overwritten: {item['id']}"
+    assert item["content"] == "canonical-content", f"content was overwritten: {item['content']}"
+    assert item["distance"] == pytest.approx(0.3), f"distance was overwritten: {item['distance']}"
+    assert item["collection"] == "code__repo", f"collection was overwritten: {item['collection']}"
+
+
+def test_match_pct_clipped_for_large_distance():
+    """match_pct must be >= 0 even when distance > 1.0 (L2 distances can exceed 1)."""
+    from nexus.answer import answer_mode
+    from unittest.mock import patch, MagicMock
+
+    results = [
+        SearchResult(
+            id="r1",
+            content="some content",
+            distance=1.5,  # L2 distance exceeding 1 — would give negative pct without clip
+            collection="docs__test",
+            metadata={"source_path": "foo.py", "line_start": 1, "line_end": 5},
+        )
+    ]
+
+    # Mock _haiku_answer so we don't need API credentials
+    with patch("nexus.answer._haiku_answer", return_value="Synthesized answer."):
+        output = answer_mode("test query", results)
+
+    # The footer must contain a non-negative match percentage
+    # Find the line with the citation footer
+    lines = output.splitlines()
+    footer_lines = [l for l in lines if "% match" in l]
+    assert footer_lines, f"No footer lines found in output:\n{output}"
+    for line in footer_lines:
+        # Extract the percentage value from "(...% match)"
+        import re
+        m = re.search(r"\((-?[\d.]+)% match\)", line)
+        assert m, f"Could not parse match_pct from line: {line}"
+        pct = float(m.group(1))
+        assert pct >= 0.0, f"match_pct is negative ({pct}) for distance=1.5"
+
+
+def test_rerank_results_degrades_on_api_error():
+    """rerank_results must return original results[:n] when Voyage API raises an exception."""
+    from nexus.scoring import rerank_results
+    from unittest.mock import patch, MagicMock
+
+    results = [
+        SearchResult(id=f"r{i}", content=f"content {i}", distance=float(i) * 0.1,
+                     collection="docs__test", metadata={})
+        for i in range(5)
+    ]
+
+    mock_client = MagicMock()
+    mock_client.rerank.side_effect = Exception("API outage")
+
+    with patch("nexus.scoring._voyage_client", return_value=mock_client):
+        output = rerank_results(results, query="test query", top_k=3)
+
+    # Must degrade gracefully: return up to n original results, not raise
+    assert len(output) <= 3
+    assert all(r.id.startswith("r") for r in output)
+
+
+def test_min_max_normalize_empty_raises():
+    """min_max_normalize must raise ValueError when window is empty."""
+    from nexus.scoring import min_max_normalize
+
+    with pytest.raises(ValueError, match="non-empty"):
+        min_max_normalize(1.0, [])

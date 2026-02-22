@@ -255,7 +255,8 @@ def test_promote_cmd_remove_deletes_t2_entry(runner: CliRunner, mem_home: Path, 
     mock_t3 = MagicMock()
     mock_t3.put.return_value = "ghi789"
 
-    with patch("nexus.commands.memory.T2Database", return_value=db):
+    _t2_cm = MagicMock(__enter__=MagicMock(return_value=db))
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm):
         with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
             with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
                 result = runner.invoke(

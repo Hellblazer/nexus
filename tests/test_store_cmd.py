@@ -415,7 +415,7 @@ def test_search_content_flag_short_text_no_ellipsis(runner: CliRunner, env_creds
 # ── nexus-u4e: [path] positional argument ─────────────────────────────────────
 
 def test_search_path_scopes_where_filter(runner: CliRunner, env_creds, tmp_path) -> None:
-    """[path] argument passes a $startswith metadata filter for file_path."""
+    """[path] argument applies Python-side path filtering; $startswith must NOT be sent to ChromaDB."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
     mock_db.search.return_value = []  # empty is fine; we test the where kwarg
@@ -429,17 +429,12 @@ def test_search_path_scopes_where_filter(runner: CliRunner, env_creds, tmp_path)
         )
 
     assert result.exit_code == 0
-    # search() must have been called with a where filter containing $startswith
     assert mock_db.search.called, "Expected at least one search() call"
+    # Path scoping is Python-side after retrieval; $startswith must not reach ChromaDB
     actual_call = mock_db.search.call_args
-    # where is always passed as a keyword argument from search_cross_corpus
     where_filter = actual_call.kwargs.get("where")
-    assert where_filter is not None, "Expected a where filter when path is provided"
-    assert "$startswith" in str(where_filter), (
-        f"Expected $startswith in where filter, got: {where_filter}"
-    )
-    assert str(src_dir) in str(where_filter), (
-        f"Expected resolved path in where filter, got: {where_filter}"
+    assert "$startswith" not in str(where_filter), (
+        f"$startswith must not be passed to ChromaDB (invalid operator); got where={where_filter}"
     )
 
 
@@ -453,12 +448,10 @@ def test_search_path_filters_results_by_file_path(runner: CliRunner, env_creds, 
     other_dir = tmp_path / "other"
     other_dir.mkdir()
 
-    # The mock returns both results; with a proper where filter only one would
-    # come from ChromaDB, but since we're mocking search() directly, we verify
-    # that the filter IS passed so ChromaDB would do the scoping.
-    # We make mock_db.search sensitive to 'where' to simulate the filtering.
+    # The mock returns both results; Python-side path filtering in search_cmd
+    # keeps only the result whose file_path / source_path starts with src_dir.
     def fake_search(query, collection_names, n_results=10, where=None):
-        all_results = [
+        return [
             {
                 "id": "r1",
                 "content": "inside src",
@@ -476,10 +469,6 @@ def test_search_path_filters_results_by_file_path(runner: CliRunner, env_creds, 
                 "file_path": str(other_dir / "file.py"),
             },
         ]
-        if where and "$startswith" in str(where):
-            prefix = list(where.get("file_path", {}).values())[0] if "file_path" in where else ""
-            return [r for r in all_results if r.get("file_path", "").startswith(prefix)]
-        return all_results
 
     mock_db.search.side_effect = fake_search
 

@@ -122,7 +122,9 @@ def test_hook_and_cli_use_same_getsid_anchor(
     monkeypatch.delenv("NX_SESSION_PID", raising=False)
 
     with patch("nexus.session.os.getsid", return_value=98765):
-        with patch("nexus.hooks._open_t2", return_value=MagicMock(get=lambda **kw: None, list_entries=lambda **kw: [])):
+        _inner = MagicMock(get=lambda **kw: None, list_entries=lambda **kw: [])
+        _t2_cm = MagicMock(__enter__=MagicMock(return_value=_inner))
+        with patch("nexus.hooks.T2Database", return_value=_t2_cm):
             session_start()
         recovered = read_session_id()
 
@@ -147,8 +149,9 @@ def test_session_start_pm_detection_injects_continuation(
         "title": "CONTINUATION.md",
     }
     # Simulate repo name detection
+    _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_db))
     with patch("nexus.hooks._infer_repo", return_value="myrepo"):
-        with patch("nexus.hooks._open_t2", return_value=mock_db):
+        with patch("nexus.hooks.T2Database", return_value=_t2_cm):
             result = runner.invoke(main, ["hook", "session-start"])
 
     assert "Phase: 3" in result.output or "implement auth" in result.output
@@ -166,8 +169,9 @@ def test_session_start_non_pm_outputs_memory_summary(
         {"id": 1, "title": "note.md", "agent": "coder", "timestamp": "2026-01-01T10:00:00Z"},
     ]
 
+    _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_db))
     with patch("nexus.hooks._infer_repo", return_value="myrepo"):
-        with patch("nexus.hooks._open_t2", return_value=mock_db):
+        with patch("nexus.hooks.T2Database", return_value=_t2_cm):
             result = runner.invoke(main, ["hook", "session-start"])
 
     assert "memory" in result.output.lower() or "note.md" in result.output
@@ -197,8 +201,9 @@ def test_session_end_flushes_flagged_t1_entries(
         ]
         mock_t2 = MagicMock()
 
+        _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_t2))
         with patch("nexus.hooks._open_t1", return_value=mock_t1):
-            with patch("nexus.hooks._open_t2", return_value=mock_t2):
+            with patch("nexus.hooks.T2Database", return_value=_t2_cm):
                 result = runner.invoke(main, ["hook", "session-end"])
 
     assert result.exit_code == 0, result.output
@@ -223,8 +228,9 @@ def test_session_end_clears_t1_and_removes_session_file(
         session_file.parent.mkdir(parents=True, exist_ok=True)
         session_file.write_text("test-session-id")
 
+        _t2_cm = MagicMock(__enter__=MagicMock(return_value=MagicMock()))
         with patch("nexus.hooks._open_t1", return_value=mock_t1):
-            with patch("nexus.hooks._open_t2", return_value=MagicMock()):
+            with patch("nexus.hooks.T2Database", return_value=_t2_cm):
                 result = runner.invoke(main, ["hook", "session-end"])
 
     assert result.exit_code == 0, result.output
@@ -237,8 +243,9 @@ def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:
     mock_t2 = MagicMock()
     mock_t2.expire.return_value = 3
 
+    _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_t2))
     with patch("nexus.hooks._open_t1", return_value=MagicMock(flagged_entries=lambda: [])):
-        with patch("nexus.hooks._open_t2", return_value=mock_t2):
+        with patch("nexus.hooks.T2Database", return_value=_t2_cm):
             result = runner.invoke(main, ["hook", "session-end"])
 
     mock_t2.expire.assert_called_once()

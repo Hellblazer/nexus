@@ -80,6 +80,12 @@ class T2Database:
             self.conn.executescript(_SCHEMA_SQL)
             self.conn.commit()
 
+    def __enter__(self) -> "T2Database":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
     def close(self) -> None:
         self.conn.close()
 
@@ -217,7 +223,7 @@ class T2Database:
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def decay_project(self, project: str, ttl: int) -> None:
-        """Set TTL and flip pm → pm-archived tags for all docs in *project*."""
+        """Set TTL and flip pm -> pm-archived tags for all docs in *project*."""
         with self._lock:
             self.conn.execute(
                 """

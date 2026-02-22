@@ -17,10 +17,6 @@ def _t1() -> T1Database:
     return T1Database(session_id=session_id)
 
 
-def _t2() -> T2Database:
-    return T2Database(Path.home() / ".config" / "nexus" / "memory.db")
-
-
 @click.group()
 def scratch() -> None:
     """Temporary in-session scratch space (cleared when the session ends)."""
@@ -117,13 +113,14 @@ def unflag_cmd(id: str) -> None:
 @click.option("--title", "-t", required=True, help="Target T2 title")
 def promote_cmd(id: str, project: str, title: str) -> None:
     """Copy a scratch entry to T2 immediately."""
-    t1, t2 = _t1(), _t2()
-    try:
-        t1.promote(id, project=project, title=title, t2=t2)
-    except KeyError as exc:
-        click.echo(str(exc), err=True)
-        raise SystemExit(1)
-    click.echo(f"Promoted {id} → {project}/{title}")
+    t1 = _t1()
+    with T2Database(Path.home() / ".config" / "nexus" / "memory.db") as t2:
+        try:
+            t1.promote(id, project=project, title=title, t2=t2)
+        except KeyError as exc:
+            click.echo(str(exc), err=True)
+            raise SystemExit(1)
+    click.echo(f"Promoted {id} -> {project}/{title}")
 
 
 @scratch.command("clear")

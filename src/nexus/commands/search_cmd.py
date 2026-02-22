@@ -147,22 +147,16 @@ def search_cmd(
         lines_before = lines_context
         lines_after = lines_context
 
-    # Build where filter: path scoping + --where pairs merged
-    where_filter: dict | None = None
-    if path is not None:
-        resolved = str(Path(path).resolve())
-        where_filter = {"file_path": {"$startswith": resolved}}
+    # Build where filter: --where pairs only ($startswith is not a valid ChromaDB operator;
+    # path scoping is applied Python-side after retrieval).
+    resolved: str | None = str(Path(path).resolve()) if path is not None else None
 
     try:
         user_where = _parse_where(where_pairs)
     except click.BadParameter as exc:
         raise SystemExit(str(exc)) from exc
 
-    if user_where:
-        if where_filter:
-            where_filter.update(user_where)
-        else:
-            where_filter = user_where
+    where_filter: dict | None = user_where if user_where else None
 
     db = _t3()
     all_collections = [c["name"] for c in db.list_collections()]
@@ -210,6 +204,17 @@ def search_cmd(
     if not results:
         click.echo("No results.")
         return
+
+    # Python-side path scoping (ChromaDB has no $startswith operator)
+    if resolved is not None:
+        results = [
+            r for r in results
+            if r.metadata.get("file_path", "").startswith(resolved)
+            or r.metadata.get("source_path", "").startswith(resolved)
+        ]
+        if not results:
+            click.echo("No results.")
+            return
 
     # Hybrid scoring
     results = apply_hybrid_scoring(results, hybrid=hybrid)

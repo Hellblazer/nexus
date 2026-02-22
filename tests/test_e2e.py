@@ -318,7 +318,8 @@ def test_pm_init_status_block_unblock(
     runner: CliRunner, fake_home: Path, db
 ) -> None:
     """nx pm init → status → block → unblock lifecycle."""
-    with patch("nexus.commands.pm.T2Database", return_value=db):
+    _t2_cm = MagicMock(__enter__=MagicMock(return_value=db))
+    with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
         init = runner.invoke(main, ["pm", "init", "--project", "e2e-proj"])
         assert init.exit_code == 0, init.output
 
@@ -340,7 +341,8 @@ def test_pm_archive_with_mocked_haiku(
     """nx pm archive synthesizes docs via Haiku (mocked) and writes to T3."""
     canned_synthesis = "# Archive\n\n## Summary\nProject completed.\n\n## Key Decisions\n- Used ChromaDB"
 
-    with patch("nexus.commands.pm.T2Database", return_value=db):
+    _t2_cm = MagicMock(__enter__=MagicMock(return_value=db))
+    with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
         runner.invoke(main, ["pm", "init", "--project", "archive-proj"])
 
     with patch("nexus.pm.make_t3", return_value=local_t3):
@@ -351,7 +353,7 @@ def test_pm_archive_with_mocked_haiku(
                 mock_client.messages.create.return_value = MagicMock(
                     content=[MagicMock(text=canned_synthesis)]
                 )
-                with patch("nexus.commands.pm.T2Database", return_value=db):
+                with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
                     result = runner.invoke(main, [
                         "pm", "archive", "--project", "archive-proj"
                     ])

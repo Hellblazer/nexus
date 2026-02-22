@@ -10,7 +10,7 @@ from nexus.db.t2 import T2Database
 from nexus.session import generate_session_id, session_file_path, write_session_file
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 
 def _default_db_path() -> Path:
     return Path.home() / ".config" / "nexus" / "memory.db"
@@ -37,15 +37,15 @@ def _infer_repo() -> str:
         return Path.cwd().name
 
 
-# ── SessionStart ──────────────────────────────────────────────────────────────
+# -- SessionStart -------------------------------------------------------------
 
 def session_start() -> str:
     """Execute the SessionStart hook.
 
     1. Generate UUID4 session ID and write to getsid(0)-scoped session file.
     2. Detect PM project via T2 query.
-    3. If PM: inject CONTINUATION.md (≤2000 chars).
-       Else: print recent memory summary (≤10 entries × 500 chars).
+    3. If PM: inject CONTINUATION.md (<=2000 chars).
+       Else: print recent memory summary (<=10 entries x 500 chars).
 
     Returns the output string to be printed.
     """
@@ -56,29 +56,28 @@ def session_start() -> str:
 
     repo = _infer_repo()
     try:
-        db = _open_t2()
-
-        # PM detection: T2 SQL query for {repo}_pm CONTINUATION.md
-        pm_row = db.get(project=f"{repo}_pm", title="CONTINUATION.md")
-        if pm_row is not None:
-            content = (pm_row.get("content") or "")[:2000]
-            lines.append(content)
-        else:
-            # Non-PM: recent memory summary
-            entries = db.list_entries(project=repo)[:10]
-            if entries:
-                lines.append(f"Recent memory ({repo}, last {len(entries)} entries):")
-                for e in entries:
-                    lines.append(f"  - {e['title']} ({e.get('agent') or '-'}, {e.get('timestamp', '')[:10]})")
+        with _open_t2() as db:
+            # PM detection: T2 SQL query for {repo}_pm CONTINUATION.md
+            pm_row = db.get(project=f"{repo}_pm", title="CONTINUATION.md")
+            if pm_row is not None:
+                content = (pm_row.get("content") or "")[:2000]
+                lines.append(content)
             else:
-                lines.append(f"No memory entries for '{repo}'.")
+                # Non-PM: recent memory summary
+                entries = db.list_entries(project=repo)[:10]
+                if entries:
+                    lines.append(f"Recent memory ({repo}, last {len(entries)} entries):")
+                    for e in entries:
+                        lines.append(f"  - {e['title']} ({e.get('agent') or '-'}, {e.get('timestamp', '')[:10]})")
+                else:
+                    lines.append(f"No memory entries for '{repo}'.")
     except Exception:
         lines.append("(memory unavailable)")
 
     return "\n".join(lines)
 
 
-# ── SessionEnd ────────────────────────────────────────────────────────────────
+# -- SessionEnd ---------------------------------------------------------------
 
 def session_end() -> str:
     """Execute the SessionEnd hook.
@@ -98,25 +97,25 @@ def session_end() -> str:
     except FileNotFoundError:
         session_id = None
 
-    db = _open_t2()
     flushed = 0
 
-    if session_id:
-        t1 = _open_t1(session_id)
-        for entry in t1.flagged_entries():
-            db.put(
-                project=entry["flush_project"],
-                title=entry["flush_title"],
-                content=entry["content"],
-                tags=entry.get("tags", ""),
-                ttl=None,
-            )
-            flushed += 1
-        # Only clear T1 after all entries are successfully flushed to T2.
-        # A finally: t1.clear() would wipe entries if db.put() raises.
-        t1.clear()
+    with _open_t2() as db:
+        if session_id:
+            t1 = _open_t1(session_id)
+            for entry in t1.flagged_entries():
+                db.put(
+                    project=entry["flush_project"],
+                    title=entry["flush_title"],
+                    content=entry["content"],
+                    tags=entry.get("tags", ""),
+                    ttl=None,
+                )
+                flushed += 1
+            # Only clear T1 after all entries are successfully flushed to T2.
+            # A finally: t1.clear() would wipe entries if db.put() raises.
+            t1.clear()
 
-    expired = db.expire()
+        expired = db.expire()
 
     # Remove session file
     try:

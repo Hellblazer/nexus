@@ -20,16 +20,21 @@ def format_vimgrep(results: list[SearchResult]) -> list[str]:
 
 
 def format_json(results: list[SearchResult]) -> str:
-    """Format results as a JSON array with id, content, distance, and metadata."""
+    """Format results as a JSON array with id, content, distance, collection, and metadata.
+
+    Metadata fields are spread into the top-level object first, then the canonical
+    fields (id, content, distance, collection) are written last so they always win
+    over any metadata keys with the same name.
+    """
     items: list[dict[str, Any]] = []
     for r in results:
         item: dict[str, Any] = {
+            **r.metadata,
             "id": r.id,
             "content": r.content,
             "distance": r.distance,
             "collection": r.collection,
         }
-        item.update(r.metadata)
         items.append(item)
     return json.dumps(items, indent=2, default=str)
 

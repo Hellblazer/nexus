@@ -37,8 +37,8 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
         ttl_days = parse_ttl(ttl)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    db = T2Database(_default_db_path())
-    row_id = db.put(project=project, title=title, content=content, tags=tags, ttl=ttl_days)
+    with T2Database(_default_db_path()) as db:
+        row_id = db.put(project=project, title=title, content=content, tags=tags, ttl=ttl_days)
     click.echo(f"Stored: {project}/{title} (id={row_id})")
 
 
@@ -48,15 +48,14 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
 @click.option("--title", "-t", default=None, help="Entry title")
 def get_cmd(id: int | None, project: str | None, title: str | None) -> None:
     """Retrieve a memory entry by ID or by --project + --title."""
-    db = T2Database(_default_db_path())
-    if id is not None:
-        result = db.get(id=id)
-    elif project and title:
-        result = db.get(project=project, title=title)
-    else:
+    if id is None and not (project and title):
         click.echo("Error: provide an ID or --project and --title", err=True)
         raise SystemExit(1)
-
+    with T2Database(_default_db_path()) as db:
+        if id is not None:
+            result = db.get(id=id)
+        else:
+            result = db.get(project=project, title=title)
     if result is None:
         click.echo("Not found.", err=True)
         raise SystemExit(1)
@@ -68,8 +67,8 @@ def get_cmd(id: int | None, project: str | None, title: str | None) -> None:
 @click.option("--project", "-p", default=None, help="Scope search to a project")
 def search_cmd(query: str, project: str | None) -> None:
     """FTS5 keyword search across T2 memory entries."""
-    db = T2Database(_default_db_path())
-    results = db.search(query=query, project=project)
+    with T2Database(_default_db_path()) as db:
+        results = db.search(query=query, project=project)
     if not results:
         click.echo("No results found.")
         return
@@ -85,8 +84,8 @@ def search_cmd(query: str, project: str | None) -> None:
 @click.option("--agent", "-a", default=None, help="Filter by agent name")
 def list_cmd(project: str | None, agent: str | None) -> None:
     """List memory entries."""
-    db = T2Database(_default_db_path())
-    entries = db.list_entries(project=project, agent=agent)
+    with T2Database(_default_db_path()) as db:
+        entries = db.list_entries(project=project, agent=agent)
     if not entries:
         click.echo("No entries found.")
         return
@@ -98,8 +97,8 @@ def list_cmd(project: str | None, agent: str | None) -> None:
 @memory.command("expire")
 def expire_cmd() -> None:
     """Remove TTL-expired memory entries."""
-    db = T2Database(_default_db_path())
-    count = db.expire()
+    with T2Database(_default_db_path()) as db:
+        count = db.expire()
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
 
 
@@ -110,54 +109,54 @@ def expire_cmd() -> None:
 @click.option("--remove", is_flag=True, default=False, help="Delete the entry from T2 after promoting.")
 def promote_cmd(id: int, collection: str, tags: str, remove: bool) -> None:
     """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
-    db = T2Database(_default_db_path())
-    entry = db.get(id=id)
-    if entry is None:
-        raise click.ClickException(f"Entry {id} not found in T2 memory.")
+    with T2Database(_default_db_path()) as db:
+        entry = db.get(id=id)
+        if entry is None:
+            raise click.ClickException(f"Entry {id} not found in T2 memory.")
 
-    missing = [
-        k
-        for k in ("chroma_api_key", "voyage_api_key", "chroma_tenant", "chroma_database")
-        if not get_credential(k)
-    ]
-    if missing:
-        raise click.ClickException(
-            f"T3 credentials not configured: {', '.join(missing)}. Run `nx config init`."
+        missing = [
+            k
+            for k in ("chroma_api_key", "voyage_api_key", "chroma_tenant", "chroma_database")
+            if not get_credential(k)
+        ]
+        if missing:
+            raise click.ClickException(
+                f"T3 credentials not configured: {', '.join(missing)}. Run `nx config init`."
+            )
+
+        # Translate TTL: T2 ttl=None (permanent) -> T3 ttl_days=0; T2 ttl=N -> T3 ttl_days=N
+        ttl_days: int = entry["ttl"] if entry["ttl"] is not None else 0  # type: ignore[assignment]
+        merged_tags = tags if tags else (entry.get("tags") or "")
+
+        # Compute expires_at from the T2 entry's original timestamp so that the
+        # promoted T3 entry honours the remaining TTL rather than resetting it.
+        if ttl_days > 0:
+            base_ts = datetime.fromisoformat(entry["timestamp"])
+            expires_at = (base_ts + timedelta(days=ttl_days)).isoformat()
+        else:
+            expires_at = ""  # permanent
+
+        t3 = T3Database(
+            tenant=get_credential("chroma_tenant"),
+            database=get_credential("chroma_database"),
+            api_key=get_credential("chroma_api_key"),
+            voyage_api_key=get_credential("voyage_api_key"),
+        )
+        doc_id = t3.put(
+            collection=collection,
+            content=entry["content"],
+            title=entry["title"],
+            tags=merged_tags,
+            ttl_days=ttl_days,
+            expires_at=expires_at,
         )
 
-    # Translate TTL: T2 ttl=None (permanent) → T3 ttl_days=0; T2 ttl=N → T3 ttl_days=N
-    ttl_days: int = entry["ttl"] if entry["ttl"] is not None else 0  # type: ignore[assignment]
-    merged_tags = tags if tags else (entry.get("tags") or "")
-
-    # Compute expires_at from the T2 entry's original timestamp so that the
-    # promoted T3 entry honours the remaining TTL rather than resetting it.
-    if ttl_days > 0:
-        base_ts = datetime.fromisoformat(entry["timestamp"])
-        expires_at = (base_ts + timedelta(days=ttl_days)).isoformat()
-    else:
-        expires_at = ""  # permanent
-
-    t3 = T3Database(
-        tenant=get_credential("chroma_tenant"),
-        database=get_credential("chroma_database"),
-        api_key=get_credential("chroma_api_key"),
-        voyage_api_key=get_credential("voyage_api_key"),
-    )
-    doc_id = t3.put(
-        collection=collection,
-        content=entry["content"],
-        title=entry["title"],
-        tags=merged_tags,
-        ttl_days=ttl_days,
-        expires_at=expires_at,
-    )
-
-    if remove:
-        db.delete(entry["project"], entry["title"])
-        click.echo(
-            f"Promoted and removed: {entry['project']}/{entry['title']} → {collection} (id={doc_id})"
-        )
-    else:
-        click.echo(
-            f"Promoted: {entry['project']}/{entry['title']} → {collection} (id={doc_id})"
-        )
+        if remove:
+            db.delete(entry["project"], entry["title"])
+            click.echo(
+                f"Promoted and removed: {entry['project']}/{entry['title']} -> {collection} (id={doc_id})"
+            )
+        else:
+            click.echo(
+                f"Promoted: {entry['project']}/{entry['title']} -> {collection} (id={doc_id})"
+            )

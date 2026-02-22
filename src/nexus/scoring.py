@@ -17,7 +17,11 @@ def min_max_normalize(value: float, window: list[float]) -> float:
 
     Computed over the combined result window (not per-corpus). Returns 0.0
     when all values are identical (denominator collapses to ε).
+
+    Raises ValueError if *window* is empty.
     """
+    if not window:
+        raise ValueError("min_max_normalize: window must be non-empty")
     lo = min(window)
     hi = max(window)
     return (value - lo) / (hi - lo + _EPSILON)
@@ -91,12 +95,16 @@ def rerank_results(
     n = top_k or len(results)
     documents = [r.content for r in results]
     client = _voyage_client()
-    rerank_response = client.rerank(
-        query=query,
-        documents=documents,
-        model=model,
-        top_k=n,
-    )
+    try:
+        rerank_response = client.rerank(
+            query=query,
+            documents=documents,
+            model=model,
+            top_k=n,
+        )
+    except Exception as exc:
+        _log.warning("rerank failed, returning original order", error=str(exc))
+        return results[:n]
     reranked: list[SearchResult] = []
     for item in rerank_response.results:
         r = results[item.index]

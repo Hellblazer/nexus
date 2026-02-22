@@ -79,7 +79,7 @@ def answer_mode(query: str, results: list[SearchResult]) -> str:
         source_path = r.metadata.get("source_path", "?")
         line_start = r.metadata.get("line_start", "?")
         line_end = r.metadata.get("line_end", "?")
-        match_pct = (1.0 - r.distance) * 100
+        match_pct = max(0.0, 1.0 - r.distance) * 100
         line_ref = f"{line_start}-{line_end}" if line_end != "?" else str(line_start)
         footer_lines.append(f"{i}: {source_path}:{line_ref} ({match_pct:.1f}% match)")
 

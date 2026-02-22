@@ -102,7 +102,13 @@ def search_cross_corpus(
 
 def _mxbai_client(api_key: str):
     """Return a Mixedbread client."""
-    from mixedbread import Mixedbread
+    try:
+        from mixedbread import Mixedbread
+    except ImportError as exc:
+        raise ImportError(
+            "The 'mixedbread' package is required for --mxbai. "
+            "Install it with: pip install mixedbread"
+        ) from exc
     return Mixedbread(api_key=api_key)
 
 
@@ -124,7 +130,7 @@ def fetch_mxbai_results(
         try:
             response = client.stores.search(store_id=store_id, query=query, top_k=per_k)
         except Exception:
-            _log.warning("Mixedbread store %s unavailable — skipping", store_id)
+            _log.warning("Mixedbread store unavailable, skipping", store_id=store_id)
             continue
         for chunk in response.chunks:
             _digest = hashlib.sha256(chunk.content.text.encode()).hexdigest()[:16]

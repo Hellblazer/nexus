@@ -159,6 +159,16 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
         # Compute content hash once per file (reused across all chunks of the file)
         content_hash = _hl.sha256(content.encode()).hexdigest()
 
+        # Staleness check: skip if content_hash matches what's already indexed
+        col = db.get_or_create_collection(collection_name)
+        existing = col.get(
+            where={"source_path": str(file)},
+            include=["metadatas"],
+        )
+        if existing["metadatas"]:
+            if existing["metadatas"][0].get("content_hash") == content_hash:
+                continue
+
         chunks = chunk_file(file, content)
         total_chunks = len(chunks)
         for i, chunk in enumerate(chunks):
@@ -176,7 +186,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
                 "indexed_at": now_iso,
                 "expires_at": "",
                 "ttl_days": 0,
-                "source_path": str(file.relative_to(repo)),
+                "source_path": str(file),
                 # Line range — spec names
                 "line_start": chunk["line_start"],
                 "line_end": chunk["line_end"],
