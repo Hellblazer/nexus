@@ -8,7 +8,7 @@ This directory contains shared resources used across multiple agents.
 
 ## Usage Pattern
 
-All 16 agents now reference this shared Context Protocol using:
+All 15 agents now reference this shared Context Protocol using:
 
 ```markdown
 ## Context Protocol

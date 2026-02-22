@@ -4,8 +4,8 @@ description: >
   Validate test coverage and quality after implementation. Triggers: finishing feature,
   after fixing a bug, before merge/PR, user says "check tests" or "validate coverage",
   CI/CD check needed, verifying code has adequate tests.
+# See ../../registry.yaml for full agent metadata
 allowed-tools: Task, Read, Glob, Grep, Bash
-# See ~/.claude/registry.yaml for full agent metadata
 ---
 
 # Test Validation Skill

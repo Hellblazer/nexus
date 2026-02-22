@@ -4,9 +4,9 @@ description: >
   Design comprehensive Java architecture and create phased execution plans. Triggers when:
   starting complex features requiring architectural design, planning multi-phase implementations,
   before major refactoring, or when system design decisions are needed.
+# See ../../registry.yaml for full agent metadata
 allowed-tools: Task, Read, Glob, Grep, Bash, LSP
 memory: project
-# See ~/.claude/registry.yaml for full agent metadata
 ---
 
 # Java Architecture Skill

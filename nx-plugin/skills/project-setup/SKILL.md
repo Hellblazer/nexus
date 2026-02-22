@@ -3,8 +3,8 @@ name: project-setup
 description: >
   Create project management infrastructure for multi-week projects. Triggers:
   starting projects over 3 weeks, requiring phase tracking, user says "set up project".
+# See ../../registry.yaml for full agent metadata
 allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
-# See ~/.claude/registry.yaml for full agent metadata
 ---
 
 # Project Setup Skill

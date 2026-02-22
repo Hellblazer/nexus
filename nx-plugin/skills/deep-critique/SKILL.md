@@ -5,9 +5,9 @@ description: >
   reviewing architectural decisions, validating implementations against specs,
   verifying claims against evidence, comprehensive system audits.
   (Workaround for substantive-critic framework bug)
+# See ../../registry.yaml for full agent metadata
 allowed-tools: Task, Read, Glob, Grep, Bash
 memory: user
-# See ~/.claude/registry.yaml for full agent metadata
 ---
 
 # Deep Critique Skill

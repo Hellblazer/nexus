@@ -3,8 +3,8 @@ name: pdf-processing
 description: >
   Process PDF files into nx store for semantic search. Triggers: user says "index PDF",
   importing technical documentation, PDFs need semantic indexing.
+# See ../../registry.yaml for full agent metadata
 allowed-tools: Task, Read, Glob, Grep, Bash
-# See ~/.claude/registry.yaml for full agent metadata
 ---
 
 # PDF Processing Skill

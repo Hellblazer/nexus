@@ -4,9 +4,9 @@ description: >
   Create implementation plans before development. Triggers: user says "implement feature",
   "add functionality", "build component", starting new epic, before multi-step development,
   user says "plan this", before architectural changes, breaking down complex work.
+# See ../../registry.yaml for full agent metadata
 allowed-tools: Task, Read, Glob, Grep, Bash
 memory: project
-# See ~/.claude/registry.yaml for full agent metadata
 ---
 
 # Strategic Planning Skill

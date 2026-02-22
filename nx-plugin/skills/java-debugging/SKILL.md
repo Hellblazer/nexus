@@ -4,9 +4,9 @@ description: >
   Debug Java failures using hypothesis-driven investigation. Triggers when:
   test fails, NullPointerException, ClassCastException, ConcurrentModificationException,
   after 2+ failed fix attempts, non-deterministic behavior, or stack trace analysis needed.
+# See ../../registry.yaml for full agent metadata
 allowed-tools: Task, Read, Glob, Grep, Bash, LSP
 memory: project
-# See ~/.claude/registry.yaml for full agent metadata
 ---
 
 # Java Debugging Skill

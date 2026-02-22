@@ -1,0 +1,443 @@
+# registry.yaml - Single source of truth for agent/skill architecture
+# Version 2.0 - Ported to nx-plugin (Nexus T1/T2/T3 storage, no ChromaDB/allPepper MCP)
+#
+# This registry defines all agents, skills, pipelines, and naming conventions.
+# Skills reference this file via ../../registry.yaml rather than duplicating metadata.
+
+version: "2.0"
+
+# Files that derive content from this registry
+generated_docs:
+  - skills/*/SKILL.md # Agent details, related skills sections
+
+# =============================================================================
+# AGENTS
+# =============================================================================
+# Each agent maps to a skill directory and slash command.
+# Model options: opus (complex reasoning), sonnet (balanced), haiku (fast/cheap)
+
+agents:
+  code-review-expert:
+    model: sonnet
+    version: "2.0"
+    color: purple
+    skill: code-review
+    slash_command: /code-review
+    description: "Reviews code for quality, security, and best practices"
+    triggers:
+      - "after feature completion"
+      - "before pull request"
+      - "after refactoring"
+      - "after modifying 10+ lines"
+    strengths:
+      - "Pattern recognition"
+      - "Security analysis"
+      - "Best practices validation"
+    typical_runtime: "15-30 seconds per file"
+    predecessors: [java-developer]
+    successors: [test-validator]
+
+  codebase-deep-analyzer:
+    model: sonnet
+    version: "2.0"
+    color: amber
+    skill: codebase-analysis
+    slash_command: /analyze-code
+    description: "Analyzes codebase structure, patterns, and architecture"
+    triggers:
+      - "exploring new codebase"
+      - "onboarding to project"
+      - "before major refactoring"
+      - "understanding module structure"
+    strengths:
+      - "Architecture patterns"
+      - "Dependency analysis"
+      - "Technical debt identification"
+    typical_runtime: "30-60 seconds"
+    predecessors: []
+    successors: [strategic-planner]
+
+  deep-analyst:
+    model: opus
+    version: "2.0"
+    color: blue
+    skill: deep-analysis
+    slash_command: /deep-analysis
+    description: "Thorough analysis of complex problems and system relationships"
+    triggers:
+      - "investigating performance mysteries"
+      - "debugging multi-component interactions"
+      - "understanding complex system behavior"
+      - "surface-level analysis insufficient"
+    strengths:
+      - "Root cause analysis"
+      - "Cross-cutting concerns"
+      - "System behavior modeling"
+    typical_runtime: "60-120 seconds"
+    predecessors: [codebase-deep-analyzer]
+    successors: [strategic-planner]
+
+  deep-research-synthesizer:
+    model: sonnet
+    version: "2.0"
+    color: teal
+    skill: research-synthesis
+    slash_command: /research
+    description: "Research across multiple sources with knowledge synthesis"
+    triggers:
+      - "researching new topic or technology"
+      - "investigating best practices"
+      - "comparing approaches"
+      - "building comprehensive understanding"
+    strengths:
+      - "Multi-source synthesis"
+      - "Technology comparison"
+      - "Best practice discovery"
+    typical_runtime: "45-90 seconds"
+    predecessors: []
+    successors: [knowledge-tidier]
+
+  java-architect-planner:
+    model: opus
+    version: "2.0"
+    color: green
+    skill: java-architecture
+    slash_command: /java-architecture
+    description: "Designs Java architecture and creates phased execution plans"
+    triggers:
+      - "starting complex features requiring architectural design"
+      - "planning multi-phase implementations"
+      - "before major refactoring"
+      - "system design decisions needed"
+    strengths:
+      - "Architecture design"
+      - "Phase planning"
+      - "Integration patterns"
+    typical_runtime: "60-120 seconds"
+    predecessors: [strategic-planner, plan-auditor]
+    successors: [java-developer]
+
+  java-debugger:
+    model: opus
+    version: "2.0"
+    color: red
+    skill: java-debugging
+    slash_command: /java-debug
+    description: "Hypothesis-driven debugging for Java failures"
+    triggers:
+      - "test failures"
+      - "NullPointerException"
+      - "ClassCastException"
+      - "after 2+ failed fix attempts"
+      - "non-deterministic behavior"
+    strengths:
+      - "Hypothesis generation"
+      - "Root cause isolation"
+      - "Stack trace analysis"
+    typical_runtime: "30-90 seconds"
+    predecessors: []
+    successors: [java-developer]
+
+  java-developer:
+    model: sonnet
+    version: "2.0"
+    color: cyan
+    skill: java-development
+    slash_command: /java-implement
+    description: "TDD implementation with test-first methodology"
+    triggers:
+      - "plan approved by plan-auditor"
+      - "user says implement"
+      - "bead status is in_progress for implementation"
+      - "executing phase from plan"
+    strengths:
+      - "Test-first development"
+      - "Clean code practices"
+      - "Modern Java patterns"
+    typical_runtime: "varies by complexity"
+    predecessors: [plan-auditor, java-architect-planner]
+    successors: [code-review-expert, test-validator]
+
+  knowledge-tidier:
+    model: haiku
+    version: "2.0"
+    color: mint
+    skill: knowledge-tidying
+    slash_command: /knowledge-tidy
+    description: "Persists and organizes knowledge in nx store (T3)"
+    triggers:
+      - "research-synthesis completes"
+      - "major investigation concludes"
+      - "valuable insights discovered"
+      - "consolidating cross-session information"
+    strengths:
+      - "Knowledge organization"
+      - "nx store management"
+      - "Deduplication"
+    typical_runtime: "15-30 seconds"
+    predecessors: [deep-research-synthesizer]
+    successors: []
+
+  orchestrator:
+    model: haiku
+    version: "2.0"
+    color: gold
+    skill: orchestration
+    slash_command: /orchestrate
+    description: "Routes requests to appropriate specialized agents"
+    triggers:
+      - "task is ambiguous about which agent to use"
+      - "coordinating work across multiple agents"
+      - "workflow routing needed"
+    strengths:
+      - "Agent selection"
+      - "Pipeline coordination"
+      - "Routing decisions"
+    typical_runtime: "5-15 seconds"
+    predecessors: []
+    successors: [] # Routes to any agent
+
+  pdf-chromadb-processor:
+    model: haiku
+    version: "2.0"
+    color: coral
+    skill: pdf-processing
+    slash_command: /pdf-process
+    description: "Processes PDF files into nx store for semantic search"
+    triggers:
+      - "user says index PDF"
+      - "importing technical documentation"
+      - "PDFs need semantic indexing"
+    strengths:
+      - "PDF extraction"
+      - "Chunk optimization"
+      - "Metadata preservation"
+    typical_runtime: "30-60 seconds per PDF"
+    predecessors: []
+    successors: []
+
+  plan-auditor:
+    model: sonnet
+    version: "2.0"
+    color: orange
+    skill: plan-validation
+    slash_command: /plan-audit
+    description: "Validates implementation plans before execution"
+    triggers:
+      - "strategic-planner completes a plan"
+      - "before starting implementation"
+      - "reviewing existing plan"
+    strengths:
+      - "Plan validation"
+      - "Risk identification"
+      - "Codebase alignment"
+    typical_runtime: "30-60 seconds"
+    predecessors: [strategic-planner]
+    successors: [java-architect-planner, java-developer]
+
+  project-management-setup:
+    model: haiku
+    version: "2.0"
+    color: sage
+    skill: project-setup
+    slash_command: /project-setup
+    description: "Creates project management infrastructure for multi-week projects"
+    triggers:
+      - "starting projects over 3 weeks"
+      - "requiring phase tracking"
+      - "systematic tracking needed"
+    strengths:
+      - "PM infrastructure"
+      - "Phase definition"
+      - "Tracking systems"
+    typical_runtime: "30-60 seconds"
+    predecessors: []
+    successors: [strategic-planner]
+
+  strategic-planner:
+    model: opus
+    version: "2.1"  # v2.1: Enhanced bead integration and phase decomposition
+    color: indigo
+    skill: strategic-planning
+    slash_command: /plan
+    description: "Creates implementation plans before development"
+    triggers:
+      - "user says implement feature"
+      - "starting new epic"
+      - "before multi-step development"
+      - "before architectural changes"
+    strengths:
+      - "Task decomposition"
+      - "Dependency identification"
+      - "Risk assessment"
+    typical_runtime: "45-90 seconds"
+    predecessors: [codebase-deep-analyzer]
+    successors: [plan-auditor]
+
+  deep-critic:
+    model: sonnet
+    version: "2.0"
+    color: teal
+    skill: deep-critique
+    slash_command: /deep-critique
+    description: "Deep constructive critique (workaround for substantive-critic framework bug)"
+    triggers:
+      - "reviewing architectural decisions"
+      - "validating implementations against specs"
+      - "verifying claims against evidence"
+      - "comprehensive system audit"
+    strengths:
+      - "Structural analysis"
+      - "Logic validation"
+      - "Gap identification"
+    typical_runtime: "30-60 seconds"
+    predecessors: []
+    successors: []
+
+  test-validator:
+    model: sonnet
+    version: "2.0"
+    color: lime
+    skill: test-validation
+    slash_command: /test-validate
+    description: "Validates test coverage and quality after implementation"
+    triggers:
+      - "finishing feature implementation"
+      - "after fixing a bug"
+      - "before merge or pull request"
+      - "CI/CD check needed"
+    strengths:
+      - "Coverage analysis"
+      - "Test quality assessment"
+      - "Gap identification"
+    typical_runtime: "30-60 seconds"
+    predecessors: [java-developer, code-review-expert]
+    successors: []
+
+# =============================================================================
+# STANDALONE SKILLS
+# =============================================================================
+# Skills that provide guidance directly without delegating to an agent.
+# Different structure from agents: has 'tools' field instead of 'model',
+# no predecessors/successors (not part of agent pipelines).
+
+standalone_skills:
+  cli-controller:
+    description: "Expert guidance for controlling interactive CLI applications using tmux-cli"
+    triggers:
+      - "interactive debugging (pdb, gdb, jshell)"
+      - "spawning Claude Code instances"
+      - "long-running interactive processes"
+      - "REPL sessions"
+    tools: [Bash, Read, Write]
+
+  nexus:
+    description: "Nexus CLI reference for nx search, nx store, nx memory, nx pm"
+    triggers:
+      - "using nx commands"
+      - "searching knowledge base"
+      - "storing findings"
+      - "managing session memory"
+    tools: [Bash, Read]
+
+# =============================================================================
+# PIPELINES
+# =============================================================================
+# Common agent sequences for different work types
+
+pipelines:
+  feature:
+    description: "Full feature development from planning to validation"
+    sequence:
+      - strategic-planner
+      - plan-auditor
+      - java-architect-planner
+      - java-developer
+      - code-review-expert
+      - test-validator
+
+  bug:
+    description: "Bug investigation and fix with review"
+    sequence:
+      - java-debugger
+      - java-developer
+      - code-review-expert
+      - test-validator
+
+  research:
+    description: "Research with knowledge persistence"
+    sequence:
+      - deep-research-synthesizer
+      - knowledge-tidier
+
+  onboarding:
+    description: "New codebase understanding"
+    sequence:
+      - codebase-deep-analyzer
+      - strategic-planner
+
+  architecture:
+    description: "Architectural design and planning"
+    sequence:
+      - codebase-deep-analyzer
+      - deep-analyst
+      - strategic-planner
+      - plan-auditor
+      - java-architect-planner
+
+# =============================================================================
+# NAMING ALIASES
+# =============================================================================
+# Document intentional mismatches between slash commands and skill directories
+# These are NOT bugs - they're deliberate choices for usability
+
+naming_aliases:
+  # Format: slash_command -> skill_directory (reason)
+  /java-implement: java-development    # Action-oriented naming
+  /java-debug: java-debugging          # Shorter, memorable
+  /plan: strategic-planning            # Brevity
+  /research: research-synthesis        # Common usage
+  /knowledge-tidy: knowledge-tidying   # Verb form preference
+  /test-validate: test-validation      # Verb form preference
+  /plan-audit: plan-validation         # Action-oriented
+  /orchestrate: orchestration          # Verb form preference
+  /pdf-process: pdf-processing         # Verb form preference
+  /analyze-code: codebase-analysis     # Different naming convention
+
+# =============================================================================
+# MODEL DISTRIBUTION
+# =============================================================================
+# Summary for quick reference
+
+model_summary:
+  opus: # Complex reasoning, architecture, debugging
+    - strategic-planner
+    - java-architect-planner
+    - java-debugger
+    - deep-analyst
+  sonnet: # Balanced - most common agents
+    - code-review-expert
+    - codebase-deep-analyzer
+    - deep-critic
+    - deep-research-synthesizer
+    - java-developer
+    - plan-auditor
+    - test-validator
+  haiku: # Fast, cheap - utility agents
+    - knowledge-tidier
+    - orchestrator
+    - pdf-chromadb-processor
+    - project-management-setup
+
+# =============================================================================
+# LIFECYCLE
+# =============================================================================
+
+lifecycle:
+  deprecation:
+    enabled: false
+  testing:
+    smoke_test: "Invoke each skill, verify no errors"
+    integration_test: "Run feature pipeline end-to-end"
+  metrics:
+    track_invocations: false

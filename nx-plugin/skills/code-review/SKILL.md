@@ -4,9 +4,9 @@ description: >
   Review code for quality, security, and best practices. Triggers when:
   completing feature implementation, fixing bugs, refactoring code,
   after git commit, before pull request, when code quality check is needed.
+# See ../../registry.yaml for full agent metadata
 allowed-tools: Task, Read, Glob, Grep, Bash
 memory: user
-# See ~/.claude/registry.yaml for full agent metadata
 ---
 
 # Code Review Skill

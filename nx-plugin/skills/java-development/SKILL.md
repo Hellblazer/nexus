@@ -3,9 +3,9 @@ name: java-development
 description: >
   Implement Java features using TDD methodology. Triggers: plan approved,
   user says "implement", bead in_progress for implementation, executing plan phase.
+# See ../../registry.yaml for full agent metadata
 allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash, LSP
 memory: project
-# See ~/.claude/registry.yaml for full agent metadata
 ---
 
 # Java Development Skill

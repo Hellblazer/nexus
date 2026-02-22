@@ -5,8 +5,8 @@ description: >
   Expert guidance for controlling interactive CLI applications using tmux-cli.
   Triggers: debugging Python/Java interactively, spawning Claude Code instances,
   long-running interactive processes, web application testing with browser automation.
+# See ../../registry.yaml for standalone skill metadata
 allowed-tools: Bash, Read, Write
-# See ~/.claude/registry.yaml for standalone skill metadata
 ---
 
 # CLI Controller Skill
