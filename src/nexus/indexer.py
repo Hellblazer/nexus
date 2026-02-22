@@ -36,7 +36,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     import os
 
     from nexus.chunker import chunk_file
-    from nexus.frecency import compute_frecency
+    from nexus.frecency import batch_frecency
     from nexus.ripgrep_cache import build_cache
 
     info = registry.get(repo)
@@ -45,6 +45,9 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
 
     collection_name = info["collection"]
 
+    # Compute frecency scores in a single git log pass
+    frecency_map = batch_frecency(repo)
+
     # Gather all text files with frecency scores
     scored: list[tuple[float, Path]] = []
     for path in sorted(repo.rglob("*")):
@@ -52,7 +55,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
             continue
         if any(part.startswith(".") for part in path.relative_to(repo).parts):
             continue  # Skip hidden dirs/files
-        score = compute_frecency(repo, path)
+        score = frecency_map.get(path, 0.0)
         scored.append((score, path))
 
     # Sort descending by frecency

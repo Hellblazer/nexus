@@ -195,6 +195,14 @@ class T3Database:
             result.append({"name": name, "count": col.count()})
         return result
 
+    def collection_exists(self, name: str) -> bool:
+        """Return True if the collection already exists in T3 (no create side-effect)."""
+        try:
+            self._client.get_collection(name)
+            return True
+        except Exception:
+            return False
+
     def delete_collection(self, name: str) -> None:
         """Delete a T3 collection entirely."""
         self._client.delete_collection(name)

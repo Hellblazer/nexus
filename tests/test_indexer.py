@@ -59,7 +59,7 @@ def test_run_index_raises_credentials_missing_without_credentials(
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 
-    with patch("nexus.frecency.compute_frecency", return_value=1.0):
+    with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.db.t3.T3Database") as mock_t3:
                 with pytest.raises(CredentialsMissingError):
@@ -104,7 +104,7 @@ def test_cache_path_includes_repo_hash(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 
-    with patch("nexus.frecency.compute_frecency", return_value=0.0):
+    with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache", side_effect=fake_build_cache):
             with pytest.raises(CredentialsMissingError):
                 _run_index(repo_a, registry)
@@ -133,16 +133,16 @@ def test_run_index_skips_hidden_files(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 
-    seen: list[Path] = []
+    # Capture paths that make it into the scored list via build_cache
+    seen_paths: list[Path] = []
 
-    def fake_frecency(r: Path, f: Path) -> float:
-        seen.append(f)
-        return 1.0
+    def fake_build_cache(repo_: Path, cache_path: Path, scored: list) -> None:
+        seen_paths.extend(f for _, f in scored)
 
-    with patch("nexus.frecency.compute_frecency", side_effect=fake_frecency):
-        with patch("nexus.ripgrep_cache.build_cache"):
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache", side_effect=fake_build_cache):
             with pytest.raises(CredentialsMissingError):
                 _run_index(repo, registry)
 
-    assert all(".git" not in str(p) for p in seen), f"Hidden files were not filtered: {seen}"
-    assert any("main.py" in str(p) for p in seen)
+    assert all(".git" not in str(p) for p in seen_paths), f"Hidden files were not filtered: {seen_paths}"
+    assert any("main.py" in str(p) for p in seen_paths)

@@ -47,3 +47,45 @@ def compute_frecency(repo: Path, file: Path) -> float:
         days = (now - ts) / 86400.0
         total += math.exp(-0.01 * days)
     return total
+
+
+def batch_frecency(repo: Path) -> dict[Path, float]:
+    """Return frecency scores for all committed files in *repo*.
+
+    Runs a single ``git log`` subprocess rather than one per file.
+    Returns a mapping from absolute file path to score.
+    Files with no commits map to 0.0 (callers should use `.get(path, 0.0)`).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--format=COMMIT %ct", "--name-only"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        _log.warning("git log timed out for %s — returning empty frecency map", repo)
+        return {}
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+
+    now = datetime.now(UTC).timestamp()
+    scores: dict[Path, float] = {}
+    current_ts: float | None = None
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("COMMIT "):
+            try:
+                current_ts = float(line[7:])
+            except ValueError:
+                current_ts = None
+        elif current_ts is not None:
+            file_path = repo / line
+            days = (now - current_ts) / 86400.0
+            scores[file_path] = scores.get(file_path, 0.0) + math.exp(-0.01 * days)
+
+    return scores

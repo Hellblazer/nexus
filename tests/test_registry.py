@@ -146,3 +146,25 @@ def test_registry_concurrent_reads_and_writes(tmp_path: Path) -> None:
     assert errors == [], f"Concurrent access raised: {errors}"
     # All writers completed — 10 repos should be registered
     assert len(reg.all()) == 10
+
+
+# ── nexus-bgv: get() returns a copy, not a mutable reference ─────────────────
+
+def test_registry_get_returns_copy_not_reference(tmp_path: Path) -> None:
+    """registry.get() returns a copy; mutating it does not corrupt the registry."""
+    reg = RepoRegistry(tmp_path / "repos.json")
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    reg.add(repo)
+
+    entry = reg.get(repo)
+    assert entry is not None
+
+    # Mutate the returned dict
+    entry["collection"] = "code__MUTATED"
+    entry["injected"] = True
+
+    # Internal state must be unchanged
+    fresh = reg.get(repo)
+    assert fresh["collection"] == "code__myrepo"
+    assert "injected" not in fresh

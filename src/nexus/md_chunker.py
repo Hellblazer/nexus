@@ -206,8 +206,11 @@ class SemanticMarkdownChunker:
                         )
                     )
                     chunk_index += 1
+                # Truncate oversized parts to prevent unbounded chunk sizes
+                if len(part_text) > self.max_chars:
+                    part_text = part_text[: self.max_chars]
                 current_parts = ([header_text, part_text] if header_text else [part_text])
-                current_tokens = (len(header_text) / _CHARS_PER_TOKEN if header_text else 0) + part_tokens
+                current_tokens = (len(header_text) / _CHARS_PER_TOKEN if header_text else 0) + len(part_text) / _CHARS_PER_TOKEN
 
         if current_parts:
             chunks.append(

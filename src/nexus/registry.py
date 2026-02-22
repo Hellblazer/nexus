@@ -42,7 +42,8 @@ class RepoRegistry:
     def get(self, repo: Path) -> dict[str, Any] | None:
         """Return registry entry for *repo*, or None if not registered."""
         with self._lock:
-            return self._data["repos"].get(str(repo))
+            entry = self._data["repos"].get(str(repo))
+            return dict(entry) if entry is not None else None
 
     def all(self) -> list[str]:
         """Return list of all registered repo paths."""

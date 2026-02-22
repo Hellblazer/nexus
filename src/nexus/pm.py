@@ -231,8 +231,11 @@ def pm_unblock(db: "T2Database", project: str, line: int) -> None:
         ln for ln in row["content"].splitlines() if ln.strip().startswith("-")
     ]
     idx = line - 1
-    if 0 <= idx < len(bullets):
-        bullets.pop(idx)
+    if idx < 0 or idx >= len(bullets):
+        raise IndexError(
+            f"No blocker at line {line}; only {len(bullets)} blocker(s) exist."
+        )
+    bullets.pop(idx)
     non_bullets = [
         ln for ln in row["content"].splitlines() if not ln.strip().startswith("-")
     ]
@@ -308,20 +311,20 @@ def pm_archive(
 
     t3 = _make_t3()
 
-    # Idempotency: check for existing synthesis
-    existing = t3.search(
-        "Archive",
-        [collection],
-        n_results=1,
+    # Idempotency: metadata-only check — no embedding API call (nexus-dqz)
+    col = t3.get_or_create_collection(collection)
+    existing = col.get(
         where={"store_type": {"$eq": "pm-archive"}},
+        include=["metadatas"],
     )
-    if existing:
-        prior = existing[0]
+    if existing["ids"]:
+        prior_meta = existing["metadatas"][0]
         if (
-            prior.get("pm_doc_count") == doc_count
-            and prior.get("pm_latest_timestamp") == max_ts
+            prior_meta.get("pm_doc_count") == doc_count
+            and prior_meta.get("pm_latest_timestamp") == max_ts
+            and len(existing["ids"]) >= prior_meta.get("chunk_total", 1)
         ):
-            # Current — skip synthesis, proceed to T2 decay
+            # Current and complete — skip synthesis, proceed to T2 decay
             db.decay_project(ns, archive_ttl)
             return
 
@@ -358,11 +361,10 @@ def pm_archive(
             "phase_count": phase_count,
             "pm_doc_count": doc_count,
             "pm_latest_timestamp": max_ts,
+            "chunk_total": len(chunks),
         }
         if len(chunks) > 1:
             extra_meta["chunk_index"] = i
-
-        col = t3.get_or_create_collection(collection)
         doc_id = hashlib.sha256(f"{collection}:{chunk_title}".encode()).hexdigest()[:16]
         from datetime import timedelta as _td
         now_iso = datetime.now(UTC).isoformat()
@@ -451,6 +453,8 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
         # Project-name path: metadata-only filter on collection for that project
         t3 = _make_t3()
         collection = f"knowledge__pm__{query}"
+        if not t3.collection_exists(collection):
+            return []
         col = t3.get_or_create_collection(collection)
         result = col.get(
             where={"store_type": {"$eq": "pm-archive"}},

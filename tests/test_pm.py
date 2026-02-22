@@ -204,7 +204,7 @@ def test_pm_archive_decays_t2_after_t3(db) -> None:
 
 
 def test_pm_archive_idempotent_skips_synthesis(db) -> None:
-    """pm_archive skips Haiku if T3 synthesis matches current T2 state."""
+    """pm_archive skips Haiku if T3 synthesis matches current T2 state (metadata-only check)."""
     pm_init(db, project="myrepo")
 
     # Count active docs and get max timestamp
@@ -213,16 +213,19 @@ def test_pm_archive_idempotent_skips_synthesis(db) -> None:
     rows = [db.get(project="myrepo_pm", title=e["title"]) for e in entries]
     max_ts = max(r["timestamp"] for r in rows if r)
 
-    existing_synthesis = {
-        "id": "existing-id",
-        "content": "# prior summary",
-        "store_type": "pm-archive",
-        "pm_doc_count": doc_count,
-        "pm_latest_timestamp": max_ts,
+    # The idempotency check now uses col.get() instead of t3.search()
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["existing-id"],
+        "metadatas": [{
+            "store_type": "pm-archive",
+            "pm_doc_count": doc_count,
+            "pm_latest_timestamp": max_ts,
+            "chunk_total": 1,
+        }],
     }
     mock_t3 = MagicMock()
-    mock_t3.search.return_value = [existing_synthesis]
-    mock_t3.put.return_value = "doc-id-2"
+    mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku") as mock_h:
         with patch("nexus.pm._make_t3", return_value=mock_t3):
@@ -459,3 +462,67 @@ def test_pm_phase_next_continuation_tag_increments_correctly(db) -> None:
     assert "phase:3" in (cont["tags"] or ""), (
         f"Expected 'phase:3' in tags, got: {cont['tags']!r}"
     )
+
+
+# ── nexus-dsu: pm_unblock raises IndexError on out-of-range line ──────────────
+
+def test_pm_unblock_raises_for_out_of_range_line(db) -> None:
+    """pm_unblock raises IndexError when line number exceeds blocker count."""
+    pm_init(db, project="myrepo")
+    pm_block(db, project="myrepo", blocker="blocker A")
+
+    with pytest.raises(IndexError, match="No blocker at line"):
+        pm_unblock(db, project="myrepo", line=99)
+
+
+def test_pm_unblock_raises_for_zero_line(db) -> None:
+    """pm_unblock raises IndexError for line=0 (1-based lines)."""
+    pm_init(db, project="myrepo")
+    pm_block(db, project="myrepo", blocker="blocker A")
+
+    with pytest.raises(IndexError):
+        pm_unblock(db, project="myrepo", line=0)
+
+
+# ── nexus-iyz: pm_archive writes chunk_total in metadata ─────────────────────
+
+def test_pm_archive_writes_chunk_total_in_metadata(db) -> None:
+    """pm_archive includes chunk_total in every chunk's metadata."""
+    pm_init(db, project="myrepo")
+
+    upserted_metadatas: list[dict] = []
+
+    mock_col = MagicMock()
+
+    def capture_upsert(ids, documents, metadatas):
+        upserted_metadatas.extend(metadatas)
+
+    mock_col.upsert.side_effect = capture_upsert
+    mock_col.get.return_value = {"ids": [], "metadatas": []}  # no prior synthesis
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    synthesis = "# Archive\n\n## Key Decisions\n- Used SQLite"
+    with patch("nexus.pm._synthesize_haiku", return_value=synthesis):
+        with patch("nexus.pm._make_t3", return_value=mock_t3):
+            pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
+
+    assert len(upserted_metadatas) >= 1
+    for meta in upserted_metadatas:
+        assert "chunk_total" in meta, "chunk_total missing from archive metadata"
+        assert meta["chunk_total"] == len(upserted_metadatas)
+
+
+# ── nexus-zii: pm_reference does not create empty collection ─────────────────
+
+def test_pm_reference_returns_empty_when_collection_does_not_exist(db) -> None:
+    """pm_reference returns [] for bare project name when T3 collection doesn't exist."""
+    mock_t3 = MagicMock()
+    mock_t3.collection_exists.return_value = False  # collection not yet created
+
+    with patch("nexus.pm._make_t3", return_value=mock_t3):
+        results = pm_reference(db, query="myrepo")
+
+    assert results == []
+    mock_t3.get_or_create_collection.assert_not_called()

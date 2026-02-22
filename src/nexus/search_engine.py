@@ -210,7 +210,11 @@ def fetch_mxbai_results(
     client = _mxbai_client(api_key)
     results: list[SearchResult] = []
     for store_id in stores:
-        response = client.stores.search(store_id=store_id, query=query, top_k=per_k)
+        try:
+            response = client.stores.search(store_id=store_id, query=query, top_k=per_k)
+        except Exception:
+            _log.warning("Mixedbread store %s unavailable — skipping", store_id)
+            continue
         for chunk in response.chunks:
             _digest = hashlib.sha256(chunk.content.text.encode()).hexdigest()[:16]
             results.append(SearchResult(
@@ -314,6 +318,8 @@ def _haiku_answer(query: str, results: list[SearchResult]) -> str:
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
+    if not msg.content:
+        return ""
     return msg.content[0].text
 
 

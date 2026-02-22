@@ -61,12 +61,13 @@ def config_set(key_value: str, value: str | None) -> None:
 
 @config_group.command("get")
 @click.argument("key")
-def config_get(key: str) -> None:
+@click.option("--show", is_flag=True, default=False, help="Reveal the full value instead of masking.")
+def config_get(key: str, show: bool) -> None:
     """Print the current value of a credential (env var takes precedence)."""
     key = key.strip().lower().replace("-", "_")
     val = get_credential(key)
     if val:
-        click.echo(val)
+        click.echo(val if show else _mask(val))
     else:
         click.echo(f"{key}: not set")
 
