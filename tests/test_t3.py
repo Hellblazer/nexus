@@ -359,3 +359,124 @@ def test_embedding_fn_different_names_not_confused(mock_chromadb: tuple) -> None
     assert r2 is ef_b
     assert r3 is ef_a
     assert mock_ef_cls.call_count == 2  # only 2 constructions, not 3
+
+
+# ── nexus-5n4: make_t3() factory ──────────────────────────────────────────────
+
+def test_make_t3_returns_t3database(mock_chromadb: tuple) -> None:
+    """make_t3() returns a T3Database instance."""
+    from nexus.db import make_t3
+
+    with patch("nexus.db.get_credential", side_effect=lambda k: f"val-{k}"):
+        db = make_t3()
+
+    assert isinstance(db, T3Database)
+
+
+def test_make_t3_uses_credentials(mock_chromadb: tuple) -> None:
+    """make_t3() passes all four credentials to T3Database."""
+    from nexus.db import make_t3
+
+    creds = {
+        "chroma_tenant": "my-tenant",
+        "chroma_database": "my-db",
+        "chroma_api_key": "ck-abc",
+        "voyage_api_key": "vk-xyz",
+    }
+    with patch("nexus.db.get_credential", side_effect=lambda k: creds.get(k, "")):
+        db = make_t3()
+
+    mock_chromadb[0].CloudClient.assert_called_once_with(
+        tenant="my-tenant", database="my-db", api_key="ck-abc"
+    )
+    assert db._voyage_api_key == "vk-xyz"
+
+
+def test_make_t3_client_injection(mock_chromadb: tuple) -> None:
+    """make_t3(_client=...) injects a test client, bypassing CloudClient."""
+    import chromadb as _chromadb
+    from nexus.db import make_t3
+
+    fake_client = MagicMock()
+    with patch("nexus.db.get_credential", return_value="x"):
+        db = make_t3(_client=fake_client)
+
+    # CloudClient should NOT have been called because _client was injected
+    mock_chromadb[0].CloudClient.assert_not_called()
+    assert db._client is fake_client
+
+
+# ── nexus-tyo: upsert_chunks() ────────────────────────────────────────────────
+
+def test_upsert_chunks_calls_col_upsert(mock_chromadb: tuple) -> None:
+    """upsert_chunks() calls col.upsert with the provided ids/docs/metadatas."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    db.upsert_chunks(
+        collection="code__myrepo",
+        ids=["id-1", "id-2"],
+        documents=["chunk one", "chunk two"],
+        metadatas=[{"title": "f.py:1-10"}, {"title": "f.py:11-20"}],
+    )
+
+    mock_col.upsert.assert_called_once_with(
+        ids=["id-1", "id-2"],
+        documents=["chunk one", "chunk two"],
+        metadatas=[{"title": "f.py:1-10"}, {"title": "f.py:11-20"}],
+    )
+
+
+def test_upsert_chunks_passes_all_metadata_fields(mock_chromadb: tuple) -> None:
+    """upsert_chunks() does not truncate or filter metadata — all fields pass through."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    rich_meta = {
+        "title": "f.py:1-5",
+        "tags": "py",
+        "category": "code",
+        "session_id": "",
+        "source_agent": "nexus-indexer",
+        "store_type": "code",
+        "indexed_at": "2026-01-01T00:00:00+00:00",
+        "expires_at": "",
+        "ttl_days": 0,
+        "source_path": "src/foo.py",
+        "start_line": 1,
+        "end_line": 5,
+        "frecency_score": 0.42,
+    }
+    db.upsert_chunks(
+        collection="code__myrepo",
+        ids=["abc123"],
+        documents=["def foo(): pass"],
+        metadatas=[rich_meta],
+    )
+
+    call_kwargs = mock_col.upsert.call_args.kwargs
+    assert call_kwargs["metadatas"][0] == rich_meta
+
+
+def test_upsert_chunks_uses_correct_embedding_fn(mock_chromadb: tuple) -> None:
+    """upsert_chunks() routes through get_or_create_collection for embedding selection."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vk")
+    db.upsert_chunks(
+        collection="docs__corpus",
+        ids=["d1"],
+        documents=["some text"],
+        metadatas=[{"source_path": "doc.pdf"}],
+    )
+
+    # Verify it went through get_or_create_collection (not a raw client call)
+    mock_client.get_or_create_collection.assert_called_once()
+    call_args = mock_client.get_or_create_collection.call_args
+    assert call_args.args[0] == "docs__corpus"

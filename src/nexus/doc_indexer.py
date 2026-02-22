@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nexus.db import make_t3
 from nexus.db.t3 import T3Database
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
@@ -19,16 +19,6 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: f.read(65536), b""):
             h.update(block)
     return h.hexdigest()
-
-
-def _make_t3() -> T3Database:
-    from nexus.config import get_credential
-    return T3Database(
-        tenant=get_credential("chroma_tenant"),
-        database=get_credential("chroma_database"),
-        api_key=get_credential("chroma_api_key"),
-        voyage_api_key=get_credential("voyage_api_key"),
-    )
 
 
 def _has_credentials() -> bool:
@@ -47,7 +37,7 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
 
     content_hash = _sha256(pdf_path)
     collection_name = f"docs__{corpus}"
-    db = _make_t3()
+    db = make_t3()
     col = db.get_or_create_collection(collection_name)
 
     # Incremental sync: skip if file is already indexed with the same hash
@@ -101,7 +91,7 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
         documents.append(chunk.text)
         metadatas.append(meta)
 
-    col.add(ids=ids, documents=documents, metadatas=metadatas)
+    db.upsert_chunks(collection=collection_name, ids=ids, documents=documents, metadatas=metadatas)
     return len(chunks)
 
 
@@ -116,7 +106,7 @@ def index_markdown(md_path: Path, corpus: str) -> int:
 
     content_hash = _sha256(md_path)
     collection_name = f"docs__{corpus}"
-    db = _make_t3()
+    db = make_t3()
     col = db.get_or_create_collection(collection_name)
 
     # Incremental sync
@@ -178,5 +168,5 @@ def index_markdown(md_path: Path, corpus: str) -> int:
         documents.append(chunk.text)
         metadatas.append(meta)
 
-    col.add(ids=ids, documents=documents, metadatas=metadatas)
+    db.upsert_chunks(collection=collection_name, ids=ids, documents=documents, metadatas=metadatas)
     return len(chunks)

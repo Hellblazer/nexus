@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -150,14 +149,8 @@ def round_robin_interleave(
 
 def _t3_for_search():
     """Create a T3Database from credentials."""
-    from nexus.config import get_credential
-    from nexus.db.t3 import T3Database
-    return T3Database(
-        tenant=get_credential("chroma_tenant"),
-        database=get_credential("chroma_database"),
-        api_key=get_credential("chroma_api_key"),
-        voyage_api_key=get_credential("voyage_api_key"),
-    )
+    from nexus.db import make_t3
+    return make_t3()
 
 
 def search_cross_corpus(

@@ -80,15 +80,9 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
         )
 
     from datetime import UTC, datetime as _dt
-    from nexus.db.t3 import T3Database
+    from nexus.db import make_t3
 
-    db = T3Database(
-        tenant=get_credential("chroma_tenant"),
-        database=get_credential("chroma_database") or "default",
-        api_key=chroma_key,
-        voyage_api_key=voyage_key,
-    )
-    col = db.get_or_create_collection(collection_name)
+    db = make_t3()
     now_iso = _dt.now(UTC).isoformat()
 
     for score, file in scored:
@@ -115,4 +109,9 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
                 "end_line": chunk["line_end"],
                 "frecency_score": float(score),
             }
-            col.upsert(ids=[doc_id], documents=[chunk["text"]], metadatas=[metadata])
+            db.upsert_chunks(
+                collection=collection_name,
+                ids=[doc_id],
+                documents=[chunk["text"]],
+                metadatas=[metadata],
+            )

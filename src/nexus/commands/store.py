@@ -5,6 +5,7 @@ from pathlib import Path
 import click
 
 from nexus.corpus import t3_collection_name
+from nexus.db import make_t3
 from nexus.db.t3 import T3Database
 from nexus.ttl import parse_ttl
 
@@ -30,9 +31,7 @@ def _t3() -> T3Database:
             "ChromaDB tenant/database not configured. "
             "Run 'nx config init' or set chroma_tenant/chroma_database via 'nx config set'."
         )
-    return T3Database(
-        tenant=tenant, database=database, api_key=api_key, voyage_api_key=voyage_api_key
-    )
+    return make_t3()
 
 
 @click.group()

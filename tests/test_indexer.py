@@ -61,11 +61,11 @@ def test_run_index_raises_credentials_missing_without_credentials(
 
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.db.t3.T3Database") as mock_t3:
+            with patch("nexus.db.make_t3") as mock_make_t3:
                 with pytest.raises(CredentialsMissingError):
                     _run_index(repo, registry)
 
-    mock_t3.assert_not_called()
+    mock_make_t3.assert_not_called()
 
 
 def test_index_sets_pending_credentials_when_missing(tmp_path: Path, registry) -> None:

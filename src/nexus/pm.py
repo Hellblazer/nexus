@@ -8,12 +8,13 @@ Archive synthesis lives in T3 ``knowledge__pm__{repo}`` (permanent, ttl=0).
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from nexus.db import make_t3
 
 if TYPE_CHECKING:
     from nexus.db.t2 import T2Database
@@ -48,18 +49,6 @@ _PM_SUFFIX = "_pm"
 
 def _project_ns(project: str) -> str:
     return project + _PM_SUFFIX
-
-
-def _make_t3() -> "T3Database":
-    """Create a T3Database from credentials."""
-    from nexus.config import get_credential
-    from nexus.db.t3 import T3Database
-    return T3Database(
-        tenant=get_credential("chroma_tenant"),
-        database=get_credential("chroma_database"),
-        api_key=get_credential("chroma_api_key"),
-        voyage_api_key=get_credential("voyage_api_key"),
-    )
 
 
 def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> str:
@@ -310,7 +299,7 @@ def pm_archive(
     doc_count = len(all_docs)
     max_ts = max(d.get("timestamp", "") for d in all_docs)
 
-    t3 = _make_t3()
+    t3 = make_t3()
 
     # Idempotency: metadata-only check — no embedding API call (nexus-dqz)
     col = t3.get_or_create_collection(collection)
@@ -381,7 +370,7 @@ def pm_archive(
             "ttl_days": 0,
             **extra_meta,
         }
-        col.upsert(ids=[doc_id], documents=[chunk], metadatas=[full_meta])
+        t3.upsert_chunks(collection=collection, ids=[doc_id], documents=[chunk], metadatas=[full_meta])
 
     # Phase 2: Decay T2 (only after T3 write succeeds)
     db.decay_project(ns, archive_ttl)
@@ -439,7 +428,7 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
     """Dispatch reference query to T3 semantic search or metadata-only filter."""
     if _is_semantic_query(query):
         # Semantic path: fan out to all knowledge__pm__ collections
-        t3 = _make_t3()
+        t3 = make_t3()
         clean_query = query.strip('"')
         pm_collections = _list_pm_collections(t3)
         if not pm_collections:
@@ -452,7 +441,7 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
         )
     else:
         # Project-name path: metadata-only filter on collection for that project
-        t3 = _make_t3()
+        t3 = make_t3()
         collection = f"knowledge__pm__{query}"
         if not t3.collection_exists(collection):
             return []
