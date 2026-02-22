@@ -1,6 +1,8 @@
 """AC1: nx serve start/stop/status/logs — PID file lifecycle and stale PID detection."""
 import signal
+import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -272,3 +274,127 @@ def test_serve_start_passes_port_from_config(runner: CliRunner, serve_home: Path
 
     cmd = mock_popen.call_args.args[0]
     assert cmd[-1] == "9999", f"Expected port '9999' in cmd, got {cmd}"
+
+
+# ── nexus-968: wire server stdout/stderr to serve.log ─────────────────────────
+
+def test_serve_start_passes_log_file_to_popen(runner: CliRunner, serve_home: Path) -> None:
+    """start_cmd opens serve.log in append mode and passes it as stdout and stderr."""
+    mock_proc = MagicMock()
+    mock_proc.pid = 42
+
+    with patch("nexus.commands.serve.subprocess.Popen", return_value=mock_proc) as mock_popen:
+        runner.invoke(main, ["serve", "start"])
+
+    call_kwargs = mock_popen.call_args.kwargs
+    # stdout and stderr should both be the same open file handle (not DEVNULL)
+    assert call_kwargs.get("stdout") is not subprocess.DEVNULL, (
+        "stdout should be a log file handle, not DEVNULL"
+    )
+    assert call_kwargs.get("stderr") is not subprocess.DEVNULL, (
+        "stderr should be a log file handle, not DEVNULL"
+    )
+    # Both should be the same file object
+    assert call_kwargs.get("stdout") is call_kwargs.get("stderr"), (
+        "stdout and stderr should be the same file handle"
+    )
+
+
+def test_serve_start_creates_log_file(runner: CliRunner, serve_home: Path) -> None:
+    """start_cmd creates the serve.log file (parent dirs created, file opened)."""
+    mock_proc = MagicMock()
+    mock_proc.pid = 42
+
+    log_path = _log_path(serve_home)
+    assert not log_path.exists(), "Pre-condition: log file should not exist yet"
+
+    with patch("nexus.commands.serve.subprocess.Popen", return_value=mock_proc):
+        result = runner.invoke(main, ["serve", "start"])
+
+    assert result.exit_code == 0
+    assert log_path.exists(), "serve.log should be created by start_cmd"
+
+
+def test_serve_logs_shows_content_from_log_file(runner: CliRunner, serve_home: Path) -> None:
+    """logs_cmd returns content from the log file when it exists."""
+    log_path = _log_path(serve_home)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("Server listening on port 8765\nIndexing /home/user/project\n")
+
+    result = runner.invoke(main, ["serve", "logs"])
+
+    assert result.exit_code == 0
+    assert "Server listening on port 8765" in result.output
+    assert "Indexing /home/user/project" in result.output
+
+
+# ── nexus-m6s: nx serve status shows uptime ───────────────────────────────────
+
+def test_serve_status_shows_uptime_when_start_file_exists(
+    runner: CliRunner, serve_home: Path
+) -> None:
+    """status_cmd includes an uptime line when serve.start file is present."""
+    import datetime
+
+    pid_path = _pid_path(serve_home)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("12345")
+
+    # Write a start timestamp 2 hours ago
+    start_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+    start_file = serve_home / ".config" / "nexus" / "serve.start"
+    start_file.write_text(start_time.isoformat())
+
+    with patch("nexus.commands.serve._process_running", return_value=True):
+        with patch(
+            "nexus.commands.serve.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("refused"),
+        ):
+            result = runner.invoke(main, ["serve", "status"])
+
+    assert result.exit_code == 0
+    output = result.output.lower()
+    # Must show uptime in some form (hours/minutes/seconds)
+    assert "uptime" in output or ("started" in output and ("h" in output or "m" in output)), (
+        f"Expected uptime info in output, got: {result.output!r}"
+    )
+
+
+def test_serve_status_no_uptime_without_start_file(runner: CliRunner, serve_home: Path) -> None:
+    """status_cmd does not crash and shows running status even if serve.start is absent."""
+    pid_path = _pid_path(serve_home)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("12345")
+
+    with patch("nexus.commands.serve._process_running", return_value=True):
+        with patch(
+            "nexus.commands.serve.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("refused"),
+        ):
+            result = runner.invoke(main, ["serve", "status"])
+
+    assert result.exit_code == 0
+    assert "12345" in result.output
+
+
+def test_serve_start_writes_start_timestamp_file(runner: CliRunner, serve_home: Path) -> None:
+    """start_cmd writes serve.start with an ISO timestamp."""
+    import datetime
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 42
+
+    before = datetime.datetime.now(datetime.timezone.utc)
+
+    with patch("nexus.commands.serve.subprocess.Popen", return_value=mock_proc):
+        result = runner.invoke(main, ["serve", "start"])
+
+    after = datetime.datetime.now(datetime.timezone.utc)
+
+    assert result.exit_code == 0
+    start_file = serve_home / ".config" / "nexus" / "serve.start"
+    assert start_file.exists(), "serve.start should be written by start_cmd"
+
+    ts_text = start_file.read_text().strip()
+    ts = datetime.datetime.fromisoformat(ts_text)
+    assert before <= ts <= after, f"Timestamp {ts} should be between {before} and {after}"

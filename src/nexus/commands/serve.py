@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx serve — start/stop/status/logs for the Nexus background server."""
+import datetime
 import errno
 import os
 import signal
@@ -23,6 +24,10 @@ def _pid_path() -> Path:
 
 def _log_path() -> Path:
     return _config_dir() / "serve.log"
+
+
+def _start_path() -> Path:
+    return _config_dir() / "serve.start"
 
 
 def _process_running(pid: int) -> bool:
@@ -76,14 +81,23 @@ def start_cmd() -> None:
         else:
             click.echo("Server start already in progress.")
         return
+    log_file = _log_path()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     try:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "nexus.server_main", str(port)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        log_fh = log_file.open("a")
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "nexus.server_main", str(port)],
+                stdout=log_fh,
+                stderr=log_fh,
+                start_new_session=True,
+            )
+        finally:
+            log_fh.close()  # parent closes; child inherits the fd
         pid_path.write_text(str(proc.pid))
+        _start_path().write_text(
+            datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
     except Exception:
         pid_path.unlink(missing_ok=True)
         raise
@@ -133,6 +147,19 @@ def stop_cmd() -> None:
     click.echo(f"Server stopped (PID {pid}).")
 
 
+def _format_uptime(started_at: datetime.datetime) -> str:
+    """Return a human-readable uptime string from a UTC start timestamp."""
+    delta = datetime.datetime.now(datetime.timezone.utc) - started_at
+    total_seconds = int(delta.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
 @serve.command("status")
 def status_cmd() -> None:
     """Show server status and per-repo indexing state."""
@@ -143,6 +170,15 @@ def status_cmd() -> None:
         click.echo("Server not running.")
         return
     click.echo(f"Server running (PID {pid}).")
+
+    start_file = _start_path()
+    if start_file.exists():
+        try:
+            started_at = datetime.datetime.fromisoformat(start_file.read_text().strip())
+            uptime = _format_uptime(started_at)
+            click.echo(f"Started: {started_at.isoformat()} (uptime: {uptime})")
+        except (ValueError, OSError):
+            pass
 
     port: int = load_config()["server"]["port"]
     try:

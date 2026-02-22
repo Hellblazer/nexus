@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import sys
+
 import click
 
 from nexus.commands.store import _t3
+from nexus.corpus import embedding_model_for_collection
 
 
 @click.group()
@@ -25,12 +28,24 @@ def list_cmd() -> None:
 @click.argument("name")
 def info_cmd(name: str) -> None:
     """Show details for a single collection."""
-    cols = _t3().list_collections()
+    db = _t3()
+    cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
         raise click.ClickException(f"Collection not found: {name}")
-    click.echo(f"Name:  {match['name']}")
-    click.echo(f"Docs:  {match['count']}")
+
+    model = embedding_model_for_collection(name)
+
+    col = db._client.get_collection(name)
+    result = col.get(include=["metadatas"])
+    metadatas: list[dict] = result.get("metadatas") or []
+    timestamps = [m["indexed_at"] for m in metadatas if m and "indexed_at" in m]
+    last_indexed = max(timestamps) if timestamps else "unknown"
+
+    click.echo(f"Collection: {match['name']}")
+    click.echo(f"Documents:  {match['count']}")
+    click.echo(f"Model:      {model}")
+    click.echo(f"Indexed:    {last_indexed}")
 
 
 @collection.command("delete")
@@ -46,11 +61,27 @@ def delete_cmd(name: str, yes: bool) -> None:
 
 @collection.command("verify")
 @click.argument("name")
-def verify_cmd(name: str) -> None:
+@click.option("--deep", is_flag=True, help="Run embedding probe query to verify index health")
+def verify_cmd(name: str, deep: bool) -> None:
     """Verify a collection exists and report its document count."""
     db = _t3()
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
         raise click.ClickException(f"Collection not found: {name}")
-    click.echo(f"Collection '{name}': {match['count']} documents — OK")
+
+    if not deep:
+        click.echo(f"Collection '{name}': {match['count']} documents — OK")
+        return
+
+    count = match["count"]
+    if count == 0:
+        click.echo(f"Warning: collection '{name}' is empty (0 documents) — skipping embedding probe")
+        return
+
+    try:
+        db.search(query="health check probe", collection_names=[name], n_results=1)
+        click.echo(f"Collection '{name}': {count} documents — embedding health OK")
+    except Exception as exc:
+        click.echo(f"Error: embedding probe failed for '{name}': {exc}", err=True)
+        sys.exit(1)
