@@ -740,215 +740,7 @@ The aspirational `search/` subpackage with separate `semantic.py`, `fulltext.py`
 `hybrid.py`, `cross_corpus.py`, `agentic.py`, and `mxbai.py` modules [v2-planned] does
 not exist. All search orchestration remains in `search_engine.py`.
 
----
-
-## Phased Implementation Plan
-
-> **SUPERSEDED**: The bead-by-bead execution plan has moved to `.pm/PLAN.md`, which is the single authoritative source for phase structure, bead IDs, and dependency tracking. The section below is **retained as structural context only** — bead IDs listed here (`nexus-5v7`, `nexus-c4b`, etc.) were superseded by the comprehensive plan in `.pm/PLAN.md`. Always use `.pm/PLAN.md` for tracking and AGENT_INSTRUCTIONS.md for the canonical bead reference.
-
-### Dependency Graph
-
-```
-Phase 1 (scaffold + T2)
-  |         \
-  v          v
-Phase 2    Phase 3 (T3)
-(T1)         |       \
-  |          v        v
-  |       Phase 4   Phase 5
-  |       (server)  (PDF/md)
-  |          \       /
-  |           v     v
-  |        Phase 6 (hybrid + rerank)
-  |            |
-  +------+     |
-         v     v
-       Phase 7 (PM + integration)
-```
-
-### Phase 1: Project Scaffold + T2 SQLite + nx memory CRUD
-**Bead:** `nexus-5v7` (status: open, ready)
-
-**Entry criteria:** None (starting point)
-
-**Deliverables:**
-- `pyproject.toml` with all dependencies (version-pinned)
-- `src/nexus/` package skeleton with `__init__.py`, `__main__.py`
-- `src/nexus/protocols/` with all Protocol definitions
-- `src/nexus/types.py` with Chunk, MemoryEntry, SearchResult dataclasses
-- `src/nexus/errors.py` with exception hierarchy
-- `src/nexus/config.py` with YAML loading and env var override
-- `src/nexus/storage/t2_sqlite.py` with full schema (WAL + FTS5 + triggers)
-- `src/nexus/cli/main.py` + `memory_cmd.py` with Click commands
-- `tests/` with pytest fixtures and T2 unit tests
-
-**Exit criteria:**
-- [ ] `pip install -e .` succeeds
-- [ ] `nx memory put "test" --project test --title test.md` writes to SQLite
-- [ ] `nx memory get --project test --title test.md` retrieves content
-- [ ] `nx memory search "test"` returns FTS5 results
-- [ ] `nx memory list --project test` lists entries
-- [ ] `nx memory expire` cleans up TTL-expired entries
-- [ ] All Protocol classes importable and type-checkable
-- [ ] pytest passes with >80% coverage on t2_sqlite.py
-
-### Phase 2: T1 EphemeralClient + nx scratch + Session ID
-**Bead:** `nexus-8zh` (blocked by: nexus-5v7)
-
-**Entry criteria:** Phase 1 complete (T2 working, protocols defined)
-
-**Deliverables:**
-- `src/nexus/session.py` with UUID4 generation and file management
-- `src/nexus/storage/t1_ephemeral.py` with EphemeralClient + DefaultEmbeddingFunction
-- `src/nexus/cli/scratch_cmd.py` with all scratch subcommands
-- `src/nexus/integration/claude_code/hooks.py` (SessionStart/SessionEnd logic)
-- Tests for T1 operations and session management
-
-**Exit criteria:**
-- [ ] Session ID generated and persisted to `~/.config/nexus/sessions/{getsid}.session`
-- [ ] `nx scratch put "content" --tags "test"` stores in T1
-- [ ] `nx scratch search "content"` returns semantic results (local ONNX)
-- [ ] `nx scratch flag <id>` marks for flush
-- [ ] `nx scratch promote <id> --project P --title T` copies to T2
-- [ ] `nx scratch clear` empties T1
-- [ ] SessionStart/SessionEnd hooks testable in isolation
-
-### Phase 3: T3 CloudClient + nx store + nx search (semantic)
-**Bead:** `nexus-evn` (blocked by: nexus-5v7)
-
-**Entry criteria:** Phase 1 complete (protocols and T2 working)
-
-**Deliverables:**
-- `src/nexus/storage/t3_cloud.py` with CloudClient + VoyageAIEmbeddingFunction
-- `src/nexus/cli/store_cmd.py` with `nx store` + `nx store expire`
-- `src/nexus/cli/search_cmd.py` with semantic search (single corpus)
-- `src/nexus/cli/collection_cmd.py` with list/info/delete/verify
-- `src/nexus/search/semantic.py` with basic ChromaDB query
-- `src/nexus/search/cross_corpus.py` with per-corpus retrieval + reranking
-- `src/nexus/search/scoring.py` with min_max_normalize
-- `src/nexus/formatting/plain.py` + `json_fmt.py`
-- `src/nexus/cli/doctor_cmd.py` with health checks
-- Tests with mocked ChromaDB and Voyage AI
-
-**Exit criteria:**
-- [ ] `nx store content --collection knowledge --tags "test"` upserts to T3
-- [ ] `nx search "query" --corpus knowledge` returns semantic results
-- [ ] `nx search "query" --corpus code --corpus docs` does cross-corpus reranking
-- [ ] `nx collection list` shows T3 collections
-- [ ] `nx doctor` validates API keys and connectivity
-- [ ] `nx store expire` removes expired knowledge entries (with guarded query)
-- [ ] `nx memory promote <id>` copies T2 entry to T3
-
-### Phase 4: nx serve (Flask/Waitress) + Code Indexing Pipeline
-**Bead:** `nexus-wjd` (blocked by: nexus-evn)
-
-**Entry criteria:** Phase 3 complete (T3 working, search operational)
-
-**Deliverables:**
-- `src/nexus/server/app.py` with Flask routes
-- `src/nexus/server/daemon.py` with PID management and daemonization
-- `src/nexus/server/registry.py` with repos.json management
-- `src/nexus/server/polling.py` with HEAD hash polling
-- `src/nexus/indexing/code/frecency.py` (ported from SeaGOAT)
-- `src/nexus/indexing/code/chunker.py` (llama-index CodeSplitter wrapper)
-- `src/nexus/indexing/code/ripgrep_cache.py` (ported from SeaGOAT)
-- `src/nexus/indexing/code/pipeline.py` orchestrating the above
-- `src/nexus/cli/serve_cmd.py` and `index_cmd.py` (code subcommand)
-- `src/nexus/integration/git_hooks.py` (post-commit hook)
-- Tests for frecency computation, chunking, server lifecycle
-
-**Exit criteria:**
-- [ ] `nx serve start` launches Flask/Waitress daemon
-- [ ] `nx serve status` shows running state
-- [ ] `nx index code /path/to/repo` registers repo and triggers indexing
-- [ ] Code chunks upserted to T3 `code__{repo}` with correct metadata
-- [ ] Ripgrep line cache built (path:line:content format)
-- [ ] HEAD polling detects changes and triggers re-index
-- [ ] `nx serve stop` gracefully shuts down
-- [ ] Frecency scores match SeaGOAT formula: sum(exp(-0.01 * days))
-
-### Phase 5: PDF/Markdown Indexing Pipelines
-**Bead:** `nexus-yut` (blocked by: nexus-evn)
-
-**Entry criteria:** Phase 3 complete (T3 and VoyageDocsEmbedding working)
-
-**Deliverables:**
-- `src/nexus/indexing/pdf/extractor.py` (ported from Arcaneum PDFExtractor)
-- `src/nexus/indexing/pdf/chunker.py` (ported from Arcaneum PDFChunker)
-- `src/nexus/indexing/pdf/ocr.py` (ported from Arcaneum OCREngine)
-- `src/nexus/indexing/pdf/pipeline.py` orchestrator
-- `src/nexus/indexing/markdown/chunker.py` (ported from Arcaneum SemanticMarkdownChunker)
-- `src/nexus/indexing/markdown/pipeline.py` orchestrator
-- `src/nexus/cli/index_cmd.py` additions (pdf and md subcommands)
-- Tests with sample PDFs and markdown files
-
-**Exit criteria:**
-- [ ] `nx index pdf /path/to/doc.pdf` extracts, chunks, embeds to T3 `docs__*`
-- [ ] PyMuPDF4LLM -> pdfplumber -> OCR fallback chain works
-- [ ] Type3 font detection prevents hangs
-- [ ] `nx index md /path/to/notes/` indexes markdown with frontmatter
-- [ ] SemanticMarkdownChunker preserves header context
-- [ ] Incremental sync via SHA256 content hashing
-- [ ] ChromaDB metadata matches schema (page_number, section_title, etc.)
-
-### Phase 6: Hybrid Search + Cross-corpus Reranking + Answer Mode
-**Bead:** `nexus-0sp` (blocked by: nexus-wjd, nexus-yut)
-
-**Entry criteria:** Phases 4 and 5 complete (code + docs indexed, ripgrep cache built)
-
-**Deliverables:**
-- `src/nexus/search/fulltext.py` with ripgrep line cache search
-- `src/nexus/search/hybrid.py` with hybrid scoring
-- `src/nexus/search/agentic.py` with multi-step Haiku refinement
-- `src/nexus/search/mxbai.py` with Mixedbread fan-out
-- `src/nexus/answer/synthesizer.py` with Haiku-based Q&A
-- `src/nexus/formatting/highlighted.py` (bat/pygments)
-- `src/nexus/formatting/vimgrep.py`
-- `src/nexus/formatting/citations.py`
-- Complete `src/nexus/cli/search_cmd.py` with all flags
-- Tests for hybrid scoring, reranking, answer synthesis
-
-**Exit criteria:**
-- [ ] `nx search "query" --hybrid` merges semantic + ripgrep results
-- [ ] Hybrid scoring: 0.7*vector_norm + 0.3*frecency_norm (code only)
-- [ ] `nx search "query" --corpus code --corpus docs` cross-corpus reranks
-- [ ] `nx search "query" -a` produces Haiku synthesis with <cite> formatting
-- [ ] `nx search "query" --agentic` does multi-step refinement (max 3 iterations)
-- [ ] `nx search "query" --mxbai` fans out to Mixedbread (when configured)
-- [ ] `--vimgrep`, `--json`, `--files`, `--no-color` formatters work
-- [ ] `-B`, `-A`, `-C` context lines work
-- [ ] `--no-rerank` falls back to round-robin interleave
-
-### Phase 7: nx pm Full Lifecycle + Claude Code Plugin Integration
-**Bead:** `nexus-wdm` (blocked by: nexus-0sp, nexus-8zh)
-
-**Entry criteria:** Phase 1, 3 complete (T2 SQLite + T3 CloudClient, basic search working). Note: the Claude Code plugin installer (nx install claude-code) additionally requires T1 scratch (Phase 2); that work is tracked as Phase 8 in `.pm/PLAN.md`.
-
-**Deliverables:**
-- `src/nexus/pm/lifecycle.py` with full state machine
-- `src/nexus/pm/templates.py` with embedded document templates
-- `src/nexus/pm/synthesis.py` with Haiku archive synthesis
-- `src/nexus/cli/pm_cmd.py` with all subcommands
-- `src/nexus/integration/claude_code/installer.py`
-- `src/nexus/integration/claude_code/skill_template.py`
-- `src/nexus/cli/install_cmd.py`
-- `src/nexus/cli/config_cmd.py`
-- Complete integration tests
-
-**Exit criteria:**
-- [ ] `nx pm init` creates 5 standard PM docs in T2
-- [ ] `nx pm resume` outputs CONTINUATION.md content
-- [ ] `nx pm status` shows phase, last-agent, blockers
-- [ ] `nx pm phase next` creates new phase doc and updates CONTINUATION.md
-- [ ] `nx pm search "query"` does FTS5 across PM docs (GLOB '*_pm')
-- [ ] `nx pm archive` synthesizes via Haiku -> T3 + decays T2
-- [ ] `nx pm restore` reverses decay within 90d window
-- [ ] `nx pm reference "query"` does semantic search on archived syntheses
-- [ ] `nx install claude-code` writes SKILL.md + hooks to ~/.claude/
-- [ ] SessionStart hook detects PM project and injects context
-- [ ] SessionEnd hook flushes flagged scratch + runs expire
-- [ ] `nx config show` and `nx config set` work
-- [ ] End-to-end integration test: index -> search -> answer -> store -> pm lifecycle
+> **Original Phased Implementation Plan**: Superseded. See [Appendix A](#appendix-a-original-phased-implementation-plan) for historical phase structure and bead IDs. Current authoritative plan: `.pm/PLAN.md`.
 
 ---
 
@@ -971,26 +763,6 @@ Phase 2    Phase 3 (T3)
 | 13 | **ripgrep not on PATH at install time** | Medium | Low (hybrid search silently unavailable) | `nx doctor` checks `which rg` and prints install instructions per platform. `nx serve start` logs a warning if ripgrep absent. Hybrid search gracefully falls back to semantic-only with a warning message (not an error). |
 | 14 | **SQLite WAL corruption under abnormal termination** | Low | High (T2 data inaccessible) | Run `PRAGMA integrity_check` on database open; abort with clear error if corrupt rather than continuing with broken state. Document recovery path: `sqlite3 nexus.db .dump > recovery.sql && sqlite3 nexus-new.db < recovery.sql`. |
 | 15 | **Daemon daemonization differs between macOS and Linux** | Low | Low (nx serve start behaves differently across platforms) | Use `subprocess.Popen(start_new_session=True)` for platform-portable session detachment instead of `os.fork()`. Document tested platforms in README. Add cross-platform CI jobs (ubuntu-latest, macos-latest) for serve lifecycle tests. |
-
----
-
-## Beads Summary
-
-| Phase | Bead ID | Status | Blocked By |
-|-------|---------|--------|------------|
-| Epic | `nexus-c4b` | open | - |
-| Phase 1: Scaffold + T2 + memory | `nexus-5v7` | open (ready) | - |
-| Phase 2: T1 + scratch + session | `nexus-8zh` | open | nexus-5v7 |
-| Phase 3: T3 + store + search | `nexus-evn` | open | nexus-5v7 |
-| Phase 4: Server + code indexing | `nexus-wjd` | open | nexus-evn |
-| Phase 5: PDF/markdown indexing | `nexus-yut` | open | nexus-evn |
-| Phase 6: Hybrid + rerank + answer | `nexus-0sp` | open | nexus-wjd, nexus-yut |
-| Phase 7: PM lifecycle + Claude Code | `nexus-wdm` | open | nexus-0sp, nexus-8zh |
-
-**Parallelizable phases:**
-- Phases 2 and 3 can proceed in parallel after Phase 1
-- Phases 4 and 5 can proceed in parallel after Phase 3
-- Phase 7 must wait for all prior phases
 
 ---
 
@@ -1020,3 +792,86 @@ Phase 2    Phase 3 (T3)
 
 7. **Lazy session ID**: Session ID is generated on first access, not at import time.
    This prevents errors when running commands that do not need a session (e.g., `nx config show`).
+
+---
+
+## Appendix A: Original Phased Implementation Plan
+
+> **SUPERSEDED**: This plan was the original scaffold for the project. The bead-by-bead execution plan has moved to `.pm/PLAN.md`, which is the single authoritative source for phase structure, bead IDs, and dependency tracking. Bead IDs listed here (`nexus-5v7`, `nexus-c4b`, etc.) were superseded by the comprehensive plan in `.pm/PLAN.md`. Always use `.pm/PLAN.md` for tracking and `AGENT_INSTRUCTIONS.md` for the canonical bead reference.
+
+### Dependency Graph
+
+```
+Phase 1 (scaffold + T2)
+  |         \
+  v          v
+Phase 2    Phase 3 (T3)
+(T1)         |       \
+  |          v        v
+  |       Phase 4   Phase 5
+  |       (server)  (PDF/md)
+  |          \       /
+  |           v     v
+  |        Phase 6 (hybrid + rerank)
+  |            |
+  +------+     |
+         v     v
+       Phase 7 (PM + integration)
+```
+
+### Phase Summary
+
+| Phase | Bead ID | Focus | Blocked By |
+|-------|---------|-------|------------|
+| Epic | `nexus-c4b` | Overall project epic | - |
+| 1 | `nexus-5v7` | Scaffold + T2 SQLite + nx memory | - |
+| 2 | `nexus-8zh` | T1 EphemeralClient + nx scratch + session | nexus-5v7 |
+| 3 | `nexus-evn` | T3 CloudClient + nx store + nx search | nexus-5v7 |
+| 4 | `nexus-wjd` | nx serve + code indexing pipeline | nexus-evn |
+| 5 | `nexus-yut` | PDF/markdown indexing pipelines | nexus-evn |
+| 6 | `nexus-0sp` | Hybrid search + reranking + answer mode | nexus-wjd, nexus-yut |
+| 7 | `nexus-wdm` | nx pm lifecycle + Claude Code integration | nexus-0sp, nexus-8zh |
+
+**Parallelizable phases:** 2+3 after Phase 1; 4+5 after Phase 3; Phase 7 last.
+
+### Phase 1: Project Scaffold + T2 SQLite + nx memory CRUD
+
+**Deliverables:** `pyproject.toml` (version-pinned), package skeleton, `protocols/` with all Protocol definitions, `types.py`, `errors.py`, `config.py`, `storage/t2_sqlite.py` (WAL + FTS5), `cli/main.py` + `memory_cmd.py`, tests.
+
+**Exit criteria:** `nx memory put/get/search/list/expire` all work; pytest >80% coverage on t2_sqlite.py.
+
+### Phase 2: T1 EphemeralClient + nx scratch + Session ID
+
+**Deliverables:** `session.py`, `storage/t1_ephemeral.py`, `cli/scratch_cmd.py`, `integration/claude_code/hooks.py`, tests.
+
+**Exit criteria:** Session ID written to `~/.config/nexus/sessions/{getsid}.session`; full `nx scratch` subcommand set working with local ONNX embeddings.
+
+### Phase 3: T3 CloudClient + nx store + nx search (semantic)
+
+**Deliverables:** `storage/t3_cloud.py`, `cli/store_cmd.py`, `cli/search_cmd.py`, `cli/collection_cmd.py`, `search/semantic.py`, `search/cross_corpus.py`, `search/scoring.py`, `formatting/plain.py` + `json_fmt.py`, `cli/doctor_cmd.py`, tests.
+
+**Exit criteria:** `nx store`, `nx search`, `nx collection list`, `nx doctor`, `nx store expire` (guarded query), `nx memory promote` all working.
+
+### Phase 4: nx serve (Flask/Waitress) + Code Indexing Pipeline
+
+**Deliverables:** `server/app.py`, `server/daemon.py`, `server/registry.py`, `server/polling.py`, `indexing/code/frecency.py`, `indexing/code/chunker.py`, `indexing/code/ripgrep_cache.py`, `indexing/code/pipeline.py`, `cli/serve_cmd.py`, `cli/index_cmd.py` (code), `integration/git_hooks.py`, tests.
+
+**Exit criteria:** Full `nx serve` lifecycle; `nx index code` registers repo + triggers indexing + builds ripgrep cache; HEAD polling detects changes; frecency matches SeaGOAT formula.
+
+### Phase 5: PDF/Markdown Indexing Pipelines
+
+**Deliverables:** `indexing/pdf/extractor.py`, `indexing/pdf/chunker.py`, `indexing/pdf/ocr.py`, `indexing/pdf/pipeline.py`, `indexing/markdown/chunker.py`, `indexing/markdown/pipeline.py`, `cli/index_cmd.py` additions (pdf, md), tests.
+
+**Exit criteria:** `nx index pdf` with PyMuPDF4LLM → pdfplumber → OCR fallback; Type3 font hang prevention; `nx index md` with SemanticMarkdownChunker; incremental sync via SHA256.
+
+### Phase 6: Hybrid Search + Cross-corpus Reranking + Answer Mode
+
+**Deliverables:** `search/fulltext.py`, `search/hybrid.py`, `search/agentic.py`, `search/mxbai.py`, `answer/synthesizer.py`, `formatting/highlighted.py`, `formatting/vimgrep.py`, `formatting/citations.py`, complete `cli/search_cmd.py`, tests.
+
+**Exit criteria:** `--hybrid`, cross-corpus reranking, `-a` answer mode with `<cite>` formatting, `--agentic` multi-step refinement, `--mxbai` fan-out, all output format flags (`--vimgrep`, `--json`, `-B/-A/-C`).
+
+### Phase 7: nx pm Full Lifecycle + Claude Code Plugin Integration
+
+**Deliverables:** `pm/lifecycle.py`, `pm/templates.py`, `pm/synthesis.py`, `cli/pm_cmd.py`, `integration/claude_code/installer.py`, `integration/claude_code/skill_template.py`, `cli/install_cmd.py`, `cli/config_cmd.py`, integration tests.
+
+**Exit criteria:** Full `nx pm` state machine (init → archive → restore); `nx install claude-code`; SessionStart/SessionEnd hooks; `nx config show/set`; end-to-end integration test.
