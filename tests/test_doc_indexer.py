@@ -35,20 +35,20 @@ def test_index_pdf_skips_without_credentials(sample_pdf, monkeypatch):
     """Without VOYAGE_API_KEY + CHROMA_API_KEY, returns 0 and never touches T3."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    with patch("nexus.doc_indexer.T3Database") as mock_t3:
+    with patch("nexus.doc_indexer.make_t3") as mock_factory:
         result = index_pdf(sample_pdf, corpus="test")
     assert result == 0
-    mock_t3.assert_not_called()
+    mock_factory.assert_not_called()
 
 
 def test_index_markdown_skips_without_credentials(sample_md, monkeypatch):
     """Without credentials, index_markdown returns 0."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    with patch("nexus.doc_indexer.T3Database") as mock_t3:
+    with patch("nexus.doc_indexer.make_t3") as mock_factory:
         result = index_markdown(sample_md, corpus="test")
     assert result == 0
-    mock_t3.assert_not_called()
+    mock_factory.assert_not_called()
 
 
 # ── SHA256 incremental sync ───────────────────────────────────────────────────
@@ -64,11 +64,13 @@ def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch):
         "metadatas": [{"content_hash": content_hash}],
     }
 
-    with patch("nexus.doc_indexer.T3Database") as mock_t3_class:
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
-            mock_t3 = MagicMock()
-            mock_t3_class.return_value = mock_t3
-            mock_t3.get_or_create_collection.return_value = mock_col
             result = index_pdf(sample_pdf, corpus="mybook")
 
     assert result == 0
@@ -89,13 +91,14 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch):
     mock_chunk.chunk_index = 0
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 18, "page_number": 1}
 
-    with patch("nexus.doc_indexer.T3Database") as mock_t3_class:
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
             with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
-                mock_t3 = MagicMock()
-                mock_t3_class.return_value = mock_t3
-                mock_t3.get_or_create_collection.return_value = mock_col
-
                 mock_extractor = MagicMock()
                 mock_extractor_class.return_value = mock_extractor
                 mock_extractor.extract.return_value = MagicMock(
@@ -152,12 +155,10 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch):
         "header_path": "Hello",
     }
 
-    with patch("nexus.doc_indexer.T3Database") as mock_t3_class:
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
-            mock_t3 = MagicMock()
-            mock_t3_class.return_value = mock_t3
-            mock_t3.get_or_create_collection.return_value = mock_col
-
             mock_chunker = MagicMock()
             mock_chunker_class.return_value = mock_chunker
             mock_chunker.chunk.return_value = [mock_chunk]
@@ -219,13 +220,11 @@ def test_index_pdf_sets_store_type_pdf(sample_pdf, monkeypatch):
     mock_chunk.chunk_index = 0
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 1}
 
-    with patch("nexus.doc_indexer.T3Database") as mock_t3_class:
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
             with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
-                mock_t3 = MagicMock()
-                mock_t3_class.return_value = mock_t3
-                mock_t3.get_or_create_collection.return_value = mock_col
-
                 mock_extractor = MagicMock()
                 mock_extractor_class.return_value = mock_extractor
                 mock_extractor.extract.return_value = MagicMock(
@@ -261,12 +260,10 @@ def test_index_markdown_sets_store_type_markdown(sample_md, monkeypatch):
     mock_chunk.chunk_index = 0
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 0, "header_path": "H"}
 
-    with patch("nexus.doc_indexer.T3Database") as mock_t3_class:
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
-            mock_t3 = MagicMock()
-            mock_t3_class.return_value = mock_t3
-            mock_t3.get_or_create_collection.return_value = mock_col
-
             mock_chunker = MagicMock()
             mock_chunker_class.return_value = mock_chunker
             mock_chunker.chunk.return_value = [mock_chunk]
@@ -312,12 +309,10 @@ def test_index_markdown_offsets_account_for_frontmatter(tmp_path: Path, monkeypa
         "header_path": "Hello",
     }
 
-    with patch("nexus.doc_indexer.T3Database") as mock_t3_class:
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
-            mock_t3 = MagicMock()
-            mock_t3_class.return_value = mock_t3
-            mock_t3.get_or_create_collection.return_value = mock_col
-
             mock_chunker = MagicMock()
             mock_chunker_class.return_value = mock_chunker
             mock_chunker.chunk.return_value = [mock_chunk]
@@ -357,12 +352,10 @@ def test_index_markdown_no_frontmatter_offsets_unchanged(tmp_path: Path, monkeyp
         "header_path": "",
     }
 
-    with patch("nexus.doc_indexer.T3Database") as mock_t3_class:
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
-            mock_t3 = MagicMock()
-            mock_t3_class.return_value = mock_t3
-            mock_t3.get_or_create_collection.return_value = mock_col
-
             mock_chunker = MagicMock()
             mock_chunker_class.return_value = mock_chunker
             mock_chunker.chunk.return_value = [mock_chunk]

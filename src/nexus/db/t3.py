@@ -128,6 +128,23 @@ class T3Database:
         col.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
         return doc_id
 
+    def upsert_chunks(
+        self,
+        collection: str,
+        ids: list[str],
+        documents: list[str],
+        metadatas: list[dict],
+    ) -> None:
+        """Upsert a batch of pre-chunked documents into *collection*.
+
+        All metadata fields are passed through verbatim — nothing is added,
+        removed, or truncated.  This preserves any atomicity semantics
+        (delete-then-add) applied by the caller and passes through the full
+        metadata schema emitted by the indexing pipeline.
+        """
+        col = self.get_or_create_collection(collection)
+        col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+
     # ── Read ──────────────────────────────────────────────────────────────────
 
     def search(

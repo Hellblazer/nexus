@@ -220,12 +220,11 @@ def test_semantic_chunker_sets_char_offsets() -> None:
 def test_index_markdown_atomicity_originals_survive_add_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pre-existing documents must not be lost if col.add() raises during reindex.
+    """Pre-existing documents must not be lost if col.upsert() raises during reindex.
 
-    Regression guard: index_markdown() deletes stale chunks *before* calling
-    col.add().  If col.add() then raises an exception, the collection is left
-    empty — a data-loss bug.  After a failed add(), the 3 original documents
-    must still exist in the collection.
+    Regression guard: index_markdown() calls col.upsert() *before* pruning stale
+    chunks.  If col.upsert() raises an exception, no delete has occurred and the
+    original documents must still be intact — no data-loss window.
     """
     monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
     monkeypatch.setenv("CHROMA_API_KEY", "ck_test")
@@ -273,28 +272,13 @@ def test_index_markdown_atomicity_originals_survive_add_failure(
             stored_docs.pop(idx)
             stored_metas.pop(idx)
 
-    add_call_count = [0]
-
-    def mock_add_raises(**kwargs):
-        add_call_count[0] += 1
-        if add_call_count[0] == 1:
-            # First call is the new-data add — simulate failure.
-            raise RuntimeError("Simulated embedding API failure during add()")
-        # Second call is the rollback restore — let it succeed.
-        ids_to_add = kwargs.get("ids", [])
-        docs_to_add = kwargs.get("documents", [])
-        metas_to_add = kwargs.get("metadatas", [])
-        stored_ids.extend(ids_to_add)
-        stored_docs.extend(docs_to_add)
-        stored_metas.extend(metas_to_add)
-
     def mock_count():
         return len(stored_ids)
 
     mock_col = MagicMock()
     mock_col.get.side_effect = mock_get
     mock_col.delete.side_effect = mock_delete
-    mock_col.add.side_effect = mock_add_raises
+    mock_col.upsert.side_effect = RuntimeError("Simulated embedding API failure during upsert()")
     mock_col.count.side_effect = mock_count
 
     # Create a markdown file whose source_path does NOT match "/other/doc.md"
@@ -311,19 +295,18 @@ def test_index_markdown_atomicity_originals_survive_add_failure(
         m["source_path"] = str(md_path)
         m["content_hash"] = "old-hash-that-differs"
 
-    with patch("nexus.doc_indexer.T3Database") as mock_t3_class:
-        mock_t3 = MagicMock()
-        mock_t3_class.return_value = mock_t3
-        mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
 
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         from nexus.doc_indexer import index_markdown
         with pytest.raises(Exception):  # noqa: B017
             index_markdown(md_path, corpus="testcorpus")
 
-    # After the failed add(), the 3 original documents must still exist.
+    # After the failed upsert(), no delete occurred — 3 originals must be intact.
     remaining = len(stored_ids)
     assert remaining == 3, (
-        f"After a failed col.add(), the collection must still contain the 3 "
+        f"After a failed col.upsert(), the collection must still contain the 3 "
         f"original documents, but only {remaining} remain: {stored_ids}.  "
         "This indicates a data-loss atomicity bug in index_markdown()."
     )
