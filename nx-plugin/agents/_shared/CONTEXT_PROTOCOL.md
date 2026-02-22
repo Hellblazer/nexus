@@ -9,7 +9,7 @@ This file documents the standard context exchange protocol used by all agents fo
 These agents **MUST proactively search** for context before starting:
 - **strategic-planner**: Search nx T3 store for prior decisions, nx T2 memory for active work
 - **java-architect-planner**: Search nx T3 store for architectural patterns, design decisions
-- **deep-research-synthesizer**: Search nx T3 store for prior research, DEVONthink for related docs
+- **deep-research-synthesizer**: Search nx T3 store for prior research, web resources for related docs
 - **codebase-deep-analyzer**: Search nx T3 store for codebase knowledge, architecture notes
 
 **Search Sources in Order**:
