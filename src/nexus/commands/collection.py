@@ -35,7 +35,7 @@ def info_cmd(name: str) -> None:
 
 @collection.command("delete")
 @click.argument("name")
-@click.option("--yes", "-y", is_flag=True, help="Skip interactive confirmation prompt")
+@click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
 def delete_cmd(name: str, yes: bool) -> None:
     """Delete a T3 collection (irreversible)."""
     if not yes:

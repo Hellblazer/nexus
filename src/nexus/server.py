@@ -93,10 +93,10 @@ def _poll_loop() -> None:
                 try:
                     check_and_reindex(Path(repo_str), _get_registry())
                 except Exception as exc:
-                    _log.warning("Poll error for %s: %s", repo_str, exc, exc_info=True)
+                    _log.warning("Poll error", repo=repo_str, error=str(exc), exc_info=True)
             time.sleep(_poll_interval)
         except Exception as exc:
-            _log.exception("Poll loop body raised — restarting in %ss: %s", _poll_interval, exc)
+            _log.exception("Poll loop body raised — restarting", poll_interval=_poll_interval, error=str(exc))
             time.sleep(_poll_interval)
 
 

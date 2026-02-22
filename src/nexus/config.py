@@ -7,6 +7,10 @@ from typing import Any
 
 import yaml
 
+# ── Model constants ───────────────────────────────────────────────────────────
+
+HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
+
 # ── Credential registry ───────────────────────────────────────────────────────
 # Maps config-file key → environment variable name
 CREDENTIALS: dict[str, str] = {
@@ -81,6 +85,11 @@ def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def default_port() -> int:
+    """Return the default server port from built-in defaults."""
+    return _DEFAULTS["server"]["port"]
+
 
 def _global_config_path() -> Path:
     return Path.home() / ".config" / "nexus" / "config.yml"

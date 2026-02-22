@@ -116,7 +116,11 @@ def search_cmd(
         except Exception as exc:
             click.echo(f"Warning: reranking failed ({exc}), using raw order", err=True)
     else:
-        results = results[:n]
+        # Group by collection and interleave round-robin for even distribution
+        groups: dict[str, list[SearchResult]] = {}
+        for r in results:
+            groups.setdefault(r.collection, []).append(r)
+        results = round_robin_interleave(list(groups.values()))[:n]
 
     # Answer mode
     if answer:
