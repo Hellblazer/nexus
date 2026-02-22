@@ -268,6 +268,106 @@ def test_promote_cmd_remove_deletes_t2_entry(runner: CliRunner, mem_home: Path, 
     assert "removed" in result.output.lower()
 
 
+# ── nexus-mox: promote_cmd four-credential guard ──────────────────────────────
+
+def test_promote_cmd_missing_tenant_raises(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """promote fails when chroma_tenant is absent even if api keys are present."""
+    row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
+
+    def cred_side_effect(key: str) -> str:
+        # Return empty string only for chroma_tenant
+        return "" if key == "chroma_tenant" else "fake-value"
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", side_effect=cred_side_effect):
+            result = runner.invoke(
+                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
+            )
+
+    assert result.exit_code != 0
+    assert "chroma_tenant" in result.output
+    assert "not configured" in result.output.lower()
+
+
+def test_promote_cmd_missing_database_raises(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """promote fails when chroma_database is absent even if api keys are present."""
+    row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
+
+    def cred_side_effect(key: str) -> str:
+        return "" if key == "chroma_database" else "fake-value"
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", side_effect=cred_side_effect):
+            result = runner.invoke(
+                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
+            )
+
+    assert result.exit_code != 0
+    assert "chroma_database" in result.output
+    assert "not configured" in result.output.lower()
+
+
+# ── nexus-huj: promote_cmd expires_at computed from T2 timestamp ───────────────
+
+def test_promote_cmd_expires_at_derived_from_t2_timestamp(
+    runner: CliRunner, mem_home: Path, db: T2Database
+) -> None:
+    """promote passes expires_at computed from the T2 entry's timestamp, not now()."""
+    from datetime import UTC, datetime, timedelta
+
+    row_id = db.put(project="proj", title="dated.md", content="content", ttl=10)
+
+    # Backdate the timestamp so we can confirm expires_at is T2-based, not now-based
+    past = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.conn.execute("UPDATE memory SET timestamp=? WHERE id=?", (past, row_id))
+    db.conn.commit()
+
+    mock_t3 = MagicMock()
+    mock_t3.put.return_value = "xyz000"
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                result = runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
+                )
+
+    assert result.exit_code == 0, result.output
+    call_kwargs = mock_t3.put.call_args.kwargs
+
+    # expires_at must be present and non-empty for a TTL entry
+    assert call_kwargs.get("expires_at", "") != "", "expires_at must be set for TTL entry"
+
+    # The value should be base_ts + 10 days; verify it is in the past relative to now+6d
+    # (since base_ts is 5 days ago and ttl is 10 days, expires_at is ~5 days from now)
+    expires = datetime.fromisoformat(call_kwargs["expires_at"])
+    now = datetime.now(UTC)
+    assert expires > now, "expires_at should be in the future (5 days out)"
+    assert expires < now + timedelta(days=7), "expires_at should not be 10 days from now"
+
+
+def test_promote_cmd_permanent_expires_at_is_empty(
+    runner: CliRunner, mem_home: Path, db: T2Database
+) -> None:
+    """Permanent T2 entry (ttl=None) → expires_at='' passed to t3.put()."""
+    row_id = db.put(project="proj", title="perm2.md", content="forever", ttl=None)
+
+    mock_t3 = MagicMock()
+    mock_t3.put.return_value = "perm-id"
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
+                )
+
+    call_kwargs = mock_t3.put.call_args.kwargs
+    assert call_kwargs.get("expires_at", "MISSING") == "", "permanent entry must have expires_at=''"
+
+
 # ── nexus-28b: t2._read_session_id delegates to session.read_session_id ──────
 
 def test_t2_uses_session_module_for_session_id(db: T2Database) -> None:

@@ -37,14 +37,14 @@ def test_health_returns_ok(client) -> None:
 def test_list_repos_empty(client) -> None:
     resp = client.get("/repos")
     assert resp.status_code == 200
-    assert resp.get_json() == {"repos": []}
+    assert resp.get_json() == {"repos": {}}
 
 
 def test_list_repos_shows_registered(client, tmp_path: Path) -> None:
     repo = tmp_path / "myrepo"
     repo.mkdir()
     mock_reg = MagicMock()
-    mock_reg.all.return_value = [str(repo)]
+    mock_reg.all_info.return_value = {str(repo): {"name": "myrepo", "status": "registered"}}
     with patch.object(server_module, "_get_registry", return_value=mock_reg):
         resp = client.get("/repos")
     assert str(repo) in resp.get_json()["repos"]

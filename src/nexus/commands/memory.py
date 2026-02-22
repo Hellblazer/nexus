@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
@@ -114,14 +115,27 @@ def promote_cmd(id: int, collection: str, tags: str, remove: bool) -> None:
     if entry is None:
         raise click.ClickException(f"Entry {id} not found in T2 memory.")
 
-    if not (get_credential("chroma_api_key") and get_credential("voyage_api_key")):
+    missing = [
+        k
+        for k in ("chroma_api_key", "voyage_api_key", "chroma_tenant", "chroma_database")
+        if not get_credential(k)
+    ]
+    if missing:
         raise click.ClickException(
-            "T3 credentials not configured — set chroma_api_key and voyage_api_key."
+            f"T3 credentials not configured: {', '.join(missing)}. Run `nx config init`."
         )
 
     # Translate TTL: T2 ttl=None (permanent) → T3 ttl_days=0; T2 ttl=N → T3 ttl_days=N
     ttl_days: int = entry["ttl"] if entry["ttl"] is not None else 0  # type: ignore[assignment]
     merged_tags = tags if tags else (entry.get("tags") or "")
+
+    # Compute expires_at from the T2 entry's original timestamp so that the
+    # promoted T3 entry honours the remaining TTL rather than resetting it.
+    if ttl_days > 0:
+        base_ts = datetime.fromisoformat(entry["timestamp"])
+        expires_at = (base_ts + timedelta(days=ttl_days)).isoformat()
+    else:
+        expires_at = ""  # permanent
 
     t3 = T3Database(
         tenant=get_credential("chroma_tenant"),
@@ -135,6 +149,7 @@ def promote_cmd(id: int, collection: str, tags: str, remove: bool) -> None:
         title=entry["title"],
         tags=merged_tags,
         ttl_days=ttl_days,
+        expires_at=expires_at,
     )
 
     if remove:

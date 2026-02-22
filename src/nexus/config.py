@@ -76,7 +76,12 @@ def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
     for env_var, (section, key, cast) in _ENV_OVERRIDES.items():
         raw = os.environ.get(env_var)
         if raw is not None:
-            result.setdefault(section, {})[key] = cast(raw)
+            try:
+                result.setdefault(section, {})[key] = cast(raw)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"Invalid value for {env_var!r}: cannot convert {raw!r} to {cast.__name__}: {exc}"
+                ) from exc
     return result
 
 
@@ -117,8 +122,8 @@ def set_credential(name: str, value: str) -> None:
     try:
         with os.fdopen(tmp_fd, "w") as fh:
             fh.write(content)
+        os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, path)
-        os.chmod(path, 0o600)
     except Exception:
         try:
             os.unlink(tmp_path)

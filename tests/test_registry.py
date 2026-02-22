@@ -1,4 +1,5 @@
 """AC2: Repo registry add/remove/update, JSON persistence, atomic write."""
+import hashlib
 import json
 from pathlib import Path
 
@@ -26,7 +27,8 @@ def test_registry_add_sets_collection_name(tmp_path: Path) -> None:
     info = reg.get(repo)
 
     assert info is not None
-    assert info["collection"] == "code__myrepo"
+    expected_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+    assert info["collection"] == f"code__myrepo-{expected_hash}"
     assert info["name"] == "myrepo"
 
 
@@ -166,5 +168,6 @@ def test_registry_get_returns_copy_not_reference(tmp_path: Path) -> None:
 
     # Internal state must be unchanged
     fresh = reg.get(repo)
-    assert fresh["collection"] == "code__myrepo"
+    expected_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+    assert fresh["collection"] == f"code__myrepo-{expected_hash}"
     assert "injected" not in fresh

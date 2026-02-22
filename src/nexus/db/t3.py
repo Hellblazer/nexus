@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from datetime import UTC, datetime, timedelta
 
 import chromadb
+import chromadb.errors
+from chromadb.errors import NotFoundError as _ChromaNotFoundError
+import structlog
 
 from nexus.corpus import embedding_model_for_collection
+
+_log = structlog.get_logger(__name__)
 
 
 class T3Database:
@@ -38,6 +44,7 @@ class T3Database:
         self._voyage_api_key = voyage_api_key
         self._ef_override = _ef_override
         self._ef_cache: dict[str, object] = {}
+        self._ef_lock = threading.Lock()
         if _client is not None:
             self._client = _client
         else:
@@ -50,14 +57,17 @@ class T3Database:
     def _embedding_fn(self, collection_name: str):
         if self._ef_override is not None:
             return self._ef_override
-        if collection_name not in self._ef_cache:
-            model = embedding_model_for_collection(collection_name)
-            self._ef_cache[collection_name] = (
-                chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
-                    model_name=model, api_key=self._voyage_api_key
+        if collection_name in self._ef_cache:
+            return self._ef_cache[collection_name]
+        with self._ef_lock:
+            if collection_name not in self._ef_cache:
+                model = embedding_model_for_collection(collection_name)
+                self._ef_cache[collection_name] = (
+                    chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
+                        model_name=model, api_key=self._voyage_api_key
+                    )
                 )
-            )
-        return self._ef_cache[collection_name]
+            return self._ef_cache[collection_name]
 
     # ── Collection access ─────────────────────────────────────────────────────
 
@@ -82,18 +92,25 @@ class T3Database:
         source_agent: str = "",
         store_type: str = "knowledge",
         ttl_days: int = 0,
+        expires_at: str = "",
     ) -> str:
         """Upsert *content* into *collection*. Returns the document ID.
 
         *ttl_days* = 0 means permanent (``expires_at=""``).
+
+        *expires_at* may be supplied by the caller (e.g. ``promote_cmd`` when
+        carrying over an existing T2 TTL from a known base timestamp).  When
+        omitted and *ttl_days* > 0, ``expires_at`` is computed from
+        ``datetime.now(UTC)``.
         """
         doc_id = hashlib.sha256(f"{collection}:{title}".encode()).hexdigest()[:16]
         now_iso = datetime.now(UTC).isoformat()
 
-        if ttl_days > 0:
-            expires_at = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
-        else:
-            expires_at = ""
+        if not expires_at:
+            if ttl_days > 0:
+                expires_at = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
+            else:
+                expires_at = ""
 
         metadata: dict = {
             "title": title,
@@ -130,7 +147,12 @@ class T3Database:
         """
         results: list[dict] = []
         for name in collection_names:
-            col = self.get_or_create_collection(name)
+            try:
+                col = self._client.get_collection(
+                    name, embedding_function=self._embedding_fn(name)
+                )
+            except _ChromaNotFoundError:
+                continue  # collection doesn't exist, skip it
             count = col.count()
             if count == 0:
                 continue
@@ -205,7 +227,10 @@ class T3Database:
         try:
             self._client.get_collection(name)
             return True
-        except Exception:
+        except chromadb.errors.NotFoundError:
+            return False
+        except Exception as exc:
+            _log.warning("collection_exists check failed", name=name, error=str(exc))
             return False
 
     def delete_collection(self, name: str) -> None:

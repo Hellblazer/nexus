@@ -46,7 +46,8 @@ def health():
 
 @app.route("/repos", methods=["GET"])
 def list_repos():
-    return jsonify({"repos": _get_registry().all()})
+    reg = _get_registry()
+    return jsonify({"repos": reg.all_info()})
 
 
 @app.route("/repos", methods=["POST"])

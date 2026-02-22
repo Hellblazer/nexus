@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Repo registry: JSON persistence with atomic write and thread safety."""
+import hashlib
 import json
+import logging
 import os
 import threading
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 
 class RepoRegistry:
@@ -15,7 +19,11 @@ class RepoRegistry:
         self._lock = threading.RLock()
         self._data: dict[str, dict[str, Any]] = {"repos": {}}
         if path.exists():
-            self._data = json.loads(path.read_text())
+            try:
+                self._data = json.loads(path.read_text())
+            except (json.JSONDecodeError, OSError) as exc:
+                _log.warning("Failed to load registry from %s (%s); starting empty.", path, exc)
+                self._data = {"repos": {}}
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -23,10 +31,12 @@ class RepoRegistry:
         """Register *repo*, initialising collection name and head_hash."""
         key = str(repo)
         name = repo.name
+        _path_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+        collection = f"code__{name}-{_path_hash}"
         with self._lock:
             self._data["repos"][key] = {
                 "name": name,
-                "collection": f"code__{name}",
+                "collection": collection,
                 "head_hash": "",
                 "status": "registered",
             }
@@ -49,6 +59,11 @@ class RepoRegistry:
         """Return list of all registered repo paths."""
         with self._lock:
             return list(self._data["repos"].keys())
+
+    def all_info(self) -> dict[str, dict[str, Any]]:
+        """Return dict of all registered repos: path -> full entry dict."""
+        with self._lock:
+            return {k: dict(v) for k, v in self._data["repos"].items()}
 
     def update(self, repo: Path, **kwargs: Any) -> None:
         """Update fields for *repo* (e.g. head_hash, status)."""

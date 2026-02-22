@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import chromadb.errors
 import pytest
 
 from nexus.db.t3 import T3Database
@@ -195,7 +196,7 @@ def test_search_single_corpus_results_ordered(mock_chromadb: tuple) -> None:
         "metadatas": [[{"title": "t1", "tags": "x"}, {"title": "t2", "tags": "y"}]],
         "distances": [[0.1, 0.5]],
     }
-    mock_client.get_or_create_collection.return_value = mock_col
+    mock_client.get_collection.return_value = mock_col
 
     db = T3Database(tenant="t", database="d", api_key="k")
     results = db.search("my query", ["knowledge__security"], n_results=5)
@@ -217,7 +218,7 @@ def test_search_caps_n_results_to_collection_count(mock_chromadb: tuple) -> None
         "metadatas": [[{}, {}]],
         "distances": [[0.2, 0.8]],
     }
-    mock_client.get_or_create_collection.return_value = mock_col
+    mock_client.get_collection.return_value = mock_col
 
     db = T3Database(tenant="t", database="d", api_key="k")
     db.search("query", ["knowledge__sec"], n_results=10)
@@ -234,13 +235,27 @@ def test_search_empty_collection_returns_empty(mock_chromadb: tuple) -> None:
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
     mock_col.count.return_value = 0
-    mock_client.get_or_create_collection.return_value = mock_col
+    mock_client.get_collection.return_value = mock_col
 
     db = T3Database(tenant="t", database="d", api_key="k")
     results = db.search("query", ["knowledge__sec"], n_results=10)
 
     assert results == []
     mock_col.query.assert_not_called()
+
+
+def test_search_skips_missing_collection_without_creating(mock_chromadb: tuple) -> None:
+    """search() skips non-existent collections without creating them (read-only)."""
+    chromadb_m, mock_client = mock_chromadb
+    mock_client.get_collection.side_effect = chromadb.errors.NotFoundError(
+        "Collection not found"
+    )
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    results = db.search("query", ["knowledge__missing"], n_results=10)
+
+    assert results == []
+    mock_client.get_or_create_collection.assert_not_called()
 
 
 # ── AC7: collection list ──────────────────────────────────────────────────────

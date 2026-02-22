@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx serve — start/stop/status/logs for the Nexus background server."""
+import errno
 import os
 import signal
 import subprocess
@@ -97,16 +98,33 @@ def stop_cmd() -> None:
         raise click.ClickException("No server running (no PID file found).")
     try:
         os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        click.echo(f"Process {pid} not found (stale PID file). Cleaning up.")
-        _pid_path().unlink(missing_ok=True)
-        return
+    except OSError as e:
+        if isinstance(e, ProcessLookupError) or e.errno == errno.ESRCH:
+            click.echo(f"Process {pid} not found (stale PID file). Cleaning up.")
+            _pid_path().unlink(missing_ok=True)
+            return
+        elif e.errno == errno.EPERM:
+            click.echo(
+                f"Permission denied sending signal to process {pid}. "
+                "You may need elevated privileges to stop this server.",
+                err=True,
+            )
+            sys.exit(1)
+        raise
     # Wait up to 5 seconds for the process to exit before reporting success.
     deadline = time.monotonic() + 5.0
+    still_running = True
     while time.monotonic() < deadline:
         if not _process_running(pid):
+            still_running = False
             break
         time.sleep(0.1)
+    if still_running:
+        click.echo(
+            f"Warning: process {pid} did not stop within 5 seconds. PID file preserved.",
+            err=True,
+        )
+        sys.exit(1)
     _pid_path().unlink(missing_ok=True)
     click.echo(f"Server stopped (PID {pid}).")
 
