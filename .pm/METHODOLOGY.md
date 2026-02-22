@@ -239,50 +239,56 @@ def test_concurrent_access(memory_db):
 - Isolated state (each test gets a fresh database)
 - Readable test names (no TestClass boilerplate)
 
-### ABC and Protocol for Polymorphism
+### Protocol for Polymorphism
 
-Use `abc.ABC` for base classes, `typing.Protocol` for duck typing:
+**Nexus uses `typing.Protocol` for all interfaces** (per ARCHITECTURE.md Key Design Decision). `abc.ABC` is not used in this codebase — structural subtyping (Protocol) enables duck typing without inheritance coupling, which simplifies mocking in tests.
 
 ```python
-from abc import ABC, abstractmethod
-from typing import Protocol, List
+from typing import Protocol, runtime_checkable
+from pathlib import Path
 
-class EmbeddingFunction(ABC):
-    """Base class for embedding providers."""
+@runtime_checkable
+class EmbeddingFunction(Protocol):
+    """Any object that can embed texts."""
 
-    @abstractmethod
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed multiple texts. Returns list of embedding vectors."""
-        pass
+        ...
 
-    @abstractmethod
-    def embed_query(self, query: str) -> List[float]:
+    def embed_query(self, query: str) -> list[float]:
         """Embed a single query."""
-        pass
-
-class DefaultEmbedding(EmbeddingFunction):
-    """Local ONNX all-MiniLM-L6-v2 for T1 scratch."""
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        # Use huggingface sentence-transformers
         ...
 
-class VoyageEmbedding(EmbeddingFunction):
-    """Voyage AI API wrapper for T3."""
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        # Call Voyage API
+class DefaultEmbedding:
+    """Local ONNX all-MiniLM-L6-v2 for T1 scratch. Satisfies EmbeddingFunction protocol."""
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         ...
 
-# Protocol for reader-only interface (doesn't require inheritance)
-class ChunkReader(Protocol):
-    """Anything with a read() method."""
-    def read(self) -> str: ...
+    def embed_query(self, query: str) -> list[float]:
+        ...
+
+class VoyageEmbedding:
+    """Voyage AI API wrapper for T3. Satisfies EmbeddingFunction protocol."""
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        ...
+
+    def embed_query(self, query: str) -> list[float]:
+        ...
+
+# Test mock — no inheritance required:
+class MockEmbedding:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1] * 1024 for _ in texts]
+    def embed_query(self, query: str) -> list[float]:
+        return [0.1] * 1024
 ```
 
-**Why**:
-- Abstract base classes enforce interface contracts (must implement all @abstractmethod)
-- Protocols enable duck typing without coupling to a hierarchy
-- Easier testing: mock implementations satisfy the interface
-- Clear separation of concerns: storage layer doesn't care if T1 uses DefaultEmbedding or a mock
+**Why Protocol over ABC**:
+- Mock implementations satisfy the interface without inheritance boilerplate
+- No import of the base class needed in concrete implementations
+- `@runtime_checkable` enables `isinstance(obj, EmbeddingFunction)` checks when needed
+- Cleaner test fixtures: mock just implements the required methods, nothing else
+- Matches ChromaDB's own embedding function pattern (structural, not nominal)
 
 ### Config via dataclass + environment variables
 

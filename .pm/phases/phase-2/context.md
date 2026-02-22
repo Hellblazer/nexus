@@ -10,7 +10,7 @@ Phase 2 delivers:
 1. **T1 In-Memory Storage** (`nexus/storage/t1/`)
    - ChromaDB EphemeralClient (in-process, no persistence)
    - DefaultEmbeddingFunction (local ONNX, all-MiniLM-L6-v2, no API calls)
-   - Session ID generation via SessionStart hook (UUID4 → `~/.config/nexus/current_session`)
+   - Session ID generation via SessionStart hook (UUID4 → `~/.config/nexus/sessions/{ppid}.session`, PID-scoped to prevent concurrent window collisions)
    - Metadata on each chunk: session_id (for per-session filtering), created_at, tags
    - CRUD: put, get, search, list, clear, flag (for auto-flush to T2)
 
@@ -26,7 +26,7 @@ Phase 2 delivers:
 
 3. **SessionStart Hook**
    - Generate session ID (UUID4) on session start
-   - Write to `~/.config/nexus/current_session` (read by all nx subcommands)
+   - Write to `~/.config/nexus/sessions/{ppid}.session` (read by all nx subcommands)
    - Initialize T1 EphemeralClient (fresh, empty on each session)
    - Print "Nexus ready. T1 scratch initialized (session: {session_id})"
    - (Deferred Phase 2+) If PM project exists: inject CONTINUATION.md from T2
@@ -50,7 +50,7 @@ Phase 2 delivers:
 - [ ] Search returns results ranked by cosine similarity (no Voyage API calls)
 - [ ] flag/unflag marks entries for SessionEnd auto-flush
 - [ ] promote() manually copies T1 entry to T2 immediately
-- [ ] SessionStart hook generates session ID, writes to `~/.config/nexus/current_session`
+- [ ] SessionStart hook generates session ID, writes to `~/.config/nexus/sessions/{ppid}.session`
 - [ ] SessionEnd hook flushes flagged entries to T2 (tested via mock)
 
 ### Quality
@@ -85,12 +85,12 @@ Phase 2 delivers:
 ```
 SessionStart hook:
   1. Generate UUID4: session_id = str(uuid.uuid4())
-  2. Write to ~/.config/nexus/current_session
+  2. Write to ~/.config/nexus/sessions/{ppid}.session
   3. Initialize fresh EphemeralClient
   4. Print "Nexus ready. T1 scratch initialized (session: {session_id})"
 
 All nx commands:
-  1. Read session_id from ~/.config/nexus/current_session
+  1. Read session_id from ~/.config/nexus/sessions/{ppid}.session
   2. All T1 operations store session_id in entry metadata
   3. Enables per-session filtering + multi-session safety
 
@@ -107,7 +107,7 @@ SessionEnd hook:
 class ScratchEntry:
     """In-memory session scratch entry."""
     id: str  # ChromaDB-assigned ID (UUID)
-    session_id: str  # From ~/.config/nexus/current_session
+    session_id: str  # From ~/.config/nexus/sessions/{ppid}.session
     content: str  # Text snippet
     tags: Optional[str]  # Comma-separated
     embedding: List[float]  # From DefaultEmbeddingFunction
@@ -192,7 +192,7 @@ def t1_store(session_id, tmp_path):
 
 SESSION_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
 mkdir -p ~/.config/nexus
-echo "$SESSION_ID" > ~/.config/nexus/current_session
+echo "$SESSION_ID" > ~/.config/nexus/sessions/{ppid}.session
 
 # Initialize T1 (Python)
 python3 -c "
@@ -210,7 +210,7 @@ echo "Nexus ready. T1 scratch initialized (session: $SESSION_ID)."
 ```python
 # nexus/session.py
 def get_current_session_id() -> str:
-    """Read session ID from ~/.config/nexus/current_session."""
+    """Read session ID from ~/.config/nexus/sessions/{ppid}.session."""
     session_file = Path.home() / ".config" / "nexus" / "current_session"
     if not session_file.exists():
         raise SessionError("Session not initialized. SessionStart hook may not have run.")
@@ -231,7 +231,7 @@ def scratch_search(query: str):
 #!/bin/bash
 # ~/.claude/hooks/sessionend.sh
 
-SESSION_ID=$(cat ~/.config/nexus/current_session 2>/dev/null)
+SESSION_ID=$(cat ~/.config/nexus/sessions/{ppid}.session 2>/dev/null)
 
 # Flush flagged T1 entries to T2
 if [ ! -z "$SESSION_ID" ]; then
@@ -292,7 +292,7 @@ def promote(t1_entry_id: str, project: str, title: str, ttl: Optional[int] = 30)
 
 **No new config needed for Phase 2** — T1 uses existing `~/.config/nexus/` directory.
 
-**Session file**: `~/.config/nexus/current_session` (readable only by user; mode 0600)
+**Session file**: `~/.config/nexus/sessions/{ppid}.session` (readable only by user; mode 0600)
 
 ## Dependencies (Phase 2)
 
@@ -320,7 +320,7 @@ bd create "T1 CRUD operations (put/get/search/list)" -t task -p 1
 bd create "T1 flag/unflag for SessionEnd auto-flush" -t task -p 1
 
 # Session management
-bd create "Session ID generation + ~/.config/nexus/current_session" -t task -p 1
+bd create "Session ID generation + ~/.config/nexus/sessions/{ppid}.session" -t task -p 1
 
 # CLI layer
 bd create "nx scratch commands (scratch_commands.py)" -t task -p 1
@@ -340,7 +340,7 @@ bd create "Phase 2 validation: T1 + T2 integration working" -t task -p 1
 
 ## Open Questions (Phase 2)
 
-1. **Session ID cleanup**: Should `~/.config/nexus/current_session` be deleted on SessionEnd, or kept for historical reference? Decision: keep file (may be useful for debugging); documented as auto-generated on SessionStart, no manual intervention needed.
+1. **Session ID cleanup**: Should `~/.config/nexus/sessions/{ppid}.session` be deleted on SessionEnd, or kept for historical reference? Decision: keep file (may be useful for debugging); documented as auto-generated on SessionStart, no manual intervention needed.
 
 2. **Multi-session T1 safety**: Can multiple Claude Code sessions run concurrently? If yes, each session has its own UUID4 (in separate `current_session` files, or read from env?). Decision: each session gets its own SessionStart hook run, so separate UUID4. T1 EphemeralClient is per-process (in-memory), so no cross-session collision. T2 (SQLite) uses WAL mode for concurrent access.
 
@@ -373,7 +373,7 @@ bd create "Phase 2 validation: T1 + T2 integration working" -t task -p 1
 - [ ] T1 EphemeralClient initializes on first command
 - [ ] All CRUD ops working: put, get, search, list, flag, promote
 - [ ] DefaultEmbedding: no API calls, local inference only
-- [ ] Session ID generated + written to ~/.config/nexus/current_session
+- [ ] Session ID generated + written to ~/.config/nexus/sessions/{ppid}.session
 - [ ] Test coverage >85% (nexus/storage/t1)
 - [ ] SessionStart hook: installs in ~/.claude/hooks/
 - [ ] SessionEnd hook: flushes flagged T1 entries to T2

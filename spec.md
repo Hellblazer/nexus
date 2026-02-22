@@ -168,6 +168,7 @@ WHERE ttl IS NOT NULL
 - `nx index code <path>` adds the path to the registry and triggers initial indexing
 - Each repo has its own T3 collection (`code__{repo-name}`) and ripgrep line cache file
 - HEAD polling runs per-repo every 10 seconds (configurable via `server.headPollInterval`); stale repos are re-indexed automatically
+- **Concurrent access**: polling threads and Flask handlers share three resources requiring explicit locking: (1) `repos.json` — use `threading.RLock` + atomic write (`repos.json.tmp` → `os.replace()`); (2) ripgrep cache file — use per-repo `threading.RLock`; exclusive lock during rebuild, shared lock during hybrid search reads; (3) indexing progress counters — update atomically or hold the per-repo lock. Waitress runs with `threads=1` (eliminates Flask-level concurrency) but does not protect against concurrent polling threads
 - Optional: `nx install claude-code` sets a post-commit hook as an additional trigger alongside polling
 - `nx serve status` shows each repo's indexing state and estimated accuracy (SeaGOAT sigmoid pattern)
 
@@ -465,7 +466,7 @@ nx scratch promote <id> --project BFDB_active --title findings.md   # → T2 imm
 ```
 
 - Uses `DefaultEmbeddingFunction` (local ONNX, no API call) — fast, no network dependency
-- Session ID: generated as a UUID4 by the SessionStart hook and written to `~/.config/nexus/current_session`; read from there by all nx subcommands. `CLAUDE_SESSION_ID` does **not** exist in Claude Code (open feature requests #13733, #17188 — unresolved as of 2026-02). T1 is a shared EphemeralClient; session ID is stored as metadata on each T1 document, enabling per-session filtering. When flagged entries are flushed to T2 with no explicit destination, they go to project `scratch_sessions`, title `{session_id}_{id}`.
+- Session ID: generated as a UUID4 by the SessionStart hook and written to `~/.config/nexus/sessions/{ppid}.session` (PID-scoped, where `ppid` is the Claude Code process PID obtained via `os.getppid()` in the hook subprocess). `nx` subcommands discover their session by reading `~/.config/nexus/sessions/{os.getppid()}.session`. Using a per-PID path prevents concurrent Claude Code windows from overwriting each other's session ID (a shared `current_session` file would cause window B's hook to overwrite window A's ID, corrupting T1 metadata and potentially triggering deletion of the wrong window's scratch entries). Orphaned session files are cleaned up by the SessionEnd hook. `CLAUDE_SESSION_ID` does **not** exist in Claude Code (open feature requests #13733, #17188 — unresolved as of 2026-02). T1 is a shared EphemeralClient; session ID is stored as metadata on each T1 document, enabling per-session filtering. When flagged entries are flushed to T2 with no explicit destination, they go to project `scratch_sessions`, title `{session_id}_{id}`.
 - On crash: T1 is in-memory; data is lost by design — scratch is ephemeral
 
 ## Memory Bank Replacement
@@ -627,7 +628,7 @@ Active ──── nx pm archive ──── Archived (T2, 90d decay) + Synthe
 1. **Synthesize → T3 first**: Haiku reads all PM docs from T2. Selection: always include the 5 standard init docs (CONTINUATION.md, METHODOLOGY.md, AGENT_INSTRUCTIONS.md, CONTEXT_PROTOCOL.md, phases/phase-1/context.md), then fill remaining capacity with other docs sorted by most-recently-written. Overall cap: 100 docs or 100K total characters (whichever is smaller). Produces a structured synthesis chunk stored in `knowledge__pm__{repo}`. The T3 `title` field is set to `"Archive: {repo}"`.
    - If Haiku synthesis **fails** (API error, rate limit, content policy): the archive is aborted. T2 is left untouched. The error is printed; the user can retry. This is the safe failure mode — raw PM docs remain accessible.
    - If T3 **write fails** after synthesis: same abort behavior.
-2. **Decay T2 second**: Only after T3 write succeeds. Runs as a single SQLite transaction: `UPDATE memory SET ttl = {NX_PM_ARCHIVE_TTL}, tags = replace(tags, 'pm,', 'pm-archived,') WHERE project = '{repo}_pm'`. If this T2 update fails after T3 succeeds: the T3 chunk is orphaned but not harmful — a retry of `nx pm archive` checks for an existing T3 chunk with `title = "Archive: {repo}"` before synthesizing. Idempotency check: query T3 for `title="Archive: {repo}"` ordered by `indexed_at DESC LIMIT 1`; if the most recent chunk was written within the last 5 minutes, skip re-synthesis and proceed directly to the T2 decay step.
+2. **Decay T2 second**: Only after T3 write succeeds. Runs as a single SQLite transaction: `UPDATE memory SET ttl = {NX_PM_ARCHIVE_TTL}, tags = replace(tags, 'pm,', 'pm-archived,') WHERE project = '{repo}_pm'`. If this T2 update fails after T3 succeeds: the T3 chunk is orphaned but not harmful — a retry of `nx pm archive` checks for an existing T3 chunk with `title = "Archive: {repo}"` before synthesizing. Idempotency check: query T3 for `title="Archive: {repo}"` ordered by `indexed_at DESC LIMIT 1`; compare `pm_doc_count` and `pm_latest_timestamp` metadata fields against current T2 state (count of active PM docs and MAX(timestamp) of those docs). If they match, the existing synthesis is current — skip re-synthesis regardless of age and proceed directly to the T2 decay step. A time-based window (e.g., "skip if written within 5 minutes") is insufficient because a user investigating a crash for longer than the window would trigger duplicate synthesis accumulation. The T3 synthesis chunk must carry `pm_doc_count` (int) and `pm_latest_timestamp` (ISO 8601 string) metadata fields for this check.
 
 `NX_PM_ARCHIVE_TTL` accepts an **integer number of days** (e.g. `90`). Default: `90`. Same unit as the T2 `ttl` column.
 
@@ -727,9 +728,11 @@ nx search "security vulnerabilities" --corpus knowledge
 # Lifecycle management
 nx store expire           # remove knowledge__ chunks whose expires_at has passed
                           # Implementation: collection.get(where={"$and": [{"ttl_days": {"$gt": 0}},
+                          #   {"expires_at": {"$ne": ""}},
                           #   {"expires_at": {"$lt": <current ISO time>}}]})
                           # Required guard: expires_at="" for permanent entries sorts BEFORE any ISO
-                          # timestamp lexicographically — an unguarded query deletes permanent entries.
+                          # timestamp lexicographically — omitting {"expires_at": {"$ne": ""}} causes
+                          # permanent entries to be deleted silently on every expire call.
                           # Automated: nx serve schedules this daily; also run by SessionEnd hook.
 ```
 

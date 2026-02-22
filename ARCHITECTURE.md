@@ -131,9 +131,9 @@ src/nexus/
 | `storage/t1_ephemeral.py` | In-memory ChromaDB scratch | `protocols/`, `types.py`, `chromadb` |
 | `storage/t2_sqlite.py` | SQLite + FTS5 memory bank | `protocols/`, `types.py`, `sqlite3` (stdlib) |
 | `storage/t3_cloud.py` | ChromaDB cloud knowledge | `protocols/`, `types.py`, `chromadb`, `voyageai` |
-| `indexing/code/` | Code repo indexing | `storage/t3_cloud.py`, `protocols/`, git, llama-index |
-| `indexing/pdf/` | PDF extraction + chunking | `storage/t3_cloud.py`, `protocols/`, pymupdf4llm |
-| `indexing/markdown/` | Markdown chunking | `storage/t3_cloud.py`, `protocols/`, markdown-it-py |
+| `indexing/code/` | Code repo indexing | `protocols/storage.py (VectorStore)`, `protocols/`, git, llama-index |
+| `indexing/pdf/` | PDF extraction + chunking | `protocols/storage.py (VectorStore)`, `protocols/`, pymupdf4llm |
+| `indexing/markdown/` | Markdown chunking | `protocols/storage.py (VectorStore)`, `protocols/`, markdown-it-py |
 | `search/` | All search strategies | `storage/`, `scoring.py` |
 | `answer/` | Haiku synthesis | `search/`, `anthropic` SDK |
 | `pm/` | Project management lifecycle | `storage/t2_sqlite.py`, `storage/t3_cloud.py`, `answer/` |
@@ -146,11 +146,13 @@ src/nexus/
 
 1. `protocols/` imports NOTHING from `storage/`, `indexing/`, `search/`, `cli/`
 2. `storage/` imports only from `protocols/` and `types.py`
-3. `indexing/` imports from `storage/` and `protocols/` (never from `search/` or `cli/`)
+3. `indexing/` imports from `protocols/` only — **not** from `storage/t3_cloud.py` directly; receives a `VectorStore` protocol via constructor injection from `cli/index_cmd.py`
 4. `search/` imports from `storage/` and `protocols/` (never from `indexing/` or `cli/`)
 5. `cli/` imports from everything but NOTHING imports from `cli/`
 6. `formatting/` imports only from `types.py`
 7. No circular dependency paths exist
+
+These rules are enforced by `import-linter` (`dev` dependency). Configuration in `.importlinter`. Run `lint-imports` as part of the CI gate alongside pytest, mypy, and ruff.
 
 ---
 
@@ -278,8 +280,13 @@ from nexus.types import Chunk
 class ChunkStrategy(Protocol):
     """Strategy for splitting content into embeddable chunks."""
 
-    def chunk(self, content: str, metadata: dict) -> list[Chunk]:
-        """Split content into chunks with metadata."""
+    def chunk(self, content: str, source_path: Path | None, metadata: dict) -> list[Chunk]:
+        """Split content into chunks with metadata.
+
+        source_path: filesystem path to the source file (required by CodeChunker for
+        language detection via file extension and line attribution; ignored by
+        PDFChunker and SemanticMarkdownChunker, which use metadata instead).
+        """
         ...
 ```
 
@@ -616,6 +623,8 @@ class SynthesisError(NexusError):
 
 ## Phased Implementation Plan
 
+> **SUPERSEDED**: The bead-by-bead execution plan has moved to `.pm/PLAN.md`, which is the single authoritative source for phase structure, bead IDs, and dependency tracking. The section below is **retained as structural context only** — bead IDs listed here (`nexus-5v7`, `nexus-c4b`, etc.) were superseded by the comprehensive plan in `.pm/PLAN.md`. Always use `.pm/PLAN.md` for tracking and AGENT_INSTRUCTIONS.md for the canonical bead reference.
+
 ### Dependency Graph
 
 ```
@@ -792,7 +801,7 @@ Phase 2    Phase 3 (T3)
 ### Phase 7: nx pm Full Lifecycle + Claude Code Plugin Integration
 **Bead:** `nexus-wdm` (blocked by: nexus-0sp, nexus-8zh)
 
-**Entry criteria:** Phases 2, 6 complete (T1 scratch, search, answer all working)
+**Entry criteria:** Phase 1, 3 complete (T2 SQLite + T3 CloudClient, basic search working). Note: the Claude Code plugin installer (nx install claude-code) additionally requires T1 scratch (Phase 2); that work is tracked as Phase 8 in `.pm/PLAN.md`.
 
 **Deliverables:**
 - `src/nexus/pm/lifecycle.py` with full state machine
@@ -836,6 +845,11 @@ Phase 2    Phase 3 (T3)
 | 8 | **PyMuPDF4LLM Type3 font hang** | Low | High (indexing blocks indefinitely) | Port Arcaneum's Type3 font pre-check. Add per-page extraction timeout (30s). Fallback chain: markdown -> normalized -> skip with warning. |
 | 9 | **Haiku API dependency for archive and answer mode** | Medium | Medium (PM archive and -a flag fail) | Archive failure leaves T2 untouched (already in spec). Retry with exponential backoff (3 attempts). Clear error messages. Answer mode gracefully degrades to showing raw results. |
 | 10 | **Mixedbread SDK authentication** | Low | Low (--mxbai silently skips) | Warning message when MXBAI_API_KEY unset. `nx doctor` validates when mxbai.stores configured. Graceful skip does not affect core search functionality. |
+| 11 | **ChromaDB CloudClient rate limits during bulk indexing** | Medium | Medium (upsert failures during large repo initial index) | Implement exponential backoff with jitter on `upsert()` (max 5 retries, base 1s). Log retry attempts. Resume upsert from last successful batch using chunk IDs as progress markers. |
+| 12 | **Voyage AI free tier exhaustion during iterative development** | Medium | Medium (embedding calls silently fail or return 402) | Track approximate embedding token consumption in `nx doctor`. Display usage warning after each index operation. Cache embeddings locally in a SQLite sidecar to avoid re-embedding unchanged chunks on re-index. |
+| 13 | **ripgrep not on PATH at install time** | Medium | Low (hybrid search silently unavailable) | `nx doctor` checks `which rg` and prints install instructions per platform. `nx serve start` logs a warning if ripgrep absent. Hybrid search gracefully falls back to semantic-only with a warning message (not an error). |
+| 14 | **SQLite WAL corruption under abnormal termination** | Low | High (T2 data inaccessible) | Run `PRAGMA integrity_check` on database open; abort with clear error if corrupt rather than continuing with broken state. Document recovery path: `sqlite3 nexus.db .dump > recovery.sql && sqlite3 nexus-new.db < recovery.sql`. |
+| 15 | **Daemon daemonization differs between macOS and Linux** | Low | Low (nx serve start behaves differently across platforms) | Use `subprocess.Popen(start_new_session=True)` for platform-portable session detachment instead of `os.fork()`. Document tested platforms in README. Add cross-platform CI jobs (ubuntu-latest, macos-latest) for serve lifecycle tests. |
 
 ---
 
