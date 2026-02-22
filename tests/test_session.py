@@ -1,10 +1,11 @@
 """AC1: Session ID is a valid UUID4, written to and readable from a PID-scoped file."""
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from nexus.session import generate_session_id, read_session_id, write_session_file
+from nexus.session import _stable_pid, generate_session_id, read_session_id, write_session_file
 
 
 def test_generate_session_id_is_uuid4() -> None:
@@ -40,3 +41,24 @@ def test_session_file_is_pid_scoped(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     assert read_session_id(ppid=1001) == "session-a"
     assert read_session_id(ppid=1002) == "session-b"
+
+
+# ── Behavior 1: _stable_pid() env var path ────────────────────────────────────
+
+def test_stable_pid_env_var_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When NX_SESSION_PID is set, _stable_pid() returns that value and ignores getsid(0)."""
+    monkeypatch.setenv("NX_SESSION_PID", "77777")
+    with patch("nexus.session.os.getsid", return_value=99999):
+        result = _stable_pid()
+    assert result == 77777
+
+
+# ── Behavior 2: _stable_pid() getsid fallback ────────────────────────────────
+
+def test_stable_pid_falls_back_to_getsid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When NX_SESSION_PID is unset, _stable_pid() returns os.getsid(0)."""
+    monkeypatch.delenv("NX_SESSION_PID", raising=False)
+    with patch("nexus.session.os.getsid", return_value=55555) as mock_getsid:
+        result = _stable_pid()
+    assert result == 55555
+    mock_getsid.assert_called_once_with(0)
