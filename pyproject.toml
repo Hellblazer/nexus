@@ -12,6 +12,7 @@ dependencies = [
     "click>=8.1",
     "pyyaml>=6.0",
     "structlog>=24.0",
+    "voyageai>=0.2",
 ]
 
 [project.scripts]
