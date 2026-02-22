@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -81,6 +82,12 @@ def stop_cmd() -> None:
         click.echo(f"Process {pid} not found (stale PID file). Cleaning up.")
         _pid_path().unlink(missing_ok=True)
         return
+    # Wait up to 5 seconds for the process to exit before reporting success.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not _process_running(pid):
+            break
+        time.sleep(0.1)
     _pid_path().unlink(missing_ok=True)
     click.echo(f"Server stopped (PID {pid}).")
 

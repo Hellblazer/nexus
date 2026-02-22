@@ -65,6 +65,36 @@ def test_run_index_skips_embedding_without_credentials(tmp_path: Path, monkeypat
     mock_t3.assert_not_called()
 
 
+def test_cache_path_includes_repo_hash(tmp_path: Path, monkeypatch) -> None:
+    """Cache filenames include a path hash so two repos named 'myproject' don't collide."""
+    from nexus.indexer import _run_index
+
+    repo_a = tmp_path / "myproject"
+    repo_b = tmp_path / "other" / "myproject"
+    repo_a.mkdir()
+    repo_b.mkdir(parents=True)
+
+    seen_paths: list[Path] = []
+
+    def fake_build_cache(repo: Path, cache_path: Path, scored: list) -> None:
+        seen_paths.append(cache_path)
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__myproject"}
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+
+    with patch("nexus.frecency.compute_frecency", return_value=0.0):
+        with patch("nexus.ripgrep_cache.build_cache", side_effect=fake_build_cache):
+            _run_index(repo_a, registry)
+            _run_index(repo_b, registry)
+
+    assert len(seen_paths) == 2
+    assert seen_paths[0] != seen_paths[1], "Cache paths for same-name repos must differ"
+    assert seen_paths[0].name != seen_paths[1].name
+
+
 def test_run_index_skips_hidden_files(tmp_path: Path, monkeypatch) -> None:
     """Files inside hidden directories (e.g. .git/) are excluded."""
     from nexus.indexer import _run_index

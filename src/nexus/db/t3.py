@@ -58,6 +58,8 @@ class T3Database:
 
     def get_or_create_collection(self, name: str) -> chromadb.Collection:
         """Get or create a T3 collection with the appropriate embedding function."""
+        from nexus.corpus import validate_collection_name
+        validate_collection_name(name)
         return self._client.get_or_create_collection(
             name, embedding_function=self._embedding_fn(name)
         )

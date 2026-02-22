@@ -76,3 +76,17 @@ def test_chunk_preserves_base_metadata():
     for c in chunks:
         assert c.metadata["source_path"] == "/my/doc.md"
         assert c.metadata["corpus"] == "notes"
+
+
+def test_chunk_multiple_headings_no_index_error():
+    """Multiple headings in sequence do not crash the token advance loop.
+
+    Exercises the forward-search for heading_close (guards against the old
+    hardcoded i += 3 assumption).
+    """
+    chunker = SemanticMarkdownChunker(chunk_size=512)
+    text = "# Alpha\n\nContent A.\n\n# Beta\n\nContent B.\n\n# Gamma\n\nContent C."
+    chunks = chunker.chunk(text, {})
+    titles = [c.metadata.get("header_path", "") for c in chunks]
+    assert any("Alpha" in t for t in titles)
+    assert any("Gamma" in t for t in titles)

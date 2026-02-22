@@ -64,8 +64,10 @@ class PDFExtractor:
         with pymupdf.open(pdf_path) as doc:
             page_count = len(doc)
             for page_num in range(page_count):
+                # Pass the open doc object (not the path) to avoid re-opening
+                # the file for every page — O(1) opens instead of O(N_pages).
                 page_md: str = pymupdf4llm.to_markdown(
-                    str(pdf_path),
+                    doc,
                     pages=[page_num],
                     ignore_images=True,
                     force_text=True,
@@ -102,8 +104,14 @@ class PDFExtractor:
         with pymupdf.open(pdf_path) as doc:
             page_count = len(doc)
             for page_num, page in enumerate(doc):
-                page_text: str = page.get_text(sort=True)
-                if page_text.strip():
+                raw: str = page.get_text(sort=True)
+                # Normalize per-page so page_boundaries match character positions
+                # in the final joined text (global normalization after the fact
+                # would shift boundaries unpredictably).
+                page_text = re.sub(r" +", " ", raw)
+                page_text = re.sub(r"\n{3,}", "\n\n", page_text)
+                page_text = "\n".join(line.rstrip() for line in page_text.split("\n")).strip()
+                if page_text:
                     page_boundaries.append(
                         {
                             "page_number": page_num + 1,
@@ -115,9 +123,6 @@ class PDFExtractor:
                     current_pos += len(page_text) + 1
 
         text = "\n".join(text_parts)
-        text = re.sub(r" +", " ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = "\n".join(line.rstrip() for line in text.split("\n"))
 
         return ExtractionResult(
             text=text,

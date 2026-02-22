@@ -56,8 +56,10 @@ def test_add_repo_success(client, tmp_path: Path) -> None:
     repo = tmp_path / "myrepo"
     repo.mkdir()
     mock_reg = MagicMock()
+    mock_git = MagicMock(returncode=0)
     with patch.object(server_module, "_get_registry", return_value=mock_reg):
-        resp = client.post("/repos", json={"path": str(repo)})
+        with patch("nexus.server.subprocess.run", return_value=mock_git):
+            resp = client.post("/repos", json={"path": str(repo)})
     assert resp.status_code == 201
     mock_reg.add.assert_called_once_with(repo)
 
@@ -65,6 +67,28 @@ def test_add_repo_success(client, tmp_path: Path) -> None:
 def test_add_repo_path_not_found(client, tmp_path: Path) -> None:
     resp = client.post("/repos", json={"path": str(tmp_path / "nonexistent")})
     assert resp.status_code == 404
+
+
+def test_add_repo_rejects_non_git_directory(client, tmp_path: Path) -> None:
+    """POST /repos returns 400 when the path exists but is not a git repository."""
+    repo = tmp_path / "notgit"
+    repo.mkdir()
+    resp = client.post("/repos", json={"path": str(repo)})
+    assert resp.status_code == 400
+    assert "git" in resp.get_json()["error"].lower()
+
+
+def test_add_repo_accepts_git_repository(client, tmp_path: Path) -> None:
+    """POST /repos accepts a directory that contains a .git repo."""
+    import subprocess as _sp
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _sp.run(["git", "init", str(repo)], capture_output=True)
+    mock_reg = MagicMock()
+    with patch.object(server_module, "_get_registry", return_value=mock_reg):
+        resp = client.post("/repos", json={"path": str(repo)})
+    assert resp.status_code == 201
+    mock_reg.add.assert_called_once_with(repo)
 
 
 def test_add_repo_malformed_json(client) -> None:

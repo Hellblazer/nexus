@@ -94,7 +94,8 @@ def test_serve_stop_sends_sigterm(runner: CliRunner, serve_home: Path) -> None:
     pid_path.write_text("12345")
 
     with patch("nexus.commands.serve.os.kill") as mock_kill:
-        result = runner.invoke(main, ["serve", "stop"])
+        with patch("nexus.commands.serve._process_running", return_value=False):
+            result = runner.invoke(main, ["serve", "stop"])
 
     assert result.exit_code == 0
     mock_kill.assert_called_once_with(12345, signal.SIGTERM)
@@ -107,6 +108,24 @@ def test_serve_stop_no_server_running(runner: CliRunner, serve_home: Path) -> No
     assert result.exit_code != 0
     output = result.output.lower()
     assert "not running" in output or "no server" in output or "pid" in output
+
+
+def test_serve_stop_waits_for_process_exit(runner: CliRunner, serve_home: Path) -> None:
+    """stop_cmd polls until the process exits before reporting success."""
+    pid_path = _pid_path(serve_home)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("12345")
+
+    # Simulate process still running on first check, gone on second
+    running_sequence = [True, False]
+
+    with patch("nexus.commands.serve.os.kill"):
+        with patch("nexus.commands.serve._process_running", side_effect=running_sequence):
+            result = runner.invoke(main, ["serve", "stop"])
+
+    assert result.exit_code == 0
+    assert "stopped" in result.output.lower()
+    assert not pid_path.exists()
 
 
 def test_serve_stop_stale_pid_cleans_up(runner: CliRunner, serve_home: Path) -> None:
