@@ -69,6 +69,8 @@ nx scratch promote <id> --project myproject --title findings.md
 nx scratch clear
 ```
 
+**Usage pattern**: Use T1 scratch for in-flight working notes (hypotheses, interim findings, checkpoints). Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via `nx store put`.
+
 ## Indexing
 
 ```bash

@@ -87,6 +87,32 @@ def main() -> None:
             output_lines.append(status_output)
             output_lines.append("")
 
+        # Show available T2 memory docs for active project
+        project_name = None
+        try:
+            import subprocess as sp
+            git_result = sp.run(
+                ['git', 'rev-parse', '--show-toplevel'],
+                capture_output=True, text=True, timeout=5, cwd=cwd
+            )
+            if git_result.returncode == 0:
+                project_name = Path(git_result.stdout.strip()).name
+        except Exception:
+            pass
+
+        if project_name:
+            memory_output = run_command(
+                ['nx', 'memory', 'list', '--project', f'{project_name}_active'],
+                timeout=NX_TIMEOUT, cwd=cwd
+            )
+            if memory_output:
+                lines = memory_output.split('\n')[:8]  # cap at 8 lines
+                output_lines.append("## T2 Memory (Active Project)")
+                output_lines.append("```")
+                output_lines.extend(line[:200] for line in lines)
+                output_lines.append("```")
+                output_lines.append("")
+
     # --- bd ready ---
     if which('bd'):
         ready_output = run_command(['bd', 'ready'], timeout=BD_TIMEOUT, cwd=cwd)
@@ -99,6 +125,13 @@ def main() -> None:
             output_lines.append("")
     else:
         debug("bd command not found")
+
+    # T1 scratch reminder
+    if which('nx'):
+        output_lines.append("## Session Scratch (T1)")
+        output_lines.append("Session-scoped ephemeral scratch available: `nx scratch put/get/list/search`")
+        output_lines.append("Flag important scratch entries before session ends: `nx scratch flag <id>`")
+        output_lines.append("")
 
     if output_lines:
         print("\n".join(output_lines))

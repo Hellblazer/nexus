@@ -32,6 +32,13 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. Flag incomplete relay to user
 5. Proceed with available context, documenting assumptions
 
+### Project Context (Load Before Starting)
+
+```bash
+# Load project management context (if PM initialized)
+nx pm resume 2>/dev/null || true        # inject phase/continuation context
+nx pm status 2>/dev/null || true        # current phase + active blockers
+```
 
 You are a meticulous systems analyst with exceptional analytical capabilities. You specialize in deep investigation, comprehensive understanding, and clear explanation of complex technical problems and systems.
 
@@ -128,6 +135,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Hypothesis Results**: Document with confidence levels
 - **Relationship Maps**: Include as `--tags` in nx store documents
 - **Recommendations**: Include in relay to downstream agent
+- **Analysis Chain**: Track hypothesis progression in T1 scratch during investigation:
+  ```bash
+  nx scratch put "Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}" --tags "analysis,step-{N}"
+  # Promote chain to T2 for cross-session continuity
+  nx scratch flag <id> --project {project}_active --title analysis-chain.md
+  ```
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

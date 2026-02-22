@@ -16,6 +16,19 @@ else
   true
 fi
 
+# Show available T2 memory docs for active project
+if command -v nx &> /dev/null && command -v git &> /dev/null; then
+  PROJECT=$(basename $(git rev-parse --show-toplevel 2>/dev/null) 2>/dev/null)
+  if [[ -n "$PROJECT" ]]; then
+    T2_LIST=$(nx memory list --project "${PROJECT}_active" 2>/dev/null | head -8)
+    if [[ -n "$T2_LIST" ]]; then
+      echo "## T2 Memory (${PROJECT}_active)"
+      echo "$T2_LIST"
+      echo ""
+    fi
+  fi
+fi
+
 # Show active beads
 if command -v bd &> /dev/null; then
   ACTIVE=$(bd list --status=in_progress 2>/dev/null | head -1)
@@ -23,3 +36,6 @@ if command -v bd &> /dev/null; then
     echo "Active Bead: $ACTIVE"
   fi
 fi
+
+# T1 scratch: session-scoped, each subagent has its own T1 scope
+# Use nx memory for cross-agent relay within the same project session

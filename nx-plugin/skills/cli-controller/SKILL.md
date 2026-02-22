@@ -141,3 +141,5 @@ tmux-cli kill --pane=$pane
 5. Handle errors - check output for error patterns
 6. Clean up panes when done
 7. Use `tmux-cli status` to see all active panes
+
+**Session Scratch (T1)**: Use `nx scratch put "..."` to note interactive session findings (pane IDs, interim output, working hypotheses). Flagged items auto-promote to T2 at session end.

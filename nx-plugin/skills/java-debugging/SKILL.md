@@ -58,6 +58,8 @@ When invoking this agent via Task tool, use this exact structure:
 ### Input Artifacts
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
+- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
 - Files: [key files or "none"]
 
 ### Deliverable
@@ -89,3 +91,6 @@ The java-debugger uses sequential thinking:
 - [ ] Fix proposed and validated
 - [ ] Findings stored in nx store with title `debug-{component}-{issue-type}`
 - [ ] Bead updated with resolution
+- [ ] Hypothesis chain preserved in T2 for future sessions
+
+**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.

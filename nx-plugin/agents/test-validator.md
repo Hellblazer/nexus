@@ -33,6 +33,14 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. Flag incomplete relay to user
 5. Proceed with available context, documenting assumptions
 
+### Project Context (Load Before Starting)
+
+```bash
+# Load project management context (if PM initialized)
+nx pm resume 2>/dev/null || true        # inject phase/continuation context
+nx pm status 2>/dev/null || true        # current phase + active blockers
+```
+
 
 You are a test validation specialist with deep expertise in test strategy, coverage analysis, test execution, and quality assurance. You ensure that code changes are adequately tested and that test suites remain healthy.
 
@@ -146,8 +154,15 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Validation Reports**: Include in response
 - **Coverage Gaps**: Create task beads for missing tests
-- **Quality Metrics**: Store in nx memory as `{project}_active/test-metrics.md`
+- **Quality Metrics**: Store in nx memory: `nx memory put "metrics" --project {project}_active --title test-metrics.md --ttl 30d`
 - **Regression Risks**: Document in relay notes
+- **Test Result Snapshots**: Use T1 scratch to capture test run state during analysis:
+  ```bash
+  # Capture test run result
+  nx scratch put "Test run {timestamp}: {N} passed, {M} failed\n{summary}" --tags "test-results"
+  # For multi-session validation, promote to T2
+  nx scratch promote <id> --project {project}_active --title test-validation-{date}.md
+  ```
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

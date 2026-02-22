@@ -63,6 +63,8 @@ When invoking this agent via Task tool, use this exact structure:
 ### Input Artifacts
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
+- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
 - Files: [key files or "none"]
 
 ### Deliverable
@@ -96,3 +98,5 @@ The java-architect-planner uses `nx search --corpus code --hybrid` for discovery
 - [ ] Beads created for trackable work
 - [ ] Risks identified with mitigations
 - [ ] Ready for plan-auditor validation
+
+**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.

@@ -38,6 +38,29 @@ description: Constructive critique of code, plans, designs, or documentation usi
   echo ""
   echo "The deep-critic analyzes structure, logical consistency, completeness, and spec conformance."
   echo "Findings are prioritized: Critical > Significant > Minor."
+
+  # Project management context
+  echo "### Project Management Context"
+  echo ""
+  if command -v nx &> /dev/null; then
+    echo "**PM Status:**"
+    echo '```'
+    nx pm status 2>/dev/null || echo "No PM initialized"
+    echo '```'
+    echo ""
+    PROJECT=$(basename $(git rev-parse --show-toplevel 2>/dev/null) 2>/dev/null)
+    if [ -n "$PROJECT" ]; then
+      echo "**T2 Memory (${PROJECT}_active):**"
+      echo '```'
+      nx memory list --project "${PROJECT}_active" 2>/dev/null | head -8 || echo "No T2 memory"
+      echo '```'
+      echo ""
+      echo "**Session Scratch (T1):**"
+      echo '```'
+      nx scratch list 2>/dev/null | head -5 || echo "No T1 scratch"
+      echo '```'
+    fi
+  fi
 }
 
 ## Artifact to Critique

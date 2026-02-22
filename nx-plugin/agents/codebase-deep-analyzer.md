@@ -32,6 +32,15 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. Flag incomplete relay to user
 5. Proceed with available context, documenting assumptions
 
+### Project Context (Load Before Starting)
+
+```bash
+# Load project management context (if PM initialized)
+nx pm resume 2>/dev/null || true        # inject phase/continuation context
+nx pm status 2>/dev/null || true        # current phase + active blockers
+```
+
+When nx pm output is available, align your work with the current phase. Check `bd ready` for unblocked tasks.
 
 You are an elite codebase architect and analysis specialist with deep expertise in software archaeology, system comprehension, and technical documentation. Your mission is to perform comprehensive, systematic analysis of codebases using sequential thought processes and parallel task coordination.
 
@@ -46,7 +55,7 @@ Before analysis, ensure the codebase is indexed:
 
 This provides semantic search + ripgrep + git frecency, far more powerful than grep alone.
 
-1. **Initial Reconnaissance**: Begin with high-level structural analysis - identify project type, build system, module organization, and primary technologies. Document findings in Nexus knowledge store immediately.
+1. **Initial Reconnaissance**: Begin with high-level structural analysis - identify project type, build system, module organization, and primary technologies. Document findings in Nexus knowledge store immediately. Check `nx pm status` to understand where this analysis fits in the broader project lifecycle.
 
 2. **Parallel Task Orchestration**: Spawn multiple simultaneous subtasks to analyze different aspects:
    - Architecture and module dependencies
@@ -140,6 +149,15 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Dependency Analysis**: Include in response
 - **Technical Debt**: Create chore beads for significant debt
 - **Pattern Catalog**: Store via `echo "..." | nx store put - --collection knowledge --title "pattern-codebase-{name}" --tags "pattern"`
+- **Per-Subtask Findings**: Use T1 scratch to track findings during parallel subtask analysis:
+  ```bash
+  # Store subtask finding
+  nx scratch put "# Subtask: {module}\n{findings}" --tags "analysis,subtask-{n}"
+  # At end of each subtask, promote to T2
+  nx scratch promote <id> --project {project}_active --title subtask-{n}-findings.md
+  # Final synthesis: promote all to T2
+  nx scratch flag <id> --project {project}_active --title analysis-session.md
+  ```
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

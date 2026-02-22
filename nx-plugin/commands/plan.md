@@ -39,6 +39,19 @@ description: Create implementation plan using strategic-planner agent
     echo "Gradle project"
   fi
   echo '```'
+
+  PROJECT=$(basename $(git rev-parse --show-toplevel 2>/dev/null) 2>/dev/null)
+  if [ -n "$PROJECT" ]; then
+    echo "**T2 Memory (${PROJECT}_active):**"
+    echo '```'
+    nx memory list --project "${PROJECT}_active" 2>/dev/null | head -8 || echo "No T2 memory"
+    echo '```'
+    echo ""
+    echo "**Session Scratch (T1):**"
+    echo '```'
+    nx scratch list 2>/dev/null | head -5 || echo "No T1 scratch"
+    echo '```'
+  fi
 }
 
 ## Feature/Task to Plan

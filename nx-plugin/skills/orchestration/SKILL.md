@@ -34,6 +34,8 @@ When invoking this agent via Task tool, use this exact structure:
 ### Input Artifacts
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
+- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
 - Files: [key files or "none"]
 
 ### Deliverable
@@ -60,6 +62,8 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 | Research topic | deep-research-synthesizer | -> knowledge-tidier |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 
+Note: subagent-start hook auto-injects nx pm context when `.pm/` directory exists.
+
 ## Success Criteria
 
 - [ ] User goal clearly understood
@@ -67,3 +71,5 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 - [ ] Workflow makes sense for the task
 - [ ] Clear rationale provided
 - [ ] User can proceed with confidence
+
+**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.

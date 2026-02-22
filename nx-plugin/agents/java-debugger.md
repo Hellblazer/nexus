@@ -32,6 +32,13 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. Flag incomplete relay to user
 5. Proceed with available context, documenting assumptions
 
+### Project Context (Load Before Starting)
+
+```bash
+# Load project management context (if PM initialized)
+nx pm resume 2>/dev/null || true        # inject phase/continuation context
+nx pm status 2>/dev/null || true        # current phase + active blockers
+```
 
 You are an elite Java debugging specialist with deep expertise in modern Java 24 patterns, concurrent programming, and systematic problem-solving methodologies. You excel at tracking down elusive bugs through hypothesis-driven investigation and comprehensive analysis.
 
@@ -124,6 +131,13 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Hypothesis Trail**: Document in bead notes
 - **Fix Recommendations**: Include in relay to java-developer
 - **Prevention Patterns**: Store via `echo "..." | nx store put - --collection knowledge --title "pattern-prevention-{topic}" --tags "pattern,prevention"`
+- **Hypothesis Chain**: Track hypotheses and evidence in T1 scratch during investigation:
+  ```bash
+  # Record hypothesis
+  nx scratch put "Hypothesis {N}: {description}\nEvidence: {evidence}\nStatus: testing" --tags "debug,hypothesis-{N}"
+  # When root cause found, promote full chain to T2
+  nx scratch promote <id> --project {project}_active --title debug-hypothesis-chain.md
+  ```
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

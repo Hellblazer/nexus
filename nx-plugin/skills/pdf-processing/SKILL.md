@@ -34,6 +34,8 @@ When invoking this agent via Task tool, use this exact structure:
 ### Input Artifacts
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
+- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
 - Files: [key files or "none"]
 
 ### Deliverable
@@ -67,3 +69,5 @@ The pdf-chromadb-processor agent:
 - [ ] Metadata preserved
 - [ ] Documents searchable in nx store
 - [ ] Sample queries return relevant results
+
+**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.

@@ -23,6 +23,8 @@ All agent relays follow this standardized structure. Skills and agents reference
 ### Input Artifacts
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]       # optional: ephemeral T1 items for this pipeline run
+- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
 - Files: [key files touched or relevant]
 
 ### Deliverable
@@ -42,6 +44,8 @@ All agent relays follow this standardized structure. Skills and agents reference
 | **Preceding Work** | What was done before this relay (if relevant) |
 | **Time Constraints** | Deadlines or urgency indicators |
 | **Related Beads** | Other beads that may be affected |
+| **nx scratch** | Passing ephemeral scratch IDs to a downstream agent in the same pipeline session |
+| **nx pm context** | Current phase and blockers from `nx pm status`, injected by subagent-start hook |
 
 ### Extended Template (with optional fields)
 
@@ -54,6 +58,8 @@ All agent relays follow this standardized structure. Skills and agents reference
 ### Input Artifacts
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]       # optional: ephemeral T1 items for this pipeline run
+- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
 - Files: [key files touched]
 
 ### Deliverable
@@ -168,6 +174,8 @@ See [CONTEXT_PROTOCOL.md](./CONTEXT_PROTOCOL.md) RECOVER section for details.
 ```
 
 **Validation is non-optional**. Agents must check relay structure before executing work.
+
+**Note on nx pm context**: The subagent-start hook automatically injects current phase and blockers from `nx pm status` into agent sessions when a `.pm/` directory is present. Agents typically do not need to manually add `nx pm context` to relays — it is pre-populated by the hook. Include it explicitly only when passing non-default phase context or when the relay crosses project boundaries.
 
 ## Relationship to Context Protocol
 

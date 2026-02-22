@@ -32,6 +32,14 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. Flag incomplete relay to user
 5. Proceed with available context, documenting assumptions
 
+### Project Context (Load Before Starting)
+
+```bash
+# Load project management context (if PM initialized)
+nx pm resume 2>/dev/null || true        # inject phase/continuation context
+nx pm status 2>/dev/null || true        # current phase + active blockers
+```
+
 
 Systematically review, validate, and consolidate information across knowledge bases to ensure:
 - **Accuracy**: All facts are correct and properly sourced
@@ -183,6 +191,13 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Contradiction Resolutions**: Update source documents directly via nx store
 - **Archive Actions**: Document in nx T2 memory as `--project {project}_active --title archive-log.md`
 - **Version Updates**: Increment versions in document content
+- **Review Artifacts**: Use T1 scratch to track review round findings:
+  ```bash
+  # After each review round
+  nx scratch put "# Review Round {N}: {N} issues found\n{issue-list}" --tags "review,round-{N}"
+  # Promote summary to T2 for cross-session continuity
+  nx scratch promote <id> --project {project}_active --title review-round-{N}.md
+  ```
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

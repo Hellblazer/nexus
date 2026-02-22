@@ -14,9 +14,14 @@ These agents **MUST proactively search** for context before starting:
 
 **Search Sources in Order**:
 1. **Bead**: `bd show <id>` for task context, design field, dependencies
-2. **Project Infrastructure**: `nx pm resume` if project uses nx PM
+2. **Project Infrastructure**: load phase context first:
+   ```bash
+   nx pm resume 2>/dev/null || true   # inject phase context
+   nx pm status 2>/dev/null || true   # current phase + blockers
+   ```
 3. **nx T3 store**: `nx search "[topic]" --corpus knowledge --n 5`
 4. **nx T2 memory**: `nx memory get --project {project}_active --title ACTIVE_INDEX.md`
+5. **T1 scratch** (current session): `nx scratch search "[topic]"` for any in-flight notes
 
 ### Relay-Reliant Agents (Execution & Validation)
 
@@ -37,6 +42,42 @@ If relay received, verify it contains:
 - [ ] Deliverable description
 - [ ] Quality criteria checkboxes
 
+## T1 — Session Scratch (Ephemeral)
+
+T1 is session-scoped: all entries are wiped at SessionEnd unless flagged.
+
+**When to use T1:**
+- Ephemeral working notes and hypotheses during a single session
+- Intermediate analysis results before validation
+- Step-by-step debug traces that may not be worth persisting
+- Routing or coordination notes within a pipeline run
+
+**T1 CLI:**
+```bash
+nx scratch put "<content>" [--tags TAG1,TAG2] [--persist] [--project PROJECT] [--title TITLE]
+nx scratch get <id>
+nx scratch search "<query>" [--n N]
+nx scratch list
+nx scratch flag <id> [--project PROJECT] [--title TITLE]   # mark for auto-flush to T2 at SessionEnd
+nx scratch promote <id> --project PROJECT --title TITLE    # immediate T2 copy
+nx scratch clear
+```
+
+`nx hook session-end` auto-promotes flagged T1 items to T2 at session end.
+
+**Promote to T2 when:**
+- Hypothesis validated (worth preserving across sessions)
+- Interim findings that a future session may need
+- Working notes that inform next-phase work
+
+## Storage Tier Quick Reference
+
+| Tier | Name | Scope | CLI Entry | Use Cases | TTL |
+|------|------|-------|-----------|-----------|-----|
+| T1 | nx scratch | Session (ephemeral) | `nx scratch put` | Working notes, hypotheses, debug traces | Wiped on SessionEnd (flag to survive) |
+| T2 | nx memory | Per-project, persistent | `nx memory put` | Session state, phase docs, agent relay, active work | 30d default; `permanent` available |
+| T3 | nx store / nx search | Permanent, cross-session | `nx store put` | Research findings, architectural decisions, validated patterns | `permanent` or explicit TTL |
+
 ## PRODUCE
 
 Agents produce artifacts based on their specialization:
@@ -44,12 +85,43 @@ Agents produce artifacts based on their specialization:
 - **Test Results**: Logged; failures create bug beads
 - **Analysis/Research**: Store in nx T3 store with appropriate title pattern
 - **Session State**: Store in nx T2 memory for multi-session work
+- **Interim Working Notes**: Use T1 scratch for session-scoped state; promote to T2 when validated:
+  ```bash
+  # Store ephemeral working note
+  nx scratch put "<hypothesis or interim finding>" --tags "hypothesis,phase-N"
+  # Flag for auto-flush to T2 at session end
+  nx scratch flag <id> --project {project}_active --title interim-notes.md
+  # Or promote immediately
+  nx scratch promote <id> --project {project}_active --title interim-findings.md
+  ```
 
 ### Naming Conventions
 
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: `--project {project}_active --title {phase}.md` (e.g., `--project ART_active --title phase2-implementation.md`)
 - **Bead Description**: Include `Context: nx-plugin` line if project uses PM infrastructure
+
+## nx pm Lifecycle
+
+When a project has PM infrastructure (`.pm/` directory), use these commands:
+
+```bash
+nx pm init [--project PROJECT]       # creates CONTINUATION.md, BLOCKERS.md, PHASES.md, METADATA.md, FINDINGS.md
+nx pm resume [--project PROJECT]     # print CONTINUATION.md (≤2000 chars) for session injection
+nx pm status [--project PROJECT]     # Phase N, Agent, Blockers
+nx pm block "<text>" [--project PROJECT]     # record blocker
+nx pm unblock <line> [--project PROJECT]     # resolve blocker
+nx pm phase next [--project PROJECT]         # advance to next phase
+nx pm search "<query>" [--project PROJECT]   # FTS5 search across PM docs
+nx pm archive [--project PROJECT]            # T2→T3 synthesis + 90-day decay
+```
+
+**When to call:**
+- **Session start**: `nx pm resume && nx pm status` (auto-injected by subagent-start hook)
+- **Starting work on a bead**: `nx pm status` to confirm phase alignment
+- **Blocking issue discovered**: `nx pm block "<description>"`
+- **Phase completion**: `nx pm phase next`
+- **Session end**: `nx pm archive` for completed projects
 
 ## RELAY (Standard Format)
 
@@ -64,6 +136,8 @@ All relays to downstream agents use this structure:
 ### Input Artifacts
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]
+- nx pm context: [Phase N, active blockers or "none"]
 - Files: [key files touched]
 
 ### Deliverable
@@ -77,14 +151,17 @@ All relays to downstream agents use this structure:
 [Special context, blockers, or warnings]
 ```
 
+See [RELAY_TEMPLATE.md](./RELAY_TEMPLATE.md) for the full template, extended template, and optional fields reference.
+
 ## RECOVER (If Context Missing)
 
 If expected context not received:
 1. Search nx T3 store for related prior work: `nx search "[topic]" --corpus knowledge --n 5`
 2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
-3. Query `bd list --status=in_progress` for active work
-4. Document assumption in bead notes
-5. Flag incomplete context in downstream relay
+3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+4. Query `bd list --status=in_progress` for active work
+5. Document assumption in bead notes
+6. Flag incomplete context in downstream relay
 
 ## Beads Integration
 
