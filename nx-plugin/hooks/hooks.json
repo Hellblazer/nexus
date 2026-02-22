@@ -1,0 +1,14 @@
+{
+  "SessionStart": [
+    {
+      "type": "command",
+      "command": "nx hook session-start"
+    }
+  ],
+  "SessionEnd": [
+    {
+      "type": "command",
+      "command": "nx hook session-end"
+    }
+  ]
+}

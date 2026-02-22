@@ -17,91 +17,9 @@ _NX_HOOK_MARKER = "nx hook"  # sentinel for install/uninstall detection
 
 # ── SKILL.md content ──────────────────────────────────────────────────────────
 
-_SKILL_MD = """\
----
-name: nexus
-description: Use Nexus (nx) for semantic search, memory, knowledge, and project management.
----
-
-# Nexus — Agent Usage Guide
-
-Nexus replaces cloud ingest (Mixedbread) with a locally-controlled pipeline.
-Use these commands for search, memory, and PM operations.
-
-## Search
-
-```bash
-nx search "query"                    # semantic search across T3 knowledge
-nx search "query" --corpus code      # code-only search
-nx search "query" --hybrid           # hybrid: semantic + ripgrep + frecency
-nx search "query" -a                 # search + Haiku answer synthesis
-nx search "query" --vimgrep          # vimgrep-compatible output
-nx search "query" --json             # JSON output
-nx search "query" --mxbai            # include Mixedbread fan-out
-nx search "query" --agentic          # Haiku-driven query refinement
-```
-
-## Memory (T2 SQLite — persistent across sessions)
-
-```bash
-nx memory put "content" -p myproject -t title.md  # store with title
-nx memory get --project myproject --title title.md
-nx memory search "query" --project myproject
-nx memory list --project myproject
-nx memory expire                                   # remove TTL-expired entries
-```
-
-## Knowledge Store (T3 ChromaDB cloud)
-
-```bash
-echo "# My Finding..." | nx store put - --collection knowledge --title "My Finding"  # stdin
-nx store put analysis.md --collection knowledge --tags "arch"                         # file
-nx store expire                                                                       # remove expired
-nx search "query" --corpus knowledge                                                  # search stored knowledge
-```
-
-## Scratch (T1 in-memory — cleared at session end)
-
-```bash
-nx scratch put "content" --tags "hypothesis"
-nx scratch put "content" --persist --project myproject --title finding.md
-nx scratch search "query"
-nx scratch list
-nx scratch flag <id>                     # mark for SessionEnd flush
-nx scratch clear                         # explicit clear
-```
-
-## Indexing
-
-```bash
-nx index code <path>                     # register and index a code repo
-nx index pdf <path>                      # index a PDF into docs__ T3 collection
-nx index md <path>                       # index a markdown file
-```
-
-## Project Management (PM)
-
-```bash
-nx pm init                               # create 5 standard PM docs in T2
-nx pm resume                             # inject CONTINUATION.md into session
-nx pm status                             # show phase, agent, blockers
-nx pm block "reason"                     # add a blocker
-nx pm unblock 1                          # remove blocker by line number
-nx pm phase next                         # advance to next phase
-nx pm search "query"                     # FTS5 search across PM docs
-nx pm archive                            # synthesize → T3 + T2 decay
-nx pm restore <project>                  # restore within decay window
-nx pm reference "query"                  # semantic search across PM archives
-nx pm expire                             # remove TTL-expired PM docs
-```
-
-## Health
-
-```bash
-nx doctor                                # verify all services and credentials
-nx serve                                 # start persistent indexing server
-```
-"""
+_SKILL_MD = (
+    Path(__file__).parents[3] / "nx-plugin" / "skills" / "nexus" / "SKILL.md"
+).read_text()
 
 
 # ── Settings helpers ──────────────────────────────────────────────────────────
