@@ -28,6 +28,9 @@ jobs:
           path: ~/.cache/chroma
           key: chromadb-onnx-${{ runner.os }}
 
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
       - name: Install project + dev deps
         run: uv sync --group dev
 
