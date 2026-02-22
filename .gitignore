@@ -9,3 +9,5 @@ dist/
 .coverage.*
 htmlcov/
 *.log
+.pm/
+.pm-archives/
