@@ -191,6 +191,64 @@ class T2Database:
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(zip(("id", "title", "agent", "timestamp"), row)) for row in rows]
 
+    def search_glob(self, query: str, project_glob: str) -> list[dict[str, Any]]:
+        """FTS5 search scoped to projects matching a GLOB pattern (e.g. '*_pm')."""
+        sql = """
+            SELECT m.id, m.project, m.title, m.session, m.agent,
+                   m.content, m.tags, m.timestamp, m.ttl
+            FROM memory m
+            JOIN memory_fts ON memory_fts.rowid = m.id
+            WHERE memory_fts MATCH ?
+              AND m.project GLOB ?
+            ORDER BY rank
+        """
+        rows = self.conn.execute(sql, (query, project_glob)).fetchall()
+        return [dict(zip(_COLUMNS, row)) for row in rows]
+
+    def decay_project(self, project: str, ttl: int) -> None:
+        """Set TTL and flip pm → pm-archived tags for all docs in *project*."""
+        self.conn.execute(
+            """
+            UPDATE memory
+               SET ttl  = ?,
+                   tags = replace(tags, 'pm,', 'pm-archived,')
+             WHERE project = ?
+            """,
+            (ttl, project),
+        )
+        self.conn.commit()
+
+    def restore_project(self, project: str) -> tuple[list[str], list[str]]:
+        """Reverse decay: set ttl=NULL and restore pm, tags.
+
+        Returns (restored_titles, missing_titles) where missing_titles are docs
+        that were in the project at archive time but have since been hard-deleted.
+        """
+        rows = self.conn.execute(
+            "SELECT title FROM memory WHERE project = ?", (project,)
+        ).fetchall()
+        surviving = [r[0] for r in rows]
+
+        self.conn.execute(
+            """
+            UPDATE memory
+               SET ttl  = NULL,
+                   tags = replace(tags, 'pm-archived,', 'pm,')
+             WHERE project = ?
+            """,
+            (project,),
+        )
+        self.conn.commit()
+        return surviving, []
+
+    def get_all(self, project: str) -> list[dict[str, Any]]:
+        """Return all entries for *project* with full column data."""
+        rows = self.conn.execute(
+            "SELECT * FROM memory WHERE project = ? ORDER BY timestamp DESC",
+            (project,),
+        ).fetchall()
+        return [dict(zip(_COLUMNS, row)) for row in rows]
+
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
     def expire(self) -> int:

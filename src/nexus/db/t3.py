@@ -94,13 +94,19 @@ class T3Database:
     # ── Read ──────────────────────────────────────────────────────────────────
 
     def search(
-        self, query: str, collection_names: list[str], n_results: int = 10
+        self,
+        query: str,
+        collection_names: list[str],
+        n_results: int = 10,
+        where: dict | None = None,
     ) -> list[dict]:
         """Semantic search over the given collections.
 
         Each collection is queried with its appropriate embedding model.
         Results are returned sorted by distance (closest first).
         Empty collections are skipped.
+
+        *where* is an optional ChromaDB metadata filter applied to every collection.
         """
         results: list[dict] = []
         for name in collection_names:
@@ -109,11 +115,14 @@ class T3Database:
             if count == 0:
                 continue
             actual_n = min(n_results, count)
-            qr = col.query(
-                query_texts=[query],
-                n_results=actual_n,
-                include=["documents", "metadatas", "distances"],
-            )
+            query_kwargs: dict = {
+                "query_texts": [query],
+                "n_results": actual_n,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where is not None:
+                query_kwargs["where"] = where
+            qr = col.query(**query_kwargs)
             for doc_id, doc, meta, dist in zip(
                 qr["ids"][0],
                 qr["documents"][0],
