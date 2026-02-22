@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Self-hosted semantic search and knowledge management"
 requires-python = ">=3.12"
 dependencies = [
+    "chromadb>=0.6",
     "click>=8.1",
     "pyyaml>=6.0",
     "structlog>=24.0",

@@ -1,0 +1,42 @@
+"""AC1: Session ID is a valid UUID4, written to and readable from a PID-scoped file."""
+import re
+from pathlib import Path
+
+import pytest
+
+from nexus.session import generate_session_id, read_session_id, write_session_file
+
+
+def test_generate_session_id_is_uuid4() -> None:
+    sid = generate_session_id()
+    assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", sid)
+
+
+def test_generate_session_id_unique() -> None:
+    assert generate_session_id() != generate_session_id()
+
+
+def test_write_and_read_session_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sid = generate_session_id()
+
+    path = write_session_file(sid, ppid=99999)
+    assert path.exists()
+    assert path.read_text() == sid
+
+    recovered = read_session_id(ppid=99999)
+    assert recovered == sid
+
+
+def test_read_session_id_missing_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert read_session_id(ppid=99998) is None
+
+
+def test_session_file_is_pid_scoped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    write_session_file("session-a", ppid=1001)
+    write_session_file("session-b", ppid=1002)
+
+    assert read_session_id(ppid=1001) == "session-a"
+    assert read_session_id(ppid=1002) == "session-b"
