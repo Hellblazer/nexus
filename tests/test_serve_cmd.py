@@ -109,6 +109,20 @@ def test_serve_stop_no_server_running(runner: CliRunner, serve_home: Path) -> No
     assert "not running" in output or "no server" in output or "pid" in output
 
 
+def test_serve_stop_stale_pid_cleans_up(runner: CliRunner, serve_home: Path) -> None:
+    """T4: stop when process is already dead cleans up PID file gracefully."""
+    pid_path = _pid_path(serve_home)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("99999")
+
+    with patch("nexus.commands.serve.os.kill", side_effect=ProcessLookupError):
+        result = runner.invoke(main, ["serve", "stop"])
+
+    assert result.exit_code == 0
+    assert not pid_path.exists()
+    assert "stale" in result.output.lower() or "not found" in result.output.lower()
+
+
 # ── status ────────────────────────────────────────────────────────────────────
 
 def test_serve_status_no_server(runner: CliRunner, serve_home: Path) -> None:

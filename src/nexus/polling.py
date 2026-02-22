@@ -15,6 +15,7 @@ def _current_head(repo: Path) -> str:
         cwd=repo,
         capture_output=True,
         text=True,
+        timeout=30,
     )
     if result.returncode != 0:
         return ""
@@ -33,19 +34,24 @@ def check_and_reindex(repo: Path, registry: "RepoRegistry") -> None:
 
     Skips if:
     - repo not in registry
-    - repo status is 'indexing' (already in progress)
+    - repo status is 'indexing' or 'error' (already in progress / persistent failure)
     - HEAD hash unchanged
+
+    Always records the new head_hash even if indexing fails, to prevent
+    an infinite re-index loop on persistent failures.
     """
     info = registry.get(repo)
     if info is None:
         return
 
-    if info.get("status") == "indexing":
+    if info.get("status") in ("indexing", "error"):
         return
 
     current = _current_head(repo)
     if current == info.get("head_hash", ""):
         return
 
-    index_repo(repo, registry)
-    registry.update(repo, head_hash=current)
+    try:
+        index_repo(repo, registry)
+    finally:
+        registry.update(repo, head_hash=current)

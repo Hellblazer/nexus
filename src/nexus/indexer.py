@@ -11,13 +11,10 @@ def index_repository(repo: Path, registry: "RepoRegistry") -> None:
     """Index all files in *repo* into the T3 code__ collection.
 
     Marks status as 'indexing' while running, 'ready' on success.
-    This is a placeholder — full implementation follows frecency + chunking pipeline.
     """
     registry.update(repo, status="indexing")
     try:
         _run_index(repo, registry)
-        info = registry.get(repo)
-        collection = info["collection"] if info else f"code__{repo.name}"
         registry.update(repo, status="ready")
     except Exception:
         registry.update(repo, status="error")
@@ -28,9 +25,9 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     """Full indexing pipeline: frecency → chunking → embedding → T3 upsert."""
     import os
 
-    from nexus.frecency import compute_frecency
     from nexus.chunker import chunk_file
-    from nexus.ripgrep_cache import MAX_CACHE_SIZE, build_cache
+    from nexus.frecency import compute_frecency
+    from nexus.ripgrep_cache import build_cache
 
     info = registry.get(repo)
     if info is None:

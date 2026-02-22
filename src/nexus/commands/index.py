@@ -6,11 +6,13 @@ import click
 
 from nexus.registry import RepoRegistry
 
-_REGISTRY_PATH = Path.home() / ".config" / "nexus" / "repos.json"
+
+def _registry_path() -> Path:
+    return Path.home() / ".config" / "nexus" / "repos.json"
 
 
 def _registry() -> RepoRegistry:
-    return RepoRegistry(_REGISTRY_PATH)
+    return RepoRegistry(_registry_path())
 
 
 @click.group()
