@@ -278,7 +278,7 @@ class NexusConfig:
 
 ### Open Questions
 
-1. **Session ID generation**: Claude Code doesn't provide CLAUDE_SESSION_ID env var. Solution deferred to Phase 2: SessionStart hook generates UUID4, writes to `~/.config/nexus/current_session`, read by all nx subcommands.
+1. **Session ID generation**: Claude Code doesn't provide CLAUDE_SESSION_ID env var. Solution implemented in Phase 2: SessionStart hook uses `os.getsid(0)` (session group leader PID), writes to `~/.config/nexus/sessions/{getsid}.session`. The flat `current_session` design was rejected as race-prone for concurrent sessions.
 2. **Database file permissions**: Should .config/nexus be mode 0700 (user-only) or 0755 (world-readable)? T2 stores agent findings + session notes (semi-sensitive). Decision: 0700 for user-only.
 
 ## Dependencies (Phase 1)

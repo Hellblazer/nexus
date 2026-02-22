@@ -84,7 +84,7 @@ Start with T2 (SQLite + FTS5) infrastructure:
 
 ## Recent Learnings
 
-- **Session ID generation**: Claude Code doesn't provide `CLAUDE_SESSION_ID` env var (open feature requests #13733, #17188). Solution: SessionStart hook generates UUID4 and writes to `~/.config/nexus/current_session`, read by all nx subcommands.
+- **Session ID generation**: Claude Code doesn't provide `CLAUDE_SESSION_ID` env var. Solution: SessionStart hook uses `os.getsid(0)` (session group leader PID) and writes to `~/.config/nexus/sessions/{getsid}.session`. The flat `current_session` design was rejected (race condition with concurrent Claude Code windows). Implemented in `src/nexus/session.py` + `src/nexus/hooks.py`.
 
 - **Collection naming**: ChromaDB + FTS5 metadata queries require careful naming. Double underscore (`code__repo`, `docs__corpus`, `knowledge__topic`) avoids conflicts with FTS5 delimiters. Single colon (Arcaneum pattern `code::repo`) is safe, but `:` in ChromaDB metadata queries can be ambiguous. Stuck with `__` to be explicit.
 

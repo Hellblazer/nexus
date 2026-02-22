@@ -28,9 +28,9 @@ See `spec.md` for the full specification.
 
 **Collection naming**: always `__` as separator — `code__myrepo`, `docs__corpus`, `knowledge__topic` (colons are invalid in ChromaDB collection names).
 
-**Session ID**: generated as UUID4 by SessionStart hook, written to `~/.config/nexus/current_session`. `CLAUDE_SESSION_ID` does not exist in Claude Code.
+**Session ID**: generated via `os.getsid(0)` (session group leader PID), written to `~/.config/nexus/sessions/{getsid}.session`. `CLAUDE_SESSION_ID` does not exist in Claude Code. The PID-scoped path is intentional — multiple concurrent Claude Code windows each get an isolated session file (the flat `current_session` design was rejected as race-prone).
 
-**T3 expire guard**: always filter `ttl_days > 0 AND expires_at < now` — `expires_at=""` for permanent entries sorts before ISO timestamps.
+**T3 expire guard**: always filter `ttl_days > 0 AND expires_at != "" AND expires_at < now` — the `expires_at != ""` guard is mandatory: permanent entries use `expires_at=""` which sorts before ISO timestamps and would be incorrectly deleted by a 2-condition guard.
 
 ## Development Conventions
 

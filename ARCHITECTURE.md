@@ -533,10 +533,11 @@ writes to T2 except `nx pm restore` which operates on T2 metadata only).
 
 ### Session ID Management
 
-- Generated as UUID4 by SessionStart hook
-- Written to `~/.config/nexus/current_session`
+- Generated via `os.getsid(0)` (session group leader PID) by SessionStart hook
+- Written to `~/.config/nexus/sessions/{getsid}.session`
 - Read from file by all `nx` subcommands that need it (scratch, memory, store)
-- Fallback: if file missing, generate lazily on first access
+- Fallback: if file missing, generate lazily on first access (UUID4)
+- Note: PID-scoped path is intentional — the flat `~/.config/nexus/current_session` design was rejected as race-prone when multiple Claude Code windows run concurrently
 - Stored as metadata on T1 documents (enables per-session filtering)
 - Stored in T2 `session` column (provenance tracking)
 - Stored in T3 `session_id` metadata field (provenance tracking)
@@ -684,7 +685,7 @@ Phase 2    Phase 3 (T3)
 - Tests for T1 operations and session management
 
 **Exit criteria:**
-- [ ] Session ID generated and persisted to `~/.config/nexus/current_session`
+- [ ] Session ID generated and persisted to `~/.config/nexus/sessions/{getsid}.session`
 - [ ] `nx scratch put "content" --tags "test"` stores in T1
 - [ ] `nx scratch search "content"` returns semantic results (local ONNX)
 - [ ] `nx scratch flag <id>` marks for flush
