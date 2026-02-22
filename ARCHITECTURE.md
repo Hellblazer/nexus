@@ -1,5 +1,9 @@
 # Nexus Architecture
 
+> **Implementation Status**: Sections marked `[v1-actual]` reflect the current implementation.
+> Sections marked `[v2-planned]` describe aspirational design not yet implemented.
+> When in doubt, check `src/nexus/` — the code is the ground truth.
+
 ## Executive Summary
 
 Nexus is a self-hosted semantic search and knowledge system implemented in Python 3.12+.
@@ -19,6 +23,68 @@ persistent server), and Arcaneum (PDF/markdown extraction and chunking).
 ---
 
 ## Module/Package Structure
+
+### [v1-actual] Current Flat Layout
+
+The implementation uses a flat module layout, not the hierarchical subpackages described
+in the v2-planned section below. This is the ground truth as of the current codebase.
+
+```
+src/nexus/
+|-- __init__.py
+|-- __main__.py
+|-- answer.py                      # answer synthesis (Haiku-based Q&A with citations)
+|-- chunker.py                     # code chunker (AST via llama-index CodeSplitter)
+|-- cli.py                         # Click CLI entry point
+|-- config.py                      # config loading (YAML, env vars, merging)
+|-- corpus.py                      # corpus utilities
+|-- doc_indexer.py                 # document indexing orchestration
+|-- errors.py                      # custom exception hierarchy (see below)
+|-- formatters.py                  # output formatters (plain, JSON, vimgrep, etc.)
+|-- frecency.py                    # git frecency scoring (ported from SeaGOAT)
+|-- hooks.py                       # SessionStart/SessionEnd hook logic
+|-- indexer.py                     # indexing pipeline orchestrator
+|-- md_chunker.py                  # SemanticMarkdownChunker (ported from Arcaneum)
+|-- pdf_chunker.py                 # PDF chunker (ported from Arcaneum)
+|-- pdf_extractor.py               # PyMuPDF4LLM + pdfplumber + OCR
+|-- pm.py                          # project management lifecycle
+|-- polling.py                     # HEAD hash polling, re-index triggers
+|-- registry.py                    # repo registry (~/.config/nexus/repos.json)
+|-- ripgrep_cache.py               # mmap line cache (ported from SeaGOAT)
+|-- scoring.py                     # scoring primitives (min_max_normalize, etc.)
+|-- search_engine.py               # search orchestration (~175 lines, see [v1-actual] below)
+|-- server.py                      # Flask app factory and routes
+|-- server_main.py                 # server entry point / daemonization
+|-- session.py                     # session ID management (PID-scoped file)
+|-- ttl.py                         # TTL sentinel utilities
+|-- types.py                       # shared dataclasses (Chunk, SearchResult, etc.)
+|
+|-- commands/                      # Click CLI command modules
+|   |-- __init__.py
+|   |-- collection.py              # nx collection list/info/delete/verify
+|   |-- config_cmd.py              # nx config show/set
+|   |-- index.py                   # nx index code/pdf/md
+|   |-- memory.py                  # nx memory put/get/search/list/expire/promote
+|   |-- pm.py                      # nx pm (all lifecycle subcommands)
+|   |-- scratch.py                 # nx scratch put/get/search/list/clear/flag/promote
+|   |-- search_cmd.py              # nx search
+|   |-- serve.py                   # nx serve start/stop/status/logs
+|   +-- store.py                   # nx store, nx store expire
+|
++-- db/                            # Storage tier implementations
+    |-- __init__.py
+    |-- t1.py                      # EphemeralClient + DefaultEmbeddingFunction
+    |-- t2.py                      # SQLite + FTS5 + WAL
+    +-- t3.py                      # CloudClient + VoyageAIEmbeddingFunction
+```
+
+### [v2-planned] Aspirational Hierarchical Layout
+
+The following hierarchical structure was the original design intent. It has NOT been
+implemented. The subpackages `protocols/`, `storage/`, `indexing/`, `search/`, `answer/`,
+`pm/`, `server/`, `cli/`, `formatting/`, and `integration/` do not exist.
+Note: `answer.py`, `formatters.py`, and `scoring.py` NOW EXIST as flat modules (partial
+progress toward the aspirational layout), but the full subpackage structure remains unimplemented.
 
 ```
 src/nexus/
@@ -123,7 +189,12 @@ src/nexus/
     +-- git_hooks.py               # post-commit hook for nx serve notification
 ```
 
-### Module Responsibility Summary
+### [v2-planned] Module Responsibility Summary
+
+This table reflects the aspirational hierarchical layout. In the v1-actual flat layout,
+the responsibilities map to: `db/t1.py`, `db/t2.py`, `db/t3.py` (storage tiers),
+`scoring.py`, `answer.py`, `formatters.py` (search/formatting), `pm.py` (lifecycle),
+`server.py` / `server_main.py` (server), `commands/` (CLI), and flat modules for indexing.
 
 | Module | Responsibility | Dependencies |
 |--------|---------------|--------------|
@@ -142,7 +213,11 @@ src/nexus/
 | `formatting/` | Output rendering | `types.py` only |
 | `integration/` | External tool hooks | `config.py`, `session.py` |
 
-### Dependency Rules (enforced by import structure)
+### [v2-planned] Dependency Rules (aspirational import structure)
+
+These rules describe the intended architecture for the hierarchical subpackage layout.
+In the v1-actual flat layout, these rules are approximated but not formally enforced via
+import-linter (the `.importlinter` configuration file does not yet exist).
 
 1. `protocols/` imports NOTHING from `storage/`, `indexing/`, `search/`, `cli/`
 2. `storage/` imports only from `protocols/` and `types.py`
@@ -152,11 +227,17 @@ src/nexus/
 6. `formatting/` imports only from `types.py`
 7. No circular dependency paths exist
 
-These rules are enforced by `import-linter` (`dev` dependency). Configuration in `.importlinter`. Run `lint-imports` as part of the CI gate alongside pytest, mypy, and ruff.
+These rules are intended to be enforced by `import-linter` (`dev` dependency). Configuration in `.importlinter`. Run `lint-imports` as part of the CI gate alongside pytest, mypy, and ruff.
 
 ---
 
-## Core Abstractions (Protocols)
+## Core Abstractions (Protocols) [v2-planned]
+
+The `protocols/` subpackage described in this section does not exist in the v1-actual
+flat layout. The protocol interfaces below document the intended contracts. In practice,
+the v1-actual implementation wires dependencies via direct imports within the flat module
+structure rather than formal Protocol injection. These definitions remain as the
+aspirational interface specification.
 
 ### StorageTier Protocols
 
@@ -380,7 +461,15 @@ class ResultFormatter(Protocol):
 
 ## Component Architecture
 
-### CLI Dispatch Flow
+### CLI Dispatch Flow [v2-planned]
+
+The module paths in this diagram reflect the aspirational hierarchical layout.
+In the v1-actual layout, the equivalent modules are: `commands/search_cmd.py`,
+`commands/memory.py`, `commands/store.py`, `commands/scratch.py`, `commands/index.py`,
+`commands/serve.py`, `commands/pm.py`, `commands/collection.py`, `commands/config_cmd.py`,
+`commands/doctor.py`, `commands/install.py`; storage tiers are in `db/t1.py`, `db/t2.py`,
+`db/t3.py`; and search/answer/formatting live in flat modules `search_engine.py`,
+`answer.py`, `formatters.py`, `scoring.py`.
 
 ```
 nx <command> [subcommand] [args] [flags]
@@ -415,31 +504,36 @@ cli/main.py (Click group)
      +-- install_cmd.py ---> integration/claude_code/installer.py
 ```
 
-### Server Architecture (`nx serve`)
+### Server Architecture (`nx serve`) [v1-actual: server.py / server_main.py]
+
+The aspirational `server/` subpackage does not exist. The server is implemented in the
+flat modules `src/nexus/server.py` (Flask app factory + routes) and
+`src/nexus/server_main.py` (daemonization/entry point). Registry and polling live in
+`src/nexus/registry.py` and `src/nexus/polling.py` respectively.
 
 ```
 nx serve start [--port N]
      |
      v
-server/daemon.py
+server_main.py (daemonization)   [v1-actual: server_main.py]
   |-- check_stale_pid()
   |-- write PID to ~/.config/nexus/server.pid
   |-- Popen(start_new_session=True) for daemonization
      |
      v
-server/app.py (Flask app factory)
+server.py (Flask app factory)    [v1-actual: server.py]
   |-- /search          POST  -> search pipeline
   |-- /index/status    GET   -> indexing progress per repo
   |-- /status          GET   -> server health + repo accuracy %
      |
-     +-- server/registry.py
+     +-- registry.py             [v1-actual: registry.py]
      |     |-- repos.json: [{path, collection, last_head, ...}]
      |     |-- register(path) / unregister(path)
      |
-     +-- server/polling.py
+     +-- polling.py              [v1-actual: polling.py]
            |-- per-repo thread: every N seconds (default 10)
            |   |-- git rev-parse HEAD
-           |   |-- if changed: trigger indexing/code/pipeline.py
+           |   |-- if changed: trigger indexer.py / doc_indexer.py
            |-- accuracy sigmoid (SeaGOAT pattern):
                  chunks_analyzed / total_chunks -> estimated accuracy %
 ```
@@ -510,7 +604,11 @@ writes to T2 except `nx pm restore` which operates on T2 metadata only).
                             (after 90d: T2 entries expire, only T3 synthesis remains)
 ```
 
-### Component Ownership
+### Component Ownership [v1-actual: pm.py]
+
+In the v1-actual flat layout, all PM lifecycle logic lives in `src/nexus/pm.py` and the
+CLI commands in `src/nexus/commands/pm.py`. The aspirational `pm/lifecycle.py` and
+`pm/synthesis.py` submodules do not exist.
 
 | Operation | Primary Module | Storage Touched |
 |-----------|---------------|-----------------|
@@ -531,7 +629,11 @@ writes to T2 except `nx pm restore` which operates on T2 metadata only).
 
 ## Cross-cutting Concerns
 
-### Session ID Management
+### Session ID Management [v1-actual]
+
+Implementation: `src/nexus/session.py`. Uses `os.getsid(0)` as the stable PID anchor
+(with `NX_SESSION_PID` env var override for testing). Session file path:
+`~/.config/nexus/sessions/{pid}.session`.
 
 - Generated via `os.getsid(0)` (session group leader PID) by SessionStart hook
 - Written to `~/.config/nexus/sessions/{getsid}.session`
@@ -584,41 +686,59 @@ Global config: ~/.config/nexus/config.yml (lowest priority)
 
 Loaded by `config.py` with deepmerge (repo overrides global, env overrides both).
 
-### Error Hierarchy
+### Error Hierarchy [v1-actual]
+
+Implementation: `src/nexus/errors.py`. The actual hierarchy is simpler than originally
+designed. The aspirational `StorageError`, `T2Error`, `T3Error`, `T3OfflineError`,
+`SearchError`, `ConfigError`, `SessionError`, and `SynthesisError` classes do NOT exist.
 
 ```python
-# errors.py
+# errors.py  [v1-actual]
 
 class NexusError(Exception):
     """Base exception for all Nexus errors."""
 
-class StorageError(NexusError):
-    """Storage tier operation failed."""
-
-class T2Error(StorageError):
-    """SQLite operation failed."""
-
-class T3Error(StorageError):
-    """ChromaDB cloud operation failed."""
-
-class T3OfflineError(T3Error):
-    """ChromaDB cloud unreachable."""
+class T3ConnectionError(NexusError):
+    """Failed to connect to or use the T3 ChromaDB cloud backend."""
 
 class IndexingError(NexusError):
-    """Indexing pipeline failed."""
+    """Error during document indexing pipeline."""
 
-class SearchError(NexusError):
-    """Search operation failed."""
+class CredentialsMissingError(NexusError):
+    """A required API key or credential is absent."""
 
-class ConfigError(NexusError):
-    """Configuration invalid or missing."""
-
-class SessionError(NexusError):
-    """Session ID management failed."""
-
-class SynthesisError(NexusError):
-    """Haiku synthesis failed (answer mode or PM archive)."""
+class CollectionNotFoundError(NexusError):
+    """The requested ChromaDB collection does not exist."""
 ```
+
+The aspirational (v2-planned) hierarchy below was NOT implemented:
+
+```python
+# errors.py  [v2-planned — NOT YET IMPLEMENTED]
+
+class StorageError(NexusError): ...      # not implemented
+class T2Error(StorageError): ...         # not implemented
+class T3Error(StorageError): ...         # not implemented
+class T3OfflineError(T3Error): ...       # not implemented
+class SearchError(NexusError): ...       # not implemented
+class ConfigError(NexusError): ...       # not implemented
+class SessionError(NexusError): ...      # not implemented
+class SynthesisError(NexusError): ...    # not implemented
+```
+
+### Search Engine Split [v1-actual]
+
+The original design described `search_engine.py` as a monolithic search module. As of
+nexus-895, the search responsibilities have been split into focused flat modules:
+
+- `src/nexus/scoring.py` — scoring primitives (min_max_normalize, frecency weighting, etc.)
+- `src/nexus/answer.py` — answer synthesis (Haiku-based Q&A with `<cite>` formatting)
+- `src/nexus/formatters.py` — output formatters (plain, JSON, vimgrep, highlighted, citations)
+- `src/nexus/search_engine.py` — search orchestration only (~175 lines)
+
+The aspirational `search/` subpackage with separate `semantic.py`, `fulltext.py`,
+`hybrid.py`, `cross_corpus.py`, `agentic.py`, and `mxbai.py` modules [v2-planned] does
+not exist. All search orchestration remains in `search_engine.py`.
 
 ---
 
