@@ -3,7 +3,6 @@
 """SessionStart and SessionEnd hook logic for Claude Code integration."""
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
@@ -43,16 +42,15 @@ def _infer_repo() -> str:
 def session_start() -> str:
     """Execute the SessionStart hook.
 
-    1. Generate UUID4 session ID and write to PID-scoped session file.
+    1. Generate UUID4 session ID and write to getsid(0)-scoped session file.
     2. Detect PM project via T2 query.
     3. If PM: inject CONTINUATION.md (≤2000 chars).
        Else: print recent memory summary (≤10 entries × 500 chars).
 
     Returns the output string to be printed.
     """
-    ppid = os.getppid()
     session_id = generate_session_id()
-    write_session_file(session_id, ppid=ppid)
+    write_session_file(session_id)
 
     lines: list[str] = [f"Nexus ready. T1 scratch initialized (session: {session_id})."]
 
@@ -85,12 +83,11 @@ def session_end() -> str:
     1. Flush flagged T1 entries to T2.
     2. Clear T1 session entries.
     3. Run T2 expire.
-    4. Remove the PID-scoped session file.
+    4. Remove the session file.
 
     Returns a summary string.
     """
-    ppid = os.getppid()
-    session_file = session_file_path(ppid)
+    session_file = session_file_path()
 
     # Read session ID so we can open T1
     try:
@@ -116,7 +113,7 @@ def session_end() -> str:
 
     expired = db.expire()
 
-    # Remove session file (clean up orphan)
+    # Remove session file
     try:
         session_file.unlink()
     except FileNotFoundError:
