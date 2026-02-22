@@ -46,7 +46,7 @@ description: Design Java architecture and create phased execution plans using ja
 
   echo "### Pipeline Position"
   echo ""
-  echo "strategic-planner -> java-architect-planner -> plan-auditor -> java-developer"
+  echo "strategic-planner -> plan-auditor -> java-architect-planner -> java-developer"
   echo ""
   echo "### Tip"
   echo ""

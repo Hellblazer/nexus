@@ -63,7 +63,7 @@ def main() -> None:
     print("1. Update bead status:")
     print("   `bd update <id> --status [done|in_progress|blocked]`")
     print("")
-    print("2. Save session context to T2 memory bank:")
+    print("2. Save session context to T2 memory (nx memory):")
     print("   `nx memory put \"<summary>\" --project <project> --title context.md`")
     print("")
     print("3. Persist knowledge findings to T3 store (if applicable):")

@@ -1,5 +1,5 @@
 # registry.yaml - Single source of truth for agent/skill architecture
-# Version 2.0 - Ported to nx-plugin (Nexus T1/T2/T3 storage, no ChromaDB/allPepper MCP)
+# Version 2.0 - Nexus T1/T2/T3 storage backend
 #
 # This registry defines all agents, skills, pipelines, and naming conventions.
 # Skills reference this file via ../../registry.yaml rather than duplicating metadata.

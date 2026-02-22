@@ -92,10 +92,8 @@ This document is what `nx pm resume` injects into session context — make it de
 
 **Create each document using**:
 ```bash
-nx memory put "pm::<name>::continuation" "<content>"
+nx memory put "<content>" --project <name>_active --title continuation.md
 ```
-
-Or use the `nx memory put` API if running via Bash tool.
 
 ### Project-Type-Specific Documents
 
