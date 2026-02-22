@@ -60,3 +60,45 @@ def test_index_code_invalid_path(runner: CliRunner, index_home: Path) -> None:
     """Non-existent path produces a non-zero exit code."""
     result = runner.invoke(main, ["index", "code", str(index_home / "nonexistent")])
     assert result.exit_code != 0
+
+
+# ── nx index pdf ──────────────────────────────────────────────────────────────
+
+def test_index_pdf_command_indexes_file(runner: CliRunner, index_home: Path) -> None:
+    """nx index pdf <path> calls index_pdf and reports chunk count."""
+    pdf = index_home / "doc.pdf"
+    pdf.write_bytes(b"fake pdf")
+
+    with patch("nexus.doc_indexer.index_pdf", return_value=3) as mock_index:
+        result = runner.invoke(main, ["index", "pdf", str(pdf)])
+
+    assert result.exit_code == 0, result.output
+    mock_index.assert_called_once()
+    assert "3" in result.output
+
+
+def test_index_pdf_nonexistent_path_fails(runner: CliRunner, index_home: Path) -> None:
+    """Non-existent PDF path produces a non-zero exit code."""
+    result = runner.invoke(main, ["index", "pdf", str(index_home / "missing.pdf")])
+    assert result.exit_code != 0
+
+
+# ── nx index md ───────────────────────────────────────────────────────────────
+
+def test_index_md_command_indexes_file(runner: CliRunner, index_home: Path) -> None:
+    """nx index md <path> calls index_markdown and reports chunk count."""
+    md = index_home / "doc.md"
+    md.write_text("# Hello\n\nWorld.\n")
+
+    with patch("nexus.doc_indexer.index_markdown", return_value=2) as mock_index:
+        result = runner.invoke(main, ["index", "md", str(md)])
+
+    assert result.exit_code == 0, result.output
+    mock_index.assert_called_once()
+    assert "2" in result.output
+
+
+def test_index_md_nonexistent_path_fails(runner: CliRunner, index_home: Path) -> None:
+    """Non-existent markdown path produces a non-zero exit code."""
+    result = runner.invoke(main, ["index", "md", str(index_home / "missing.md")])
+    assert result.exit_code != 0
