@@ -12,6 +12,14 @@ Nexus organises data across three tiers:
 - **T2 — memory**: local SQLite + FTS5, survives restarts, no network dependency
 - **T3 — knowledge**: ChromaDB cloud + Voyage AI, permanent semantic search
 
+Within T3, all collections belong to one of three corpus categories:
+
+- **code** — source code indexed by `nx index code`, stored as `code__<repo>`
+- **docs** — PDFs and markdown indexed by `nx index pdf`/`nx index md`, stored as `docs__<corpus>`
+- **knowledge** — agent outputs and notes stored by `nx store put`, stored as `knowledge__<topic>`
+
+`nx search --corpus code` searches all code collections; `--corpus code__myrepo` scopes to one.
+
 ## Commands
 
 | Command | Tier | Use |
