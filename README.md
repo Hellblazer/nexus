@@ -31,13 +31,8 @@ Nexus indexes your code, PDFs, and notes into ChromaDB cloud using Voyage AI emb
 ```bash
 git clone https://github.com/Hellblazer/nexus.git
 cd nexus
+uv sync
 uv pip install -e .
-```
-
-Or install from a wheel:
-
-```bash
-uv pip install nexus-0.2.0-py3-none-any.whl
 ```
 
 ### Configure credentials
@@ -51,10 +46,10 @@ nx config init
 Or set individual values:
 
 ```bash
-nx config set chroma_api_key   your-key
-nx config set chroma_tenant    your-tenant
-nx config set chroma_database  your-database
-nx config set voyage_api_key   your-key
+nx config set chroma_api_key    your-key
+nx config set chroma_tenant     your-tenant
+nx config set chroma_database   your-database
+nx config set voyage_api_key    your-key
 nx config set anthropic_api_key your-key
 ```
 
@@ -75,36 +70,54 @@ Install session hooks and a SKILL.md so agents can use Nexus automatically:
 nx install claude-code
 ```
 
-This writes `~/.claude/skills/nexus/SKILL.md` and adds SessionStart/SessionEnd hooks to `~/.claude/settings.json`. The SessionStart hook initializes T1 scratch and injects your project's `CONTINUATION.md` into context at the start of each session.
+This writes `~/.claude/skills/nexus/SKILL.md` and adds SessionStart/SessionEnd hooks to
+`~/.claude/settings.json`. The SessionStart hook initializes T1 scratch and injects your
+project's `CONTINUATION.md` into context at the start of each session.
 
 ## Quick start
 
 ### Index a code repository
 
 ```bash
-nx serve start           # start the background server
-nx index code .          # index the current repo (registers it with the server)
+nx serve start              # start the background server
+nx index code .             # index the current repo (registers it with the server)
 nx index code /path/to/other-repo
+
+# Refresh frecency scores only — skip re-embedding (fast, for re-ranking refresh)
+nx index code . --frecency-only
 ```
 
-The server polls HEAD every 10 seconds and re-indexes on change. Re-indexing is automatic after commits.
+The server polls HEAD every 10 seconds and re-indexes on change.
 
 ### Search
 
 ```bash
-# Semantic search across all indexed code
+# Semantic search across all indexed code, docs, and knowledge
 nx search "authentication token validation"
 
-# Scope to a specific collection type
+# Scope to a specific collection type or repo
 nx search "caching strategy" --corpus docs
 nx search "retry logic" --corpus code__myrepo
 
 # Synthesize a cited answer via Haiku
 nx search "how does session management work" -a
 
+# Hybrid: semantic + ripgrep frecency weighting (code corpora only)
+nx search "token validation" --hybrid
+
 # Output formats for editor integration
 nx search "validate_token" --vimgrep    # path:line:col:content
 nx search "validate_token" --json       # JSON array
+nx search "validate_token" --files      # unique file paths only
+
+# Context lines around results
+nx search "parse_request" -C 3
+
+# Multi-corpus search (independent retrieval + Voyage reranker merge)
+nx search "auth flow" --corpus code --corpus docs
+
+# Metadata filter
+nx search "caching" --where store_type=pm-archive
 ```
 
 ### Index and search PDFs and Markdown
@@ -113,18 +126,23 @@ nx search "validate_token" --json       # JSON array
 nx index pdf ~/papers/architecture.pdf --corpus my-papers
 nx index md  ~/notes/decisions.md      --corpus notes
 
-nx search "distributed consensus" --corpus docs
+nx search "distributed consensus" --corpus docs__my-papers
 ```
 
 ### Persist agent outputs
 
 ```bash
-# Store a finding permanently in T3
-nx store analysis.md --collection knowledge --tags "security,audit"
-echo "# Key insight..." | nx store - --collection knowledge --title "Auth Analysis"
+# Store a file permanently in T3
+nx store put analysis.md --collection knowledge --tags "security,audit"
+
+# Store from stdin (--title required)
+echo "# Key insight..." | nx store put - --collection knowledge --title "Auth Analysis"
 
 # Store with a TTL
-nx store temp-notes.md --collection knowledge --ttl 30d
+nx store put temp-notes.md --collection knowledge --ttl 30d
+
+# Remove expired T3 entries
+nx store expire
 
 # Search stored knowledge
 nx search "security vulnerabilities" --corpus knowledge
@@ -135,21 +153,22 @@ nx search "security vulnerabilities" --corpus knowledge
 ### T1 — Session scratch (in-memory)
 
 Fast, ephemeral, no API calls. Cleared when the session ends.
+Uses ChromaDB's bundled MiniLM-L6-v2 model (local ONNX, no network round-trip).
 
 ```bash
 nx scratch put "working hypothesis: the cache is stale"
 nx scratch search "cache"
 nx scratch list
+nx scratch get <id>
 nx scratch flag <id>          # mark for auto-flush to T2 at session end
+nx scratch unflag <id>
 nx scratch promote <id> --project myrepo --title findings.md  # flush immediately
 nx scratch clear
 ```
 
-Uses ChromaDB's bundled MiniLM-L6-v2 model (local ONNX, no network round-trip).
+### T2 — Memory bank (local SQLite + FTS5)
 
-### T2 — Memory bank (local SQLite)
-
-Survives restarts. Backed by SQLite with FTS5 for keyword search.
+Survives restarts. No network dependency. WAL mode supports multiple concurrent sessions.
 
 ```bash
 # Write
@@ -182,7 +201,7 @@ Semantic search via Voyage AI. Collections namespaced by type:
 
 ## Project management
 
-`nx pm` provides structured project lifecycle management backed by T2 (no new infra).
+`nx pm` provides structured project lifecycle management backed by T2.
 
 ```bash
 # Initialise PM docs for the current git repo
@@ -214,28 +233,13 @@ nx pm reference "how did we handle rate limiting"
 nx pm reference myrepo   # retrieve by project name
 ```
 
-Auto-detect project name from `git rev-parse --show-toplevel`. Override with `--project <name>`.
-
-## Advanced search options
+## Collection management
 
 ```bash
-# Hybrid search: semantic + ripgrep frecency weighting (code corpora only)
-nx search "token validation" --hybrid
-
-# Multi-corpus search (independent retrieval + Voyage reranker merge)
-nx search "auth flow" --corpus code --corpus docs
-
-# Agentic mode: Haiku-driven multi-step query refinement (up to 3 iterations)
-nx search "session expiry" --agentic
-
-# Fan-out to Mixedbread-indexed collections (read-only, requires MXBAI_API_KEY)
-nx search "recent papers on retrieval" --mxbai
-
-# Metadata filters
-nx search "caching" --where store_type=pm-archive
-
-# Suppress Voyage reranker, use round-robin merge instead
-nx search "auth" --corpus code --corpus docs --no-rerank
+nx collection list                          # all T3 collections with doc counts
+nx collection info <name>                   # details for a single collection
+nx collection verify <name>                 # existence check + doc count
+nx collection delete <name> --confirm       # irreversible
 ```
 
 ## Server management
@@ -243,21 +247,15 @@ nx search "auth" --corpus code --corpus docs --no-rerank
 ```bash
 nx serve start [--port 7890]
 nx serve stop
-nx serve status          # show indexed repos, indexing progress, uptime
+nx serve status          # show indexed repos, indexing progress
 nx serve logs            # tail ~/.config/nexus/serve.log
-```
-
-## Collection management
-
-```bash
-nx collection list                      # all T3 collections with doc counts
-nx collection delete <name> --confirm
 ```
 
 ## Configuration
 
 ```bash
 nx config list                          # show all credentials and settings
+nx config get <key>
 nx config set server.port 7891
 nx config set embeddings.rerankerModel rerank-2.5-lite   # lower cost
 ```
@@ -275,17 +273,18 @@ Key settings:
 | `embeddings.docsModel` | `voyage-4` | Voyage model for docs/knowledge |
 | `embeddings.rerankerModel` | `rerank-2.5` | Voyage reranker for cross-corpus merge |
 | `pm.archiveTtl` | `90` | Days before archived PM docs decay from T2 |
-| `mxbai.stores` | `[]` | Mixedbread store IDs for `--mxbai` fan-out |
 
 ## Development
 
 ```bash
 uv sync
-uv run pytest               # 280 tests, no API keys required
+uv run pytest               # 505 tests, no API keys required
 uv run pytest -m integration  # skip unless real keys are set
+uv run pytest --cov=nexus   # with coverage
 ```
 
-E2E tests use `chromadb.EphemeralClient` + `DefaultEmbeddingFunction` (bundled ONNX) — no API keys needed for the full test suite.
+Tests use `chromadb.EphemeralClient` + `DefaultEmbeddingFunction` (bundled ONNX) — no API keys
+needed for the full test suite.
 
 ## Architecture
 
@@ -296,13 +295,16 @@ T3  chromadb.CloudClient + VoyageAIEmbeddingFunction — ChromaDB cloud
 
 Indexing pipelines:
   code   git frecency → tree-sitter AST chunking → voyage-code-3 → T3 code__<repo>
-  PDF    PyMuPDF4LLM / pdfplumber / OCR → voyage-4 → T3 docs__<corpus>
-  MD     SemanticMarkdownChunker + SHA256 sync → voyage-4 → T3 docs__<corpus>
+  PDF    PyMuPDF4LLM extraction → voyage-4 (CCE) → T3 docs__<corpus>
+  MD     SemanticMarkdownChunker + SHA256 sync → voyage-4 (CCE) → T3 docs__<corpus>
 
 Search:
   semantic    ChromaDB vector similarity (per-corpus, then Voyage rerank-2.5 merge)
   hybrid      semantic + ripgrep frecency (0.7 × vector + 0.3 × frecency, code only)
   answer      retrieval → Haiku synthesis → cited output (<cite i="N">)
+
+Session ID: os.getsid(0) written to ~/.config/nexus/sessions/{getsid}.session
+Repo registry: ~/.config/nexus/repos.json
 ```
 
 ## License
