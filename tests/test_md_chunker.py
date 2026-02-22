@@ -90,3 +90,26 @@ def test_chunk_multiple_headings_no_index_error():
     titles = [c.metadata.get("header_path", "") for c in chunks]
     assert any("Alpha" in t for t in titles)
     assert any("Gamma" in t for t in titles)
+
+
+# ── nexus-9vp: oversized part is truncated in _split_large_section ───────────
+
+def test_split_large_section_truncates_oversized_part():
+    """A content part larger than max_chars is truncated to max_chars."""
+    chunker = SemanticMarkdownChunker(chunk_size=10)  # max_chars ≈ 33 chars
+
+    # Build a section with one part that vastly exceeds max_chars
+    oversized = "x" * 10000  # 10000 chars >> max_chars (≈33)
+    section = {
+        "level": 1,
+        "header": "Big Section",
+        "header_path": ["Big Section"],
+        "content_parts": [{"type": "text", "content": oversized, "is_code_block": False}],
+    }
+    chunks = chunker._split_large_section(section, {}, start_index=0)
+
+    assert len(chunks) >= 1
+    for chunk in chunks:
+        assert len(chunk.text) <= chunker.max_chars + len("# Big Section") + 4, (
+            f"Chunk text exceeds max_chars: {len(chunk.text)} chars"
+        )

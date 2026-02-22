@@ -83,20 +83,29 @@ def test_config_set_accepts_space_separated_key_value(runner: CliRunner, fake_ho
 # ── nx config get ─────────────────────────────────────────────────────────────
 
 def test_config_get_returns_value_from_file(runner: CliRunner, fake_home: Path) -> None:
-    """nx config get prints the credential value from config.yml."""
+    """nx config get --show prints the full credential value from config.yml."""
     runner.invoke(main, ["config", "set", "voyage_api_key=vk-123"])
-    result = runner.invoke(main, ["config", "get", "voyage_api_key"])
+    result = runner.invoke(main, ["config", "get", "--show", "voyage_api_key"])
     assert result.exit_code == 0, result.output
     assert "vk-123" in result.output
+
+
+def test_config_get_masks_by_default(runner: CliRunner, fake_home: Path) -> None:
+    """nx config get masks the credential value by default."""
+    runner.invoke(main, ["config", "set", "voyage_api_key=secret-voyage-key-xyz"])
+    result = runner.invoke(main, ["config", "get", "voyage_api_key"])
+    assert result.exit_code == 0, result.output
+    assert "secret-voyage-key-xyz" not in result.output
+    assert "***" in result.output
 
 
 def test_config_get_prefers_env_var(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nx config get returns env var value when both env and file set."""
+    """nx config get --show returns env var value when both env and file set."""
     runner.invoke(main, ["config", "set", "chroma_api_key=file-val"])
     monkeypatch.setenv("CHROMA_API_KEY", "env-val")
-    result = runner.invoke(main, ["config", "get", "chroma_api_key"])
+    result = runner.invoke(main, ["config", "get", "--show", "chroma_api_key"])
     assert "env-val" in result.output
 
 

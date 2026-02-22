@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import copy
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -110,7 +111,20 @@ def set_credential(name: str, value: str) -> None:
     if path.exists():
         data = yaml.safe_load(path.read_text()) or {}
     data.setdefault("credentials", {})[name] = value
-    path.write_text(yaml.dump(data, default_flow_style=False))
+    content = yaml.dump(data, default_flow_style=False)
+    # Atomic write: write to temp file in same directory, then os.replace()
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
+    try:
+        with os.fdopen(tmp_fd, "w") as fh:
+            fh.write(content)
+        os.replace(tmp_path, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def load_config(repo_root: Path | None = None) -> dict[str, Any]:

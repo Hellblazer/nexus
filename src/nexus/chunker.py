@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """AST-based code chunking with line-based fallback."""
-import logging
 from pathlib import Path
 from typing import Any
 
-_log = logging.getLogger(__name__)
+import structlog
+
+_log = structlog.get_logger()
 
 # Extensions supported by llama-index CodeSplitter / tree-sitter
 _AST_EXTENSIONS: dict[str, str] = {

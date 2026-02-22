@@ -5,6 +5,8 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import click
@@ -50,6 +52,9 @@ def serve() -> None:
 @serve.command("start")
 def start_cmd() -> None:
     """Start the Nexus server as a background process."""
+    from nexus.config import load_config
+    port: int = load_config()["server"]["port"]
+
     pid = _read_pid()
     if pid is not None:
         if _process_running(pid):
@@ -72,7 +77,7 @@ def start_cmd() -> None:
         return
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "nexus.server_main"],
+            [sys.executable, "-m", "nexus.server_main", str(port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -108,12 +113,31 @@ def stop_cmd() -> None:
 
 @serve.command("status")
 def status_cmd() -> None:
-    """Show server status."""
+    """Show server status and per-repo indexing state."""
+    from nexus.config import load_config
+
     pid = _read_pid()
     if pid is None or not _process_running(pid):
         click.echo("Server not running.")
         return
     click.echo(f"Server running (PID {pid}).")
+
+    port: int = load_config()["server"]["port"]
+    try:
+        with urllib.request.urlopen(
+            f"http://localhost:{port}/repos", timeout=2
+        ) as resp:
+            import json
+            data = json.loads(resp.read())
+        repos: dict = data.get("repos", {})
+        if not repos:
+            click.echo("  No repos registered.")
+        else:
+            for repo_path, info in sorted(repos.items()):
+                status = info.get("status", "unknown") if isinstance(info, dict) else "unknown"
+                click.echo(f"  {repo_path}  [{status}]")
+    except (urllib.error.URLError, OSError):
+        click.echo("  (repo status unavailable — server unreachable)")
 
 
 @serve.command("logs")

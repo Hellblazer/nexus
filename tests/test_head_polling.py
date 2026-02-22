@@ -90,3 +90,66 @@ def test_missing_repo_in_registry_skips(registry) -> None:
             check_and_reindex(repo, registry)
 
     mock_index.assert_not_called()
+
+
+def test_credentials_missing_does_not_record_head_hash(registry) -> None:
+    """When CredentialsMissingError is raised, head_hash is NOT recorded so retry is possible."""
+    from nexus.indexer import CredentialsMissingError
+
+    repo = Path("/repo")
+    registry.get.return_value = {
+        "head_hash": "old_hash",
+        "status": "pending_credentials",
+        "collection": "code__repo",
+    }
+
+    with patch("nexus.polling._current_head", return_value="new_hash"):
+        with patch("nexus.polling.index_repo", side_effect=CredentialsMissingError("no creds")):
+            check_and_reindex(repo, registry)
+
+    # head_hash must NOT be updated so the next poll retries
+    registry.update.assert_not_called()
+
+
+def test_pending_credentials_status_is_not_skipped(registry) -> None:
+    """pending_credentials repos are retried on every poll (not skipped like 'indexing')."""
+    repo = Path("/repo")
+    registry.get.return_value = {
+        "head_hash": "old_hash",
+        "status": "pending_credentials",
+        "collection": "code__repo",
+    }
+
+    with patch("nexus.polling._current_head", return_value="new_hash"):
+        with patch("nexus.polling.index_repo") as mock_index:
+            check_and_reindex(repo, registry)
+
+    mock_index.assert_called_once_with(repo, registry)
+
+
+# ── nexus-1ui: polling.py logs warning on git rev-parse errors ───────────────
+
+def test_current_head_warns_on_nonzero_returncode(capsys) -> None:
+    """_current_head logs a warning when git rev-parse returns non-zero."""
+    from nexus.polling import _current_head
+
+    with patch("nexus.polling.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=128, stdout="")
+        result = _current_head(Path("/no/git/repo"))
+
+    assert result == ""
+    captured = capsys.readouterr()
+    assert "warning" in (captured.out + captured.err).lower() or "rev-parse" in (captured.out + captured.err).lower()
+
+
+def test_current_head_warns_on_timeout(capsys) -> None:
+    """_current_head logs a warning when git rev-parse times out."""
+    import subprocess
+    from nexus.polling import _current_head
+
+    with patch("nexus.polling.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
+        result = _current_head(Path("/repo"))
+
+    assert result == ""
+    captured = capsys.readouterr()
+    assert "timeout" in (captured.out + captured.err).lower() or "rev-parse" in (captured.out + captured.err).lower()

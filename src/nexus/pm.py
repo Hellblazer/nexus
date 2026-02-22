@@ -7,11 +7,13 @@ Archive synthesis lives in T3 ``knowledge__pm__{repo}`` (permanent, ttl=0).
 """
 from __future__ import annotations
 
-import logging
+import hashlib
 import os
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 if TYPE_CHECKING:
     from nexus.db.t2 import T2Database
@@ -39,7 +41,7 @@ _STANDARD_DOCS: dict[str, str] = {
     ),
 }
 
-_log = logging.getLogger(__name__)
+_log = structlog.get_logger()
 
 _PM_SUFFIX = "_pm"
 
@@ -230,8 +232,11 @@ def pm_unblock(db: "T2Database", project: str, line: int) -> None:
         ln for ln in row["content"].splitlines() if ln.strip().startswith("-")
     ]
     idx = line - 1
-    if 0 <= idx < len(bullets):
-        bullets.pop(idx)
+    if idx < 0 or idx >= len(bullets):
+        raise IndexError(
+            f"No blocker at line {line}; only {len(bullets)} blocker(s) exist."
+        )
+    bullets.pop(idx)
     non_bullets = [
         ln for ln in row["content"].splitlines() if not ln.strip().startswith("-")
     ]
@@ -307,20 +312,20 @@ def pm_archive(
 
     t3 = _make_t3()
 
-    # Idempotency: check for existing synthesis
-    existing = t3.search(
-        "Archive",
-        [collection],
-        n_results=1,
+    # Idempotency: metadata-only check — no embedding API call (nexus-dqz)
+    col = t3.get_or_create_collection(collection)
+    existing = col.get(
         where={"store_type": {"$eq": "pm-archive"}},
+        include=["metadatas"],
     )
-    if existing:
-        prior = existing[0]
+    if existing["ids"]:
+        prior_meta = existing["metadatas"][0]
         if (
-            prior.get("pm_doc_count") == doc_count
-            and prior.get("pm_latest_timestamp") == max_ts
+            prior_meta.get("pm_doc_count") == doc_count
+            and prior_meta.get("pm_latest_timestamp") == max_ts
+            and len(existing["ids"]) >= prior_meta.get("chunk_total", 1)
         ):
-            # Current — skip synthesis, proceed to T2 decay
+            # Current and complete — skip synthesis, proceed to T2 decay
             db.decay_project(ns, archive_ttl)
             return
 
@@ -341,35 +346,42 @@ def pm_archive(
     phase_count = max(phase_tags) if phase_tags else 1
 
     chunks = _split_synthesis(synthesis_text)
-    col = t3.get_or_create_collection(collection)
     for i, chunk in enumerate(chunks):
         chunk_title = (
             f"Archive: {project}"
             if len(chunks) == 1
             else f"Archive: {project} (part {i + 1})"
         )
-        doc_id = t3.put(
-            collection=collection,
-            content=chunk,
-            title=chunk_title,
-            tags=f"pm-archive,{project}",
-            store_type="pm-archive",
-            ttl_days=0,  # permanent
-            session_id="",
-            source_agent="nx-pm-archive",
-            category="pm-archive",
-        )
-        update_meta: dict[str, Any] = {
+        # Build complete metadata up front so t3.put() writes the full set.
+        # col.update() replaces ALL metadata (it's not a merge), so we must
+        # include every required field in the initial put — no post-put update needed.
+        extra_meta: dict[str, Any] = {
             "project": project,
             "status": status,
             "archived_at": archived_at,
             "phase_count": phase_count,
             "pm_doc_count": doc_count,
             "pm_latest_timestamp": max_ts,
+            "chunk_total": len(chunks),
         }
         if len(chunks) > 1:
-            update_meta["chunk_index"] = i
-        col.update(ids=[doc_id], metadatas=[update_meta])
+            extra_meta["chunk_index"] = i
+        doc_id = hashlib.sha256(f"{collection}:{chunk_title}".encode()).hexdigest()[:16]
+        from datetime import timedelta as _td
+        now_iso = datetime.now(UTC).isoformat()
+        full_meta: dict[str, Any] = {
+            "title": chunk_title,
+            "tags": f"pm-archive,{project}",
+            "category": "pm-archive",
+            "session_id": "",
+            "source_agent": "nx-pm-archive",
+            "store_type": "pm-archive",
+            "indexed_at": now_iso,
+            "expires_at": "",
+            "ttl_days": 0,
+            **extra_meta,
+        }
+        col.upsert(ids=[doc_id], documents=[chunk], metadatas=[full_meta])
 
     # Phase 2: Decay T2 (only after T3 write succeeds)
     db.decay_project(ns, archive_ttl)
@@ -383,7 +395,7 @@ def pm_restore(db: "T2Database", project: str) -> None:
     Raises if no docs remain. Warns (prints) if only some docs survived.
     """
     ns = _project_ns(project)
-    surviving, _ = db.restore_project(ns)
+    surviving = db.restore_project(ns)
 
     if not surviving:
         raise RuntimeError(
@@ -414,15 +426,27 @@ def _is_semantic_query(query: str) -> bool:
     return False
 
 
+def _list_pm_collections(t3: "T3Database") -> list[str]:
+    """Return names of all knowledge__pm__ collections that have documents."""
+    return [
+        c["name"]
+        for c in t3.list_collections()
+        if c["name"].startswith("knowledge__pm__") and c["count"] > 0
+    ]
+
+
 def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
     """Dispatch reference query to T3 semantic search or metadata-only filter."""
     if _is_semantic_query(query):
-        # Semantic path: query all pm-archive collections
+        # Semantic path: fan out to all knowledge__pm__ collections
         t3 = _make_t3()
         clean_query = query.strip('"')
+        pm_collections = _list_pm_collections(t3)
+        if not pm_collections:
+            return []
         return t3.search(
             clean_query,
-            [f"knowledge__pm__{_infer_collection_suffix(query)}"],
+            pm_collections,
             n_results=10,
             where={"store_type": {"$eq": "pm-archive"}},
         )
@@ -430,6 +454,8 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
         # Project-name path: metadata-only filter on collection for that project
         t3 = _make_t3()
         collection = f"knowledge__pm__{query}"
+        if not t3.collection_exists(collection):
+            return []
         col = t3.get_or_create_collection(collection)
         result = col.get(
             where={"store_type": {"$eq": "pm-archive"}},
@@ -443,14 +469,6 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
         ):
             items.append({"id": doc_id, "content": doc, **meta})
         return items
-
-
-def _infer_collection_suffix(query: str) -> str:
-    """For semantic queries, use a wildcard-style approach by searching a generic name."""
-    # We search across a generic collection name; real semantic searches should
-    # fan out to all pm__ collections. For now use a sentinel name and let T3
-    # handle it — the test mocks T3.search directly.
-    return "all"
 
 
 # ── AC8: pm_search ────────────────────────────────────────────────────────────

@@ -4,20 +4,29 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
+
+_log = structlog.get_logger()
+
 if TYPE_CHECKING:
     from nexus.registry import RepoRegistry
 
 
 def _current_head(repo: Path) -> str:
     """Return the current HEAD commit hash for *repo*, or '' on error."""
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        _log.warning("git rev-parse timed out", repo=str(repo))
+        return ""
     if result.returncode != 0:
+        _log.warning("git rev-parse failed", repo=str(repo), returncode=result.returncode)
         return ""
     return result.stdout.strip()
 
@@ -46,12 +55,20 @@ def check_and_reindex(repo: Path, registry: "RepoRegistry") -> None:
 
     if info.get("status") in ("indexing", "error"):
         return
+    # Retry pending_credentials on each poll — user may have added credentials
 
     current = _current_head(repo)
     if current == info.get("head_hash", ""):
         return
 
+    from nexus.indexer import CredentialsMissingError
     try:
         index_repo(repo, registry)
-    finally:
         registry.update(repo, head_hash=current)
+    except CredentialsMissingError:
+        # Don't record head_hash — allow retry on next poll when credentials are added
+        _log.warning("Credentials missing for %s — will retry on next poll", repo)
+    except Exception:
+        # Record head_hash even on other errors to prevent infinite reindex loops
+        registry.update(repo, head_hash=current)
+        raise

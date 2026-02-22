@@ -2,7 +2,7 @@
 import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from nexus.frecency import compute_frecency
 
@@ -42,3 +42,62 @@ def test_frecency_old_commit_near_zero() -> None:
         score = compute_frecency(Path("/repo"), Path("/repo/file.py"))
     # exp(-0.01 * 3650) ≈ 2e-16 — effectively 0
     assert score < 0.001
+
+
+# ── nexus-1eq: batch_frecency runs a single git subprocess ───────────────────
+
+def test_batch_frecency_single_subprocess_call() -> None:
+    """batch_frecency issues a single git log call regardless of file count."""
+    from nexus.frecency import batch_frecency
+
+    git_output = (
+        "COMMIT 1700000000\n"
+        "\n"
+        "src/foo.py\n"
+        "src/bar.py\n"
+        "\n"
+        "COMMIT 1699000000\n"
+        "\n"
+        "src/foo.py\n"
+    )
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = git_output
+
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
+        scores = batch_frecency(Path("/repo"))
+
+    # Only one subprocess call
+    mock_run.assert_called_once()
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0] == "git"
+    assert "--name-only" in cmd
+
+    # Both files scored; foo.py has two commits (higher score)
+    assert Path("/repo/src/foo.py") in scores
+    assert Path("/repo/src/bar.py") in scores
+    assert scores[Path("/repo/src/foo.py")] > scores[Path("/repo/src/bar.py")]
+
+
+def test_batch_frecency_timeout_returns_empty() -> None:
+    """batch_frecency returns {} on git timeout."""
+    from nexus.frecency import batch_frecency
+
+    with patch("subprocess.run", side_effect=__import__("subprocess").TimeoutExpired("git", 60)):
+        scores = batch_frecency(Path("/repo"))
+
+    assert scores == {}
+
+
+def test_batch_frecency_empty_repo_returns_empty() -> None:
+    """batch_frecency returns {} when git log has no output."""
+    from nexus.frecency import batch_frecency
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+
+    with patch("subprocess.run", return_value=mock_result):
+        scores = batch_frecency(Path("/repo"))
+
+    assert scores == {}

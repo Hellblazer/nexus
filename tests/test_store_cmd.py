@@ -134,6 +134,20 @@ def test_store_put_file_not_found(
     assert "not found" in result.output.lower() or "File not found" in result.output
 
 
+def test_store_put_invalid_ttl_shows_error(
+    runner: CliRunner, env_creds, tmp_path
+) -> None:
+    """Invalid TTL format is rejected with a clear CLI error (not a traceback)."""
+    src = tmp_path / "f.txt"
+    src.write_text("content")
+
+    with patch("nexus.commands.store._t3"):
+        result = runner.invoke(main, ["store", "put", str(src), "--ttl", "5z"])
+
+    assert result.exit_code != 0
+    assert "5z" in result.output
+
+
 def test_store_expire_reports_count(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.expire.return_value = 3
@@ -242,3 +256,38 @@ def test_search_displays_results(runner: CliRunner, env_creds) -> None:
 
     assert result.exit_code == 0
     assert "security finding here" in result.output
+
+
+# ── nexus-ani: collection delete --yes flag ───────────────────────────────────
+
+def test_collection_delete_yes_skips_prompt(runner: CliRunner, env_creds) -> None:
+    """--yes flag skips interactive confirmation."""
+    mock_db = MagicMock()
+
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    mock_db.delete_collection.assert_called_once_with("knowledge__test")
+    assert "Deleted" in result.output
+
+
+def test_collection_delete_without_yes_prompts(runner: CliRunner, env_creds) -> None:
+    """Without --yes, a confirmation prompt is shown (user declines via 'n')."""
+    mock_db = MagicMock()
+
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
+
+    # User said no → aborted, collection NOT deleted
+    mock_db.delete_collection.assert_not_called()
+
+
+def test_collection_delete_confirm_flag_no_longer_exists(runner: CliRunner, env_creds) -> None:
+    """--confirm flag was removed (renamed to --yes); using it is an error."""
+    mock_db = MagicMock()
+
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--confirm"])
+
+    assert result.exit_code != 0  # no such option

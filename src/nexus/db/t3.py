@@ -37,6 +37,7 @@ class T3Database:
     ) -> None:
         self._voyage_api_key = voyage_api_key
         self._ef_override = _ef_override
+        self._ef_cache: dict[str, object] = {}
         if _client is not None:
             self._client = _client
         else:
@@ -49,10 +50,14 @@ class T3Database:
     def _embedding_fn(self, collection_name: str):
         if self._ef_override is not None:
             return self._ef_override
-        model = embedding_model_for_collection(collection_name)
-        return chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
-            model_name=model, api_key=self._voyage_api_key
-        )
+        if collection_name not in self._ef_cache:
+            model = embedding_model_for_collection(collection_name)
+            self._ef_cache[collection_name] = (
+                chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
+                    model_name=model, api_key=self._voyage_api_key
+                )
+            )
+        return self._ef_cache[collection_name]
 
     # ── Collection access ─────────────────────────────────────────────────────
 
@@ -194,6 +199,14 @@ class T3Database:
             col = self._client.get_collection(name)
             result.append({"name": name, "count": col.count()})
         return result
+
+    def collection_exists(self, name: str) -> bool:
+        """Return True if the collection already exists in T3 (no create side-effect)."""
+        try:
+            self._client.get_collection(name)
+            return True
+        except Exception:
+            return False
 
     def delete_collection(self, name: str) -> None:
         """Delete a T3 collection entirely."""

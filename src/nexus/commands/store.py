@@ -78,10 +78,11 @@ def put_cmd(
         if not title:
             title = path.name
 
-    ttl_days = 0
-    if ttl and ttl.lower() not in ("permanent", "never"):
+    try:
         days = parse_ttl(ttl)
-        ttl_days = days if days is not None else 0
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    ttl_days = days if days is not None else 0
 
     col_name = t3_collection_name(collection)
     db = _t3()

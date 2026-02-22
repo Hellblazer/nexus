@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Flask server for the Nexus persistent background service."""
-import logging
 import subprocess
 import threading
 import time
 from pathlib import Path
 
+import structlog
 from flask import Flask, jsonify, request
 
 from nexus.registry import RepoRegistry
 
 app = Flask(__name__)
 
-_log = logging.getLogger(__name__)
+_log = structlog.get_logger()
 
 _poll_interval = 10  # seconds
 
@@ -75,7 +75,7 @@ def add_repo():
 
 @app.route("/repos/<path:repo_path>", methods=["DELETE"])
 def remove_repo(repo_path: str):
-    full_path = Path("/" + repo_path)
+    full_path = Path("/" + repo_path).resolve()
     reg = _get_registry()
     if reg.get(full_path) is None:
         return jsonify({"error": "repo not registered"}), 404
@@ -88,12 +88,16 @@ def _poll_loop() -> None:
     from nexus.polling import check_and_reindex
 
     while True:
-        for repo_str in _get_registry().all():
-            try:
-                check_and_reindex(Path(repo_str), _get_registry())
-            except Exception as exc:
-                _log.warning("Poll error for %s: %s", repo_str, exc, exc_info=True)
-        time.sleep(_poll_interval)
+        try:
+            for repo_str in _get_registry().all():
+                try:
+                    check_and_reindex(Path(repo_str), _get_registry())
+                except Exception as exc:
+                    _log.warning("Poll error for %s: %s", repo_str, exc, exc_info=True)
+            time.sleep(_poll_interval)
+        except Exception as exc:
+            _log.exception("Poll loop body raised — restarting in %ss: %s", _poll_interval, exc)
+            time.sleep(_poll_interval)
 
 
 def start_server(host: str = "127.0.0.1", port: int = 7474, poll_interval: int = 10) -> None:

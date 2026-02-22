@@ -2,12 +2,14 @@
 """Semantic markdown chunking using markdown-it-py AST with naive fallback."""
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
 import yaml
+
+_log = structlog.get_logger()
 
 try:
     from markdown_it import MarkdownIt
@@ -16,9 +18,7 @@ try:
     MARKDOWN_IT_AVAILABLE = True
 except ImportError:
     MARKDOWN_IT_AVAILABLE = False
-    logging.warning("markdown-it-py not available; SemanticMarkdownChunker uses naive splitting")
-
-_log = logging.getLogger(__name__)
+    _log.warning("markdown-it-py not available; SemanticMarkdownChunker uses naive splitting")
 
 _CHARS_PER_TOKEN = 3.3
 
@@ -206,8 +206,11 @@ class SemanticMarkdownChunker:
                         )
                     )
                     chunk_index += 1
+                # Truncate oversized parts to prevent unbounded chunk sizes
+                if len(part_text) > self.max_chars:
+                    part_text = part_text[: self.max_chars]
                 current_parts = ([header_text, part_text] if header_text else [part_text])
-                current_tokens = (len(header_text) / _CHARS_PER_TOKEN if header_text else 0) + part_tokens
+                current_tokens = (len(header_text) / _CHARS_PER_TOKEN if header_text else 0) + len(part_text) / _CHARS_PER_TOKEN
 
         if current_parts:
             chunks.append(

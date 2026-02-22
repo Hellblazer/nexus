@@ -55,16 +55,15 @@ def test_hybrid_score_ripgrep_exact_vector_norm_one():
 
 # ── AC2: --hybrid warns when no code corpus ───────────────────────────────────
 
-def test_hybrid_no_code_corpus_warning(caplog):
+def test_hybrid_no_code_corpus_warning(capsys):
     """hybrid_score_results logs a warning when no code__ collections in scope."""
-    import logging
     results = [
         SearchResult(id="1", content="text", distance=0.1,
                      collection="docs__papers", metadata={}),
     ]
-    with caplog.at_level(logging.WARNING, logger="nexus.search_engine"):
-        se_mod.apply_hybrid_scoring(results, hybrid=True)
-    assert any("no code corpus" in r.message.lower() for r in caplog.records)
+    se_mod.apply_hybrid_scoring(results, hybrid=True)
+    captured = capsys.readouterr()
+    assert "no code corpus" in (captured.out + captured.err).lower()
 
 
 def test_hybrid_mixed_corpus_no_warning(capsys):
@@ -137,13 +136,12 @@ def test_cross_corpus_overfetch():
 
 # ── AC4: Mixedbread graceful degradation ──────────────────────────────────────
 
-def test_mxbai_missing_key_warns_and_returns_empty(caplog, monkeypatch):
+def test_mxbai_missing_key_warns_and_returns_empty(capsys, monkeypatch):
     """When MXBAI_API_KEY is unset, logs a warning and returns empty results."""
-    import logging
     monkeypatch.delenv("MXBAI_API_KEY", raising=False)
-    with caplog.at_level(logging.WARNING, logger="nexus.search_engine"):
-        results = se_mod.fetch_mxbai_results(query="test", stores=["art"], per_k=5)
-    assert any("MXBAI_API_KEY" in r.message for r in caplog.records)
+    results = se_mod.fetch_mxbai_results(query="test", stores=["art"], per_k=5)
+    captured = capsys.readouterr()
+    assert "MXBAI_API_KEY" in (captured.out + captured.err)
     assert results == []
 
 
@@ -402,3 +400,50 @@ def test_min_max_normalize_over_combined_not_per_corpus():
     # If per-corpus: code [0.1] → both 0.0; docs [0.9] → both 0.0
     # Combined window correctly distinguishes them
     assert norm_code < norm_doc
+
+
+# ── nexus-7vr: _haiku_answer guards empty content ────────────────────────────
+
+def test_haiku_answer_returns_empty_string_on_empty_content():
+    """_haiku_answer returns '' when msg.content is empty (no IndexError)."""
+    mock_msg = MagicMock()
+    mock_msg.content = []  # Empty list — previously caused IndexError
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_msg
+
+    results = [SearchResult(id="1", content="ctx", distance=0.1, collection="c", metadata={})]
+    with patch("nexus.config.get_credential", return_value="key"):
+        with patch("anthropic.Anthropic", return_value=mock_client):
+            from nexus.search_engine import _haiku_answer
+            result = _haiku_answer("what?", results)
+
+    assert result == ""
+
+
+# ── nexus-6kj: fetch_mxbai_results isolates per-store errors ─────────────────
+
+def test_mxbai_store_error_skipped_other_stores_still_searched(monkeypatch):
+    """When one store raises, remaining stores are still searched."""
+    monkeypatch.setenv("MXBAI_API_KEY", "test-key")
+    mock_client = MagicMock()
+
+    good_chunk = MagicMock()
+    good_chunk.content.text = "good result"
+    good_chunk.score = 0.9
+
+    def fake_search(store_id, query, top_k):
+        if store_id == "bad-store":
+            raise RuntimeError("store unavailable")
+        return MagicMock(chunks=[good_chunk])
+
+    mock_client.stores.search.side_effect = fake_search
+
+    with patch("nexus.search_engine._mxbai_client", return_value=mock_client):
+        results = se_mod.fetch_mxbai_results(
+            query="test", stores=["bad-store", "good-store"], per_k=5
+        )
+
+    # Bad store skipped, good store returned 1 result
+    assert len(results) == 1
+    assert results[0].content == "good result"
+    assert results[0].collection == "mxbai__good-store"

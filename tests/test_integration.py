@@ -103,9 +103,14 @@ def test_t1_scratch_put_list_clear(runner: CliRunner, tmp_path, monkeypatch) -> 
 
 @pytest.mark.integration
 def test_doctor_runs_and_reports(runner: CliRunner) -> None:
-    """nx doctor completes without crashing and reports all five checks."""
+    """nx doctor completes without crashing and reports all five checks.
+
+    Exit code is 0 when all credentials are present, 1 when any are missing.
+    """
     result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 0, result.output
+    # Exit code is now 1 when credentials are absent (the happy case in CI),
+    # or 0 when all credentials are configured — both are acceptable here.
+    assert result.exit_code in (0, 1), result.output
     output = result.output.lower()
     assert "chroma" in output
     assert "voyage" in output

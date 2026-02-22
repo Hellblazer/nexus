@@ -14,7 +14,11 @@ from nexus.pdf_extractor import PDFExtractor
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _make_t3() -> T3Database:
@@ -79,7 +83,7 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
             "source_author": "",
             "source_date": "",
             "corpus": corpus,
-            "store_type": "docs",
+            "store_type": "pdf",
             "page_count": result.metadata.get("page_count", 0),
             "page_number": chunk.metadata.get("page_number", 0),
             "section_title": "",
@@ -131,6 +135,9 @@ def index_markdown(md_path: Path, corpus: str) -> int:
     # Parse frontmatter then chunk
     raw_text = md_path.read_text(encoding="utf-8")
     frontmatter, body = parse_frontmatter(raw_text)
+    # Offset added to chunk char positions so they reference the original file,
+    # not the body-only text (frontmatter is stripped before chunking).
+    frontmatter_len = len(raw_text) - len(body)
 
     base_meta: dict = {
         "source_path": str(md_path),
@@ -153,7 +160,7 @@ def index_markdown(md_path: Path, corpus: str) -> int:
             "source_author": str(frontmatter.get("author", "")),
             "source_date": str(frontmatter.get("date", "")),
             "corpus": corpus,
-            "store_type": "docs",
+            "store_type": "markdown",
             "page_count": 0,
             "page_number": chunk.metadata.get("page_number", 0),
             "section_title": chunk.metadata.get("header_path", ""),
@@ -161,8 +168,8 @@ def index_markdown(md_path: Path, corpus: str) -> int:
             "extraction_method": "markdown_chunker",
             "chunk_index": chunk.chunk_index,
             "chunk_count": len(chunks),
-            "chunk_start_char": chunk.metadata.get("chunk_start_char", 0),
-            "chunk_end_char": chunk.metadata.get("chunk_end_char", 0),
+            "chunk_start_char": chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
+            "chunk_end_char": chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
             "embedding_model": "voyage-4",
             "indexed_at": now_iso,
             "content_hash": content_hash,

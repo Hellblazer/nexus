@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-_log = logging.getLogger(__name__)
+import structlog
+
+_log = structlog.get_logger()
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _RERANK_MODEL = "rerank-2.5"
@@ -76,7 +77,8 @@ def apply_hybrid_scoring(
     ]
 
     for r in results:
-        v_norm = min_max_normalize(r.distance, distances)
+        # Invert: distances are dissimilarity (smaller = better), so best match → v_norm=1.0
+        v_norm = 1.0 - min_max_normalize(r.distance, distances)
         if hybrid and r.collection.startswith("code__"):
             f_score = r.metadata.get("frecency_score", 0.0)
             f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
@@ -209,7 +211,11 @@ def fetch_mxbai_results(
     client = _mxbai_client(api_key)
     results: list[SearchResult] = []
     for store_id in stores:
-        response = client.stores.search(store_id=store_id, query=query, top_k=per_k)
+        try:
+            response = client.stores.search(store_id=store_id, query=query, top_k=per_k)
+        except Exception:
+            _log.warning("Mixedbread store %s unavailable — skipping", store_id)
+            continue
         for chunk in response.chunks:
             _digest = hashlib.sha256(chunk.content.text.encode()).hexdigest()[:16]
             results.append(SearchResult(
@@ -313,6 +319,8 @@ def _haiku_answer(query: str, results: list[SearchResult]) -> str:
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
+    if not msg.content:
+        return ""
     return msg.content[0].text
 
 
@@ -371,6 +379,6 @@ def format_plain(results: list[SearchResult]) -> list[str]:
         source_path = r.metadata.get("source_path", "")
         start_line = r.metadata.get("start_line", 0)
         for i, content_line in enumerate(r.content.splitlines()):
-            line_no = int(start_line) + i if start_line else 0
+            line_no = int(start_line) + i
             lines.append(f"{source_path}:{line_no}:{content_line}")
     return lines
