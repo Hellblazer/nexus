@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import os
 from pathlib import Path
 
 import click
@@ -16,11 +15,32 @@ from nexus.search_engine import (
     fetch_mxbai_results,
     format_json,
     format_plain,
+    format_plain_with_context,
     format_vimgrep,
     rerank_results,
     round_robin_interleave,
     search_cross_corpus,
 )
+
+
+def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
+    """Parse ``KEY=VALUE`` strings into a ChromaDB where dict.
+
+    Multiple pairs are ANDed by merging into a single dict.
+    Returns ``None`` when *where_pairs* is empty.
+    """
+    if not where_pairs:
+        return None
+    result: dict = {}
+    for pair in where_pairs:
+        if "=" not in pair:
+            raise click.BadParameter(
+                f"--where value {pair!r} must be in KEY=VALUE format",
+                param_hint="'--where'",
+            )
+        key, _, value = pair.partition("=")
+        result[key] = value
+    return result
 
 _CONTENT_MAX_CHARS: int = 200
 
@@ -56,9 +76,10 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
 @click.command("search")
 @click.argument("query")
 @click.argument("path", required=False, default=None)
-@click.option("--corpus", "-C", multiple=True, default=("knowledge", "code", "docs"),
+@click.option("--corpus", multiple=True, default=("knowledge", "code", "docs"),
               show_default=True, help="Corpus prefix or full collection name (repeatable)")
-@click.option("--n", default=10, show_default=True, help="Max results to return")
+@click.option("--n", "-m", "--max-results", "n", default=10, show_default=True,
+              help="Max results to return")
 @click.option("--hybrid", is_flag=True, default=False,
               help="Merge semantic + ripgrep results for code (0.7*vector + 0.3*frecency)")
 @click.option("--no-rerank", "no_rerank", is_flag=True, default=False,
@@ -79,6 +100,16 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               help="Disable colour output")
 @click.option("-c", "--content", "show_content", is_flag=True, default=False,
               help="Show matched text inline under each result.")
+@click.option("--where", "where_pairs", multiple=True, metavar="KEY=VALUE",
+              help="Filter by metadata field (repeatable; multiple flags are ANDed)")
+@click.option("-A", "lines_after", default=0, type=int, metavar="N",
+              help="Show N lines of context after each result chunk")
+@click.option("-B", "lines_before", default=0, type=int, metavar="N",
+              help="Show N lines of context before each result chunk")
+@click.option("-C", "lines_context", default=0, type=int, metavar="N",
+              help="Show N lines of context above and below (shorthand for -A N -B N)")
+@click.option("--reverse", "-r", is_flag=True, default=False,
+              help="Reverse output order (highest-scoring last)")
 def search_cmd(
     query: str,
     path: str | None,
@@ -94,6 +125,11 @@ def search_cmd(
     files_only: bool,
     no_color: bool,
     show_content: bool,
+    where_pairs: tuple[str, ...],
+    lines_after: int,
+    lines_before: int,
+    lines_context: int,
+    reverse: bool,
 ) -> None:
     """Semantic search across T3 knowledge collections.
 
@@ -105,11 +141,27 @@ def search_cmd(
     --corpus may be a prefix (code, docs, knowledge) or a fully-qualified
     collection name (code__myrepo).  Repeat --corpus to search multiple corpora.
     """
-    # Build path-scoping where filter
+    # -C N is shorthand for -A N -B N
+    if lines_context:
+        lines_before = lines_context
+        lines_after = lines_context
+
+    # Build where filter: path scoping + --where pairs merged
     where_filter: dict | None = None
     if path is not None:
         resolved = str(Path(path).resolve())
         where_filter = {"file_path": {"$startswith": resolved}}
+
+    try:
+        user_where = _parse_where(where_pairs)
+    except click.BadParameter as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if user_where:
+        if where_filter:
+            where_filter.update(user_where)
+        else:
+            where_filter = user_where
 
     db = _t3()
     all_collections = [c["name"] for c in db.list_collections()]
@@ -174,6 +226,10 @@ def search_cmd(
             groups.setdefault(r.collection, []).append(r)
         results = round_robin_interleave(list(groups.values()))[:n]
 
+    # --reverse: invert final order
+    if reverse:
+        results = list(reversed(results))
+
     # Answer mode
     if answer:
         click.echo(answer_mode(query=query, results=results))
@@ -193,10 +249,12 @@ def search_cmd(
                 seen.add(file_path)
                 click.echo(file_path)
     else:
-        for result in results:
-            for line in format_plain([result]):
-                click.echo(line)
-            if show_content:
+        for line in format_plain_with_context(
+            results, lines_before=lines_before, lines_after=lines_after
+        ):
+            click.echo(line)
+        if show_content:
+            for result in results:
                 text = result.content
                 if len(text) > _CONTENT_MAX_CHARS:
                     text = text[:_CONTENT_MAX_CHARS] + "..."
