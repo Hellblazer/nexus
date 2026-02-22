@@ -332,6 +332,8 @@ nx serve logs            # last 20 lines of server output
 nx serve logs -n 50      # last N lines
 ```
 
+Server output is written to `~/.config/nexus/serve.log`.
+
 ## Configuration
 
 ```bash
