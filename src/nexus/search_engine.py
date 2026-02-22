@@ -303,7 +303,7 @@ def _haiku_answer(query: str, results: list[SearchResult]) -> str:
 
     snippets = "\n".join(
         f"[{i}] {r.metadata.get('source_path', 'unknown')}:"
-        f"{r.metadata.get('start_line', '?')}\n{r.content[:400]}"
+        f"{r.metadata.get('line_start', '?')}\n{r.content[:400]}"
         for i, r in enumerate(results)
     )
     prompt = (
@@ -335,10 +335,10 @@ def answer_mode(query: str, results: list[SearchResult]) -> str:
     footer_lines: list[str] = [""]
     for i, r in enumerate(results):
         source_path = r.metadata.get("source_path", "?")
-        start_line = r.metadata.get("start_line", "?")
-        end_line = r.metadata.get("end_line", "?")
+        line_start = r.metadata.get("line_start", "?")
+        line_end = r.metadata.get("line_end", "?")
         match_pct = (1.0 - r.distance) * 100
-        line_ref = f"{start_line}-{end_line}" if end_line != "?" else str(start_line)
+        line_ref = f"{line_start}-{line_end}" if line_end != "?" else str(line_start)
         footer_lines.append(f"{i}: {source_path}:{line_ref} ({match_pct:.1f}% match)")
 
     return synthesis + "\n".join(footer_lines)
@@ -351,9 +351,9 @@ def format_vimgrep(results: list[SearchResult]) -> list[str]:
     lines: list[str] = []
     for r in results:
         source_path = r.metadata.get("source_path", "")
-        start_line = r.metadata.get("start_line", 0)
+        line_start = r.metadata.get("line_start", 0)
         first_line = r.content.splitlines()[0] if r.content else ""
-        lines.append(f"{source_path}:{start_line}:0:{first_line}")
+        lines.append(f"{source_path}:{line_start}:0:{first_line}")
     return lines
 
 
@@ -377,8 +377,8 @@ def format_plain(results: list[SearchResult]) -> list[str]:
     lines: list[str] = []
     for r in results:
         source_path = r.metadata.get("source_path", "")
-        start_line = r.metadata.get("start_line", 0)
+        line_start = r.metadata.get("line_start", 0)
         for i, content_line in enumerate(r.content.splitlines()):
-            line_no = int(start_line) + i
+            line_no = int(line_start) + i
             lines.append(f"{source_path}:{line_no}:{content_line}")
     return lines

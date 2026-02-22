@@ -224,10 +224,10 @@ def test_answer_mode_produces_cite_tags():
     results = [
         SearchResult(id="1", content="Token validation logic here.",
                      distance=0.1, collection="code__r",
-                     metadata={"source_path": "./auth.py", "start_line": 42}),
+                     metadata={"source_path": "./auth.py", "line_start": 42}),
         SearchResult(id="2", content="Session management code.",
                      distance=0.2, collection="code__r",
-                     metadata={"source_path": "./session.py", "start_line": 12}),
+                     metadata={"source_path": "./session.py", "line_start": 12}),
     ]
     mock_response = MagicMock()
     mock_response.content = [MagicMock(text='Auth uses <cite i="0"> and session <cite i="1">.')]
@@ -244,7 +244,7 @@ def test_answer_mode_includes_citation_footer():
     results = [
         SearchResult(id="1", content="foo", distance=0.1,
                      collection="code__r",
-                     metadata={"source_path": "./foo.py", "start_line": 1}),
+                     metadata={"source_path": "./foo.py", "line_start": 1}),
     ]
     with patch("nexus.search_engine._haiku_answer", return_value='Result <cite i="0">.'):
         output = answer_mode(query="foo", results=results)
@@ -260,7 +260,7 @@ def test_format_vimgrep():
     results = [
         SearchResult(id="1", content="    def authenticate(user, token):",
                      distance=0.1, collection="code__r",
-                     metadata={"source_path": "./auth.py", "start_line": 42}),
+                     metadata={"source_path": "./auth.py", "line_start": 42}),
     ]
     lines = format_vimgrep(results)
     assert lines[0] == "./auth.py:42:0:    def authenticate(user, token):"
@@ -298,7 +298,7 @@ def test_format_json_includes_metadata():
     import json
     results = [
         SearchResult(id="1", content="x", distance=0.1, collection="code__r",
-                     metadata={"source_path": "./a.py", "start_line": 10}),
+                     metadata={"source_path": "./a.py", "line_start": 10}),
     ]
     parsed = json.loads(format_json(results))
     assert parsed[0].get("source_path") == "./a.py"
