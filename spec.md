@@ -23,7 +23,7 @@ without vendor lock-in, without a Swiss army knife.
 
 > **Arcaneum clarification**: Arcaneum uses Qdrant as its vector backend and `fastembed`/SentenceTransformers
 > (local ONNX, Jina/Stella models) for embeddings — no ChromaDB, no Voyage AI. Nexus borrows only the
-> extraction and chunking logic (PyMuPDF4LLM, pdfplumber fallback, OCR, SemanticMarkdownChunker). The
+> extraction and chunking logic (PyMuPDF4LLM, OCR, SemanticMarkdownChunker — pdfplumber fallback not ported, pymupdf4llm only). The
 > storage layer is reimplemented for ChromaDB; the embedding layer is replaced with Voyage AI. The `arc store`
 > memory pattern is also not borrowed: Arcaneum explicitly persists content to local disk for re-indexability,
 > which is the opposite of Nexus's design (vectors + chunk text only, no local raw copy).
@@ -196,12 +196,12 @@ ChromaDB natively supports `VoyageAIEmbeddingFunction` (`pip install voyageai`; 
 ### PDFs and Documents
 
 1. `nx index pdf <path>` reads PDFs **directly from their source path** — no local copy stored
-2. Text extracted and chunked in-process using **ported Arcaneum extraction logic**: PyMuPDF4LLM → markdown (primary), pdfplumber (complex tables fallback), Tesseract/EasyOCR (scanned fallback)
+2. Text extracted and chunked in-process using **ported Arcaneum extraction logic**: PyMuPDF4LLM → markdown (primary), PyMuPDF → normalized text (fallback), Tesseract/EasyOCR (scanned fallback)
 3. **Only the extracted text chunks + embeddings + metadata are stored in T3 ChromaDB** — raw PDF bytes never leave the machine
 4. Chunks embedded via `VoyageAIEmbeddingFunction(model_name="voyage-4")`
 5. Upserted into T3 collection `docs__{corpus-name}`
 
-Arcaneum's extraction and chunking logic (PDFExtractor, PDFChunker, OCREngine) is **ported** — not imported as a library. The storage layer calls (Qdrant `PointStruct`, `upload_points`, scroll-based sync) must be rewritten as ChromaDB `collection.upsert()` calls. The embedding layer (`fastembed` local ONNX) is replaced with `VoyageAIEmbeddingFunction`. The extraction and chunking logic itself (PyMuPDF4LLM calls, pdfplumber fallback, OCR orchestration) ports with minimal changes.
+Arcaneum's extraction and chunking logic (PDFExtractor, PDFChunker, OCREngine) is **ported** — not imported as a library. The storage layer calls (Qdrant `PointStruct`, `upload_points`, scroll-based sync) must be rewritten as ChromaDB `collection.upsert()` calls. The embedding layer (`fastembed` local ONNX) is replaced with `VoyageAIEmbeddingFunction`. The extraction and chunking logic itself (PyMuPDF4LLM calls, OCR orchestration) ports with minimal changes.
 
 Since ChromaDB stores the chunk text (`documents` field), result display and `--content` work without
 re-reading the source file. Re-indexing (`nx index pdf <path>` again) requires the source path to still
@@ -241,7 +241,7 @@ page_count           int   Total pages in document
 page_number          int   Page this chunk is on (1-indexed; 0 if not applicable)
 section_title        str   Nearest heading above this chunk (markdown-extracted)
 format               str   "markdown" | "normalized" | "plain"
-extraction_method    str   "pymupdf4llm_markdown" | "pymupdf_normalized" | "pdfplumber" | "ocr"
+extraction_method    str   "pymupdf4llm_markdown" | "pymupdf_normalized" | "ocr" | "pdfplumber" (legacy — present in pre-v1 documents; not produced by current implementation)
 
 # Chunk position
 chunk_index          int   Position of this chunk within the document (0-based)
@@ -904,7 +904,7 @@ Recent memory ({project}, last 10 entries):
 - **ripgrep** — full-text code search via flat mmap line cache (local, 500MB cap)
 - **Git** — frecency computation from commit history
 - **Flask + Waitress** — persistent `nx serve` process (SeaGOAT pattern)
-- **PyMuPDF4LLM + pdfplumber + Tesseract/EasyOCR** — PDF extraction (ported from Arcaneum)
+- **PyMuPDF4LLM + Tesseract/EasyOCR** — PDF extraction (ported from Arcaneum; pdfplumber fallback not implemented)
 - **tree-sitter + llama-index-core** — AST-based code chunking; uses `llama_index.core.node_parser.CodeSplitter` as the interface (which wraps `tree-sitter-language-pack` internally); installing bare `tree-sitter` alone is not sufficient. **Version pinning required** in `pyproject.toml` — known breaking incompatibilities exist between package versions (issues #13521, #17567 in llama_index repo)
 - **Environment variables**: `VOYAGE_API_KEY` (embeddings + reranker), `CHROMA_API_KEY` (ChromaDB cloud auth — required for all T3 operations), `ANTHROPIC_API_KEY` (Haiku synthesis)
 
