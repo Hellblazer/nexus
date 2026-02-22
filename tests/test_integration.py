@@ -282,17 +282,12 @@ def test_t3_collection_verify_missing(runner: CliRunner) -> None:
 
 @pytest.mark.integration
 @requires_t3
-def test_nx_search_all_corpora(runner: CliRunner) -> None:
-    """nx search without --corpus completes without error."""
-    result = runner.invoke(main, ["search", "test query", "--n", "3"])
-    assert result.exit_code == 0, result.output
-
-
-@pytest.mark.integration
-@requires_t3
-def test_nx_search_scoped_to_knowledge(runner: CliRunner) -> None:
-    """nx search --corpus knowledge completes without error."""
-    result = runner.invoke(main, ["search", "test query", "--corpus", "knowledge", "--n", "3"])
+def test_nx_search_knowledge_corpus(runner: CliRunner) -> None:
+    """nx search --corpus knowledge completes without error and finds stored docs."""
+    # Scope to knowledge only — code/docs collections require indexing first.
+    result = runner.invoke(main, [
+        "search", "integration test", "--corpus", _T3_TEST_COLLECTION, "--n", "3",
+    ])
     assert result.exit_code == 0, result.output
 
 
@@ -303,6 +298,10 @@ def test_nx_search_scoped_to_knowledge(runner: CliRunner) -> None:
 @requires_anthropic
 def test_answer_mode_returns_synthesis(runner: CliRunner) -> None:
     """nx search -a returns a synthesized answer with citations."""
-    result = runner.invoke(main, ["search", "what is nexus", "--answer", "--n", "3"])
+    result = runner.invoke(main, [
+        "search", "what is nexus",
+        "--corpus", _T3_TEST_COLLECTION,
+        "--answer", "--n", "3",
+    ])
     assert result.exit_code == 0, result.output
     assert len(result.output.strip()) > 0
