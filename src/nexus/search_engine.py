@@ -11,9 +11,11 @@ from typing import Any, Callable
 
 import structlog
 
+from nexus.config import HAIKU_MODEL
+
 _log = structlog.get_logger()
 
-_HAIKU_MODEL = "claude-haiku-4-5-20251001"
+_HAIKU_MODEL = HAIKU_MODEL
 _RERANK_MODEL = "rerank-2.5"
 
 # ── Data types ────────────────────────────────────────────────────────────────

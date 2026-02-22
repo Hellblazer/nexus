@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""PDF text extraction: PyMuPDF4LLM markdown primary, normalized fallback."""
+"""PDF text extraction: PyMuPDF4LLM markdown primary, normalized fallback.
+
+Extraction strategy (two tiers implemented):
+1. PyMuPDF4LLM markdown — quality-first, preserves headings/lists/tables.
+2. PyMuPDF normalized — used when Type3 fonts are detected (pymupdf4llm can
+   hang indefinitely on Type3 fonts) or when a font-related RuntimeError is raised.
+
+Note: pdfplumber was considered for a third-tier complex-table fallback
+(e.g., multi-column PDFs where pymupdf table detection is unreliable) but is
+not currently implemented. The two-tier strategy covers the known failure modes.
+"""
 from dataclasses import dataclass, field
 from pathlib import Path
 import re

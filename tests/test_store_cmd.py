@@ -283,11 +283,12 @@ def test_collection_delete_without_yes_prompts(runner: CliRunner, env_creds) -> 
     mock_db.delete_collection.assert_not_called()
 
 
-def test_collection_delete_confirm_flag_no_longer_exists(runner: CliRunner, env_creds) -> None:
-    """--confirm flag was removed (renamed to --yes); using it is an error."""
+def test_collection_delete_confirm_flag_alias(runner: CliRunner, env_creds) -> None:
+    """--confirm is a supported alias for --yes and skips the confirmation prompt."""
     mock_db = MagicMock()
 
     with patch("nexus.commands.collection._t3", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--confirm"])
 
-    assert result.exit_code != 0  # no such option
+    assert result.exit_code == 0
+    mock_db.delete_collection.assert_called_once_with("knowledge__test")

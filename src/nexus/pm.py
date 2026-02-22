@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from nexus.config import HAIKU_MODEL
+
 if TYPE_CHECKING:
     from nexus.db.t2 import T2Database
     from nexus.db.t3 import T3Database
@@ -117,7 +119,7 @@ def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> 
     from nexus.config import get_credential
     client = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
     message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=HAIKU_MODEL,
         max_tokens=1200,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -181,6 +183,7 @@ def pm_status(db: "T2Database", project: str) -> dict[str, Any]:
     # Determine current phase: MAX phase tag across all docs
     phase = 1
     last_agent = None
+    latest_ts = ""
     blockers_row = None
     for row in all_rows:
         tags = row.get("tags") or ""
@@ -193,7 +196,9 @@ def pm_status(db: "T2Database", project: str) -> dict[str, Any]:
                         phase = n
                 except ValueError:
                     pass
-        if last_agent is None and row.get("agent"):
+        ts = row.get("timestamp", "")
+        if row.get("agent") and ts > latest_ts:
+            latest_ts = ts
             last_agent = row["agent"]
         if row["title"] == "BLOCKERS.md":
             blockers_row = row

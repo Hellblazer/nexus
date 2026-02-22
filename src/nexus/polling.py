@@ -67,7 +67,7 @@ def check_and_reindex(repo: Path, registry: "RepoRegistry") -> None:
         registry.update(repo, head_hash=current)
     except CredentialsMissingError:
         # Don't record head_hash — allow retry on next poll when credentials are added
-        _log.warning("Credentials missing for %s — will retry on next poll", repo)
+        _log.warning("Credentials missing — will retry on next poll", repo=str(repo))
     except Exception:
         # Record head_hash even on other errors to prevent infinite reindex loops
         registry.update(repo, head_hash=current)
