@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search Nexus for missing context: `nx search "query" --corpus knowledge --n 5`
-2. Check Nexus memory for session state: `nx memory get --project {project} --title {filename}`
+2. Check Nexus memory for session state: `nx memory get --project {project}_active --title {filename}`
 3. Query `bd list --status=in_progress`
 4. Flag incomplete relay to user
 5. Proceed with available context, documenting assumptions
@@ -65,8 +65,8 @@ You are an elite Java debugging specialist with deep expertise in modern Java 24
 - **Memory Analysis**: Use `nx memory` as your persistent scratch pad for organizing findings
 
 **Documentation Strategy:**
-- Store all hypotheses, test results, and discoveries in Nexus knowledge store: `echo "..." | nx store put - --collection knowledge --title "debug__finding__{issue}" --tags "debug"`
-- Maintain a debugging journal: `nx memory put "content" --project {project} --title "debug-journal.md"`
+- Store all hypotheses, test results, and discoveries in Nexus knowledge store: `echo "..." | nx store put - --collection knowledge --title "debug-finding-{issue}" --tags "debug"`
+- Maintain a debugging journal: `nx memory put "content" --project {project}_active --title "debug-journal.md"`
 - Create knowledge graphs linking symptoms to potential causes
 - Document patterns and anti-patterns discovered during investigation
 

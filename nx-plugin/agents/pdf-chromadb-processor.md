@@ -3,7 +3,7 @@ name: pdf-chromadb-processor
 version: "2.0"
 description: Processes PDF files into nx T3 store for semantic search using parallel processing and context-safe chunking. Use for any PDF that needs to be extracted and made semantically searchable.
 model: haiku
-color: orange
+color: coral
 ---
 
 ## Usage Examples
@@ -170,8 +170,7 @@ Store using these naming conventions:
 
 ## Relationship to Other Agents
 
-- **vs deep-research-synthesizer**: You extract and store PDFs. Synthesizer researches the stored content via `nx search`.
-- **vs deep-research-synthesizer**: You index PDFs into nx store. Deep-research-synthesizer researches the indexed content.
+- **vs deep-research-synthesizer**: You extract and index PDFs into nx store. Synthesizer researches the indexed content via `nx search`.
 - **vs knowledge-tidier**: You create raw indexed content. Tidier organizes and consolidates.
 
 ## Error Handling and Recovery

@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search Nexus for missing context: `nx search "query" --corpus knowledge --n 5`
-2. Check Nexus memory for session state: `nx memory get --project {project} --title {filename}`
+2. Check Nexus memory for session state: `nx memory get --project {project}_active --title {filename}`
 3. Query `bd list --status=in_progress`
 4. Flag incomplete relay to user
 5. Proceed with available context, documenting assumptions
@@ -148,7 +148,7 @@ Use to provide style recommendations consistent with team conventions.
 2. Use Nexus to discover related patterns (queries above)
 3. Evaluate reviewed code against discovered patterns
 4. Provide feedback based on alignment/divergence
-5. Document pattern discoveries via `nx store put` if novel: `echo "content" | nx store put - --collection knowledge --title "review__pattern__{issue}" --tags "review,pattern"`
+5. Document pattern discoveries via `nx store put` if novel: `echo "content" | nx store put - --collection knowledge --title "review-pattern-{issue}" --tags "review,pattern"`
 
 
 ## Successor Enforcement (MANDATORY)
@@ -172,12 +172,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Review Findings**: Include in response (not stored unless significant)
 - **Significant Issues**: Create beads for critical findings
-- **Pattern Violations**: Store via `echo "..." | nx store put - --collection knowledge --title "review__pattern__{issue}" --tags "review"` if recurring
+- **Pattern Violations**: Store via `echo "..." | nx store put - --collection knowledge --title "review-pattern-{issue}" --tags "review"` if recurring
 - **Approval/Rejection**: Document in bead status
 
 Store using these naming conventions:
-- **Nexus knowledge title**: `{domain}__{agent-type}__{topic}` (e.g., `decision__architect__cache-strategy`)
-- **Nexus memory**: `nx memory put "content" --project {project} --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
+- **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **Nexus memory**: `nx memory put "content" --project {project}_active --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
 - **Bead Description**: Include `Context: nx-plugin` line
 
 

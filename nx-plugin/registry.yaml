@@ -237,7 +237,7 @@ agents:
 
   project-management-setup:
     model: haiku
-    version: "2.0"
+    version: "3.0"
     color: sage
     skill: project-setup
     slash_command: /project-setup

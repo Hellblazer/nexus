@@ -22,10 +22,9 @@ nx-plugin/
 │   │   ├── MAINTENANCE.md       # How to maintain/update agents
 │   │   ├── README.md            # _shared directory guide (this section)
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
-│   └── *.md                 # 15 specialized agent definitions
+│   └── *.md                 # 14 specialized agent definitions
 ├── commands/
 │   └── *.md                 # Slash commands (/research, /plan, /code-review, etc.)
-├── docs/                    # Additional documentation
 ├── hooks/
 │   ├── hooks.json           # Hook event → script wiring
 │   └── scripts/
@@ -57,7 +56,7 @@ nx-plugin/
     └── test-validation/     # → test-validator agent
 ```
 
-## Agents (15)
+## Agents (14)
 
 See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, predecessors/successors).
 
@@ -103,6 +102,7 @@ Defined in `registry.yaml`:
 | `PreCompact` | `bd prime` | Re-prime bead context after compact |
 | `SubagentStart` | `subagent-start.sh` | Inject context for spawned subagents |
 | `PermissionRequest` | `permission-request-stdin.sh` | Auto-approve safe read-only commands |
+| `PostToolUse` | `bead_context_hook.py` | Remind to include context pointer in `bd create` |
 
 ## Slash Commands
 
@@ -160,10 +160,10 @@ All agent handoffs use the relay template from `agents/_shared/RELAY_TEMPLATE.md
 ### Permission Auto-Approval
 
 `hooks/scripts/permission-request-stdin.sh` auto-approves safe read-only operations:
-- `bd list`, `bd show`, `bd ready`, `bd status`
-- `git status`, `git log`, `git diff`, `git show`
-- `nx search`, `nx store list`, `nx memory list`
-- `mvn help:*`, `mvn dependency:tree`
+- `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
+- `git log`, `git diff`, `git status`, `git show`, `git branch -a`, `git remote -v`
+- `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx pm status/list`, `nx doctor`, `nx health`, `nx index`
+- `mvn help:*`, `mvn dependency:tree`, `mvn dependency:analyze`, `mvn versions:display`
 
 Dangerous commands (force-push, `bd delete`, deploys) are always denied.
 

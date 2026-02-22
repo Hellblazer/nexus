@@ -45,7 +45,7 @@ Delegates to the **java-architect-planner** agent (model: opus).
 ## Pipeline Position
 
 ```
-strategic-planner -> java-architect-planner -> plan-auditor -> java-developer
+strategic-planner -> plan-auditor -> java-architect-planner -> java-developer
 ```
 
 ## Agent Invocation

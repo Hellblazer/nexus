@@ -139,11 +139,11 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Architecture Maps**: Store via `echo "..." | nx store put - --collection knowledge --title "architecture-{scope}-{date}" --tags "architecture"`
 - **Dependency Analysis**: Include in response
 - **Technical Debt**: Create chore beads for significant debt
-- **Pattern Catalog**: Store via `echo "..." | nx store put - --collection knowledge --title "pattern__codebase__{name}" --tags "pattern"`
+- **Pattern Catalog**: Store via `echo "..." | nx store put - --collection knowledge --title "pattern-codebase-{name}" --tags "pattern"`
 
 Store using these naming conventions:
-- **Nexus knowledge title**: `{domain}__{agent-type}__{topic}` (e.g., `decision__architect__cache-strategy`)
-- **Nexus memory**: `nx memory put "content" --project {project} --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
+- **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **Nexus memory**: `nx memory put "content" --project {project}_active --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
 - **Bead Description**: Include `Context: nx-plugin` line
 
 

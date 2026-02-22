@@ -3,7 +3,7 @@ name: project-management-setup
 version: "3.0"
 description: Initializes Nexus-based project management for multi-week projects requiring systematic tracking and resumability. Uses nx pm init + nx memory put to store PM docs in T2 (SQLite). Use when starting projects over 3 weeks requiring phase tracking and knowledge integration.
 model: haiku
-color: green
+color: sage
 ---
 
 ## Usage Examples

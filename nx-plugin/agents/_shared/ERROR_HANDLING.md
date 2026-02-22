@@ -18,8 +18,8 @@ This file documents common error handling patterns for agents.
 - Never silently swallow errors
 
 ### Knowledge Base Errors
-- Connection failures: verify MCP server is available
-- Write failures: check collection permissions
+- Connection failures: verify nx CLI is available (`nx doctor`)
+- Write failures: check nx store permissions
 - Duplicate ID errors: append timestamp suffix
 
 ### Context Management Errors

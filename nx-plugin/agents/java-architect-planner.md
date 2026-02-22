@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search Nexus for missing context: `nx search "query" --corpus knowledge --n 5`
-2. Check Nexus memory for session state: `nx memory get --project {project} --title {filename}`
+2. Check Nexus memory for session state: `nx memory get --project {project}_active --title {filename}`
 3. Query `bd list --status=in_progress`
 4. Flag incomplete relay to user
 5. Proceed with available context, documenting assumptions
@@ -78,8 +78,8 @@ You are an elite Java architect and strategic planner with deep expertise in Jav
 - Always conclude planning phase by spawning the plan-auditor agent for comprehensive review
 
 **Documentation Requirements:**
-- Store architectural decisions and rationale: `echo "..." | nx store put - --collection knowledge --title "decision__architect__{component}" --tags "architecture"`
-- Maintain execution progress and learnings: `nx memory put "content" --project {project} --title "plan-{phase}.md"`
+- Store architectural decisions and rationale: `echo "..." | nx store put - --collection knowledge --title "decision-architect-{component}" --tags "architecture"`
+- Maintain execution progress and learnings: `nx memory put "content" --project {project}_active --title "plan-{phase}.md"`
 - Create correlation maps between related concepts and components
 - Document alternative paths and decision criteria
 - Track metrics and success indicators throughout execution
@@ -133,7 +133,7 @@ Use to propose architectures using proven technologies.
 2. Use 5 Nexus queries above to understand landscape
 3. Design architecture informed by discovered patterns
 4. Reference discovered patterns in design document
-5. Store design decisions in Nexus: `echo "..." | nx store put - --collection knowledge --title "decision__architect__{topic}" --tags "architecture"`
+5. Store design decisions in Nexus: `echo "..." | nx store put - --collection knowledge --title "decision-architect-{topic}" --tags "architecture"`
 
 
 ## Successor Enforcement (MANDATORY)
@@ -155,14 +155,14 @@ Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Architectural Decisions**: Store via `echo "..." | nx store put - --collection knowledge --title "decision__architect__{component}" --tags "architecture"`
-- **Execution Plans**: Store via `nx memory put "content" --project {project} --title "plan-{phase}.md"`
+- **Architectural Decisions**: Store via `echo "..." | nx store put - --collection knowledge --title "decision-architect-{component}" --tags "architecture"`
+- **Execution Plans**: Store via `nx memory put "content" --project {project}_active --title "plan-{phase}.md"`
 - **Dependency Maps**: Include in bead design field
-- **Risk Assessments**: Store via `echo "..." | nx store put - --collection knowledge --title "risk__architect__{topic}" --tags "risk"`
+- **Risk Assessments**: Store via `echo "..." | nx store put - --collection knowledge --title "risk-architect-{topic}" --tags "risk"`
 
 Store using these naming conventions:
-- **Nexus knowledge title**: `{domain}__{agent-type}__{topic}` (e.g., `decision__architect__cache-strategy`)
-- **Nexus memory**: `nx memory put "content" --project {project} --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
+- **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **Nexus memory**: `nx memory put "content" --project {project}_active --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
 - **Bead Description**: Include `Context: nx-plugin` line
 
 

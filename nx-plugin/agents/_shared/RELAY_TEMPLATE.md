@@ -140,7 +140,7 @@ Skills should reference this template rather than inline it:
 ## Agent Invocation
 
 Use the Task tool with standardized relay format.
-See [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md) for required fields.
+See [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md) for required fields.
 ```
 
 ## Usage in Agents
@@ -164,7 +164,7 @@ If validation fails:
 4. Flag incomplete relay in response to user
 5. Proceed with available context, documenting assumptions
 
-See [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md) RECOVER section for details.
+See [CONTEXT_PROTOCOL.md](./CONTEXT_PROTOCOL.md) RECOVER section for details.
 ```
 
 **Validation is non-optional**. Agents must check relay structure before executing work.
