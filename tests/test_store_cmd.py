@@ -134,6 +134,20 @@ def test_store_put_file_not_found(
     assert "not found" in result.output.lower() or "File not found" in result.output
 
 
+def test_store_put_invalid_ttl_shows_error(
+    runner: CliRunner, env_creds, tmp_path
+) -> None:
+    """Invalid TTL format is rejected with a clear CLI error (not a traceback)."""
+    src = tmp_path / "f.txt"
+    src.write_text("content")
+
+    with patch("nexus.commands.store._t3"):
+        result = runner.invoke(main, ["store", "put", str(src), "--ttl", "5z"])
+
+    assert result.exit_code != 0
+    assert "5z" in result.output
+
+
 def test_store_expire_reports_count(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.expire.return_value = 3

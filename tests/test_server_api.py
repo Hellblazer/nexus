@@ -127,3 +127,17 @@ def test_delete_repo_not_registered(client, tmp_path: Path) -> None:
         resp = client.delete(f"/repos{repo}")
     assert resp.status_code == 404
     mock_reg.remove.assert_not_called()
+
+
+def test_delete_repo_path_is_canonicalized(client, tmp_path: Path) -> None:
+    """DELETE /repos canonicalizes the path so registry lookup uses the real path."""
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    mock_reg = MagicMock()
+    mock_reg.get.return_value = {"collection": "code__myrepo"}
+    with patch.object(server_module, "_get_registry", return_value=mock_reg):
+        resp = client.delete(f"/repos{repo}")
+    assert resp.status_code == 200
+    # The path passed to reg.get must be the resolved canonical path
+    called_path = mock_reg.get.call_args[0][0]
+    assert called_path == repo.resolve()

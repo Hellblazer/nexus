@@ -225,7 +225,7 @@ class T2Database:
                 """
                 UPDATE memory
                    SET ttl  = ?,
-                       tags = replace(tags, 'pm,', 'pm-archived,')
+                       tags = trim(replace(',' || tags || ',', ',pm,', ',pm-archived,'), ',')
                  WHERE project = ?
                 """,
                 (ttl, project),
@@ -248,7 +248,7 @@ class T2Database:
                 """
                 UPDATE memory
                    SET ttl  = NULL,
-                       tags = replace(tags, 'pm-archived,', 'pm,')
+                       tags = trim(replace(',' || tags || ',', ',pm-archived,', ',pm,'), ',')
                  WHERE project = ?
                 """,
                 (project,),

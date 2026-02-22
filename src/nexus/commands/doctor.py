@@ -74,3 +74,4 @@ def doctor_cmd() -> None:
         for key in missing:
             click.echo(f"  {key:<24} {_SIGNUP.get(key, '')}")
         click.echo("\nRun 'nx config init' for an interactive setup wizard.")
+        raise click.exceptions.Exit(1)

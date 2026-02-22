@@ -55,22 +55,25 @@ def session_start() -> str:
     lines: list[str] = [f"Nexus ready. T1 scratch initialized (session: {session_id})."]
 
     repo = _infer_repo()
-    db = _open_t2()
+    try:
+        db = _open_t2()
 
-    # PM detection: T2 SQL query for {repo}_pm CONTINUATION.md
-    pm_row = db.get(project=f"{repo}_pm", title="CONTINUATION.md")
-    if pm_row is not None:
-        content = (pm_row.get("content") or "")[:2000]
-        lines.append(content)
-    else:
-        # Non-PM: recent memory summary
-        entries = db.list_entries(project=repo)[:10]
-        if entries:
-            lines.append(f"Recent memory ({repo}, last {len(entries)} entries):")
-            for e in entries:
-                lines.append(f"  - {e['title']} ({e.get('agent') or '-'}, {e.get('timestamp', '')[:10]})")
+        # PM detection: T2 SQL query for {repo}_pm CONTINUATION.md
+        pm_row = db.get(project=f"{repo}_pm", title="CONTINUATION.md")
+        if pm_row is not None:
+            content = (pm_row.get("content") or "")[:2000]
+            lines.append(content)
         else:
-            lines.append(f"No memory entries for '{repo}'.")
+            # Non-PM: recent memory summary
+            entries = db.list_entries(project=repo)[:10]
+            if entries:
+                lines.append(f"Recent memory ({repo}, last {len(entries)} entries):")
+                for e in entries:
+                    lines.append(f"  - {e['title']} ({e.get('agent') or '-'}, {e.get('timestamp', '')[:10]})")
+            else:
+                lines.append(f"No memory entries for '{repo}'.")
+    except Exception:
+        lines.append("(memory unavailable)")
 
     return "\n".join(lines)
 

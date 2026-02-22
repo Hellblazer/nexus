@@ -249,7 +249,8 @@ def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:
 def test_doctor_shows_all_checks(runner: CliRunner, fake_home: Path) -> None:
     """nx doctor runs all required service checks and reports status."""
     result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 0, result.output
+    # Exit 0 when all creds present, 1 when some are missing (both valid outcomes)
+    assert result.exit_code in (0, 1), result.output
     # Should check: ChromaDB, Voyage AI, Anthropic, ripgrep, git
     output_lower = result.output.lower()
     assert "chroma" in output_lower or "chromadb" in output_lower
@@ -262,20 +263,20 @@ def test_doctor_shows_all_checks(runner: CliRunner, fake_home: Path) -> None:
 def test_doctor_missing_voyage_key_reports_warning(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nx doctor reports warning when VOYAGE_API_KEY is unset."""
+    """nx doctor reports warning and exits 1 when VOYAGE_API_KEY is unset."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "VOYAGE_API_KEY" in result.output or "voyage" in result.output.lower()
 
 
 def test_doctor_missing_chroma_key_reports_warning(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nx doctor reports warning when CHROMA_API_KEY is unset."""
+    """nx doctor reports warning and exits 1 when CHROMA_API_KEY is unset."""
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "CHROMA_API_KEY" in result.output or "chroma" in result.output.lower()
 
 

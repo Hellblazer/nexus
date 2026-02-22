@@ -50,7 +50,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     for path in sorted(repo.rglob("*")):
         if not path.is_file() or path.is_symlink():
             continue
-        if any(part.startswith(".") for part in path.parts):
+        if any(part.startswith(".") for part in path.relative_to(repo).parts):
             continue  # Skip hidden dirs/files
         score = compute_frecency(repo, path)
         scored.append((score, path))
@@ -76,6 +76,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
             f"chroma_api_key={'set' if chroma_key else 'missing'})"
         )
 
+    from datetime import UTC, datetime as _dt
     from nexus.db.t3 import T3Database
 
     db = T3Database(
@@ -84,22 +85,31 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
         api_key=chroma_key,
         voyage_api_key=voyage_key,
     )
+    col = db.get_or_create_collection(collection_name)
+    now_iso = _dt.now(UTC).isoformat()
 
-    for _score, file in scored:
+    for score, file in scored:
         try:
             content = file.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
         chunks = chunk_file(file, content)
         for chunk in chunks:
-            db.put(
-                collection=collection_name,
-                content=chunk["text"],
-                title=f"{file.relative_to(repo)}:{chunk['line_start']}-{chunk['line_end']}",
-                tags=file.suffix.lstrip("."),
-                category="code",
-                session_id="",
-                source_agent="nexus-indexer",
-                store_type="code",
-                ttl_days=0,
-            )
+            title = f"{file.relative_to(repo)}:{chunk['line_start']}-{chunk['line_end']}"
+            doc_id = _hl.sha256(f"{collection_name}:{title}".encode()).hexdigest()[:16]
+            metadata: dict = {
+                "title": title,
+                "tags": file.suffix.lstrip("."),
+                "category": "code",
+                "session_id": "",
+                "source_agent": "nexus-indexer",
+                "store_type": "code",
+                "indexed_at": now_iso,
+                "expires_at": "",
+                "ttl_days": 0,
+                "source_path": str(file.relative_to(repo)),
+                "start_line": chunk["line_start"],
+                "end_line": chunk["line_end"],
+                "frecency_score": float(score),
+            }
+            col.upsert(ids=[doc_id], documents=[chunk["text"]], metadatas=[metadata])

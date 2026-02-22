@@ -118,6 +118,7 @@ def set_credential(name: str, value: str) -> None:
         with os.fdopen(tmp_fd, "w") as fh:
             fh.write(content)
         os.replace(tmp_path, path)
+        os.chmod(path, 0o600)
     except Exception:
         try:
             os.unlink(tmp_path)

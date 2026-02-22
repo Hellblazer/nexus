@@ -23,7 +23,7 @@ from nexus.search_engine import (
 
 @click.command("search")
 @click.argument("query")
-@click.option("--corpus", "-C", multiple=True, default=("knowledge",),
+@click.option("--corpus", "-C", multiple=True, default=("knowledge", "code", "docs"),
               show_default=True, help="Corpus prefix or full collection name (repeatable)")
 @click.option("--n", default=10, show_default=True, help="Max results to return")
 @click.option("--hybrid", is_flag=True, default=False,

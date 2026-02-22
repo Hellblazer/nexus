@@ -30,7 +30,10 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
     """
     if content == "-":
         content = sys.stdin.read()
-    ttl_days = parse_ttl(ttl)
+    try:
+        ttl_days = parse_ttl(ttl)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     db = T2Database(_default_db_path())
     row_id = db.put(project=project, title=title, content=content, tags=tags, ttl=ttl_days)
     click.echo(f"Stored: {project}/{title} (id={row_id})")
