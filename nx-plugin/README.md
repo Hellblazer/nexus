@@ -4,8 +4,6 @@ A Claude Code plugin that provides a full suite of specialized agents, skills, c
 
 ## Overview
 
-This plugin ports a production `~/.claude/` agent configuration into an installable, shareable plugin. It replaces ChromaDB MCP, allPepper Memory Bank MCP, and `.pm/` directory tooling with the Nexus CLI (`nx`), which provides a unified three-tier storage system.
-
 **Storage tiers:**
 - **T1** — `nx scratch`: ephemeral session scratch, cleared on exit
 - **T2** — `nx memory`: per-project persistent notes (SQLite + FTS5)
