@@ -1,0 +1,74 @@
+---
+name: strategic-planning
+description: >
+  Create implementation plans before development. Triggers: user says "implement feature",
+  "add functionality", "build component", starting new epic, before multi-step development,
+  user says "plan this", before architectural changes, breaking down complex work.
+allowed-tools: Task, Read, Glob, Grep, Bash
+memory: project
+# See ~/.claude/registry.yaml for full agent metadata
+---
+
+# Strategic Planning Skill
+
+Delegates to the **strategic-planner** agent. See [registry.yaml](../../registry.yaml) for details.
+
+## When This Skill Activates
+
+- Before implementing a new feature
+- When asked to add new functionality
+- Before building a new component or module
+- For any development task requiring multiple steps
+- When breaking down complex work into phases
+- Before architectural changes
+
+## Agent Invocation
+
+## Relay Template (Use This Format)
+
+When invoking this agent via Task tool, use this exact structure:
+
+```markdown
+## Relay: {agent-name}
+
+**Task**: [1-2 sentence summary of what needs to be done]
+**Bead**: [ID] (status: [status]) or 'none'
+
+### Input Artifacts
+- nx store: [document titles or "none"]
+- nx memory: [project/title path or "none"]
+- Files: [key files or "none"]
+
+### Deliverable
+[What the receiving agent should produce]
+
+### Quality Criteria
+- [ ] [Criterion 1]
+- [ ] [Criterion 2]
+- [ ] [Criterion 3]
+```
+
+**Required**: All fields must be present. Agent will validate relay before starting.
+
+For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+
+## Planning Methodology
+
+The agent uses sequential thinking:
+1. Analyze codebase to understand context and constraints
+2. Form hypothesis about optimal architecture approach
+3. Validate approach against existing patterns
+4. Break down work into logical phases
+5. Identify dependencies between tasks
+6. Create beads for trackable work items
+7. Define success criteria and test strategy
+
+## Success Criteria
+
+- [ ] Epic/feature breakdown documented
+- [ ] Phased execution plan created
+- [ ] Dependency graph established
+- [ ] Beads created for all phases/tasks
+- [ ] Success criteria defined per phase
+- [ ] Risks identified and mitigated
+- [ ] Plan validated by plan-auditor

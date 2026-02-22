@@ -1,0 +1,91 @@
+---
+name: java-debugging
+description: >
+  Debug Java failures using hypothesis-driven investigation. Triggers when:
+  test fails, NullPointerException, ClassCastException, ConcurrentModificationException,
+  after 2+ failed fix attempts, non-deterministic behavior, or stack trace analysis needed.
+allowed-tools: Task, Read, Glob, Grep, Bash, LSP
+memory: project
+# See ~/.claude/registry.yaml for full agent metadata
+---
+
+# Java Debugging Skill
+
+Delegates to the **java-debugger** agent (model: opus).
+
+## LSP Usage Patterns
+
+**CRITICAL**: Use LSP for call tracing and type analysis (900x faster than Grep).
+
+- **Trace call chains**: Use `findReferences` on failing methods to find all callers
+- **Find exception sources**: Use `goToDefinition` on exception types
+- **Understand type hierarchies**: Use `goToImplementation` for polymorphic calls
+- **Method signatures**: Use `hover` to get parameter types and return values
+- **Call hierarchy**: Use `incomingCalls`/`outgoingCalls` to trace execution paths
+- **Always use LSP before manual code reading**
+
+### Debugging Workflow
+```
+1. Identify failing test/exception
+2. Use LSP.goToDefinition on failure point
+3. Use LSP.findReferences to trace usage
+4. Use LSP.hover for type information
+5. Form hypothesis based on LSP evidence
+6. Validate with sequential thinking
+```
+
+## When This Skill Activates
+
+- Test failures after 2-3 fix attempts
+- NullPointerException or other exceptions with unclear causes
+- Non-deterministic or flaky test failures
+- Performance issues requiring investigation
+- Any bug where the root cause is not immediately obvious
+- When user says "debug", "investigate", or "why is this failing"
+
+## Agent Invocation
+
+## Relay Template (Use This Format)
+
+When invoking this agent via Task tool, use this exact structure:
+
+```markdown
+## Relay: {agent-name}
+
+**Task**: [1-2 sentence summary of what needs to be done]
+**Bead**: [ID] (status: [status]) or 'none'
+
+### Input Artifacts
+- nx store: [document titles or "none"]
+- nx memory: [project/title path or "none"]
+- Files: [key files or "none"]
+
+### Deliverable
+[What the receiving agent should produce]
+
+### Quality Criteria
+- [ ] [Criterion 1]
+- [ ] [Criterion 2]
+- [ ] [Criterion 3]
+```
+
+**Required**: All fields must be present. Agent will validate relay before starting.
+
+For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+
+## Debugging Methodology
+
+The java-debugger uses sequential thinking:
+1. Form initial hypotheses about root cause
+2. Identify evidence needed to validate/refute each hypothesis
+3. Gather evidence from code, tests, logs
+4. Evaluate - does evidence support hypothesis?
+5. If refuted, branch to new hypothesis
+6. When confirmed, propose fix with explanation
+
+## Success Criteria
+
+- [ ] Root cause definitively identified with evidence
+- [ ] Fix proposed and validated
+- [ ] Findings stored in nx store with title `debug-{component}-{issue-type}`
+- [ ] Bead updated with resolution

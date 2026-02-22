@@ -3,12 +3,52 @@
     {
       "type": "command",
       "command": "nx hook session-start"
+    },
+    {
+      "type": "command",
+      "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/mcp_health_hook.sh"
+    },
+    {
+      "type": "command",
+      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/session_start_hook.py"
+    },
+    {
+      "type": "command",
+      "command": "bd prime"
     }
   ],
   "SessionEnd": [
     {
       "type": "command",
       "command": "nx hook session-end"
+    }
+  ],
+  "PreCompact": [
+    {
+      "type": "command",
+      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/pre_compact_hook.py"
+    },
+    {
+      "type": "command",
+      "command": "bd prime"
+    }
+  ],
+  "Setup": [
+    {
+      "type": "command",
+      "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/setup.sh"
+    }
+  ],
+  "SubagentStart": [
+    {
+      "type": "command",
+      "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start.sh"
+    }
+  ],
+  "PermissionRequest": [
+    {
+      "type": "command",
+      "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/permission-request-stdin.sh"
     }
   ]
 }
