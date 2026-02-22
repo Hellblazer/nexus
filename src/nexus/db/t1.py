@@ -10,14 +10,15 @@ _COLLECTION = "scratch"
 
 
 class T1Database:
-    """T1 in-memory ChromaDB session scratch.
+    """T1 ChromaDB session scratch.
 
-    Uses ``chromadb.EphemeralClient`` + ``DefaultEmbeddingFunction``
+    Uses a single shared ``chromadb.PersistentClient`` + ``DefaultEmbeddingFunction``
     (all-MiniLM-L6-v2, local ONNX — no API calls).
 
-    Each document stores ``session_id`` in its metadata so that, when T1 is
-    hosted in the long-running ``nx serve`` process and shared across sessions,
-    per-session filtering still works correctly.
+    All sessions share one PersistentClient directory. Per-session isolation is
+    provided by ``session_id`` metadata filtering in ``list_entries``, ``clear``,
+    and ``flagged_entries``. This avoids per-session directory proliferation and
+    allows ``SessionEnd`` to recover orphaned entries from crashed sessions.
     """
 
     def __init__(self, session_id: str) -> None:
@@ -25,11 +26,7 @@ class T1Database:
         from pathlib import Path
 
         self._session_id = session_id
-        # Use a PersistentClient keyed by session_id so data survives across
-        # separate CLI invocations within the same session (e.g., multiple
-        # `uv run nx scratch …` calls from the same terminal).  The directory
-        # is cleaned up by the SessionEnd hook or `nx scratch clear`.
-        scratch_dir = Path.home() / ".config" / "nexus" / "scratch" / session_id
+        scratch_dir = Path.home() / ".config" / "nexus" / "scratch"
         scratch_dir.mkdir(parents=True, exist_ok=True)
         self._client = chromadb.PersistentClient(path=str(scratch_dir))
         self._col = self._client.get_or_create_collection(_COLLECTION)

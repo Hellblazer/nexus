@@ -1,6 +1,5 @@
 """AC1–AC7: nx install/uninstall claude-code, hooks, doctor."""
 import json
-import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -84,15 +83,14 @@ def test_install_merges_existing_settings(runner: CliRunner, fake_home: Path) ->
 # ── AC2: SessionStart — UUID4 session ID ──────────────────────────────────────
 
 def test_session_start_writes_session_file(runner: CliRunner, fake_home: Path) -> None:
-    """nx hook session-start writes UUID4 session ID to the session file."""
-    with patch("nexus.hooks.os.getppid", return_value=12345):
+    """nx hook session-start writes UUID4 session ID to the getsid-scoped session file."""
+    with patch("nexus.session.os.getsid", return_value=12345):
         result = runner.invoke(main, ["hook", "session-start"])
     assert result.exit_code == 0, result.output
 
     session_file = fake_home / ".config" / "nexus" / "sessions" / "12345.session"
     assert session_file.exists()
     session_id = session_file.read_text().strip()
-    # UUID4 format: 8-4-4-4-12 hex digits
     import re
     assert re.match(
         r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -102,8 +100,7 @@ def test_session_start_writes_session_file(runner: CliRunner, fake_home: Path) -
 
 def test_session_start_prints_ready_message(runner: CliRunner, fake_home: Path) -> None:
     """nx hook session-start prints 'Nexus ready' with session ID."""
-    with patch("nexus.hooks.os.getppid", return_value=99):
-        result = runner.invoke(main, ["hook", "session-start"])
+    result = runner.invoke(main, ["hook", "session-start"])
     assert "Nexus ready" in result.output
     assert "session" in result.output.lower()
 
@@ -123,8 +120,7 @@ def test_session_start_pm_detection_injects_continuation(
     # Simulate repo name detection
     with patch("nexus.hooks._infer_repo", return_value="myrepo"):
         with patch("nexus.hooks._open_t2", return_value=mock_db):
-            with patch("nexus.hooks.os.getppid", return_value=1):
-                result = runner.invoke(main, ["hook", "session-start"])
+            result = runner.invoke(main, ["hook", "session-start"])
 
     assert "Phase: 3" in result.output or "implement auth" in result.output
 
@@ -143,8 +139,7 @@ def test_session_start_non_pm_outputs_memory_summary(
 
     with patch("nexus.hooks._infer_repo", return_value="myrepo"):
         with patch("nexus.hooks._open_t2", return_value=mock_db):
-            with patch("nexus.hooks.os.getppid", return_value=1):
-                result = runner.invoke(main, ["hook", "session-start"])
+            result = runner.invoke(main, ["hook", "session-start"])
 
     assert "memory" in result.output.lower() or "note.md" in result.output
 
@@ -156,25 +151,25 @@ def test_session_end_flushes_flagged_t1_entries(
 ) -> None:
     """SessionEnd flushes T1 flagged entries to T2."""
     # Create session file so session_end can find the session ID
-    session_file = fake_home / ".config" / "nexus" / "sessions" / "1.session"
-    session_file.parent.mkdir(parents=True, exist_ok=True)
-    session_file.write_text("test-session-id")
+    with patch("nexus.session.os.getsid", return_value=1):
+        session_file = fake_home / ".config" / "nexus" / "sessions" / "1.session"
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        session_file.write_text("test-session-id")
 
-    mock_t1 = MagicMock()
-    mock_t1.flagged_entries.return_value = [
-        {
-            "id": "entry-1",
-            "content": "important finding",
-            "tags": "research",
-            "flush_project": "myproject",
-            "flush_title": "finding.md",
-        }
-    ]
-    mock_t2 = MagicMock()
+        mock_t1 = MagicMock()
+        mock_t1.flagged_entries.return_value = [
+            {
+                "id": "entry-1",
+                "content": "important finding",
+                "tags": "research",
+                "flush_project": "myproject",
+                "flush_title": "finding.md",
+            }
+        ]
+        mock_t2 = MagicMock()
 
-    with patch("nexus.hooks._open_t1", return_value=mock_t1):
-        with patch("nexus.hooks._open_t2", return_value=mock_t2):
-            with patch("nexus.hooks.os.getppid", return_value=1):
+        with patch("nexus.hooks._open_t1", return_value=mock_t1):
+            with patch("nexus.hooks._open_t2", return_value=mock_t2):
                 result = runner.invoke(main, ["hook", "session-end"])
 
     assert result.exit_code == 0, result.output
@@ -194,13 +189,13 @@ def test_session_end_clears_t1_and_removes_session_file(
     mock_t1 = MagicMock()
     mock_t1.flagged_entries.return_value = []
 
-    session_file = fake_home / ".config" / "nexus" / "sessions" / "42.session"
-    session_file.parent.mkdir(parents=True, exist_ok=True)
-    session_file.write_text("test-session-id")
+    with patch("nexus.session.os.getsid", return_value=42):
+        session_file = fake_home / ".config" / "nexus" / "sessions" / "42.session"
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        session_file.write_text("test-session-id")
 
-    with patch("nexus.hooks._open_t1", return_value=mock_t1):
-        with patch("nexus.hooks._open_t2", return_value=MagicMock()):
-            with patch("nexus.hooks.os.getppid", return_value=42):
+        with patch("nexus.hooks._open_t1", return_value=mock_t1):
+            with patch("nexus.hooks._open_t2", return_value=MagicMock()):
                 result = runner.invoke(main, ["hook", "session-end"])
 
     assert result.exit_code == 0, result.output
@@ -215,8 +210,7 @@ def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:
 
     with patch("nexus.hooks._open_t1", return_value=MagicMock(flagged_entries=lambda: [])):
         with patch("nexus.hooks._open_t2", return_value=mock_t2):
-            with patch("nexus.hooks.os.getppid", return_value=1):
-                result = runner.invoke(main, ["hook", "session-end"])
+            result = runner.invoke(main, ["hook", "session-end"])
 
     mock_t2.expire.assert_called_once()
 

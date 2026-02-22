@@ -14,20 +14,12 @@ def _stable_pid() -> int:
 
     Lookup order:
     1. ``NX_SESSION_PID`` env var — allows callers to pin a specific PID.
-    2. PPID (``os.getppid()``) — used only when a ppid-scoped session file
-       already exists (i.e. a Claude Code SessionStart hook wrote it).
-    3. Process session leader (``os.getsid(0)``) — stable across all commands
-       in the same interactive terminal session; the correct anchor when
-       running ``nx`` directly from the CLI outside of Claude Code.
+    2. Process session leader (``os.getsid(0)``) — stable across all commands
+       in the same interactive terminal session, whether invoked from the
+       SessionStart hook or directly from the CLI.
     """
     if env_pid := os.environ.get("NX_SESSION_PID"):
         return int(env_pid)
-    ppid = os.getppid()
-    ppid_file = (
-        Path.home() / ".config" / "nexus" / "sessions" / f"{ppid}.session"
-    )
-    if ppid_file.exists():
-        return ppid
     return os.getsid(0)
 
 

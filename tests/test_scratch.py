@@ -1,4 +1,6 @@
-"""AC2-AC6: T1 EphemeralClient scratch operations."""
+"""AC2-AC6: T1 scratch operations."""
+from pathlib import Path
+
 import pytest
 
 from nexus.db.t1 import T1Database
@@ -8,9 +10,9 @@ _SESSION = "test-session-0000-0000-0000-000000000000"
 
 
 @pytest.fixture
-def t1() -> T1Database:
-    # EphemeralClient shares in-process state; clear our session's docs before
-    # and after each test to ensure isolation.
+def t1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> T1Database:
+    # Redirect HOME so T1 uses a tmp directory, not ~/.config/nexus/scratch.
+    monkeypatch.setenv("HOME", str(tmp_path))
     db = T1Database(session_id=_SESSION)
     db.clear()          # defensive: remove stale docs from previous test
     yield db
