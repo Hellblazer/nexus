@@ -167,17 +167,20 @@ def search_cross_corpus(
     collections: list[str],
     n_results: int,
     t3: Any,
+    where: dict | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
     Per-corpus over-fetch: max(5, (n_results // num_corpora) * 2).
+
+    *where* is an optional ChromaDB metadata filter forwarded to every collection.
     """
     num = len(collections) or 1
     per_k = max(5, (n_results // num) * 2)
 
     all_results: list[SearchResult] = []
     for col in collections:
-        raw = t3.search(query, [col], n_results=per_k)
+        raw = t3.search(query, [col], n_results=per_k, where=where)
         for r in raw:
             all_results.append(SearchResult(
                 id=r["id"],
@@ -384,3 +387,36 @@ def format_plain(results: list[SearchResult]) -> list[str]:
             line_no = int(line_start) + i
             lines.append(f"{source_path}:{line_no}:{content_line}")
     return lines
+
+
+def format_plain_with_context(
+    results: list[SearchResult],
+    lines_before: int = 0,
+    lines_after: int = 0,
+) -> list[str]:
+    """Plain-text format with context-line windowing.
+
+    Shows at most ``lines_before`` lines before the first line of the chunk,
+    then the first matched line, then at most ``lines_after`` additional lines.
+    When both are 0, produces identical output to ``format_plain``.
+    """
+    if lines_before == 0 and lines_after == 0:
+        return format_plain(results)
+
+    output: list[str] = []
+    for r in results:
+        source_path = r.metadata.get("source_path", "")
+        line_start = r.metadata.get("line_start", 0)
+        chunk_lines = r.content.splitlines()
+        total = len(chunk_lines)
+
+        # Treat index 0 as the match line.  lines_before draws from lines
+        # *before* the match line inside the chunk (indices < match_idx).
+        match_idx = min(lines_before, total - 1) if total > 0 else 0
+        start_idx = max(0, match_idx - lines_before)
+        end_idx = min(total, match_idx + 1 + lines_after)
+
+        for i, content_line in enumerate(chunk_lines[start_idx:end_idx]):
+            line_no = int(line_start) + start_idx + i
+            output.append(f"{source_path}:{line_no}:{content_line}")
+    return output

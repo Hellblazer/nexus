@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import os
+from pathlib import Path
 
 import click
 
@@ -20,9 +21,12 @@ from nexus.search_engine import (
     search_cross_corpus,
 )
 
+_CONTENT_MAX_CHARS: int = 200
+
 
 @click.command("search")
 @click.argument("query")
+@click.argument("path", required=False, default=None)
 @click.option("--corpus", "-C", multiple=True, default=("knowledge", "code", "docs"),
               show_default=True, help="Corpus prefix or full collection name (repeatable)")
 @click.option("--n", default=10, show_default=True, help="Max results to return")
@@ -44,8 +48,11 @@ from nexus.search_engine import (
               help="Output only unique file paths")
 @click.option("--no-color", is_flag=True, default=False,
               help="Disable colour output")
+@click.option("-c", "--content", "show_content", is_flag=True, default=False,
+              help="Show matched text inline under each result.")
 def search_cmd(
     query: str,
+    path: str | None,
     corpus: tuple[str, ...],
     n: int,
     hybrid: bool,
@@ -57,12 +64,24 @@ def search_cmd(
     json_out: bool,
     files_only: bool,
     no_color: bool,
+    show_content: bool,
 ) -> None:
     """Semantic search across T3 knowledge collections.
+
+    QUERY is the search query string.
+
+    PATH (optional) scopes results to files under that directory path.
+    Relative paths are resolved against the current working directory.
 
     --corpus may be a prefix (code, docs, knowledge) or a fully-qualified
     collection name (code__myrepo).  Repeat --corpus to search multiple corpora.
     """
+    # Build path-scoping where filter
+    where_filter: dict | None = None
+    if path is not None:
+        resolved = str(Path(path).resolve())
+        where_filter = {"file_path": {"$startswith": resolved}}
+
     db = _t3()
     all_collections = [c["name"] for c in db.list_collections()]
 
@@ -83,7 +102,7 @@ def search_cmd(
     reranker_model = config["embeddings"]["rerankerModel"]
 
     def _retrieve(q: str) -> list[SearchResult]:
-        raw = search_cross_corpus(q, target_collections, n_results=n, t3=db)
+        raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter)
         if mxbai:
             stores = config.get("mxbai", {}).get("stores", [])
             num = len(target_collections) or 1
@@ -136,10 +155,16 @@ def search_cmd(
     elif files_only:
         seen: set[str] = set()
         for r in results:
-            path = r.metadata.get("source_path", "")
-            if path and path not in seen:
-                seen.add(path)
-                click.echo(path)
+            file_path = r.metadata.get("source_path", "")
+            if file_path and file_path not in seen:
+                seen.add(file_path)
+                click.echo(file_path)
     else:
-        for line in format_plain(results):
-            click.echo(line)
+        for result in results:
+            for line in format_plain([result]):
+                click.echo(line)
+            if show_content:
+                text = result.content
+                if len(text) > _CONTENT_MAX_CHARS:
+                    text = text[:_CONTENT_MAX_CHARS] + "..."
+                click.echo(f"  {text}")

@@ -292,3 +292,229 @@ def test_collection_delete_confirm_flag_alias(runner: CliRunner, env_creds) -> N
 
     assert result.exit_code == 0
     mock_db.delete_collection.assert_called_once_with("knowledge__test")
+
+
+# ── nexus-2pw: --content flag ─────────────────────────────────────────────────
+
+def test_search_content_flag_shows_chunk_text(runner: CliRunner, env_creds) -> None:
+    """--content flag prints matched chunk text as a separate indented line under each result."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
+    # Use a single-line chunk so format_plain emits exactly one result line;
+    # the --content flag should then emit a second indented line below it.
+    mock_db.search.return_value = [
+        {
+            "id": "abc1",
+            "content": "UNIQUE_CHUNK_BODY",
+            "distance": 0.1,
+            "source_path": "./sec.md",
+            "line_start": 5,
+        }
+    ]
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+        result = runner.invoke(
+            main, ["search", "security", "--corpus", "knowledge", "--content"]
+        )
+
+    assert result.exit_code == 0
+    lines = result.output.splitlines()
+    # The indented content line must start with two spaces
+    indented = [ln for ln in lines if ln.startswith("  ") and "UNIQUE_CHUNK_BODY" in ln]
+    assert indented, (
+        f"Expected an indented line containing 'UNIQUE_CHUNK_BODY'. Got output:\n{result.output}"
+    )
+
+
+def test_search_content_flag_absent_no_chunk_text(runner: CliRunner, env_creds) -> None:
+    """Without --content flag, chunk text is NOT printed inline."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
+    chunk_text = "Unique chunk text that only appears when content flag is set."
+    mock_db.search.return_value = [
+        {
+            "id": "abc2",
+            "content": chunk_text,
+            "distance": 0.1,
+            "source_path": "./sec.md",
+            "line_start": 5,
+        }
+    ]
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+        result = runner.invoke(
+            main, ["search", "security", "--corpus", "knowledge"]
+        )
+
+    # Without --content the plain formatter emits path:line:content, so
+    # the text IS in the output (format_plain embeds it).  What must NOT
+    # happen is an extra indented copy appearing below the result line.
+    lines = result.output.splitlines()
+    indented = [ln for ln in lines if ln.startswith("  ") and chunk_text in ln]
+    assert indented == [], "No indented content line should appear without --content"
+
+
+def test_search_content_flag_truncates_long_text(runner: CliRunner, env_creds) -> None:
+    """--content truncates chunk text at ~200 chars and appends '...'."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
+    long_content = "A" * 300  # well over 200 chars
+    mock_db.search.return_value = [
+        {
+            "id": "abc3",
+            "content": long_content,
+            "distance": 0.1,
+            "source_path": "./long.md",
+            "line_start": 1,
+        }
+    ]
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "knowledge", "--content"]
+        )
+
+    assert result.exit_code == 0
+    lines = result.output.splitlines()
+    indented = [ln for ln in lines if ln.startswith("  ")]
+    assert indented, "Expected indented content line"
+    content_line = indented[0]
+    # Must end with ellipsis and not be longer than ~205 chars (200 + "  " + "...")
+    assert content_line.endswith("..."), f"Expected '...' suffix, got: {content_line!r}"
+    assert len(content_line) <= 210, f"Content line too long: {len(content_line)}"
+
+
+def test_search_content_flag_short_text_no_ellipsis(runner: CliRunner, env_creds) -> None:
+    """--content does NOT add '...' when chunk text is 200 chars or fewer."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
+    short_content = "Short enough."
+    mock_db.search.return_value = [
+        {
+            "id": "abc4",
+            "content": short_content,
+            "distance": 0.1,
+            "source_path": "./short.md",
+            "line_start": 1,
+        }
+    ]
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "knowledge", "--content"]
+        )
+
+    assert result.exit_code == 0
+    lines = result.output.splitlines()
+    indented = [ln for ln in lines if ln.startswith("  ")]
+    assert indented, "Expected indented content line"
+    assert not indented[0].endswith("..."), "Short text should not have ellipsis"
+    assert short_content in indented[0]
+
+
+# ── nexus-u4e: [path] positional argument ─────────────────────────────────────
+
+def test_search_path_scopes_where_filter(runner: CliRunner, env_creds, tmp_path) -> None:
+    """[path] argument passes a $startswith metadata filter for file_path."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+    mock_db.search.return_value = []  # empty is fine; we test the where kwarg
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+        result = runner.invoke(
+            main, ["search", "query", str(src_dir), "--corpus", "knowledge"]
+        )
+
+    assert result.exit_code == 0
+    # search() must have been called with a where filter containing $startswith
+    assert mock_db.search.called, "Expected at least one search() call"
+    actual_call = mock_db.search.call_args
+    # where is always passed as a keyword argument from search_cross_corpus
+    where_filter = actual_call.kwargs.get("where")
+    assert where_filter is not None, "Expected a where filter when path is provided"
+    assert "$startswith" in str(where_filter), (
+        f"Expected $startswith in where filter, got: {where_filter}"
+    )
+    assert str(src_dir) in str(where_filter), (
+        f"Expected resolved path in where filter, got: {where_filter}"
+    )
+
+
+def test_search_path_filters_results_by_file_path(runner: CliRunner, env_creds, tmp_path) -> None:
+    """Two chunks at different paths: scoped search returns only the matching one."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+
+    # The mock returns both results; with a proper where filter only one would
+    # come from ChromaDB, but since we're mocking search() directly, we verify
+    # that the filter IS passed so ChromaDB would do the scoping.
+    # We make mock_db.search sensitive to 'where' to simulate the filtering.
+    def fake_search(query, collection_names, n_results=10, where=None):
+        all_results = [
+            {
+                "id": "r1",
+                "content": "inside src",
+                "distance": 0.1,
+                "source_path": str(src_dir / "file.py"),
+                "line_start": 1,
+                "file_path": str(src_dir / "file.py"),
+            },
+            {
+                "id": "r2",
+                "content": "outside src",
+                "distance": 0.2,
+                "source_path": str(other_dir / "file.py"),
+                "line_start": 1,
+                "file_path": str(other_dir / "file.py"),
+            },
+        ]
+        if where and "$startswith" in str(where):
+            prefix = list(where.get("file_path", {}).values())[0] if "file_path" in where else ""
+            return [r for r in all_results if r.get("file_path", "").startswith(prefix)]
+        return all_results
+
+    mock_db.search.side_effect = fake_search
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+        result = runner.invoke(
+            main, ["search", "query", str(src_dir), "--corpus", "knowledge"]
+        )
+
+    assert result.exit_code == 0
+    assert "inside src" in result.output
+    assert "outside src" not in result.output
+
+
+def test_search_no_path_returns_all(runner: CliRunner, env_creds) -> None:
+    """Without [path], search() is called without a where filter (None)."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+    mock_db.search.return_value = [
+        {
+            "id": "r1",
+            "content": "result one",
+            "distance": 0.1,
+            "source_path": "./a.py",
+            "line_start": 1,
+        }
+    ]
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+
+    assert result.exit_code == 0
+    actual_call = mock_db.search.call_args
+    where_filter = actual_call.kwargs.get("where") if actual_call.kwargs else None
+    if where_filter is None and actual_call.args and len(actual_call.args) > 3:
+        where_filter = actual_call.args[3]
+    assert where_filter is None, (
+        f"Expected no where filter when path is absent, got: {where_filter}"
+    )
