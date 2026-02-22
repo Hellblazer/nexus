@@ -168,19 +168,20 @@ def test_pm_phase_next_increments_correctly(db) -> None:
 # ── AC5: pm_archive — two-phase, idempotency ──────────────────────────────────
 
 def test_pm_archive_calls_haiku_then_t3(db) -> None:
-    """pm_archive synthesizes via Haiku then writes to T3."""
+    """pm_archive synthesizes via Haiku then upserts to T3 collection."""
     pm_init(db, project="myrepo")
 
+    mock_col = MagicMock()
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []  # no prior archive
-    mock_t3.put.return_value = "doc-id-1"
+    mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku", return_value="# Archive summary") as mock_h:
         with patch("nexus.pm._make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
     mock_h.assert_called_once()
-    mock_t3.put.assert_called_once()
+    mock_col.upsert.assert_called_once()
 
 
 def test_pm_archive_decays_t2_after_t3(db) -> None:
@@ -189,7 +190,7 @@ def test_pm_archive_decays_t2_after_t3(db) -> None:
 
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
-    mock_t3.put.return_value = "doc-id-1"
+    mock_t3.get_or_create_collection.return_value = MagicMock()
 
     with patch("nexus.pm._synthesize_haiku", return_value="# summary"):
         with patch("nexus.pm._make_t3", return_value=mock_t3):
@@ -302,19 +303,40 @@ def test_pm_restore_fails_if_all_expired(db) -> None:
 # ── AC7: pm_reference — dispatch rules ───────────────────────────────────────
 
 def test_pm_reference_dispatch_semantic_for_quoted_query(db) -> None:
-    """Quoted query dispatches to T3 semantic search."""
+    """Quoted query fans out to all knowledge__pm__ collections via T3 semantic search."""
     mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__pm__myrepo", "count": 3}
+    ]
     mock_t3.search.return_value = [{"content": "result", "distance": 0.1}]
 
     with patch("nexus.pm._make_t3", return_value=mock_t3):
         results = pm_reference(db, query='"caching decisions"')
 
     mock_t3.search.assert_called_once()
+    # Verify it searched the discovered pm collection
+    search_collections = mock_t3.search.call_args[0][1]
+    assert "knowledge__pm__myrepo" in search_collections
+
+
+def test_pm_reference_semantic_returns_empty_when_no_pm_collections(db) -> None:
+    """Semantic query returns [] gracefully when no knowledge__pm__ collections exist."""
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = []  # no pm collections
+
+    with patch("nexus.pm._make_t3", return_value=mock_t3):
+        results = pm_reference(db, query='"caching decisions"')
+
+    assert results == []
+    mock_t3.search.assert_not_called()
 
 
 def test_pm_reference_dispatch_semantic_for_question(db) -> None:
-    """Query containing '?' dispatches to T3 semantic search."""
+    """Query containing '?' dispatches to T3 semantic search across pm collections."""
     mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__pm__proj", "count": 1}
+    ]
     mock_t3.search.return_value = []
 
     with patch("nexus.pm._make_t3", return_value=mock_t3):
@@ -385,26 +407,31 @@ def test_pm_archive_raises_value_error_for_empty_project(db) -> None:
 
 # ── Behavior: pm_archive uses returned doc_id for metadata update ─────────────
 
-def test_pm_archive_uses_put_return_id_for_metadata_update(db) -> None:
-    """pm_archive passes the ID returned by t3.put() to col.update(), not a re-query."""
+def test_pm_archive_upsert_includes_required_metadata(db) -> None:
+    """pm_archive upsert includes store_type and required metadata fields in a single call."""
     pm_init(db, project="myrepo")
 
+    mock_col = MagicMock()
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
-    mock_t3.put.return_value = "exact-doc-id"
-
-    mock_col = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku", return_value="# summary"):
         with patch("nexus.pm._make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
-    mock_col.update.assert_called_once()
-    update_call_ids = mock_col.update.call_args.kwargs["ids"]
-    assert update_call_ids == ["exact-doc-id"], (
-        "col.update() must use the ID returned by t3.put(), not a re-query result"
-    )
+    mock_col.upsert.assert_called_once()
+    # Metadata must include store_type so idempotency and search filtering work
+    metadatas = mock_col.upsert.call_args.kwargs["metadatas"]
+    assert metadatas is not None and len(metadatas) == 1
+    meta = metadatas[0]
+    assert meta["store_type"] == "pm-archive", "store_type must survive upsert"
+    assert meta["project"] == "myrepo"
+    assert meta["status"] == "completed"
+    assert "pm_doc_count" in meta
+    assert "pm_latest_timestamp" in meta
+    # col.update() must NOT be called (old bug: it wiped store_type)
+    mock_col.update.assert_not_called()
 
 
 # ── Behavior: pm_phase_next CONTINUATION.md tag reflects current phase ────────

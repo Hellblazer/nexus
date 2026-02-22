@@ -3,6 +3,10 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+
+class CredentialsMissingError(RuntimeError):
+    """Raised when T3 credentials are absent; prevents marking repo as ready."""
+
 if TYPE_CHECKING:
     from nexus.registry import RepoRegistry
 
@@ -10,12 +14,18 @@ if TYPE_CHECKING:
 def index_repository(repo: Path, registry: "RepoRegistry") -> None:
     """Index all files in *repo* into the T3 code__ collection.
 
-    Marks status as 'indexing' while running, 'ready' on success.
+    Marks status as 'indexing' while running, 'ready' on success,
+    'pending_credentials' when T3 credentials are absent.
     """
     registry.update(repo, status="indexing")
     try:
         _run_index(repo, registry)
         registry.update(repo, status="ready")
+    except CredentialsMissingError:
+        registry.update(repo, status="pending_credentials")
+        # Do NOT re-raise: callers (polling) treat non-exception return as success;
+        # raising here lets polling avoid recording head_hash (see polling.py).
+        raise
     except Exception:
         registry.update(repo, status="error")
         raise
@@ -60,7 +70,11 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     voyage_key = get_credential("voyage_api_key")
     chroma_key = get_credential("chroma_api_key")
     if not voyage_key or not chroma_key:
-        return  # Skip embedding without credentials
+        raise CredentialsMissingError(
+            f"T3 credentials missing for repo '{repo.name}' "
+            f"(voyage_api_key={'set' if voyage_key else 'missing'}, "
+            f"chroma_api_key={'set' if chroma_key else 'missing'})"
+        )
 
     from nexus.db.t3 import T3Database
 
@@ -82,7 +96,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
                 collection=collection_name,
                 content=chunk["text"],
                 title=f"{file.relative_to(repo)}:{chunk['line_start']}-{chunk['line_end']}",
-                tags=[file.suffix.lstrip(".")],
+                tags=file.suffix.lstrip("."),
                 category="code",
                 session_id="",
                 source_agent="nexus-indexer",

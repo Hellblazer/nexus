@@ -76,7 +76,8 @@ def apply_hybrid_scoring(
     ]
 
     for r in results:
-        v_norm = min_max_normalize(r.distance, distances)
+        # Invert: distances are dissimilarity (smaller = better), so best match → v_norm=1.0
+        v_norm = 1.0 - min_max_normalize(r.distance, distances)
         if hybrid and r.collection.startswith("code__"):
             f_score = r.metadata.get("frecency_score", 0.0)
             f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
@@ -371,6 +372,6 @@ def format_plain(results: list[SearchResult]) -> list[str]:
         source_path = r.metadata.get("source_path", "")
         start_line = r.metadata.get("start_line", 0)
         for i, content_line in enumerate(r.content.splitlines()):
-            line_no = int(start_line) + i if start_line else 0
+            line_no = int(start_line) + i
             lines.append(f"{source_path}:{line_no}:{content_line}")
     return lines

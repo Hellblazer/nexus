@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """HEAD polling: detect hash changes and trigger re-indexing."""
+import logging
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from nexus.registry import RepoRegistry
@@ -46,12 +49,20 @@ def check_and_reindex(repo: Path, registry: "RepoRegistry") -> None:
 
     if info.get("status") in ("indexing", "error"):
         return
+    # Retry pending_credentials on each poll — user may have added credentials
 
     current = _current_head(repo)
     if current == info.get("head_hash", ""):
         return
 
+    from nexus.indexer import CredentialsMissingError
     try:
         index_repo(repo, registry)
-    finally:
         registry.update(repo, head_hash=current)
+    except CredentialsMissingError:
+        # Don't record head_hash — allow retry on next poll when credentials are added
+        _log.warning("Credentials missing for %s — will retry on next poll", repo)
+    except Exception:
+        # Record head_hash even on other errors to prevent infinite reindex loops
+        registry.update(repo, head_hash=current)
+        raise

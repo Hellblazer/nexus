@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from nexus.indexer import index_repository
+from nexus.indexer import CredentialsMissingError, index_repository
 
 
 @pytest.fixture
@@ -43,8 +43,10 @@ def test_index_sets_error_on_failure(tmp_path: Path, registry) -> None:
     assert not any(c == call(repo, status="ready") for c in calls)
 
 
-def test_run_index_skips_embedding_without_credentials(tmp_path: Path, monkeypatch) -> None:
-    """Without VOYAGE_API_KEY, _run_index returns early without touching T3."""
+def test_run_index_raises_credentials_missing_without_credentials(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Without VOYAGE_API_KEY, _run_index raises CredentialsMissingError (not silently skips)."""
     from nexus.indexer import _run_index
 
     repo = tmp_path / "repo"
@@ -60,9 +62,26 @@ def test_run_index_skips_embedding_without_credentials(tmp_path: Path, monkeypat
     with patch("nexus.frecency.compute_frecency", return_value=1.0):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.db.t3.T3Database") as mock_t3:
-                _run_index(repo, registry)
+                with pytest.raises(CredentialsMissingError):
+                    _run_index(repo, registry)
 
     mock_t3.assert_not_called()
+
+
+def test_index_sets_pending_credentials_when_missing(tmp_path: Path, registry) -> None:
+    """When credentials are absent, status is 'pending_credentials' (not 'ready' or 'error')."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with patch("nexus.indexer._run_index", side_effect=CredentialsMissingError("no creds")):
+        with pytest.raises(CredentialsMissingError):
+            index_repository(repo, registry)
+
+    calls = registry.update.call_args_list
+    assert any(c == call(repo, status="indexing") for c in calls)
+    assert any(c == call(repo, status="pending_credentials") for c in calls)
+    assert not any(c == call(repo, status="ready") for c in calls)
+    assert not any(c == call(repo, status="error") for c in calls)
 
 
 def test_cache_path_includes_repo_hash(tmp_path: Path, monkeypatch) -> None:
@@ -87,8 +106,10 @@ def test_cache_path_includes_repo_hash(tmp_path: Path, monkeypatch) -> None:
 
     with patch("nexus.frecency.compute_frecency", return_value=0.0):
         with patch("nexus.ripgrep_cache.build_cache", side_effect=fake_build_cache):
-            _run_index(repo_a, registry)
-            _run_index(repo_b, registry)
+            with pytest.raises(CredentialsMissingError):
+                _run_index(repo_a, registry)
+            with pytest.raises(CredentialsMissingError):
+                _run_index(repo_b, registry)
 
     assert len(seen_paths) == 2
     assert seen_paths[0] != seen_paths[1], "Cache paths for same-name repos must differ"
@@ -120,7 +141,8 @@ def test_run_index_skips_hidden_files(tmp_path: Path, monkeypatch) -> None:
 
     with patch("nexus.frecency.compute_frecency", side_effect=fake_frecency):
         with patch("nexus.ripgrep_cache.build_cache"):
-            _run_index(repo, registry)
+            with pytest.raises(CredentialsMissingError):
+                _run_index(repo, registry)
 
     assert all(".git" not in str(p) for p in seen), f"Hidden files were not filtered: {seen}"
     assert any("main.py" in str(p) for p in seen)

@@ -11,13 +11,17 @@ _log = logging.getLogger(__name__)
 
 def _git_commit_timestamps(repo: Path, file: Path) -> list[float]:
     """Return Unix timestamps for every commit that touched *file*."""
-    result = subprocess.run(
-        ["git", "log", "--follow", "--format=%ct", "--", str(file)],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "log", "--follow", "--format=%ct", "--", str(file)],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        _log.warning("git log timed out for %s — skipping frecency", file)
+        return []
     if result.returncode != 0 or not result.stdout.strip():
         return []
     timestamps: list[float] = []

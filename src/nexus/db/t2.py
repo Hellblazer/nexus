@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 import os
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -76,12 +77,14 @@ class T2Database:
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(path))
+        self._lock = threading.Lock()
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self._init_schema()
 
     def _init_schema(self) -> None:
-        self.conn.executescript(_SCHEMA_SQL)
-        self.conn.commit()
+        with self._lock:
+            self.conn.executescript(_SCHEMA_SQL)
+            self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -105,30 +108,31 @@ class T2Database:
             session = _read_session_id()
         timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        cursor = self.conn.execute(
-            """
-            INSERT INTO memory (project, title, session, agent, content, tags, timestamp, ttl)
-            VALUES (:project, :title, :session, :agent, :content, :tags, :timestamp, :ttl)
-            ON CONFLICT(project, title) DO UPDATE SET
-                session   = excluded.session,
-                agent     = excluded.agent,
-                content   = excluded.content,
-                tags      = excluded.tags,
-                timestamp = excluded.timestamp,
-                ttl       = excluded.ttl
-            """,
-            {
-                "project": project,
-                "title": title,
-                "session": session,
-                "agent": agent,
-                "content": content,
-                "tags": tags,
-                "timestamp": timestamp,
-                "ttl": ttl,
-            },
-        )
-        self.conn.commit()
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO memory (project, title, session, agent, content, tags, timestamp, ttl)
+                VALUES (:project, :title, :session, :agent, :content, :tags, :timestamp, :ttl)
+                ON CONFLICT(project, title) DO UPDATE SET
+                    session   = excluded.session,
+                    agent     = excluded.agent,
+                    content   = excluded.content,
+                    tags      = excluded.tags,
+                    timestamp = excluded.timestamp,
+                    ttl       = excluded.ttl
+                """,
+                {
+                    "project": project,
+                    "title": title,
+                    "session": session,
+                    "agent": agent,
+                    "content": content,
+                    "tags": tags,
+                    "timestamp": timestamp,
+                    "ttl": ttl,
+                },
+            )
+            self.conn.commit()
         return cursor.lastrowid  # type: ignore[return-value]
 
     # ── Read ──────────────────────────────────────────────────────────────────
@@ -216,16 +220,17 @@ class T2Database:
 
     def decay_project(self, project: str, ttl: int) -> None:
         """Set TTL and flip pm → pm-archived tags for all docs in *project*."""
-        self.conn.execute(
-            """
-            UPDATE memory
-               SET ttl  = ?,
-                   tags = replace(tags, 'pm,', 'pm-archived,')
-             WHERE project = ?
-            """,
-            (ttl, project),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                UPDATE memory
+                   SET ttl  = ?,
+                       tags = replace(tags, 'pm,', 'pm-archived,')
+                 WHERE project = ?
+                """,
+                (ttl, project),
+            )
+            self.conn.commit()
 
     def restore_project(self, project: str) -> tuple[list[str], list[str]]:
         """Reverse decay: set ttl=NULL and restore pm, tags.
@@ -233,21 +238,22 @@ class T2Database:
         Returns (restored_titles, missing_titles) where missing_titles are docs
         that were in the project at archive time but have since been hard-deleted.
         """
-        rows = self.conn.execute(
-            "SELECT title FROM memory WHERE project = ?", (project,)
-        ).fetchall()
-        surviving = [r[0] for r in rows]
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT title FROM memory WHERE project = ?", (project,)
+            ).fetchall()
+            surviving = [r[0] for r in rows]
 
-        self.conn.execute(
-            """
-            UPDATE memory
-               SET ttl  = NULL,
-                   tags = replace(tags, 'pm-archived,', 'pm,')
-             WHERE project = ?
-            """,
-            (project,),
-        )
-        self.conn.commit()
+            self.conn.execute(
+                """
+                UPDATE memory
+                   SET ttl  = NULL,
+                       tags = replace(tags, 'pm-archived,', 'pm,')
+                 WHERE project = ?
+                """,
+                (project,),
+            )
+            self.conn.commit()
         return surviving, []
 
     def get_all(self, project: str) -> list[dict[str, Any]]:
@@ -260,23 +266,25 @@ class T2Database:
 
     def delete(self, project: str, title: str) -> bool:
         """Delete an entry by (project, title). Returns True if a row was deleted."""
-        cursor = self.conn.execute(
-            "DELETE FROM memory WHERE project = ? AND title = ?",
-            (project, title),
-        )
-        self.conn.commit()
+        with self._lock:
+            cursor = self.conn.execute(
+                "DELETE FROM memory WHERE project = ? AND title = ?",
+                (project, title),
+            )
+            self.conn.commit()
         return cursor.rowcount > 0
 
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
     def expire(self) -> int:
         """Delete TTL-expired entries. Returns the count of deleted rows."""
-        cursor = self.conn.execute(
-            """
-            DELETE FROM memory
-            WHERE ttl IS NOT NULL
-              AND julianday('now') - julianday(timestamp) > ttl
-            """
-        )
-        self.conn.commit()
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                DELETE FROM memory
+                WHERE ttl IS NOT NULL
+                  AND julianday('now') - julianday(timestamp) > ttl
+                """
+            )
+            self.conn.commit()
         return cursor.rowcount
