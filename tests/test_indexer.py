@@ -223,3 +223,81 @@ def test_run_index_skips_unchanged_content_hash(tmp_path: Path) -> None:
                             _run_index(repo, registry)
 
     mock_db.upsert_chunks.assert_not_called()
+
+
+# ── _run_index_frecency_only ──────────────────────────────────────────────────
+
+def test_frecency_only_updates_frecency_score(tmp_path: Path) -> None:
+    """_run_index_frecency_only updates frecency_score on existing chunks."""
+    from nexus.indexer import _run_index_frecency_only
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src_file = repo / "main.py"
+    src_file.write_text("x = 1\n")
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    old_meta = {"frecency_score": 0.1, "source_path": str(src_file), "title": "main.py:1-1"}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": ["chunk-1"], "metadatas": [old_meta]}
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.75}):
+        with patch("nexus.config.get_credential", return_value="fake-key"):
+            with patch("nexus.db.make_t3", return_value=mock_db):
+                _run_index_frecency_only(repo, registry)
+
+    mock_db.update_chunks.assert_called_once()
+    call_kwargs = mock_db.update_chunks.call_args.kwargs
+    assert call_kwargs["ids"] == ["chunk-1"]
+    assert call_kwargs["metadatas"][0]["frecency_score"] == 0.75
+    # Other metadata fields must be preserved
+    assert call_kwargs["metadatas"][0]["title"] == "main.py:1-1"
+
+
+def test_frecency_only_skips_unindexed_files(tmp_path: Path) -> None:
+    """_run_index_frecency_only skips files with no existing indexed chunks."""
+    from nexus.indexer import _run_index_frecency_only
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src_file = repo / "new_file.py"
+    src_file.write_text("y = 2\n")
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    mock_col = MagicMock()
+    # No existing chunks for this file
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.5}):
+        with patch("nexus.config.get_credential", return_value="fake-key"):
+            with patch("nexus.db.make_t3", return_value=mock_db):
+                _run_index_frecency_only(repo, registry)
+
+    mock_db.update_chunks.assert_not_called()
+
+
+def test_frecency_only_raises_credentials_missing(tmp_path: Path, monkeypatch) -> None:
+    """_run_index_frecency_only raises CredentialsMissingError when T3 keys are absent."""
+    from nexus.indexer import _run_index_frecency_only
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+
+    with pytest.raises(CredentialsMissingError):
+        _run_index_frecency_only(repo, registry)

@@ -623,3 +623,33 @@ def test_upsert_chunks_with_embeddings_uses_get_or_create(mock_chromadb: tuple) 
 
     mock_client.get_or_create_collection.assert_called_once()
     assert mock_client.get_or_create_collection.call_args.args[0] == "knowledge__wiki"
+
+
+# ── update_chunks ─────────────────────────────────────────────────────────────
+
+def test_update_chunks_calls_col_update_without_documents(mock_chromadb: tuple) -> None:
+    """update_chunks() calls col.update with ids+metadatas only — no documents — preserving embeddings."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    db.update_chunks(
+        collection="code__myrepo",
+        ids=["id-1", "id-2"],
+        metadatas=[
+            {"frecency_score": 0.9, "source_path": "src/foo.py"},
+            {"frecency_score": 0.9, "source_path": "src/foo.py"},
+        ],
+    )
+
+    mock_col.update.assert_called_once_with(
+        ids=["id-1", "id-2"],
+        metadatas=[
+            {"frecency_score": 0.9, "source_path": "src/foo.py"},
+            {"frecency_score": 0.9, "source_path": "src/foo.py"},
+        ],
+    )
+    # documents must NOT be passed — that would trigger re-embedding
+    call_kwargs = mock_col.update.call_args.kwargs
+    assert "documents" not in call_kwargs

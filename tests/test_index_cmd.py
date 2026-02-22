@@ -102,3 +102,42 @@ def test_index_md_nonexistent_path_fails(runner: CliRunner, index_home: Path) ->
     """Non-existent markdown path produces a non-zero exit code."""
     result = runner.invoke(main, ["index", "md", str(index_home / "missing.md")])
     assert result.exit_code != 0
+
+
+# ── --frecency-only flag ──────────────────────────────────────────────────────
+
+def test_index_code_frecency_only_flag_passed_through(runner: CliRunner, index_home: Path) -> None:
+    """nx index code <path> --frecency-only passes frecency_only=True to index_repository."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    mock_reg = MagicMock()
+    mock_reg.get.return_value = {"collection": "code__myrepo"}  # already registered
+
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        with patch("nexus.indexer.index_repository") as mock_index:
+            result = runner.invoke(main, ["index", "code", str(repo), "--frecency-only"])
+
+    assert result.exit_code == 0, result.output
+    mock_index.assert_called_once()
+    _, call_kwargs = mock_index.call_args
+    assert call_kwargs.get("frecency_only") is True
+    assert "frecency" in result.output.lower()
+
+
+def test_index_code_default_is_full_index(runner: CliRunner, index_home: Path) -> None:
+    """nx index code <path> without --frecency-only passes frecency_only=False."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    mock_reg = MagicMock()
+    mock_reg.get.return_value = {"collection": "code__myrepo"}
+
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        with patch("nexus.indexer.index_repository") as mock_index:
+            result = runner.invoke(main, ["index", "code", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    mock_index.assert_called_once()
+    _, call_kwargs = mock_index.call_args
+    assert call_kwargs.get("frecency_only") is False
