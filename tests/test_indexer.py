@@ -146,3 +146,80 @@ def test_run_index_skips_hidden_files(tmp_path: Path, monkeypatch) -> None:
 
     assert all(".git" not in str(p) for p in seen_paths), f"Hidden files were not filtered: {seen_paths}"
     assert any("main.py" in str(p) for p in seen_paths)
+
+
+def test_run_index_source_path_is_absolute(tmp_path: Path) -> None:
+    """source_path in chunk metadata must be an absolute path, not relative to repo root."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    captured_metadatas: list = []
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": []}  # no existing data → proceed to upsert
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    def capture_upsert(collection, ids, documents, metadatas):
+        captured_metadatas.extend(metadatas)
+
+    mock_db.upsert_chunks.side_effect = capture_upsert
+
+    fake_chunk = {
+        "line_start": 1, "line_end": 1, "text": "x = 1",
+        "chunk_index": 0, "chunk_count": 1,
+        "ast_chunked": False, "filename": "main.py", "file_extension": ".py",
+    }
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
+                                _run_index(repo, registry)
+
+    assert captured_metadatas, "Expected upsert_chunks to be called for main.py"
+    source_path = captured_metadatas[0]["source_path"]
+    assert Path(source_path).is_absolute(), f"source_path must be absolute; got {source_path!r}"
+    assert source_path == str(repo / "main.py")
+
+
+def test_run_index_skips_unchanged_content_hash(tmp_path: Path) -> None:
+    """Files whose content_hash is already in T3 must be skipped (no upsert_chunks call)."""
+    import hashlib
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    content = "x = 1\n"
+    (repo / "main.py").write_text(content)
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    mock_col = MagicMock()
+    # Simulate file already indexed with the same content_hash
+    mock_col.get.return_value = {"metadatas": [{"content_hash": content_hash}]}
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            _run_index(repo, registry)
+
+    mock_db.upsert_chunks.assert_not_called()

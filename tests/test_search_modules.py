@@ -256,3 +256,10 @@ def test_min_max_normalize_empty_raises():
 
     with pytest.raises(ValueError, match="non-empty"):
         min_max_normalize(1.0, [])
+
+
+def test_rerank_results_empty_input_returns_empty():
+    """rerank_results with no results must return [] without raising."""
+    from nexus.scoring import rerank_results
+
+    assert rerank_results([], query="anything") == []
