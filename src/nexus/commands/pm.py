@@ -39,7 +39,7 @@ def _infer_project() -> str:
 
 @click.group()
 def pm() -> None:
-    """T2-backed project management infrastructure (nx pm)."""
+    """Project management: phases, blockers, archive, and restore."""
 
 
 @pm.command("init")

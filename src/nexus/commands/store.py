@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import os
 import sys
 from pathlib import Path
 
@@ -11,28 +10,25 @@ from nexus.ttl import parse_ttl
 
 
 def _t3() -> T3Database:
-    from nexus.config import load_config
+    from nexus.config import get_credential
 
-    cfg = load_config()
-    chroma = cfg.get("chroma", {})
-    tenant = chroma.get("tenant", "") or os.environ.get("CHROMA_TENANT", "")
-    database = chroma.get("database", "") or os.environ.get("CHROMA_DATABASE", "")
-    api_key = os.environ.get("CHROMA_API_KEY", "")
-    voyage_api_key = os.environ.get("VOYAGE_API_KEY", "")
+    tenant = get_credential("chroma_tenant")
+    database = get_credential("chroma_database")
+    api_key = get_credential("chroma_api_key")
+    voyage_api_key = get_credential("voyage_api_key")
 
     if not api_key:
         raise click.ClickException(
-            "CHROMA_API_KEY is not set. T3 operations require ChromaDB Cloud credentials."
+            "CHROMA_API_KEY is not set. Run 'nx config init' or set the environment variable."
         )
     if not voyage_api_key:
         raise click.ClickException(
-            "VOYAGE_API_KEY is not set. T3 operations require Voyage AI credentials."
+            "VOYAGE_API_KEY is not set. Run 'nx config init' or set the environment variable."
         )
     if not tenant or not database:
         raise click.ClickException(
             "ChromaDB tenant/database not configured. "
-            "Set chroma.tenant and chroma.database in ~/.config/nexus/config.yml, "
-            "or set CHROMA_TENANT / CHROMA_DATABASE environment variables."
+            "Run 'nx config init' or set chroma_tenant/chroma_database via 'nx config set'."
         )
     return T3Database(
         tenant=tenant, database=database, api_key=api_key, voyage_api_key=voyage_api_key
@@ -41,7 +37,7 @@ def _t3() -> T3Database:
 
 @click.group()
 def store() -> None:
-    """T3 CloudChromaDB knowledge store (permanent, semantic)."""
+    """Permanent semantic knowledge store (ChromaDB Cloud + Voyage AI)."""
 
 
 @store.command("put")

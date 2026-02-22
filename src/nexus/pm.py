@@ -45,13 +45,14 @@ def _project_ns(project: str) -> str:
 
 
 def _make_t3() -> "T3Database":
-    """Create a T3Database from environment credentials."""
+    """Create a T3Database from credentials."""
+    from nexus.config import get_credential
     from nexus.db.t3 import T3Database
     return T3Database(
-        tenant=os.environ.get("CHROMA_TENANT", ""),
-        database=os.environ.get("CHROMA_DATABASE", ""),
-        api_key=os.environ.get("CHROMA_API_KEY", ""),
-        voyage_api_key=os.environ.get("VOYAGE_API_KEY", ""),
+        tenant=get_credential("chroma_tenant"),
+        database=get_credential("chroma_database"),
+        api_key=get_credential("chroma_api_key"),
+        voyage_api_key=get_credential("voyage_api_key"),
     )
 
 
@@ -107,7 +108,8 @@ def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> 
         f"Use brief bullets (one line per item). Target 400-800 tokens, hard cap 1200 tokens."
     )
 
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    from nexus.config import get_credential
+    client = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
     message = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1200,

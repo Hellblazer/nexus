@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx doctor — health check for all required services."""
-import os
 import shutil
 
 import click
 
+from nexus.config import get_credential
+
 _CHECK = "✓"
 _WARN  = "✗"
+
+_SIGNUP = {
+    "CHROMA_API_KEY":    "https://trychroma.com",
+    "VOYAGE_API_KEY":    "https://voyageai.com",
+    "ANTHROPIC_API_KEY": "https://console.anthropic.com",
+    "MXBAI_API_KEY":     "https://mixedbread.ai",
+}
 
 
 def _check(label: str, ok: bool, detail: str = "") -> str:
@@ -20,36 +28,49 @@ def _check(label: str, ok: bool, detail: str = "") -> str:
 @click.command("doctor")
 def doctor_cmd() -> None:
     """Verify that all required services and credentials are available."""
-    lines: list[str] = ["Nexus health check:"]
+    lines: list[str] = ["Nexus health check:\n"]
+    missing: list[str] = []
 
     # CHROMA_API_KEY
-    chroma_key = os.environ.get("CHROMA_API_KEY", "")
-    lines.append(_check("ChromaDB (CHROMA_API_KEY)", bool(chroma_key),
-                         "set" if chroma_key else "CHROMA_API_KEY not set"))
+    chroma_key = get_credential("chroma_api_key")
+    lines.append(_check("ChromaDB  (CHROMA_API_KEY)",  bool(chroma_key),
+                        "set" if chroma_key else "not set"))
+    if not chroma_key:
+        missing.append("CHROMA_API_KEY")
 
     # VOYAGE_API_KEY
-    voyage_key = os.environ.get("VOYAGE_API_KEY", "")
-    lines.append(_check("Voyage AI (VOYAGE_API_KEY)", bool(voyage_key),
-                         "set" if voyage_key else "VOYAGE_API_KEY not set"))
+    voyage_key = get_credential("voyage_api_key")
+    lines.append(_check("Voyage AI (VOYAGE_API_KEY)",  bool(voyage_key),
+                        "set" if voyage_key else "not set"))
+    if not voyage_key:
+        missing.append("VOYAGE_API_KEY")
 
     # ANTHROPIC_API_KEY
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    anthropic_key = get_credential("anthropic_api_key")
     lines.append(_check("Anthropic (ANTHROPIC_API_KEY)", bool(anthropic_key),
-                         "set" if anthropic_key else "ANTHROPIC_API_KEY not set"))
+                        "set" if anthropic_key else "not set"))
+    if not anthropic_key:
+        missing.append("ANTHROPIC_API_KEY")
 
     # ripgrep
     rg_path = shutil.which("rg")
-    lines.append(_check("ripgrep (rg)", bool(rg_path),
-                         rg_path or "rg not found on PATH"))
+    lines.append(_check("ripgrep   (rg)",              bool(rg_path),
+                        rg_path or "not found on PATH — install ripgrep"))
 
     # git
     git_path = shutil.which("git")
-    lines.append(_check("git", bool(git_path),
-                         git_path or "git not found on PATH"))
+    lines.append(_check("git",                         bool(git_path),
+                        git_path or "not found on PATH"))
 
-    # Mixedbread (optional — only warn if MXBAI_API_KEY absent)
-    mxbai_key = os.environ.get("MXBAI_API_KEY", "")
+    # Mixedbread (optional)
+    mxbai_key = get_credential("mxbai_api_key")
     lines.append(_check("Mixedbread (MXBAI_API_KEY, optional)", True,
-                         "set" if mxbai_key else "MXBAI_API_KEY not set (--mxbai will warn)"))
+                        "set" if mxbai_key else "not set — only needed for --mxbai flag"))
 
     click.echo("\n".join(lines))
+
+    if missing:
+        click.echo("\nMissing credentials — get them here:")
+        for key in missing:
+            click.echo(f"  {key:<24} {_SIGNUP.get(key, '')}")
+        click.echo("\nRun 'nx config init' for an interactive setup wizard.")

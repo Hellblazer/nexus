@@ -25,7 +25,7 @@ def _t2() -> T2Database:
 
 @click.group()
 def scratch() -> None:
-    """T1 in-memory session scratch (cleared at session end)."""
+    """Temporary in-session scratch space (cleared when the session ends)."""
 
 
 @scratch.command("put")

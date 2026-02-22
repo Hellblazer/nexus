@@ -6,7 +6,7 @@ from nexus.commands.store import _t3
 
 @click.group()
 def collection() -> None:
-    """Manage T3 ChromaDB collections."""
+    """Manage ChromaDB collections (list, delete, rename)."""
 
 
 @collection.command("list")

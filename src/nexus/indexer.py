@@ -53,16 +53,20 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     build_cache(repo, cache_path, scored)
 
     # Chunk and index (requires T3 credentials)
-    voyage_key = os.environ.get("VOYAGE_API_KEY", "")
-    chroma_key = os.environ.get("CHROMA_API_KEY", "")
+    from nexus.config import get_credential
+    voyage_key = get_credential("voyage_api_key")
+    chroma_key = get_credential("chroma_api_key")
     if not voyage_key or not chroma_key:
         return  # Skip embedding without credentials
 
     from nexus.db.t3 import T3Database
 
-    tenant = os.environ.get("CHROMA_TENANT", "")
-    database = os.environ.get("CHROMA_DATABASE", "default")
-    db = T3Database(tenant=tenant, database=database, api_key=chroma_key, voyage_api_key=voyage_key)
+    db = T3Database(
+        tenant=get_credential("chroma_tenant"),
+        database=get_credential("chroma_database") or "default",
+        api_key=chroma_key,
+        voyage_api_key=voyage_key,
+    )
 
     for _score, file in scored:
         try:
