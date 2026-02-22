@@ -267,6 +267,23 @@ class T3Database:
 
     # ── Collection management ─────────────────────────────────────────────────
 
+    def list_store(self, collection: str, limit: int = 200) -> list[dict]:
+        """Return metadata for entries in a single knowledge__ collection.
+
+        Each entry is a dict with at minimum ``id``, ``title``, ``tags``,
+        ``ttl_days``, ``expires_at``, and ``indexed_at``.  Returns an empty
+        list when the collection does not exist.
+        """
+        try:
+            col = self._client.get_collection(collection)
+        except _ChromaNotFoundError:
+            return []
+        result = col.get(include=["metadatas"], limit=limit)
+        return [
+            {"id": doc_id, **meta}
+            for doc_id, meta in zip(result["ids"], result["metadatas"])
+        ]
+
     def list_collections(self) -> list[dict]:
         """Return all T3 collections with their document counts.
 

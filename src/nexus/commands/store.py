@@ -98,6 +98,35 @@ def put_cmd(
     click.echo(f"Stored: {doc_id}  →  {col_name}")
 
 
+@store.command("list")
+@click.option("--collection", "-c", default="knowledge", show_default=True,
+              help="Collection name or prefix (default: knowledge)")
+@click.option("--limit", "-n", default=200, show_default=True,
+              help="Maximum entries to show")
+def list_cmd(collection: str, limit: int) -> None:
+    """List entries in a T3 knowledge collection."""
+    from nexus.corpus import t3_collection_name
+    col_name = t3_collection_name(collection)
+    entries = _t3().list_store(col_name, limit=limit)
+    if not entries:
+        click.echo(f"No entries in {col_name}.")
+        return
+    click.echo(f"{col_name}  ({len(entries)} {'entry' if len(entries) == 1 else 'entries'})\n")
+    for e in entries:
+        doc_id = e.get("id", "")[:12]
+        title = (e.get("title") or "")[:40]
+        tags = e.get("tags") or ""
+        ttl_days = e.get("ttl_days", 0)
+        expires_at = e.get("expires_at") or ""
+        indexed_at = (e.get("indexed_at") or "")[:10]  # date only
+        if ttl_days and ttl_days > 0 and expires_at:
+            ttl_str = f"expires {expires_at[:10]}"
+        else:
+            ttl_str = "permanent"
+        tag_str = f"  [{tags}]" if tags else ""
+        click.echo(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
+
+
 @store.command("expire")
 def expire_cmd() -> None:
     """Remove T3 knowledge__ entries whose TTL has expired."""

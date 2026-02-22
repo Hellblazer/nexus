@@ -148,6 +148,100 @@ def test_store_put_invalid_ttl_shows_error(
     assert "5z" in result.output
 
 
+# ── nx store list ─────────────────────────────────────────────────────────────
+
+def test_store_list_empty_collection(runner: CliRunner, env_creds) -> None:
+    """No entries in collection prints a friendly 'No entries' message."""
+    mock_db = MagicMock()
+    mock_db.list_store.return_value = []
+
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "list"])
+
+    assert result.exit_code == 0
+    assert "No entries" in result.output
+    mock_db.list_store.assert_called_once()
+
+
+def test_store_list_shows_entries(runner: CliRunner, env_creds) -> None:
+    """Entries are displayed with id, title, ttl, and indexed date."""
+    mock_db = MagicMock()
+    mock_db.list_store.return_value = [
+        {
+            "id": "abc123def456",
+            "title": "analysis.md",
+            "tags": "security,audit",
+            "ttl_days": 0,
+            "expires_at": "",
+            "indexed_at": "2026-02-22T10:00:00+00:00",
+        },
+        {
+            "id": "fff000aaa111",
+            "title": "temp-notes.md",
+            "tags": "",
+            "ttl_days": 30,
+            "expires_at": "2026-03-24T10:00:00+00:00",
+            "indexed_at": "2026-02-22T11:00:00+00:00",
+        },
+    ]
+
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "list"])
+
+    assert result.exit_code == 0
+    assert "abc123def456" in result.output
+    assert "analysis.md" in result.output
+    assert "permanent" in result.output
+    assert "fff000aaa111" in result.output
+    assert "temp-notes.md" in result.output
+    assert "2026-03-24" in result.output
+
+
+def test_store_list_shows_tags(runner: CliRunner, env_creds) -> None:
+    """Tags are shown in brackets when present."""
+    mock_db = MagicMock()
+    mock_db.list_store.return_value = [
+        {
+            "id": "aabbccdd1234",
+            "title": "doc.md",
+            "tags": "arch,decision",
+            "ttl_days": 0,
+            "expires_at": "",
+            "indexed_at": "2026-02-22T00:00:00+00:00",
+        }
+    ]
+
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "list"])
+
+    assert result.exit_code == 0
+    assert "arch,decision" in result.output
+
+
+def test_store_list_custom_collection(runner: CliRunner, env_creds) -> None:
+    """--collection flag selects the right collection name."""
+    mock_db = MagicMock()
+    mock_db.list_store.return_value = []
+
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        runner.invoke(main, ["store", "list", "--collection", "knowledge__notes"])
+
+    call_args = mock_db.list_store.call_args
+    assert call_args[0][0] == "knowledge__notes"
+
+
+def test_store_list_limit_flag(runner: CliRunner, env_creds) -> None:
+    """--limit is forwarded to list_store."""
+    mock_db = MagicMock()
+    mock_db.list_store.return_value = []
+
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        runner.invoke(main, ["store", "list", "--limit", "10"])
+
+    call_args = mock_db.list_store.call_args
+    assert call_args[1].get("limit") == 10 or call_args[0][1] == 10
+
+
 def test_store_expire_reports_count(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.expire.return_value = 3

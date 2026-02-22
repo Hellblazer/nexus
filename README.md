@@ -166,6 +166,10 @@ echo "# Key insight..." | nx store put - --collection knowledge --title "Auth An
 # Store with a TTL
 nx store put temp-notes.md --collection knowledge --ttl 30d
 
+# List entries in a knowledge collection
+nx store list
+nx store list --collection knowledge__notes
+
 # Remove expired entries
 nx store expire
 
