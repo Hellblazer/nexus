@@ -6,16 +6,14 @@ import click
 
 from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
-from nexus.session import read_session_id
+from nexus.session import read_session_id, write_session_file, generate_session_id
 
 
 def _t1() -> T1Database:
     session_id = read_session_id()
     if session_id is None:
-        raise click.ClickException(
-            "No active session found. Run 'nx session start' or ensure the "
-            "SessionStart hook has run (session file missing)."
-        )
+        session_id = generate_session_id()
+        write_session_file(session_id)
     return T1Database(session_id=session_id)
 
 
