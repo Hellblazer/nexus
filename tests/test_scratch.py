@@ -175,10 +175,13 @@ _SESSION_B = "test-session-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 @pytest.fixture
 def two_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Two T1Database instances sharing the same scratch directory."""
+    """Two T1Database instances sharing the same in-memory EphemeralClient."""
+    import chromadb
+
     monkeypatch.setenv("HOME", str(tmp_path))
-    db_a = T1Database(session_id=_SESSION)
-    db_b = T1Database(session_id=_SESSION_B)
+    shared_client = chromadb.EphemeralClient()
+    db_a = T1Database(session_id=_SESSION, client=shared_client)
+    db_b = T1Database(session_id=_SESSION_B, client=shared_client)
     db_a.clear()
     db_b.clear()
     yield db_a, db_b
@@ -217,23 +220,29 @@ def test_clear_does_not_delete_other_session_entries(two_sessions) -> None:
     assert len(b_entries) == 2
 
 
-# ── Behavior 6: search is unscoped across sessions ────────────────────────────
+# ── Behavior 6: search is session-scoped ─────────────────────────────────────
 
-def test_search_is_unscoped_across_sessions(two_sessions) -> None:
-    """search() returns entries from ALL sessions, not just the calling session.
+def test_search_is_scoped_to_session(two_sessions) -> None:
+    """search() returns only entries belonging to the calling session.
 
-    This is intentional design: scratch search is a broad similarity lookup
-    across the shared collection, regardless of which session stored the entry.
+    Per spec, T1 search is session-scoped: results from other sessions must
+    not appear even when both sessions share the same underlying EphemeralClient.
     """
     db_a, db_b = two_sessions
     db_a.put("neural network gradient descent training")
     db_b.put("convolutional neural network image classification")
 
-    # Search from db_a — should surface db_b's entry too
+    # Search from db_a — must only surface db_a's own entry
     results = db_a.search("neural network machine learning", n_results=10)
     session_ids_in_results = {r["session_id"] for r in results}
     assert _SESSION in session_ids_in_results
-    assert _SESSION_B in session_ids_in_results
+    assert _SESSION_B not in session_ids_in_results
+
+    # Search from db_b — must only surface db_b's own entry
+    results_b = db_b.search("neural network machine learning", n_results=10)
+    session_ids_b = {r["session_id"] for r in results_b}
+    assert _SESSION_B in session_ids_b
+    assert _SESSION not in session_ids_b
 
 
 # ── Behavior 7: flagged_entries scoped to this session ────────────────────────

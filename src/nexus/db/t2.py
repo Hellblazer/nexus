@@ -138,42 +138,44 @@ class T2Database:
         id: int | None = None,
     ) -> dict[str, Any] | None:
         """Retrieve a single entry by (project, title) or by numeric ID."""
-        if id is not None:
-            row = self.conn.execute("SELECT * FROM memory WHERE id = ?", (id,)).fetchone()
-        elif project is not None and title is not None:
-            row = self.conn.execute(
-                "SELECT * FROM memory WHERE project = ? AND title = ?", (project, title)
-            ).fetchone()
-        else:
-            raise ValueError("Provide either id or both project and title.")
+        with self._lock:
+            if id is not None:
+                row = self.conn.execute("SELECT * FROM memory WHERE id = ?", (id,)).fetchone()
+            elif project is not None and title is not None:
+                row = self.conn.execute(
+                    "SELECT * FROM memory WHERE project = ? AND title = ?", (project, title)
+                ).fetchone()
+            else:
+                raise ValueError("Provide either id or both project and title.")
         return dict(zip(_COLUMNS, row)) if row else None
 
     def search(self, query: str, project: str | None = None) -> list[dict[str, Any]]:
         """FTS5 keyword search. Returns rows ordered by relevance."""
-        try:
-            if project:
-                sql = """
-                    SELECT m.id, m.project, m.title, m.session, m.agent,
-                           m.content, m.tags, m.timestamp, m.ttl
-                    FROM memory m
-                    JOIN memory_fts ON memory_fts.rowid = m.id
-                    WHERE memory_fts MATCH ?
-                      AND m.project = ?
-                    ORDER BY rank
-                """
-                rows = self.conn.execute(sql, (query, project)).fetchall()
-            else:
-                sql = """
-                    SELECT m.id, m.project, m.title, m.session, m.agent,
-                           m.content, m.tags, m.timestamp, m.ttl
-                    FROM memory m
-                    JOIN memory_fts ON memory_fts.rowid = m.id
-                    WHERE memory_fts MATCH ?
-                    ORDER BY rank
-                """
-                rows = self.conn.execute(sql, (query,)).fetchall()
-        except sqlite3.OperationalError as exc:
-            raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
+        with self._lock:
+            try:
+                if project:
+                    sql = """
+                        SELECT m.id, m.project, m.title, m.session, m.agent,
+                               m.content, m.tags, m.timestamp, m.ttl
+                        FROM memory m
+                        JOIN memory_fts ON memory_fts.rowid = m.id
+                        WHERE memory_fts MATCH ?
+                          AND m.project = ?
+                        ORDER BY rank
+                    """
+                    rows = self.conn.execute(sql, (query, project)).fetchall()
+                else:
+                    sql = """
+                        SELECT m.id, m.project, m.title, m.session, m.agent,
+                               m.content, m.tags, m.timestamp, m.ttl
+                        FROM memory m
+                        JOIN memory_fts ON memory_fts.rowid = m.id
+                        WHERE memory_fts MATCH ?
+                        ORDER BY rank
+                    """
+                    rows = self.conn.execute(sql, (query,)).fetchall()
+            except sqlite3.OperationalError as exc:
+                raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def list_entries(
@@ -192,7 +194,8 @@ class T2Database:
             params.append(agent)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = f"SELECT id, title, agent, timestamp FROM memory {where} ORDER BY timestamp DESC"
-        rows = self.conn.execute(sql, params).fetchall()
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
         return [dict(zip(("id", "title", "agent", "timestamp"), row)) for row in rows]
 
     def search_glob(self, query: str, project_glob: str) -> list[dict[str, Any]]:
@@ -206,10 +209,11 @@ class T2Database:
               AND m.project GLOB ?
             ORDER BY rank
         """
-        try:
-            rows = self.conn.execute(sql, (query, project_glob)).fetchall()
-        except sqlite3.OperationalError as exc:
-            raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
+        with self._lock:
+            try:
+                rows = self.conn.execute(sql, (query, project_glob)).fetchall()
+            except sqlite3.OperationalError as exc:
+                raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def decay_project(self, project: str, ttl: int) -> None:
@@ -253,10 +257,11 @@ class T2Database:
 
     def get_all(self, project: str) -> list[dict[str, Any]]:
         """Return all entries for *project* with full column data."""
-        rows = self.conn.execute(
-            "SELECT * FROM memory WHERE project = ? ORDER BY timestamp DESC",
-            (project,),
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM memory WHERE project = ? ORDER BY timestamp DESC",
+                (project,),
+            ).fetchall()
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def delete(self, project: str, title: str) -> bool:

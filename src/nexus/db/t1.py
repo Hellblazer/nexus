@@ -12,23 +12,22 @@ _COLLECTION = "scratch"
 class T1Database:
     """T1 ChromaDB session scratch.
 
-    Uses a single shared ``chromadb.PersistentClient`` + ``DefaultEmbeddingFunction``
+    Uses a per-process ``chromadb.EphemeralClient`` + ``DefaultEmbeddingFunction``
     (all-MiniLM-L6-v2, local ONNX — no API calls).
 
-    All sessions share one PersistentClient directory. Per-session isolation is
-    provided by ``session_id`` metadata filtering in ``list_entries``, ``clear``,
-    and ``flagged_entries``. This avoids per-session directory proliferation and
-    allows ``SessionEnd`` to recover orphaned entries from crashed sessions.
+    EphemeralClient holds data in-memory only; nothing is written to disk.
+    Per-session isolation is provided by ``session_id`` metadata filtering in
+    ``search``, ``list_entries``, ``clear``, and ``flagged_entries``.
+
+    Note: crash-recovery of orphaned entries from previous sessions is out of scope
+    per spec — T1 is the scratch tier and must be zero-persistence.
     """
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(self, session_id: str, client=None) -> None:
         import chromadb
-        from pathlib import Path
 
         self._session_id = session_id
-        scratch_dir = Path.home() / ".config" / "nexus" / "scratch"
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(path=str(scratch_dir))
+        self._client = client if client is not None else chromadb.EphemeralClient()
         self._col = self._client.get_or_create_collection(_COLLECTION)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -83,16 +82,21 @@ class T1Database:
     def search(self, query: str, n_results: int = 10) -> list[dict]:
         """Semantic search using the local ONNX embedding model.
 
+        Results are scoped to this session via ``session_id`` metadata filter.
         Returns results ordered by relevance (closest first).
-        Returns an empty list when the collection is empty.
+        Returns an empty list when the session has no entries.
         """
-        count = self._col.count()
-        if count == 0:
+        # Count session-scoped documents to avoid n_results > matching count error.
+        session_filter = {"session_id": self._session_id}
+        session_docs = self._col.get(where=session_filter, include=[])
+        session_count = len(session_docs["ids"])
+        if session_count == 0:
             return []
-        actual_n = min(n_results, count)
+        actual_n = min(n_results, session_count)
         results = self._col.query(
             query_texts=[query],
             n_results=actual_n,
+            where=session_filter,
             include=["documents", "metadatas", "distances"],
         )
         return [
