@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""PDF text extraction: PyMuPDF4LLM markdown primary, normalized fallback."""
+from dataclasses import dataclass, field
+from pathlib import Path
+import re
+
+
+@dataclass
+class ExtractionResult:
+    """Result of PDF text extraction."""
+
+    text: str
+    metadata: dict = field(default_factory=dict)
+
+
+class PDFExtractor:
+    """Extract PDF text as markdown (PyMuPDF4LLM) with normalized fallback.
+
+    Extraction priority:
+    1. PyMuPDF4LLM markdown — quality-first, preserves headings/lists/tables.
+    2. PyMuPDF normalized — used when Type3 fonts are detected (pymupdf4llm
+       can hang indefinitely on Type3 fonts) or when a font-related RuntimeError
+       is raised by pymupdf4llm.
+    """
+
+    def extract(self, pdf_path: Path) -> ExtractionResult:
+        """Extract text from *pdf_path*. Returns ExtractionResult."""
+        if self._has_type3_fonts(pdf_path):
+            return self._extract_normalized(pdf_path)
+        try:
+            return self._extract_markdown(pdf_path)
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "font" in msg or "code=4" in msg:
+                return self._extract_normalized(pdf_path)
+            raise
+
+    # ── internal extraction methods ───────────────────────────────────────────
+
+    def _has_type3_fonts(self, pdf_path: Path) -> bool:
+        """Return True if any page uses a Type3 font (can cause pymupdf4llm hangs)."""
+        import pymupdf  # lazy — not installed in all environments
+
+        try:
+            with pymupdf.open(pdf_path) as doc:
+                for page in doc:
+                    for font in page.get_fonts():
+                        font_type = font[2] if len(font) > 2 else ""
+                        if "Type3" in font_type:
+                            return True
+            return False
+        except Exception:
+            return False
+
+    def _extract_markdown(self, pdf_path: Path) -> ExtractionResult:
+        """Extract per-page markdown via pymupdf4llm."""
+        import pymupdf        # lazy
+        import pymupdf4llm    # lazy
+
+        page_texts: list[str] = []
+        page_boundaries: list[dict] = []
+        current_pos = 0
+
+        with pymupdf.open(pdf_path) as doc:
+            page_count = len(doc)
+            for page_num in range(page_count):
+                page_md: str = pymupdf4llm.to_markdown(
+                    str(pdf_path),
+                    pages=[page_num],
+                    ignore_images=True,
+                    force_text=True,
+                ).strip()
+                if page_md:
+                    page_boundaries.append(
+                        {
+                            "page_number": page_num + 1,
+                            "start_char": current_pos,
+                            "page_text_length": len(page_md),
+                        }
+                    )
+                    page_texts.append(page_md)
+                    current_pos += len(page_md) + 1
+
+        return ExtractionResult(
+            text="\n".join(page_texts),
+            metadata={
+                "extraction_method": "pymupdf4llm_markdown",
+                "page_count": page_count,
+                "format": "markdown",
+                "page_boundaries": page_boundaries,
+            },
+        )
+
+    def _extract_normalized(self, pdf_path: Path) -> ExtractionResult:
+        """Extract via raw PyMuPDF with whitespace normalization."""
+        import pymupdf  # lazy
+
+        text_parts: list[str] = []
+        page_boundaries: list[dict] = []
+        current_pos = 0
+
+        with pymupdf.open(pdf_path) as doc:
+            page_count = len(doc)
+            for page_num, page in enumerate(doc):
+                page_text: str = page.get_text(sort=True)
+                if page_text.strip():
+                    page_boundaries.append(
+                        {
+                            "page_number": page_num + 1,
+                            "start_char": current_pos,
+                            "page_text_length": len(page_text),
+                        }
+                    )
+                    text_parts.append(page_text)
+                    current_pos += len(page_text) + 1
+
+        text = "\n".join(text_parts)
+        text = re.sub(r" +", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = "\n".join(line.rstrip() for line in text.split("\n"))
+
+        return ExtractionResult(
+            text=text,
+            metadata={
+                "extraction_method": "pymupdf_normalized",
+                "page_count": page_count,
+                "format": "normalized",
+                "page_boundaries": page_boundaries,
+            },
+        )
