@@ -3,11 +3,15 @@
 """Search engine: hybrid scoring, cross-corpus reranking, answer mode, formatters."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+_HAIKU_MODEL = "claude-haiku-4-5-20251001"
+_RERANK_MODEL = "rerank-2.5"
 
 # ── Data types ────────────────────────────────────────────────────────────────
 
@@ -96,7 +100,7 @@ def _voyage_client():
 def rerank_results(
     results: list[SearchResult],
     query: str,
-    model: str = "rerank-2.5",
+    model: str = _RERANK_MODEL,
     top_k: int | None = None,
 ) -> list[SearchResult]:
     """Rerank *results* using Voyage AI reranker.
@@ -208,8 +212,9 @@ def fetch_mxbai_results(
     for store_id in stores:
         response = client.stores.search(store_id=store_id, query=query, top_k=per_k)
         for chunk in response.chunks:
+            _digest = hashlib.sha256(chunk.content.text.encode()).hexdigest()[:12]
             results.append(SearchResult(
-                id=f"mxbai__{store_id}__{hash(chunk.content.text) & 0xFFFFFF:06x}",
+                id=f"mxbai__{store_id}__{_digest}",
                 content=chunk.content.text,
                 distance=1.0 - float(chunk.score),
                 collection=f"mxbai__{store_id}",
@@ -237,12 +242,17 @@ def _haiku_refine(query: str, results: list[SearchResult]) -> dict:
     from nexus.config import get_credential
     client = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
     msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=_HAIKU_MODEL,
         max_tokens=64,
         messages=[{"role": "user", "content": prompt}],
     )
+    if not msg.content:
+        return {"done": True}
     text = msg.content[0].text.strip()
-    return _json.loads(text)
+    try:
+        return _json.loads(text)
+    except _json.JSONDecodeError:
+        return {"done": True}
 
 
 def agentic_search(
@@ -271,8 +281,9 @@ def agentic_search(
         decision = _haiku_refine(query, combined)
         if decision.get("done"):
             break
-        if "query" in decision:
-            query = decision["query"]
+        refined = decision.get("query", "").strip()
+        if refined:
+            query = refined
         else:
             break
 
@@ -299,7 +310,7 @@ def _haiku_answer(query: str, results: list[SearchResult]) -> str:
     from nexus.config import get_credential
     client = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
     msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=_HAIKU_MODEL,
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )

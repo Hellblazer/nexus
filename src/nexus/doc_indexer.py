@@ -72,7 +72,7 @@ def index_pdf(pdf_path: Path, corpus: str) -> int:
     metadatas: list[dict] = []
 
     for chunk in chunks:
-        chunk_id = f"{content_hash[:8]}_{chunk.chunk_index}"
+        chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
             "source_path": str(pdf_path),
             "source_title": "",
@@ -146,7 +146,7 @@ def index_markdown(md_path: Path, corpus: str) -> int:
     metadatas: list[dict] = []
 
     for chunk in chunks:
-        chunk_id = f"{content_hash[:8]}_{chunk.chunk_index}"
+        chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
             "source_path": str(md_path),
             "source_title": str(frontmatter.get("title", "")),

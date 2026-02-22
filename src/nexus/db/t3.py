@@ -2,9 +2,9 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
 import chromadb
 
@@ -80,7 +80,7 @@ class T3Database:
 
         *ttl_days* = 0 means permanent (``expires_at=""``).
         """
-        doc_id = str(uuid4())
+        doc_id = hashlib.sha256(f"{collection}:{title}".encode()).hexdigest()[:16]
         now_iso = datetime.now(UTC).isoformat()
 
         if ttl_days > 0:

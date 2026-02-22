@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Git frecency scoring: sum(exp(-0.01 * days_since_commit)) per file."""
+import logging
 import math
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 
 def _git_commit_timestamps(repo: Path, file: Path) -> list[float]:
@@ -17,7 +20,16 @@ def _git_commit_timestamps(repo: Path, file: Path) -> list[float]:
     )
     if result.returncode != 0 or not result.stdout.strip():
         return []
-    return [float(ts) for ts in result.stdout.strip().splitlines() if ts.strip()]
+    timestamps: list[float] = []
+    for ts in result.stdout.strip().splitlines():
+        ts = ts.strip()
+        if not ts:
+            continue
+        try:
+            timestamps.append(float(ts))
+        except ValueError:
+            _log.debug("Unexpected git log output line for %s: %r", file, ts)
+    return timestamps
 
 
 def compute_frecency(repo: Path, file: Path) -> float:

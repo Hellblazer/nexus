@@ -38,7 +38,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     # Gather all text files with frecency scores
     scored: list[tuple[float, Path]] = []
     for path in sorted(repo.rglob("*")):
-        if not path.is_file():
+        if not path.is_file() or path.is_symlink():
             continue
         if any(part.startswith(".") for part in path.parts):
             continue  # Skip hidden dirs/files

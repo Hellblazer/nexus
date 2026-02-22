@@ -269,3 +269,52 @@ def test_list_collections_empty(mock_chromadb: tuple) -> None:
 
     db = T3Database(tenant="t", database="d", api_key="k")
     assert db.list_collections() == []
+
+
+# ── Deterministic ID ──────────────────────────────────────────────────────────
+
+def test_put_same_collection_and_title_produces_same_id(mock_chromadb: tuple) -> None:
+    """Two put() calls with the same collection+title must produce the same document ID.
+
+    This enables upsert semantics: repeated writes to the same logical document
+    update in-place rather than accumulating duplicates.
+    """
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    id1 = db.put(collection="knowledge__sec", content="first version", title="finding.md")
+    id2 = db.put(collection="knowledge__sec", content="updated version", title="finding.md")
+
+    assert id1 == id2
+    # upsert called twice with the same ID → second call updates in place
+    assert mock_col.upsert.call_count == 2
+    assert mock_col.upsert.call_args_list[0].kwargs["ids"][0] == id1
+    assert mock_col.upsert.call_args_list[1].kwargs["ids"][0] == id1
+
+
+def test_put_different_titles_produce_different_ids(mock_chromadb: tuple) -> None:
+    """Different titles within the same collection produce different document IDs."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    id_a = db.put(collection="knowledge__sec", content="chunk A", title="chunk-a.md")
+    id_b = db.put(collection="knowledge__sec", content="chunk B", title="chunk-b.md")
+
+    assert id_a != id_b
+
+
+def test_put_id_is_deterministic_across_processes(mock_chromadb: tuple) -> None:
+    """ID generation must not use Python hash() or uuid4() — must be process-stable."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    # Call twice: same collection+title, same content → same ID
+    id1 = db.put(collection="code__repo", content="same text", title="file.py:1-50")
+    id2 = db.put(collection="code__repo", content="same text", title="file.py:1-50")
+    assert id1 == id2

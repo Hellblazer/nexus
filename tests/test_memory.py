@@ -106,3 +106,23 @@ def test_memory_list_by_project(db: T2Database) -> None:
     assert len(entries) == 2
     titles = {e["title"] for e in entries}
     assert titles == {"x.md", "y.md"}
+
+
+# ── FTS5 safety: malformed query raises ValueError ────────────────────────────
+
+def test_search_raises_on_malformed_fts5_query(db: T2Database) -> None:
+    """FTS5 queries with bare operators (AND, OR alone) raise ValueError, not OperationalError."""
+    import pytest
+    db.put(project="proj", title="doc.md", content="some content")
+
+    with pytest.raises(ValueError, match="Invalid search query"):
+        db.search("AND")
+
+
+def test_search_glob_raises_on_malformed_fts5_query(db: T2Database) -> None:
+    """search_glob with bare FTS5 operator raises ValueError."""
+    import pytest
+    db.put(project="proj_pm", title="doc.md", content="some content")
+
+    with pytest.raises(ValueError, match="Invalid search query"):
+        db.search_glob("NOT", "*_pm")

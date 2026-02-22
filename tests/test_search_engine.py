@@ -305,6 +305,87 @@ def test_format_json_includes_metadata():
     assert parsed[0].get("source_path") == "./a.py"
 
 
+# ── Behavior: Mixedbread hash determinism ────────────────────────────────────
+
+def test_mxbai_chunk_id_is_deterministic(monkeypatch):
+    """Same Mixedbread chunk content always produces the same SearchResult ID."""
+    monkeypatch.setenv("MXBAI_API_KEY", "test-key")
+    mock_client = MagicMock()
+
+    chunk = MagicMock()
+    chunk.content.text = "identical content"
+    chunk.score = 0.9
+    mock_client.stores.search.return_value = MagicMock(chunks=[chunk])
+
+    with patch("nexus.search_engine._mxbai_client", return_value=mock_client):
+        results_a = se_mod.fetch_mxbai_results(query="q", stores=["art"], per_k=5)
+        results_b = se_mod.fetch_mxbai_results(query="q", stores=["art"], per_k=5)
+
+    assert results_a[0].id == results_b[0].id, (
+        "Mixedbread chunk IDs must be deterministic (no python hash() randomness)"
+    )
+
+
+# ── Behavior: Agentic search handles invalid JSON from Haiku ─────────────────
+
+def test_agentic_search_graceful_on_json_decode_error():
+    """agentic_search stops gracefully when _haiku_refine returns invalid JSON."""
+    initial = [SearchResult(id="1", content="result", distance=0.1,
+                            collection="c", metadata={})]
+    mock_retrieve = MagicMock(return_value=initial)
+
+    with patch("nexus.search_engine._haiku_refine", return_value={"done": True}):
+        result = se_mod.agentic_search(
+            initial_query="test", retrieve_fn=mock_retrieve, max_iterations=3
+        )
+    assert result == initial
+
+
+def test_haiku_refine_returns_done_on_json_error():
+    """_haiku_refine returns {'done': True} when Haiku response is not valid JSON."""
+    mock_msg = MagicMock()
+    mock_msg.content = [MagicMock(text="Sure! Here is some text, not JSON.")]
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_msg
+
+    with patch("nexus.config.get_credential", return_value="key"):
+        with patch("anthropic.Anthropic", return_value=mock_client):
+            result = se_mod._haiku_refine("query", [])
+    assert result == {"done": True}
+
+
+def test_haiku_refine_returns_done_on_empty_content():
+    """_haiku_refine returns {'done': True} when Haiku returns empty content."""
+    mock_msg = MagicMock()
+    mock_msg.content = []
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_msg
+
+    with patch("nexus.config.get_credential", return_value="key"):
+        with patch("anthropic.Anthropic", return_value=mock_client):
+            result = se_mod._haiku_refine("query", [])
+    assert result == {"done": True}
+
+
+# ── Behavior: Agentic search skips empty refined queries ─────────────────────
+
+def test_agentic_search_stops_on_empty_refined_query():
+    """agentic_search stops loop when Haiku returns empty/whitespace query."""
+    call_count = 0
+
+    def mock_retrieve(query):
+        nonlocal call_count
+        call_count += 1
+        return [SearchResult(id=str(call_count), content="r",
+                             distance=0.1, collection="c", metadata={})]
+
+    with patch("nexus.search_engine._haiku_refine", return_value={"query": "   "}):
+        se_mod.agentic_search(
+            initial_query="test", retrieve_fn=mock_retrieve, max_iterations=3
+        )
+    assert call_count == 1  # stopped after initial retrieve
+
+
 # ── AC8: min_max_normalize over combined window ───────────────────────────────
 
 def test_min_max_normalize_over_combined_not_per_corpus():

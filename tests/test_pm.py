@@ -371,3 +371,66 @@ def test_pm_search_scoped_to_project(db) -> None:
 
     results = pm_search(db, query="Postgres", project="repoA")
     assert all(r.get("project") == "repoA_pm" for r in results)
+
+
+# ── Behavior: pm_archive raises ValueError on empty project ───────────────────
+
+def test_pm_archive_raises_value_error_for_empty_project(db) -> None:
+    """pm_archive raises ValueError (not RuntimeError) when project has no docs."""
+    mock_t3 = MagicMock()
+    mock_t3.search.return_value = []
+
+    with patch("nexus.pm._make_t3", return_value=mock_t3):
+        with pytest.raises(ValueError, match="No PM docs found"):
+            pm_archive(db, project="nonexistent", status="completed", archive_ttl=90)
+
+
+# ── Behavior: pm_archive uses returned doc_id for metadata update ─────────────
+
+def test_pm_archive_uses_put_return_id_for_metadata_update(db) -> None:
+    """pm_archive passes the ID returned by t3.put() to col.update(), not a re-query."""
+    pm_init(db, project="myrepo")
+
+    mock_t3 = MagicMock()
+    mock_t3.search.return_value = []
+    mock_t3.put.return_value = "exact-doc-id"
+
+    mock_col = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.pm._synthesize_haiku", return_value="# summary"):
+        with patch("nexus.pm._make_t3", return_value=mock_t3):
+            pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
+
+    mock_col.update.assert_called_once()
+    update_call_ids = mock_col.update.call_args.kwargs["ids"]
+    assert update_call_ids == ["exact-doc-id"], (
+        "col.update() must use the ID returned by t3.put(), not a re-query result"
+    )
+
+
+# ── Behavior: pm_phase_next CONTINUATION.md tag reflects current phase ────────
+
+def test_pm_phase_next_continuation_tag_reflects_new_phase(db) -> None:
+    """After pm_phase_next, CONTINUATION.md is tagged with the new phase number."""
+    pm_init(db, project="myrepo")
+    pm_phase_next(db, project="myrepo")
+
+    cont = db.get(project="myrepo_pm", title="CONTINUATION.md")
+    assert cont is not None
+    assert "phase:2" in (cont["tags"] or ""), (
+        f"Expected 'phase:2' in tags, got: {cont['tags']!r}"
+    )
+
+
+def test_pm_phase_next_continuation_tag_increments_correctly(db) -> None:
+    """After two pm_phase_next calls, CONTINUATION.md is tagged 'phase:3'."""
+    pm_init(db, project="myrepo")
+    pm_phase_next(db, project="myrepo")
+    pm_phase_next(db, project="myrepo")
+
+    cont = db.get(project="myrepo_pm", title="CONTINUATION.md")
+    assert cont is not None
+    assert "phase:3" in (cont["tags"] or ""), (
+        f"Expected 'phase:3' in tags, got: {cont['tags']!r}"
+    )
