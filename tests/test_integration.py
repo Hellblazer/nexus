@@ -283,12 +283,25 @@ def test_t3_collection_verify_missing(runner: CliRunner) -> None:
 @pytest.mark.integration
 @requires_t3
 def test_nx_search_knowledge_corpus(runner: CliRunner) -> None:
-    """nx search --corpus knowledge completes without error and finds stored docs."""
-    # Scope to knowledge only — code/docs collections require indexing first.
+    """nx search --corpus knowledge finds a document stored immediately before the query."""
+    unique = f"searchcorpus-{uuid.uuid4().hex[:8]}"
+    # Seed a document with a unique token so the search has something to find
+    runner.invoke(main, [
+        "store", "put", "-",
+        "--collection", _T3_TEST_COLLECTION,
+        "--title", f"{unique}.md",
+        "--ttl", "1d",
+    ], input=f"Corpus search test document {unique}")
+
     result = runner.invoke(main, [
-        "search", "integration test", "--corpus", _T3_TEST_COLLECTION, "--n", "3",
+        "search", unique,
+        "--corpus", _T3_TEST_COLLECTION,
+        "--n", "3",
     ])
     assert result.exit_code == 0, result.output
+    assert unique in result.output, (
+        f"Expected unique token {unique!r} to appear in search output; got: {result.output!r}"
+    )
 
 
 # ── Cross-model compatibility: voyage-code-3 index + voyage-4 query ──────────
@@ -356,6 +369,117 @@ def test_voyage4_query_retrieves_voyage_code3_indexed_content() -> None:
         assert results, "voyage-4 query returned no results from voyage-code-3-indexed collection"
         assert any(uid in r.get("content", "") for r in results), (
             "voyage-4 query did not retrieve the voyage-code-3-indexed code chunk"
+        )
+    finally:
+        try:
+            db.delete_collection(collection)
+        except Exception:
+            pass
+
+
+# ── Cross-model: voyage-context-3 (CCE) index + voyage-4 query ───────────────
+
+@pytest.mark.integration
+@requires_t3
+def test_voyage4_query_retrieves_cce_indexed_markdown() -> None:
+    """voyage-4 queries retrieve results from CCE-indexed docs__ content.
+
+    Validates the second cross-model assumption: voyage-context-3 (CCE) index
+    vectors are in the same space as voyage-4 query vectors.
+
+    Method:
+    - Index a multi-chunk markdown file via index_markdown (triggers CCE path)
+    - Query via db.search (collection EF = voyage-4)
+    - Assert the indexed chunk is returned and embedding_model is recorded
+    """
+    import tempfile
+    from pathlib import Path
+
+    from nexus.db import make_t3
+    from nexus.doc_indexer import index_markdown
+
+    uid = uuid.uuid4().hex[:8]
+    collection = f"docs__int-cce-{uid}"
+
+    # Multi-section markdown → SemanticMarkdownChunker produces 2+ chunks → CCE fires
+    md_content = (
+        f"# Authentication Module {uid}\n\n"
+        f"This document describes the user authentication system for integration test {uid}.\n\n"
+        f"## Token Generation\n\n"
+        f"JWT tokens are generated using RS256 signing with a rotating key schedule. "
+        f"Each token carries a session ID and an expiration timestamp. "
+        f"The token payload is validated on every request by the middleware layer.\n\n"
+        f"## Credential Verification\n\n"
+        f"User credentials are validated against bcrypt hashes stored in the database. "
+        f"Failed attempts are rate-limited using a sliding window algorithm. "
+        f"Successful logins reset the failure counter and update the last-seen timestamp.\n"
+    )
+
+    db = make_t3()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        md_path = Path(tmpdir) / f"auth_{uid}.md"
+        md_path.write_text(md_content)
+        try:
+            chunk_count = index_markdown(md_path, corpus=f"int-cce-{uid}", t3=db)
+            assert chunk_count > 0, "Expected at least one chunk indexed from markdown"
+
+            results = db.search(
+                query=f"user authentication JWT token bcrypt {uid}",
+                collection_names=[collection],
+                n_results=5,
+            )
+            assert results, (
+                "voyage-4 query returned no results from CCE-indexed docs__ collection"
+            )
+            assert any(uid in r.get("content", "") for r in results), (
+                "voyage-4 query did not retrieve the CCE-indexed markdown chunk"
+            )
+            # embedding_model must be voyage-context-3 (CCE succeeded) or voyage-4 (fallback)
+            stored_model = results[0].get("embedding_model", "")
+            assert stored_model in ("voyage-context-3", "voyage-4"), (
+                f"embedding_model should be voyage-context-3 or voyage-4 (fallback), "
+                f"got: {stored_model!r}"
+            )
+        finally:
+            try:
+                db.delete_collection(collection)
+            except Exception:
+                pass
+
+
+@pytest.mark.integration
+@requires_t3
+def test_t3_put_embedding_model_in_search_metadata() -> None:
+    """T3Database.put() stores embedding_model='voyage-4'; field survives to search results.
+
+    Validates that the metadata provenance field added to put() is persisted
+    through ChromaDB and returned by db.search().
+    """
+    from nexus.db import make_t3
+
+    uid = uuid.uuid4().hex[:8]
+    collection = f"knowledge__int-prov-{uid}"
+    db = make_t3()
+    try:
+        doc_id = db.put(
+            collection=collection,
+            content=f"Provenance test document with unique token {uid}",
+            title=f"{uid}-provenance.md",
+            ttl_days=1,
+        )
+        assert doc_id, "put() must return a non-empty doc ID"
+
+        results = db.search(
+            query=f"provenance test document {uid}",
+            collection_names=[collection],
+            n_results=5,
+        )
+        assert results, "Expected search to find the just-stored document"
+        matching = [r for r in results if uid in r.get("content", "")]
+        assert matching, "Stored document not found by unique token in search results"
+        assert matching[0].get("embedding_model") == "voyage-4", (
+            f"knowledge__ put() must store embedding_model='voyage-4', "
+            f"got: {matching[0].get('embedding_model')!r}"
         )
     finally:
         try:
