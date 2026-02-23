@@ -15,6 +15,9 @@ DEFAULT_IGNORE: list[str] = [
     "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", ".git",
 ]
 
+# Voyage AI embed() API limit: https://docs.voyageai.com/reference/embeddings-api
+_VOYAGE_EMBED_BATCH_SIZE = 128
+
 _EXT_TO_LANGUAGE: dict[str, str] = {
     ".py": "python",
     ".js": "javascript",
@@ -196,6 +199,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     now_iso = _dt.now(UTC).isoformat()
     target_model = index_model_for_collection(collection_name)
     voyage_client = voyageai.Client(api_key=voyage_key)
+    col = db.get_or_create_collection(collection_name)
 
     for score, file in scored:
         try:
@@ -207,7 +211,6 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
         content_hash = _hl.sha256(content.encode()).hexdigest()
 
         # Staleness check: skip if content_hash AND embedding_model both match
-        col = db.get_or_create_collection(collection_name)
         existing = col.get(
             where={"source_path": str(file)},
             include=["metadatas"],
@@ -264,11 +267,10 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
             documents.append(chunk["text"])
             metadatas.append(metadata)
 
-        # Pre-compute voyage-code-3 embeddings; batch in groups of 128 (API limit)
+        # Pre-compute voyage-code-3 embeddings; batch per API limit
         embeddings: list[list[float]] = []
-        batch_size = 128
-        for batch_start in range(0, len(documents), batch_size):
-            batch = documents[batch_start : batch_start + batch_size]
+        for batch_start in range(0, len(documents), _VOYAGE_EMBED_BATCH_SIZE):
+            batch = documents[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
             result = voyage_client.embed(texts=batch, model=target_model, input_type="document")
             embeddings.extend(result.embeddings)
 

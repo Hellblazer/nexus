@@ -177,12 +177,12 @@ WHERE ttl IS NOT NULL
 1. `nx index code <path>` registers the repo with the persistent `nx serve` process
 2. `git log` to compute frecency scores per file: `sum(exp(-0.01 * days_passed))`
 3. Files chunked: AST-first via `llama_index.core.node_parser.CodeSplitter` (which wraps `tree-sitter-language-pack` internally) for 30+ languages including Python, JS/TS, Java, Go, Rust, C, C++, C#, PHP, Ruby, Kotlin, Scala, Swift, and more — line-based fallback for unsupported extensions. Target ~150 lines per chunk; no overlap at function/class boundaries; 15% overlap for line-based fallback. Install: `pip install llama-index-core tree-sitter-language-pack`. **Version pinning required**: known breaking incompatibilities exist between these packages at certain version combinations (see llama_index issues #13521, #17567); pin to a verified-good pair in `pyproject.toml` and test before upgrading.
-4. Chunks embedded via **Voyage AI** using `VoyageAIEmbeddingFunction(model_name="voyage-code-3")`
+4. Chunks embedded via `voyageai.Client().embed(model="voyage-code-3", input_type="document")` (direct SDK call; bypasses ChromaDB's `VoyageAIEmbeddingFunction`). Batched at 128 texts per API call. Stored via `upsert_chunks_with_embeddings()` so ChromaDB's collection EF is not invoked at write time.
 5. Upserted into T3 ChromaDB collection `code__{repo-name}`
 6. Ripgrep line cache built locally: flat `path:line:content\n` text file, memory-mapped for hybrid search — 500MB cap (SeaGOAT pattern)
 7. `nx serve` polls HEAD hash every 10 seconds (default, matching SeaGOAT's `SECONDS_BETWEEN_MAINTENANCE`); re-indexes on change. Configurable via `server.headPollInterval` in `~/.config/nexus/config.yml`.
 
-ChromaDB natively supports `VoyageAIEmbeddingFunction` (`pip install voyageai`; env var: `VOYAGE_API_KEY`).
+ChromaDB natively supports `VoyageAIEmbeddingFunction` (`pip install voyageai`; env var: `VOYAGE_API_KEY`). For code collections the EF is used only at **query time**; indexing uses the direct SDK to send voyage-code-3 vectors.
 
 **Frecency score staleness**: `frecency_score` is computed and stored at index time. If a file has not changed (no content reindex) but other files in the repo have recent commits, its relative frecency score becomes stale. Known limitation: frecency-only reindex (updating scores without re-embedding) is not implemented in v1. Stable files may rank lower than their true recency warrants until the next content change triggers reindex.
 
@@ -262,7 +262,7 @@ content_hash         str   SHA256 of source file at index time (for change detec
 
 ```
 # Source identity
-file_path            str   Absolute path to source file
+source_path          str   Absolute path to source file
 filename             str   Basename (e.g. "auth.py")
 file_extension       str   e.g. ".py", ".java"
 programming_language str   e.g. "python", "java"
@@ -281,9 +281,6 @@ line_end             int   Last line of this chunk (1-indexed)
 chunk_index          int   Position within file (0-based)
 chunk_count          int   Total chunks in this file
 ast_chunked          bool  True if AST parsing succeeded (vs line-based fallback)
-has_functions        bool  Chunk contains function/method definitions
-has_classes          bool  Chunk contains class definitions
-has_imports          bool  Chunk contains import statements
 
 # Frecency
 frecency_score       float sum(exp(-0.01 * days_since_commit)) at index time
@@ -291,7 +288,7 @@ frecency_score       float sum(exp(-0.01 * days_since_commit)) at index time
 # Embedding provenance
 embedding_model      str   "voyage-code-3"
 indexed_at           str   ISO 8601 timestamp
-content_hash         str   git object ID (for staleness detection)
+content_hash         str   SHA256 of file content at index time (for change detection)
 ```
 
 ### Knowledge / agent memory chunks (`knowledge__*` collections)

@@ -232,6 +232,53 @@ def test_run_index_skips_unchanged_content_hash(tmp_path: Path) -> None:
     mock_db.upsert_chunks_with_embeddings.assert_not_called()
 
 
+def test_run_index_reindexes_when_embedding_model_changed(tmp_path: Path) -> None:
+    """Files with matching content_hash but outdated embedding_model must be re-embedded."""
+    import hashlib
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    content = "x = 1\n"
+    (repo / "main.py").write_text(content)
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    mock_col = MagicMock()
+    # Same content_hash but stale embedding model (voyage-4 from old collection-EF path)
+    mock_col.get.return_value = {"metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-4"}]}
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    fake_chunk = {
+        "line_start": 1, "line_end": 1, "text": "x = 1",
+        "chunk_index": 0, "chunk_count": 1,
+        "ast_chunked": False, "filename": "main.py", "file_extension": ".py",
+    }
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
+                                with patch("voyageai.Client", return_value=mock_voyage_client):
+                                    _run_index(repo, registry)
+
+    # Must re-embed even though content_hash matches, because embedding_model differs
+    mock_db.upsert_chunks_with_embeddings.assert_called_once()
+
+
 # ── _run_index_frecency_only ──────────────────────────────────────────────────
 
 def test_frecency_only_updates_frecency_score(tmp_path: Path) -> None:

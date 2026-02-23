@@ -98,14 +98,6 @@ def mock_voyage_client():
         yield mock_client
 
 
-def _patch_t3(t3: T3Database):
-    """Patch make_t3 and credential checks to use local EphemeralClient."""
-    return (
-        patch("nexus.db.make_t3", return_value=t3),
-        patch("nexus.config.get_credential", side_effect=lambda k: "test-key"),
-    )
-
-
 # ── Indexer pipeline tests ─────────────────────────────────────────────────────
 
 def test_index_creates_chunks_in_t3(
