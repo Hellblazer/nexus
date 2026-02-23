@@ -2,6 +2,8 @@
 """Pure scoring primitives: normalization, hybrid scoring, reranking, interleaving."""
 from __future__ import annotations
 
+import threading
+
 import structlog
 
 from nexus.types import SearchResult
@@ -75,11 +77,21 @@ def apply_hybrid_scoring(
     return sorted(results, key=lambda r: r.hybrid_score, reverse=True)
 
 
+_voyage_instance: object | None = None
+_voyage_lock = threading.Lock()
+
+
 def _voyage_client():
-    """Return a voyageai.Client instance."""
-    import voyageai
-    from nexus.config import get_credential
-    return voyageai.Client(api_key=get_credential("voyage_api_key"))
+    """Return a cached voyageai.Client instance."""
+    global _voyage_instance
+    if _voyage_instance is not None:
+        return _voyage_instance
+    with _voyage_lock:
+        if _voyage_instance is None:
+            import voyageai
+            from nexus.config import get_credential
+            _voyage_instance = voyageai.Client(api_key=get_credential("voyage_api_key"))
+    return _voyage_instance
 
 
 def rerank_results(

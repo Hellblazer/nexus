@@ -37,7 +37,9 @@ def info_cmd(name: str) -> None:
     query_model = embedding_model_for_collection(name)
     idx_model   = index_model_for_collection(name)
 
-    col = db._client.get_collection(name)
+    info = db.collection_info(name)
+
+    col = db.get_or_create_collection(name)
     result = col.get(include=["metadatas"])
     metadatas: list[dict] = result.get("metadatas") or []
     timestamps = [m["indexed_at"] for m in metadatas if m and "indexed_at" in m]

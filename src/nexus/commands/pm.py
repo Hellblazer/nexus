@@ -62,8 +62,7 @@ def resume_cmd(project: str | None) -> None:
     with T2Database(_default_db_path()) as db:
         content = pm_resume(db, project=proj)
     if content is None:
-        click.echo(f"No PM project found for '{proj}'. Run `nx pm init` first.", err=True)
-        raise SystemExit(1)
+        raise click.ClickException(f"No PM project found for '{proj}'. Run `nx pm init` first.")
     click.echo(content)
 
 
@@ -157,8 +156,7 @@ def archive_cmd(project: str | None, archive_status: str) -> None:
             pm_archive(db, project=proj, status=archive_status, archive_ttl=ttl)
             click.echo(f"Archived project '{proj}' (status={archive_status}).")
         except (RuntimeError, ValueError) as exc:
-            click.echo(f"Archive failed: {exc}", err=True)
-            raise SystemExit(1)
+            raise click.ClickException(f"Archive failed: {exc}") from exc
 
 
 @pm.command("close")
@@ -173,8 +171,7 @@ def close_cmd(project: str | None) -> None:
             pm_archive(db, project=proj, status="completed", archive_ttl=ttl)
             click.echo(f"Closed project '{proj}'.")
         except (RuntimeError, ValueError) as exc:
-            click.echo(f"Close failed: {exc}", err=True)
-            raise SystemExit(1)
+            raise click.ClickException(f"Close failed: {exc}") from exc
 
 
 @pm.command("restore")
@@ -186,8 +183,7 @@ def restore_cmd(project: str) -> None:
             pm_restore(db, project=project)
             click.echo(f"Restored project '{project}'.")
         except RuntimeError as exc:
-            click.echo(str(exc), err=True)
-            raise SystemExit(1)
+            raise click.ClickException(str(exc)) from exc
 
 
 @pm.command("reference")
@@ -243,8 +239,7 @@ def promote_cmd(title: str, project: str | None, collection: str | None, ttl_day
             )
             click.echo(doc_id)
         except KeyError as exc:
-            click.echo(str(exc), err=True)
-            raise SystemExit(1)
+            raise click.ClickException(str(exc)) from exc
 
 
 @pm.command("expire")

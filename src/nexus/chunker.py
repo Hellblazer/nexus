@@ -114,6 +114,8 @@ def chunk_file(file: Path, content: str) -> list[dict[str, Any]]:
     # Line-based fallback
     raw_chunks = _line_chunk(content)
     if not raw_chunks:
+        if not content.strip():
+            return []
         raw_chunks = [(1, 1, content)]
     count = len(raw_chunks)
     result = []

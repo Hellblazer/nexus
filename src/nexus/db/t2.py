@@ -79,6 +79,9 @@ class T2Database:
         with self._lock:
             self.conn.executescript(_SCHEMA_SQL)
             self.conn.commit()
+            result = self.conn.execute("PRAGMA journal_mode").fetchone()
+            if result and result[0].lower() != "wal":
+                _log.warning("WAL mode not available", actual_mode=result[0])
 
     def __enter__(self) -> "T2Database":
         return self
@@ -87,7 +90,8 @@ class T2Database:
         self.close()
 
     def close(self) -> None:
-        self.conn.close()
+        with self._lock:
+            self.conn.close()
 
     # ── Write ─────────────────────────────────────────────────────────────────
 

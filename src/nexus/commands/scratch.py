@@ -47,8 +47,7 @@ def get_cmd(id: str) -> None:
     """Retrieve a scratch entry by ID."""
     result = _t1().get(id)
     if result is None:
-        click.echo("Not found.", err=True)
-        raise SystemExit(1)
+        raise click.ClickException("Not found.")
     click.echo(result["content"])
 
 
@@ -89,8 +88,7 @@ def flag_cmd(id: str, project: str, title: str) -> None:
     try:
         t1.flag(id, project=project, title=title)
     except KeyError as exc:
-        click.echo(str(exc), err=True)
-        raise SystemExit(1)
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Flagged: {id}")
 
 
@@ -102,8 +100,7 @@ def unflag_cmd(id: str) -> None:
     try:
         t1.unflag(id)
     except KeyError as exc:
-        click.echo(str(exc), err=True)
-        raise SystemExit(1)
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Unflagged: {id}")
 
 
@@ -118,8 +115,7 @@ def promote_cmd(id: str, project: str, title: str) -> None:
         try:
             t1.promote(id, project=project, title=title, t2=t2)
         except KeyError as exc:
-            click.echo(str(exc), err=True)
-            raise SystemExit(1)
+            raise click.ClickException(str(exc)) from exc
     click.echo(f"Promoted {id} -> {project}/{title}")
 
 

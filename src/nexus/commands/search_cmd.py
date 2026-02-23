@@ -154,7 +154,7 @@ def search_cmd(
     try:
         user_where = _parse_where(where_pairs)
     except click.BadParameter as exc:
-        raise SystemExit(str(exc)) from exc
+        raise click.ClickException(str(exc)) from exc
 
     where_filter: dict | None = user_where if user_where else None
 

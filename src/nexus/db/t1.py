@@ -111,9 +111,6 @@ class T1Database:
 
     def list_entries(self) -> list[dict]:
         """Return all entries belonging to this session."""
-        count = self._col.count()
-        if count == 0:
-            return []
         result = self._col.get(
             where={"session_id": self._session_id},
             include=["documents", "metadatas"],

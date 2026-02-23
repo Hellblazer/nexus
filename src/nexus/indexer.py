@@ -129,7 +129,7 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
             {**m, "frecency_score": float(score)}
             for m in existing["metadatas"]
         ]
-        db.update_chunks(collection_name, ids=existing["ids"], metadatas=updated_metadatas)
+        db.update_chunks(collection=collection_name, ids=existing["ids"], metadatas=updated_metadatas)
 
 
 def _run_index(repo: Path, registry: "RepoRegistry") -> None:

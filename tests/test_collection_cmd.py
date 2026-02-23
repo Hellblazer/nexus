@@ -128,11 +128,11 @@ def test_info_shows_embedding_model_for_code_collection(
     mock_db.list_collections.return_value = [
         {"name": "code__nexus", "count": 1247},
     ]
-    # Mock get_collection to return a collection with no indexed_at in metadata
+    mock_db.collection_info.return_value = {"count": 1247, "metadata": {}}
+    # Mock get_or_create_collection to return a collection with no indexed_at in metadata
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db._client = MagicMock()
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.commands.collection._t3", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "code__nexus"])
@@ -150,10 +150,10 @@ def test_info_shows_embedding_model_for_knowledge_collection(
     mock_db.list_collections.return_value = [
         {"name": "knowledge__research", "count": 88},
     ]
+    mock_db.collection_info.return_value = {"count": 88, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db._client = MagicMock()
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.commands.collection._t3", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__research"])
@@ -170,6 +170,7 @@ def test_info_shows_last_indexed_when_metadata_exists(
     mock_db.list_collections.return_value = [
         {"name": "knowledge__test", "count": 3},
     ]
+    mock_db.collection_info.return_value = {"count": 3, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {
         "ids": ["a", "b", "c"],
@@ -179,8 +180,7 @@ def test_info_shows_last_indexed_when_metadata_exists(
             {"indexed_at": "2026-02-21T12:00:00+00:00", "title": "doc3"},
         ],
     }
-    mock_db._client = MagicMock()
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.commands.collection._t3", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__test"])
@@ -198,6 +198,7 @@ def test_info_shows_unknown_when_no_indexed_at_metadata(
     mock_db.list_collections.return_value = [
         {"name": "knowledge__legacy", "count": 2},
     ]
+    mock_db.collection_info.return_value = {"count": 2, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {
         "ids": ["x", "y"],
@@ -206,8 +207,7 @@ def test_info_shows_unknown_when_no_indexed_at_metadata(
             {"title": "another_without_ts"},
         ],
     }
-    mock_db._client = MagicMock()
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.commands.collection._t3", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__legacy"])

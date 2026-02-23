@@ -45,7 +45,7 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     if idx == -1:
         return {}, text
     fm_content = text[3:idx].strip()
-    rest = text[idx + 4:].lstrip("\n")
+    rest = text[idx + 4:].lstrip("\r\n")
     try:
         data = yaml.safe_load(fm_content) or {}
         if not isinstance(data, dict):

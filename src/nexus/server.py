@@ -58,16 +58,19 @@ def add_repo():
     path_str = data.get("path")
     if not isinstance(path_str, str):
         return jsonify({"error": "'path' must be a non-null string"}), 400
-    path = Path(path_str)
+    path = Path(path_str).resolve()
     if not path.exists():
         return jsonify({"error": "path not found"}), 404
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd=path,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "git rev-parse timed out", "path": str(path)}), 504
     if result.returncode != 0:
         return jsonify({"error": "path is not a git repository"}), 400
     _get_registry().add(path)

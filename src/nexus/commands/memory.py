@@ -49,16 +49,14 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
 def get_cmd(id: int | None, project: str | None, title: str | None) -> None:
     """Retrieve a memory entry by ID or by --project + --title."""
     if id is None and not (project and title):
-        click.echo("Error: provide an ID or --project and --title", err=True)
-        raise SystemExit(1)
+        raise click.UsageError("provide an ID or --project and --title")
     with T2Database(_default_db_path()) as db:
         if id is not None:
             result = db.get(id=id)
         else:
             result = db.get(project=project, title=title)
     if result is None:
-        click.echo("Not found.", err=True)
-        raise SystemExit(1)
+        raise click.ClickException("Not found.")
     click.echo(result["content"])
 
 
