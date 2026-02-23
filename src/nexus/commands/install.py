@@ -61,7 +61,8 @@ Claude Code session hooks call 'nx hook session-start/end' in a plain shell
 where that environment won't be active — the hooks will silently fail.
 
 Install nx permanently so it's always on PATH:
-  macOS (Homebrew):  brew install Hellblazer/nexus/nx
+  macOS (Homebrew):  brew tap Hellblazer/nexus https://github.com/Hellblazer/nexus
+                     brew install Hellblazer/nexus/nx
   any platform:      uv tool install nexus
                      pipx install nexus
 """
