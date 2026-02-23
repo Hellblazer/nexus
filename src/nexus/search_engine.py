@@ -14,7 +14,8 @@ import structlog
 
 from nexus.types import SearchResult  # re-exported for backward compatibility
 
-# ── Re-exports for backward compatibility ─────────────────────────────────────
+# Re-exported for backward compatibility and test patching.
+# Prefer importing directly from nexus.scoring / nexus.answer.
 from nexus.scoring import (
     min_max_normalize,
     hybrid_score,

@@ -121,6 +121,9 @@ def get_credential(name: str) -> str:
 
 def set_credential(name: str, value: str) -> None:
     """Persist *name*=*value* under ``credentials`` in ``~/.config/nexus/config.yml``."""
+    if name not in CREDENTIALS:
+        known = ", ".join(sorted(CREDENTIALS))
+        raise ValueError(f"Unknown credential '{name}'. Known: {known}")
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Lock covers the entire read-modify-write unit so two concurrent calls in

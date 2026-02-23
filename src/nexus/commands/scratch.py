@@ -9,6 +9,10 @@ from nexus.db.t2 import T2Database
 from nexus.session import read_session_id, write_session_file, generate_session_id
 
 
+def _default_db_path() -> Path:
+    return Path.home() / ".config" / "nexus" / "memory.db"
+
+
 def _t1() -> T1Database:
     session_id = read_session_id()
     if session_id is None:
@@ -111,7 +115,7 @@ def unflag_cmd(id: str) -> None:
 def promote_cmd(id: str, project: str, title: str) -> None:
     """Copy a scratch entry to T2 immediately."""
     t1 = _t1()
-    with T2Database(Path.home() / ".config" / "nexus" / "memory.db") as t2:
+    with T2Database(_default_db_path()) as t2:
         try:
             t1.promote(id, project=project, title=title, t2=t2)
         except KeyError as exc:

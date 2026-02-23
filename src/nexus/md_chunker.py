@@ -190,6 +190,9 @@ class SemanticMarkdownChunker:
         if token.content:
             return token.content
         if token.map:
+            # Re-splits source_text on each call. Acceptable because most tokens
+            # have .content populated; the .map fallback path is rare. If this
+            # becomes a bottleneck, pre-split and pass lines as a parameter.
             lines = source_text.split("\n")
             start, end = token.map
             return "\n".join(lines[start:end])
@@ -267,8 +270,9 @@ class SemanticMarkdownChunker:
                 # Truncate oversized parts to prevent unbounded chunk sizes
                 if len(part_text) > self.max_chars:
                     part_text = part_text[: self.max_chars]
-                current_parts = ([header_text, part_text] if header_text else [part_text])
-                current_tokens = (len(header_text) / _CHARS_PER_TOKEN if header_text else 0) + len(part_text) / _CHARS_PER_TOKEN
+                header_tokens = len(header_text) / _CHARS_PER_TOKEN if header_text else 0.0
+                current_parts = [header_text, part_text] if header_text else [part_text]
+                current_tokens = header_tokens + len(part_text) / _CHARS_PER_TOKEN
                 current_end_char = part_end_char
 
         if current_parts:

@@ -7,16 +7,13 @@ from nexus.config import load_config
 from nexus.corpus import resolve_corpus
 from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
+from nexus.formatters import format_json, format_plain, format_plain_with_context, format_vimgrep
 from nexus.search_engine import (
     SearchResult,
     answer_mode,
     apply_hybrid_scoring,
     agentic_search,
     fetch_mxbai_results,
-    format_json,
-    format_plain,
-    format_plain_with_context,
-    format_vimgrep,
     rerank_results,
     round_robin_interleave,
     search_cross_corpus,
@@ -255,12 +252,12 @@ def search_cmd(
                 seen.add(file_path)
                 click.echo(file_path)
     else:
-        for line in format_plain_with_context(
-            results, lines_before=lines_before, lines_after=lines_after
-        ):
-            click.echo(line)
-        if show_content:
-            for result in results:
+        for result in results:
+            for line in format_plain_with_context(
+                [result], lines_before=lines_before, lines_after=lines_after
+            ):
+                click.echo(line)
+            if show_content:
                 text = result.content
                 if len(text) > _CONTENT_MAX_CHARS:
                     text = text[:_CONTENT_MAX_CHARS] + "..."

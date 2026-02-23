@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 PostToolUse hook: Validate bead creation includes context pointer.
 Runs after bd create commands.

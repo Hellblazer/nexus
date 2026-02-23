@@ -7,6 +7,7 @@ Output goes to stdout and is injected into Claude's session context.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,12 +26,7 @@ def debug(msg: str) -> None:
 
 def which(cmd: str) -> bool:
     """Return True if cmd is found on PATH."""
-    result = subprocess.run(
-        ['which', cmd],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
+    return shutil.which(cmd) is not None
 
 
 def run_command(args: list[str], timeout: int, cwd: str | None = None) -> str | None:

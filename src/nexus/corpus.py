@@ -12,6 +12,8 @@ _COLLECTION_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,61}[a-zA-Z0-9]$")
 
 def validate_collection_name(name: str) -> None:
     """Raise ValueError if *name* violates ChromaDB collection name constraints."""
+    # Length check fires first for <3 chars; regex rejects other invalid patterns.
+    # Both gates are needed: length for clear error messages, regex for charset/boundary validation.
     if not (3 <= len(name) <= 63):
         raise ValueError(
             f"Collection name {name!r} must be 3–63 characters (got {len(name)})"

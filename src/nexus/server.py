@@ -98,6 +98,7 @@ def _poll_loop() -> None:
                     check_and_reindex(Path(repo_str), _get_registry())
                 except Exception as exc:
                     _log.warning("Poll error", repo=repo_str, error=str(exc), exc_info=True)
+                    _get_registry().update(Path(repo_str), status="error")
         except Exception as exc:
             _log.exception("Poll loop body raised — restarting", poll_interval=_poll_interval, error=str(exc))
         # Single sleep per iteration regardless of whether the loop body raised.

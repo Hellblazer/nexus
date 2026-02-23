@@ -35,8 +35,12 @@ def _process_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except OSError:
-        return False
+    except OSError as e:
+        if e.errno == errno.ESRCH:
+            return False
+        if e.errno == errno.EPERM:
+            return True  # process exists but owned by another user
+        raise
 
 
 def _read_pid() -> int | None:

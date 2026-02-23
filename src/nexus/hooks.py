@@ -100,28 +100,32 @@ def session_end() -> str:
         session_id = None
 
     flushed = 0
+    expired = 0
 
-    with _open_t2() as db:
-        if session_id:
-            t1 = _open_t1(session_id)
-            for entry in t1.flagged_entries():
-                db.put(
-                    project=entry["flush_project"],
-                    title=entry["flush_title"],
-                    content=entry["content"],
-                    tags=entry.get("tags", ""),
-                    ttl=None,
-                )
-                flushed += 1
-            # Only clear T1 after all entries are successfully flushed to T2.
-            # A finally: t1.clear() would wipe entries if db.put() raises, so
-            # we intentionally clear only on full success.
-            # If db.put() fails mid-loop, the already-flushed entries will be
-            # re-flushed on the next session end — T2.put uses ON CONFLICT DO UPDATE
-            # so duplicate flushes are idempotent (same project/title overwrites).
-            t1.clear()
+    try:
+        with _open_t2() as db:
+            if session_id:
+                t1 = _open_t1(session_id)
+                for entry in t1.flagged_entries():
+                    db.put(
+                        project=entry["flush_project"],
+                        title=entry["flush_title"],
+                        content=entry["content"],
+                        tags=entry.get("tags", ""),
+                        ttl=None,
+                    )
+                    flushed += 1
+                # Only clear T1 after all entries are successfully flushed to T2.
+                # A finally: t1.clear() would wipe entries if db.put() raises, so
+                # we intentionally clear only on full success.
+                # If db.put() fails mid-loop, the already-flushed entries will be
+                # re-flushed on the next session end — T2.put uses ON CONFLICT DO UPDATE
+                # so duplicate flushes are idempotent (same project/title overwrites).
+                t1.clear()
 
-        expired = db.expire()
+            expired = db.expire()
+    except (sqlite3.Error, OSError):
+        pass
 
     # Remove session file
     try:

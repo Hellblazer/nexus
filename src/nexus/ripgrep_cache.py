@@ -40,6 +40,9 @@ def build_cache(
             for lineno, line in enumerate(text.splitlines(), start=1):
                 entry = f"{file}:{lineno}:{line}\n"
                 fh.write(entry)
+                # Approximate: counts UTF-8 bytes of the Python string, not actual
+                # on-disk bytes (text mode may apply newline translation on Windows).
+                # The 500 MB cap is intentionally approximate.
                 written_bytes += len(entry.encode("utf-8"))
 
 
@@ -112,6 +115,9 @@ def search_ripgrep(
             "file_path": file_path_str,
             "line_number": line_number,
             "line_content": line_content,
+            # Hardcoded midpoint score. Ripgrep cache results rely on cache
+            # ordering (not this score) for relevance. If ever used for ranking
+            # against semantic search, consider computing a position-based score.
             "frecency_score": 0.5,
         })
 

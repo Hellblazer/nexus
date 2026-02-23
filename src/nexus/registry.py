@@ -2,14 +2,15 @@
 """Repo registry: JSON persistence with atomic write and thread safety."""
 import hashlib
 import json
-import logging
 import os
 import tempfile
 import threading
 from pathlib import Path
 from typing import Any
 
-_log = logging.getLogger(__name__)
+import structlog
+
+_log = structlog.get_logger()
 
 
 def _collection_name(repo: Path) -> str:
@@ -35,7 +36,7 @@ class RepoRegistry:
             try:
                 self._data = json.loads(path.read_text())
             except (json.JSONDecodeError, OSError) as exc:
-                _log.warning("Failed to load registry from %s (%s); starting empty.", path, exc)
+                _log.warning("Failed to load registry; starting empty", path=str(path), error=str(exc))
                 self._data = {"repos": {}}
 
     # ── public API ────────────────────────────────────────────────────────────

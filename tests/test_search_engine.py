@@ -342,27 +342,33 @@ def test_agentic_search_graceful_on_json_decode_error():
 
 def test_haiku_refine_returns_done_on_json_error():
     """_haiku_refine returns {'done': True} when Haiku response is not valid JSON."""
+    import nexus.answer as _answer_mod
     mock_msg = MagicMock()
     mock_msg.content = [MagicMock(text="Sure! Here is some text, not JSON.")]
     mock_client = MagicMock()
     mock_client.messages.create.return_value = mock_msg
 
+    _answer_mod._anthropic_instance = None
     with patch("nexus.config.get_credential", return_value="key"):
         with patch("anthropic.Anthropic", return_value=mock_client):
             result = se_mod._haiku_refine("query", [])
+    _answer_mod._anthropic_instance = None
     assert result == {"done": True}
 
 
 def test_haiku_refine_returns_done_on_empty_content():
     """_haiku_refine returns {'done': True} when Haiku returns empty content."""
+    import nexus.answer as _answer_mod
     mock_msg = MagicMock()
     mock_msg.content = []
     mock_client = MagicMock()
     mock_client.messages.create.return_value = mock_msg
 
+    _answer_mod._anthropic_instance = None
     with patch("nexus.config.get_credential", return_value="key"):
         with patch("anthropic.Anthropic", return_value=mock_client):
             result = se_mod._haiku_refine("query", [])
+    _answer_mod._anthropic_instance = None
     assert result == {"done": True}
 
 
@@ -406,16 +412,19 @@ def test_min_max_normalize_over_combined_not_per_corpus():
 
 def test_haiku_answer_returns_empty_string_on_empty_content():
     """_haiku_answer returns '' when msg.content is empty (no IndexError)."""
+    import nexus.answer as _answer_mod
     mock_msg = MagicMock()
     mock_msg.content = []  # Empty list — previously caused IndexError
     mock_client = MagicMock()
     mock_client.messages.create.return_value = mock_msg
 
     results = [SearchResult(id="1", content="ctx", distance=0.1, collection="c", metadata={})]
+    _answer_mod._anthropic_instance = None
     with patch("nexus.config.get_credential", return_value="key"):
         with patch("anthropic.Anthropic", return_value=mock_client):
             from nexus.search_engine import _haiku_answer
             result = _haiku_answer("what?", results)
+    _answer_mod._anthropic_instance = None
 
     assert result == ""
 

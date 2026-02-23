@@ -262,8 +262,8 @@ def batch_index_pdfs(
     results: dict[str, str] = {}
     for path in paths:
         try:
-            index_pdf(path, corpus, t3=t3)
-            results[str(path)] = "indexed"
+            count = index_pdf(path, corpus, t3=t3)
+            results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
             _log.warning("batch_index_pdfs: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
@@ -284,8 +284,8 @@ def batch_index_markdowns(
     results: dict[str, str] = {}
     for path in paths:
         try:
-            index_markdown(path, corpus, t3=t3)
-            results[str(path)] = "indexed"
+            count = index_markdown(path, corpus, t3=t3)
+            results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
             _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"

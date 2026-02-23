@@ -38,7 +38,11 @@ def _git_commit_timestamps(repo: Path, file: Path) -> list[float]:
 
 
 def compute_frecency(repo: Path, file: Path) -> float:
-    """Return frecency score: sum of exp(-0.01 * days_since_commit) over all commits."""
+    """Return frecency score: sum of exp(-0.01 * days_since_commit) over all commits.
+
+    Single-file API for computing frecency score. For indexing pipelines,
+    use :func:`batch_frecency` which is more efficient (single git subprocess).
+    """
     now = datetime.now(UTC).timestamp()
     timestamps = _git_commit_timestamps(repo, file)
     if not timestamps:
@@ -52,6 +56,9 @@ def compute_frecency(repo: Path, file: Path) -> float:
 
 def batch_frecency(repo: Path) -> dict[Path, float]:
     """Return frecency scores for all committed files in *repo*.
+
+    Batch API for indexing pipelines. See also :func:`compute_frecency`
+    for single-file usage.
 
     Runs a single ``git log`` subprocess rather than one per file.
     Returns a mapping from absolute file path to score.
@@ -75,6 +82,10 @@ def batch_frecency(repo: Path) -> dict[Path, float]:
     scores: dict[Path, float] = {}
     current_ts: float | None = None
 
+    # Format: "COMMIT <timestamp>\n<file1>\n<file2>\n\n"
+    # The "COMMIT " prefix is 7 chars; blank lines between commits are skipped.
+    # Fragile assumption: file paths never start with "COMMIT ".
+    # If git output format changes, this parser may silently misassign timestamps.
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line:

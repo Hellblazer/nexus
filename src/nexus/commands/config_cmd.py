@@ -87,13 +87,15 @@ def config_list() -> None:
     """Show all credentials and config settings."""
     click.echo("Credentials  (env var takes precedence over config file)\n")
 
+    path = _global_config_path()
+    file_data: dict = {}
+    if path.exists():
+        file_data = yaml.safe_load(path.read_text()) or {}
+    file_creds = file_data.get("credentials", {})
+
     for cred, env_var in CREDENTIALS.items():
         env_val = os.environ.get(env_var, "")
-        file_val = ""
-        path = _global_config_path()
-        if path.exists():
-            data = yaml.safe_load(path.read_text()) or {}
-            file_val = data.get("credentials", {}).get(cred, "")
+        file_val = file_creds.get(cred, "")
 
         if env_val:
             source = f"env:{env_var}"

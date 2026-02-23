@@ -3,11 +3,28 @@
 from __future__ import annotations
 
 import json as _json
+import threading
 
 from nexus.config import HAIKU_MODEL
 from nexus.types import SearchResult
 
 _HAIKU_MODEL = HAIKU_MODEL
+
+_anthropic_instance: "object | None" = None
+_anthropic_lock = threading.Lock()
+
+
+def _anthropic_client():
+    """Return a cached anthropic.Anthropic instance."""
+    global _anthropic_instance
+    if _anthropic_instance is not None:
+        return _anthropic_instance
+    with _anthropic_lock:
+        if _anthropic_instance is None:
+            import anthropic
+            from nexus.config import get_credential
+            _anthropic_instance = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
+    return _anthropic_instance
 
 
 def _haiku_answer(query: str, results: list[SearchResult]) -> str:
@@ -25,8 +42,7 @@ def _haiku_answer(query: str, results: list[SearchResult]) -> str:
         "Cite each source by index number. Use <cite i=\"N\"> for single source, "
         "<cite i=\"N-M\"> for a range of consecutive sources."
     )
-    from nexus.config import get_credential
-    client = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
+    client = _anthropic_client()
     msg = client.messages.create(
         model=_HAIKU_MODEL,
         max_tokens=1024,
@@ -50,8 +66,7 @@ def _haiku_refine(query: str, results: list[SearchResult]) -> dict:
         '{"done": true}  — if results are sufficient\n'
         '{"query": "<refined query>"}  — if results need improvement'
     )
-    from nexus.config import get_credential
-    client = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
+    client = _anthropic_client()
     msg = client.messages.create(
         model=_HAIKU_MODEL,
         max_tokens=64,
@@ -74,7 +89,7 @@ def answer_mode(query: str, results: list[SearchResult]) -> str:
     synthesis = _haiku_answer(query, results)
 
     # Build citation footer
-    footer_lines: list[str] = [""]
+    footer_lines: list[str] = []
     for i, r in enumerate(results):
         source_path = r.metadata.get("source_path", "?")
         line_start = r.metadata.get("line_start", "?")
@@ -83,4 +98,4 @@ def answer_mode(query: str, results: list[SearchResult]) -> str:
         line_ref = f"{line_start}-{line_end}" if line_end != "?" else str(line_start)
         footer_lines.append(f"{i}: {source_path}:{line_ref} ({match_pct:.1f}% match)")
 
-    return synthesis + "\n".join(footer_lines)
+    return synthesis + "\n\n" + "\n".join(footer_lines)

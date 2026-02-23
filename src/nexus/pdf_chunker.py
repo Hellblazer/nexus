@@ -2,6 +2,10 @@
 """PDF text chunker with sentence-boundary awareness and page number tracking."""
 from dataclasses import dataclass
 
+import structlog
+
+_log = structlog.get_logger()
+
 _DEFAULT_CHUNK_CHARS = 1500   # ~450 tokens at 3.3 chars/token
 _DEFAULT_OVERLAP = 0.15
 
@@ -73,4 +77,7 @@ class PDFChunker:
             page_end = page_start + page["page_text_length"]
             if page_start <= char_pos < page_end:
                 return page["page_number"]
+        # If we reach here, chunk_start is past all page boundaries — unexpected
+        _log.debug("chunk_start past all page boundaries, using last page",
+                   chunk_start=char_pos, last_boundary=page_boundaries[-1]["end"] if page_boundaries else None)
         return page_boundaries[-1]["page_number"] if page_boundaries else 0

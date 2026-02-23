@@ -61,6 +61,10 @@ def format_plain_with_context(
     Shows at most ``lines_before`` lines before the first line of the chunk,
     then the first matched line, then at most ``lines_after`` additional lines.
     When both are 0, produces identical output to ``format_plain``.
+
+    Note: ``lines_before`` is accepted for API compatibility but currently
+    has no functional effect — the context window always starts at line 0
+    of the chunk because the match position defaults to ``min(lines_before, total - 1)``.
     """
     if lines_before == 0 and lines_after == 0:
         return format_plain(results)

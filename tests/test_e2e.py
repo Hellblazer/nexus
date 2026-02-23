@@ -209,6 +209,7 @@ def test_format_json_is_valid_json(local_t3: T3Database) -> None:
 
 def test_answer_mode_returns_synthesis_with_citations() -> None:
     """answer_mode() calls Haiku and returns the synthesized text."""
+    import nexus.answer as _answer_mod
     from nexus.search_engine import SearchResult, answer_mode
 
     results = [
@@ -218,6 +219,7 @@ def test_answer_mode_returns_synthesis_with_citations() -> None:
     ]
     canned = 'Nexus stores data in ChromaDB. <cite i="1">ChromaDB for storage</cite>'
 
+    _answer_mod._anthropic_instance = None
     with patch("nexus.config.get_credential", return_value="mock-key"):
         with patch("anthropic.Anthropic") as mock_cls:
             mock_client = MagicMock()
@@ -226,6 +228,7 @@ def test_answer_mode_returns_synthesis_with_citations() -> None:
                 content=[MagicMock(text=canned)]
             )
             output = answer_mode("how does nexus store data?", results)
+    _answer_mod._anthropic_instance = None
 
     assert "ChromaDB" in output
     assert "arch.md" in output  # citation footer

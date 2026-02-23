@@ -103,5 +103,10 @@ def doctor_cmd() -> None:
             click.echo(f"  {key:<24} {_SIGNUP.get(key, '')}")
         click.echo("\nRun 'nx config init' for an interactive setup wizard.")
 
+    if missing_tools:
+        click.echo("\nMissing tools:")
+        for tool in missing_tools:
+            click.echo(f"  • {tool} — install via your system package manager")
+
     if missing or missing_tools:
         raise click.exceptions.Exit(1)

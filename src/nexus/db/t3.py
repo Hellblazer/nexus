@@ -65,6 +65,8 @@ class T3Database:
     def _embedding_fn(self, collection_name: str):
         if self._ef_override is not None:
             return self._ef_override
+        # Fast path: dict read without lock. Safe under CPython GIL but
+        # technically a data race in GIL-free Python (3.13+ free-threaded mode).
         if collection_name in self._ef_cache:
             return self._ef_cache[collection_name]
         with self._ef_lock:
@@ -110,6 +112,11 @@ class T3Database:
         carrying over an existing T2 TTL from a known base timestamp).  When
         omitted and *ttl_days* > 0, ``expires_at`` is computed from
         ``datetime.now(UTC)``.
+
+        Note: The document ID is derived from ``collection:title``. Calling put()
+        with an empty title will overwrite any previous empty-title document in the
+        same collection. Always provide a meaningful title to avoid unintentional
+        overwrites.
         """
         doc_id = hashlib.sha256(f"{collection}:{title}".encode()).hexdigest()[:16]
         now_iso = datetime.now(UTC).isoformat()
@@ -252,6 +259,9 @@ class T3Database:
         Only removes entries where ``ttl_days > 0`` AND ``expires_at != ""``
         AND ``expires_at < now``. Permanent entries (``ttl_days=0``,
         ``expires_at=""``) are always preserved.
+
+        Note: Intentionally bypasses _embedding_fn / _ef_cache since expire()
+        only needs metadata-only operations (get + delete), not embedding queries.
 
         Returns the total number of deleted documents.
         """

@@ -48,6 +48,9 @@ def apply_hybrid_scoring(
 
     If *hybrid* is True but no code__ collections appear in results, a warning
     is printed and all results use 1.0 * vector_norm.
+
+    Note: Mutates ``hybrid_score`` on each SearchResult in place before
+    returning the sorted list.
     """
     if not results:
         return results
@@ -103,6 +106,9 @@ def rerank_results(
     """Rerank *results* using Voyage AI reranker.
 
     Returns results sorted by relevance_score descending.
+
+    Note: Mutates ``hybrid_score`` on each SearchResult in place before
+    returning the sorted list.
     """
     if not results:
         return results

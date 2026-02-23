@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -118,6 +118,8 @@ def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> 
 
 def _split_synthesis(text: str) -> list[str]:
     """Split synthesis into chunks if it exceeds 1200 tokens (~3960 chars)."""
+    # ~1200 tokens × 3.3 chars/token ≈ 3960 chars. Keeps each chunk
+    # within Claude Haiku's comfortable synthesis window.
     CHAR_LIMIT = 3960
     if len(text) <= CHAR_LIMIT:
         return [text]
@@ -360,7 +362,6 @@ def pm_archive(
         if len(chunks) > 1:
             extra_meta["chunk_index"] = i
         doc_id = hashlib.sha256(f"{collection}:{chunk_title}".encode()).hexdigest()[:16]
-        from datetime import timedelta as _td
         now_iso = datetime.now(UTC).isoformat()
         full_meta: dict[str, Any] = {
             "title": chunk_title,
@@ -401,11 +402,7 @@ def pm_restore(db: "T2Database", project: str) -> None:
     standard_titles = set(_STANDARD_DOCS.keys())
     missing = standard_titles - set(surviving)
     if missing:
-        _log.warning(
-            "%d doc(s) expired before restore: %s",
-            len(missing),
-            ", ".join(sorted(missing)),
-        )
+        _log.warning("docs expired before restore", count=len(missing), titles=", ".join(sorted(missing)))
 
 
 # ── AC7: pm_reference ────────────────────────────────────────────────────────
@@ -495,8 +492,7 @@ def pm_promote(
     # When ttl_days=0 (permanent), expires_at is empty.
     if ttl_days > 0:
         base_ts = datetime.fromisoformat(doc["timestamp"].replace("Z", "+00:00"))
-        from datetime import timedelta as _timedelta
-        expires_at = (base_ts + _timedelta(days=ttl_days)).isoformat()
+        expires_at = (base_ts + timedelta(days=ttl_days)).isoformat()
     else:
         expires_at = ""
 

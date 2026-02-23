@@ -77,6 +77,8 @@ class T2Database:
 
     def _init_schema(self) -> None:
         with self._lock:
+            # Note: executescript() implicitly COMMITs any open transaction.
+            # Safe here because _init_schema runs only during __init__ with no prior transaction.
             self.conn.executescript(_SCHEMA_SQL)
             self.conn.commit()
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
@@ -193,7 +195,11 @@ class T2Database:
         project: str | None = None,
         agent: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List entries ordered by timestamp descending. Optionally filtered."""
+        """List entries ordered by timestamp descending. Optionally filtered.
+
+        Returns a summary view with columns: id, title, agent, timestamp.
+        Use get() or get_all() for full row content including the text body.
+        """
         conditions: list[str] = []
         params: list[Any] = []
         if project:

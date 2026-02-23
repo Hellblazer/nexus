@@ -23,6 +23,8 @@ def _stable_pid() -> int:
             return int(raw)
         except ValueError:
             pass  # fall through to getsid
+    # os.getsid is POSIX-only; raises AttributeError on Windows.
+    # Acceptable since Nexus targets macOS/Linux (Claude Code environments).
     return os.getsid(0)
 
 
@@ -35,8 +37,9 @@ def session_file_path(ppid: int | None = None) -> Path:
 def write_session_file(session_id: str, ppid: int | None = None) -> Path:
     """Write *session_id* to the session file. Returns the path."""
     path = session_file_path(ppid)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.write_text(session_id)
+    path.chmod(0o600)
     return path
 
 

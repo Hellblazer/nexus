@@ -88,7 +88,10 @@ def status_cmd(project: str | None) -> None:
 @click.argument("blocker")
 @click.option("--project", default=None)
 def block_cmd(blocker: str, project: str | None) -> None:
-    """Append a blocker bullet to BLOCKERS.md."""
+    """Add a blocker line to the project's BLOCKERS.md.
+
+    BLOCKER is the text describing what is blocking progress.
+    """
     proj = project or _infer_project()
     with T2Database(_default_db_path()) as db:
         pm_block(db, project=proj, blocker=blocker)
@@ -99,7 +102,10 @@ def block_cmd(blocker: str, project: str | None) -> None:
 @click.argument("line", type=int)
 @click.option("--project", default=None)
 def unblock_cmd(line: int, project: str | None) -> None:
-    """Remove blocker at 1-based LINE number."""
+    """Remove a blocker by line number from BLOCKERS.md.
+
+    LINE is the 1-based line number to remove.
+    """
     proj = project or _infer_project()
     with T2Database(_default_db_path()) as db:
         pm_unblock(db, project=proj, line=line)

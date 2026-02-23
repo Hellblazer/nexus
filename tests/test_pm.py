@@ -173,6 +173,7 @@ def test_pm_archive_calls_haiku_then_t3(db) -> None:
     pm_init(db, project="myrepo")
 
     mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []  # no prior archive
     mock_t3.get_or_create_collection.return_value = mock_col
@@ -189,9 +190,11 @@ def test_pm_archive_decays_t2_after_t3(db) -> None:
     """pm_archive sets TTL on T2 docs only after T3 write succeeds."""
     pm_init(db, project="myrepo")
 
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
-    mock_t3.get_or_create_collection.return_value = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku", return_value="# summary"):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
@@ -239,8 +242,11 @@ def test_pm_archive_aborts_on_haiku_failure(db) -> None:
     """pm_archive aborts without touching T2 if Haiku synthesis fails."""
     pm_init(db, project="myrepo")
 
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
+    mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku", side_effect=RuntimeError("API error")):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
@@ -415,6 +421,7 @@ def test_pm_archive_upsert_includes_required_metadata(db) -> None:
     pm_init(db, project="myrepo")
 
     mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
     mock_t3.get_or_create_collection.return_value = mock_col
