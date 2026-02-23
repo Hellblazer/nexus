@@ -69,17 +69,17 @@ nx search "how does feature X work in our codebase" --corpus code --hybrid --n 1
 
 ## Consistency Checks
 
-> **Note**: Run all commands below from the **repository root** (`/path/to/nexus/`), not from within `agents/_shared/`.
+Run from the **plugin root** (the `nx-plugin/` directory):
 
 ```bash
 # All agents reference shared protocol
-grep -l "Shared Context Protocol.*_shared" nx-plugin/agents/*.md | wc -l
+grep -l "Shared Context Protocol.*_shared" agents/*.md | wc -l
 
 # No inline RECEIVE sections (should return nothing)
-grep -l "^### RECEIVE " nx-plugin/agents/*.md
+grep -l "^### RECEIVE " agents/*.md
 
 # Validate markdown frontmatter
-for f in nx-plugin/agents/*.md; do
+for f in agents/*.md; do
   head -7 "$f" | grep -q "^---" && echo "✓ $(basename $f)" || echo "✗ $(basename $f)"
 done
 ```
