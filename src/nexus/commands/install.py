@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import sys
 from pathlib import Path
 
 import click
@@ -48,6 +50,30 @@ def _nx_hook_entry(command: str) -> dict:
     return {"command": command}
 
 
+# ── PATH check ────────────────────────────────────────────────────────────────
+
+_VENV_INDICATORS = (".venv", "/venv/", "virtualenvs", "site-packages")
+
+_INSTALL_HINT = """\
+
+Warning: nx is running from an isolated environment ({path}).
+Claude Code session hooks call 'nx hook session-start/end' in a plain shell
+where that environment won't be active — the hooks will silently fail.
+
+Install nx permanently so it's always on PATH:
+  macOS (Homebrew):  brew install Hellblazer/nexus/nx
+  any platform:      uv tool install nexus
+                     pipx install nexus
+"""
+
+
+def _warn_if_transient_install() -> None:
+    """Emit a warning when nx is running from a venv that hooks won't see."""
+    nx_path = shutil.which("nx") or sys.argv[0]
+    if any(ind in nx_path for ind in _VENV_INDICATORS):
+        click.echo(_INSTALL_HINT.format(path=nx_path), err=True)
+
+
 # ── Install ───────────────────────────────────────────────────────────────────
 
 @click.group("install")
@@ -58,6 +84,8 @@ def install_group() -> None:
 @install_group.command("claude-code")
 def install_claude_code() -> None:
     """Install SKILL.md and session hooks for Claude Code."""
+    _warn_if_transient_install()
+
     # Write SKILL.md
     skill_path = Path.home() / ".claude" / "skills" / "nexus" / "SKILL.md"
     skill_path.parent.mkdir(parents=True, exist_ok=True)

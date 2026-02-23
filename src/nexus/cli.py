@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import importlib.metadata
+
 import click
 
 from nexus.commands.collection import collection
@@ -16,6 +18,7 @@ from nexus.commands.store import store
 
 
 @click.group()
+@click.version_option(importlib.metadata.version("nexus"), prog_name="nx")
 def main() -> None:
     """Nexus — self-hosted semantic search and knowledge management."""
 
