@@ -2,10 +2,16 @@
 import copy
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# Protects the read-modify-write sequence in set_credential() against concurrent
+# calls within the same process.  Cross-process safety is provided by the atomic
+# os.replace() at the end; in-process safety requires this lock.
+_config_lock = threading.Lock()
 
 # ── Model constants ───────────────────────────────────────────────────────────
 
@@ -117,24 +123,27 @@ def set_credential(name: str, value: str) -> None:
     """Persist *name*=*value* under ``credentials`` in ``~/.config/nexus/config.yml``."""
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data: dict[str, Any] = {}
-    if path.exists():
-        data = yaml.safe_load(path.read_text()) or {}
-    data.setdefault("credentials", {})[name] = value
-    content = yaml.dump(data, default_flow_style=False)
-    # Atomic write: write to temp file in same directory, then os.replace()
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
-    try:
-        with os.fdopen(tmp_fd, "w") as fh:
-            fh.write(content)
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, path)
-    except Exception:
+    # Lock covers the entire read-modify-write unit so two concurrent calls in
+    # the same process cannot silently drop each other's change.
+    with _config_lock:
+        data: dict[str, Any] = {}
+        if path.exists():
+            data = yaml.safe_load(path.read_text()) or {}
+        data.setdefault("credentials", {})[name] = value
+        content = yaml.dump(data, default_flow_style=False)
+        # Atomic write: unique temp file → os.replace() (0o600 permissions).
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(tmp_fd, "w") as fh:
+                fh.write(content)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def load_config(repo_root: Path | None = None) -> dict[str, Any]:

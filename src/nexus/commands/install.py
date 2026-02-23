@@ -17,11 +17,22 @@ _SESSION_END_CMD   = "nx hook session-end"
 _NX_HOOK_MARKER = "nx hook"  # sentinel for install/uninstall detection
 
 
-# ── SKILL.md content ──────────────────────────────────────────────────────────
+# ── SKILL.md source path ──────────────────────────────────────────────────────
 
-_SKILL_MD = (
-    Path(__file__).parents[3] / "nx" / "skills" / "nexus" / "SKILL.md"
-).read_text()
+# Evaluated lazily (at command invocation, not at import) to avoid crashing
+# the entire nx CLI with FileNotFoundError when installed outside the source tree.
+_SKILL_MD_PATH = Path(__file__).parents[3] / "nx" / "skills" / "nexus" / "SKILL.md"
+
+
+def _read_skill_md() -> str:
+    """Read SKILL.md content, raising ClickException with install hint if absent."""
+    if not _SKILL_MD_PATH.exists():
+        raise click.ClickException(
+            f"SKILL.md not found at {_SKILL_MD_PATH}.\n"
+            "This usually means nx is installed outside its source tree.\n"
+            "Install permanently with: uv tool install nexus  or  pipx install nexus"
+        )
+    return _SKILL_MD_PATH.read_text()
 
 
 # ── Settings helpers ──────────────────────────────────────────────────────────
@@ -87,10 +98,10 @@ def install_claude_code() -> None:
     """Install SKILL.md and session hooks for Claude Code."""
     _warn_if_transient_install()
 
-    # Write SKILL.md
+    # Write SKILL.md (read here, not at import time, to avoid startup crashes)
     skill_path = Path.home() / ".claude" / "skills" / "nexus" / "SKILL.md"
     skill_path.parent.mkdir(parents=True, exist_ok=True)
-    skill_path.write_text(_SKILL_MD)
+    skill_path.write_text(_read_skill_md())
     click.echo(f"Wrote SKILL.md → {skill_path}")
 
     # Update settings.json

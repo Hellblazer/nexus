@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -86,8 +87,21 @@ class RepoRegistry:
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _save(self) -> None:
-        """Atomic write: write to .tmp then os.replace()."""
-        tmp = Path(str(self._path) + ".tmp")
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(self._data, indent=2))
-        os.replace(tmp, self._path)
+        """Atomic write via mkstemp + os.replace(), safe against concurrent processes.
+
+        Using a fixed .tmp name would allow two concurrent nx processes to collide:
+        both write to the same temp file and one silently loses its update.
+        mkstemp creates a uniquely-named temp file so each process writes independently.
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path_str = tempfile.mkstemp(dir=self._path.parent, prefix=".repos_")
+        try:
+            with os.fdopen(tmp_fd, "w") as fh:
+                fh.write(json.dumps(self._data, indent=2))
+            os.replace(tmp_path_str, self._path)
+        except Exception:
+            try:
+                os.unlink(tmp_path_str)
+            except OSError:
+                pass
+            raise

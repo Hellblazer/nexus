@@ -19,17 +19,24 @@ def parse_ttl(s: str | None) -> int | None:
     if low in ("permanent", "never"):
         return None
 
+    _MAX_TTL_DAYS = 36500  # 100 years; beyond this datetime arithmetic overflows
+
     if m := re.fullmatch(r"(\d+)d", low):
         days = int(m.group(1))
         if days == 0:
             raise ValueError(f"TTL must be positive; got {s!r}")
+        if days > _MAX_TTL_DAYS:
+            raise ValueError(f"TTL too large: {days}d exceeds maximum {_MAX_TTL_DAYS}d (100 years)")
         return days
 
     if m := re.fullmatch(r"(\d+)w", low):
         weeks = int(m.group(1))
         if weeks == 0:
             raise ValueError(f"TTL must be positive; got {s!r}")
-        return weeks * 7
+        days = weeks * 7
+        if days > _MAX_TTL_DAYS:
+            raise ValueError(f"TTL too large: {weeks}w exceeds maximum {_MAX_TTL_DAYS}d (100 years)")
+        return days
 
     raise ValueError(
         f"Invalid TTL format {s!r}. Use Nd (days), Nw (weeks), or 'permanent'/'never'."

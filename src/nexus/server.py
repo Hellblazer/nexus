@@ -95,14 +95,20 @@ def _poll_loop() -> None:
                     check_and_reindex(Path(repo_str), _get_registry())
                 except Exception as exc:
                     _log.warning("Poll error", repo=repo_str, error=str(exc), exc_info=True)
-            time.sleep(_poll_interval)
         except Exception as exc:
             _log.exception("Poll loop body raised — restarting", poll_interval=_poll_interval, error=str(exc))
-            time.sleep(_poll_interval)
+        # Single sleep per iteration regardless of whether the loop body raised.
+        time.sleep(_poll_interval)
 
 
-def start_server(host: str = "127.0.0.1", port: int = 7474, poll_interval: int = 10) -> None:
-    """Start Flask + poll thread via Waitress."""
+def start_server(host: str = "127.0.0.1", port: int = 7890, poll_interval: int = 10) -> None:
+    """Start Flask + poll thread via Waitress.
+
+    Security note: the server binds to 127.0.0.1 (localhost only) and has no
+    authentication by design — it is a local developer tool.  Any process on
+    the same machine can register repos or trigger reindexing.  Do not expose
+    this server on a non-loopback interface without adding authentication.
+    """
     global _poll_interval
     _poll_interval = poll_interval
 

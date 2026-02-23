@@ -136,20 +136,20 @@ def promote_cmd(id: int, collection: str, tags: str, remove: bool) -> None:
         else:
             expires_at = ""  # permanent
 
-        t3 = T3Database(
+        with T3Database(
             tenant=get_credential("chroma_tenant"),
             database=get_credential("chroma_database"),
             api_key=get_credential("chroma_api_key"),
             voyage_api_key=get_credential("voyage_api_key"),
-        )
-        doc_id = t3.put(
-            collection=collection,
-            content=entry["content"],
-            title=entry["title"],
-            tags=merged_tags,
-            ttl_days=ttl_days,
-            expires_at=expires_at,
-        )
+        ) as t3:
+            doc_id = t3.put(
+                collection=collection,
+                content=entry["content"],
+                title=entry["title"],
+                tags=merged_tags,
+                ttl_days=ttl_days,
+                expires_at=expires_at,
+            )
 
         if remove:
             db.delete(entry["project"], entry["title"])

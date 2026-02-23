@@ -52,6 +52,14 @@ class T3Database:
                 tenant=tenant, database=database, api_key=api_key
             )
 
+    # ── Context manager (no-op: CloudClient is stateless REST) ───────────────
+
+    def __enter__(self) -> "T3Database":
+        return self
+
+    def __exit__(self, *_) -> None:
+        pass  # ChromaDB CloudClient is HTTP-based; no persistent connection to close.
+
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _embedding_fn(self, collection_name: str):
@@ -318,7 +326,10 @@ class T3Database:
 
     def delete_by_source(self, collection_name: str, source_path: str) -> int:
         """Delete all chunks for a given source path. Returns count deleted."""
-        col = self._client.get_collection(collection_name)
+        try:
+            col = self._client.get_collection(collection_name)
+        except _ChromaNotFoundError:
+            return 0
         existing = col.get(where={"source_path": source_path}, include=[])
         ids = existing["ids"]
         if ids:
@@ -330,8 +341,13 @@ class T3Database:
 
         Keys returned: ``name``, ``count``, ``embedding_model`` (query-time model),
         ``index_model`` (index-time model, may differ for CCE collections).
+
+        Raises KeyError if the collection does not exist.
         """
-        col = self._client.get_collection(collection_name)
+        try:
+            col = self._client.get_collection(collection_name)
+        except _ChromaNotFoundError:
+            raise KeyError(f"Collection not found: {collection_name!r}") from None
         return {
             "name": collection_name,
             "count": col.count(),

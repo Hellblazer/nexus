@@ -6,6 +6,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import sqlite3
+
 from nexus.db.t2 import T2Database
 from nexus.session import generate_session_id, session_file_path, write_session_file
 
@@ -71,7 +73,7 @@ def session_start() -> str:
                         lines.append(f"  - {e['title']} ({e.get('agent') or '-'}, {e.get('timestamp', '')[:10]})")
                 else:
                     lines.append(f"No memory entries for '{repo}'.")
-    except Exception:
+    except (sqlite3.Error, OSError):
         lines.append("(memory unavailable)")
 
     return "\n".join(lines)
@@ -112,7 +114,11 @@ def session_end() -> str:
                 )
                 flushed += 1
             # Only clear T1 after all entries are successfully flushed to T2.
-            # A finally: t1.clear() would wipe entries if db.put() raises.
+            # A finally: t1.clear() would wipe entries if db.put() raises, so
+            # we intentionally clear only on full success.
+            # If db.put() fails mid-loop, the already-flushed entries will be
+            # re-flushed on the next session end — T2.put uses ON CONFLICT DO UPDATE
+            # so duplicate flushes are idempotent (same project/title overwrites).
             t1.clear()
 
         expired = db.expire()

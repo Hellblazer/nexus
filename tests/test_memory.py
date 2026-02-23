@@ -210,6 +210,9 @@ def test_promote_cmd_calls_t3_put(runner: CliRunner, mem_home: Path, db: T2Datab
 
     mock_t3 = MagicMock()
     mock_t3.put.return_value = "abc123"
+    # Wire up context manager so `with T3Database(...) as t3:` yields mock_t3.
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
         with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
@@ -234,6 +237,8 @@ def test_promote_cmd_permanent_entry_ttl_is_zero(runner: CliRunner, mem_home: Pa
     row_id = db.put(project="proj", title="perm.md", content="forever", ttl=None)
 
     mock_t3 = MagicMock()
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
     mock_t3.put.return_value = "def456"
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
@@ -253,6 +258,8 @@ def test_promote_cmd_remove_deletes_t2_entry(runner: CliRunner, mem_home: Path, 
     row_id = db.put(project="proj", title="tmp.md", content="temp data", ttl=5)
 
     mock_t3 = MagicMock()
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
     mock_t3.put.return_value = "ghi789"
 
     _t2_cm = MagicMock(__enter__=MagicMock(return_value=db))
@@ -324,6 +331,8 @@ def test_promote_cmd_expires_at_derived_from_t2_timestamp(
     db.conn.commit()
 
     mock_t3 = MagicMock()
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
     mock_t3.put.return_value = "xyz000"
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
@@ -355,6 +364,8 @@ def test_promote_cmd_permanent_expires_at_is_empty(
     row_id = db.put(project="proj", title="perm2.md", content="forever", ttl=None)
 
     mock_t3 = MagicMock()
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
     mock_t3.put.return_value = "perm-id"
 
     with patch("nexus.commands.memory.T2Database", return_value=db):

@@ -170,9 +170,10 @@ class T1Database:
 
     def clear(self) -> int:
         """Remove all session entries. Returns the count deleted."""
-        count = self._col.count()
-        if count == 0:
-            return 0
+        # Query by session_id directly — the former total-count early-exit was
+        # incorrect: if the collection has entries from OTHER sessions (count > 0)
+        # but THIS session has none, the early return would still proceed to the
+        # get() call unnecessarily.  Removing it is cleaner and correct.
         result = self._col.get(
             where={"session_id": self._session_id},
             include=[],

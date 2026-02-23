@@ -87,7 +87,12 @@ class PDFExtractor:
                         {
                             "page_number": page_num + 1,
                             "start_char": current_pos,
-                            "page_text_length": len(page_md),
+                            # +1 includes the \n separator from "\n".join so that
+                            # _page_for ranges are contiguous and the separator is
+                            # attributed to the preceding page (not left uncovered).
+                            # For the last page the range extends 1 char beyond the
+                            # text end, which is harmless since no chunk starts there.
+                            "page_text_length": len(page_md) + 1,
                         }
                     )
                     page_texts.append(page_md)
@@ -126,7 +131,9 @@ class PDFExtractor:
                         {
                             "page_number": page_num + 1,
                             "start_char": current_pos,
-                            "page_text_length": len(page_text),
+                            # +1 includes the \n separator from "\n".join (same
+                            # rationale as _extract_markdown: contiguous ranges).
+                            "page_text_length": len(page_text) + 1,
                         }
                     )
                     text_parts.append(page_text)

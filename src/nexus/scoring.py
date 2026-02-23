@@ -15,13 +15,16 @@ _RERANK_MODEL = "rerank-2.5"
 def min_max_normalize(value: float, window: list[float]) -> float:
     """Normalize *value* into [0, 1] using the min/max of *window*.
 
-    Computed over the combined result window (not per-corpus). Returns 0.0
-    when all values are identical (denominator collapses to ε).
+    Computed over the combined result window (not per-corpus). Returns 1.0
+    when *window* has a single element (it is trivially the maximum). Returns
+    0.0 when all values are identical (denominator collapses to ε).
 
     Raises ValueError if *window* is empty.
     """
     if not window:
         raise ValueError("min_max_normalize: window must be non-empty")
+    if len(window) == 1:
+        return 1.0  # single element is trivially the best; avoid collapsing to 0.0
     lo = min(window)
     hi = max(window)
     return (value - lo) / (hi - lo + _EPSILON)
