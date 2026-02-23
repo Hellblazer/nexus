@@ -26,22 +26,20 @@ description: List current and archived PM projects (project)
   fi
 
   echo ""
-  echo "## Archived Projects (T2 — restorable within 90 days)"
+  echo "## Archived Projects (restorable within 90 days of archiving)"
   echo ""
 
-  # List T2 memory entries tagged as PM projects
-  nx memory list 2>&1 | grep -i "^pm::\|__pm__\|project:" | head -20 || true
-
-  # If no filtered results, show broader memory list with note
-  if ! nx memory list 2>&1 | grep -qi "pm::\|__pm__\|project:"; then
-    echo "(no archived PM projects in T2)"
+  # nx pm reference lists T3 archived PM syntheses; also covers 90-day T2 window
+  ARCHIVED=$(nx pm reference 2>/dev/null)
+  if [ -n "$ARCHIVED" ]; then
+    echo "$ARCHIVED"
+  else
+    echo "(no archived PM projects found)"
+    echo ""
+    echo "Use \`/pm-new <name>\` to start a new project, or"
+    echo "  \`nx pm reference \"<topic>\"\` to search past work by keyword."
   fi
 
-  echo ""
-  echo "## T3 Archives (permanent — use reference search)"
-  echo ""
-  echo "Search permanent archives with:"
-  echo "  nx pm reference \"<project-name or topic>\""
   echo ""
   echo "---"
   echo ""
