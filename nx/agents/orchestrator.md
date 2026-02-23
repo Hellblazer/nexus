@@ -167,7 +167,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 Store using these naming conventions:
 - **nx store title**: `pattern-orchestrator-{routing-scenario}` for routing patterns
 - **nx memory**: `--project {project}_active --title {phase}.md`
-- **Bead Description**: Include `Context: nx-plugin` line
+- **Bead Description**: Include `Context: nx` line
 
 
 

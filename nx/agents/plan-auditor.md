@@ -183,7 +183,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **Nexus memory**: `nx memory put "content" --project {project}_active --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
-- **Bead Description**: Include `Context: nx-plugin` line
+- **Bead Description**: Include `Context: nx` line
 
 ### Completion Protocol
 

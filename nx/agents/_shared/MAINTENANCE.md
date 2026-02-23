@@ -69,7 +69,7 @@ nx search "how does feature X work in our codebase" --corpus code --hybrid --n 1
 
 ## Consistency Checks
 
-Run from the **plugin root** (the `nx-plugin/` directory):
+Run from the **plugin root** (the `nx/` directory):
 
 ```bash
 # All agents reference shared protocol

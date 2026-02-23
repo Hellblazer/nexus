@@ -101,7 +101,7 @@ Agents produce artifacts based on their specialization:
 
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: `--project {project}_active --title {phase}.md` (e.g., `--project ART_active --title phase2-implementation.md`)
-- **Bead Description**: Include `Context: nx-plugin` line if project uses PM infrastructure
+- **Bead Description**: Include `Context: nx` line if project uses PM infrastructure
 
 ## nx pm Lifecycle
 

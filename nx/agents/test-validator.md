@@ -167,7 +167,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: `{project}_active/{phase}.md` (e.g., `ART_active/phase2-implementation.md`)
-- **Bead Description**: Include `Context: nx-plugin` line
+- **Bead Description**: Include `Context: nx` line
 
 
 

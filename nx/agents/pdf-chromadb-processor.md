@@ -176,7 +176,7 @@ Store using these naming conventions:
 - **nx store title**: `{author-year}-p{start}-p{end}` for chunks, or use `nx index pdf` for full ingestion
 - **nx store collection**: `{author-lastname}-{year}-{short-title}` (corpus name)
 - **nx memory**: `--project pdf-processing --title {collection-name}-progress.md` for progress tracking
-- **Bead Description**: Include `Context: nx-plugin` line
+- **Bead Description**: Include `Context: nx` line
 
 
 

@@ -12,7 +12,7 @@ A Claude Code plugin that provides a full suite of specialized agents, skills, c
 ## Directory Structure
 
 ```
-nx-plugin/
+nx/
 ├── .claude-plugin/
 │   └── plugin.json          # Plugin manifest (name, version, license)
 ├── agents/

@@ -18,7 +18,7 @@ _NX_HOOK_MARKER = "nx hook"  # sentinel for install/uninstall detection
 # ── SKILL.md content ──────────────────────────────────────────────────────────
 
 _SKILL_MD = (
-    Path(__file__).parents[3] / "nx-plugin" / "skills" / "nexus" / "SKILL.md"
+    Path(__file__).parents[3] / "nx" / "skills" / "nexus" / "SKILL.md"
 ).read_text()
 
 

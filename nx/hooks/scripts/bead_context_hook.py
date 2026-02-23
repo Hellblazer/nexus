@@ -22,9 +22,9 @@ def main():
         sys.exit(0)
 
     # Check if context pointer was included
-    if 'Context:' not in command and 'nx-plugin' not in command:
+    if 'Context:' not in command and 'nx' not in command:
         result = {
-            "message": "Tip: Include 'Context: nx-plugin' in bead description."
+            "message": "Tip: Include 'Context: nx' in bead description."
         }
         print(json.dumps(result))
 
