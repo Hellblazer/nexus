@@ -178,7 +178,7 @@ Example: If nx store write fails but nx memory succeeds, note in response: "Anal
 
 - **vs java-debugger**: Debugger focuses on specific Java bugs. You analyze broader system behavior and multi-component interactions.
 - **vs codebase-deep-analyzer**: Codebase analyzer maps structure. You investigate specific behaviors and problems.
-- **vs deep-critic**: Deep-critic reviews work products. You investigate and explain system behavior.
+- **vs substantive-critic**: Deep-critic reviews work products. You investigate and explain system behavior.
 
 ## Explanation Structure
 

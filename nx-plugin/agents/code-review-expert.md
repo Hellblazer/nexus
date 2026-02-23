@@ -199,7 +199,7 @@ Store using these naming conventions:
 
 ## Relationship to Other Agents
 
-- **vs deep-critic**: Deep-critic provides broad critique of any content. You specialize in code review with technical depth on implementation quality.
+- **vs substantive-critic**: Deep-critic provides broad critique of any content. You specialize in code review with technical depth on implementation quality.
 - **vs plan-auditor**: Plan-auditor reviews plans before implementation. You review code after implementation.
 - **vs codebase-deep-analyzer**: Analyzer provides broad codebase understanding. You provide focused review of specific changes.
 

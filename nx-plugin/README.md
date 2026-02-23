@@ -42,7 +42,7 @@ nx-plugin/
     ├── code-review/         # → code-review-expert agent
     ├── codebase-analysis/   # → codebase-deep-analyzer agent
     ├── deep-analysis/       # → deep-analyst agent
-    ├── deep-critique/       # → deep-critic agent
+    ├── substantive-critique/       # → substantive-critic agent
     ├── java-architecture/   # → java-architect-planner agent
     ├── java-debugging/      # → java-debugger agent
     ├── java-development/    # → java-developer agent
@@ -65,7 +65,7 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | code-review-expert | code-review | `/code-review` | sonnet | Code quality, security, best practices |
 | codebase-deep-analyzer | codebase-analysis | `/analyze-code` | sonnet | Architecture, patterns, dependency mapping |
 | deep-analyst | deep-analysis | `/deep-analysis` | opus | Complex problem investigation, root cause |
-| deep-critic | deep-critique | `/deep-critique` | sonnet | Constructive critique of plans/designs/code |
+| substantive-critic | substantive-critique | `/substantive-critique` | sonnet | Constructive critique of plans/designs/code |
 | deep-research-synthesizer | research-synthesis | `/research` | sonnet | Multi-source research with synthesis |
 | java-architect-planner | java-architecture | `/java-architecture` | opus | Java architecture design, phased plans |
 | java-debugger | java-debugging | `/java-debug` | opus | Hypothesis-driven Java debugging |
@@ -120,7 +120,7 @@ Defined in `registry.yaml`:
 - `/knowledge-tidy` → knowledge-tidier
 - `/pdf-process` → pdf-chromadb-processor
 - `/project-setup` → project-management-setup
-- `/deep-critique` → deep-critic
+- `/substantive-critique` → substantive-critic
 
 **Session commands**: `/session-save`, `/session-load`, `/session-list`, `/session-delete`
 

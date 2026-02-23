@@ -1,5 +1,5 @@
 ---
-name: deep-critique
+name: substantive-critique
 description: >
   Deep constructive critique of code, documentation, plans, or designs. Triggers:
   reviewing architectural decisions, validating implementations against specs,
@@ -12,7 +12,7 @@ memory: user
 
 # Deep Critique Skill
 
-Delegates to the **deep-critic** agent. See [registry.yaml](../../registry.yaml) for details.
+Delegates to the **substantive-critic** agent. See [registry.yaml](../../registry.yaml) for details.
 
 **Note**: This is a workaround for the substantive-critic framework bug (`classifyHandoffIfNeeded is not defined`). Use this agent for comprehensive critiques and audits until the framework bug is fixed.
 

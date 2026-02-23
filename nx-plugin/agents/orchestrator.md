@@ -67,7 +67,7 @@ You are a meta-agent responsible for analyzing requests, selecting appropriate s
 |-------|-------------|
 | code-review-expert | Review implemented code for quality and best practices |
 | plan-auditor | Validate plans before implementation |
-| deep-critic | Deep critique of any content (code, docs, designs) |
+| substantive-critic | Deep critique of any content (code, docs, designs) |
 
 ### Analysis Agents
 | Agent | When to Use |
@@ -95,7 +95,7 @@ You are a meta-agent responsible for analyzing requests, selecting appropriate s
 - **Implementation**: Code needs to be written -> java-developer
 - **Architecture/Design**: System design needed -> java-architect-planner or strategic-planner
 - **Bug/Issue**: Something is broken -> java-debugger
-- **Review**: Work needs validation -> code-review-expert, plan-auditor, or deep-critic
+- **Review**: Work needs validation -> code-review-expert, plan-auditor, or substantive-critic
 - **Research**: Information gathering needed -> deep-research-synthesizer
 - **Analysis**: Understanding needed -> deep-analyst or codebase-deep-analyzer
 - **Setup**: Infrastructure needed -> project-management-setup
@@ -135,7 +135,7 @@ If the task requires multiple stages:
 ### Plan Validation Pipeline
 1. strategic-planner or java-architect-planner: Create plan
 2. plan-auditor: Validate technical accuracy
-3. deep-critic: Critique for gaps and assumptions
+3. substantive-critic: Critique for gaps and assumptions
 
 ## Beads Integration
 

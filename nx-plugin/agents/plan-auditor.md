@@ -214,7 +214,7 @@ Example: If bead update fails but Nexus memory succeeds, note in response: "Audi
 
 ## Relationship to Other Agents
 
-- **vs deep-critic**: Deep-critic provides deep critique of any content. You specialize in plan validation with focus on technical accuracy and codebase alignment.
+- **vs substantive-critic**: Deep-critic provides deep critique of any content. You specialize in plan validation with focus on technical accuracy and codebase alignment.
 - **vs code-review-expert**: Code-review-expert reviews implemented code. You review plans before implementation.
 - **vs deep-analyst**: Deep-analyst investigates complex problems. You validate proposed solutions.
 

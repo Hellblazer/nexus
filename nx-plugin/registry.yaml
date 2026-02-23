@@ -274,13 +274,13 @@ agents:
     predecessors: [codebase-deep-analyzer]
     successors: [plan-auditor]
 
-  deep-critic:
+  substantive-critic:
     model: sonnet
     version: "2.0"
     color: teal
-    skill: deep-critique
-    slash_command: /deep-critique
-    description: "Deep constructive critique (workaround for substantive-critic framework bug)"
+    skill: substantive-critique
+    slash_command: /substantive-critique
+    description: "Deep constructive critique of code, documentation, plans, and designs"
     triggers:
       - "reviewing architectural decisions"
       - "validating implementations against specs"
@@ -418,7 +418,7 @@ model_summary:
   sonnet: # Balanced - most common agents
     - code-review-expert
     - codebase-deep-analyzer
-    - deep-critic
+    - substantive-critic
     - deep-research-synthesizer
     - java-developer
     - plan-auditor

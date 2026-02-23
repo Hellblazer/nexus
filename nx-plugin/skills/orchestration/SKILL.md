@@ -58,7 +58,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 | Plan a feature | strategic-planner | -> plan-auditor -> java-architect-planner |
 | Implement code | java-developer | -> code-review-expert -> test-validator |
 | Debug issue | java-debugger | -> (if cross-cutting) deep-analyst |
-| Review code | code-review-expert | -> (if critical) deep-critic |
+| Review code | code-review-expert | -> (if critical) substantive-critic |
 | Research topic | deep-research-synthesizer | -> knowledge-tidier |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 

@@ -1,5 +1,5 @@
 ---
-description: Constructive critique of code, plans, designs, or documentation using deep-critic agent
+description: Constructive critique of code, plans, designs, or documentation using substantive-critic agent
 ---
 
 # Deep Critique Request
@@ -36,7 +36,7 @@ description: Constructive critique of code, plans, designs, or documentation usi
 
   echo "### Tip"
   echo ""
-  echo "The deep-critic analyzes structure, logical consistency, completeness, and spec conformance."
+  echo "The substantive-critic analyzes structure, logical consistency, completeness, and spec conformance."
   echo "Findings are prioritized: Critical > Significant > Minor."
 
   # Project management context
@@ -69,10 +69,10 @@ $ARGUMENTS
 
 ## Relay Instructions
 
-Use the **Task tool** to delegate to deep-critic:
+Use the **Task tool** to delegate to substantive-critic:
 
 ```markdown
-## Relay: deep-critic
+## Relay: substantive-critic
 
 **Task**: Provide deep constructive critique of: $ARGUMENTS
 **Bead**: [From active beads above or 'none']
