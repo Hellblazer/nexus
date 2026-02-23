@@ -50,6 +50,26 @@ def test_t2database_context_manager_does_not_suppress_exception(tmp_path: Path) 
             raise RuntimeError("propagated")
 
 
+# ── get() ValueError ─────────────────────────────────────────────────────────
+
+def test_t2_get_without_id_or_project_title_raises_valueerror(db: T2Database) -> None:
+    """get() with neither id nor (project, title) raises ValueError."""
+    with pytest.raises(ValueError, match="Provide either id or both project and title"):
+        db.get()
+
+
+def test_t2_get_with_project_only_raises_valueerror(db: T2Database) -> None:
+    """get() with project but no title raises ValueError."""
+    with pytest.raises(ValueError, match="Provide either id or both project and title"):
+        db.get(project="proj")
+
+
+def test_t2_get_with_title_only_raises_valueerror(db: T2Database) -> None:
+    """get() with title but no project raises ValueError."""
+    with pytest.raises(ValueError, match="Provide either id or both project and title"):
+        db.get(title="some.md")
+
+
 # ── WAL mode ─────────────────────────────────────────────────────────────────
 
 def test_t2_wal_mode_enabled(db: T2Database) -> None:

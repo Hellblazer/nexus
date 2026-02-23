@@ -35,6 +35,22 @@ def test_scratch_put_from_stdin(runner: CliRunner, fake_home: Path) -> None:
     assert "Stored:" in result.output
 
 
+# ── get success ──────────────────────────────────────────────────────────────
+
+def test_scratch_get_success(runner: CliRunner, fake_home: Path) -> None:
+    """get with a valid ID echoes the content of the scratch entry."""
+    with patch("nexus.session.os.getsid", return_value=99910):
+        # Put an entry and capture the ID
+        put_result = runner.invoke(main, ["scratch", "put", "hello scratch world"])
+        assert put_result.exit_code == 0, put_result.output
+        doc_id = put_result.output.strip().split("Stored: ")[1]
+
+        # Get it back
+        get_result = runner.invoke(main, ["scratch", "get", doc_id])
+        assert get_result.exit_code == 0, get_result.output
+        assert "hello scratch world" in get_result.output
+
+
 # ── get missing entry ─────────────────────────────────────────────────────────
 
 def test_scratch_get_missing_entry_shows_error(runner: CliRunner, fake_home: Path) -> None:

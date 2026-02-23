@@ -154,3 +154,34 @@ def test_batch_frecency_invalid_timestamp_skipped() -> None:
     # bar.py should be scored normally
     assert Path("/repo/src/bar.py") in scores
     assert scores[Path("/repo/src/bar.py")] > 0.0
+
+
+# ── _git_commit_timestamps: successful stdout parsing ────────────────────────
+
+def test_git_commit_timestamps_parses_multiline_stdout() -> None:
+    """_git_commit_timestamps parses multi-line timestamp output from git log."""
+    from nexus.frecency import _git_commit_timestamps
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "1700000000\n1700100000\n"
+
+    with patch("subprocess.run", return_value=mock_result):
+        timestamps = _git_commit_timestamps(Path("/repo"), Path("/repo/file.py"))
+
+    assert timestamps == [1700000000.0, 1700100000.0]
+
+
+def test_git_commit_timestamps_skips_blank_and_invalid_lines() -> None:
+    """_git_commit_timestamps skips blank lines and lines that can't be parsed as floats."""
+    from nexus.frecency import _git_commit_timestamps
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "1700000000\n\nnot-a-number\n1700200000\n  \n"
+
+    with patch("subprocess.run", return_value=mock_result):
+        timestamps = _git_commit_timestamps(Path("/repo"), Path("/repo/file.py"))
+
+    # Should include the two valid timestamps, skip the blank and invalid lines
+    assert timestamps == [1700000000.0, 1700200000.0]

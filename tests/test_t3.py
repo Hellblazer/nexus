@@ -755,3 +755,45 @@ def test_collection_exists_true_after_put(local_t3: T3Database) -> None:
 def test_collection_exists_false_for_missing(local_t3: T3Database) -> None:
     """collection_exists() returns False for a non-existent collection."""
     assert local_t3.collection_exists("knowledge__never_created") is False
+
+
+# ── delete_by_source with nonexistent collection ────────────────────────────
+
+def test_delete_by_source_nonexistent_collection_returns_zero(mock_chromadb: tuple) -> None:
+    """delete_by_source() returns 0 (not an exception) when collection doesn't exist."""
+    chromadb_m, mock_client = mock_chromadb
+    mock_client.get_collection.side_effect = chromadb.errors.NotFoundError(
+        "Collection not found"
+    )
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    result = db.delete_by_source("code__nonexistent", "src/file.py")
+
+    assert result == 0
+
+
+# ── T3Database context manager ──────────────────────────────────────────────
+
+def test_t3_context_manager_enter_returns_self(mock_chromadb: tuple) -> None:
+    """T3Database used as a context manager returns itself from __enter__."""
+    _, mock_client = mock_chromadb
+    db = T3Database(tenant="t", database="d", api_key="k")
+
+    with db as ctx:
+        assert ctx is db
+
+
+def test_t3_context_manager_works_end_to_end(mock_chromadb: tuple) -> None:
+    """T3Database context manager can be used in a with-block and exits cleanly."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    with T3Database(tenant="t", database="d", api_key="k") as db:
+        doc_id = db.put(
+            collection="knowledge__cm_test",
+            content="context manager test",
+            title="cm.md",
+        )
+        assert isinstance(doc_id, str) and len(doc_id) > 0
+    # No exception means __exit__ succeeded

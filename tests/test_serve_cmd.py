@@ -400,6 +400,52 @@ def test_serve_start_writes_start_timestamp_file(runner: CliRunner, serve_home: 
     assert before <= ts <= after, f"Timestamp {ts} should be between {before} and {after}"
 
 
+# ── _format_uptime ────────────────────────────────────────────────────────────
+
+def test_format_uptime_hours_and_minutes() -> None:
+    """_format_uptime with a timestamp >1 hour ago returns 'Xh Ym' format."""
+    import datetime
+    from nexus.commands.serve import _format_uptime
+
+    started = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=3, minutes=25)
+    result = _format_uptime(started)
+    assert result == "3h 25m"
+
+
+def test_format_uptime_minutes_and_seconds() -> None:
+    """_format_uptime with a timestamp 1-60 minutes ago returns 'Xm Ys' format."""
+    import datetime
+    from nexus.commands.serve import _format_uptime
+
+    started = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=12, seconds=45)
+    result = _format_uptime(started)
+    assert result == "12m 45s"
+
+
+def test_format_uptime_seconds_only() -> None:
+    """_format_uptime with a timestamp <1 minute ago returns 'Xs' format."""
+    import datetime
+    from nexus.commands.serve import _format_uptime
+
+    started = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
+    result = _format_uptime(started)
+    assert result == "30s"
+
+
+# ── _read_pid: ValueError path ───────────────────────────────────────────────
+
+def test_read_pid_returns_none_for_non_integer_content(serve_home: Path) -> None:
+    """_read_pid() returns None when the PID file contains non-integer content."""
+    from nexus.commands.serve import _read_pid
+
+    pid_path = _pid_path(serve_home)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("not-an-int")
+
+    result = _read_pid()
+    assert result is None
+
+
 # ── _process_running: EPERM handling ─────────────────────────────────────────
 
 def test_process_running_returns_true_on_eperm() -> None:
