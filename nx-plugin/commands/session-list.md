@@ -8,7 +8,7 @@ description: List all saved sessions with metadata (user)
   if [ ! -d "$SESSIONS_DIR" ]; then
     echo "No sessions found."
     echo ""
-    echo "Use /check <session-name> <task> to create your first session."
+    echo "Use /session-save <session-name> <task> to create your first session."
     exit 0
   fi
 
@@ -18,7 +18,7 @@ description: List all saved sessions with metadata (user)
   if [ "$SESSION_COUNT" -eq 0 ]; then
     echo "No sessions found."
     echo ""
-    echo "Use /check <session-name> <task> to create your first session."
+    echo "Use /session-save <session-name> <task> to create your first session."
     exit 0
   fi
 
@@ -74,6 +74,6 @@ description: List all saved sessions with metadata (user)
   done
 
   echo "---"
-  echo "Use /load <session-name> to continue a session"
+  echo "Use /session-load <session-name> to continue a session"
   echo "Use /session-delete <session-name> to delete a session"
 }

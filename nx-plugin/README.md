@@ -122,7 +122,7 @@ Defined in `registry.yaml`:
 - `/project-setup` → project-management-setup
 - `/deep-critique` → deep-critic
 
-**Session commands**: `/check`, `/load`, `/sessions`, `/session-delete`
+**Session commands**: `/session-save`, `/session-load`, `/session-list`, `/session-delete`
 
 **PM commands**: `/pm-new`, `/pm-status`, `/pm-list`, `/pm-archive`, `/pm-restore`, `/pm-close`
 

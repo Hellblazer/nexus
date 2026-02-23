@@ -26,19 +26,17 @@ description: List current and archived PM projects (project)
   fi
 
   echo ""
-  echo "## Archived Projects (restorable within 90 days of archiving)"
+  echo "## Archived Projects (T3 permanent; restorable within 90-day T2 window)"
   echo ""
 
-  # nx pm reference lists T3 archived PM syntheses; also covers 90-day T2 window
-  ARCHIVED=$(nx pm reference 2>/dev/null)
-  if [ -n "$ARCHIVED" ]; then
-    echo "$ARCHIVED"
-  else
-    echo "(no archived PM projects found)"
-    echo ""
-    echo "Use \`/pm-new <name>\` to start a new project, or"
-    echo "  \`nx pm reference \"<topic>\"\` to search past work by keyword."
-  fi
+  # nx pm reference requires a query argument — no-arg mode prompts interactively
+  # (not safe in a non-TTY slash command context). Display instructions instead.
+  echo "Search archived projects with:"
+  echo "  \`nx pm reference \"<project-name>\"\`       — retrieve by project name"
+  echo "  \`nx pm reference \"<topic or question>\"\`  — semantic search across all archives"
+  echo ""
+  echo "Restore a project (within 90-day T2 decay window):"
+  echo "  \`/pm-restore <project-name>\`"
 
   echo ""
   echo "---"

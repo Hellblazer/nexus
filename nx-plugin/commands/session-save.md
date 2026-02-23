@@ -1,13 +1,13 @@
 ---
-description: Save intent and clear any previous context (user)
+description: Save session intent and context checkpoint (user)
 ---
 
 !{
   # Parse session name and task from arguments
   if [ -z "$ARGUMENTS" ]; then
     echo "Error: Session name and task description required"
-    echo "Usage: /check <session-name> <task description>"
-    echo "Example: /check chatsome-vision Fix TemporalSpatialSynchronizer tests"
+    echo "Usage: /session-save <session-name> <task description>"
+    echo "Example: /session-save chatsome-vision Fix TemporalSpatialSynchronizer tests"
     exit 1
   fi
 
@@ -17,7 +17,7 @@ description: Save intent and clear any previous context (user)
 
   if [ -z "$TASK_DESC" ]; then
     echo "Error: Task description required after session name"
-    echo "Usage: /check <session-name> <task description>"
+    echo "Usage: /session-save <session-name> <task description>"
     exit 1
   fi
 
@@ -108,6 +108,6 @@ Continuation prompt saved for session **$SESSION_NAME**:
 
 Next steps:
 1. Type /clear to clear this session's context
-2. Type **/load $SESSION_NAME** in a fresh session to continue
+2. Type **/session-load $SESSION_NAME** in a fresh session to continue
 
 Or copy the prompt above manually if preferred.
