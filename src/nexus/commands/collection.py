@@ -4,7 +4,7 @@ import sys
 import click
 
 from nexus.commands.store import _t3
-from nexus.corpus import embedding_model_for_collection
+from nexus.corpus import embedding_model_for_collection, index_model_for_collection
 
 
 @click.group()
@@ -34,7 +34,8 @@ def info_cmd(name: str) -> None:
     if match is None:
         raise click.ClickException(f"Collection not found: {name}")
 
-    model = embedding_model_for_collection(name)
+    query_model = embedding_model_for_collection(name)
+    idx_model   = index_model_for_collection(name)
 
     col = db._client.get_collection(name)
     result = col.get(include=["metadatas"])
@@ -42,10 +43,11 @@ def info_cmd(name: str) -> None:
     timestamps = [m["indexed_at"] for m in metadatas if m and "indexed_at" in m]
     last_indexed = max(timestamps) if timestamps else "unknown"
 
-    click.echo(f"Collection: {match['name']}")
-    click.echo(f"Documents:  {match['count']}")
-    click.echo(f"Model:      {model}")
-    click.echo(f"Indexed:    {last_indexed}")
+    click.echo(f"Collection:  {match['name']}")
+    click.echo(f"Documents:   {match['count']}")
+    click.echo(f"Index model: {idx_model}")
+    click.echo(f"Query model: {query_model}")
+    click.echo(f"Indexed:     {last_indexed}")
 
 
 @collection.command("delete")

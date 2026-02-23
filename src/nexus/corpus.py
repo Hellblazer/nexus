@@ -24,16 +24,20 @@ def validate_collection_name(name: str) -> None:
 
 
 def embedding_model_for_collection(collection_name: str) -> str:
-    """Return the Voyage AI model name appropriate for a T3 collection."""
-    if collection_name.startswith("code__"):
-        return "voyage-code-3"
+    """Return the Voyage AI model used at QUERY time for a T3 collection.
+
+    voyage-4 is the universal query model for all collection types.
+    Code collections are indexed with voyage-code-3 but queried with voyage-4 —
+    the semantic spaces are compatible enough for effective retrieval, and a single
+    query model simplifies cross-corpus search.
+    """
     return "voyage-4"
 
 
 def index_model_for_collection(collection_name: str) -> str:
     """Return the Voyage AI model used at INDEX time for a T3 collection.
 
-    code__      → voyage-code-3    (same at index and query time)
+    code__      → voyage-code-3    (code-optimised index; voyage-4 at query time)
     docs__      → voyage-context-3 (CCE for richer cross-chunk context)
     knowledge__ → voyage-context-3 (CCE for richer cross-chunk context)
     all others  → voyage-4         (standard embedding)

@@ -123,7 +123,7 @@ def test_verify_deep_search_raises_exits_one(
 def test_info_shows_embedding_model_for_code_collection(
     runner: CliRunner, env_creds
 ) -> None:
-    """info shows voyage-code-3 for code__ collections."""
+    """info shows voyage-code-3 index model and voyage-4 query model for code__ collections."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = [
         {"name": "code__nexus", "count": 1247},
@@ -138,7 +138,8 @@ def test_info_shows_embedding_model_for_code_collection(
         result = runner.invoke(main, ["collection", "info", "code__nexus"])
 
     assert result.exit_code == 0, result.output
-    assert "voyage-code-3" in result.output
+    assert "voyage-code-3" in result.output  # index model
+    assert "voyage-4" in result.output        # query model
 
 
 def test_info_shows_embedding_model_for_knowledge_collection(

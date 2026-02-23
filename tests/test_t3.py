@@ -32,12 +32,12 @@ def test_cloudclient_init(mock_chromadb: tuple) -> None:
 # ── AC2: VoyageAI embedding function selection ────────────────────────────────
 
 def test_voyage_embedding_fn_code_collection(mock_chromadb: tuple) -> None:
-    """code__ collections use voyage-code-3."""
+    """code__ collections use voyage-4 at query time (universal query model)."""
     chromadb_m, mock_client = mock_chromadb
     db = T3Database(tenant="t", database="d", api_key="key", voyage_api_key="vkey")
     db.get_or_create_collection("code__myrepo")
     chromadb_m.utils.embedding_functions.VoyageAIEmbeddingFunction.assert_called_with(
-        model_name="voyage-code-3", api_key="vkey"
+        model_name="voyage-4", api_key="vkey"
     )
 
 
@@ -563,7 +563,7 @@ def test_collection_metadata_returns_correct_fields(mock_chromadb: tuple) -> Non
 
 
 def test_collection_metadata_code_collection(mock_chromadb: tuple) -> None:
-    """collection_metadata() for code__ returns voyage-code-3 for both models."""
+    """collection_metadata() for code__: voyage-4 query model, voyage-code-3 index model."""
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
     mock_col.count.return_value = 5
@@ -572,7 +572,7 @@ def test_collection_metadata_code_collection(mock_chromadb: tuple) -> None:
     db = T3Database(tenant="t", database="d", api_key="k")
     meta = db.collection_metadata("code__myrepo")
 
-    assert meta["embedding_model"] == "voyage-code-3"
+    assert meta["embedding_model"] == "voyage-4"
     assert meta["index_model"] == "voyage-code-3"
 
 

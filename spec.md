@@ -362,13 +362,22 @@ When multiple `--corpus` flags are used, each corpus is queried separately (they
 
 ### Cross-corpus search
 
-`code__*` collections use `voyage-code-3` at both index and query time. `docs__*` and `knowledge__*`
-use `voyage-context-3` (CCE) at **index time** and `voyage-4` at **query time** — CCE is an
-index-only technique; queries always use the standard `voyage-4` model so stored CCE vectors remain
-comparable to query vectors. All others use `voyage-4` at both times.
+`voyage-4` is the **universal query model** for all collection types. Index models differ:
 
-These embedding spaces are not directly comparable across corpus types — similarity scores between
-`voyage-code-3` and `voyage-4` results are meaningless when combined naively.
+| Collection prefix | Index model | Query model |
+|---|---|---|
+| `code__*` | `voyage-code-3` | `voyage-4` |
+| `docs__*` | `voyage-context-3` (CCE; `voyage-4` fallback) | `voyage-4` |
+| `knowledge__*` | `voyage-context-3` (CCE; `voyage-4` fallback) | `voyage-4` |
+| other | `voyage-4` | `voyage-4` |
+
+CCE is an index-only technique — the resulting vectors are in the same embedding space as standard
+`voyage-4` vectors and are directly queryable with `voyage-4`. Code collections are indexed with
+`voyage-code-3` for higher recall on code-specific patterns; `voyage-4` queries are semantically
+compatible and retrieve effectively against those vectors.
+
+Cross-corpus result sets are all in the `voyage-4` query space, so similarity scores are directly
+comparable — reranking is still applied for quality, not to reconcile incompatible spaces.
 
 Resolution strategy:
 1. Each corpus queried independently using its own embedding function
@@ -929,7 +938,7 @@ Recent memory ({project}, last 10 entries):
 | 5 | HEAD detection via 10s polling in `nx serve` | Default matches SeaGOAT's `SECONDS_BETWEEN_MAINTENANCE = 10`; configurable via `server.headPollInterval`. Post-commit hook is an optional additional trigger installed by `nx install`; polling is the guaranteed baseline; inotify/FSEvents is out of scope v1 |
 | 6 | Single `nx serve` manages multiple repos | Per-repo registry in `~/.config/nexus/repos.json`; each repo has its own T3 collection and ripgrep line cache; `--corpus` routes queries |
 | 7 | T1 uses `DefaultEmbeddingFunction` (local ONNX) | Session scratch doesn't need Voyage AI's semantic fidelity; a network call on every scratch search defeats the purpose of an in-memory store |
-| 8 | Cross-corpus: separate retrieval + reranking | `voyage-code-3` and `voyage-4` produce incomparable similarity scores; independent retrieval per corpus followed by reranking is the correct merge strategy. Note: docs/knowledge are indexed with `voyage-context-3` (CCE) but queried with `voyage-4` — CCE vectors are in the same embedding space as `voyage-4` query vectors by design. |
+| 8 | Cross-corpus: separate retrieval + reranking | `voyage-4` is the universal query model; all corpora share the same query embedding space. Separate retrieval per corpus is still correct because index models differ (`voyage-code-3`, `voyage-context-3`) — per-corpus retrieval lets each collection use its native index structure before scores are merged. Reranking provides a quality-ranked unified list. |
 | 9 | `nx pm` uses T2 (not a new storage tier) | PM docs are a named-file project workspace — exactly T2's model. No new infrastructure; FTS5 covers keyword search needs; T3 is opt-in via `nx pm promote` for cross-project semantic queries |
 | 10 | Archive synthesizes to T3 rather than dumping raw PM docs | Raw phase docs are drafts/iterations — noisy, redundant, pollute semantic search. Haiku synthesis at archive time extracts signal (decisions, challenges, outcome) into one semantically rich chunk per project. T2 raw docs decay over 90d for restore flexibility; after that, the T3 synthesis is the permanent reference. |
 | 11 | T3 = ChromaDB CloudClient (not Qdrant, not self-hosted Chroma) | Already running in the existing Claude Code toolchain (same ChromaDB instance used by current agents); no new infrastructure required. `chromadb.CloudClient` provides tenant+database isolation. Qdrant rejected (Arcaneum port only; would require new infra). Self-hosted Chroma rejected (adds operational burden, defeats "already running" benefit). |

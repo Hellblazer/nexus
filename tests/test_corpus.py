@@ -13,7 +13,7 @@ from nexus.corpus import (
 # ── Embedding model selection ─────────────────────────────────────────────────
 
 def test_embedding_model_code_collection() -> None:
-    assert embedding_model_for_collection("code__myrepo") == "voyage-code-3"
+    assert embedding_model_for_collection("code__myrepo") == "voyage-4"
 
 
 def test_embedding_model_docs_collection() -> None:
@@ -131,8 +131,8 @@ def test_index_model_bare_name_defaults_voyage4() -> None:
 
 
 def test_embedding_model_for_collection_regression() -> None:
-    """embedding_model_for_collection still returns correct values (regression)."""
-    assert embedding_model_for_collection("code__myrepo") == "voyage-code-3"
+    """voyage-4 is the universal query model for all collection types."""
+    assert embedding_model_for_collection("code__myrepo") == "voyage-4"
     assert embedding_model_for_collection("knowledge__security") == "voyage-4"
     assert embedding_model_for_collection("docs__papers") == "voyage-4"
     assert embedding_model_for_collection("other__collection") == "voyage-4"
