@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from nexus.corpus import embedding_model_for_collection
+from nexus.corpus import index_model_for_collection
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 
 if TYPE_CHECKING:
@@ -188,11 +188,14 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
             f"chroma_api_key={'set' if chroma_key else 'missing'})"
         )
 
+    import voyageai
     from datetime import UTC, datetime as _dt
     from nexus.db import make_t3
 
     db = make_t3()
     now_iso = _dt.now(UTC).isoformat()
+    target_model = index_model_for_collection(collection_name)
+    voyage_client = voyageai.Client(api_key=voyage_key)
 
     for score, file in scored:
         try:
@@ -203,18 +206,26 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
         # Compute content hash once per file (reused across all chunks of the file)
         content_hash = _hl.sha256(content.encode()).hexdigest()
 
-        # Staleness check: skip if content_hash matches what's already indexed
+        # Staleness check: skip if content_hash AND embedding_model both match
         col = db.get_or_create_collection(collection_name)
         existing = col.get(
             where={"source_path": str(file)},
             include=["metadatas"],
         )
         if existing["metadatas"]:
-            if existing["metadatas"][0].get("content_hash") == content_hash:
+            stored = existing["metadatas"][0]
+            if stored.get("content_hash") == content_hash and stored.get("embedding_model") == target_model:
                 continue
 
         chunks = chunk_file(file, content)
+        if not chunks:
+            continue
         total_chunks = len(chunks)
+
+        ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[dict] = []
+
         for i, chunk in enumerate(chunks):
             title = f"{file.relative_to(repo)}:{chunk['line_start']}-{chunk['line_end']}"
             doc_id = _hl.sha256(f"{collection_name}:{title}".encode()).hexdigest()[:16]
@@ -244,14 +255,27 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
                 # Computed fields
                 "programming_language": _EXT_TO_LANGUAGE.get(ext, ""),
                 "corpus": collection_name,
-                "embedding_model": embedding_model_for_collection(collection_name),
+                "embedding_model": target_model,
                 "content_hash": content_hash,
                 # Git fields (computed once per index run)
                 **git_meta,
             }
-            db.upsert_chunks(
-                collection=collection_name,
-                ids=[doc_id],
-                documents=[chunk["text"]],
-                metadatas=[metadata],
-            )
+            ids.append(doc_id)
+            documents.append(chunk["text"])
+            metadatas.append(metadata)
+
+        # Pre-compute voyage-code-3 embeddings; batch in groups of 128 (API limit)
+        embeddings: list[list[float]] = []
+        batch_size = 128
+        for batch_start in range(0, len(documents), batch_size):
+            batch = documents[batch_start : batch_start + batch_size]
+            result = voyage_client.embed(texts=batch, model=target_model, input_type="document")
+            embeddings.extend(result.embeddings)
+
+        db.upsert_chunks_with_embeddings(
+            collection_name=collection_name,
+            ids=ids,
+            documents=documents,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )

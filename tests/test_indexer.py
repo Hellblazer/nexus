@@ -167,16 +167,22 @@ def test_run_index_source_path_is_absolute(tmp_path: Path) -> None:
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
 
-    def capture_upsert(collection, ids, documents, metadatas):
+    def capture_upsert(collection_name, ids, documents, embeddings, metadatas):
         captured_metadatas.extend(metadatas)
 
-    mock_db.upsert_chunks.side_effect = capture_upsert
+    mock_db.upsert_chunks_with_embeddings.side_effect = capture_upsert
 
     fake_chunk = {
         "line_start": 1, "line_end": 1, "text": "x = 1",
         "chunk_index": 0, "chunk_count": 1,
         "ast_chunked": False, "filename": "main.py", "file_extension": ".py",
     }
+
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_client.embed.return_value = mock_voyage_result
 
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
@@ -185,9 +191,10 @@ def test_run_index_source_path_is_absolute(tmp_path: Path) -> None:
                     with patch("nexus.config.get_credential", return_value="fake-key"):
                         with patch("nexus.db.make_t3", return_value=mock_db):
                             with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
-                                _run_index(repo, registry)
+                                with patch("voyageai.Client", return_value=mock_voyage_client):
+                                    _run_index(repo, registry)
 
-    assert captured_metadatas, "Expected upsert_chunks to be called for main.py"
+    assert captured_metadatas, "Expected upsert_chunks_with_embeddings to be called for main.py"
     source_path = captured_metadatas[0]["source_path"]
     assert Path(source_path).is_absolute(), f"source_path must be absolute; got {source_path!r}"
     assert source_path == str(repo / "main.py")
@@ -208,8 +215,8 @@ def test_run_index_skips_unchanged_content_hash(tmp_path: Path) -> None:
     registry.get.return_value = {"collection": "code__repo"}
 
     mock_col = MagicMock()
-    # Simulate file already indexed with the same content_hash
-    mock_col.get.return_value = {"metadatas": [{"content_hash": content_hash}]}
+    # Simulate file already indexed with the same content_hash AND same embedding model
+    mock_col.get.return_value = {"metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-code-3"}]}
 
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
@@ -222,7 +229,7 @@ def test_run_index_skips_unchanged_content_hash(tmp_path: Path) -> None:
                         with patch("nexus.db.make_t3", return_value=mock_db):
                             _run_index(repo, registry)
 
-    mock_db.upsert_chunks.assert_not_called()
+    mock_db.upsert_chunks_with_embeddings.assert_not_called()
 
 
 # ── _run_index_frecency_only ──────────────────────────────────────────────────

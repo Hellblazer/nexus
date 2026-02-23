@@ -12,7 +12,7 @@ import hashlib
 import shutil
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import chromadb
 import pytest
@@ -73,6 +73,29 @@ def registry(tmp_path: Path, mini_repo: Path) -> RepoRegistry:
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(mini_repo)
     return reg
+
+
+@pytest.fixture(autouse=True)
+def mock_voyage_client():
+    """Patch voyageai.Client so E2E tests run without API keys.
+
+    Uses DefaultEmbeddingFunction (ONNX MiniLM-L6) to produce embeddings so
+    that index vectors and query vectors are in the same space as the local_t3
+    fixture's _ef_override — keeping semantic search meaningful in unit tests.
+    """
+    ef = DefaultEmbeddingFunction()
+
+    mock_client = MagicMock()
+
+    def fake_embed(texts, model, input_type="document"):
+        result = MagicMock()
+        result.embeddings = ef(texts)
+        return result
+
+    mock_client.embed.side_effect = fake_embed
+
+    with patch("voyageai.Client", return_value=mock_client):
+        yield mock_client
 
 
 def _patch_t3(t3: T3Database):
