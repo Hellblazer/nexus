@@ -72,4 +72,15 @@ Note: subagent-start hook auto-injects nx pm context when `.pm/` directory exist
 - [ ] Clear rationale provided
 - [ ] User can proceed with confidence
 
-**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.
+## Agent-Specific PRODUCE
+
+- **Routing Decisions**: Document in response; for significant routing patterns store in nx T3:
+  ```bash
+  printf "# Routing Pattern: {pattern}\n{rationale}\n" | nx store put - --collection knowledge --title "pattern-orchestrator-{scenario}" --tags "routing,orchestration"
+  ```
+- **Pipeline Plans**: Relay to first agent in pipeline using standard relay format
+- **Escalation Notes**: Create blocker beads when routing is blocked
+- **Routing Notes**: Use T1 scratch during complex pipeline analysis:
+  ```bash
+  nx scratch put "Routing hypothesis: {agent} because {reason}" --tags "routing,pipeline"
+  ```

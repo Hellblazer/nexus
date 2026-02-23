@@ -80,6 +80,17 @@ If contradictions found with existing knowledge:
 2. Identify which is more current/accurate
 3. Replace the stale entry by re-storing with the corrected content
 
+## Agent-Specific PRODUCE
+
+- **Consolidated Documents**: Store in nx T3 as `printf "# {topic}\n{consolidated-content}\n" | nx store put - --collection knowledge --title "consolidation-{date}-{scope}" --tags "consolidation,tidier"`
+- **Archive Actions**: Moved documents go to `--collection knowledge__archive --title "{old-title}-archived-{date}"`, logged in nx T2 memory as `--project {project}_active --title archive-log.md`
+- **Contradiction Resolutions**: Updated directly in source nx T3 documents
+- **Review Artifacts**: Use T1 scratch to track review round findings:
+  ```bash
+  nx scratch put $'# Review Round {N}: {N} issues found\n{issue-list}' --tags "review,round-{N}"
+  nx scratch promote <id> --project {project}_active --title review-round-{N}.md
+  ```
+
 ## Success Criteria
 
 - [ ] Knowledge stored in Nexus T3 via `nx store put`

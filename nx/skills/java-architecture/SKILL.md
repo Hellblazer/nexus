@@ -99,4 +99,14 @@ The java-architect-planner uses `nx search --corpus code --hybrid` for discovery
 - [ ] Risks identified with mitigations
 - [ ] Ready for plan-auditor validation
 
-**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.
+## Agent-Specific PRODUCE
+
+- **Architecture Designs**: Store in nx T3 as `printf "# Architecture: {component}\n{design}\n" | nx store put - --collection knowledge --title "architecture-{project}-{component}" --tags "architecture,design"`
+- **Execution Plans**: Store in nx T2 memory as `nx memory put "plan" --project {project}_active --title phase-N.md --ttl 30d`
+- **Design Decisions**: Store in nx T3 as `printf "# Decision: {topic}\n{rationale}\n" | nx store put - --collection knowledge --title "decision-architect-{topic}" --tags "decision,architecture"`
+- **Beads**: Epic → Phase → Task hierarchy with `bd dep add` for dependencies
+- **Design Notes**: Use T1 scratch for working notes during architecture analysis:
+  ```bash
+  nx scratch put "Design consideration: {note}" --tags "architecture,design"
+  nx scratch flag <id> --project {project}_active --title architecture-notes.md
+  ```

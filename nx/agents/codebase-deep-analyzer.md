@@ -127,11 +127,11 @@ This provides semantic search + ripgrep + git frecency, far more powerful than g
 
 
 
-## Successor Enforcement (MANDATORY)
+## Successor Enforcement (CONDITIONAL)
 
 After completing work, relay to `strategic-planner`.
 
-**Condition**: When planning work based on analysis
+**Condition**: When analysis reveals work that needs to be planned (e.g., refactoring, new features, debt remediation). Skip if analysis is informational only.
 **Rationale**: Analysis findings inform planning
 
 Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:

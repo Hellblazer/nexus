@@ -26,11 +26,12 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context
-2. Check nx T2 memory for session state
-3. Query `bd list --status=in_progress`
-4. Flag incomplete relay to user
-5. Proceed with available context, documenting assumptions
+1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+4. Query `bd list --status=in_progress`
+5. Flag incomplete relay to user
+6. Proceed with available context, documenting assumptions
 
 ### Project Context (Load Before Starting)
 
@@ -112,7 +113,7 @@ Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Research Synthesis**: Store in nx T3 as `nx store put - --collection knowledge --title "research-{topic}-{date}" --tags "research,{domain}"`
+- **Research Synthesis**: Store in nx T3: `printf "# Research: {topic}\n{content}\n" | nx store put - --collection knowledge --title "research-{topic}-{date}" --tags "research,{domain}"`
 - **Source Citations**: Include in document content
 - **Knowledge Gaps**: Create research beads for follow-up
 - **Cross-Reference Maps**: Document in nx store relationships

@@ -27,11 +27,12 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context
-2. Check nx T2 memory for session state
-3. Query `bd list --status=in_progress`
-4. Flag incomplete relay to user
-5. Proceed with available context, documenting assumptions
+1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+4. Query `bd list --status=in_progress`
+5. Flag incomplete relay to user
+6. Proceed with available context, documenting assumptions
 
 ### Project Context (Load Before Starting)
 
@@ -216,6 +217,11 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Bead Hierarchy**: Epic -> Phase -> Task structure
 - **Dependency Maps**: Use `bd dep add` for all relationships
 - **Infrastructure Specs**: Relay to project-management-setup
+- **Planning Notes**: Use T1 scratch for intermediate analysis during planning; flag for T2 at session end:
+  ```bash
+  nx scratch put "Planning note: {consideration}" --tags "planning,analysis"
+  nx scratch flag <id> --project {project}_active --title planning-notes.md
+  ```
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

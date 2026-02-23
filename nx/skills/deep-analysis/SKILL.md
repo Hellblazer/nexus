@@ -75,4 +75,13 @@ The deep-analyst uses sequential thinking:
 - [ ] Findings stored in nx store for future reference
 - [ ] T2 memory updated with session findings (if multi-session work)
 
-**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.
+## Agent-Specific PRODUCE
+
+- **Analysis Findings**: Store in nx T3 as `printf "# Analysis: {topic}\n{findings}\n" | nx store put - --collection knowledge --title "analysis-{topic}-{date}" --tags "analysis"`
+- **Hypothesis Results**: Document with confidence levels in nx T3
+- **Recommendations**: Include in relay to downstream agent (strategic-planner)
+- **Analysis Chain**: Use T1 scratch to track hypothesis progression during investigation:
+  ```bash
+  nx scratch put $'Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}' --tags "analysis,step-{N}"
+  nx scratch promote <id> --project {project}_active --title analysis-chain.md
+  ```

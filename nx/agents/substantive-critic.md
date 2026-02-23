@@ -29,9 +29,10 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
 2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
-3. Query `bd list --status=in_progress`
-4. Flag incomplete relay to user
-5. Proceed with available context, documenting assumptions
+3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+4. Query `bd list --status=in_progress`
+5. Flag incomplete relay to user
+6. Proceed with available context, documenting assumptions
 
 ### Project Context (Load Before Starting)
 
@@ -115,6 +116,20 @@ Set `needsMoreThoughts: true` to continue analysis, `isRevision: true` to correc
 - Flag if implementation deviates from bead description/design
 - Suggest bead updates if scope or design needs revision: `bd update <id> --design "revised"`
 - Create bead for significant critique findings: `bd create "Critique: topic" -t task`
+
+
+## Successor Enforcement (CONDITIONAL)
+
+After completing work, relay critique findings back to the requesting agent.
+
+**Condition**: When critique reveals Critical issues that require remediation. Skip relay if findings are informational only or if the requesting agent is waiting synchronously.
+**Rationale**: Critical issues must be addressed by the owning agent before work is considered complete.
+
+Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
+- Task: List of Critical issues requiring remediation
+- Input Artifacts: Include critique output (beads created, nx memory path)
+- Deliverable: Remediated artifact addressing critical findings
+- Quality Criteria: Checkboxes matching the critical issues found
 
 
 ## Context Protocol

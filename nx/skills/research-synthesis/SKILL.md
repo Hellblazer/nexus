@@ -75,4 +75,14 @@ The agent uses sequential thinking:
 - [ ] Findings persisted to nx T3 store via knowledge-tidier
 - [ ] Round artifacts persisted to T2 or T3
 
-**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.
+## Agent-Specific PRODUCE
+
+- **Research Synthesis**: Store in nx T3 as `printf "# Research: {topic}\n{content}\n" | nx store put - --collection knowledge --title "research-{topic}-{date}" --tags "research,{domain}"`
+- **Source Citations**: Include in document content (not separate)
+- **Knowledge Gaps**: Create research beads for follow-up
+- **Cross-Reference Maps**: Document relationships in nx T3 document content
+- **Round Artifacts**: Use T1 scratch to track findings per research round:
+  ```bash
+  nx scratch put $'# Round {N} findings\n{content}' --tags "research,round-{N}"
+  nx scratch flag <id> --project {project}_active --title research-round-{N}.md
+  ```

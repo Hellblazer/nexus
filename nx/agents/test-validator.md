@@ -29,9 +29,10 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
 2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
-3. Query `bd list --status=in_progress`
-4. Flag incomplete relay to user
-5. Proceed with available context, documenting assumptions
+3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+4. Query `bd list --status=in_progress`
+5. Flag incomplete relay to user
+6. Proceed with available context, documenting assumptions
 
 ### Project Context (Load Before Starting)
 
@@ -154,7 +155,11 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Validation Reports**: Include in response
 - **Coverage Gaps**: Create task beads for missing tests
-- **Quality Metrics**: Store in nx memory: `nx memory put "metrics" --project {project}_active --title test-metrics.md --ttl 30d`
+- **Quality Metrics**: Store in nx T2 memory: `nx memory put "metrics" --project {project}_active --title test-metrics.md --ttl 30d`
+- **Recurring Patterns**: Store test quality patterns in nx T3 for reuse across sessions:
+  ```bash
+  printf "# Test pattern: {pattern-name}\n{description}\n" | nx store put - --collection knowledge --title "pattern-test-{pattern-name}" --tags "testing,pattern"
+  ```
 - **Regression Risks**: Document in relay notes
 - **Test Result Snapshots**: Use T1 scratch to capture test run state during analysis:
   ```bash
