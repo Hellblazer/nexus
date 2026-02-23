@@ -53,7 +53,7 @@ description: Initialize project management for current repo via nx pm (project)
   echo "# Initializing Project: $PROJECT_NAME"
   echo ""
 
-  nx pm init 2>&1
+  nx pm init --project "$PROJECT_NAME" 2>&1
   INIT_EXIT=$?
 
   if [ $INIT_EXIT -ne 0 ]; then

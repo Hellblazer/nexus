@@ -35,26 +35,30 @@ nx search "query" --where store_type=pm-archive  # metadata filter
 ## Memory (T2 — persistent across sessions)
 
 ```bash
-nx memory put "content" --project myproject --title title.md
-nx memory put - --project myproject --title title.md   # from stdin
-nx memory get --project myproject --title title.md
+nx memory put "content" --project {repo}_active --title title.md
+nx memory put - --project {repo}_active --title title.md   # from stdin
+nx memory get --project {repo}_active --title title.md
 nx memory search "query"
-nx memory search "query" --project myproject
-nx memory list --project myproject
+nx memory search "query" --project {repo}_active
+nx memory list --project {repo}_active
 nx memory expire                           # remove TTL-expired entries
 nx memory promote <id> --collection knowledge  # push to T3
 ```
+
+**Project naming**: use `{repo}_active` for working notes (e.g., `nexus_active`), `{repo}_pm` for PM documents.
 
 ## Knowledge store (T3 — permanent, cloud)
 
 ```bash
 nx store put analysis.md --collection knowledge --tags "arch"
-echo "# Finding..." | nx store put - --collection knowledge --title "My Finding"
-nx store put notes.md --collection knowledge --ttl 30d
+echo "# Finding..." | nx store put - --collection knowledge --title "My Finding" --tags "research"
+nx store put notes.md --collection knowledge --tags "notes" --ttl 30d
 nx store list
 nx store list --collection knowledge__notes
 nx store expire
 ```
+
+**TTL formats**: `30d` (30 days), `4w` (4 weeks), `permanent` or `never` (no expiry). Use `Nd`/`Nw` format — NOT bare integers. Omit `--ttl` entirely for permanent entries.
 
 ## Scratch (T1 — session-scoped, cleared at session end)
 
@@ -65,7 +69,7 @@ nx scratch list
 nx scratch get <id>
 nx scratch flag <id>                       # mark for auto-flush to T2 at session end
 nx scratch unflag <id>
-nx scratch promote <id> --project myproject --title findings.md
+nx scratch promote <id> --project {repo}_active --title findings.md
 nx scratch clear
 ```
 

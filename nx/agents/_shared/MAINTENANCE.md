@@ -105,4 +105,4 @@ Update version in frontmatter when making significant changes to an agent.
 - Run `nx index code <path>` first to index the repo
 - Use `--hybrid` flag for best results with code
 - Try broader queries if results are sparse
-- Use `nx health` to verify Nexus server is running
+- Use `nx doctor` to verify Nexus server is running

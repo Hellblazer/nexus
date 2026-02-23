@@ -33,6 +33,15 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. Flag incomplete relay to user
 5. Proceed with available context, documenting assumptions
 
+### Project Context (Load Before Starting)
+
+```bash
+# Load project management context (if PM initialized)
+nx pm resume 2>/dev/null || true        # inject phase/continuation context
+nx pm status 2>/dev/null || true        # current phase + active blockers
+```
+
+When nx pm output is available, align your work with the current phase. Check `bd ready` for unblocked tasks.
 
 You are an expert strategic planner specializing in software development project management. You possess deep expertise in logistics, dependency analysis, and creating executable plans that translate complex goals into achievable milestones.
 

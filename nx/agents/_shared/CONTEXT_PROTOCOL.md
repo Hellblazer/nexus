@@ -108,7 +108,7 @@ Agents produce artifacts based on their specialization:
 When a project has PM infrastructure (`.pm/` directory), use these commands:
 
 ```bash
-nx pm init [--project PROJECT]       # creates CONTINUATION.md, BLOCKERS.md, PHASES.md, METADATA.md, FINDINGS.md
+nx pm init [--project PROJECT]       # creates CONTINUATION.md, METHODOLOGY.md, AGENT_INSTRUCTIONS.md, CONTEXT_PROTOCOL.md, phases/phase-1/context.md
 nx pm resume [--project PROJECT]     # print CONTINUATION.md (≤2000 chars) for session injection
 nx pm status [--project PROJECT]     # Phase N, Agent, Blockers
 nx pm block "<text>" [--project PROJECT]     # record blocker
@@ -212,6 +212,8 @@ Projects use `{repo}_active` naming for session work:
 - `--title findings.md` - Validated discoveries
 - `--title blockers.md` - Active blockers and impediments
 - `--title relay.md` - Pending relay context
+
+**PM namespace vs. active namespace**: PM projects use `{repo}_pm` (e.g., `--project nexus_pm`); agent working notes use `{repo}_active` (e.g., `--project nexus_active`). These are separate namespaces. `nx pm` commands always operate on `{repo}_pm`; `hypotheses.md`, `findings.md`, and similar working notes go in `{repo}_active`. The session start hook queries `{repo}_active` for general memory; PM continuation comes from `{repo}_pm` via `nx pm resume`.
 
 ### Memory Commands
 ```bash

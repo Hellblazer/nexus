@@ -70,7 +70,7 @@ echo "# content" | nx store put - --collection knowledge --title "pattern-name" 
 **Verify storage**:
 ```bash
 nx search "topic" --corpus knowledge --n 5   # confirm searchable
-nx store list --collection knowledge__topic  # list entries
+nx store list --collection knowledge  # list all knowledge entries
 ```
 
 ## Contradiction Handling

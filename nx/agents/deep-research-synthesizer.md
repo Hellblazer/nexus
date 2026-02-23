@@ -119,7 +119,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Round Artifacts**: Use T1 scratch to track findings per research round:
   ```bash
   # After each round of research
-  nx scratch put $'# Round {N} findings\n{content}' --tags "research,round-{N}" --project {project}_active --title round-{N}.md
+  nx scratch put $'# Round {N} findings\n{content}' --tags "research,round-{N}"
   # If valuable, flag for T2 persistence
   nx scratch flag <id> --project {project}_active --title research-round-{N}.md
   ```

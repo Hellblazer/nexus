@@ -139,7 +139,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   ```bash
   nx scratch put $'Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}' --tags "analysis,step-{N}"
   # Promote chain to T2 for cross-session continuity
-  nx scratch flag <id> --project {project}_active --title analysis-chain.md
+  nx scratch promote <id> --project {project}_active --title analysis-chain.md
   ```
 
 Store using these naming conventions:

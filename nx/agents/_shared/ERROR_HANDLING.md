@@ -67,7 +67,7 @@ This file documents common error handling patterns for agents.
 - Fallback: Use `nx memory search "topic" --project {project}_active` for fuzzy retrieval
 
 **TTL format errors**:
-- Valid formats: `30d`, `4w`, `permanent`
+- Valid formats: `30d`, `4w`, `permanent`, `never` (`permanent` and `never` are both aliases for no-expiry)
 - Invalid: `30`, `"30 days"`, `30days`
 - Always use the short-form: `--ttl 30d`
 

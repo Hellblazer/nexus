@@ -64,6 +64,11 @@ The agent will:
 5. Check test quality (assertions, edge cases, error paths)
 6. Recommend additional tests if needed
 
+## Agent-Specific PRODUCE
+
+- **Session Scratch (T1)**: `nx scratch put "<snapshot>" --tags "test-run"` — test run snapshots and interim findings during session
+- **nx memory**: `nx memory put "..." --project {project}_active --title test-validation-{date}.md` — quality metrics and coverage findings persisted across sessions
+
 ## Bead Integration
 
 After validation:

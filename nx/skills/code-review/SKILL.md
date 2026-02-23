@@ -61,6 +61,13 @@ The code-review-expert agent uses hypothesis-driven review:
 3. Validate against best practices and security requirements
 4. Document findings with file:line references
 
+## Agent-Specific PRODUCE
+
+- **Session Scratch (T1)**: `nx scratch put "<notes>" --tags "review"` — working review notes during session; flagged items auto-promote to T2 at session end
+- **nx memory**: `nx memory put "..." --project {project}_active --title review-findings.md` — persistent review findings across sessions
+- **nx store** (optional): `echo "..." | nx store put - --collection knowledge --title "pattern-code-{topic}" --tags "pattern,code-review"` — recurring violation patterns worth long-term storage
+- **Beads**: creates bug beads (`bd create "..." -t bug`) for critical findings that require follow-up work
+
 ## Success Criteria
 
 - [ ] All changed files analyzed

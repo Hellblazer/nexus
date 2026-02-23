@@ -63,7 +63,7 @@ description: List all saved sessions with metadata (user)
 
       # Extract working directory from context
       if [ -f "$CONTEXT_FILE" ]; then
-        WD=$(grep "^**Working Directory:**" "$CONTEXT_FILE" | sed -n 's/.*`\([^`]*\)`.*/\1/p')
+        WD=$(grep -F "**Working Directory:**" "$CONTEXT_FILE" | sed -n 's/.*`\([^`]*\)`.*/\1/p')
         if [ -n "$WD" ]; then
           echo "  Directory: $WD"
         fi

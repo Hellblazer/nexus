@@ -27,10 +27,11 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search Nexus for missing context: `nx search "query" --corpus knowledge --n 5`
-2. Check Nexus memory for session state: `nx memory get --project {project}_active --title {filename}`
-3. Query `bd list --status=in_progress`
-4. Flag incomplete relay to user
-5. Proceed with available context, documenting assumptions
+2. Check Nexus memory for session state: `nx memory search "[topic]" --project {project}_active`
+3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+4. Query `bd list --status=in_progress`
+5. Flag incomplete relay to user
+6. Proceed with available context, documenting assumptions
 
 ### Project Context (Load Before Starting)
 
@@ -133,7 +134,7 @@ Store using these naming conventions:
 
 **Nexus Knowledge Store**: Use `nx store put` for storing and relating complex information during long-running projects. Store architectural decisions, design patterns used, relationships between modules, and any knowledge that needs to be referenced across sessions. Query with `nx search "query" --corpus knowledge --n 5`.
 
-**Nexus Memory**: Use `nx memory put/get` for temporary scratch pads, intermediate results, and working notes during development.
+**Nexus Memory (T2)**: Use `nx memory put/get` for persistent per-project memory (30d default TTL), intermediate results, and working notes during development. Use `nx scratch` for ephemeral session scratch that does not need to persist across sessions.
 
 **Parallel Subtasks**: Spawn parallel subtasks when appropriate to structure work efficiently and conserve context.
 
@@ -208,6 +209,7 @@ Before marking any work complete:
 
 ### I Relay To:
 - **code-review-expert**: Completed code for quality review (before marking complete)
+- **test-validator**: After implementation for coverage validation
 - **java-debugger**: Complex bugs requiring systematic investigation
 - **plan-auditor**: When discovering that a plan has issues during execution
 

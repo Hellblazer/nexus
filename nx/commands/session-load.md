@@ -53,7 +53,7 @@ description: Load saved session continuation (context or intent) (user)
     fi
 
     # Extract working directory safely
-    WD=$(grep "^**Working Directory:**" "$CONTEXT_FILE" | sed -n 's/.*`\([^`]*\)`.*/\1/p')
+    WD=$(grep -F "**Working Directory:**" "$CONTEXT_FILE" | sed -n 's/.*`\([^`]*\)`.*/\1/p')
 
     if [ -n "$WD" ] && [ -d "$WD" ]; then
       if cd "$WD" 2>/dev/null; then

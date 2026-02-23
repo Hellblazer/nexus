@@ -14,7 +14,7 @@ memory: user
 
 Delegates to the **substantive-critic** agent. See [registry.yaml](../../registry.yaml) for details.
 
-**Note**: This is a workaround for the substantive-critic framework bug (`classifyHandoffIfNeeded is not defined`). Use this agent for comprehensive critiques and audits until the framework bug is fixed.
+**Note**: The `classifyHandoffIfNeeded is not defined` framework error can affect any custom agent including this one. Work is complete despite this error. See CLAUDE.md Known Issues section.
 
 ## When This Skill Activates
 

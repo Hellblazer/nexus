@@ -98,16 +98,16 @@ description: Save session intent and context checkpoint (user)
   echo "$TASK_DESC" > "$INTENT_FILE"
 
   echo "Session '$SESSION_NAME' saved"
+  echo ""
+  echo "Continuation prompt saved for session **$SESSION_NAME**:"
+  echo ""
+  echo '```markdown'
+  cat "$CONTEXT_FILE"
+  echo '```'
+  echo ""
+  echo "Next steps:"
+  echo "1. Type /clear to clear this session's context"
+  echo "2. Type **/session-load $SESSION_NAME** in a fresh session to continue"
+  echo ""
+  echo "Or copy the prompt above manually if preferred."
 }
-
-Continuation prompt saved for session **$SESSION_NAME**:
-
-```markdown
-!cat "$SESSION_DIR/context.txt"
-```
-
-Next steps:
-1. Type /clear to clear this session's context
-2. Type **/session-load $SESSION_NAME** in a fresh session to continue
-
-Or copy the prompt above manually if preferred.

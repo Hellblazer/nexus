@@ -130,7 +130,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   ```bash
   nx scratch put "Issue [{severity}]: {description} in {location}" --tags "critique,{severity}"
   # Promote summary to T2 for tracking
-  nx scratch flag <id> --project {project}_active --title critique-notes.md
+  nx scratch promote <id> --project {project}_active --title critique-notes.md
   ```
 
 Store using these naming conventions:

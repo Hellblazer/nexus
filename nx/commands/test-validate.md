@@ -34,7 +34,7 @@ description: Validate tests using test-validator agent
     echo "### Last Test Run"
     echo '```'
     TOTAL=$(find target/surefire-reports -name "TEST-*.xml" 2>/dev/null | wc -l | tr -d ' ')
-    FAILED=$(grep -l 'failures="[1-9]' target/surefire-reports/TEST-*.xml 2>/dev/null | wc -l | tr -d ' ')
+    FAILED=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -l 'failures="[1-9]' {} \; 2>/dev/null | wc -l | tr -d ' ')
     echo "Total test files: $TOTAL"
     echo "Files with failures: $FAILED"
     echo '```'

@@ -67,6 +67,12 @@ The plan-auditor agent uses sequential thinking:
 **GO**: Proceed to java-developer with validated plan
 **NO-GO**: Return to strategic-planner with specific issues for revision
 
+## Agent-Specific PRODUCE
+
+- **Session Scratch (T1)**: `nx scratch put "<notes>" --tags "audit"` — audit working notes during session; flagged items auto-promote to T2 at session end
+- **nx store**: `echo "..." | nx store put - --collection knowledge --title "validation-plan-{plan-id}" --tags "validation,audit"` — audit results for the validated plan
+- **Beads**: creates gap/risk beads (`bd create "..." -t task`) for major issues found during validation
+
 ## Success Criteria
 
 - [ ] All plan assumptions verified

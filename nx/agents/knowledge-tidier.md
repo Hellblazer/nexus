@@ -116,7 +116,7 @@ For each issue found:
    - Include comprehensive tags
 
 2. **Archive Obsolete Content**
-   - Move outdated documents to archive collection: `nx store put - --collection knowledge__archive --title "{old-title}-archived-{date}"`
+   - Move outdated documents to archive collection: `echo "$(nx memory get --project {project}_active --title {old-title})" | nx store put - --collection knowledge__archive --title "{old-title}-archived-{date}" --tags "archive,knowledge"`
    - Maintain for historical reference
    - Add deprecation notices in content
 
@@ -194,7 +194,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Review Artifacts**: Use T1 scratch to track review round findings:
   ```bash
   # After each review round
-  nx scratch put $'# Review Round {N}: {N} issues found\n{issue-list}' --tags "review,round-{N}"
+  nx scratch put $'# Review Round {N}: {N} issues found\n{issue-list}' --tags "review,round-{N}" --project {project}_active --title review-round-{N}.md
   # Promote summary to T2 for cross-session continuity
   nx scratch promote <id> --project {project}_active --title review-round-{N}.md
   ```
