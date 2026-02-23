@@ -295,31 +295,10 @@ def test_context_A_shows_extra_lines_after(
     assert result.exit_code == 0, result.output
 
 
-def test_context_B_is_accepted(
+def test_context_C_sets_lines_after(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """-B N is accepted as a flag without error."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
-                result = runner.invoke(
-                    main,
-                    ["search", "query", "--corpus", "knowledge", "-B", "2"],
-                )
-
-    assert result.exit_code == 0, result.output
-
-
-def test_context_C_sets_both_A_and_B(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """-C N is accepted as shorthand for -A N -B N (no error, integer arg)."""
+    """-C N is accepted as alias for -A N (no error, integer arg)."""
     monkeypatch.setenv("CHROMA_API_KEY", "k")
     monkeypatch.setenv("VOYAGE_API_KEY", "v")
     monkeypatch.setenv("CHROMA_TENANT", "t")
@@ -360,7 +339,7 @@ def test_context_C_requires_integer(
 
 
 def test_format_plain_with_context_shows_correct_lines() -> None:
-    """format_plain_with_context trims/pads chunk to (before + 1 match + after) lines."""
+    """format_plain_with_context shows first line + lines_after additional lines."""
     from nexus.search_engine import format_plain_with_context
 
     content = "\n".join(f"line{i}" for i in range(10))
@@ -368,14 +347,14 @@ def test_format_plain_with_context_shows_correct_lines() -> None:
         id="x", content=content, distance=0.1, collection="c",
         metadata={"source_path": "file.py", "line_start": 0},
     )
-    lines = format_plain_with_context([result], lines_before=2, lines_after=3)
-    # Should show at most 2 + 1 + 3 = 6 lines
+    lines = format_plain_with_context([result], lines_after=3)
+    # Should show 1 + 3 = 4 lines
     content_lines = [ln for ln in lines if ln.strip()]
-    assert len(content_lines) <= 6, f"Expected ≤6 lines, got: {content_lines}"
+    assert len(content_lines) <= 4, f"Expected ≤4 lines, got: {content_lines}"
 
 
 def test_format_plain_with_context_no_context_equals_format_plain() -> None:
-    """format_plain_with_context(0, 0) produces same output as format_plain."""
+    """format_plain_with_context(0) produces same output as format_plain."""
     from nexus.search_engine import format_plain, format_plain_with_context
 
     content = "alpha\nbeta\ngamma"
@@ -384,7 +363,7 @@ def test_format_plain_with_context_no_context_equals_format_plain() -> None:
         metadata={"source_path": "file.py", "line_start": 5},
     )
     plain = format_plain([result])
-    ctx = format_plain_with_context([result], lines_before=0, lines_after=0)
+    ctx = format_plain_with_context([result], lines_after=0)
     assert plain == ctx
 
 

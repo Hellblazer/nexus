@@ -130,8 +130,8 @@ def fetch_mxbai_results(
     for store_id in stores:
         try:
             response = client.stores.search(store_id=store_id, query=query, top_k=per_k)
-        except Exception:
-            _log.warning("Mixedbread store unavailable, skipping", store_id=store_id)
+        except Exception as exc:
+            _log.warning("Mixedbread store unavailable, skipping", store_id=store_id, error=str(exc))
             continue
         for chunk in response.chunks:
             _digest = hashlib.sha256(chunk.content.text.encode()).hexdigest()[:16]

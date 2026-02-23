@@ -7,7 +7,7 @@ from nexus.config import load_config
 from nexus.corpus import resolve_corpus
 from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
-from nexus.formatters import format_json, format_plain, format_plain_with_context, format_vimgrep
+from nexus.formatters import format_json, format_plain_with_context, format_vimgrep
 from nexus.search_engine import (
     SearchResult,
     answer_mode,
@@ -102,10 +102,8 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               help="Filter by metadata field (repeatable; multiple flags are ANDed)")
 @click.option("-A", "lines_after", default=0, type=int, metavar="N",
               help="Show N lines of context after each result chunk")
-@click.option("-B", "lines_before", default=0, type=int, metavar="N",
-              help="Show N lines of context before each result chunk")
 @click.option("-C", "lines_context", default=0, type=int, metavar="N",
-              help="Show N lines of context above and below (shorthand for -A N -B N)")
+              help="Show N lines of context after each result chunk (alias for -A N)")
 @click.option("--reverse", "-r", is_flag=True, default=False,
               help="Reverse output order (highest-scoring last)")
 def search_cmd(
@@ -125,7 +123,6 @@ def search_cmd(
     show_content: bool,
     where_pairs: tuple[str, ...],
     lines_after: int,
-    lines_before: int,
     lines_context: int,
     reverse: bool,
 ) -> None:
@@ -139,9 +136,8 @@ def search_cmd(
     --corpus may be a prefix (code, docs, knowledge) or a fully-qualified
     collection name (code__myrepo).  Repeat --corpus to search multiple corpora.
     """
-    # -C N is shorthand for -A N -B N
+    # -C N is alias for -A N
     if lines_context:
-        lines_before = lines_context
         lines_after = lines_context
 
     # Build where filter: --where pairs only ($startswith is not a valid ChromaDB operator;
@@ -149,11 +145,9 @@ def search_cmd(
     resolved: str | None = str(Path(path).resolve()) if path is not None else None
 
     try:
-        user_where = _parse_where(where_pairs)
+        where_filter = _parse_where(where_pairs)
     except click.BadParameter as exc:
         raise click.ClickException(str(exc)) from exc
-
-    where_filter: dict | None = user_where if user_where else None
 
     db = _t3()
     all_collections = [c["name"] for c in db.list_collections()]
@@ -254,7 +248,7 @@ def search_cmd(
     else:
         for result in results:
             for line in format_plain_with_context(
-                [result], lines_before=lines_before, lines_after=lines_after
+                [result], lines_after=lines_after
             ):
                 click.echo(line)
             if show_content:

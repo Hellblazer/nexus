@@ -326,9 +326,6 @@ class T3Database:
             return True
         except _ChromaNotFoundError:
             return False
-        except Exception as exc:
-            _log.warning("collection_exists check failed", name=name, error=str(exc))
-            return False
 
     def delete_collection(self, name: str) -> None:
         """Delete a T3 collection entirely."""
@@ -347,8 +344,14 @@ class T3Database:
         return len(ids)
 
     def collection_info(self, name: str) -> dict:
-        """Return metadata for a collection (count, metadata dict)."""
-        col = self._client.get_collection(name)
+        """Return metadata for a collection (count, metadata dict).
+
+        Raises KeyError if the collection does not exist.
+        """
+        try:
+            col = self._client.get_collection(name)
+        except _ChromaNotFoundError:
+            raise KeyError(f"Collection not found: {name!r}") from None
         return {"count": col.count(), "metadata": col.metadata or {}}
 
     def collection_metadata(self, collection_name: str) -> dict:

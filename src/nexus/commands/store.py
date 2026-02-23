@@ -73,7 +73,10 @@ def put_cmd(
         path = Path(source)
         if not path.exists():
             raise click.ClickException(f"File not found: {source}")
-        content = path.read_text()
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            raise click.ClickException(f"File {source!r} is not valid UTF-8.")
         if not title:
             title = path.name
 
@@ -105,7 +108,6 @@ def put_cmd(
               help="Maximum entries to show")
 def list_cmd(collection: str, limit: int) -> None:
     """List entries in a T3 knowledge collection."""
-    from nexus.corpus import t3_collection_name
     col_name = t3_collection_name(collection)
     entries = _t3().list_store(col_name, limit=limit)
     if not entries:

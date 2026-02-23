@@ -31,7 +31,11 @@ class PDFChunker:
         self.overlap_chars = max(1, int(chunk_chars * overlap_percent))
 
     def chunk(self, text: str, extraction_metadata: dict) -> list[TextChunk]:
-        """Split *text* into chunks. *extraction_metadata* is forwarded to each chunk."""
+        """Split *text* into chunks.
+
+        *extraction_metadata* is used to extract page boundaries for assigning
+        page numbers to each chunk; it is not forwarded wholesale into chunk metadata.
+        """
         page_boundaries = extraction_metadata.get("page_boundaries", [])
         chunks: list[TextChunk] = []
         start = 0
@@ -78,6 +82,10 @@ class PDFChunker:
             if page_start <= char_pos < page_end:
                 return page["page_number"]
         # If we reach here, chunk_start is past all page boundaries — unexpected
-        _log.debug("chunk_start past all page boundaries, using last page",
-                   chunk_start=char_pos, last_boundary=page_boundaries[-1]["end"] if page_boundaries else None)
+        last = page_boundaries[-1] if page_boundaries else None
+        _log.debug(
+            "chunk_start past all page boundaries, using last page",
+            chunk_start=char_pos,
+            last_page_number=last["page_number"] if last else None,
+        )
         return page_boundaries[-1]["page_number"] if page_boundaries else 0

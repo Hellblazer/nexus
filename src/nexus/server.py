@@ -79,7 +79,7 @@ def add_repo():
 
 @app.route("/repos/<path:repo_path>", methods=["DELETE"])
 def remove_repo(repo_path: str):
-    full_path = Path("/" + repo_path).resolve()
+    full_path = Path("/" + repo_path.lstrip("/")).resolve()
     reg = _get_registry()
     if reg.get(full_path) is None:
         return jsonify({"error": "repo not registered"}), 404

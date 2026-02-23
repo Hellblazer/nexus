@@ -88,16 +88,13 @@ def start_cmd() -> None:
     log_file = _log_path()
     log_file.parent.mkdir(parents=True, exist_ok=True)
     try:
-        log_fh = log_file.open("a")
-        try:
+        with log_file.open("a") as log_fh:
             proc = subprocess.Popen(
                 [sys.executable, "-m", "nexus.server_main", str(port)],
                 stdout=log_fh,
                 stderr=log_fh,
                 start_new_session=True,
             )
-        finally:
-            log_fh.close()  # parent closes; child inherits the fd
         pid_path.write_text(str(proc.pid))
         _start_path().write_text(
             datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -127,7 +124,7 @@ def stop_cmd() -> None:
                 "You may need elevated privileges to stop this server.",
                 err=True,
             )
-            sys.exit(1)
+            raise click.exceptions.Exit(1)
         raise
     # Wait up to 5 seconds for the process to exit before reporting success.
     deadline = time.monotonic() + 5.0
@@ -142,7 +139,7 @@ def stop_cmd() -> None:
             f"Warning: process {pid} did not stop within 5 seconds. PID file preserved.",
             err=True,
         )
-        sys.exit(1)
+        raise click.exceptions.Exit(1)
     _pid_path().unlink(missing_ok=True)
     click.echo(f"Server stopped (PID {pid}).")
 

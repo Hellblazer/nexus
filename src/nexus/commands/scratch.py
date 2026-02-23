@@ -4,13 +4,10 @@ from pathlib import Path
 
 import click
 
+from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
 from nexus.session import read_session_id, write_session_file, generate_session_id
-
-
-def _default_db_path() -> Path:
-    return Path.home() / ".config" / "nexus" / "memory.db"
 
 
 def _t1() -> T1Database:
@@ -46,10 +43,10 @@ def put_cmd(content: str, tags: str, persist: bool, project: str, title: str) ->
 
 
 @scratch.command("get")
-@click.argument("id")
-def get_cmd(id: str) -> None:
+@click.argument("entry_id", metavar="ID")
+def get_cmd(entry_id: str) -> None:
     """Retrieve a scratch entry by ID."""
-    result = _t1().get(id)
+    result = _t1().get(entry_id)
     if result is None:
         raise click.ClickException("Not found.")
     click.echo(result["content"])
@@ -83,44 +80,44 @@ def list_cmd() -> None:
 
 
 @scratch.command("flag")
-@click.argument("id")
+@click.argument("entry_id", metavar="ID")
 @click.option("--project", "-p", default="", help="Explicit T2 destination project")
 @click.option("--title", "-t", default="", help="Explicit T2 destination title")
-def flag_cmd(id: str, project: str, title: str) -> None:
+def flag_cmd(entry_id: str, project: str, title: str) -> None:
     """Mark a scratch entry for SessionEnd flush to T2."""
     t1 = _t1()
     try:
-        t1.flag(id, project=project, title=title)
+        t1.flag(entry_id, project=project, title=title)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Flagged: {id}")
+    click.echo(f"Flagged: {entry_id}")
 
 
 @scratch.command("unflag")
-@click.argument("id")
-def unflag_cmd(id: str) -> None:
+@click.argument("entry_id", metavar="ID")
+def unflag_cmd(entry_id: str) -> None:
     """Remove the SessionEnd flush marking from a scratch entry."""
     t1 = _t1()
     try:
-        t1.unflag(id)
+        t1.unflag(entry_id)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Unflagged: {id}")
+    click.echo(f"Unflagged: {entry_id}")
 
 
 @scratch.command("promote")
-@click.argument("id")
+@click.argument("entry_id", metavar="ID")
 @click.option("--project", "-p", required=True, help="Target T2 project")
 @click.option("--title", "-t", required=True, help="Target T2 title")
-def promote_cmd(id: str, project: str, title: str) -> None:
+def promote_cmd(entry_id: str, project: str, title: str) -> None:
     """Copy a scratch entry to T2 immediately."""
     t1 = _t1()
     with T2Database(_default_db_path()) as t2:
         try:
-            t1.promote(id, project=project, title=title, t2=t2)
+            t1.promote(entry_id, project=project, title=title, t2=t2)
         except KeyError as exc:
             raise click.ClickException(str(exc)) from exc
-    click.echo(f"Promoted {id} -> {project}/{title}")
+    click.echo(f"Promoted {entry_id} -> {project}/{title}")
 
 
 @scratch.command("clear")

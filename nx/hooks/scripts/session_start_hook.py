@@ -84,15 +84,9 @@ def main() -> None:
 
         # Show available T2 memory docs for active project
         project_name = None
-        try:
-            git_result = subprocess.run(
-                ['git', 'rev-parse', '--show-toplevel'],
-                capture_output=True, text=True, timeout=5, cwd=cwd
-            )
-            if git_result.returncode == 0:
-                project_name = Path(git_result.stdout.strip()).name
-        except Exception:
-            pass
+        toplevel = run_command(['git', 'rev-parse', '--show-toplevel'], timeout=5, cwd=cwd)
+        if toplevel:
+            project_name = Path(toplevel).name
 
         if project_name:
             memory_output = run_command(

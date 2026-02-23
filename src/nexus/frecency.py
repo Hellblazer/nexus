@@ -49,7 +49,7 @@ def compute_frecency(repo: Path, file: Path) -> float:
         return 0.0
     total = 0.0
     for ts in timestamps:
-        days = (now - ts) / 86400.0
+        days = max(0.0, (now - ts) / 86400.0)
         total += math.exp(-0.01 * days)
     return total
 
@@ -97,7 +97,7 @@ def batch_frecency(repo: Path) -> dict[Path, float]:
                 current_ts = None
         elif current_ts is not None:
             file_path = repo / line
-            days = (now - current_ts) / 86400.0
+            days = max(0.0, (now - current_ts) / 86400.0)
             scores[file_path] = scores.get(file_path, 0.0) + math.exp(-0.01 * days)
 
     return scores

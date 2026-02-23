@@ -32,6 +32,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_project_title ON memory(project, ti
 CREATE INDEX        IF NOT EXISTS idx_memory_project       ON memory(project);
 CREATE INDEX        IF NOT EXISTS idx_memory_agent         ON memory(agent);
 CREATE INDEX        IF NOT EXISTS idx_memory_timestamp     ON memory(timestamp);
+CREATE INDEX        IF NOT EXISTS idx_memory_ttl_timestamp ON memory(ttl, timestamp);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     content,
@@ -253,7 +254,7 @@ class T2Database:
         Note: entries hard-deleted during the decay window cannot be detected,
         so only surviving titles are returned.
         """
-        with self._lock:
+        with self._lock, self.conn:
             rows = self.conn.execute(
                 "SELECT title FROM memory WHERE project = ?", (project,)
             ).fetchall()
@@ -268,7 +269,6 @@ class T2Database:
                 """,
                 (project,),
             )
-            self.conn.commit()
         return surviving
 
     def get_all(self, project: str) -> list[dict[str, Any]]:

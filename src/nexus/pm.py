@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from nexus.config import HAIKU_MODEL
+from nexus.config import HAIKU_MODEL, get_credential
 from nexus.db import make_t3
 
 if TYPE_CHECKING:
@@ -44,6 +44,10 @@ _STANDARD_DOCS: dict[str, str] = {
 }
 
 _log = structlog.get_logger()
+
+# ~1200 tokens x 3.3 chars/token ~ 3960 chars. Keeps each chunk
+# within Claude Haiku's comfortable synthesis window.
+_SYNTHESIS_CHAR_LIMIT = 3960
 
 _PM_SUFFIX = "_pm"
 
@@ -104,8 +108,14 @@ def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> 
         f"Use brief bullets (one line per item). Target 400-800 tokens, hard cap 1200 tokens."
     )
 
-    from nexus.config import get_credential
-    client = anthropic.Anthropic(api_key=get_credential("anthropic_api_key"))
+    api_key = get_credential("anthropic_api_key")
+    if not api_key:
+        raise RuntimeError(
+            "anthropic_api_key is required for PM archive synthesis. "
+            "Set ANTHROPIC_API_KEY or run `nx config set anthropic_api_key <key>`."
+        )
+    _log.info("Synthesizing archive via Haiku", project=project)
+    client = anthropic.Anthropic(api_key=api_key, timeout=60.0)
     message = client.messages.create(
         model=HAIKU_MODEL,
         max_tokens=1200,
@@ -117,17 +127,14 @@ def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> 
 
 
 def _split_synthesis(text: str) -> list[str]:
-    """Split synthesis into chunks if it exceeds 1200 tokens (~3960 chars)."""
-    # ~1200 tokens × 3.3 chars/token ≈ 3960 chars. Keeps each chunk
-    # within Claude Haiku's comfortable synthesis window.
-    CHAR_LIMIT = 3960
-    if len(text) <= CHAR_LIMIT:
+    """Split synthesis into chunks if it exceeds _SYNTHESIS_CHAR_LIMIT."""
+    if len(text) <= _SYNTHESIS_CHAR_LIMIT:
         return [text]
 
     # Split at any ## section boundary — robust against header name variations
     parts = re.split(r"(?=^## )", text, flags=re.MULTILINE)
     if len(parts) <= 1:
-        return [text[:CHAR_LIMIT]]
+        return [text[:_SYNTHESIS_CHAR_LIMIT]]
 
     # Group parts into at most 3 evenly-distributed chunks
     n = len(parts)
@@ -138,7 +145,7 @@ def _split_synthesis(text: str) -> list[str]:
         if chunk:
             chunks.append(chunk)
 
-    return chunks[:3] if chunks else [text[:CHAR_LIMIT]]
+    return chunks[:3] if chunks else [text[:_SYNTHESIS_CHAR_LIMIT]]
 
 
 # ── AC1: pm_init ──────────────────────────────────────────────────────────────

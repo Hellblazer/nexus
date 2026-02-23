@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import sys
-
 import click
 
 from nexus.commands.store import _t3
@@ -88,4 +86,4 @@ def verify_cmd(name: str, deep: bool) -> None:
         click.echo(f"Collection '{name}': {count} documents — embedding health OK")
     except Exception as exc:
         click.echo(f"Error: embedding probe failed for '{name}': {exc}", err=True)
-        sys.exit(1)
+        raise click.exceptions.Exit(1)

@@ -38,6 +38,9 @@ class RepoRegistry:
             except (json.JSONDecodeError, OSError) as exc:
                 _log.warning("Failed to load registry; starting empty", path=str(path), error=str(exc))
                 self._data = {"repos": {}}
+            if not isinstance(self._data.get("repos"), dict):
+                _log.warning("Registry has invalid structure; starting empty", path=str(path))
+                self._data = {"repos": {}}
 
     # ── public API ────────────────────────────────────────────────────────────
 

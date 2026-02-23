@@ -441,19 +441,19 @@ def test_pm_restore_error(runner: CliRunner) -> None:
 
 
 def test_pm_close_success(runner: CliRunner) -> None:
-    """close subcommand calls pm_archive with status='completed'."""
+    """close subcommand delegates to archive with status='completed'."""
     db_patch, mock_db = _patch_db()
     with db_patch, _patch_infer("proj"), _patch_config(90), patch("nexus.commands.pm.pm_archive") as mock_archive:
         result = runner.invoke(main, ["pm", "close"])
 
     assert result.exit_code == 0, result.output
     mock_archive.assert_called_once_with(mock_db, project="proj", status="completed", archive_ttl=90)
-    assert "Closed" in result.output
+    assert "Archived" in result.output
     assert "proj" in result.output
 
 
 def test_pm_close_error(runner: CliRunner) -> None:
-    """close when RuntimeError is raised shows a ClickException."""
+    """close when RuntimeError is raised shows a ClickException (via archive delegation)."""
     db_patch, _ = _patch_db()
     with (
         db_patch,
@@ -464,7 +464,7 @@ def test_pm_close_error(runner: CliRunner) -> None:
         result = runner.invoke(main, ["pm", "close"])
 
     assert result.exit_code != 0
-    assert "Close failed" in result.output
+    assert "Archive failed" in result.output
     assert "T3 unreachable" in result.output
 
 

@@ -97,12 +97,16 @@ def search_ripgrep(
         _log.warning("rg timed out after 10 s — skipping ripgrep results")
         return []
 
+    if proc.returncode == 2:
+        _log.warning("rg exited with error", stderr=proc.stderr[:200] if proc.stderr else "")
+        return []
+
     results: list[dict] = []
     for raw_line in proc.stdout.splitlines():
         # Each matched line is a cache entry: /abs/path:lineno:content
-        # Split on ":" at most twice to isolate path and lineno.
-        # Paths may contain colons on exotic filesystems; the lineno field
-        # is always the *second* colon-delimited token that parses as int.
+        # Split on ":" with maxsplit=2 to get exactly three parts.
+        # This assumes the file path does NOT contain colons; paths with
+        # colons (rare, but legal on some filesystems) will be misparsed.
         parts = raw_line.split(":", 2)
         if len(parts) < 3:
             continue

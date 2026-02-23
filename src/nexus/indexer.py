@@ -234,7 +234,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
 
         for i, chunk in enumerate(chunks):
             title = f"{file.relative_to(repo)}:{chunk['line_start']}-{chunk['line_end']}"
-            doc_id = _hl.sha256(f"{collection_name}:{title}".encode()).hexdigest()[:16]
+            doc_id = _hl.sha256(f"{collection_name}:{title}".encode()).hexdigest()[:32]
             ext = file.suffix.lower()
             metadata: dict = {
                 # Core fields

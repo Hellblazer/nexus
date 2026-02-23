@@ -53,20 +53,15 @@ def format_plain(results: list[SearchResult]) -> list[str]:
 
 def format_plain_with_context(
     results: list[SearchResult],
-    lines_before: int = 0,
     lines_after: int = 0,
 ) -> list[str]:
-    """Plain-text format with context-line windowing.
+    """Plain-text format with optional context-line windowing.
 
-    Shows at most ``lines_before`` lines before the first line of the chunk,
-    then the first matched line, then at most ``lines_after`` additional lines.
-    When both are 0, produces identical output to ``format_plain``.
-
-    Note: ``lines_before`` is accepted for API compatibility but currently
-    has no functional effect — the context window always starts at line 0
-    of the chunk because the match position defaults to ``min(lines_before, total - 1)``.
+    Shows the first line of each chunk, then at most *lines_after* additional
+    lines from the chunk.  When *lines_after* is 0, produces identical output
+    to :func:`format_plain`.
     """
-    if lines_before == 0 and lines_after == 0:
+    if lines_after == 0:
         return format_plain(results)
 
     output: list[str] = []
@@ -75,14 +70,9 @@ def format_plain_with_context(
         line_start = r.metadata.get("line_start", 0)
         chunk_lines = r.content.splitlines()
         total = len(chunk_lines)
+        end_idx = min(total, 1 + lines_after)
 
-        # Treat index 0 as the match line.  lines_before draws from lines
-        # *before* the match line inside the chunk (indices < match_idx).
-        match_idx = min(lines_before, total - 1) if total > 0 else 0
-        start_idx = max(0, match_idx - lines_before)
-        end_idx = min(total, match_idx + 1 + lines_after)
-
-        for i, content_line in enumerate(chunk_lines[start_idx:end_idx]):
-            line_no = int(line_start) + start_idx + i
+        for i, content_line in enumerate(chunk_lines[:end_idx]):
+            line_no = int(line_start) + i
             output.append(f"{source_path}:{line_no}:{content_line}")
     return output

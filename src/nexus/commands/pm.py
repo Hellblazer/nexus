@@ -4,6 +4,7 @@ from pathlib import Path
 
 import click
 
+from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.config import load_config
 from nexus.db.t2 import T2Database
 from nexus.db import make_t3
@@ -22,10 +23,6 @@ from nexus.pm import (
 )
 
 
-def _default_db_path() -> Path:
-    return Path.home() / ".config" / "nexus" / "memory.db"
-
-
 def _infer_project() -> str:
     """Infer the project name from the current git repo name, or fallback."""
     import subprocess
@@ -35,7 +32,7 @@ def _infer_project() -> str:
             capture_output=True, text=True, check=True,
         )
         return Path(result.stdout.strip()).name
-    except Exception:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return Path.cwd().name
 
 
@@ -167,17 +164,10 @@ def archive_cmd(project: str | None, archive_status: str) -> None:
 
 @pm.command("close")
 @click.option("--project", default=None)
-def close_cmd(project: str | None) -> None:
-    """Archive and mark the project as completed (alias for archive --status completed)."""
-    proj = project or _infer_project()
-    config = load_config()
-    ttl = config["pm"]["archiveTtl"]
-    with T2Database(_default_db_path()) as db:
-        try:
-            pm_archive(db, project=proj, status="completed", archive_ttl=ttl)
-            click.echo(f"Closed project '{proj}'.")
-        except (RuntimeError, ValueError) as exc:
-            raise click.ClickException(f"Close failed: {exc}") from exc
+@click.pass_context
+def close_cmd(ctx: click.Context, project: str | None) -> None:
+    """Archive and mark the project as completed."""
+    ctx.invoke(archive_cmd, project=project, archive_status="completed")
 
 
 @pm.command("restore")

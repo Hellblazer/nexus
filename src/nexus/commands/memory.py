@@ -5,14 +5,11 @@ from pathlib import Path
 
 import click
 
+from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.config import get_credential
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.ttl import parse_ttl
-
-
-def _default_db_path() -> Path:
-    return Path.home() / ".config" / "nexus" / "memory.db"
 
 
 @click.group()
@@ -43,16 +40,16 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
 
 
 @memory.command("get")
-@click.argument("id", required=False, type=int)
+@click.argument("entry_id", metavar="ID", required=False, type=int)
 @click.option("--project", "-p", default=None, help="Project namespace")
 @click.option("--title", "-t", default=None, help="Entry title")
-def get_cmd(id: int | None, project: str | None, title: str | None) -> None:
+def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> None:
     """Retrieve a memory entry by ID or by --project + --title."""
-    if id is None and not (project and title):
+    if entry_id is None and not (project and title):
         raise click.UsageError("provide an ID or --project and --title")
     with T2Database(_default_db_path()) as db:
-        if id is not None:
-            result = db.get(id=id)
+        if entry_id is not None:
+            result = db.get(id=entry_id)
         else:
             result = db.get(project=project, title=title)
     if result is None:
@@ -101,16 +98,16 @@ def expire_cmd() -> None:
 
 
 @memory.command("promote")
-@click.argument("id", type=int)
+@click.argument("entry_id", metavar="ID", type=int)
 @click.option("--collection", required=True, help="Target T3 collection name (e.g. knowledge__myproject)")
 @click.option("--tags", default="", help="Comma-separated tags (overrides T2 tags when provided)")
 @click.option("--remove", is_flag=True, default=False, help="Delete the entry from T2 after promoting.")
-def promote_cmd(id: int, collection: str, tags: str, remove: bool) -> None:
+def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None:
     """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
     with T2Database(_default_db_path()) as db:
-        entry = db.get(id=id)
+        entry = db.get(id=entry_id)
         if entry is None:
-            raise click.ClickException(f"Entry {id} not found in T2 memory.")
+            raise click.ClickException(f"Entry {entry_id} not found in T2 memory.")
 
         missing = [
             k

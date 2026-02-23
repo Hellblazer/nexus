@@ -36,17 +36,16 @@ def _haiku_answer(query: str, results: list[SearchResult]) -> str:
         f"{r.metadata.get('line_start', '?')}\n{r.content[:400]}"
         for i, r in enumerate(results)
     )
-    prompt = (
-        f"Answer the question: {query}\n\n"
-        f"Use these sources (cite with <cite i=\"N\"> inline):\n{snippets}\n\n"
-        "Cite each source by index number. Use <cite i=\"N\"> for single source, "
-        "<cite i=\"N-M\"> for a range of consecutive sources."
-    )
     client = _anthropic_client()
     msg = client.messages.create(
         model=_HAIKU_MODEL,
         max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
+        system=(
+            'Answer questions using the provided sources. '
+            'Cite each source by index number using <cite i="N"> for a single source '
+            'or <cite i="N-M"> for a range of consecutive sources.'
+        ),
+        messages=[{"role": "user", "content": f"Question: {query}\n\nSources:\n{snippets}"}],
     )
     if not msg.content:
         return ""
@@ -60,17 +59,16 @@ def _haiku_refine(query: str, results: list[SearchResult]) -> dict:
     snippets = "\n".join(
         f"{i}: {r.content[:200]}" for i, r in enumerate(results[:10])
     )
-    prompt = (
-        f"Query: {query}\n\nTop results:\n{snippets}\n\n"
-        "Are these results sufficient? Respond ONLY with valid JSON:\n"
-        '{"done": true}  — if results are sufficient\n'
-        '{"query": "<refined query>"}  — if results need improvement'
-    )
     client = _anthropic_client()
     msg = client.messages.create(
         model=_HAIKU_MODEL,
         max_tokens=64,
-        messages=[{"role": "user", "content": prompt}],
+        system=(
+            "Decide if search results are sufficient. Respond ONLY with valid JSON:\n"
+            '{"done": true}  — if results are sufficient\n'
+            '{"query": "<refined query>"}  — if results need improvement'
+        ),
+        messages=[{"role": "user", "content": f"Query: {query}\n\nTop results:\n{snippets}"}],
     )
     if not msg.content:
         return {"done": True}

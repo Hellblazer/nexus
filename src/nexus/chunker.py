@@ -109,7 +109,7 @@ def chunk_file(file: Path, content: str) -> list[dict[str, Any]]:
                     result.append(meta)
                 return result
         except Exception:
-            _log.debug("AST chunking failed for %s, falling back to line chunks", file, exc_info=True)
+            _log.debug("AST chunking failed, falling back to line chunks", file=str(file), exc_info=True)
 
     # Line-based fallback
     raw_chunks = _line_chunk(content)

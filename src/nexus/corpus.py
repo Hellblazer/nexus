@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+import structlog
+
 # ChromaDB collection name constraints:
 # - 3–63 characters
 # - Must start and end with an alphanumeric character
@@ -70,6 +72,10 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
     ``{corpus}__`` are returned.
     """
     if "__" in corpus:
-        return [c for c in all_collections if c == corpus]
-    prefix = f"{corpus}__"
-    return [c for c in all_collections if c.startswith(prefix)]
+        matches = [c for c in all_collections if c == corpus]
+    else:
+        prefix = f"{corpus}__"
+        matches = [c for c in all_collections if c.startswith(prefix)]
+    if not matches:
+        structlog.get_logger().warning("resolve_corpus: no collections matched", corpus=corpus)
+    return matches

@@ -6,7 +6,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import structlog
 import yaml
+
+_log = structlog.get_logger(__name__)
 
 # Protects the read-modify-write sequence in set_credential() against concurrent
 # calls within the same process.  Cross-process safety is provided by the atomic
@@ -165,6 +168,9 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     if global_path.exists():
         with global_path.open() as fh:
             data = yaml.safe_load(fh) or {}
+        if not isinstance(data, dict):
+            _log.warning("global config is not a dict, ignoring", path=str(global_path))
+            data = {}
         config = _deep_merge(config, data)
 
     # Per-repo config
@@ -172,6 +178,9 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     if repo_config_path.exists():
         with repo_config_path.open() as fh:
             data = yaml.safe_load(fh) or {}
+        if not isinstance(data, dict):
+            _log.warning("repo config is not a dict, ignoring", path=str(repo_config_path))
+            data = {}
         config = _deep_merge(config, data)
 
     # Env var overrides

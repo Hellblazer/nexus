@@ -667,7 +667,7 @@ def test_synthesize_haiku_empty_response_raises() -> None:
     with patch("anthropic.Anthropic") as mock_anthropic_cls:
         mock_client = mock_anthropic_cls.return_value
         mock_client.messages.create.return_value = mock_message
-        with patch("nexus.config.get_credential", return_value="fake-api-key"):
+        with patch("nexus.pm.get_credential", return_value="fake-api-key"):
             with pytest.raises(RuntimeError, match="empty response"):
                 _synthesize_haiku(
                     docs=[{"title": "CONTINUATION.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
@@ -705,7 +705,7 @@ def test_synthesize_haiku_trims_long_content() -> None:
     with patch("anthropic.Anthropic") as mock_anthropic_cls:
         mock_client = mock_anthropic_cls.return_value
         mock_client.messages.create.side_effect = capture_create
-        with patch("nexus.config.get_credential", return_value="fake-api-key"):
+        with patch("nexus.pm.get_credential", return_value="fake-api-key"):
             result = _synthesize_haiku(all_docs, project="test", status="completed")
 
     # Verify Anthropic was called

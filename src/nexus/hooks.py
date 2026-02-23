@@ -8,9 +8,13 @@ from pathlib import Path
 
 import sqlite3
 
+import structlog
+
 from nexus.db.t2 import T2Database
 from nexus.session import generate_session_id, session_file_path, write_session_file
 
+
+_log = structlog.get_logger()
 
 # -- Helpers ------------------------------------------------------------------
 
@@ -124,13 +128,13 @@ def session_end() -> str:
                 t1.clear()
 
             expired = db.expire()
-    except (sqlite3.Error, OSError):
-        pass
+    except (sqlite3.Error, OSError) as exc:
+        _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
     # Remove session file
     try:
         session_file.unlink()
-    except FileNotFoundError:
+    except OSError:
         pass
 
     parts = [f"Session ended. Flushed {flushed} scratch entries. Expired {expired} memory entries."]

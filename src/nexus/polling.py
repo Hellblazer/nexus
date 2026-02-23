@@ -43,8 +43,10 @@ def check_and_reindex(repo: Path, registry: "RepoRegistry") -> None:
 
     Skips if:
     - repo not in registry
-    - repo status is 'indexing' or 'error' (already in progress / persistent failure)
+    - repo status is 'indexing' (already in progress)
     - HEAD hash unchanged
+
+    Repos in 'error' status are retried on the next poll.
 
     Always records the new head_hash even if indexing fails, to prevent
     an infinite re-index loop on persistent failures.
@@ -53,9 +55,9 @@ def check_and_reindex(repo: Path, registry: "RepoRegistry") -> None:
     if info is None:
         return
 
-    if info.get("status") in ("indexing", "error"):
-        return
-    # Retry pending_credentials on each poll — user may have added credentials
+    if info.get("status") == "indexing":
+        return  # skip repos currently being indexed
+    # "error" status repos are retried on next poll
 
     current = _current_head(repo)
     if current == info.get("head_hash", ""):
