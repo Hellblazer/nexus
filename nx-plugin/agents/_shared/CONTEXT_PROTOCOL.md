@@ -116,6 +116,7 @@ nx pm unblock <line> [--project PROJECT]     # resolve blocker
 nx pm phase next [--project PROJECT]         # advance to next phase
 nx pm search "<query>" [--project PROJECT]   # FTS5 search across PM docs
 nx pm archive [--project PROJECT]            # T2→T3 synthesis + 90-day decay
+nx pm close [--project PROJECT]             # archive + mark completed (alias: archive --status completed)
 nx pm restore <project>                      # restore archived project (within 90-day T2 window)
 nx pm reference [<query>]                    # search archived PM syntheses in T3
 ```

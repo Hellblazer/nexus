@@ -67,7 +67,7 @@ def main() -> None:
     print("   `nx memory put \"<summary>\" --project <project> --title context.md`")
     print("")
     print("3. Persist knowledge findings to T3 store (if applicable):")
-    print("   `nx store put \"<content>\" --collection knowledge__<topic>`")
+    print("   `echo \"<content>\" | nx store put - --collection knowledge --title \"<title>\"`")
     print("")
 
     # Show current PM status if nx is available

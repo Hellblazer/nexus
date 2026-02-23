@@ -69,6 +69,8 @@ nx search "how does feature X work in our codebase" --corpus code --hybrid --n 1
 
 ## Consistency Checks
 
+> **Note**: Run all commands below from the **repository root** (`/path/to/nexus/`), not from within `agents/_shared/`.
+
 ```bash
 # All agents reference shared protocol
 grep -l "Shared Context Protocol.*_shared" nx-plugin/agents/*.md | wc -l

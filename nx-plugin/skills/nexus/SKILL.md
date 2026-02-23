@@ -92,6 +92,7 @@ nx pm phase next
 nx pm search "what did we decide about caching"
 nx pm promote phases/phase-2/context.md --collection knowledge --tags "decision"
 nx pm archive                              # synthesise → T3, start 90-day T2 decay
+nx pm close                                # archive + mark completed (alias for archive --status completed)
 nx pm restore <project>
 nx pm reference "how did we handle rate limiting"
 nx pm expire

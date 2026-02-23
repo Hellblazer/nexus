@@ -89,8 +89,7 @@ def main() -> None:
         # Show available T2 memory docs for active project
         project_name = None
         try:
-            import subprocess as sp
-            git_result = sp.run(
+            git_result = subprocess.run(
                 ['git', 'rev-parse', '--show-toplevel'],
                 capture_output=True, text=True, timeout=5, cwd=cwd
             )

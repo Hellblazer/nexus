@@ -201,6 +201,8 @@ When routing to an agent, use the standardized relay format from [RELAY_TEMPLATE
 ### Input Artifacts
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]
+- nx pm context: [Phase N, active blockers or "none"]
 - Files: [key files or "none"]
 
 ### Deliverable
