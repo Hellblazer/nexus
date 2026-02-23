@@ -798,3 +798,113 @@ def test_pm_status_empty_blockers_list(db) -> None:
 
     status = pm_status(db, project="myrepo")
     assert status["blockers"] == []
+
+
+# ── Gap 1: _synthesize_haiku raises RuntimeError when API key is empty ──────
+
+def test_synthesize_haiku_raises_when_api_key_empty() -> None:
+    """_synthesize_haiku raises RuntimeError when get_credential returns empty string."""
+    from nexus.pm import _synthesize_haiku
+
+    with patch("nexus.pm.get_credential", return_value=""):
+        with pytest.raises(RuntimeError, match="anthropic_api_key is required"):
+            _synthesize_haiku(
+                docs=[{"title": "CONTINUATION.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
+                project="test",
+                status="completed",
+            )
+
+
+# ── Gap 2: _split_synthesis no-headers fallback ────────────────────────────
+
+def test_split_synthesis_no_headers_returns_truncated_single_chunk() -> None:
+    """_split_synthesis with long text and no ## headers returns a single element truncated to _SYNTHESIS_CHAR_LIMIT."""
+    from nexus.pm import _SYNTHESIS_CHAR_LIMIT, _split_synthesis
+
+    # Build a long string with NO ## headers, exceeding the char limit
+    long_text = "x" * (_SYNTHESIS_CHAR_LIMIT + 2000)
+    assert len(long_text) > _SYNTHESIS_CHAR_LIMIT
+
+    chunks = _split_synthesis(long_text)
+    assert len(chunks) == 1
+    assert len(chunks[0]) == _SYNTHESIS_CHAR_LIMIT
+
+
+# ── Gap 3: pm_status handles non-integer phase tag gracefully ──────────────
+
+def test_pm_status_handles_non_integer_phase_tag(db) -> None:
+    """pm_status does not crash when a T2 row has tags='phase:abc' (non-integer)."""
+    pm_init(db, project="myrepo")
+    # Insert a doc with a non-integer phase tag
+    db.put("myrepo_pm", "bad-phase.md", "content", tags="pm,phase:abc", ttl=None)
+
+    # Should not raise — gracefully ignores the bad tag
+    status = pm_status(db, project="myrepo")
+    # Phase should still be 1 from the standard docs (the bad tag is ignored)
+    assert status["phase"] == 1
+
+
+# ── Gap 4: pm_archive handles non-integer phase tag in archive path ────────
+
+def test_pm_archive_handles_non_integer_phase_tag(db) -> None:
+    """pm_archive does not crash when a T2 row has tags='phase:abc' (non-integer)."""
+    pm_init(db, project="myrepo")
+    # Insert a doc with a non-integer phase tag
+    db.put("myrepo_pm", "bad-phase.md", "content", tags="pm,phase:abc", ttl=None)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.pm._synthesize_haiku", return_value="# Archive summary"):
+        with patch("nexus.pm.make_t3", return_value=mock_t3):
+            # Should not raise — gracefully ignores the bad phase tag
+            pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
+
+    mock_t3.upsert_chunks.assert_called_once()
+    # Verify phase_count defaults to 1 (from standard docs) despite the bad tag
+    meta = mock_t3.upsert_chunks.call_args.kwargs["metadatas"][0]
+    assert meta["phase_count"] == 1
+
+
+# ── Gap 5: pm_archive stores multiple chunks for long synthesis ────────────
+
+def test_pm_archive_stores_multiple_chunks_for_long_synthesis(db) -> None:
+    """pm_archive stores multiple T3 chunks when synthesis text exceeds _SYNTHESIS_CHAR_LIMIT."""
+    from nexus.pm import _SYNTHESIS_CHAR_LIMIT
+
+    pm_init(db, project="myrepo")
+
+    # Build a synthesis text with multiple ## sections totalling > _SYNTHESIS_CHAR_LIMIT
+    sections = []
+    for i in range(6):
+        sections.append(f"## Section {i}\n" + ("y" * 980) + "\n")
+    long_synthesis = "\n".join(sections)
+    assert len(long_synthesis) > _SYNTHESIS_CHAR_LIMIT
+
+    upserted_calls: list[dict] = []
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    def capture_upsert(collection, ids, documents, metadatas):
+        upserted_calls.append({"ids": ids, "documents": documents, "metadatas": metadatas})
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3.upsert_chunks.side_effect = capture_upsert
+
+    with patch("nexus.pm._synthesize_haiku", return_value=long_synthesis):
+        with patch("nexus.pm.make_t3", return_value=mock_t3):
+            pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
+
+    # Should have been called multiple times (once per chunk)
+    assert len(upserted_calls) > 1, (
+        f"Expected multiple upsert calls for {len(long_synthesis)}-char synthesis, got {len(upserted_calls)}"
+    )
+    # Each chunk's metadata should have chunk_index and chunk_total
+    for i, call_data in enumerate(upserted_calls):
+        meta = call_data["metadatas"][0]
+        assert meta["chunk_total"] == len(upserted_calls)
+        assert meta["chunk_index"] == i
