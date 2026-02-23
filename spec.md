@@ -41,8 +41,8 @@ Nexus
 │
 ├── Indexing pipelines
 │   ├── Code repos                — git frecency (SeaGOAT) + voyage-code-3 embeddings → T3
-│   ├── PDFs / documents          — Arcaneum extraction/chunking logic + voyage-4 embeddings → T3
-│   └── Markdown / notes          — Arcaneum markdown chunking logic + voyage-4 embeddings → T3
+│   ├── PDFs / documents          — Arcaneum extraction/chunking logic + voyage-context-3 (CCE; voyage-4 fallback) → T3
+│   └── Markdown / notes          — Arcaneum markdown chunking logic + voyage-context-3 (CCE; voyage-4 fallback) → T3
 │
 ├── Search
 │   ├── Semantic                  — ChromaDB (T1/T3 depending on scope)
@@ -188,17 +188,20 @@ ChromaDB natively supports `VoyageAIEmbeddingFunction` (`pip install voyageai`; 
 
 **Ripgrep 500MB line cache**: The 500MB cap is a soft limit (matching SeaGOAT's `MAX_MMAP_SIZE`). When the cache file exceeds the cap, low-frecency files written last are omitted with a logged warning — they remain searchable via semantic search but not via ripgrep hybrid. This is not enforced as a hard error.
 
-> **Model name verification**: Verify `voyage-code-3` and `voyage-4` against the current Voyage AI model
-> catalog before use. The ChromaDB `VoyageAIEmbeddingFunction` default is `"voyage-01"` — names must
-> be set explicitly. The SDK does not enumerate valid names at import time; an invalid name fails at the
-> first API call.
+> **Model name verification**: Verified model names: `voyage-code-3`, `voyage-4`, `voyage-context-3` (CCE).
+> The ChromaDB `VoyageAIEmbeddingFunction` default is `"voyage-01"` — names must be set explicitly.
+> The SDK does not enumerate valid names at import time; an invalid name fails at the first API call.
+> `voyage-context-3` is only available via `voyageai.Client().contextualized_embed()` — not via the
+> ChromaDB embedding function wrapper.
 
 ### PDFs and Documents
 
 1. `nx index pdf <path>` reads PDFs **directly from their source path** — no local copy stored
 2. Text extracted and chunked in-process using **ported Arcaneum extraction logic**: PyMuPDF4LLM → markdown (primary), PyMuPDF → normalized text (fallback), Tesseract/EasyOCR (scanned fallback)
 3. **Only the extracted text chunks + embeddings + metadata are stored in T3 ChromaDB** — raw PDF bytes never leave the machine
-4. Chunks embedded via `VoyageAIEmbeddingFunction(model_name="voyage-4")`
+4. Chunks embedded via `voyage-context-3` (Contextualized Chunk Embedding — captures cross-chunk context
+   at index time for richer retrieval). Falls back to `voyage-4` if fewer than 2 chunks or estimated
+   tokens exceed 100K. Query-time embedding always uses `voyage-4` (standard; CCE is index-only).
 5. Upserted into T3 collection `docs__{corpus-name}`
 
 Arcaneum's extraction and chunking logic (PDFExtractor, PDFChunker, OCREngine) is **ported** — not imported as a library. The storage layer calls (Qdrant `PointStruct`, `upload_points`, scroll-based sync) must be rewritten as ChromaDB `collection.upsert()` calls. The embedding layer (`fastembed` local ONNX) is replaced with `VoyageAIEmbeddingFunction`. The extraction and chunking logic itself (PyMuPDF4LLM calls, OCR orchestration) ports with minimal changes.
@@ -216,7 +219,7 @@ be accessible — same as mgrep's `--sync`.
 1. `nx index md <path>` with YAML frontmatter extraction
 2. Semantic chunking preserving document structure (ported from Arcaneum's SemanticMarkdownChunker)
 3. Incremental sync via SHA256 content hashing
-4. Chunks embedded via `VoyageAIEmbeddingFunction(model_name="voyage-4")`, upserted into T3 `docs__{corpus-name}`
+4. Chunks embedded via `voyage-context-3` (CCE; same fallback rules as PDFs above), upserted into T3 `docs__{corpus-name}`
 
 ## ChromaDB Metadata Schema
 
@@ -359,7 +362,13 @@ When multiple `--corpus` flags are used, each corpus is queried separately (they
 
 ### Cross-corpus search
 
-`code__*` collections use `voyage-code-3`; `docs__*` and `knowledge__*` use `voyage-4`. These embedding spaces are not directly comparable — similarity scores across models are meaningless when combined naively.
+`code__*` collections use `voyage-code-3` at both index and query time. `docs__*` and `knowledge__*`
+use `voyage-context-3` (CCE) at **index time** and `voyage-4` at **query time** — CCE is an
+index-only technique; queries always use the standard `voyage-4` model so stored CCE vectors remain
+comparable to query vectors. All others use `voyage-4` at both times.
+
+These embedding spaces are not directly comparable across corpus types — similarity scores between
+`voyage-code-3` and `voyage-4` results are meaningless when combined naively.
 
 Resolution strategy:
 1. Each corpus queried independently using its own embedding function
@@ -894,9 +903,10 @@ Recent memory ({project}, last 10 entries):
 - **Python 3.12+** — CLI, server, indexing pipelines, SeaGOAT frecency logic
 - **ChromaDB** — T1 (`chromadb.EphemeralClient` + `DefaultEmbeddingFunction`) and T3 (`chromadb.CloudClient(tenant=..., database=..., api_key=CHROMA_API_KEY)` → ChromaDB cloud + `VoyageAIEmbeddingFunction`)
 - **SQLite + FTS5** — T2 memory bank (stdlib `sqlite3`, WAL mode, no ORM)
-- **Voyage AI** — embedding API: `voyage-code-3` for code, `voyage-4` for docs/PDFs; reranker: `rerank-2.5` for cross-corpus result merging (verified against voyageai.com/docs/pricing 2026-02-21)
-  - **Verified model names**: `voyage-code-3` ✓, `voyage-4` ✓, `rerank-2.5` ✓ (also available: `rerank-2.5-lite` at lower cost/quality). ChromaDB wrapper default is `"voyage-01"` — names must be set explicitly; SDK accepts any string and fails at first API call with an invalid name.
-  - **Free tier**: 200M tokens/month for all current-gen models including rerankers (verified 2026-02-21). Applies to `voyage-4`, `voyage-code-3`, `rerank-2.5`, and `rerank-2.5-lite`.
+- **Voyage AI** — embedding API: `voyage-code-3` for code; `voyage-context-3` (CCE) at index time and `voyage-4` at query time for docs/knowledge; reranker: `rerank-2.5` for cross-corpus result merging (verified against voyageai.com/docs/pricing 2026-02-21)
+  - **Verified model names**: `voyage-code-3` ✓, `voyage-4` ✓, `voyage-context-3` ✓, `rerank-2.5` ✓ (also available: `rerank-2.5-lite` at lower cost/quality). ChromaDB wrapper default is `"voyage-01"` — names must be set explicitly; SDK accepts any string and fails at first API call with an invalid name.
+  - `voyage-context-3` is only callable via `voyageai.Client().contextualized_embed()` — not via the ChromaDB `VoyageAIEmbeddingFunction` wrapper; requires direct SDK usage.
+  - **Free tier**: 200M tokens/month for all current-gen models including rerankers (verified 2026-02-21). Applies to `voyage-4`, `voyage-code-3`, `voyage-context-3`, `rerank-2.5`, and `rerank-2.5-lite`.
   - **Pricing beyond free tier**: `voyage-code-3` $0.18/1M tokens; `voyage-4` $0.06/1M tokens; `rerank-2.5` $0.05/1M tokens; `rerank-2.5-lite` $0.02/1M tokens. Batch API gives 33% discount.
   - Env var: `VOYAGE_API_KEY`; native `VoyageAIEmbeddingFunction` in ChromaDB (`pip install voyageai`); checks `VOYAGE_API_KEY` first, then `CHROMA_VOYAGE_API_KEY` — no custom glue
 - **Claude Haiku** (`claude-haiku-4-5-20251001`) — Q&A synthesis via `anthropic` Python SDK
@@ -912,14 +922,14 @@ Recent memory ({project}, last 10 entries):
 
 | # | Decision | Rationale |
 |---|---|---|
-| 1 | Voyage AI embedding API (not local ONNX) | Eliminates ~2GB model downloads and GPU setup complexity. **Verified** (2026-02-21): free tier is 200M tokens/month for all current-gen models (`voyage-4`, `voyage-code-3`, `rerank-2.5`, `rerank-2.5-lite`). Beyond free tier: $0.18/1M (code), $0.06/1M (docs), $0.05/1M (reranker). Re-verify at voyageai.com/docs/pricing if significant time has passed — free tier terms have changed historically. |
+| 1 | Voyage AI embedding API (not local ONNX) | Eliminates ~2GB model downloads and GPU setup complexity. **Verified** (2026-02-21): free tier is 200M tokens/month for all current-gen models (`voyage-4`, `voyage-code-3`, `voyage-context-3`, `rerank-2.5`, `rerank-2.5-lite`). Beyond free tier: $0.18/1M (code), $0.06/1M (docs), $0.05/1M (reranker). Re-verify at voyageai.com/docs/pricing if significant time has passed — free tier terms have changed historically. |
 | 2 | Persistent `nx serve` process | Faster repeated queries; ripgrep line cache stays warm; HEAD polling for auto-reindex |
 | 3 | SQLite T2 = memory bank only | Don't over-engineer; T3 ChromaDB handles knowledge storage naturally |
 | 4 | Mixedbread fan-out via `--mxbai` flag on `nx search` | Opt-in so normal searches stay fully local; `nx ask` is not a separate command — answer synthesis is `-a` on `nx search` |
 | 5 | HEAD detection via 10s polling in `nx serve` | Default matches SeaGOAT's `SECONDS_BETWEEN_MAINTENANCE = 10`; configurable via `server.headPollInterval`. Post-commit hook is an optional additional trigger installed by `nx install`; polling is the guaranteed baseline; inotify/FSEvents is out of scope v1 |
 | 6 | Single `nx serve` manages multiple repos | Per-repo registry in `~/.config/nexus/repos.json`; each repo has its own T3 collection and ripgrep line cache; `--corpus` routes queries |
 | 7 | T1 uses `DefaultEmbeddingFunction` (local ONNX) | Session scratch doesn't need Voyage AI's semantic fidelity; a network call on every scratch search defeats the purpose of an in-memory store |
-| 8 | Cross-corpus: separate retrieval + reranking | `voyage-code-3` and `voyage-4` produce incomparable similarity scores; independent retrieval per corpus followed by reranking is the correct merge strategy |
+| 8 | Cross-corpus: separate retrieval + reranking | `voyage-code-3` and `voyage-4` produce incomparable similarity scores; independent retrieval per corpus followed by reranking is the correct merge strategy. Note: docs/knowledge are indexed with `voyage-context-3` (CCE) but queried with `voyage-4` — CCE vectors are in the same embedding space as `voyage-4` query vectors by design. |
 | 9 | `nx pm` uses T2 (not a new storage tier) | PM docs are a named-file project workspace — exactly T2's model. No new infrastructure; FTS5 covers keyword search needs; T3 is opt-in via `nx pm promote` for cross-project semantic queries |
 | 10 | Archive synthesizes to T3 rather than dumping raw PM docs | Raw phase docs are drafts/iterations — noisy, redundant, pollute semantic search. Haiku synthesis at archive time extracts signal (decisions, challenges, outcome) into one semantically rich chunk per project. T2 raw docs decay over 90d for restore flexibility; after that, the T3 synthesis is the permanent reference. |
 | 11 | T3 = ChromaDB CloudClient (not Qdrant, not self-hosted Chroma) | Already running in the existing Claude Code toolchain (same ChromaDB instance used by current agents); no new infrastructure required. `chromadb.CloudClient` provides tenant+database isolation. Qdrant rejected (Arcaneum port only; would require new infra). Self-hosted Chroma rejected (adds operational burden, defeats "already running" benefit). |
