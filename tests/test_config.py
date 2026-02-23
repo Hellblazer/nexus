@@ -13,9 +13,9 @@ def test_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     config = load_config(repo_root=tmp_path)
     assert config["server"]["port"] == 7890
     assert config["server"]["headPollInterval"] == 10
-    assert config["embeddings"]["codeModel"] == "voyage-code-3"
-    assert config["embeddings"]["docsModel"] == "voyage-4"
     assert config["embeddings"]["rerankerModel"] == "rerank-2.5"
+    assert "codeModel" not in config["embeddings"]
+    assert "docsModel" not in config["embeddings"]
     assert config["pm"]["archiveTtl"] == 90
 
 

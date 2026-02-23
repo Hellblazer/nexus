@@ -122,6 +122,10 @@ class T3Database:
             "indexed_at": now_iso,
             "expires_at": expires_at,
             "ttl_days": ttl_days,
+            # voyage-4 is the query-time model for all collection types; nx store put
+            # intentionally uses it (via the collection EF) rather than CCE because
+            # agent-stored knowledge chunks are typically single entries (CCE requires 2+).
+            "embedding_model": embedding_model_for_collection(collection),
         }
 
         col = self.get_or_create_collection(collection)

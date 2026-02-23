@@ -30,8 +30,8 @@ def _has_credentials() -> bool:
 
 
 def _estimate_tokens(chunks: list[str]) -> int:
-    """Rough token estimate: 4 characters per token."""
-    return sum(len(c) for c in chunks) // 4
+    """Rough token estimate: 3 characters per token (conservative; code skews short)."""
+    return sum(len(c) for c in chunks) // 3
 
 
 def _embed_with_fallback(
@@ -47,6 +47,7 @@ def _embed_with_fallback(
     """
     _log = structlog.get_logger(__name__)
     import voyageai
+    client = voyageai.Client(api_key=api_key)
     if model == "voyage-context-3":
         if len(chunks) < 2:
             # CCE requires 2+ chunks; fall back to voyage-4 (the query-time model)
@@ -60,7 +61,6 @@ def _embed_with_fallback(
                 model = "voyage-4"
             else:
                 try:
-                    client = voyageai.Client(api_key=api_key)
                     result = client.contextualized_embed(
                         inputs=[chunks], model=model, input_type=input_type
                     )
@@ -68,8 +68,7 @@ def _embed_with_fallback(
                 except Exception as exc:
                     _log.warning("CCE failed, falling back to voyage-4", error=str(exc))
                     model = "voyage-4"
-    # Standard embedding path
-    client = voyageai.Client(api_key=api_key)
+    # Standard embedding path (voyage-4 or any non-CCE model)
     result = client.embed(texts=chunks, model=model, input_type=input_type)
     return result.embeddings, model
 
@@ -139,16 +138,13 @@ def index_pdf(pdf_path: Path, corpus: str, t3: Any = None) -> int:
         documents.append(chunk.text)
         metadatas.append(meta)
 
-    if target_model == "voyage-context-3":
-        from nexus.config import get_credential
-        voyage_key = get_credential("voyage_api_key")
-        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
-        if actual_model != target_model:
-            for m in metadatas:
-                m["embedding_model"] = actual_model
-        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
-    else:
-        col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+    from nexus.config import get_credential
+    voyage_key = get_credential("voyage_api_key")
+    embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
+    if actual_model != target_model:
+        for m in metadatas:
+            m["embedding_model"] = actual_model
+    db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
 
     # Prune stale chunks from a previous (larger) version of this file
     current_ids_set = set(ids)
@@ -234,16 +230,13 @@ def index_markdown(md_path: Path, corpus: str, t3: Any = None) -> int:
         documents.append(chunk.text)
         metadatas.append(meta)
 
-    if target_model == "voyage-context-3":
-        from nexus.config import get_credential
-        voyage_key = get_credential("voyage_api_key")
-        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
-        if actual_model != target_model:
-            for m in metadatas:
-                m["embedding_model"] = actual_model
-        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
-    else:
-        col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+    from nexus.config import get_credential
+    voyage_key = get_credential("voyage_api_key")
+    embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
+    if actual_model != target_model:
+        for m in metadatas:
+            m["embedding_model"] = actual_model
+    db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
 
     # Prune stale chunks from a previous (larger) version of this file
     current_ids_set = set(ids)

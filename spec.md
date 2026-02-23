@@ -796,8 +796,7 @@ nx config set server.port 7890
 Per-repo config: `.nexus.yml` (same merge pattern as SeaGOAT's `.seagoat.yml`).
 Global config: `~/.config/nexus/config.yml`.
 
-Key settings: `server.port`, `server.ignorePatterns`, `embeddings.codeModel` (default: `voyage-code-3`),
-`embeddings.docsModel` (default: `voyage-4`), `embeddings.rerankerModel` (default: `rerank-2.5`),
+Key settings: `server.port`, `server.ignorePatterns`, `embeddings.rerankerModel` (default: `rerank-2.5`),
 `pm.archiveTtl` (default: `90`, days; overridable via `NX_PM_ARCHIVE_TTL` env var),
 `mxbai.stores` (list of Mixedbread store identifiers to query when `--mxbai` is used, e.g. `["art", "docs"]`; required for `--mxbai` — if unset, `--mxbai` prints a warning and skips fan-out),
 `chromadb.tenant`, `chromadb.database`, `client.host`, `server.headPollInterval` (default: `10`).
@@ -813,8 +812,6 @@ Convenience env var overrides:
 | `NX_PM_ARCHIVE_TTL` | Override PM archive TTL (integer days; default: `90`) |
 | `NX_SERVER_PORT` | Override server port (default: `7890`) |
 | `NX_SERVER_HEAD_POLL_INTERVAL` | Override head poll interval in seconds (default: `10`) |
-| `NX_EMBEDDINGS_CODE_MODEL` | Override code embedding model (default: `voyage-code-3`) |
-| `NX_EMBEDDINGS_DOCS_MODEL` | Override docs embedding model (default: `voyage-4`) |
 | `NX_EMBEDDINGS_RERANKER_MODEL` | Override reranker model (default: `rerank-2.5`) |
 | `NX_CLIENT_HOST` | Override client host for server connection (default: `localhost`) |
 

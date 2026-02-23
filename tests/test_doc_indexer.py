@@ -402,19 +402,19 @@ def test_index_markdown_no_frontmatter_offsets_unchanged(tmp_path: Path, monkeyp
 # ── nexus-370: CCE helpers ────────────────────────────────────────────────────
 
 def test_estimate_tokens_returns_reasonable_value():
-    """400 chars of text should estimate to ~100 tokens."""
+    """300 chars of text should estimate to ~100 tokens (3 chars/token)."""
     from nexus.doc_indexer import _estimate_tokens
 
-    chunks = ["a" * 400]
+    chunks = ["a" * 300]
     result = _estimate_tokens(chunks)
     assert result == 100
 
 
 def test_estimate_tokens_multi_chunk():
-    """Estimate sums all chunk lengths then divides by 4."""
+    """Estimate sums all chunk lengths then divides by 3."""
     from nexus.doc_indexer import _estimate_tokens
 
-    chunks = ["a" * 200, "b" * 200]
+    chunks = ["a" * 150, "b" * 150]
     assert _estimate_tokens(chunks) == 100
 
 
@@ -595,33 +595,6 @@ def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
     mock_t3.upsert_chunks_with_embeddings.assert_called_once()
     mock_col.upsert.assert_not_called()
 
-
-def test_index_pdf_uses_standard_for_code_collection(sample_pdf, monkeypatch):
-    """For code__ collection, index_pdf uses upsert_chunks (standard path)."""
-    _set_credentials(monkeypatch)
-
-    mock_chunk, mock_extract_result = _make_pdf_mocks()
-
-    mock_col = MagicMock()
-    mock_col.get.return_value = {"ids": [], "metadatas": []}
-
-    mock_t3 = MagicMock()
-    mock_t3.get_or_create_collection.return_value = mock_col
-
-    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
-        with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
-            with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
-                mock_extractor_class.return_value.extract.return_value = mock_extract_result
-                mock_chunker_class.return_value.chunk.return_value = [mock_chunk]
-
-                # index_pdf builds collection_name as f"docs__{corpus}"; pass a corpus
-                # that results in a non-cce model - we need to patch index_model_for_collection
-                with patch("nexus.doc_indexer.index_model_for_collection", return_value="voyage-code-3"):
-                    result = index_pdf(sample_pdf, corpus="mybook")
-
-    assert result == 1
-    mock_t3.upsert_chunks_with_embeddings.assert_not_called()
-    mock_col.upsert.assert_called_once()
 
 
 def test_index_pdf_rerenders_when_model_changes(sample_pdf, monkeypatch):

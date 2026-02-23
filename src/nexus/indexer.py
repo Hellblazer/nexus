@@ -210,10 +210,13 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
         # Compute content hash once per file (reused across all chunks of the file)
         content_hash = _hl.sha256(content.encode()).hexdigest()
 
-        # Staleness check: skip if content_hash AND embedding_model both match
+        # Staleness check: skip if content_hash AND embedding_model both match.
+        # Reading one chunk per file is sufficient — all chunks share the same
+        # content_hash and embedding_model (set once per file in this loop).
         existing = col.get(
             where={"source_path": str(file)},
             include=["metadatas"],
+            limit=1,
         )
         if existing["metadatas"]:
             stored = existing["metadatas"][0]

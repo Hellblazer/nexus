@@ -31,8 +31,6 @@ _DEFAULTS: dict[str, Any] = {
         "ignorePatterns": [],
     },
     "embeddings": {
-        "codeModel": "voyage-code-3",
-        "docsModel": "voyage-4",
         "rerankerModel": "rerank-2.5",
     },
     "pm": {
@@ -54,8 +52,6 @@ _DEFAULTS: dict[str, Any] = {
 _ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
     "NX_SERVER_PORT": ("server", "port", int),
     "NX_SERVER_HEAD_POLL_INTERVAL": ("server", "headPollInterval", int),
-    "NX_EMBEDDINGS_CODE_MODEL": ("embeddings", "codeModel", str),
-    "NX_EMBEDDINGS_DOCS_MODEL": ("embeddings", "docsModel", str),
     "NX_EMBEDDINGS_RERANKER_MODEL": ("embeddings", "rerankerModel", str),
     "NX_PM_ARCHIVE_TTL": ("pm", "archiveTtl", int),
     "NX_CLIENT_HOST": ("client", "host", str),
