@@ -493,7 +493,7 @@ def test_embed_with_fallback_skips_cce_for_large_input(monkeypatch):
     from unittest.mock import MagicMock, patch
     from nexus.doc_indexer import _embed_with_fallback
 
-    # 4 chars per token * 100_001 tokens = 400_004 chars per chunk
+    # 3 chars per token * 100_001 tokens = 300_003 chars; use 400_004 for headroom
     big_chunk = "x" * 400_004
 
     mock_client = MagicMock()

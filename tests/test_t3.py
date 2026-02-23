@@ -96,6 +96,7 @@ def test_store_put_permanent_metadata(mock_chromadb: tuple) -> None:
     assert meta["ttl_days"] == 0       # permanent
     assert meta["expires_at"] == ""    # permanent sentinel
     assert meta["store_type"] == "knowledge"
+    assert meta["embedding_model"] == "voyage-4"  # knowledge__ always uses voyage-4
 
 
 def test_store_put_with_ttl_metadata(mock_chromadb: tuple) -> None:
