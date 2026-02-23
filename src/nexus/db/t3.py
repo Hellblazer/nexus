@@ -20,8 +20,8 @@ _log = structlog.get_logger(__name__)
 class T3Database:
     """T3 ChromaDB CloudClient permanent knowledge store.
 
-    Uses ``chromadb.CloudClient`` + ``VoyageAIEmbeddingFunction`` (voyage-code-3
-    for ``code__*`` collections; voyage-4 for all others).
+    Uses ``chromadb.CloudClient`` + ``VoyageAIEmbeddingFunction`` (voyage-4
+    universally for all collection types at query time).
 
     Each collection is namespaced by type: ``code__{repo}``, ``docs__{corpus}``,
     ``knowledge__{topic}``.

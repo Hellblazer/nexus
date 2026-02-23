@@ -291,6 +291,79 @@ def test_nx_search_knowledge_corpus(runner: CliRunner) -> None:
     assert result.exit_code == 0, result.output
 
 
+# ── Cross-model compatibility: voyage-code-3 index + voyage-4 query ──────────
+
+@pytest.mark.integration
+@requires_t3
+def test_voyage4_query_retrieves_voyage_code3_indexed_content() -> None:
+    """voyage-4 queries retrieve semantically relevant results from voyage-code-3-indexed vectors.
+
+    Validates the core design assumption: voyage-4 is a compatible universal
+    query model for code__ collections indexed with voyage-code-3.
+
+    Method:
+    - Embed a code snippet directly via voyageai SDK with model=voyage-code-3
+    - Store it using upsert_chunks_with_embeddings (bypasses collection EF)
+    - Query via db.search (uses collection EF = voyage-4)
+    - Assert the indexed chunk is returned
+    """
+    import voyageai
+
+    from nexus.config import get_credential
+    from nexus.corpus import index_model_for_collection
+    from nexus.db import make_t3
+
+    voyage_key = get_credential("voyage_api_key")
+    uid = uuid.uuid4().hex[:8]
+    collection = f"code__int-crossmodel-{uid}"
+
+    assert index_model_for_collection(collection) == "voyage-code-3"
+
+    code = (
+        f"def authenticate_user_{uid}(username: str, password: str) -> str:\n"
+        f"    '''Validate credentials against the database and return a JWT token.'''\n"
+        f"    record = user_db.lookup(username)\n"
+        f"    if record is None:\n"
+        f"        raise ValueError('unknown user')\n"
+        f"    return generate_jwt_token(username, password)\n"
+    )
+
+    voyage = voyageai.Client(api_key=voyage_key)
+    resp = voyage.embed(texts=[code], model="voyage-code-3", input_type="document")
+    code3_embeddings = resp.embeddings
+
+    db = make_t3()
+    try:
+        db.upsert_chunks_with_embeddings(
+            collection_name=collection,
+            ids=[f"chunk-{uid}"],
+            documents=[code],
+            embeddings=code3_embeddings,
+            metadatas=[{
+                "title": f"auth_{uid}.py:1-6",
+                "tags": "py",
+                "category": "code",
+                "embedding_model": "voyage-code-3",
+                "expires_at": "",
+                "ttl_days": 0,
+            }],
+        )
+        results = db.search(
+            query=f"user authentication JWT token generation {uid}",
+            collection_names=[collection],
+            n_results=3,
+        )
+        assert results, "voyage-4 query returned no results from voyage-code-3-indexed collection"
+        assert any(uid in r.get("content", "") for r in results), (
+            "voyage-4 query did not retrieve the voyage-code-3-indexed code chunk"
+        )
+    finally:
+        try:
+            db.delete_collection(collection)
+        except Exception:
+            pass
+
+
 # ── Answer mode (requires T3 + Anthropic) ─────────────────────────────────────
 
 @pytest.mark.integration

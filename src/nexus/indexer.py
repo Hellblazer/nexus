@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-
+from nexus.corpus import embedding_model_for_collection
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 
 if TYPE_CHECKING:
@@ -244,7 +244,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
                 # Computed fields
                 "programming_language": _EXT_TO_LANGUAGE.get(ext, ""),
                 "corpus": collection_name,
-                "embedding_model": "voyage-code-3",
+                "embedding_model": embedding_model_for_collection(collection_name),
                 "content_hash": content_hash,
                 # Git fields (computed once per index run)
                 **git_meta,
