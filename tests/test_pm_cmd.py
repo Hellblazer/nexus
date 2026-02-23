@@ -309,7 +309,7 @@ def test_pm_promote_success(runner: CliRunner) -> None:
     with (
         db_patch,
         _patch_infer("proj"),
-        patch("nexus.commands.pm.make_t3", return_value=mock_t3),
+        patch("nexus.commands.store._t3", return_value=mock_t3),
         patch("nexus.commands.pm.pm_promote", return_value="abc123def456") as mock_promote,
     ):
         result = runner.invoke(main, ["pm", "promote", "CONTINUATION.md"])
@@ -332,7 +332,7 @@ def test_pm_promote_key_error(runner: CliRunner) -> None:
     with (
         db_patch,
         _patch_infer("proj"),
-        patch("nexus.commands.pm.make_t3"),
+        patch("nexus.commands.store._t3"),
         patch("nexus.commands.pm.pm_promote", side_effect=KeyError("'MISSING.md' not found")),
     ):
         result = runner.invoke(main, ["pm", "promote", "MISSING.md"])
@@ -348,7 +348,7 @@ def test_pm_promote_custom_collection_and_ttl(runner: CliRunner) -> None:
     with (
         db_patch,
         _patch_infer("proj"),
-        patch("nexus.commands.pm.make_t3", return_value=mock_t3),
+        patch("nexus.commands.store._t3", return_value=mock_t3),
         patch("nexus.commands.pm.pm_promote", return_value="someid") as mock_promote,
     ):
         result = runner.invoke(

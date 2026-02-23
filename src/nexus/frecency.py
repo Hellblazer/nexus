@@ -21,7 +21,7 @@ def _git_commit_timestamps(repo: Path, file: Path) -> list[float]:
             timeout=30,
         )
     except subprocess.TimeoutExpired:
-        _log.warning("git log timed out for %s — skipping frecency", file)
+        _log.warning("git log timed out — skipping frecency", file=str(file))
         return []
     if result.returncode != 0 or not result.stdout.strip():
         return []
@@ -33,7 +33,7 @@ def _git_commit_timestamps(repo: Path, file: Path) -> list[float]:
         try:
             timestamps.append(float(ts))
         except ValueError:
-            _log.debug("Unexpected git log output line for %s: %r", file, ts)
+            _log.debug("Unexpected git log output line", file=str(file), line=repr(ts))
     return timestamps
 
 
@@ -73,7 +73,7 @@ def batch_frecency(repo: Path) -> dict[Path, float]:
             timeout=60,
         )
     except subprocess.TimeoutExpired:
-        _log.warning("git log timed out for %s — returning empty frecency map", repo)
+        _log.warning("git log timed out — returning empty frecency map", repo=str(repo))
         return {}
     if result.returncode != 0 or not result.stdout.strip():
         return {}

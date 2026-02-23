@@ -124,7 +124,8 @@ def _index_document(
 
     from nexus.config import get_credential
     voyage_key = get_credential("voyage_api_key")
-    assert voyage_key, "voyage_api_key must be set (checked by _has_credentials)"
+    if not voyage_key:
+        raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
     embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
     if actual_model != target_model:
         for m in metadatas:

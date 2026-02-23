@@ -235,7 +235,7 @@ class T2Database:
 
     def decay_project(self, project: str, ttl: int) -> None:
         """Set TTL and flip pm -> pm-archived tags for all docs in *project*."""
-        with self._lock:
+        with self._lock, self.conn:
             self.conn.execute(
                 """
                 UPDATE memory
@@ -245,7 +245,6 @@ class T2Database:
                 """,
                 (ttl, project),
             )
-            self.conn.commit()
 
     def restore_project(self, project: str) -> list[str]:
         """Reverse decay: set ttl=NULL and restore pm tags.

@@ -86,8 +86,8 @@ def index_repository(repo: Path, registry: "RepoRegistry", *, frecency_only: boo
         registry.update(repo, status="ready")
     except CredentialsMissingError:
         registry.update(repo, status="pending_credentials")
-        # Do NOT re-raise: callers (polling) treat non-exception return as success;
-        # raising here lets polling avoid recording head_hash (see polling.py).
+        # Re-raise so the polling loop skips recording head_hash for this repo.
+        # A clean return would incorrectly signal success (see polling.py).
         raise
     except Exception:
         registry.update(repo, status="error")

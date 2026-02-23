@@ -36,7 +36,7 @@ def _infer_repo() -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, timeout=10,
         )
         return Path(result.stdout.strip()).name
     except Exception:

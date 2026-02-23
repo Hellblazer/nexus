@@ -223,7 +223,8 @@ def promote_cmd(title: str, project: str | None, collection: str | None, ttl_day
     proj = project or _infer_project()
     target_collection = collection or f"knowledge__pm__{proj}"
     with T2Database(_default_db_path()) as db:
-        t3 = make_t3()
+        from nexus.commands.store import _t3
+        t3 = _t3()
         try:
             doc_id = pm_promote(
                 db_t2=db,
