@@ -101,3 +101,56 @@ def test_batch_frecency_empty_repo_returns_empty() -> None:
         scores = batch_frecency(Path("/repo"))
 
     assert scores == {}
+
+
+# ── Gap 3: frecency.py edge cases (timeout, non-zero returncode, bad ts) ─────
+
+def test_compute_frecency_git_timeout_returns_zero() -> None:
+    """When subprocess.run raises TimeoutExpired, compute_frecency returns 0.0."""
+    import subprocess as _subprocess
+
+    with patch("subprocess.run", side_effect=_subprocess.TimeoutExpired("git", 30)):
+        score = compute_frecency(Path("/repo"), Path("/repo/file.py"))
+
+    assert score == 0.0
+
+
+def test_git_commit_timestamps_nonzero_returncode() -> None:
+    """When git returns non-zero, _git_commit_timestamps returns empty list."""
+    from nexus.frecency import _git_commit_timestamps
+
+    mock_result = MagicMock()
+    mock_result.returncode = 128  # e.g., not a git repo
+    mock_result.stdout = ""
+
+    with patch("subprocess.run", return_value=mock_result):
+        timestamps = _git_commit_timestamps(Path("/repo"), Path("/repo/file.py"))
+
+    assert timestamps == []
+
+
+def test_batch_frecency_invalid_timestamp_skipped() -> None:
+    """When COMMIT line has non-numeric value, it is skipped gracefully."""
+    from nexus.frecency import batch_frecency
+
+    git_output = (
+        "COMMIT not-a-number\n"
+        "\n"
+        "src/foo.py\n"
+        "\n"
+        "COMMIT 1700000000\n"
+        "\n"
+        "src/bar.py\n"
+    )
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = git_output
+
+    with patch("subprocess.run", return_value=mock_result):
+        scores = batch_frecency(Path("/repo"))
+
+    # foo.py should NOT be scored (its COMMIT timestamp was invalid → current_ts=None)
+    assert Path("/repo/src/foo.py") not in scores
+    # bar.py should be scored normally
+    assert Path("/repo/src/bar.py") in scores
+    assert scores[Path("/repo/src/bar.py")] > 0.0

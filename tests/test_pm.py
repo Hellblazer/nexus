@@ -621,3 +621,180 @@ def test_pm_promote_ttl_translation_with_ttl(db) -> None:
     call_kwargs = mock_t3.put.call_args.kwargs
     assert call_kwargs["ttl_days"] == 30
     assert call_kwargs["expires_at"] != ""
+
+
+# ── Edge cases: _split_synthesis ──────────────────────────────────────────────
+
+def test_split_synthesis_long_text_multiple_chunks() -> None:
+    """_split_synthesis with text >3960 chars containing ## sections produces multiple chunks."""
+    from nexus.pm import _split_synthesis
+
+    # Build text with 6 sections, each ~1000 chars → total ~6000 chars (> 3960 limit)
+    sections = []
+    for i in range(6):
+        sections.append(f"## Section {i}\n" + ("x" * 980) + "\n")
+    text = "\n".join(sections)
+    assert len(text) > 3960, f"Test setup: text must exceed 3960 chars, got {len(text)}"
+
+    chunks = _split_synthesis(text)
+    assert len(chunks) > 1, f"Expected multiple chunks for {len(text)}-char text, got {len(chunks)}"
+    assert len(chunks) <= 3, f"Expected at most 3 chunks, got {len(chunks)}"
+    # All chunks should be non-empty
+    for chunk in chunks:
+        assert len(chunk.strip()) > 0
+
+
+def test_split_synthesis_short_text_single_chunk() -> None:
+    """_split_synthesis with short text returns a single-element list."""
+    from nexus.pm import _split_synthesis
+
+    short_text = "## Summary\nThis is a short synthesis.\n\n## Outcome\nAll good."
+    assert len(short_text) < 3960
+
+    chunks = _split_synthesis(short_text)
+    assert chunks == [short_text]
+
+
+# ── Edge cases: _synthesize_haiku ─────────────────────────────────────────────
+
+def test_synthesize_haiku_empty_response_raises() -> None:
+    """_synthesize_haiku raises RuntimeError when Anthropic returns empty message.content."""
+    from nexus.pm import _synthesize_haiku
+
+    mock_message = MagicMock()
+    mock_message.content = []  # empty content list
+
+    with patch("anthropic.Anthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create.return_value = mock_message
+        with patch("nexus.config.get_credential", return_value="fake-api-key"):
+            with pytest.raises(RuntimeError, match="empty response"):
+                _synthesize_haiku(
+                    docs=[{"title": "CONTINUATION.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
+                    project="test",
+                    status="completed",
+                )
+
+
+def test_synthesize_haiku_trims_long_content() -> None:
+    """_synthesize_haiku trims input when total doc chars exceed 100K before calling Anthropic."""
+    from nexus.pm import _STANDARD_DOCS, _synthesize_haiku
+
+    # Build docs: 5 standard (small) + 50 "other" docs (each 3000 chars) = ~150K total
+    standard_docs = [
+        {"title": title, "content": "short content", "timestamp": f"2026-01-{i+1:02d}T00:00:00"}
+        for i, title in enumerate(_STANDARD_DOCS.keys())
+    ]
+    other_docs = [
+        {"title": f"extra-{i}.md", "content": "y" * 3000, "timestamp": f"2026-02-{(i % 28) + 1:02d}T00:00:00"}
+        for i in range(50)
+    ]
+    all_docs = standard_docs + other_docs
+    total_chars = sum(len(d["content"]) for d in all_docs)
+    assert total_chars > 100_000, f"Test setup: need >100K chars, got {total_chars}"
+
+    mock_message = MagicMock()
+    mock_message.content = [MagicMock(text="# Archive synthesis")]
+
+    captured_prompt = {}
+
+    def capture_create(**kwargs):
+        captured_prompt["messages"] = kwargs["messages"]
+        return mock_message
+
+    with patch("anthropic.Anthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create.side_effect = capture_create
+        with patch("nexus.config.get_credential", return_value="fake-api-key"):
+            result = _synthesize_haiku(all_docs, project="test", status="completed")
+
+    # Verify Anthropic was called
+    assert "messages" in captured_prompt
+    # The prompt content sent to Anthropic should be shorter than the raw total
+    prompt_text = captured_prompt["messages"][0]["content"]
+    # The prompt should contain fewer chars than the raw 150K input
+    # (standard ~65 chars + budget ~100K max for others + prompt boilerplate)
+    assert len(prompt_text) < total_chars, (
+        f"Expected trimmed prompt ({len(prompt_text)} chars) < raw total ({total_chars} chars)"
+    )
+    assert result == "# Archive synthesis"
+
+
+# ── Edge cases: pm_block / pm_unblock ─────────────────────────────────────────
+
+def test_pm_block_appends_newline_if_missing(db) -> None:
+    """When existing BLOCKERS.md content doesn't end with newline, pm_block normalizes it."""
+    # Directly write content without trailing newline
+    db.put("myrepo_pm", "BLOCKERS.md", "# Blockers", tags="pm,blockers", ttl=None)
+
+    pm_block(db, project="myrepo", blocker="new issue")
+
+    row = db.get(project="myrepo_pm", title="BLOCKERS.md")
+    assert row is not None
+    content = row["content"]
+    # The blocker should appear on its own line after a newline
+    assert "# Blockers\n- new issue\n" in content
+
+
+def test_pm_unblock_missing_blockers_returns_early(db) -> None:
+    """pm_unblock returns without error when BLOCKERS.md doesn't exist."""
+    pm_init(db, project="myrepo")
+    # No BLOCKERS.md created — only standard docs exist (none is BLOCKERS.md)
+
+    # Should not raise any exception
+    result = pm_unblock(db, project="myrepo", line=1)
+    assert result is None
+
+
+# ── Edge cases: pm_restore ────────────────────────────────────────────────────
+
+def test_pm_restore_warns_on_expired_docs(db) -> None:
+    """pm_restore emits a structlog warning when some standard docs have expired before restore."""
+    pm_init(db, project="myrepo")
+
+    # Delete all docs except CONTINUATION.md to simulate expiry
+    for entry in db.list_entries(project="myrepo_pm"):
+        if entry["title"] != "CONTINUATION.md":
+            db.delete("myrepo_pm", entry["title"])
+
+    # Mark remaining as archived (so restore_project has something to restore)
+    row = db.get(project="myrepo_pm", title="CONTINUATION.md")
+    assert row is not None
+    db.put("myrepo_pm", "CONTINUATION.md", row["content"],
+           tags="pm-archived,phase:1,context", ttl=90)
+
+    with patch.object(pm_mod, "_log") as mock_log:
+        pm_restore(db, project="myrepo")
+
+    mock_log.warning.assert_called_once()
+    # Verify the warning mentions expired docs
+    call_kwargs = mock_log.warning.call_args
+    assert "expired" in call_kwargs[0][0]
+
+
+# ── Edge cases: pm_reference ─────────────────────────────────────────────────
+
+def test_pm_reference_no_collection_returns_early(db) -> None:
+    """pm_reference returns empty list when archive collection doesn't exist for bare project name."""
+    mock_t3 = MagicMock()
+    mock_t3.collection_exists.return_value = False
+
+    with patch("nexus.pm.make_t3", return_value=mock_t3):
+        results = pm_reference(db, query="nonexistent_project")
+
+    assert results == []
+    # Should not attempt to create or query the collection
+    mock_t3.get_or_create_collection.assert_not_called()
+    mock_t3.search.assert_not_called()
+
+
+# ── Edge cases: pm_status ────────────────────────────────────────────────────
+
+def test_pm_status_empty_blockers_list(db) -> None:
+    """pm_status returns empty blockers list when BLOCKERS.md exists but has no bullet items."""
+    pm_init(db, project="myrepo")
+    # Create BLOCKERS.md with header but no bullet items
+    db.put("myrepo_pm", "BLOCKERS.md", "# Blockers\n", tags="pm,blockers", ttl=None)
+
+    status = pm_status(db, project="myrepo")
+    assert status["blockers"] == []

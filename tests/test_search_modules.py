@@ -263,3 +263,39 @@ def test_rerank_results_empty_input_returns_empty():
     from nexus.scoring import rerank_results
 
     assert rerank_results([], query="anything") == []
+
+
+# ── Gap 4: apply_hybrid_scoring warns when hybrid=True but no code corpus ────
+
+def test_apply_hybrid_scoring_warns_no_code_corpus():
+    """When hybrid=True but no code__ corpus, a warning is logged."""
+    from unittest.mock import patch as _patch
+    from nexus.scoring import apply_hybrid_scoring
+
+    results = [
+        SearchResult(
+            id="d1",
+            content="some doc content",
+            distance=0.3,
+            collection="docs__test",
+            metadata={},
+        ),
+        SearchResult(
+            id="d2",
+            content="another doc",
+            distance=0.5,
+            collection="knowledge__notes",
+            metadata={},
+        ),
+    ]
+
+    with _patch("nexus.scoring._log") as mock_log:
+        scored = apply_hybrid_scoring(results, hybrid=True)
+
+    # Warning should have been emitted
+    mock_log.warning.assert_called_once()
+    assert "no code corpus" in mock_log.warning.call_args[0][0].lower()
+
+    # Results should still be returned (with vector-only scoring)
+    assert len(scored) == 2
+    assert all(r.hybrid_score >= 0.0 for r in scored)

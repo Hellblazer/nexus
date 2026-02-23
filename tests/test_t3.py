@@ -654,3 +654,104 @@ def test_update_chunks_calls_col_update_without_documents(mock_chromadb: tuple) 
     # documents must NOT be passed — that would trigger re-embedding
     call_kwargs = mock_col.update.call_args.kwargs
     assert "documents" not in call_kwargs
+
+
+# ── collection_info ──────────────────────────────────────────────────────────
+
+def test_collection_info_returns_count_and_metadata(local_t3: T3Database) -> None:
+    """collection_info() returns a dict with count and metadata after a put."""
+    local_t3.put(
+        collection="knowledge__info_test",
+        content="Some knowledge content",
+        title="info-doc.md",
+        tags="test",
+    )
+
+    info = local_t3.collection_info("knowledge__info_test")
+
+    assert info["count"] == 1
+    assert isinstance(info["metadata"], dict)
+
+
+def test_collection_info_nonexistent_collection_raises(local_t3: T3Database) -> None:
+    """collection_info() raises an error for a non-existent collection."""
+    with pytest.raises(Exception):
+        local_t3.collection_info("knowledge__does_not_exist")
+
+
+def test_collection_info_count_increases(local_t3: T3Database) -> None:
+    """collection_info() count reflects the actual number of documents."""
+    local_t3.put(
+        collection="knowledge__count_test",
+        content="first doc",
+        title="doc-1.md",
+    )
+    local_t3.put(
+        collection="knowledge__count_test",
+        content="second doc",
+        title="doc-2.md",
+    )
+
+    info = local_t3.collection_info("knowledge__count_test")
+    assert info["count"] == 2
+
+
+# ── list_store ───────────────────────────────────────────────────────────────
+
+def test_list_store_returns_entries_with_metadata(local_t3: T3Database) -> None:
+    """list_store() returns a list of dicts with id, title, tags, etc."""
+    local_t3.put(
+        collection="knowledge__ls_test",
+        content="stored content",
+        title="ls-doc.md",
+        tags="alpha,beta",
+        ttl_days=30,
+    )
+
+    entries = local_t3.list_store("knowledge__ls_test")
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert "id" in entry
+    assert entry["title"] == "ls-doc.md"
+    assert entry["tags"] == "alpha,beta"
+    assert entry["ttl_days"] == 30
+
+
+def test_list_store_nonexistent_collection_returns_empty(local_t3: T3Database) -> None:
+    """list_store() returns [] for a collection that does not exist."""
+    result = local_t3.list_store("knowledge__no_such_coll")
+    assert result == []
+
+
+def test_list_store_multiple_entries(local_t3: T3Database) -> None:
+    """list_store() returns all entries in the collection."""
+    for i in range(3):
+        local_t3.put(
+            collection="knowledge__multi_ls",
+            content=f"content {i}",
+            title=f"doc-{i}.md",
+        )
+
+    entries = local_t3.list_store("knowledge__multi_ls")
+    assert len(entries) == 3
+    titles = {e["title"] for e in entries}
+    assert titles == {"doc-0.md", "doc-1.md", "doc-2.md"}
+
+
+# ── collection_exists ────────────────────────────────────────────────────────
+
+def test_collection_exists_true_after_put(local_t3: T3Database) -> None:
+    """collection_exists() returns True for a collection that has been created."""
+    local_t3.put(
+        collection="knowledge__exists_test",
+        content="some content",
+        title="exists.md",
+    )
+
+    assert local_t3.collection_exists("knowledge__exists_test") is True
+
+
+def test_collection_exists_false_for_missing(local_t3: T3Database) -> None:
+    """collection_exists() returns False for a non-existent collection."""
+    assert local_t3.collection_exists("knowledge__never_created") is False

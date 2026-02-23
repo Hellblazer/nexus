@@ -1,4 +1,5 @@
 """T2: Flask HTTP API — /health, /repos GET/POST/DELETE routes."""
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -141,3 +142,23 @@ def test_delete_repo_path_is_canonicalized(client, tmp_path: Path) -> None:
     # The path passed to reg.get must be the resolved canonical path
     called_path = mock_reg.get.call_args[0][0]
     assert called_path == repo.resolve()
+
+
+# ── POST /repos: git timeout ─────────────────────────────────────────────────
+
+def test_add_repo_git_timeout_returns_504(client, tmp_path: Path) -> None:
+    """When git rev-parse times out, the endpoint should return 504 with
+    'timed out' in the error message."""
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    timeout_error = subprocess.TimeoutExpired(
+        cmd=["git", "rev-parse", "--show-toplevel"],
+        timeout=10,
+    )
+    with patch("nexus.server.subprocess.run", side_effect=timeout_error):
+        resp = client.post("/repos", json={"path": str(repo)})
+
+    assert resp.status_code == 504
+    body = resp.get_json()
+    assert "timed out" in body["error"].lower()

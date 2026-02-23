@@ -1,4 +1,5 @@
 """AC1: nx serve start/stop/status/logs — PID file lifecycle and stale PID detection."""
+import errno
 import signal
 import subprocess
 import sys
@@ -397,3 +398,34 @@ def test_serve_start_writes_start_timestamp_file(runner: CliRunner, serve_home: 
     ts_text = start_file.read_text().strip()
     ts = datetime.datetime.fromisoformat(ts_text)
     assert before <= ts <= after, f"Timestamp {ts} should be between {before} and {after}"
+
+
+# ── _process_running: EPERM handling ─────────────────────────────────────────
+
+def test_process_running_returns_true_on_eperm() -> None:
+    """When os.kill raises EPERM, _process_running returns True (process exists
+    but is owned by another user)."""
+    from nexus.commands.serve import _process_running
+
+    eperm_error = OSError(errno.EPERM, "Operation not permitted")
+    with patch("nexus.commands.serve.os.kill", side_effect=eperm_error):
+        assert _process_running(99999) is True
+
+
+# ── stop: EPERM handling ─────────────────────────────────────────────────────
+
+def test_serve_stop_eperm_prints_permission_error(
+    runner: CliRunner, serve_home: Path
+) -> None:
+    """When stopping a server and os.kill raises EPERM, the command should exit
+    with code 1 and mention 'permission' in its output."""
+    pid_path = _pid_path(serve_home)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("12345")
+
+    eperm_error = OSError(errno.EPERM, "Operation not permitted")
+    with patch("nexus.commands.serve.os.kill", side_effect=eperm_error):
+        result = runner.invoke(main, ["serve", "stop"])
+
+    assert result.exit_code == 1
+    assert "permission" in result.output.lower()
