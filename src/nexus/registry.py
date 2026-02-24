@@ -25,6 +25,15 @@ def _collection_name(repo: Path) -> str:
     return f"code__{repo.name}-{path_hash}"
 
 
+def _docs_collection_name(repo: Path) -> str:
+    """Return the docs__ ChromaDB collection name for *repo*.
+
+    Uses the same hash scheme as _collection_name() for consistency.
+    """
+    path_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+    return f"docs__{repo.name}-{path_hash}"
+
+
 class RepoRegistry:
     """Thread-safe registry of indexed repositories stored as JSON."""
 
@@ -45,13 +54,17 @@ class RepoRegistry:
     # ── public API ────────────────────────────────────────────────────────────
 
     def add(self, repo: Path) -> None:
-        """Register *repo*, initialising collection name and head_hash."""
+        """Register *repo*, initialising collection names and head_hash."""
         key = str(repo)
         name = repo.name
+        code_col = _collection_name(repo)
+        docs_col = _docs_collection_name(repo)
         with self._lock:
             self._data["repos"][key] = {
                 "name": name,
-                "collection": _collection_name(repo),
+                "collection": code_col,  # backward compat alias
+                "code_collection": code_col,
+                "docs_collection": docs_col,
                 "head_hash": "",
                 "status": "registered",
             }
