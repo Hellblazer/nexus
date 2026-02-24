@@ -97,30 +97,6 @@ Status: Draft
 Next: Fill in Problem Statement and Context, then use /rdr-research to add findings.
 ```
 
-## Relay Template (Use This Format)
-
-This skill does not dispatch agents (no Task tool). The relay template is included for consistency with the standard skill format. If future changes add agent delegation, use this structure:
-
-```markdown
-## Relay: {agent-name}
-
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
-
-### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]
-- Files: [key files or "none"]
-
-### Deliverable
-[What the receiving agent should produce]
-
-### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-```
-
 ## Success Criteria
 
 - [ ] RDR file created at `docs/rdr/NNN-kebab-title.md` with correct metadata

@@ -36,30 +36,6 @@ If the user specifies filters, apply them:
 - `--type=feature` — only show RDRs with matching type
 - `--has-assumptions` — only show RDRs that have Assumed research findings in T2
 
-## Relay Template (Use This Format)
-
-This skill does not dispatch agents (no Task tool). The relay template is included for consistency with the standard skill format. If future changes add agent delegation, use this structure:
-
-```markdown
-## Relay: {agent-name}
-
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
-
-### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]
-- Files: [key files or "none"]
-
-### Deliverable
-[What the receiving agent should produce]
-
-### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-```
-
 ## Success Criteria
 
 - [ ] All RDR files in `docs/rdr/` discovered and parsed
