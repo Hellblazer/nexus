@@ -119,6 +119,12 @@ This provides semantic search + ripgrep + git frecency, far more powerful than g
 - Update bead with progress during multi-session analysis
 - Close bead with summary of findings and deliverables
 
+### RDR Awareness
+
+When analyzing a codebase, check for `docs/rdr/` directory. If present:
+- Note the number of RDRs and their statuses in your analysis
+- Use `--corpus docs__rdr__{repo}` for semantic search of RDR content (if indexed)
+- RDR documents contain architectural decisions, trade-offs, and research — valuable context for codebase understanding
 
 
 ## Successor Enforcement (CONDITIONAL)

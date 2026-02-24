@@ -315,6 +315,60 @@ agents:
     successors: []
 
 # =============================================================================
+# RDR SKILLS (orchestration skills — dispatch to existing agents)
+# =============================================================================
+
+rdr_skills:
+  rdr-create:
+    slash_command: /rdr-create
+    description: "Scaffold new RDR from template, assign ID, register in T2"
+    triggers:
+      - "create an RDR"
+      - "new RDR"
+      - "start planning document"
+
+  rdr-research:
+    slash_command: /rdr-research
+    description: "Add, track, and verify structured research findings"
+    triggers:
+      - "add research finding"
+      - "update RDR research"
+      - "verify assumption"
+    dispatches_to: [deep-research-synthesizer, codebase-deep-analyzer]
+
+  rdr-gate:
+    slash_command: /rdr-gate
+    description: "Run finalization gate: structural + assumption + AI critique"
+    triggers:
+      - "gate this RDR"
+      - "finalization check"
+      - "is this RDR ready"
+    dispatches_to: [substantive-critic]
+
+  rdr-close:
+    slash_command: /rdr-close
+    description: "Close RDR with post-mortem, bead decomposition, T3 archive"
+    triggers:
+      - "close this RDR"
+      - "RDR done"
+      - "finish RDR"
+    dispatches_to: [knowledge-tidier]
+
+  rdr-list:
+    slash_command: /rdr-list
+    description: "List all RDRs with status, type, priority"
+    triggers:
+      - "list RDRs"
+      - "show all RDRs"
+
+  rdr-show:
+    slash_command: /rdr-show
+    description: "Display detailed RDR information"
+    triggers:
+      - "show RDR"
+      - "RDR details"
+
+# =============================================================================
 # STANDALONE SKILLS
 # =============================================================================
 # Skills that provide guidance directly without delegating to an agent.
