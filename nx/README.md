@@ -24,7 +24,7 @@ nx/
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
 │   └── *.md                 # 14 specialized agent definitions
 ├── commands/
-│   └── *.md                 # Slash commands (/research, /plan, /code-review, etc.)
+│   └── *.md                 # Slash commands (/research, /plan, /review-code, etc.)
 ├── hooks/
 │   ├── hooks.json           # Hook event → script wiring
 │   └── scripts/
@@ -61,7 +61,7 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 | Agent | Skill | Command | Model | Purpose |
 |-------|-------|---------|-------|---------|
-| code-review-expert | code-review | `/code-review` | sonnet | Code quality, security, best practices |
+| code-review-expert | code-review | `/review-code` | sonnet | Code quality, security, best practices |
 | codebase-deep-analyzer | codebase-analysis | `/analyze-code` | sonnet | Architecture, patterns, dependency mapping |
 | deep-analyst | deep-analysis | `/deep-analysis` | opus | Complex problem investigation, root cause |
 | substantive-critic | substantive-critique | `/substantive-critique` | sonnet | Constructive critique of plans/designs/code |
@@ -109,7 +109,7 @@ Defined in `registry.yaml`:
 - `/plan` → strategic-planner
 - `/plan-audit` → plan-auditor
 - `/analyze-code` → codebase-deep-analyzer
-- `/code-review` → code-review-expert
+- `/review-code` → code-review-expert
 - `/test-validate` → test-validator
 - `/java-implement` → java-developer
 - `/java-debug` → java-debugger
