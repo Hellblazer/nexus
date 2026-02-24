@@ -67,3 +67,36 @@ def index_md_cmd(path: Path, corpus: str) -> None:
     click.echo(f"Indexing {path}…")
     n = index_markdown(path, corpus=corpus)
     click.echo(f"Indexed {n} chunk(s).")
+
+
+_RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
+
+
+@index.command("rdr")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path), default=".")
+def index_rdr_cmd(path: Path) -> None:
+    """Discover and index RDR documents in docs/rdr/ into T3 docs__rdr__REPO."""
+    from nexus.doc_indexer import batch_index_markdowns
+
+    path = path.resolve()
+    rdr_dir = path / "docs" / "rdr"
+
+    if not rdr_dir.is_dir():
+        click.echo("No docs/rdr/ directory found")
+        return
+
+    # Glob only top-level .md files, excluding README.md and TEMPLATE.md
+    rdr_files = sorted(
+        p for p in rdr_dir.glob("*.md")
+        if p.is_file() and p.name not in _RDR_EXCLUDES
+    )
+
+    if not rdr_files:
+        click.echo("0 RDR documents found.")
+        return
+
+    corpus = f"rdr__{path.name}"
+    click.echo(f"Indexing {len(rdr_files)} RDR document(s) into docs__{corpus}…")
+    results = batch_index_markdowns(rdr_files, corpus)
+    indexed = sum(1 for s in results.values() if s == "indexed")
+    click.echo(f"Indexed {indexed} of {len(rdr_files)} RDR document(s).")
