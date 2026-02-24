@@ -25,9 +25,6 @@ _AST_EXTENSIONS: dict[str, str] = {
     ".cs": "c_sharp",
     ".sh": "bash",
     ".bash": "bash",
-    ".toml": "toml",
-    ".yaml": "yaml",
-    ".yml": "yaml",
 }
 
 _CHUNK_LINES = 150

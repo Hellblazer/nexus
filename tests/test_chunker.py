@@ -116,3 +116,30 @@ def test_chunk_file_ast_failure_falls_back_to_lines(tmp_path: Path) -> None:
 
     assert len(chunks) >= 1
     assert all(c["ast_chunked"] is False for c in chunks)
+
+
+# ── Config extensions use line chunking, not AST ────────────────────────────
+
+
+def test_yaml_uses_line_chunking_not_ast() -> None:
+    """YAML files should use line-based chunking, not AST (they're prose now)."""
+    content = "key: value\nlist:\n  - item1\n  - item2\n"
+    chunks = chunk_file(Path("config.yaml"), content)
+    assert chunks
+    assert not chunks[0].get("ast_chunked", False)
+
+
+def test_yml_uses_line_chunking_not_ast() -> None:
+    """YML files should use line-based chunking, not AST (they're prose now)."""
+    content = "key: value\nlist:\n  - item1\n  - item2\n"
+    chunks = chunk_file(Path("config.yml"), content)
+    assert chunks
+    assert not chunks[0].get("ast_chunked", False)
+
+
+def test_toml_uses_line_chunking_not_ast() -> None:
+    """TOML files should use line-based chunking, not AST (they're prose now)."""
+    content = '[section]\nkey = "value"\n'
+    chunks = chunk_file(Path("pyproject.toml"), content)
+    assert chunks
+    assert not chunks[0].get("ast_chunked", False)
