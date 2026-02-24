@@ -302,9 +302,8 @@ class TestSkillStructure:
     # Standalone skills don't delegate to agents — exclude from agent-specific tests
     STANDALONE_SKILLS = {
         "cli-controller", "nexus",
-        "brainstorming-gate", "verification-before-completion",
-        "receiving-code-review", "using-nx-skills",
-        "dispatching-parallel-agents", "writing-nx-skills",
+        "brainstorming-gate", "using-nx-skills",
+        "writing-nx-skills",
     }
 
     REQUIRED_SKILL_SECTIONS = [

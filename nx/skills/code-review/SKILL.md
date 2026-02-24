@@ -65,7 +65,7 @@ The code-review-expert agent uses hypothesis-driven review:
 3. Validate against best practices and security requirements
 4. Document findings with file:line references
 
-**REQUIRED BACKGROUND:** Understand nx:receiving-code-review for how to handle the review output.
+**REQUIRED BACKGROUND:** Understand superpowers:receiving-code-review for how to handle the review output.
 
 ## Agent-Specific PRODUCE
 

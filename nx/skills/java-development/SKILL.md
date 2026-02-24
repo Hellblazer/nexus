@@ -69,7 +69,7 @@ The java-developer agent follows test-driven development:
 4. Repeat for each requirement
 5. Ensure all existing tests still pass
 
-**REQUIRED SUB-SKILL:** Use nx:verification-before-completion before claiming any task is done.
+**REQUIRED SUB-SKILL:** Use superpowers:verification-before-completion before claiming any task is done.
 **REQUIRED SUB-SKILL:** Use nx:code-review after implementation for quality review.
 
 ## Java 24 Standards

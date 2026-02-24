@@ -39,11 +39,8 @@ nx/
 └── skills/
     ├── brainstorming-gate/  # Standalone: design gate before implementation
     ├── cli-controller/      # Standalone: tmux-based interactive CLI control
-    ├── dispatching-parallel-agents/ # Standalone: parallel agent coordination
     ├── nexus/               # Standalone: nx CLI reference (all tiers)
-    ├── receiving-code-review/ # Standalone: technical rigor for review feedback
     ├── using-nx-skills/     # Standalone: skill invocation discipline
-    ├── verification-before-completion/ # Standalone: evidence before claims
     ├── writing-nx-skills/   # Standalone: plugin authorship guide
     ├── code-review/         # → code-review-expert agent
     ├── codebase-analysis/   # → codebase-deep-analyzer agent
@@ -62,7 +59,22 @@ nx/
     └── test-validation/     # → test-validator agent
 ```
 
-## Standalone Skills (8)
+## Plugin Dependencies
+
+The nx plugin delegates workflow discipline skills to [superpowers](https://github.com/anthropics/claude-plugins-official/tree/main/superpowers) rather than shadowing them:
+
+| Capability | Provided by |
+|-----------|-------------|
+| Verification before completion | `superpowers:verification-before-completion` |
+| Receiving code review feedback | `superpowers:receiving-code-review` |
+| Parallel agent dispatch | `superpowers:dispatching-parallel-agents` |
+| TDD methodology | `superpowers:test-driven-development` |
+| Git worktrees | `superpowers:using-git-worktrees` |
+| Writing plans | `superpowers:writing-plans` |
+
+**Requires**: superpowers plugin installed (`/install superpowers` or via Claude Code plugin manager).
+
+## Standalone Skills (5)
 
 Skills that provide guidance directly without delegating to an agent.
 
@@ -70,11 +82,8 @@ Skills that provide guidance directly without delegating to an agent.
 |-------|---------|
 | brainstorming-gate | Design gate — requires exploration and user approval before implementation |
 | cli-controller | Expert guidance for controlling interactive CLI applications via tmux |
-| dispatching-parallel-agents | Parallel agent dispatch for independent problem domains |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
-| receiving-code-review | Technical rigor for code review feedback — verify before implementing |
 | using-nx-skills | Skill invocation discipline — check skills before every response |
-| verification-before-completion | Evidence before claims — requires verification before completion |
 | writing-nx-skills | Guide for authoring nx plugin skills |
 
 ## Agents (14)
