@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.indexer import CredentialsMissingError, index_repository
 
@@ -178,7 +179,7 @@ def test_run_index_source_path_is_absolute(tmp_path: Path) -> None:
         "ast_chunked": False, "filename": "main.py", "file_extension": ".py",
     }
 
-    mock_voyage_result = MagicMock()
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
     mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
 
     mock_voyage_client = MagicMock()
@@ -253,7 +254,7 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path: Path) -> Non
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
 
-    mock_voyage_result = MagicMock()
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
     mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
 
     mock_voyage_client = MagicMock()
@@ -355,3 +356,94 @@ def test_frecency_only_raises_credentials_missing(tmp_path: Path, monkeypatch) -
 
     with pytest.raises(CredentialsMissingError):
         _run_index_frecency_only(repo, registry)
+
+
+# ── F1: UnicodeDecodeError / OSError debug logging ───────────────────────────
+
+def test_run_index_logs_skipped_binary_files(tmp_path: Path) -> None:
+    """Binary files that fail read_text() are skipped with a debug log."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # A valid text file that will be indexed normally
+    (repo / "main.py").write_text("x = 1\n")
+    # A binary file that will fail utf-8 decoding
+    (repo / "image.bin").write_bytes(b"\x80\x81\x82\x83\xff\xfe")
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": []}
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    fake_chunk = {
+        "line_start": 1, "line_end": 1, "text": "x = 1",
+        "chunk_index": 0, "chunk_count": 1,
+        "ast_chunked": False, "filename": "main.py", "file_extension": ".py",
+    }
+
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+    mock_voyage_client = MagicMock()
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
+                                with patch("voyageai.Client", return_value=mock_voyage_client):
+                                    with patch("nexus.indexer._log") as mock_log:
+                                        _run_index(repo, registry)
+
+    # Verify debug was called for the skipped binary file
+    debug_calls = mock_log.debug.call_args_list
+    skipped_calls = [c for c in debug_calls if "skipped non-text file" in str(c)]
+    assert skipped_calls, (
+        f"Expected debug log for skipped binary file, got calls: {debug_calls}"
+    )
+
+
+# ── F2: empty chunks debug logging ──────────────────────────────────────────
+
+def test_run_index_logs_empty_chunks(tmp_path: Path) -> None:
+    """Files producing no chunks are skipped with a debug log."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # A file with only whitespace — chunker returns empty list
+    (repo / "empty.py").write_text("   \n\n   \n")
+
+    registry = MagicMock()
+    registry.get.return_value = {"collection": "code__repo"}
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": []}
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.chunker.chunk_file", return_value=[]):
+                                with patch("voyageai.Client"):
+                                    with patch("nexus.indexer._log") as mock_log:
+                                        _run_index(repo, registry)
+
+    # Verify debug was called for the empty-chunks file
+    debug_calls = mock_log.debug.call_args_list
+    empty_calls = [c for c in debug_calls if "skipped file with no chunks" in str(c)]
+    assert empty_calls, (
+        f"Expected debug log for empty chunks file, got calls: {debug_calls}"
+    )
