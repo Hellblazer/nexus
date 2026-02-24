@@ -48,33 +48,33 @@ description: Audit a plan using plan-auditor agent
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to plan-auditor:
+Invoke the **plan-validation** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: plan-auditor
 
 **Task**: Validate implementation plan before execution
-**Bead**: [Epic bead ID from context]
+**Bead**: [fill from epic bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Search for architectural constraints]
-- nx memory: [project/title path or 'none']
-- Files: [Key files referenced in plan]
+- Files: [fill from key files referenced in plan]
 
 ### Plan to Validate
 $ARGUMENTS
 
-[Include full plan from strategic-planner or output of: nx pm status]
+[fill from strategic-planner output or nx pm status]
 
 ### Deliverable
-Validation report with go/no-go decision
+Validation report with go/no-go decision: assumption verification results, dependency confirmation, build/test command validation, risk assessment, and clear recommendation.
 
 ### Quality Criteria
-- [ ] All assumptions verified against codebase
-- [ ] Dependencies confirmed to exist
-- [ ] Build/test commands validated
-- [ ] Risks identified and acceptable
-- [ ] Clear go/no-go recommendation
+- [ ] All assumptions verified against actual codebase state
+- [ ] Dependencies confirmed to exist (classes, APIs, libraries)
+- [ ] Build/test commands validated (runnable as specified)
+- [ ] Risks identified with severity and mitigation status
+- [ ] Clear go/no-go recommendation with rationale
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

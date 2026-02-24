@@ -1,5 +1,6 @@
 ---
 description: Initialize project management for current repo via nx pm (project)
+disable-model-invocation: true
 ---
 
 !{

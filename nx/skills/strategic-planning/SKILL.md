@@ -1,12 +1,6 @@
 ---
 name: strategic-planning
-description: >
-  Create implementation plans before development. Triggers: user says "implement feature",
-  "add functionality", "build component", starting new epic, before multi-step development,
-  user says "plan this", before architectural changes, breaking down complex work.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
-memory: project
+description: Use when facing multi-step development work that needs decomposition into phases, before writing any implementation code
 ---
 
 # Strategic Planning Skill
@@ -24,35 +18,27 @@ Delegates to the **strategic-planner** agent. See [registry.yaml](../../registry
 
 ## Agent Invocation
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
+Use the Task tool to invoke **strategic-planner**:
 
 ```markdown
-## Relay: {agent-name}
+## Relay: strategic-planner
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
 
 ### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+- Files: [relevant files]
 
 ### Deliverable
-[What the receiving agent should produce]
+Implementation plan with phased tasks and dependencies
 
 ### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+- [ ] Phased execution plan created
+- [ ] Dependency graph established
+- [ ] Success criteria defined per phase
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
-
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Planning Methodology
 
@@ -64,6 +50,8 @@ The agent uses sequential thinking:
 5. Identify dependencies between tasks
 6. Create beads for trackable work items
 7. Define success criteria and test strategy
+
+**REQUIRED SUB-SKILL:** Use nx:plan-validation (plan-auditor) after creating any plan.
 
 ## Success Criteria
 

@@ -1,10 +1,6 @@
 ---
 name: knowledge-tidying
-description: >
-  Persist and organize knowledge in Nexus T3. Triggers: research-synthesis completes,
-  major investigation concludes, user says "save this knowledge", valuable insights discovered.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
+description: Use when validated findings, decisions, or patterns need to be persisted to nx T3 knowledge store for cross-session reuse
 ---
 
 # Knowledge Tidying Skill
@@ -21,35 +17,27 @@ Delegates to the **knowledge-tidier** agent (haiku). See [registry.yaml](../../r
 
 ## Agent Invocation
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
+Use the Task tool to invoke **knowledge-tidier**:
 
 ```markdown
-## Relay: {agent-name}
+## Relay: knowledge-tidier
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
 
 ### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+- Files: [relevant files]
 
 ### Deliverable
-[What the receiving agent should produce]
+Organized knowledge entries in T3
 
 ### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+- [ ] Knowledge stored in Nexus T3 via nx store put
+- [ ] No contradictions with existing knowledge
+- [ ] Tags are meaningful for future retrieval
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
-
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Nexus Storage Standards
 

@@ -63,31 +63,30 @@ description: Route request to appropriate agent using orchestrator
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to orchestrator:
+Invoke the **orchestration** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: orchestrator
 
 **Task**: Analyze "$ARGUMENTS" and recommend the appropriate agent(s) and workflow
-**Bead**: [Create bead if this initiates trackable work or 'none']
+**Bead**: [fill from active bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Search for prior work on related topic]
-- nx memory: [project/title path or 'none']
-- Files: [Relevant files if applicable]
+- Files: [fill from relevant files if applicable, or 'none']
 
 ### User Request
 $ARGUMENTS
 
 ### Deliverable
-Clear recommendation of which agent(s) to use, in what order, with rationale and a ready-to-use relay message
+Routing recommendation: identified agent(s), execution order (sequential/parallel), rationale for selection, and a ready-to-use relay message for the first agent in the workflow.
 
 ### Quality Criteria
-- [ ] User goal clearly understood
-- [ ] Most appropriate agent(s) identified
-- [ ] Workflow order justified (sequential vs parallel)
-- [ ] Clear rationale provided for routing decision
-- [ ] Ready-to-use relay message included for next agent
+- [ ] User goal clearly understood and restated
+- [ ] Most appropriate agent(s) identified from available roster
+- [ ] Workflow order justified (sequential vs parallel) with rationale
+- [ ] Ready-to-use relay message included for the recommended agent
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

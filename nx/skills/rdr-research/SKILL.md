@@ -1,9 +1,6 @@
 ---
 name: rdr-research
-description: >
-  Add, track, and verify structured research findings for an RDR.
-  Triggers: user says "add research finding", "RDR research", or /rdr-research
-allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
+description: Use when adding, tracking, or verifying structured research findings for an active RDR
 ---
 
 # RDR Research Skill

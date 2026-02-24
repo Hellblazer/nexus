@@ -64,33 +64,33 @@ description: Create implementation plan using strategic-planner agent
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to strategic-planner:
+Invoke the **strategic-planning** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: strategic-planner
 
 **Task**: Create comprehensive implementation plan for: $ARGUMENTS
-**Bead**: [Create epic bead for this work]
+**Bead**: [fill from active epic bead above or create new]
 
 ### Input Artifacts
-- nx store: [Search for prior architectural decisions]
-- nx memory: [project/title path or 'none']
-- Files: [Relevant existing code for context]
+- Files: [fill from relevant existing code for context]
 
 ### Requirements
 $ARGUMENTS
 
 ### Deliverable
-Phased execution plan with beads for tracking
+Phased execution plan with dependency graph, success criteria per phase, test strategy, and beads created for all trackable items.
 
 ### Quality Criteria
-- [ ] Work broken into logical phases
-- [ ] Dependencies clearly identified
-- [ ] Success criteria defined per phase
-- [ ] Test strategy included
+- [ ] Work broken into logical phases with clear boundaries
+- [ ] Dependencies identified and ordered correctly
+- [ ] Success criteria defined per phase (measurable)
+- [ ] Test strategy included for each phase
 - [ ] Beads created for all trackable items
 
 **IMPORTANT**: After planning completes, MUST delegate to plan-auditor for validation before implementation.
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

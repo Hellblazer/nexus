@@ -49,29 +49,27 @@ description: Create PM infrastructure for multi-week projects using project-mana
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to project-management-setup:
+Invoke the **project-setup** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: project-management-setup
 
 **Task**: Create PM infrastructure for "$ARGUMENTS"
-**Bead**: [Create epic bead for this project]
+**Bead**: [fill from active epic bead above or create new]
 
 ### Input Artifacts
-- nx store: [Search for prior architectural decisions or related research]
-- nx memory: [project/title path or 'none']
-- Files: [Existing specs, READMEs, or planning docs]
+- Files: [fill from existing specs, READMEs, or planning docs]
 
 ### Project Description
 $ARGUMENTS
 
 ### Deliverable
-Complete PM infrastructure: nx pm initialized, T2 documents created (overview, continuation, phase docs), epic and phase beads created with dependencies
+Complete PM infrastructure: `nx pm init` run, T2 documents created (overview, continuation, at least one phase doc), epic and phase beads created with inter-phase dependencies, `nx pm status` verified working.
 
 ### Quality Criteria
-- [ ] `nx pm init` completed; `nx pm status` returns project info
+- [ ] `nx pm init` completed successfully
 - [ ] T2 documents created: overview, continuation, at least one phase doc
 - [ ] `nx pm status` returns actionable project context
 - [ ] Epic bead created for the overall project
@@ -80,3 +78,5 @@ Complete PM infrastructure: nx pm initialized, T2 documents created (overview, c
 
 **IMPORTANT**: After setup completes, run `nx pm status` to verify the infrastructure loads correctly.
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

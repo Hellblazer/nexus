@@ -1,11 +1,6 @@
 ---
 name: java-development
-description: >
-  Implement Java features using TDD methodology. Triggers: plan approved,
-  user says "implement", bead in_progress for implementation, executing plan phase.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash, LSP
-memory: project
+description: Use when a plan has been approved and Java implementation work is ready to begin, before writing production code
 ---
 
 # Java Development Skill
@@ -43,35 +38,27 @@ Delegates to the **java-developer** agent (sonnet). See [registry.yaml](../../re
 
 ## Agent Invocation
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
+Use the Task tool to invoke **java-developer**:
 
 ```markdown
-## Relay: {agent-name}
+## Relay: java-developer
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
 
 ### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+- Files: [relevant files]
 
 ### Deliverable
-[What the receiving agent should produce]
+Working implementation with tests
 
 ### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+- [ ] All tests written and passing (TDD)
+- [ ] Code follows project conventions
+- [ ] No regressions in existing tests
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
-
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## TDD Methodology
 
@@ -81,6 +68,9 @@ The java-developer agent follows test-driven development:
 3. Refactor while keeping tests green
 4. Repeat for each requirement
 5. Ensure all existing tests still pass
+
+**REQUIRED SUB-SKILL:** Use nx:verification-before-completion before claiming any task is done.
+**REQUIRED SUB-SKILL:** Use nx:code-review after implementation for quality review.
 
 ## Java 24 Standards
 

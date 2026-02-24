@@ -1,13 +1,6 @@
 ---
 name: deep-analysis
-description: >
-  Thorough analysis of complex problems and intricate system relationships. Triggers when:
-  investigating performance mysteries, debugging multi-component interactions,
-  understanding complex system behavior, or when surface-level analysis is insufficient.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
-memory: local
-context: fork
+description: Use when surface-level analysis is insufficient and problems require hypothesis-driven investigation across multiple system components
 ---
 
 # Deep Analysis Skill
@@ -25,35 +18,27 @@ Delegates to the **deep-analyst** agent (model: opus).
 
 ## Agent Invocation
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
+Use the Task tool to invoke **deep-analyst**:
 
 ```markdown
-## Relay: {agent-name}
+## Relay: deep-analyst
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
 
 ### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+- Files: [relevant files]
 
 ### Deliverable
-[What the receiving agent should produce]
+Analysis report with findings and recommendations
 
 ### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+- [ ] Multiple hypotheses explored
+- [ ] Root cause(s) identified with confidence
+- [ ] Recommendations are actionable
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
-
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Investigation Methodology
 

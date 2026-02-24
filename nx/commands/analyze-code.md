@@ -72,31 +72,31 @@ description: Analyze codebase using codebase-deep-analyzer agent
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to codebase-deep-analyzer:
+Invoke the **codebase-analysis** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: codebase-deep-analyzer
 
-**Task**: Analyze codebase to understand architecture and patterns
-**Bead**: [Create analysis bead if multi-session or 'none']
+**Task**: Analyze codebase architecture, patterns, and dependencies
+**Bead**: [fill from active bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Search for existing architecture docs]
-- nx memory: [project/title path or 'none']
-- Files: [Key entry points from structure above]
+- Files: [fill from key entry points in project structure above]
 
 ### Analysis Scope
 $ARGUMENTS
 
 ### Deliverable
-Comprehensive architecture analysis document
+Comprehensive architecture analysis: module structure map, identified design patterns, dependency graph, entry points, coding conventions, and technical debt assessment.
 
 ### Quality Criteria
-- [ ] Module structure mapped
-- [ ] Key patterns identified
-- [ ] Dependencies documented
-- [ ] Entry points identified
-- [ ] Conventions noted
+- [ ] Module structure mapped with responsibilities
+- [ ] Key design patterns identified and documented
+- [ ] Dependencies documented (internal and external)
+- [ ] Entry points identified for each module
+- [ ] Coding conventions and idioms noted
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

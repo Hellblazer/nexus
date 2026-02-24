@@ -1,12 +1,6 @@
 ---
 name: cli-controller
-standalone: true
-description: >
-  Expert guidance for controlling interactive CLI applications using tmux.
-  Triggers: debugging Python/Java interactively, spawning Claude Code instances,
-  long-running interactive processes, web application testing with browser automation.
-# See ../../registry.yaml for standalone skill metadata
-allowed-tools: Bash, Read, Write
+description: Use when controlling interactive CLI applications, debugging with pdb/gdb/jshell, spawning Claude Code instances, or working with REPLs and long-running processes
 ---
 
 # CLI Controller Skill

@@ -1,9 +1,6 @@
 ---
 name: rdr-gate
-description: >
-  Run the RDR finalization gate: structural validation, assumption audit, and AI critique.
-  Triggers: user says "gate this RDR", "finalization check", or /rdr-gate
-allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
+description: Use when an RDR appears complete and needs finalization validation — structural, assumption, and AI critique checks
 ---
 
 # RDR Gate Skill

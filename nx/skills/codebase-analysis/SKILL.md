@@ -1,13 +1,6 @@
 ---
 name: codebase-analysis
-description: >
-  Analyze codebase structure, patterns, and architecture. Triggers when:
-  exploring new codebase, onboarding to project, asking "how does X work",
-  "where is Y defined", before major refactoring, or understanding module structure.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
-memory: project
-context: fork
+description: Use when exploring an unfamiliar codebase, onboarding to a project, or needing to understand module structure before making changes
 ---
 
 # Codebase Analysis Skill
@@ -25,35 +18,27 @@ Delegates to the **codebase-deep-analyzer** agent (model: sonnet).
 
 ## Agent Invocation
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
+Use the Task tool to invoke **codebase-deep-analyzer**:
 
 ```markdown
-## Relay: {agent-name}
+## Relay: codebase-deep-analyzer
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
 
 ### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+- Files: [relevant files]
 
 ### Deliverable
-[What the receiving agent should produce]
+Architecture analysis with patterns and dependencies
 
 ### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+- [ ] Architecture overview documented
+- [ ] Key patterns identified and explained
+- [ ] Dependency relationships mapped
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
-
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Analysis Methodology
 

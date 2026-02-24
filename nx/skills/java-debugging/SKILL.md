@@ -1,12 +1,6 @@
 ---
 name: java-debugging
-description: >
-  Debug Java failures using hypothesis-driven investigation. Triggers when:
-  test fails, NullPointerException, ClassCastException, ConcurrentModificationException,
-  after 2+ failed fix attempts, non-deterministic behavior, or stack trace analysis needed.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash, LSP
-memory: project
+description: Use when Java tests fail, exceptions occur, or behavior is non-deterministic, especially after 2+ failed manual fix attempts
 ---
 
 # Java Debugging Skill
@@ -45,35 +39,27 @@ Delegates to the **java-debugger** agent (model: opus).
 
 ## Agent Invocation
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
+Use the Task tool to invoke **java-debugger**:
 
 ```markdown
-## Relay: {agent-name}
+## Relay: java-debugger
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
 
 ### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+- Files: [relevant files]
 
 ### Deliverable
-[What the receiving agent should produce]
+Root cause analysis with fix recommendation
 
 ### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+- [ ] Root cause definitively identified with evidence
+- [ ] Fix proposed and validated
+- [ ] Hypothesis chain preserved
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
-
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Debugging Methodology
 

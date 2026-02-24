@@ -74,30 +74,29 @@ description: Review code changes using code-review-expert agent
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to code-review-expert:
+Invoke the **code-review** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: code-review-expert
 
-**Task**: Review recent code changes for quality, security, and best practices
-**Bead**: [From active beads above or 'none']
+**Task**: Review the code changes for quality, security, and best practices
+**Bead**: [fill from active bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Search for prior reviews on these files]
-- nx memory: [project/title path or 'none']
-- Files: [List from git diff above]
+- Files: [fill from modified files list above]
 
 ### Deliverable
-Structured code review with findings categorized by severity
+Structured code review with severity-rated findings, grouped by category (correctness, security, maintainability, performance).
 
 ### Quality Criteria
-- [ ] All changed files analyzed
-- [ ] Security vulnerabilities flagged
-- [ ] Best practices validated
-- [ ] Specific remediation guidance provided
+- [ ] All changed files reviewed
+- [ ] Findings categorized by severity (critical, important, suggestion)
+- [ ] Actionable fix recommendations for each finding
 
 ### Focus Areas
 $ARGUMENTS
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

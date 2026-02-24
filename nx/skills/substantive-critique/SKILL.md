@@ -1,13 +1,6 @@
 ---
 name: substantive-critique
-description: >
-  Deep constructive critique of code, documentation, plans, or designs. Triggers:
-  reviewing architectural decisions, validating implementations against specs,
-  verifying claims against evidence, comprehensive system audits.
-  (Workaround for substantive-critic framework bug)
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
-memory: user
+description: Use when architectural decisions, implementations, or documentation need deep constructive critique against specs or evidence
 ---
 
 # Deep Critique Skill
@@ -28,35 +21,27 @@ Delegates to the **substantive-critic** agent. See [registry.yaml](../../registr
 
 ## Agent Invocation
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
+Use the Task tool to invoke **substantive-critic**:
 
 ```markdown
-## Relay: {agent-name}
+## Relay: substantive-critic
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
 
 ### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+- Files: [relevant files]
 
 ### Deliverable
-[What the receiving agent should produce]
+Critique report with prioritized findings
 
 ### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+- [ ] All major dimensions analyzed (structure, logic, completeness)
+- [ ] Findings prioritized by impact
+- [ ] Recommendations are specific and actionable
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
-
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Critique Methodology
 

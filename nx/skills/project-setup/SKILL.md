@@ -1,10 +1,6 @@
 ---
 name: project-setup
-description: >
-  Create project management infrastructure for multi-week projects. Triggers:
-  starting projects over 3 weeks, requiring phase tracking, user says "set up project".
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
+description: Use when starting a project expected to span 3+ weeks that needs phase tracking and project management infrastructure
 ---
 
 # Project Setup Skill
@@ -21,35 +17,27 @@ Delegates to the **project-management-setup** agent (haiku). See [registry.yaml]
 
 ## Agent Invocation
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
+Use the Task tool to invoke **project-management-setup**:
 
 ```markdown
-## Relay: {agent-name}
+## Relay: project-management-setup
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
 
 ### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+- Files: [relevant files]
 
 ### Deliverable
-[What the receiving agent should produce]
+PM infrastructure with phases and tracking
 
 ### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+- [ ] nx pm init completed
+- [ ] Core T2 documents created
+- [ ] Phase beads created with dependencies
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
-
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Infrastructure Created
 

@@ -1,12 +1,6 @@
 ---
 name: code-review
-description: >
-  Review code for quality, security, and best practices. Triggers when:
-  completing feature implementation, fixing bugs, refactoring code,
-  after git commit, before pull request, when code quality check is needed.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
-memory: user
+description: Use when code changes are ready for quality, security, or best practices review, before committing or creating a pull request
 ---
 
 # Code Review Skill
@@ -21,37 +15,47 @@ Delegates to the **code-review-expert** agent (model: sonnet).
 - Before creating a pull request
 - When code quality, security, or best practices review is needed
 
-## Agent Invocation
+```dot
+digraph review_flow {
+    "Code changes ready?" [shape=diamond];
+    "Run tests first" [shape=box];
+    "Invoke code-review-expert" [shape=box];
+    "Critical findings?" [shape=diamond];
+    "Fix and re-review" [shape=box];
+    "Invoke test-validator" [shape=doublecircle];
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
-
-```markdown
-## Relay: {agent-name}
-
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
-
-### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
-
-### Deliverable
-[What the receiving agent should produce]
-
-### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+    "Code changes ready?" -> "Run tests first" [label="yes"];
+    "Run tests first" -> "Invoke code-review-expert";
+    "Invoke code-review-expert" -> "Critical findings?";
+    "Critical findings?" -> "Fix and re-review" [label="yes"];
+    "Critical findings?" -> "Invoke test-validator" [label="no"];
+    "Fix and re-review" -> "Invoke code-review-expert";
+}
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
+## Agent Invocation
 
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+Use the Task tool to invoke **code-review-expert**:
+
+```markdown
+## Relay: code-review-expert
+
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
+
+### Input Artifacts
+- Files: [relevant files]
+
+### Deliverable
+Structured code review with severity-rated findings
+
+### Quality Criteria
+- [ ] All changed files analyzed
+- [ ] Security vulnerabilities flagged
+- [ ] Specific remediation guidance provided
+```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Review Methodology
 
@@ -60,6 +64,8 @@ The code-review-expert agent uses hypothesis-driven review:
 2. Gather evidence from code structure, naming, patterns
 3. Validate against best practices and security requirements
 4. Document findings with file:line references
+
+**REQUIRED BACKGROUND:** Understand nx:receiving-code-review for how to handle the review output.
 
 ## Agent-Specific PRODUCE
 

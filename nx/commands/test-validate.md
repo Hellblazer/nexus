@@ -79,33 +79,33 @@ description: Validate tests using test-validator agent
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to test-validator:
+Invoke the **test-validation** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: test-validator
 
 **Task**: Validate test coverage and quality for recent changes
-**Bead**: [From active beads above]
+**Bead**: [fill from active bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Search for test patterns]
-- nx memory: [project/title path or 'none']
-- Files: [Changed source files and their test files]
+- Files: [fill from changed source files and their test files above]
 
 ### Changes to Validate
-[List from recently modified files above]
+[fill from recently modified files list above]
 
 ### Focus Area
 $ARGUMENTS
 
 ### Deliverable
-Test coverage report with gap analysis
+Test coverage report with gap analysis: mapping of source files to test files, identified coverage gaps, assessment of test quality (meaningful vs padding), and pass/fail status.
 
 ### Quality Criteria
-- [ ] All changed code has corresponding tests
-- [ ] Tests cover happy path and edge cases
-- [ ] Tests are meaningful (not just coverage padding)
-- [ ] All tests pass
+- [ ] All changed source files mapped to corresponding test files
+- [ ] Coverage gaps identified with specific missing scenarios
+- [ ] Tests validated as meaningful (not just coverage padding)
+- [ ] All tests pass (verified by running test suite)
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

@@ -19,6 +19,10 @@
     {
       "type": "command",
       "command": "bd prime"
+    },
+    {
+      "type": "command",
+      "command": "cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md"
     }
   ],
   "SessionEnd": [
@@ -54,7 +58,8 @@
   "PostToolUse": [
     {
       "type": "command",
-      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/bead_context_hook.py"
+      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/bead_context_hook.py",
+      "matcher": "bd create"
     }
   ]
 }

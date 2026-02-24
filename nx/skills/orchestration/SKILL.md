@@ -1,10 +1,6 @@
 ---
 name: orchestration
-description: >
-  Route requests to appropriate specialized agents and manage multi-agent pipelines.
-  Triggers: task ambiguous, coordinating multiple agents, user says "which agent".
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
+description: Use when unsure which agent to use for a task, or when coordinating work across multiple agents in a pipeline
 ---
 
 # Orchestration Skill
@@ -19,37 +15,83 @@ Delegates to the **orchestrator** agent (haiku). See [registry.yaml](../../regis
 - When setting up multi-agent pipelines
 - When workflow routing decisions are needed
 
-## Agent Invocation
+```dot
+digraph routing {
+    rankdir=TB;
+    "Request type?" [shape=diamond];
 
-## Relay Template (Use This Format)
+    "Plan a feature" [shape=box];
+    "Implement code" [shape=box];
+    "Debug issue" [shape=box];
+    "Review code" [shape=box];
+    "Research topic" [shape=box];
+    "Analyze system" [shape=box];
 
-When invoking this agent via Task tool, use this exact structure:
+    "strategic-planner" [shape=ellipse];
+    "plan-auditor" [shape=ellipse];
+    "java-architect-planner" [shape=ellipse];
+    "java-developer" [shape=ellipse];
+    "code-review-expert" [shape=ellipse];
+    "test-validator" [shape=ellipse];
+    "java-debugger" [shape=ellipse];
+    "deep-analyst" [shape=ellipse];
+    "substantive-critic" [shape=ellipse];
+    "deep-research-synthesizer" [shape=ellipse];
+    "knowledge-tidier" [shape=ellipse];
+    "codebase-deep-analyzer" [shape=ellipse];
 
-```markdown
-## Relay: {agent-name}
+    "Request type?" -> "Plan a feature" [label="plan/design"];
+    "Request type?" -> "Implement code" [label="build/implement"];
+    "Request type?" -> "Debug issue" [label="test failure/bug"];
+    "Request type?" -> "Review code" [label="review/quality"];
+    "Request type?" -> "Research topic" [label="research/investigate"];
+    "Request type?" -> "Analyze system" [label="explore/understand"];
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+    "Plan a feature" -> "strategic-planner";
+    "strategic-planner" -> "plan-auditor" [label="then"];
+    "plan-auditor" -> "java-architect-planner" [label="then"];
 
-### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+    "Implement code" -> "java-developer";
+    "java-developer" -> "code-review-expert" [label="then"];
+    "code-review-expert" -> "test-validator" [label="then"];
 
-### Deliverable
-[What the receiving agent should produce]
+    "Debug issue" -> "java-debugger";
+    "java-debugger" -> "deep-analyst" [label="if cross-cutting"];
 
-### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+    "Review code" -> "code-review-expert";
+    "code-review-expert" -> "substantive-critic" [label="if critical"];
+
+    "Research topic" -> "deep-research-synthesizer";
+    "deep-research-synthesizer" -> "knowledge-tidier" [label="then"];
+
+    "Analyze system" -> "codebase-deep-analyzer";
+    "codebase-deep-analyzer" -> "deep-analyst" [label="if deep"];
+}
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
+## Agent Invocation
 
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+Use the Task tool to invoke **orchestrator**:
+
+```markdown
+## Relay: orchestrator
+
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
+
+### Input Artifacts
+- Files: [relevant files]
+
+### Deliverable
+Routing decision with recommended agent
+
+### Quality Criteria
+- [ ] User goal clearly understood
+- [ ] Appropriate agent(s) identified
+- [ ] Clear rationale provided
+```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Routing Quick Reference
 

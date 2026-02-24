@@ -1,9 +1,6 @@
 ---
 name: rdr-list
-description: >
-  List all RDRs in the current project with status, type, and priority.
-  Triggers: user says "list RDRs", "show all RDRs", or /rdr-list
-allowed-tools: Read, Glob, Grep, Bash
+description: Use when needing to see all RDRs in the project with their status, type, and priority
 ---
 
 # RDR List Skill

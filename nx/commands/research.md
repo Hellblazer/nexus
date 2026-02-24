@@ -52,33 +52,33 @@ description: Research topic using deep-research-synthesizer agent
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to deep-research-synthesizer:
+Invoke the **research-synthesis** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: deep-research-synthesizer
 
 **Task**: Research "$ARGUMENTS" across all available sources
-**Bead**: [Create research bead if significant topic or 'none']
+**Bead**: [fill from active bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Search for existing knowledge on topic]
-- nx memory: [project/title path or 'none']
-- Files: [Relevant code if applicable]
+- Files: [fill from relevant code if applicable, or 'none']
 
 ### Research Question
 $ARGUMENTS
 
 ### Deliverable
-Comprehensive research synthesis with actionable recommendations
+Comprehensive research synthesis that integrates findings from nx store, web, and codebase. Includes executive summary, detailed findings with source citations, contradiction resolution, and prioritized actionable recommendations.
 
 ### Quality Criteria
-- [ ] All sources consulted (nx store, web, code)
-- [ ] Findings synthesized (not just listed)
-- [ ] Contradictions resolved
-- [ ] Actionable recommendations provided
-- [ ] Sources cited
+- [ ] All available sources consulted (nx store, web, codebase)
+- [ ] Findings synthesized into coherent narrative (not just listed)
+- [ ] Contradictions between sources identified and resolved
+- [ ] Actionable recommendations provided with confidence levels
+- [ ] All claims cite their source
 
 **IMPORTANT**: After research completes, MUST delegate to knowledge-tidier to persist findings to nx store.
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

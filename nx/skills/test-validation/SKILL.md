@@ -1,11 +1,6 @@
 ---
 name: test-validation
-description: >
-  Validate test coverage and quality after implementation. Triggers: finishing feature,
-  after fixing a bug, before merge/PR, user says "check tests" or "validate coverage",
-  CI/CD check needed, verifying code has adequate tests.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
+description: Use when implementation is complete and test coverage needs verification, before merge or pull request
 ---
 
 # Test Validation Skill
@@ -24,35 +19,27 @@ Delegates to the **test-validator** agent. See [registry.yaml](../../registry.ya
 
 ## Agent Invocation
 
-## Relay Template (Use This Format)
-
-When invoking this agent via Task tool, use this exact structure:
+Use the Task tool to invoke **test-validator**:
 
 ```markdown
-## Relay: {agent-name}
+## Relay: test-validator
 
-**Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Task**: [what needs to be done]
+**Bead**: [ID] or 'none'
 
 ### Input Artifacts
-- nx store: [document titles or "none"]
-- nx memory: [project/title path or "none"]
-- nx scratch: [scratch IDs or "none"]           # optional: ephemeral T1 items
-- nx pm context: [Phase N, active blockers or "none"]  # optional: from nx pm status
-- Files: [key files or "none"]
+- Files: [relevant files]
 
 ### Deliverable
-[What the receiving agent should produce]
+Test coverage report with gap analysis
 
 ### Quality Criteria
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
+- [ ] All changed files have corresponding tests
+- [ ] Test coverage meets project standards
+- [ ] Edge cases covered
 ```
 
-**Required**: All fields must be present. Agent will validate relay before starting.
-
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
 ## Validation Methodology
 
@@ -63,6 +50,8 @@ The agent will:
 4. Analyze coverage gaps
 5. Check test quality (assertions, edge cases, error paths)
 6. Recommend additional tests if needed
+
+**REQUIRED SUB-SKILL:** Use nx:verification-before-completion — run all tests before claiming coverage is adequate.
 
 ## Agent-Specific PRODUCE
 

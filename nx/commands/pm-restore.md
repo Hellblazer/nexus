@@ -1,5 +1,6 @@
 ---
 description: Restore an archived project within its 90-day decay window (project)
+disable-model-invocation: true
 ---
 
 !{
