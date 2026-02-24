@@ -231,7 +231,7 @@ def _index_code_file(
 
     for i, chunk in enumerate(chunks):
         title = f"{file.relative_to(repo)}:{chunk['line_start']}-{chunk['line_end']}"
-        doc_id = _hl.sha256(f"{collection_name}:{title}".encode()).hexdigest()[:32]
+        doc_id = _hl.sha256(f"{collection_name}:{title}:chunk{i}".encode()).hexdigest()[:32]
         ext = file.suffix.lower()
         metadata: dict = {
             "title": title,

@@ -35,12 +35,17 @@ def _make_code_splitter(language: str, content: str) -> list:
     """Chunk *content* via CodeSplitter for *language*; returns list of nodes.
 
     All llama-index imports live here so tests can patch this single function.
+    Uses tree-sitter-language-pack to obtain the parser, passing it explicitly
+    to CodeSplitter (which otherwise tries the deprecated tree_sitter_languages).
     """
     from llama_index.core import Document  # type: ignore[import]
     from llama_index.core.node_parser import CodeSplitter  # type: ignore[import]
+    from tree_sitter_language_pack import get_parser  # type: ignore[import]
 
+    parser = get_parser(language)
     splitter = CodeSplitter(
         language=language,
+        parser=parser,
         chunk_lines=_CHUNK_LINES,
         chunk_lines_overlap=int(_CHUNK_LINES * _OVERLAP),
     )
