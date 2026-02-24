@@ -1,9 +1,6 @@
 ---
 name: research-synthesis
-description: >
-  Research topics across multiple sources. Triggers: researching new topic/technology,
-  investigating best practices, comparing approaches, learning unfamiliar concepts,
-  user says "research", "find out about", "what are best practices for".
+description: Use when researching unfamiliar topics, comparing technology approaches, or building comprehensive understanding from multiple sources
 ---
 
 # Research Synthesis Skill

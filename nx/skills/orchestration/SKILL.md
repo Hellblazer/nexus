@@ -1,8 +1,6 @@
 ---
 name: orchestration
-description: >
-  Route requests to appropriate specialized agents and manage multi-agent pipelines.
-  Triggers: task ambiguous, coordinating multiple agents, user says "which agent".
+description: Use when unsure which agent to use for a task, or when coordinating work across multiple agents in a pipeline
 ---
 
 # Orchestration Skill

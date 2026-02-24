@@ -1,8 +1,6 @@
 ---
 name: rdr-close
-description: >
-  Close an RDR: capture divergence, create post-mortem, decompose into beads, archive to T3.
-  Triggers: user says "close this RDR", "RDR done", or /rdr-close
+description: Use when an RDR has passed its gate and needs to be closed with post-mortem, bead decomposition, and T3 archival
 ---
 
 # RDR Close Skill

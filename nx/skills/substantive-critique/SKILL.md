@@ -1,10 +1,6 @@
 ---
 name: substantive-critique
-description: >
-  Deep constructive critique of code, documentation, plans, or designs. Triggers:
-  reviewing architectural decisions, validating implementations against specs,
-  verifying claims against evidence, comprehensive system audits.
-  (Workaround for substantive-critic framework bug)
+description: Use when architectural decisions, implementations, or documentation need deep constructive critique against specs or evidence
 ---
 
 # Deep Critique Skill

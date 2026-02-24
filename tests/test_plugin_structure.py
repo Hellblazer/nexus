@@ -463,3 +463,142 @@ class TestCrossReferenceIntegrity:
         assert shared_file.exists(), (
             f"_shared/CONTEXT_PROTOCOL.md referenced by {agent_path.name} does not exist"
         )
+
+
+# ── CSO Description Validation ───────────────────────────────────────────────
+
+
+class TestSkillDescriptionCSO:
+    """Skill descriptions must follow CSO 'Use when' pattern."""
+
+    @pytest.mark.parametrize("skill_path", [
+        pytest.param(p, id=p.parent.name) for p in skill_skill_mds()
+    ])
+    def test_description_starts_with_use_when(self, skill_path: Path) -> None:
+        """All skill descriptions must start with 'Use when' per CSO methodology."""
+        text = skill_path.read_text()
+        match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+        assert match, f"{skill_path.parent.name}/SKILL.md: no YAML frontmatter"
+        fm = yaml.safe_load(match.group(1))
+        desc = fm.get("description", "")
+        assert desc.lower().startswith("use when"), (
+            f"{skill_path.parent.name}/SKILL.md: description must start with "
+            f"'Use when' (CSO pattern). Got: {desc[:80]!r}"
+        )
+
+    @pytest.mark.parametrize("skill_path", [
+        pytest.param(p, id=p.parent.name) for p in skill_skill_mds()
+    ])
+    def test_description_no_workflow_keywords(self, skill_path: Path) -> None:
+        """Descriptions must not summarize workflow — just triggering conditions."""
+        text = skill_path.read_text()
+        match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+        if not match:
+            pytest.skip("No frontmatter")
+        fm = yaml.safe_load(match.group(1))
+        desc = fm.get("description", "")
+        bad_keywords = ["Triggers:", "user says", "workflow", "process:"]
+        for kw in bad_keywords:
+            assert kw not in desc, (
+                f"{skill_path.parent.name}/SKILL.md: description contains "
+                f"workflow keyword {kw!r}. Descriptions should state WHEN to "
+                f"use the skill, not summarize what it does."
+            )
+
+    @pytest.mark.parametrize("skill_path", [
+        pytest.param(p, id=p.parent.name) for p in skill_skill_mds()
+    ])
+    def test_frontmatter_only_standard_fields(self, skill_path: Path) -> None:
+        """Skill frontmatter must contain only name and description."""
+        text = skill_path.read_text()
+        match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+        assert match, f"{skill_path.parent.name}/SKILL.md: no YAML frontmatter"
+        fm = yaml.safe_load(match.group(1))
+        allowed = {"name", "description"}
+        extra = set(fm.keys()) - allowed
+        assert not extra, (
+            f"{skill_path.parent.name}/SKILL.md: non-standard frontmatter fields "
+            f"{extra}. Claude Code only reads 'name' and 'description'."
+        )
+
+    @pytest.mark.parametrize("skill_path", [
+        pytest.param(p, id=p.parent.name) for p in skill_skill_mds()
+    ])
+    def test_no_yaml_comments_in_frontmatter(self, skill_path: Path) -> None:
+        """No YAML comments inside frontmatter block."""
+        text = skill_path.read_text()
+        match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+        if not match:
+            pytest.skip("No frontmatter")
+        frontmatter_raw = match.group(1)
+        comment_lines = [
+            line for line in frontmatter_raw.splitlines()
+            if line.strip().startswith("#")
+        ]
+        assert not comment_lines, (
+            f"{skill_path.parent.name}/SKILL.md: YAML comments in frontmatter: "
+            f"{comment_lines}"
+        )
+
+
+# ── Hook Structure ───────────────────────────────────────────────────────────
+
+
+class TestHookStructure:
+    """Hook configuration must follow best practices."""
+
+    def test_post_tool_use_has_matcher(self) -> None:
+        """PostToolUse hooks should have a matcher to avoid firing on every tool use."""
+        import json
+        hooks_path = PLUGIN_DIR / "hooks" / "hooks.json"
+        assert hooks_path.exists(), "hooks.json not found"
+        hooks = json.loads(hooks_path.read_text())
+        for entry in hooks.get("PostToolUse", []):
+            has_matcher = "matcher" in entry
+            has_filter = "grep" in entry.get("command", "") or "bd create" in entry.get("command", "")
+            assert has_matcher or has_filter, (
+                f"PostToolUse hook fires on every tool use without matcher: "
+                f"{entry.get('command', '')[:80]}"
+            )
+
+
+# ── Standalone Skill Registry ────────────────────────────────────────────────
+
+
+class TestStandaloneSkillRegistry:
+    """standalone_skills entries must have matching directories."""
+
+    def test_standalone_skill_directory_exists(self) -> None:
+        """Every standalone_skills entry must have a matching skill directory."""
+        registry = yaml.safe_load(REGISTRY_PATH.read_text())
+        standalone = registry.get("standalone_skills", {})
+        for skill_name in standalone:
+            skill_dir = SKILLS_DIR / skill_name
+            assert skill_dir.is_dir(), (
+                f"standalone_skills entry '{skill_name}' has no matching "
+                f"directory at {skill_dir}"
+            )
+            skill_md = skill_dir / "SKILL.md"
+            assert skill_md.exists(), (
+                f"standalone_skills entry '{skill_name}' has directory but "
+                f"no SKILL.md at {skill_md}"
+            )
+
+
+# ── Shared Resources ────────────────────────────────────────────────────────
+
+
+class TestSharedResources:
+    """Shared resources referenced by skills must exist."""
+
+    def test_relay_template_exists(self) -> None:
+        """RELAY_TEMPLATE.md must exist — all hybrid relay cross-references point to it."""
+        relay_template = SHARED_DIR / "RELAY_TEMPLATE.md"
+        assert relay_template.exists(), (
+            f"RELAY_TEMPLATE.md not found at {relay_template}. "
+            f"All agent-delegating skills cross-reference this file."
+        )
+        content = relay_template.read_text()
+        assert len(content) > 100, (
+            "RELAY_TEMPLATE.md exists but appears empty or trivially short"
+        )

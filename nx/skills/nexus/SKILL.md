@@ -1,6 +1,6 @@
 ---
 name: nexus
-description: Use Nexus (nx) for semantic search, memory, knowledge storage, and project management across sessions.
+description: Use when running nx commands for search, memory, knowledge storage, or project management — or when unsure which nx subcommand to use
 ---
 
 # Nexus — Agent Usage Guide

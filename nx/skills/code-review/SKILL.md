@@ -1,9 +1,6 @@
 ---
 name: code-review
-description: >
-  Review code for quality, security, and best practices. Triggers when:
-  completing feature implementation, fixing bugs, refactoring code,
-  after git commit, before pull request, when code quality check is needed.
+description: Use when code changes are ready for quality, security, or best practices review, before committing or creating a pull request
 ---
 
 # Code Review Skill

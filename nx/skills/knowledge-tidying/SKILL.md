@@ -1,8 +1,6 @@
 ---
 name: knowledge-tidying
-description: >
-  Persist and organize knowledge in Nexus T3. Triggers: research-synthesis completes,
-  major investigation concludes, user says "save this knowledge", valuable insights discovered.
+description: Use when validated findings, decisions, or patterns need to be persisted to nx T3 knowledge store for cross-session reuse
 ---
 
 # Knowledge Tidying Skill

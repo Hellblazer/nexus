@@ -1,8 +1,6 @@
 ---
 name: java-development
-description: >
-  Implement Java features using TDD methodology. Triggers: plan approved,
-  user says "implement", bead in_progress for implementation, executing plan phase.
+description: Use when a plan has been approved and Java implementation work is ready to begin, before writing production code
 ---
 
 # Java Development Skill

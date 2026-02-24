@@ -1,8 +1,6 @@
 ---
 name: pdf-processing
-description: >
-  Process PDF files into nx store for semantic search. Triggers: user says "index PDF",
-  importing technical documentation, PDFs need semantic indexing.
+description: Use when PDF documents need to be indexed into nx store for semantic search
 ---
 
 # PDF Processing Skill

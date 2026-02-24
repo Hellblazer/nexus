@@ -1,9 +1,6 @@
 ---
 name: deep-analysis
-description: >
-  Thorough analysis of complex problems and intricate system relationships. Triggers when:
-  investigating performance mysteries, debugging multi-component interactions,
-  understanding complex system behavior, or when surface-level analysis is insufficient.
+description: Use when surface-level analysis is insufficient and problems require hypothesis-driven investigation across multiple system components
 ---
 
 # Deep Analysis Skill

@@ -1,8 +1,6 @@
 ---
 name: project-setup
-description: >
-  Create project management infrastructure for multi-week projects. Triggers:
-  starting projects over 3 weeks, requiring phase tracking, user says "set up project".
+description: Use when starting a project expected to span 3+ weeks that needs phase tracking and project management infrastructure
 ---
 
 # Project Setup Skill

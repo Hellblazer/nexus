@@ -1,9 +1,6 @@
 ---
 name: codebase-analysis
-description: >
-  Analyze codebase structure, patterns, and architecture. Triggers when:
-  exploring new codebase, onboarding to project, asking "how does X work",
-  "where is Y defined", before major refactoring, or understanding module structure.
+description: Use when exploring an unfamiliar codebase, onboarding to a project, or needing to understand module structure before making changes
 ---
 
 # Codebase Analysis Skill

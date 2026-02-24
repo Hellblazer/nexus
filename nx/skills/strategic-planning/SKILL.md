@@ -1,9 +1,6 @@
 ---
 name: strategic-planning
-description: >
-  Create implementation plans before development. Triggers: user says "implement feature",
-  "add functionality", "build component", starting new epic, before multi-step development,
-  user says "plan this", before architectural changes, breaking down complex work.
+description: Use when facing multi-step development work that needs decomposition into phases, before writing any implementation code
 ---
 
 # Strategic Planning Skill

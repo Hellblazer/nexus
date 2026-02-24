@@ -1,9 +1,6 @@
 ---
 name: java-debugging
-description: >
-  Debug Java failures using hypothesis-driven investigation. Triggers when:
-  test fails, NullPointerException, ClassCastException, ConcurrentModificationException,
-  after 2+ failed fix attempts, non-deterministic behavior, or stack trace analysis needed.
+description: Use when Java tests fail, exceptions occur, or behavior is non-deterministic, especially after 2+ failed manual fix attempts
 ---
 
 # Java Debugging Skill

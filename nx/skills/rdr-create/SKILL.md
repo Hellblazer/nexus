@@ -1,8 +1,6 @@
 ---
 name: rdr-create
-description: >
-  Scaffold a new RDR from template, assign sequential ID, register in T2, add to index.
-  Triggers: user says "create an RDR", "new RDR", or /rdr-create
+description: Use when starting a new research-design-review document, before beginning structured investigation
 ---
 
 # RDR Create Skill

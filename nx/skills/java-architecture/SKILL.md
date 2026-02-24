@@ -1,9 +1,6 @@
 ---
 name: java-architecture
-description: >
-  Design comprehensive Java architecture and create phased execution plans. Triggers when:
-  starting complex features requiring architectural design, planning multi-phase implementations,
-  before major refactoring, or when system design decisions are needed.
+description: Use when complex Java features need architectural design before implementation, or when system design decisions span multiple modules
 ---
 
 # Java Architecture Skill
