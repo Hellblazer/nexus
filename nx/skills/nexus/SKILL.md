@@ -111,3 +111,25 @@ nx serve stop
 nx serve status
 nx serve logs
 ```
+
+## Workflow — when and why to use each tier
+
+**Session lifecycle:**
+1. Search T3 for prior art before starting work: `nx search "topic" --corpus knowledge`
+2. Index the codebase once per repo: `nx index code <path>`
+3. Use T1 scratch for working notes during the session
+4. Flag important scratch items for auto-promote to T2: `nx scratch flag <id>`
+5. Persist validated findings to T3 at session end: `nx store put`
+
+**Tier selection:**
+- **T1 scratch**: hypotheses, interim findings, checkpoints — anything ephemeral to this session
+- **T2 memory**: cross-session state, agent relay notes, active project context
+- **T3 knowledge**: validated findings, architectural decisions, reusable patterns — anything worth keeping permanently
+
+**Collection naming**: always `__` as separator — `code__myrepo`, `docs__corpus`, `knowledge__topic`. Colons are invalid in ChromaDB collection names.
+
+**Title conventions** (use hyphens, not colons):
+- `research-{topic}` — research findings
+- `decision-{component}-{name}` — architectural decisions
+- `pattern-{name}` — reusable patterns
+- `debug-{component}-{issue}` — debugging insights
