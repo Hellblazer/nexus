@@ -15,6 +15,60 @@ Delegates to the **orchestrator** agent (haiku). See [registry.yaml](../../regis
 - When setting up multi-agent pipelines
 - When workflow routing decisions are needed
 
+```dot
+digraph routing {
+    rankdir=TB;
+    "Request type?" [shape=diamond];
+
+    "Plan a feature" [shape=box];
+    "Implement code" [shape=box];
+    "Debug issue" [shape=box];
+    "Review code" [shape=box];
+    "Research topic" [shape=box];
+    "Analyze system" [shape=box];
+
+    "strategic-planner" [shape=ellipse];
+    "plan-auditor" [shape=ellipse];
+    "java-architect-planner" [shape=ellipse];
+    "java-developer" [shape=ellipse];
+    "code-review-expert" [shape=ellipse];
+    "test-validator" [shape=ellipse];
+    "java-debugger" [shape=ellipse];
+    "deep-analyst" [shape=ellipse];
+    "substantive-critic" [shape=ellipse];
+    "deep-research-synthesizer" [shape=ellipse];
+    "knowledge-tidier" [shape=ellipse];
+    "codebase-deep-analyzer" [shape=ellipse];
+
+    "Request type?" -> "Plan a feature" [label="plan/design"];
+    "Request type?" -> "Implement code" [label="build/implement"];
+    "Request type?" -> "Debug issue" [label="test failure/bug"];
+    "Request type?" -> "Review code" [label="review/quality"];
+    "Request type?" -> "Research topic" [label="research/investigate"];
+    "Request type?" -> "Analyze system" [label="explore/understand"];
+
+    "Plan a feature" -> "strategic-planner";
+    "strategic-planner" -> "plan-auditor" [label="then"];
+    "plan-auditor" -> "java-architect-planner" [label="then"];
+
+    "Implement code" -> "java-developer";
+    "java-developer" -> "code-review-expert" [label="then"];
+    "code-review-expert" -> "test-validator" [label="then"];
+
+    "Debug issue" -> "java-debugger";
+    "java-debugger" -> "deep-analyst" [label="if cross-cutting"];
+
+    "Review code" -> "code-review-expert";
+    "code-review-expert" -> "substantive-critic" [label="if critical"];
+
+    "Research topic" -> "deep-research-synthesizer";
+    "deep-research-synthesizer" -> "knowledge-tidier" [label="then"];
+
+    "Analyze system" -> "codebase-deep-analyzer";
+    "codebase-deep-analyzer" -> "deep-analyst" [label="if deep"];
+}
+```
+
 ## Agent Invocation
 
 Use the Task tool to invoke **orchestrator**:

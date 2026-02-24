@@ -15,6 +15,24 @@ Delegates to the **code-review-expert** agent (model: sonnet).
 - Before creating a pull request
 - When code quality, security, or best practices review is needed
 
+```dot
+digraph review_flow {
+    "Code changes ready?" [shape=diamond];
+    "Run tests first" [shape=box];
+    "Invoke code-review-expert" [shape=box];
+    "Critical findings?" [shape=diamond];
+    "Fix and re-review" [shape=box];
+    "Invoke test-validator" [shape=doublecircle];
+
+    "Code changes ready?" -> "Run tests first" [label="yes"];
+    "Run tests first" -> "Invoke code-review-expert";
+    "Invoke code-review-expert" -> "Critical findings?";
+    "Critical findings?" -> "Fix and re-review" [label="yes"];
+    "Critical findings?" -> "Invoke test-validator" [label="no"];
+    "Fix and re-review" -> "Invoke code-review-expert";
+}
+```
+
 ## Agent Invocation
 
 Use the Task tool to invoke **code-review-expert**:
@@ -46,6 +64,8 @@ The code-review-expert agent uses hypothesis-driven review:
 2. Gather evidence from code structure, naming, patterns
 3. Validate against best practices and security requirements
 4. Document findings with file:line references
+
+**REQUIRED BACKGROUND:** Understand nx:receiving-code-review for how to handle the review output.
 
 ## Agent-Specific PRODUCE
 

@@ -51,6 +51,8 @@ The agent will:
 5. Check test quality (assertions, edge cases, error paths)
 6. Recommend additional tests if needed
 
+**REQUIRED SUB-SKILL:** Use nx:verification-before-completion — run all tests before claiming coverage is adequate.
+
 ## Agent-Specific PRODUCE
 
 - **Session Scratch (T1)**: `nx scratch put "<snapshot>" --tags "test-run"` — test run snapshots and interim findings during session

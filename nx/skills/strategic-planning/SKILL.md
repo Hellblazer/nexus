@@ -51,6 +51,8 @@ The agent uses sequential thinking:
 6. Create beads for trackable work items
 7. Define success criteria and test strategy
 
+**REQUIRED SUB-SKILL:** Use nx:plan-validation (plan-auditor) after creating any plan.
+
 ## Success Criteria
 
 - [ ] Epic/feature breakdown documented

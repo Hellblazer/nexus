@@ -50,6 +50,8 @@ The plan-auditor agent uses sequential thinking:
 6. Identify inconsistencies with current code
 7. Provide go/no-go recommendation
 
+**REQUIRED BACKGROUND:** Understand nx:strategic-planning for plan structure and conventions.
+
 ## Decision Outcomes
 
 **GO**: Proceed to java-developer with validated plan

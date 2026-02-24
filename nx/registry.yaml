@@ -433,6 +433,14 @@ standalone_skills:
       - "independent subsystems broken"
     tools: [Task]
 
+  writing-nx-skills:
+    description: "Guide for authoring nx plugin skills"
+    triggers:
+      - "creating new skill"
+      - "editing skill"
+      - "plugin authorship"
+    tools: [Read, Write, Edit, Bash]
+
 # =============================================================================
 # PIPELINES
 # =============================================================================

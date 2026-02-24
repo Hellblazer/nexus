@@ -304,7 +304,7 @@ class TestSkillStructure:
         "cli-controller", "nexus",
         "brainstorming-gate", "verification-before-completion",
         "receiving-code-review", "using-nx-skills",
-        "dispatching-parallel-agents",
+        "dispatching-parallel-agents", "writing-nx-skills",
     }
 
     REQUIRED_SKILL_SECTIONS = [
@@ -319,7 +319,7 @@ class TestSkillStructure:
             "cli-controller", "nexus",
             "brainstorming-gate", "verification-before-completion",
             "receiving-code-review", "using-nx-skills",
-            "dispatching-parallel-agents",
+            "dispatching-parallel-agents", "writing-nx-skills",
         }
     ])
     def test_skill_has_relay_template(self, skill_path: Path) -> None:
@@ -341,7 +341,7 @@ class TestSkillStructure:
             "cli-controller", "nexus",
             "brainstorming-gate", "verification-before-completion",
             "receiving-code-review", "using-nx-skills",
-            "dispatching-parallel-agents",
+            "dispatching-parallel-agents", "writing-nx-skills",
         }
     ])
     def test_agent_skill_has_produce_section(self, skill_path: Path) -> None:
@@ -358,7 +358,7 @@ class TestSkillStructure:
             "cli-controller", "nexus",
             "brainstorming-gate", "verification-before-completion",
             "receiving-code-review", "using-nx-skills",
-            "dispatching-parallel-agents",
+            "dispatching-parallel-agents", "writing-nx-skills",
         }
     ])
     def test_skill_mentions_t1_scratch(self, skill_path: Path) -> None:
