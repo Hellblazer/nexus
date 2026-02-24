@@ -50,7 +50,7 @@ def session_start() -> str:
 
     1. Generate UUID4 session ID and write to getsid(0)-scoped session file.
     2. Detect PM project via T2 query.
-    3. If PM: inject CONTINUATION.md (<=2000 chars).
+    3. If PM: inject computed PM resume (<=2000 chars) via pm_resume().
        Else: print recent memory summary (<=10 entries x 500 chars).
 
     Returns the output string to be printed.

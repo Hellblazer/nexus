@@ -253,7 +253,7 @@ class TestCliSyntax:
         text = md_path.read_text()
         assert "pm::" not in text, (
             f"{md_path}: contains stale 'pm::' notation — "
-            "use 'nx memory put --project {project}_pm' instead"
+            "use 'nx pm' commands or 'nx memory put --project {project}' (bare name, no _pm suffix) instead"
         )
 
     @pytest.mark.parametrize("md_path", [

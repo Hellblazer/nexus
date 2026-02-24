@@ -397,7 +397,7 @@ def pm_archive(
 def pm_restore(db: "T2Database", project: str) -> None:
     """Reverse T2 decay for *project*.
 
-    Raises if no docs remain. Warns (prints) if only some docs survived.
+    Raises if no docs remain. Logs a structlog warning if only some docs survived.
     """
     surviving = db.restore_project(project)
 
@@ -408,7 +408,7 @@ def pm_restore(db: "T2Database", project: str) -> None:
             f"Re-run `nx pm init` to start a new project."
         )
 
-    # Check for partial expiry: compare against 5 standard docs
+    # Check for partial expiry: compare against the 4 standard docs
     standard_titles = set(_STANDARD_DOCS.keys())
     missing = standard_titles - set(surviving)
     if missing:

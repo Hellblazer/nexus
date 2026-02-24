@@ -125,7 +125,7 @@ nx install claude-code
 nx uninstall claude-code   # to remove
 ```
 
-This writes `~/.claude/skills/nexus/SKILL.md` and registers SessionStart/SessionEnd hooks in `~/.claude/settings.json`. At session start, scratch (T1) is initialised and your project's `CONTINUATION.md` is injected into context.
+This writes `~/.claude/skills/nexus/SKILL.md` and registers SessionStart/SessionEnd hooks in `~/.claude/settings.json`. At session start, scratch (T1) is initialised and your project's PM context is computed and injected automatically.
 
 ## Quick start
 

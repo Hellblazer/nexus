@@ -271,3 +271,23 @@ def test_t2_migrate_pm_namespaces_idempotent(db: T2Database) -> None:
     assert count2 == 0
 
     assert db.get(project="nexus", title="phase1.md") is not None
+
+
+def test_t2_migrate_pm_namespaces_skips_collisions(db: T2Database) -> None:
+    """migrate_pm_namespaces() skips rows that would collide with existing bare-name entries."""
+    # Bare-name entry already exists
+    db.put(project="nexus", title="BLOCKERS.md", content="new blockers", tags="pm,blockers")
+    # Legacy entry with same title under _pm suffix
+    db.put(project="nexus_pm", title="BLOCKERS.md", content="old blockers", tags="pm,blockers")
+    # Non-colliding legacy entry
+    db.put(project="nexus_pm", title="phase1.md", content="pm phase", tags="pm,phase:1")
+
+    count = db.migrate_pm_namespaces()
+    # Only the non-colliding entry migrates; the colliding one is skipped via OR IGNORE
+    assert count == 1
+    # Bare-name entry retains its original content
+    row = db.get(project="nexus", title="BLOCKERS.md")
+    assert row is not None
+    assert row["content"] == "new blockers"
+    # Non-colliding entry migrated successfully
+    assert db.get(project="nexus", title="phase1.md") is not None

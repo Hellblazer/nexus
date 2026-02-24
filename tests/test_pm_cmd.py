@@ -186,8 +186,8 @@ def test_pm_search_with_results(runner: CliRunner) -> None:
     results = [
         {
             "id": 42,
-            "project": "repo_pm",
-            "title": "CONTINUATION.md",
+            "project": "myrepo",
+            "title": "BLOCKERS.md",
             "timestamp": "2026-02-22T10:00:00",
             "content": "Decided to use ChromaDB for storage.",
         },
@@ -199,7 +199,7 @@ def test_pm_search_with_results(runner: CliRunner) -> None:
     assert result.exit_code == 0, result.output
     mock_search.assert_called_once_with(mock_db, query="ChromaDB", project=None)
     assert "[42]" in result.output
-    assert "repo_pm/CONTINUATION.md" in result.output
+    assert "myrepo/BLOCKERS.md" in result.output
     assert "ChromaDB" in result.output
 
 
@@ -312,14 +312,14 @@ def test_pm_promote_success(runner: CliRunner) -> None:
         patch("nexus.commands.store._t3", return_value=mock_t3),
         patch("nexus.commands.pm.pm_promote", return_value="abc123def456") as mock_promote,
     ):
-        result = runner.invoke(main, ["pm", "promote", "CONTINUATION.md"])
+        result = runner.invoke(main, ["pm", "promote", "METHODOLOGY.md"])
 
     assert result.exit_code == 0, result.output
     mock_promote.assert_called_once_with(
         db_t2=mock_db,
         db_t3=mock_t3,
         project="proj",
-        title="CONTINUATION.md",
+        title="METHODOLOGY.md",
         collection="knowledge__pm__proj",
         ttl_days=0,
     )

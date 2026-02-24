@@ -642,7 +642,7 @@ def test_synthesize_haiku_empty_response_raises() -> None:
         with patch("nexus.pm.get_credential", return_value="fake-api-key"):
             with pytest.raises(RuntimeError, match="empty response"):
                 _synthesize_haiku(
-                    docs=[{"title": "CONTINUATION.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
+                    docs=[{"title": "METHODOLOGY.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
                     project="test",
                     status="completed",
                 )
@@ -780,7 +780,7 @@ def test_synthesize_haiku_raises_when_api_key_empty() -> None:
     with patch("nexus.pm.get_credential", return_value=""):
         with pytest.raises(RuntimeError, match="anthropic_api_key is required"):
             _synthesize_haiku(
-                docs=[{"title": "CONTINUATION.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
+                docs=[{"title": "METHODOLOGY.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
                 project="test",
                 status="completed",
             )

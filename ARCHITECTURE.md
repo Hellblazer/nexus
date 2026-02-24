@@ -607,7 +607,7 @@ writes to T2 except `nx pm restore` which operates on T2 metadata only).
                          |
                          v
                     +---------+
-                    | ACTIVE  |  T2 {repo}_pm namespace, ttl=permanent
+                    | ACTIVE  |  T2 {repo} namespace (tagged pm), ttl=permanent
                     |         |  Full CRUD, FTS5 search, phase management
                     +----+----+
                          |
@@ -642,11 +642,11 @@ CLI commands in `src/nexus/commands/pm.py`. The aspirational `pm/lifecycle.py` a
 
 | Operation | Primary Module | Storage Touched |
 |-----------|---------------|-----------------|
-| `nx pm init` | `pm/lifecycle.py` | T2 write (5 standard docs) |
-| `nx pm resume` | `pm/lifecycle.py` | T2 read (CONTINUATION.md) |
+| `nx pm init` | `pm/lifecycle.py` | T2 write (4 standard docs) |
+| `nx pm resume` | `pm/lifecycle.py` | T2 computed resume from phase/blockers/activity |
 | `nx pm status` | `pm/lifecycle.py` | T2 read (phase tags, BLOCKERS.md) |
-| `nx pm phase next` | `pm/lifecycle.py` | T2 write (new phase doc) + T2 update (CONTINUATION.md) |
-| `nx pm search` | `pm/lifecycle.py` | T2 FTS5 query (scoped to *_pm projects) |
+| `nx pm phase next` | `pm/lifecycle.py` | T2 write (new phase doc) |
+| `nx pm search` | `pm/lifecycle.py` | T2 FTS5 query (tag-filtered for pm) |
 | `nx pm block/unblock` | `pm/lifecycle.py` | T2 write/update (BLOCKERS.md) |
 | `nx pm archive` | `pm/lifecycle.py` + `pm/synthesis.py` | T2 read (all docs) -> Haiku -> T3 write -> T2 update (decay) |
 | `nx pm close` | `pm/lifecycle.py` | Alias for archive --status=completed |

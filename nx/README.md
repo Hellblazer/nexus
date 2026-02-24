@@ -31,7 +31,6 @@ nx/
 │       ├── bead_context_hook.py      # Bead context injection
 │       ├── mcp_health_hook.sh        # MCP/nx health checks at session start
 │       ├── permission-request-stdin.sh # Auto-approve safe read-only commands
-│       ├── pre_compact_hook.py       # Save state before context compression
 │       ├── session_start_hook.py     # Load PM context, prime beads
 │       ├── setup.sh                  # One-time setup checks
 │       └── subagent-start.sh         # Context prep for spawned subagents
@@ -98,7 +97,6 @@ Defined in `registry.yaml`:
 | `SessionStart` | `session_start_hook.py` | Load PM context, prime bead state |
 | `SessionStart` | `bd prime` | Load beads context into session |
 | `SessionEnd` | `nx hook session-end` | Flush nx session state |
-| `PreCompact` | `pre_compact_hook.py` | Save work state before context compression |
 | `PreCompact` | `bd prime` | Re-prime bead context after compact |
 | `SubagentStart` | `subagent-start.sh` | Inject context for spawned subagents |
 | `PermissionRequest` | `permission-request-stdin.sh` | Auto-approve safe read-only commands |

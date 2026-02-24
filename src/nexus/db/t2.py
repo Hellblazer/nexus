@@ -263,7 +263,7 @@ class T2Database:
         Returns the number of rows updated.
         """
         sql = """
-            UPDATE memory
+            UPDATE OR IGNORE memory
                SET project = SUBSTR(project, 1, LENGTH(project) - 3)
              WHERE project LIKE '%\\_pm' ESCAPE '\\'
                AND (',' || tags || ',') LIKE '%,pm,%'
