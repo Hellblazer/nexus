@@ -99,6 +99,50 @@ Status: Draft
 Next: Fill in Problem Statement and Context, then use /rdr-research to add findings.
 ```
 
+## Relay Template (Use This Format)
+
+This skill does not dispatch agents (no Task tool). The relay template is included for consistency with the standard skill format. If future changes add agent delegation, use this structure:
+
+```markdown
+## Relay: {agent-name}
+
+**Task**: [1-2 sentence summary of what needs to be done]
+**Bead**: [ID] (status: [status]) or 'none'
+
+### Input Artifacts
+- nx store: [document titles or "none"]
+- nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]
+- Files: [key files or "none"]
+
+### Deliverable
+[What the receiving agent should produce]
+
+### Quality Criteria
+- [ ] [Criterion 1]
+- [ ] [Criterion 2]
+```
+
+## Success Criteria
+
+- [ ] RDR file created at `docs/rdr/NNN-kebab-title.md` with correct metadata
+- [ ] Sequential ID assigned (no collisions with existing RDRs)
+- [ ] T2 record written to `{repo}_rdr` project with all required fields
+- [ ] `docs/rdr/README.md` index regenerated with new entry
+- [ ] Files staged via `git add`
+- [ ] Bootstrap completed on first use (template and directory structure)
+
+## Agent-Specific PRODUCE
+
+This skill produces outputs directly (no agent delegation):
+
+- **T3 knowledge**: Not produced at create time (archival happens at `/rdr-close`)
+- **T2 memory**: RDR metadata record via `nx memory put - --project {repo}_rdr --title {NNN} --ttl permanent --tags rdr,{type}`
+- **T1 scratch**: Working notes during creation via `nx scratch put "RDR NNN: scaffolding" --tags "rdr,create"` (optional, for tracking multi-step creation)
+- **Filesystem**: `docs/rdr/NNN-kebab-title.md`, updated `docs/rdr/README.md`
+
+**Session Scratch (T1)**: Use `nx scratch` for ephemeral working notes if the creation involves multiple prompts or complex ID assignment. Flagged items auto-promote to T2 at session end.
+
 ## Does NOT
 
 - Create beads (that happens at `/rdr-close`)

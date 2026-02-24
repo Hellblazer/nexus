@@ -41,6 +41,41 @@ def _estimate_tokens(chunks: list[str]) -> int:
     return sum(len(c) for c in chunks) // 3
 
 
+_CCE_TOKEN_LIMIT = 32_000
+_CCE_TOTAL_TOKEN_LIMIT = 120_000  # Voyage API total token limit across all inputs
+# Note: per-batch limit of 32K means we never hit 120K in a single call
+_CCE_MAX_TOTAL_CHUNKS = 16_000  # Voyage API limit: max 16K chunks across all inputs
+_EMBED_BATCH_SIZE = 128  # Voyage AI embed() limit is 1,000; use conservative batch size
+_CCE_MAX_BATCH_CHUNKS = 1000  # Voyage API limit: max 1,000 inputs per request
+
+
+def _batch_chunks_for_cce(chunks: list[str]) -> list[list[str]]:
+    """Split chunks into batches that each fit within the CCE token limit.
+
+    Each batch must have >= 2 chunks (CCE requirement).  Single-leftover
+    chunks are merged into the previous batch rather than dropped.
+    """
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for chunk in chunks:
+        chunk_tokens = len(chunk) // 3
+        if current and (current_tokens + chunk_tokens > _CCE_TOKEN_LIMIT or len(current) >= _CCE_MAX_BATCH_CHUNKS):
+            batches.append(current)
+            current = [chunk]
+            current_tokens = chunk_tokens
+        else:
+            current.append(chunk)
+            current_tokens += chunk_tokens
+    if current:
+        # CCE requires >= 2 chunks per batch; merge singletons into previous batch
+        if len(current) < 2 and batches:
+            batches[-1].extend(current)
+        else:
+            batches.append(current)
+    return batches
+
+
 def _embed_with_fallback(
     chunks: list[str],
     model: str,
@@ -49,9 +84,25 @@ def _embed_with_fallback(
 ) -> tuple[list[list[float]], str]:
     """Embed chunks using CCE when possible, falling back to voyage-4 on failure.
 
-    Returns ``(embeddings, actual_model_used)`` so callers can record the model
-    that produced the stored vectors in metadata — critical for staleness checks.
+    Large documents are automatically batched into groups that fit within the
+    CCE token limit.  Returns ``(embeddings, actual_model_used)`` so callers
+    can record the model that produced the stored vectors in metadata.
+
+    Note: both voyage-context-3 and voyage-4 produce 1024-dim embeddings,
+    so mixed CCE/fallback batches are dimensionally compatible for ChromaDB.
+
+    We rely on Voyage's default truncation=True. Our chunker keeps chunks well
+    under model context limits, so truncation should never activate. If it does,
+    the embedding is still usable (just based on truncated text).
     """
+    if not chunks:
+        return [], model
+    if len(chunks) > _CCE_MAX_TOTAL_CHUNKS:
+        _log.warning(
+            "chunk count exceeds Voyage API limit",
+            chunk_count=len(chunks),
+            limit=_CCE_MAX_TOTAL_CHUNKS,
+        )
     import voyageai
     client = voyageai.Client(api_key=api_key)
     if model == "voyage-context-3":
@@ -60,23 +111,34 @@ def _embed_with_fallback(
             # so stored vectors are in the same embedding space as query vectors.
             model = "voyage-4"
         else:
-            estimated = _estimate_tokens(chunks)
-            if estimated > 100_000:
-                _log.warning("CCE skipped: estimated tokens exceed limit",
-                             estimated=estimated, limit=100_000)
-                model = "voyage-4"
-            else:
+            batches = _batch_chunks_for_cce(chunks)
+            all_embeddings: list[list[float]] = []
+            any_fallback = False
+            for batch in batches:
                 try:
                     result = client.contextualized_embed(
-                        inputs=[chunks], model=model, input_type=input_type
+                        inputs=[batch], model=model, input_type=input_type
                     )
-                    return result.embeddings[0], model  # first (only) document's embeddings
+                    all_embeddings.extend(result.results[0].embeddings)
                 except Exception as exc:
-                    _log.warning("CCE failed, falling back to voyage-4", error=str(exc))
-                    model = "voyage-4"
+                    any_fallback = True
+                    _log.warning("CCE failed for batch, falling back to voyage-4",
+                                 error=str(exc), batch_size=len(batch))
+                    for j in range(0, len(batch), _EMBED_BATCH_SIZE):
+                        sub = batch[j:j + _EMBED_BATCH_SIZE]
+                        fb = client.embed(texts=sub, model="voyage-4", input_type=input_type)
+                        all_embeddings.extend(fb.embeddings)
+            if all_embeddings:
+                # Report voyage-4 if any batch fell back — forces re-index on next run
+                return all_embeddings, "voyage-4" if any_fallback else model
+            model = "voyage-4"
     # Standard embedding path (voyage-4 or any non-CCE model)
-    result = client.embed(texts=chunks, model=model, input_type=input_type)
-    return result.embeddings, model
+    all_emb: list[list[float]] = []
+    for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
+        batch = chunks[i:i + _EMBED_BATCH_SIZE]
+        result = client.embed(texts=batch, model=model, input_type=input_type)
+        all_emb.extend(result.embeddings)
+    return all_emb, model
 
 
 def _index_document(

@@ -5,8 +5,12 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
+
 from nexus.corpus import index_model_for_collection
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
+
+_log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from nexus.registry import RepoRegistry
@@ -204,7 +208,8 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     for score, file in scored:
         try:
             content = file.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+        except (UnicodeDecodeError, OSError) as exc:
+            _log.debug("skipped non-text file", path=str(file), error=type(exc).__name__)
             continue
 
         # Compute content hash once per file (reused across all chunks of the file)
@@ -225,6 +230,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
 
         chunks = chunk_file(file, content)
         if not chunks:
+            _log.debug("skipped file with no chunks", path=str(file))
             continue
         total_chunks = len(chunks)
 
