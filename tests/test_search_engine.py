@@ -4,17 +4,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import nexus.search_engine as se_mod
-from nexus.search_engine import (
-    SearchResult,
-    answer_mode,
-    format_json,
-    format_vimgrep,
+from nexus.answer import answer_mode
+from nexus.formatters import format_json, format_vimgrep
+from nexus.scoring import (
+    apply_hybrid_scoring,
     hybrid_score,
     min_max_normalize,
     rerank_results,
     round_robin_interleave,
-    search_cross_corpus,
 )
+from nexus.search_engine import search_cross_corpus
+from nexus.types import SearchResult
 
 
 # ── AC1: Hybrid scoring ───────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ def test_hybrid_no_code_corpus_warning(capsys):
         SearchResult(id="1", content="text", distance=0.1,
                      collection="docs__papers", metadata={}),
     ]
-    se_mod.apply_hybrid_scoring(results, hybrid=True)
+    apply_hybrid_scoring(results, hybrid=True)
     captured = capsys.readouterr()
     assert "no code corpus" in (captured.out + captured.err).lower()
 
@@ -74,7 +74,7 @@ def test_hybrid_mixed_corpus_no_warning(capsys):
         SearchResult(id="2", content="docs", distance=0.2,
                      collection="docs__papers", metadata={}),
     ]
-    se_mod.apply_hybrid_scoring(results, hybrid=True)
+    apply_hybrid_scoring(results, hybrid=True)
     out = capsys.readouterr()
     assert "no code corpus" not in (out.err + out.out).lower()
 
@@ -422,7 +422,7 @@ def test_haiku_answer_returns_empty_string_on_empty_content():
     _answer_mod._anthropic_instance = None
     with patch("nexus.config.get_credential", return_value="key"):
         with patch("anthropic.Anthropic", return_value=mock_client):
-            from nexus.search_engine import _haiku_answer
+            from nexus.answer import _haiku_answer
             result = _haiku_answer("what?", results)
     _answer_mod._anthropic_instance = None
 

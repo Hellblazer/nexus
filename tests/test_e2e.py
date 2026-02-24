@@ -143,7 +143,7 @@ def test_t3_cross_collection_search(local_t3: T3Database) -> None:
 
 def test_search_cross_corpus_end_to_end(local_t3: T3Database) -> None:
     """search_cross_corpus() retrieves and merges results from multiple corpora."""
-    from nexus.search_engine import search_cross_corpus
+    from nexus.search_engine import search_cross_corpus  # orchestration stays in search_engine
 
     uid = _uid()
     local_t3.put("knowledge__e2e", content=f"nexus architecture {uid}", title="arch.md")
@@ -162,7 +162,8 @@ def test_search_cross_corpus_end_to_end(local_t3: T3Database) -> None:
 
 def test_apply_hybrid_scoring_code_collection(local_t3: T3Database) -> None:
     """apply_hybrid_scoring applies 0.7*vector + 0.3*frecency for code__ collections."""
-    from nexus.search_engine import SearchResult, apply_hybrid_scoring
+    from nexus.scoring import apply_hybrid_scoring
+    from nexus.types import SearchResult
 
     results = [
         SearchResult(id="1", content="fn main()", distance=0.1,
@@ -177,7 +178,8 @@ def test_apply_hybrid_scoring_code_collection(local_t3: T3Database) -> None:
 
 def test_format_vimgrep(local_t3: T3Database) -> None:
     """format_vimgrep produces path:line:0:content lines."""
-    from nexus.search_engine import SearchResult, format_vimgrep
+    from nexus.formatters import format_vimgrep
+    from nexus.types import SearchResult
 
     results = [
         SearchResult(id="1", content="def foo():", distance=0.1,
@@ -193,7 +195,8 @@ def test_format_vimgrep(local_t3: T3Database) -> None:
 def test_format_json_is_valid_json(local_t3: T3Database) -> None:
     """format_json produces parseable JSON."""
     import json
-    from nexus.search_engine import SearchResult, format_json
+    from nexus.formatters import format_json
+    from nexus.types import SearchResult
 
     results = [
         SearchResult(id="a1", content="hello world", distance=0.2,
@@ -210,7 +213,8 @@ def test_format_json_is_valid_json(local_t3: T3Database) -> None:
 def test_answer_mode_returns_synthesis_with_citations() -> None:
     """answer_mode() calls Haiku and returns the synthesized text."""
     import nexus.answer as _answer_mod
-    from nexus.search_engine import SearchResult, answer_mode
+    from nexus.answer import answer_mode
+    from nexus.types import SearchResult
 
     results = [
         SearchResult(id="1", content="Nexus uses ChromaDB for storage.",

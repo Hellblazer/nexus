@@ -17,14 +17,9 @@ class TestSearchResultInTypes:
         assert r.metadata == {}
         assert r.hybrid_score == 0.0
 
-    def test_searchresult_still_importable_from_search_engine(self):
-        """Backward-compat: search_engine re-exports SearchResult."""
-        from nexus.search_engine import SearchResult  # noqa: F401
-
-    def test_types_are_identical(self):
-        from nexus.types import SearchResult as T
-        from nexus.search_engine import SearchResult as SE
-        assert T is SE
+    def test_searchresult_importable_from_types(self):
+        """SearchResult importable from nexus.types (canonical path)."""
+        from nexus.types import SearchResult  # noqa: F401
 
 
 class TestErrorHierarchy:

@@ -64,7 +64,7 @@ def search_ripgrep(
       - file_path (str)
       - line_number (int)
       - line_content (str)
-      - frecency_score (float, always 0.5 — cache ordering encodes frecency)
+      - frecency_score (float, position-based: 1.0 for first result, decaying toward 0)
 
     Returns [] if *cache_path* does not exist, ``rg`` is not installed, or the
     subprocess times out.
@@ -101,7 +101,7 @@ def search_ripgrep(
         _log.warning("rg exited with error", stderr=proc.stderr[:200] if proc.stderr else "")
         return []
 
-    results: list[dict] = []
+    parsed: list[dict] = []
     for raw_line in proc.stdout.splitlines():
         # Each matched line is a cache entry: /abs/path:lineno:content
         # Split on ":" with maxsplit=2 to get exactly three parts.
@@ -115,14 +115,17 @@ def search_ripgrep(
             line_number = int(lineno_str)
         except ValueError:
             continue
-        results.append({
+        parsed.append({
             "file_path": file_path_str,
             "line_number": line_number,
             "line_content": line_content,
-            # Hardcoded midpoint score. Ripgrep cache results rely on cache
-            # ordering (not this score) for relevance. If ever used for ranking
-            # against semantic search, consider computing a position-based score.
-            "frecency_score": 0.5,
         })
 
-    return results
+    # Position-based frecency: the cache file is ordered by descending
+    # frecency, so ripgrep (which scans sequentially) returns higher-frecency
+    # matches first.  Score decays from 1.0 (first hit) toward 0.0 (last).
+    n = len(parsed)
+    for i, hit in enumerate(parsed):
+        hit["frecency_score"] = 1.0 - (i / n) if n > 1 else 1.0
+
+    return parsed

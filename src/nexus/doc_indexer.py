@@ -18,9 +18,9 @@ from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor
 
 # Type alias for the chunking callback used by _index_document.
-# Receives (file_path, content_hash, target_model, now_iso) and returns a list
-# of (chunk_id, document_text, metadata_dict) tuples, or an empty list to skip.
-ChunkFn = Callable[[Path, str, str, str], list[tuple[str, str, dict]]]
+# Receives (file_path, content_hash, target_model, now_iso, corpus) and returns
+# a list of (chunk_id, document_text, metadata_dict) tuples, or an empty list.
+ChunkFn = Callable[[Path, str, str, str, str], list[tuple[str, str, dict]]]
 
 
 def _sha256(path: Path) -> str:
@@ -172,7 +172,7 @@ def _index_document(
             return 0
 
     now_iso = datetime.now(UTC).isoformat()
-    prepared = chunk_fn(file_path, content_hash, target_model, now_iso)
+    prepared = chunk_fn(file_path, content_hash, target_model, now_iso, corpus)
     if not prepared:
         return 0
 
@@ -205,6 +205,7 @@ def _pdf_chunks(
     content_hash: str,
     target_model: str,
     now_iso: str,
+    corpus: str,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples."""
     result = PDFExtractor().extract(pdf_path)
@@ -220,7 +221,7 @@ def _pdf_chunks(
             "source_title": "",
             "source_author": "",
             "source_date": "",
-            "corpus": "",  # filled by caller context via collection_name
+            "corpus": corpus,
             "store_type": "pdf",
             "page_count": result.metadata.get("page_count", 0),
             "page_number": chunk.metadata.get("page_number", 0),
@@ -244,6 +245,7 @@ def _markdown_chunks(
     content_hash: str,
     target_model: str,
     now_iso: str,
+    corpus: str,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a Markdown file and return (id, text, metadata) tuples."""
     raw_text = md_path.read_text(encoding="utf-8")
@@ -252,7 +254,7 @@ def _markdown_chunks(
 
     base_meta: dict = {
         "source_path": str(md_path),
-        "corpus": "",  # filled by caller context via collection_name
+        "corpus": corpus,
     }
     chunks = SemanticMarkdownChunker().chunk(body, base_meta)
     if not chunks:
@@ -266,7 +268,7 @@ def _markdown_chunks(
             "source_title": str(frontmatter.get("title", "")),
             "source_author": str(frontmatter.get("author", "")),
             "source_date": str(frontmatter.get("date", "")),
-            "corpus": "",  # filled by caller context via collection_name
+            "corpus": corpus,
             "store_type": "markdown",
             "page_count": 0,
             "page_number": chunk.metadata.get("page_number", 0),
@@ -291,15 +293,7 @@ def index_pdf(pdf_path: Path, corpus: str, t3: Any = None) -> int:
     Returns the number of chunks indexed, or 0 if skipped (no credentials or
     content unchanged since last index with the same embedding model).
     """
-    def _chunk_fn(
-        path: Path, content_hash: str, target_model: str, now_iso: str
-    ) -> list[tuple[str, str, dict]]:
-        prepared = _pdf_chunks(path, content_hash, target_model, now_iso)
-        for _, _, meta in prepared:
-            meta["corpus"] = corpus
-        return prepared
-
-    return _index_document(pdf_path, corpus, _chunk_fn, t3=t3)
+    return _index_document(pdf_path, corpus, _pdf_chunks, t3=t3)
 
 
 def index_markdown(md_path: Path, corpus: str, t3: Any = None) -> int:
@@ -308,15 +302,7 @@ def index_markdown(md_path: Path, corpus: str, t3: Any = None) -> int:
     YAML frontmatter fields (title, author, date) are stored as metadata.
     Returns the number of chunks indexed, or 0 if skipped.
     """
-    def _chunk_fn(
-        path: Path, content_hash: str, target_model: str, now_iso: str
-    ) -> list[tuple[str, str, dict]]:
-        prepared = _markdown_chunks(path, content_hash, target_model, now_iso)
-        for _, _, meta in prepared:
-            meta["corpus"] = corpus
-        return prepared
-
-    return _index_document(md_path, corpus, _chunk_fn, t3=t3)
+    return _index_document(md_path, corpus, _markdown_chunks, t3=t3)
 
 
 def batch_index_pdfs(

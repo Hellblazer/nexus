@@ -1,14 +1,13 @@
-"""Tests verifying the new module split: scoring.py, answer.py, formatters.py.
+"""Tests verifying the module split: scoring.py, answer.py, formatters.py, search_engine.py.
 
-These tests import directly from the new modules to confirm correct placement,
-and also verify backward-compat re-exports from nexus.search_engine.
+These tests import directly from the canonical modules to confirm correct placement.
 """
 import pytest
 
 from nexus.types import SearchResult
 
 
-# ── New module import paths ───────────────────────────────────────────────────
+# ── Canonical module import paths ────────────────────────────────────────────
 
 def test_scoring_imports():
     """All scoring functions importable from nexus.scoring."""
@@ -37,44 +36,20 @@ def test_formatters_imports():
 
 
 def test_search_engine_orchestration_imports():
-    """Orchestration functions still importable from nexus.search_engine."""
-    from nexus.search_engine import search_cross_corpus  # noqa: F401
-
-
-# ── Backward-compat re-exports from nexus.search_engine ──────────────────────
-
-def test_backward_compat_scoring_reexports():
-    """Scoring functions still importable from nexus.search_engine (backward compat)."""
+    """Orchestration functions importable from nexus.search_engine."""
     from nexus.search_engine import (  # noqa: F401
-        min_max_normalize,
-        hybrid_score,
-        apply_hybrid_scoring,
-        rerank_results,
-        round_robin_interleave,
+        search_cross_corpus,
+        fetch_mxbai_results,
+        agentic_search,
     )
 
 
-def test_backward_compat_answer_reexport():
-    """answer_mode still importable from nexus.search_engine (backward compat)."""
-    from nexus.search_engine import answer_mode  # noqa: F401
+def test_search_result_from_types():
+    """SearchResult importable from nexus.types (canonical path)."""
+    from nexus.types import SearchResult  # noqa: F401
 
 
-def test_backward_compat_formatter_reexports():
-    """Formatter functions still importable from nexus.search_engine (backward compat)."""
-    from nexus.search_engine import (  # noqa: F401
-        format_vimgrep,
-        format_json,
-        format_plain,
-        format_plain_with_context,
-    )
-
-
-def test_backward_compat_search_result_reexport():
-    """SearchResult still importable from nexus.search_engine (backward compat)."""
-    from nexus.search_engine import SearchResult  # noqa: F401
-
-
-# ── Functional spot-checks on new import paths ────────────────────────────────
+# ── Functional spot-checks on canonical import paths ─────────────────────────
 
 def test_scoring_min_max_normalize_works():
     """min_max_normalize from nexus.scoring returns correct values."""
@@ -171,7 +146,7 @@ def test_no_circular_imports():
         sys.modules.update(saved_modules)
 
 
-# ── New bug-fix tests ─────────────────────────────────────────────────────────
+# ── Bug-fix tests ────────────────────────────────────────────────────────────
 
 def test_format_json_metadata_does_not_shadow_canonical_fields():
     """Metadata keys must not overwrite canonical fields (id, content, distance, collection)."""

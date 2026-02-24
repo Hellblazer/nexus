@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Search engine: cross-corpus orchestration, Mixedbread fan-out, agentic search.
-
-Scoring, answer synthesis, and output formatters have been split into focused
-sub-modules. All public names are re-exported here for backward compatibility.
-"""
+"""Search engine: cross-corpus orchestration, Mixedbread fan-out, agentic search."""
 from __future__ import annotations
 
 import hashlib
@@ -12,48 +8,12 @@ from typing import Any, Callable
 
 import structlog
 
-from nexus.types import SearchResult  # re-exported for backward compatibility
-
-# Re-exported for backward compatibility and test patching.
-# Prefer importing directly from nexus.scoring / nexus.answer.
-from nexus.scoring import (
-    min_max_normalize,
-    hybrid_score,
-    apply_hybrid_scoring,
-    rerank_results,
-    round_robin_interleave,
-    _voyage_client,
-)
-from nexus.answer import (
-    answer_mode,
-    _haiku_answer,
-    _haiku_refine,
-)
-from nexus.formatters import (
-    format_vimgrep,
-    format_json,
-    format_plain,
-    format_plain_with_context,
-)
+from nexus.answer import _haiku_refine
+from nexus.types import SearchResult
 
 _log = structlog.get_logger()
 
 __all__ = [
-    "SearchResult",
-    # scoring
-    "min_max_normalize",
-    "hybrid_score",
-    "apply_hybrid_scoring",
-    "rerank_results",
-    "round_robin_interleave",
-    # answer
-    "answer_mode",
-    # formatters
-    "format_vimgrep",
-    "format_json",
-    "format_plain",
-    "format_plain_with_context",
-    # orchestration
     "search_cross_corpus",
     "fetch_mxbai_results",
     "agentic_search",
