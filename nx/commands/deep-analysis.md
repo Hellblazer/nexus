@@ -60,33 +60,33 @@ description: Thorough analysis of complex problems using deep-analyst agent
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to deep-analyst:
+Invoke the **deep-analysis** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: deep-analyst
 
 **Task**: Investigate "$ARGUMENTS" using hypothesis-driven sequential analysis
-**Bead**: [Create investigation bead if significant or 'none']
+**Bead**: [fill from active bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Search for prior analysis on this component/topic]
-- nx memory: [project/title path or 'none']
-- Files: [Key files related to the problem]
+- Files: [fill from key files related to the problem]
 
 ### Problem Statement
 $ARGUMENTS
 
 ### Deliverable
-Root cause analysis with evidence-backed conclusions and actionable recommendations
+Root cause analysis with hypothesis chain, evidence inventory, confidence-rated conclusions, and prioritized actionable recommendations.
 
 ### Quality Criteria
-- [ ] Multiple hypotheses explored before concluding
+- [ ] Multiple hypotheses explored and eliminated before concluding
 - [ ] Evidence gathered from code, logs, and metrics
-- [ ] Root cause identified with confidence rating
-- [ ] Conclusions supported by specific evidence
-- [ ] Recommendations are actionable and prioritized
+- [ ] Root cause identified with confidence rating (high/medium/low)
+- [ ] Each conclusion supported by specific cited evidence
+- [ ] Recommendations are actionable and prioritized by impact
 
 **IMPORTANT**: After analysis completes, persist findings to nx store using knowledge-tidier.
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

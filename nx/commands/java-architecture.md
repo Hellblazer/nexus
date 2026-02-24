@@ -81,35 +81,35 @@ description: Design Java architecture and create phased execution plans using ja
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to java-architect-planner:
+Invoke the **java-architecture** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: java-architect-planner
 
 **Task**: Design Java architecture for: $ARGUMENTS
-**Bead**: [From active epics/features above or create new]
+**Bead**: [fill from active epic/feature bead above or create new]
 
 ### Input Artifacts
-- nx store: [Search for prior architectural decisions on related components]
-- nx memory: [project/title path or 'none']
-- Files: [Key existing source files for context]
+- Files: [fill from key existing source files for context]
 
 ### Requirements
 $ARGUMENTS
 
 ### Deliverable
-Comprehensive Java architecture design with component boundaries, interfaces, phased execution plan, and risk assessment
+Comprehensive Java architecture design with component boundaries, interface contracts, dependency graph, phased execution plan with beads, and risk assessment with mitigations.
 
 ### Quality Criteria
 - [ ] All requirements addressed in design
-- [ ] Component boundaries clearly defined with interfaces specified
+- [ ] Component boundaries clearly defined with interface contracts
 - [ ] Integration points with existing code identified
-- [ ] Phased execution plan created with beads
+- [ ] Phased execution plan created with beads and dependencies
 - [ ] Risks identified with concrete mitigations
-- [ ] Design conforms to Java 24 patterns (var, modern concurrency)
+- [ ] Design conforms to Java 24 patterns (var, modern concurrency, no synchronized)
 - [ ] Ready for plan-auditor validation
 
 **IMPORTANT**: After architecture is designed, MUST delegate to plan-auditor for validation before implementation begins.
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

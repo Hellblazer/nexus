@@ -1,5 +1,6 @@
 ---
 description: Archive active project (synthesize to T3, start T2 90-day decay) (project)
+disable-model-invocation: true
 ---
 
 !{

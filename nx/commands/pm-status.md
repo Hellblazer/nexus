@@ -1,5 +1,6 @@
 ---
 description: Show current project status via nx pm (project)
+disable-model-invocation: true
 ---
 
 !{

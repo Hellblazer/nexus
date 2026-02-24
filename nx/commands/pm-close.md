@@ -1,5 +1,6 @@
 ---
 description: Mark project complete, archive, and close (project)
+disable-model-invocation: true
 ---
 
 !{

@@ -299,29 +299,50 @@ class TestCliSyntax:
 class TestSkillStructure:
     """All SKILL.md files must have required content."""
 
+    # Standalone skills don't delegate to agents — exclude from agent-specific tests
+    STANDALONE_SKILLS = {
+        "cli-controller", "nexus",
+        "brainstorming-gate", "verification-before-completion",
+        "receiving-code-review", "using-nx-skills",
+        "dispatching-parallel-agents",
+    }
+
     REQUIRED_SKILL_SECTIONS = [
-        "## Relay Template",
+        ("## Relay Template", "## Agent Invocation"),
         "## Success Criteria",
     ]
 
     @pytest.mark.parametrize("skill_path", [
         pytest.param(p, id=p.parent.name)
         for p in skill_skill_mds()
-        # standalone skills (cli-controller, nexus) don't delegate to agents
-        if p.parent.name not in ("cli-controller", "nexus")
+        if p.parent.name not in {
+            "cli-controller", "nexus",
+            "brainstorming-gate", "verification-before-completion",
+            "receiving-code-review", "using-nx-skills",
+            "dispatching-parallel-agents",
+        }
     ])
     def test_skill_has_relay_template(self, skill_path: Path) -> None:
         text = skill_path.read_text()
         for section in self.REQUIRED_SKILL_SECTIONS:
-            assert section in text, (
-                f"{skill_path.parent.name}/SKILL.md: missing '{section}'"
-            )
+            if isinstance(section, tuple):
+                assert any(alt in text for alt in section), (
+                    f"{skill_path.parent.name}/SKILL.md: missing one of {section}"
+                )
+            else:
+                assert section in text, (
+                    f"{skill_path.parent.name}/SKILL.md: missing '{section}'"
+                )
 
     @pytest.mark.parametrize("skill_path", [
         pytest.param(p, id=p.parent.name)
         for p in skill_skill_mds()
-        # standalone skills (cli-controller, nexus) don't delegate to agents
-        if p.parent.name not in ("cli-controller", "nexus")
+        if p.parent.name not in {
+            "cli-controller", "nexus",
+            "brainstorming-gate", "verification-before-completion",
+            "receiving-code-review", "using-nx-skills",
+            "dispatching-parallel-agents",
+        }
     ])
     def test_agent_skill_has_produce_section(self, skill_path: Path) -> None:
         """Agent-delegating skills must have an Agent-Specific PRODUCE section."""
@@ -333,7 +354,12 @@ class TestSkillStructure:
     @pytest.mark.parametrize("skill_path", [
         pytest.param(p, id=p.parent.name)
         for p in skill_skill_mds()
-        if p.parent.name not in ("cli-controller", "nexus")
+        if p.parent.name not in {
+            "cli-controller", "nexus",
+            "brainstorming-gate", "verification-before-completion",
+            "receiving-code-review", "using-nx-skills",
+            "dispatching-parallel-agents",
+        }
     ])
     def test_skill_mentions_t1_scratch(self, skill_path: Path) -> None:
         """Agent-delegating skills should acknowledge T1 scratch usage."""
@@ -348,11 +374,10 @@ class TestSkillStructure:
     def test_relay_template_has_required_rows(self, skill_path: Path) -> None:
         """Relay templates must include nx store, nx memory, and Files rows."""
         text = skill_path.read_text()
-        # Only check if there's a relay template section
         if "## Relay Template" not in text:
+            if "RELAY_TEMPLATE.md" in text:
+                return  # Valid: uses hybrid cross-reference
             pytest.skip("No relay template in this skill")
-        # Note: don't split on "##" because the relay template code block starts with
-        # "## Relay: {agent-name}", which would truncate before the actual rows.
         relay_section = text.split("## Relay Template")[1]
         for row in ("nx store:", "nx memory:", "Files:"):
             assert row in relay_section, (

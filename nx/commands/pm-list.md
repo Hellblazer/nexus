@@ -1,5 +1,6 @@
 ---
 description: List current and archived PM projects (project)
+disable-model-invocation: true
 ---
 
 !{

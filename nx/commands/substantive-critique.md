@@ -67,32 +67,32 @@ description: Constructive critique of code, plans, designs, or documentation usi
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to substantive-critic:
+Invoke the **substantive-critique** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: substantive-critic
 
 **Task**: Provide deep constructive critique of: $ARGUMENTS
-**Bead**: [From active beads above or 'none']
+**Bead**: [fill from active bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Search for specifications or prior decisions this artifact should conform to]
-- nx memory: [project/title path or 'none']
-- Files: [Artifact files to critique]
+- Files: [fill from artifact files to critique]
 
 ### Artifact
 $ARGUMENTS
 
 ### Deliverable
-Structured critique with findings categorized by priority (Critical/Significant/Minor) and specific actionable recommendations
+Structured critique with findings categorized by priority (Critical/Significant/Minor), each with specific actionable recommendations. Covers structure, logical consistency, completeness, and spec conformance.
 
 ### Quality Criteria
 - [ ] Context and purpose of artifact established
-- [ ] Relevant specifications and criteria identified
+- [ ] Relevant specifications and conformance criteria identified
 - [ ] Structure, logic, and completeness all analyzed
-- [ ] Findings prioritized by impact (Critical first)
-- [ ] Recommendations are specific and actionable
-- [ ] Substantive issues surfaced (not just style/surface)
+- [ ] Findings prioritized by impact (Critical > Significant > Minor)
+- [ ] Each recommendation is specific and actionable
+- [ ] Substantive issues surfaced (not just style/surface-level)
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

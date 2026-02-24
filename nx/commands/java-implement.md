@@ -72,37 +72,37 @@ description: Implement feature using java-developer agent
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
 **PREREQUISITE**: Plan must be validated by plan-auditor before implementation.
 
-Use the **Task tool** to delegate to java-developer:
+Invoke the **java-development** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: java-developer
 
 **Task**: Implement "$ARGUMENTS" using TDD methodology
-**Bead**: [Task bead from active work - must be in_progress]
+**Bead**: [fill from active in_progress bead above]
 
 ### Input Artifacts
-- nx store: [Search for relevant patterns]
-- nx memory: [project/title path or 'none']
-- Files: [Existing files to modify or create location]
+- Files: [fill from existing files to modify or target package]
 
 ### Plan Context
-[Reference approved plan from plan-auditor]
+[fill from approved plan-auditor output]
 
 ### Requirements
 $ARGUMENTS
 
 ### Deliverable
-Working implementation with tests
+Working implementation with passing tests, following TDD red-green-refactor cycle. Code uses Java 24 patterns (var, modern concurrency, no synchronized).
 
 ### Quality Criteria
-- [ ] Tests written first (TDD)
-- [ ] All tests pass
-- [ ] Code follows project conventions
-- [ ] No regressions introduced
+- [ ] Tests written before implementation (TDD)
+- [ ] All tests pass (./mvnw test)
+- [ ] Code follows project conventions (Java 24, FP32-only for neural nets)
+- [ ] No regressions introduced in existing tests
 
 **IMPORTANT**: After implementation completes, MUST delegate to code-review-expert for quality review.
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

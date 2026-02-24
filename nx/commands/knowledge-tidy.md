@@ -64,31 +64,31 @@ description: Persist and organize knowledge into nx store using knowledge-tidier
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to knowledge-tidier:
+Invoke the **knowledge-tidying** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: knowledge-tidier
 
 **Task**: Organize and persist knowledge about "$ARGUMENTS" into nx store (T3)
-**Bead**: [From recently completed beads above or 'none']
+**Bead**: [fill from recently completed bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Search for existing entries on this topic to avoid contradictions]
-- nx memory: [project/title path or 'none']
-- Files: [Source files or documents containing findings]
+- Files: [fill from source files or documents containing findings]
 
 ### Knowledge to Organize
 $ARGUMENTS
 
 ### Deliverable
-Knowledge persisted to nx store T3 with correct titles, tags, and verified searchability
+Knowledge persisted to nx store T3 with correct title convention, meaningful tags, contradiction check against existing entries, and verified searchability.
 
 ### Quality Criteria
 - [ ] Knowledge stored via `nx store put --collection knowledge`
 - [ ] No contradictions with existing entries (checked and resolved)
 - [ ] Title follows naming convention (research-*, decision-*, pattern-*, debug-*)
-- [ ] Tags are meaningful for future retrieval
-- [ ] Searchable — verified with `nx search "topic" --corpus knowledge`
+- [ ] Tags are meaningful and consistent with existing tag vocabulary
+- [ ] Searchable -- verified with `nx search "topic" --corpus knowledge`
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

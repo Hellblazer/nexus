@@ -79,32 +79,32 @@ description: Debug test failures using java-debugger agent
   fi
 }
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to java-debugger:
+Invoke the **java-debugging** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: java-debugger
 
 **Task**: Investigate failure using hypothesis-driven debugging
-**Bead**: [From active beads above or create bug bead]
+**Bead**: [fill from active bead above or create bug bead]
 
 ### Input Artifacts
-- nx store: [Search for prior debugging on similar issues]
-- nx memory: [project/title path or 'none']
-- Files: [Relevant source and test files]
+- Files: [fill from relevant source and test files]
 
 ### Context
-- Error message: [From test output above]
-- Stack trace: [Key frames]
-- Failed attempts: [What was already tried]
+- Error message: [fill from test output above]
+- Stack trace: [fill key frames from surefire reports]
+- Failed attempts: [fill what was already tried, or 'first attempt']
 
 ### Deliverable
-Root cause analysis with proposed fix
+Root cause analysis with hypothesis chain, supporting evidence, proposed fix, and regression test recommendation.
 
 ### Quality Criteria
-- [ ] Root cause definitively identified
-- [ ] Evidence supports conclusion
+- [ ] Root cause definitively identified with evidence
+- [ ] Hypothesis chain documented (explored and eliminated alternatives)
 - [ ] Fix addresses root cause (not symptoms)
-- [ ] Regression prevention addressed
+- [ ] Regression test recommended to prevent recurrence
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

@@ -394,6 +394,45 @@ standalone_skills:
       - "managing session memory"
     tools: [Bash, Read]
 
+  brainstorming-gate:
+    description: "Design gate — requires design exploration and user approval before implementation"
+    triggers:
+      - "about to implement a feature"
+      - "building something new"
+      - "adding functionality"
+    tools: [Read, Glob, Grep, Bash]
+
+  verification-before-completion:
+    description: "Evidence before claims — requires verification commands before completion claims"
+    triggers:
+      - "about to claim work is done"
+      - "before committing"
+      - "before marking bead complete"
+    tools: [Bash, Read]
+
+  receiving-code-review:
+    description: "Technical rigor for code review feedback — verify before implementing"
+    triggers:
+      - "receiving review feedback"
+      - "code review comments"
+      - "review suggestions"
+    tools: [Read, Grep, Bash]
+
+  using-nx-skills:
+    description: "Skill invocation discipline — check skills before every response"
+    triggers:
+      - "starting any conversation"
+      - "before any action"
+    tools: []
+
+  dispatching-parallel-agents:
+    description: "Parallel agent dispatch for independent problem domains"
+    triggers:
+      - "multiple independent failures"
+      - "parallel investigation needed"
+      - "independent subsystems broken"
+    tools: [Task]
+
 # =============================================================================
 # PIPELINES
 # =============================================================================

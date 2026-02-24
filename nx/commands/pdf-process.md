@@ -36,32 +36,32 @@ description: Index PDF files into nx store for semantic search using pdf-chromad
 
 $ARGUMENTS
 
-## Relay Instructions
+## Action
 
-Use the **Task tool** to delegate to pdf-chromadb-processor:
+Invoke the **pdf-processing** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: pdf-chromadb-processor
 
 **Task**: Index "$ARGUMENTS" into nx store T3 for semantic search
-**Bead**: [Create bead if processing significant documentation set or 'none']
+**Bead**: [fill from active bead above or 'none']
 
 ### Input Artifacts
-- nx store: [Check for existing indexed versions of these PDFs]
-- nx memory: [project/title path or 'none']
-- Files: [PDF file paths from above]
+- Files: [fill from PDF file paths listed above]
 
 ### PDFs to Index
 $ARGUMENTS
 
 ### Deliverable
-All specified PDFs indexed in nx store with extracted text, metadata preserved, and verified searchability
+All specified PDFs extracted, chunked, and indexed in nx store T3 with metadata preserved (title, author, date) and searchability verified via `nx search` sample queries.
 
 ### Quality Criteria
 - [ ] All PDFs processed without errors
 - [ ] Text properly extracted with layout preserved
 - [ ] Content chunked appropriately for semantic search
-- [ ] Metadata (title, author, date) preserved
-- [ ] Documents searchable — verified with `nx search` sample queries
+- [ ] Metadata (title, author, date) preserved in document records
+- [ ] Documents searchable -- verified with `nx search` sample queries
 - [ ] Collection name follows convention (docs__corpus-name)
 ```
+
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
