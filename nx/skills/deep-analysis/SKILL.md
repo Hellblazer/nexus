@@ -4,10 +4,6 @@ description: >
   Thorough analysis of complex problems and intricate system relationships. Triggers when:
   investigating performance mysteries, debugging multi-component interactions,
   understanding complex system behavior, or when surface-level analysis is insufficient.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
-memory: local
-context: fork
 ---
 
 # Deep Analysis Skill

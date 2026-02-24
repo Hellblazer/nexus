@@ -3,7 +3,6 @@ name: rdr-show
 description: >
   Display detailed RDR information including content, status, research findings,
   and linked beads. Triggers: user says "show RDR", "RDR details", or /rdr-show
-allowed-tools: Read, Glob, Grep, Bash
 ---
 
 # RDR Show Skill

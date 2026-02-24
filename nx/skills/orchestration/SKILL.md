@@ -3,8 +3,6 @@ name: orchestration
 description: >
   Route requests to appropriate specialized agents and manage multi-agent pipelines.
   Triggers: task ambiguous, coordinating multiple agents, user says "which agent".
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
 ---
 
 # Orchestration Skill

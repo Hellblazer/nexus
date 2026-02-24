@@ -54,7 +54,8 @@
   "PostToolUse": [
     {
       "type": "command",
-      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/bead_context_hook.py"
+      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/bead_context_hook.py",
+      "matcher": "bd create"
     }
   ]
 }

@@ -4,10 +4,6 @@ description: >
   Analyze codebase structure, patterns, and architecture. Triggers when:
   exploring new codebase, onboarding to project, asking "how does X work",
   "where is Y defined", before major refactoring, or understanding module structure.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
-memory: project
-context: fork
 ---
 
 # Codebase Analysis Skill

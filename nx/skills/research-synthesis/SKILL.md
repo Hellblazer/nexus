@@ -4,10 +4,6 @@ description: >
   Research topics across multiple sources. Triggers: researching new topic/technology,
   investigating best practices, comparing approaches, learning unfamiliar concepts,
   user says "research", "find out about", "what are best practices for".
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, WebSearch, WebFetch
-memory: local
-context: fork
 ---
 
 # Research Synthesis Skill

@@ -3,7 +3,6 @@ name: rdr-close
 description: >
   Close an RDR: capture divergence, create post-mortem, decompose into beads, archive to T3.
   Triggers: user says "close this RDR", "RDR done", or /rdr-close
-allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
 ---
 
 # RDR Close Skill

@@ -3,8 +3,6 @@ name: plan-validation
 description: >
   Validate implementation plans before execution. Triggers: strategic-planner completes,
   before starting implementation, user says "validate plan" or "audit plan".
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Glob, Grep, Bash
 ---
 
 # Plan Validation Skill

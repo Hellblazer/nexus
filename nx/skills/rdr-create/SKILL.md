@@ -3,7 +3,6 @@ name: rdr-create
 description: >
   Scaffold a new RDR from template, assign sequential ID, register in T2, add to index.
   Triggers: user says "create an RDR", "new RDR", or /rdr-create
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 ---
 
 # RDR Create Skill

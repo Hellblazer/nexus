@@ -3,8 +3,6 @@ name: knowledge-tidying
 description: >
   Persist and organize knowledge in Nexus T3. Triggers: research-synthesis completes,
   major investigation concludes, user says "save this knowledge", valuable insights discovered.
-# See ../../registry.yaml for full agent metadata
-allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
 ---
 
 # Knowledge Tidying Skill
