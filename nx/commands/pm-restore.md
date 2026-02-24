@@ -50,7 +50,7 @@ description: Restore an archived project within its 90-day decay window (project
     echo ""
     echo "**Next steps**:"
     echo "- \`/pm-status\` - View detailed project status"
-    echo "- \`nx pm resume\` - Inject session continuation context"
+    echo "- \`nx pm status\` - View project status (PM context auto-injected by hooks)"
     echo "- \`bd ready\` - See available work"
   else
     echo ""

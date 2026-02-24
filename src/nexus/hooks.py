@@ -63,11 +63,14 @@ def session_start() -> str:
     repo = _infer_repo()
     try:
         with _open_t2() as db:
-            # PM detection: T2 SQL query for {repo}_pm CONTINUATION.md
-            pm_row = db.get(project=f"{repo}_pm", title="CONTINUATION.md")
-            if pm_row is not None:
-                content = (pm_row.get("content") or "")[:2000]
-                lines.append(content)
+            # PM detection: check for BLOCKERS.md with 'pm' tag
+            from nexus.pm import pm_resume
+            blockers_row = db.get(project=repo, title="BLOCKERS.md")
+            is_pm = blockers_row is not None and "pm" in (blockers_row.get("tags") or "")
+            if is_pm:
+                content = pm_resume(db, project=repo)
+                if content:
+                    lines.append(content)
             else:
                 # Non-PM: recent memory summary
                 entries = db.list_entries(project=repo)[:10]

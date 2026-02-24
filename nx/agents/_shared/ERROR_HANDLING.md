@@ -45,7 +45,7 @@ This file documents common error handling patterns for agents.
 
 **Scratch promote fails (missing project)**:
 - Error: `nx scratch promote <id>` fails without `--project` and `--title`
-- Fix: Always specify both flags: `nx scratch promote <id> --project {project}_active --title notes.md`
+- Fix: Always specify both flags: `nx scratch promote <id> --project {project} --title notes.md`
 
 ### T2 Memory Errors
 
@@ -63,8 +63,8 @@ This file documents common error handling patterns for agents.
 
 **Memory entry not found**:
 - Error: `nx memory get` returns nothing
-- Fix: Verify exact `--project` and `--title` values; use `nx memory list --project {project}_active` to see available entries
-- Fallback: Use `nx memory search "topic" --project {project}_active` for fuzzy retrieval
+- Fix: Verify exact `--project` and `--title` values; use `nx memory list --project {project}` to see available entries
+- Fallback: Use `nx memory search "topic" --project {project}` for fuzzy retrieval
 
 **TTL format errors**:
 - Valid formats: `30d`, `4w`, `permanent`, `never` (`permanent` and `never` are both aliases for no-expiry)
@@ -86,7 +86,7 @@ ttl_days > 0 AND expires_at < now
 - Error: `nx store put` or `nx search` fails with connection error
 - Fix: Check `nx doctor` for ChromaDB + Voyage AI API status
 - Fallback: Write to T2 memory with note to promote to T3 later:
-  `nx memory put "content" --project {project}_active --title pending-t3-promotion.md`
+  `nx memory put "content" --project {project} --title pending-t3-promotion.md`
 
 **Voyage AI API limit**:
 - Error: Rate limit or quota exceeded during embedding
@@ -105,15 +105,15 @@ ttl_days > 0 AND expires_at < now
 ### nx pm Errors
 
 **PM not initialized**:
-- Error: `nx pm resume` returns nothing or error
+- Error: `nx pm status` returns nothing or error
 - Cause: `nx pm init` was never run for this project
 - Fix: Run `nx pm init --project $(basename $(git rev-parse --show-toplevel))` at project root
 - When NOT to fix: Simple projects not using PM infrastructure don't need it; suppress with `2>/dev/null || true`
 
-**Missing CONTINUATION.md**:
-- Error: `nx pm resume` returns empty even though PM was initialized
+**Missing PM context**:
+- Error: `nx pm status` returns empty even though PM was initialized
 - Fix: Run `nx pm status` to check phase; phase docs may need to be written
-- Fallback: Read `.pm/CONTINUATION.md` directly if it exists
+- Note: PM context is auto-injected by SessionStart and SubagentStart hooks
 
 **PM phase mismatch**:
 - Symptom: `nx pm status` shows unexpected phase or blockers

@@ -31,17 +31,16 @@ def db(tmp_path: Path):
     d.close()
 
 
-# ── AC1: pm_init creates the 5 standard docs ──────────────────────────────────
+# ── AC1: pm_init creates the 4 standard docs ──────────────────────────────────
 
 def test_pm_init_creates_all_standard_docs(db) -> None:
-    """pm_init inserts exactly 5 standard T2 entries under {repo}_pm."""
+    """pm_init inserts exactly 4 standard T2 entries under {repo}."""
     pm_init(db, project="myrepo")
-    entries = db.list_entries(project="myrepo_pm")
+    entries = db.list_entries(project="myrepo")
     titles = {e["title"] for e in entries}
     assert titles == {
-        "CONTINUATION.md",
         "METHODOLOGY.md",
-        "AGENT_INSTRUCTIONS.md",
+        "BLOCKERS.md",
         "CONTEXT_PROTOCOL.md",
         "phases/phase-1/context.md",
     }
@@ -50,8 +49,8 @@ def test_pm_init_creates_all_standard_docs(db) -> None:
 def test_pm_init_docs_have_pm_tag(db) -> None:
     """All standard docs are tagged with 'pm'."""
     pm_init(db, project="myrepo")
-    for entry in db.list_entries(project="myrepo_pm"):
-        row = db.get(project="myrepo_pm", title=entry["title"])
+    for entry in db.list_entries(project="myrepo"):
+        row = db.get(project="myrepo", title=entry["title"])
         assert row is not None
         assert "pm" in (row["tags"] or "")
 
@@ -59,8 +58,8 @@ def test_pm_init_docs_have_pm_tag(db) -> None:
 def test_pm_init_docs_have_permanent_ttl(db) -> None:
     """Standard docs are stored with ttl=None (permanent)."""
     pm_init(db, project="myrepo")
-    for entry in db.list_entries(project="myrepo_pm"):
-        row = db.get(project="myrepo_pm", title=entry["title"])
+    for entry in db.list_entries(project="myrepo"):
+        row = db.get(project="myrepo", title=entry["title"])
         assert row is not None
         assert row["ttl"] is None
 
@@ -69,31 +68,40 @@ def test_pm_init_idempotent(db) -> None:
     """Calling pm_init twice does not create duplicate entries."""
     pm_init(db, project="myrepo")
     pm_init(db, project="myrepo")
-    entries = db.list_entries(project="myrepo_pm")
-    assert len(entries) == 5
+    entries = db.list_entries(project="myrepo")
+    assert len(entries) == 4
 
 
-# ── AC2: pm_resume returns CONTINUATION.md content, capped at 2000 chars ─────
+# ── AC2: pm_resume returns computed continuation, capped at 2000 chars ────────
 
-def test_pm_resume_returns_continuation_content(db) -> None:
-    """pm_resume returns the content of CONTINUATION.md."""
+def test_pm_resume_returns_computed_content(db) -> None:
+    """pm_resume returns computed markdown with phase and activity info."""
     pm_init(db, project="testrepo")
-    db.put("testrepo_pm", "CONTINUATION.md", "# Continuation\n\nHello.", ttl=None)
     result = pm_resume(db, project="testrepo")
-    assert "Hello." in result
+    assert result is not None
+    assert "testrepo" in result
+    assert "Phase: 1" in result
+
+
+def test_pm_resume_includes_blockers(db) -> None:
+    """pm_resume includes blockers in the output."""
+    pm_init(db, project="testrepo")
+    pm_block(db, project="testrepo", blocker="waiting on creds")
+    result = pm_resume(db, project="testrepo")
+    assert "waiting on creds" in result
 
 
 def test_pm_resume_caps_at_2000_chars(db) -> None:
     """pm_resume returns at most 2000 characters."""
     pm_init(db, project="testrepo")
-    long_content = "x" * 5000
-    db.put("testrepo_pm", "CONTINUATION.md", long_content, ttl=None)
+    # Add a very long phase context to push the output past 2000 chars
+    db.put("testrepo", "phases/phase-1/context.md", "x" * 5000, tags="pm,phase:1,context", ttl=None)
     result = pm_resume(db, project="testrepo")
     assert len(result) <= 2000
 
 
 def test_pm_resume_returns_none_when_not_initialized(db) -> None:
-    """pm_resume returns None if no CONTINUATION.md found."""
+    """pm_resume returns None if no PM docs found for project."""
     result = pm_resume(db, project="nonexistent")
     assert result is None
 
@@ -120,7 +128,7 @@ def test_pm_block_adds_blocker(db) -> None:
     """pm_block appends a bullet to BLOCKERS.md."""
     pm_init(db, project="myrepo")
     pm_block(db, project="myrepo", blocker="waiting on credentials")
-    row = db.get(project="myrepo_pm", title="BLOCKERS.md")
+    row = db.get(project="myrepo", title="BLOCKERS.md")
     assert row is not None
     assert "waiting on credentials" in row["content"]
 
@@ -131,7 +139,7 @@ def test_pm_unblock_removes_blocker(db) -> None:
     pm_block(db, project="myrepo", blocker="blocker one")
     pm_block(db, project="myrepo", blocker="blocker two")
     pm_unblock(db, project="myrepo", line=1)
-    row = db.get(project="myrepo_pm", title="BLOCKERS.md")
+    row = db.get(project="myrepo", title="BLOCKERS.md")
     assert row is not None
     assert "blocker one" not in row["content"]
     assert "blocker two" in row["content"]
@@ -143,18 +151,9 @@ def test_pm_phase_next_creates_new_phase_doc(db) -> None:
     """pm_phase_next creates phases/phase-2/context.md after init (phase 1)."""
     pm_init(db, project="myrepo")
     pm_phase_next(db, project="myrepo")
-    row = db.get(project="myrepo_pm", title="phases/phase-2/context.md")
+    row = db.get(project="myrepo", title="phases/phase-2/context.md")
     assert row is not None
     assert "Phase 2" in row["content"]
-
-
-def test_pm_phase_next_updates_continuation(db) -> None:
-    """pm_phase_next updates CONTINUATION.md to reference the new phase."""
-    pm_init(db, project="myrepo")
-    pm_phase_next(db, project="myrepo")
-    cont = db.get(project="myrepo_pm", title="CONTINUATION.md")
-    assert cont is not None
-    assert "phase-2" in cont["content"] or "phase 2" in cont["content"].lower()
 
 
 def test_pm_phase_next_increments_correctly(db) -> None:
@@ -162,7 +161,7 @@ def test_pm_phase_next_increments_correctly(db) -> None:
     pm_init(db, project="myrepo")
     pm_phase_next(db, project="myrepo")
     pm_phase_next(db, project="myrepo")
-    row = db.get(project="myrepo_pm", title="phases/phase-3/context.md")
+    row = db.get(project="myrepo", title="phases/phase-3/context.md")
     assert row is not None
 
 
@@ -201,8 +200,8 @@ def test_pm_archive_decays_t2_after_t3(db) -> None:
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
     # All docs should now have ttl set (decay applied)
-    for entry in db.list_entries(project="myrepo_pm"):
-        row = db.get(project="myrepo_pm", title=entry["title"])
+    for entry in db.list_entries(project="myrepo"):
+        row = db.get(project="myrepo", title=entry["title"])
         assert row is not None
         assert row["ttl"] == 90
 
@@ -212,9 +211,9 @@ def test_pm_archive_idempotent_skips_synthesis(db) -> None:
     pm_init(db, project="myrepo")
 
     # Count active docs and get max timestamp
-    entries = db.list_entries(project="myrepo_pm")
+    entries = db.list_entries(project="myrepo")
     doc_count = len(entries)
-    rows = [db.get(project="myrepo_pm", title=e["title"]) for e in entries]
+    rows = [db.get(project="myrepo", title=e["title"]) for e in entries]
     max_ts = max(r["timestamp"] for r in rows if r)
 
     # The idempotency check now uses col.get() instead of t3.search()
@@ -254,8 +253,8 @@ def test_pm_archive_aborts_on_haiku_failure(db) -> None:
                 pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
     # T2 docs should be untouched (no TTL decay)
-    for entry in db.list_entries(project="myrepo_pm"):
-        row = db.get(project="myrepo_pm", title=entry["title"])
+    for entry in db.list_entries(project="myrepo"):
+        row = db.get(project="myrepo", title=entry["title"])
         assert row is not None
         assert row["ttl"] is None
 
@@ -266,16 +265,16 @@ def test_pm_restore_reverses_decay(db) -> None:
     """pm_restore sets ttl=None and restores pm, tags on archived docs."""
     pm_init(db, project="myrepo")
     # Simulate archive decay: set ttl and replace tags
-    for entry in db.list_entries(project="myrepo_pm"):
-        row = db.get(project="myrepo_pm", title=entry["title"])
+    for entry in db.list_entries(project="myrepo"):
+        row = db.get(project="myrepo", title=entry["title"])
         assert row is not None
         tags = (row["tags"] or "").replace("pm,", "pm-archived,")
-        db.put("myrepo_pm", entry["title"], row["content"], tags=tags, ttl=90)
+        db.put("myrepo", entry["title"], row["content"], tags=tags, ttl=90)
 
     pm_restore(db, project="myrepo")
 
-    for entry in db.list_entries(project="myrepo_pm"):
-        row = db.get(project="myrepo_pm", title=entry["title"])
+    for entry in db.list_entries(project="myrepo"):
+        row = db.get(project="myrepo", title=entry["title"])
         assert row is not None
         assert row["ttl"] is None
         assert "pm," in (row["tags"] or "")
@@ -285,15 +284,15 @@ def test_pm_restore_reverses_decay(db) -> None:
 def test_pm_restore_partial_expiry_warns(db, capsys) -> None:
     """pm_restore warns (not fails) when only some docs have expired."""
     pm_init(db, project="myrepo")
-    # Keep only CONTINUATION.md (simulate others expired — delete via db.delete()
+    # Keep only METHODOLOGY.md (simulate others expired — delete via db.delete()
     # so FTS5 triggers fire correctly)
-    for entry in db.list_entries(project="myrepo_pm"):
-        if entry["title"] != "CONTINUATION.md":
-            db.delete("myrepo_pm", entry["title"])
+    for entry in db.list_entries(project="myrepo"):
+        if entry["title"] != "METHODOLOGY.md":
+            db.delete("myrepo", entry["title"])
     # Mark remaining as archived
-    row = db.get(project="myrepo_pm", title="CONTINUATION.md")
+    row = db.get(project="myrepo", title="METHODOLOGY.md")
     assert row is not None
-    db.put("myrepo_pm", "CONTINUATION.md", row["content"],
+    db.put("myrepo", "METHODOLOGY.md", row["content"],
            tags="pm-archived,phase:1,context", ttl=90)
 
     pm_restore(db, project="myrepo")  # should not raise
@@ -371,35 +370,35 @@ def test_pm_reference_dispatch_project_name_for_bare_word(db) -> None:
     mock_t3.search.assert_not_called()
 
 
-# ── AC8: pm_search — FTS5 scoped to _pm namespaces ───────────────────────────
+# ── AC8: pm_search — FTS5 scoped to pm-tagged entries ─────────────────────────
 
 def test_pm_search_finds_pm_docs(db) -> None:
-    """pm_search returns T2 FTS5 matches scoped to *_pm projects."""
+    """pm_search returns T2 FTS5 matches scoped to pm-tagged entries."""
     pm_init(db, project="myrepo")
-    db.put("myrepo_pm", "CONTINUATION.md",
-           "# Continuation\n\nDecided to use ChromaDB.", tags="pm,context", ttl=None)
+    db.put("myrepo", "METHODOLOGY.md",
+           "# Methodology\n\nDecided to use ChromaDB.", tags="pm,context", ttl=None)
 
     results = pm_search(db, query="ChromaDB")
     assert len(results) >= 1
     assert any("ChromaDB" in r["content"] for r in results)
 
 
-def test_pm_search_does_not_bleed_into_non_pm_projects(db) -> None:
-    """pm_search ignores entries from non-pm projects."""
-    db.put("myrepo_active", "notes.md", "ChromaDB is great", tags="notes", ttl=30)
+def test_pm_search_does_not_bleed_into_non_pm_entries(db) -> None:
+    """pm_search ignores entries without 'pm' tag."""
+    db.put("myrepo", "notes.md", "ChromaDB is great", tags="notes", ttl=30)
     results = pm_search(db, query="ChromaDB")
-    assert all("_pm" in r.get("project", "") for r in results)
+    assert all("pm" in (r.get("tags") or "") for r in results)
 
 
 def test_pm_search_scoped_to_project(db) -> None:
     """pm_search --project limits results to that project."""
     pm_init(db, project="repoA")
     pm_init(db, project="repoB")
-    db.put("repoA_pm", "CONTINUATION.md", "We chose Postgres here", tags="pm", ttl=None)
-    db.put("repoB_pm", "CONTINUATION.md", "We chose MySQL here", tags="pm", ttl=None)
+    db.put("repoA", "METHODOLOGY.md", "We chose Postgres here", tags="pm", ttl=None)
+    db.put("repoB", "METHODOLOGY.md", "We chose MySQL here", tags="pm", ttl=None)
 
     results = pm_search(db, query="Postgres", project="repoA")
-    assert all(r.get("project") == "repoA_pm" for r in results)
+    assert all(r.get("project") == "repoA" for r in results)
 
 
 # ── Behavior: pm_archive raises ValueError on empty project ───────────────────
@@ -442,33 +441,6 @@ def test_pm_archive_upsert_includes_required_metadata(db) -> None:
     assert "pm_latest_timestamp" in meta
     # col.update() must NOT be called (old bug: it wiped store_type)
     mock_col.update.assert_not_called()
-
-
-# ── Behavior: pm_phase_next CONTINUATION.md tag reflects current phase ────────
-
-def test_pm_phase_next_continuation_tag_reflects_new_phase(db) -> None:
-    """After pm_phase_next, CONTINUATION.md is tagged with the new phase number."""
-    pm_init(db, project="myrepo")
-    pm_phase_next(db, project="myrepo")
-
-    cont = db.get(project="myrepo_pm", title="CONTINUATION.md")
-    assert cont is not None
-    assert "phase:2" in (cont["tags"] or ""), (
-        f"Expected 'phase:2' in tags, got: {cont['tags']!r}"
-    )
-
-
-def test_pm_phase_next_continuation_tag_increments_correctly(db) -> None:
-    """After two pm_phase_next calls, CONTINUATION.md is tagged 'phase:3'."""
-    pm_init(db, project="myrepo")
-    pm_phase_next(db, project="myrepo")
-    pm_phase_next(db, project="myrepo")
-
-    cont = db.get(project="myrepo_pm", title="CONTINUATION.md")
-    assert cont is not None
-    assert "phase:3" in (cont["tags"] or ""), (
-        f"Expected 'phase:3' in tags, got: {cont['tags']!r}"
-    )
 
 
 # ── nexus-dsu: pm_unblock raises IndexError on out-of-range line ──────────────
@@ -539,7 +511,7 @@ def test_pm_reference_returns_empty_when_collection_does_not_exist(db) -> None:
 def test_pm_promote_happy_path_returns_t3_doc_id(db) -> None:
     """pm_promote fetches the T2 doc and writes it to T3, returning the doc ID."""
     pm_init(db, project="myrepo")
-    db.put("myrepo_pm", "CONTINUATION.md", "# Continuation\n\nPromote me.", tags="pm,context", ttl=None)
+    db.put("myrepo", "METHODOLOGY.md", "# Methodology\n\nPromote me.", tags="pm,context", ttl=None)
 
     mock_t3 = MagicMock()
     mock_t3.put.return_value = "abc123def456789a"
@@ -548,7 +520,7 @@ def test_pm_promote_happy_path_returns_t3_doc_id(db) -> None:
         db_t2=db,
         db_t3=mock_t3,
         project="myrepo",
-        title="CONTINUATION.md",
+        title="METHODOLOGY.md",
         collection="knowledge__pm__myrepo",
         ttl_days=0,
     )
@@ -557,7 +529,7 @@ def test_pm_promote_happy_path_returns_t3_doc_id(db) -> None:
     mock_t3.put.assert_called_once()
     call_kwargs = mock_t3.put.call_args.kwargs
     assert call_kwargs["collection"] == "knowledge__pm__myrepo"
-    assert call_kwargs["title"] == "CONTINUATION.md"
+    assert call_kwargs["title"] == "METHODOLOGY.md"
     assert "Promote me." in call_kwargs["content"]
     assert call_kwargs["store_type"] == "pm-promoted"
 
@@ -566,12 +538,12 @@ def test_pm_promote_missing_doc_raises(db) -> None:
     """pm_promote raises KeyError (or similar) when the T2 document is not found."""
     mock_t3 = MagicMock()
 
-    with pytest.raises((KeyError, ValueError, LookupError), match="not found|CONTINUATION"):
+    with pytest.raises((KeyError, ValueError, LookupError), match="not found|METHODOLOGY"):
         pm_promote(
             db_t2=db,
             db_t3=mock_t3,
             project="myrepo",
-            title="CONTINUATION.md",
+            title="METHODOLOGY.md",
             collection="knowledge__pm__myrepo",
             ttl_days=0,
         )
@@ -582,7 +554,7 @@ def test_pm_promote_missing_doc_raises(db) -> None:
 def test_pm_promote_ttl_translation_permanent(db) -> None:
     """T2 ttl=None (permanent) → T3 ttl_days=0, expires_at='' (permanent)."""
     pm_init(db, project="myrepo")
-    db.put("myrepo_pm", "CONTINUATION.md", "# Content", tags="pm", ttl=None)
+    db.put("myrepo", "METHODOLOGY.md", "# Content", tags="pm", ttl=None)
 
     mock_t3 = MagicMock()
     mock_t3.put.return_value = "someid"
@@ -591,7 +563,7 @@ def test_pm_promote_ttl_translation_permanent(db) -> None:
         db_t2=db,
         db_t3=mock_t3,
         project="myrepo",
-        title="CONTINUATION.md",
+        title="METHODOLOGY.md",
         collection="knowledge__pm__myrepo",
         ttl_days=0,
     )
@@ -604,7 +576,7 @@ def test_pm_promote_ttl_translation_permanent(db) -> None:
 def test_pm_promote_ttl_translation_with_ttl(db) -> None:
     """T2 doc with ttl_days=30 → T3 ttl_days=30, expires_at non-empty."""
     pm_init(db, project="myrepo")
-    db.put("myrepo_pm", "BLOCKERS.md", "- blocker one", tags="pm,blockers", ttl=30)
+    db.put("myrepo", "BLOCKERS.md", "- blocker one", tags="pm,blockers", ttl=30)
 
     mock_t3 = MagicMock()
     mock_t3.put.return_value = "someid"
@@ -725,25 +697,25 @@ def test_synthesize_haiku_trims_long_content() -> None:
 def test_pm_block_appends_newline_if_missing(db) -> None:
     """When existing BLOCKERS.md content doesn't end with newline, pm_block normalizes it."""
     # Directly write content without trailing newline
-    db.put("myrepo_pm", "BLOCKERS.md", "# Blockers", tags="pm,blockers", ttl=None)
+    db.put("myrepo", "BLOCKERS.md", "# Blockers", tags="pm,blockers", ttl=None)
 
     pm_block(db, project="myrepo", blocker="new issue")
 
-    row = db.get(project="myrepo_pm", title="BLOCKERS.md")
+    row = db.get(project="myrepo", title="BLOCKERS.md")
     assert row is not None
     content = row["content"]
     # The blocker should appear on its own line after a newline
     assert "# Blockers\n- new issue\n" in content
 
 
-def test_pm_unblock_missing_blockers_returns_early(db) -> None:
-    """pm_unblock returns without error when BLOCKERS.md doesn't exist."""
+def test_pm_unblock_no_bullets_returns_early(db) -> None:
+    """pm_unblock returns without error when BLOCKERS.md has no bullet items."""
     pm_init(db, project="myrepo")
-    # No BLOCKERS.md created — only standard docs exist (none is BLOCKERS.md)
+    # BLOCKERS.md exists from init but has no bullets
 
-    # Should not raise any exception
-    result = pm_unblock(db, project="myrepo", line=1)
-    assert result is None
+    # Should not raise any exception (no bullets = IndexError for any line)
+    with pytest.raises(IndexError):
+        pm_unblock(db, project="myrepo", line=1)
 
 
 # ── Edge cases: pm_restore ────────────────────────────────────────────────────
@@ -752,15 +724,15 @@ def test_pm_restore_warns_on_expired_docs(db) -> None:
     """pm_restore emits a structlog warning when some standard docs have expired before restore."""
     pm_init(db, project="myrepo")
 
-    # Delete all docs except CONTINUATION.md to simulate expiry
-    for entry in db.list_entries(project="myrepo_pm"):
-        if entry["title"] != "CONTINUATION.md":
-            db.delete("myrepo_pm", entry["title"])
+    # Delete all docs except METHODOLOGY.md to simulate expiry
+    for entry in db.list_entries(project="myrepo"):
+        if entry["title"] != "METHODOLOGY.md":
+            db.delete("myrepo", entry["title"])
 
     # Mark remaining as archived (so restore_project has something to restore)
-    row = db.get(project="myrepo_pm", title="CONTINUATION.md")
+    row = db.get(project="myrepo", title="METHODOLOGY.md")
     assert row is not None
-    db.put("myrepo_pm", "CONTINUATION.md", row["content"],
+    db.put("myrepo", "METHODOLOGY.md", row["content"],
            tags="pm-archived,phase:1,context", ttl=90)
 
     with patch.object(pm_mod, "_log") as mock_log:
@@ -793,8 +765,7 @@ def test_pm_reference_no_collection_returns_early(db) -> None:
 def test_pm_status_empty_blockers_list(db) -> None:
     """pm_status returns empty blockers list when BLOCKERS.md exists but has no bullet items."""
     pm_init(db, project="myrepo")
-    # Create BLOCKERS.md with header but no bullet items
-    db.put("myrepo_pm", "BLOCKERS.md", "# Blockers\n", tags="pm,blockers", ttl=None)
+    # BLOCKERS.md is created at init with header but no bullets
 
     status = pm_status(db, project="myrepo")
     assert status["blockers"] == []
@@ -836,7 +807,7 @@ def test_pm_status_handles_non_integer_phase_tag(db) -> None:
     """pm_status does not crash when a T2 row has tags='phase:abc' (non-integer)."""
     pm_init(db, project="myrepo")
     # Insert a doc with a non-integer phase tag
-    db.put("myrepo_pm", "bad-phase.md", "content", tags="pm,phase:abc", ttl=None)
+    db.put("myrepo", "bad-phase.md", "content", tags="pm,phase:abc", ttl=None)
 
     # Should not raise — gracefully ignores the bad tag
     status = pm_status(db, project="myrepo")
@@ -850,7 +821,7 @@ def test_pm_archive_handles_non_integer_phase_tag(db) -> None:
     """pm_archive does not crash when a T2 row has tags='phase:abc' (non-integer)."""
     pm_init(db, project="myrepo")
     # Insert a doc with a non-integer phase tag
-    db.put("myrepo_pm", "bad-phase.md", "content", tags="pm,phase:abc", ttl=None)
+    db.put("myrepo", "bad-phase.md", "content", tags="pm,phase:abc", ttl=None)
 
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}

@@ -83,5 +83,5 @@ The deep-analyst uses sequential thinking:
 - **Analysis Chain**: Use T1 scratch to track hypothesis progression during investigation:
   ```bash
   nx scratch put $'Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}' --tags "analysis,step-{N}"
-  nx scratch promote <id> --project {project}_active --title analysis-chain.md
+  nx scratch promote <id> --project {project} --title analysis-chain.md
   ```

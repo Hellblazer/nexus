@@ -138,23 +138,25 @@ def test_hook_and_cli_use_same_getsid_anchor(
 
 # ── AC3: SessionStart PM detection ────────────────────────────────────────────
 
-def test_session_start_pm_detection_injects_continuation(
+def test_session_start_pm_detection_injects_computed_resume(
     runner: CliRunner, fake_home: Path
 ) -> None:
-    """SessionStart injects CONTINUATION.md content for PM projects."""
+    """SessionStart injects computed PM resume for PM projects (detected via BLOCKERS.md with pm tag)."""
     mock_db = MagicMock()
-    # Simulate PM project detected
+    # Simulate PM project detected via BLOCKERS.md with pm tag
     mock_db.get.return_value = {
-        "content": "# Continuation\n\nPhase: 3\nNext: implement auth.",
-        "title": "CONTINUATION.md",
+        "content": "# Blockers\n",
+        "title": "BLOCKERS.md",
+        "tags": "pm,blockers",
     }
     # Simulate repo name detection
     _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_db))
     with patch("nexus.hooks._infer_repo", return_value="myrepo"):
         with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-            result = runner.invoke(main, ["hook", "session-start"])
+            with patch("nexus.pm.pm_resume", return_value="## PM Resume: myrepo\nPhase: 3"):
+                result = runner.invoke(main, ["hook", "session-start"])
 
-    assert "Phase: 3" in result.output or "implement auth" in result.output
+    assert "Phase: 3" in result.output or "myrepo" in result.output
 
 
 # ── AC4: SessionStart non-PM memory summary ───────────────────────────────────

@@ -106,7 +106,7 @@ A valid relay MUST have:
 
 ### Input Artifacts
 - nx store: decision-architect-auth-redesign
-- nx memory: Delos_active/phase2-auth.md
+- nx memory: Delos/phase2-auth.md
 - Files: src/main/java/auth/AuthController.java, src/main/java/auth/TokenValidator.java
 
 ### Deliverable
@@ -165,7 +165,7 @@ Before starting, validate relay contains:
 
 If validation fails:
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory: `nx memory get --project {project}_active --title ACTIVE_INDEX.md`
+2. Check nx T2 memory: `nx memory get --project {project} --title ACTIVE_INDEX.md`
 3. Query active beads: bd list --status=in_progress
 4. Flag incomplete relay in response to user
 5. Proceed with available context, documenting assumptions

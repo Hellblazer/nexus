@@ -27,19 +27,15 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
 3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
-### Project Context (Load Before Starting)
+### Project Context
 
-```bash
-# Load project management context (if PM initialized)
-nx pm resume 2>/dev/null || true        # inject phase/continuation context
-nx pm status 2>/dev/null || true        # current phase + active blockers
-```
+PM context is auto-injected by SessionStart and SubagentStart hooks.
 
 ### 1. Initial Assessment
 - Extract and catalog all key components, dependencies, and assumptions from the plan
@@ -70,7 +66,7 @@ nx pm status 2>/dev/null || true        # current phase + active blockers
   * Rollback plans
   * Documentation requirements
   * Resource requirements (human, computational, time)
-- Create a completeness checklist in Nexus memory and track coverage: `nx memory put "content" --project {project}_active --title "audit-checklist.md"`
+- Create a completeness checklist in Nexus memory and track coverage: `nx memory put "content" --project {project} --title "audit-checklist.md"`
 
 ### 5. Codebase Alignment (when applicable)
 - Analyze the current state of the codebase:
@@ -110,7 +106,7 @@ You will follow this systematic approach:
 
 1. **Decomposition Phase**
    - Break the plan into atomic components
-   - Create a dependency graph in Nexus memory: `nx memory put "content" --project {project}_active --title "audit-deps.md"`
+   - Create a dependency graph in Nexus memory: `nx memory put "content" --project {project} --title "audit-deps.md"`
    - Identify critical paths and potential bottlenecks
 
 2. **Validation Phase**
@@ -173,17 +169,17 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Validation Results**: Store via `echo "..." | nx store put - --collection knowledge --title "validation-plan-{plan-id}" --tags "audit"`
 - **Gap Analysis**: Include in response to upstream agent
 - **Recommended Changes**: Document in bead design field
-- **Audit Trail**: Store via `nx memory put "content" --project {project}_active --title "audit-{date}.md"`
+- **Audit Trail**: Store via `nx memory put "content" --project {project} --title "audit-{date}.md"`
 - **Audit Working Notes**: Track issues found during audit in T1 scratch:
   ```bash
   nx scratch put "Audit issue: {component} - {description}" --tags "audit,issue"
   # Promote all at end to T2 for audit trail
-  nx scratch promote <id> --project {project}_active --title audit-notes-{date}.md
+  nx scratch promote <id> --project {project} --title audit-notes-{date}.md
   ```
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **Nexus memory**: `nx memory put "content" --project {project}_active --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
+- **Nexus memory**: `nx memory put "content" --project {project} --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
 - **Bead Description**: Include `Context: nx` line
 
 ### Completion Protocol
@@ -198,7 +194,7 @@ Store using these naming conventions:
 5. **Generate Response**: Only after all above steps complete, generate final audit response
 
 **Verification Checklist**:
-- [ ] Nexus memory audit file written: `nx memory get --project {project}_active --title "audit-{date}.md"` to verify
+- [ ] Nexus memory audit file written: `nx memory get --project {project} --title "audit-{date}.md"` to verify
 - [ ] Nexus knowledge validation document created: `nx search "validation plan {plan-id}" --corpus knowledge --n 1` to verify
 - [ ] Bead design field updated with recommendations (use bd show <id> when updating plan beads)
 - [ ] All data persisted before composing final response
@@ -206,7 +202,7 @@ Store using these naming conventions:
 **If Verification Fails** (partial persistence):
 1. **Retry once**: Attempt failed write again
 2. **Document partial state**: Note which writes succeeded/failed in response
-3. **Persist recovery notes**: Write failure details to Nexus memory as `nx memory put "failure details" --project {project}_active --title "persistence-failure-{date}.md"`
+3. **Persist recovery notes**: Write failure details to Nexus memory as `nx memory put "failure details" --project {project} --title "persistence-failure-{date}.md"`
 4. **Continue with response**: Partial data is better than no data - include what succeeded
 
 Example: If bead update fails but Nexus memory succeeds, note in response: "Audit persisted to Nexus memory under project {project} title audit-{date}.md. Bead update failed - manual update needed with: bd update {id} --design 'recommendations'"

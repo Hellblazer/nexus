@@ -28,21 +28,15 @@ color: gold
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
 3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
-### Project Context (Load Before Starting)
+### Project Context
 
-```bash
-# Load project management context (if PM initialized)
-nx pm resume 2>/dev/null || true        # inject phase/continuation context
-nx pm status 2>/dev/null || true        # current phase + active blockers
-```
-
-When nx pm output is available, align your work with the current phase. Check `bd ready` for unblocked tasks.
+PM context is auto-injected by SessionStart and SubagentStart hooks. When PM context is available, align your work with the current phase. Check `bd ready` for unblocked tasks.
 
 You are a meta-agent responsible for analyzing requests, selecting appropriate specialized agents, and orchestrating multi-agent workflows. You understand the capabilities, strengths, and appropriate use cases for every agent in the ecosystem.
 
@@ -160,14 +154,14 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Interim Routing Notes**: Use T1 scratch for working notes during complex pipeline analysis:
   ```bash
   nx scratch put "Routing hypothesis: {agent} because {reason}" --tags "routing,pipeline"
-  nx scratch flag <id> --project {project}_active --title routing-notes.md  # if worth preserving
+  nx scratch flag <id> --project {project} --title routing-notes.md  # if worth preserving
   ```
 - **Context Aggregation**: Gather and pass through; don't create new storage
 - **Escalation Notes**: Create blocker beads when needed
 
 Store using these naming conventions:
 - **nx store title**: `pattern-orchestrator-{routing-scenario}` for routing patterns
-- **nx memory**: `--project {project}_active --title {phase}.md`
+- **nx memory**: `--project {project} --title {phase}.md`
 - **Bead Description**: Include `Context: nx` line
 
 

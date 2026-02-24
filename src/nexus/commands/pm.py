@@ -48,13 +48,13 @@ def init_cmd(project: str | None) -> None:
     proj = project or _infer_project()
     with T2Database(_default_db_path()) as db:
         pm_init(db, project=proj)
-    click.echo(f"Initialised PM for project '{proj}' (5 standard docs created).")
+    click.echo(f"Initialised PM for project '{proj}' (4 standard docs created).")
 
 
 @pm.command("resume")
 @click.option("--project", default=None, help="Project name (defaults to repo name)")
 def resume_cmd(project: str | None) -> None:
-    """Print CONTINUATION.md content for session injection (capped at 2000 chars)."""
+    """Print computed PM continuation (phase, blockers, recent activity; capped at 2000 chars)."""
     proj = project or _infer_project()
     with T2Database(_default_db_path()) as db:
         content = pm_resume(db, project=proj)
@@ -245,3 +245,11 @@ def expire_cmd() -> None:
     with T2Database(_default_db_path()) as db:
         count = db.expire()
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
+
+
+@pm.command("migrate")
+def migrate_cmd() -> None:
+    """Migrate legacy *_pm namespaces to bare project names."""
+    with T2Database(_default_db_path()) as db:
+        count = db.migrate_pm_namespaces()
+    click.echo(f"Migrated {count} {'entry' if count == 1 else 'entries'}.")

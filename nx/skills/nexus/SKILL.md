@@ -35,17 +35,17 @@ nx search "query" --where store_type=pm-archive  # metadata filter
 ## Memory (T2 — persistent across sessions)
 
 ```bash
-nx memory put "content" --project {repo}_active --title title.md
-nx memory put - --project {repo}_active --title title.md   # from stdin
-nx memory get --project {repo}_active --title title.md
+nx memory put "content" --project {repo} --title title.md
+nx memory put - --project {repo} --title title.md   # from stdin
+nx memory get --project {repo} --title title.md
 nx memory search "query"
-nx memory search "query" --project {repo}_active
-nx memory list --project {repo}_active
+nx memory search "query" --project {repo}
+nx memory list --project {repo}
 nx memory expire                           # remove TTL-expired entries
 nx memory promote <id> --collection knowledge  # push to T3
 ```
 
-**Project naming**: use `{repo}_active` for working notes (e.g., `nexus_active`), `{repo}_pm` for PM documents.
+**Project naming**: use bare `{repo}` for all project memory (e.g., `nexus`). No `_active` or `_pm` suffixes.
 
 ## Knowledge store (T3 — permanent, cloud)
 
@@ -69,7 +69,7 @@ nx scratch list
 nx scratch get <id>
 nx scratch flag <id>                       # mark for auto-flush to T2 at session end
 nx scratch unflag <id>
-nx scratch promote <id> --project {repo}_active --title findings.md
+nx scratch promote <id> --project {repo} --title findings.md
 nx scratch clear
 ```
 
@@ -88,7 +88,7 @@ nx index md  <path> --corpus notes
 
 ```bash
 nx pm init                                 # initialise for current git repo
-nx pm resume                               # inject CONTINUATION.md into session context
+nx pm resume                               # inject continuation context (auto-called by hooks)
 nx pm status                               # phase, agent, blockers
 nx pm block "waiting on API approval"
 nx pm unblock 1

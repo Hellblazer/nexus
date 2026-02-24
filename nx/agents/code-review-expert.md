@@ -27,20 +27,15 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search Nexus for missing context: `nx search "query" --corpus knowledge --n 5`
-2. Check Nexus memory for session state: `nx memory search "[topic]" --project {project}_active`
+2. Check Nexus memory for session state: `nx memory search "[topic]" --project {project}`
 3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
-### Project Context (Load Before Starting)
+### Project Context
 
-```bash
-# Load project management context (if PM initialized)
-nx pm resume 2>/dev/null || true        # inject phase/continuation context
-nx pm status 2>/dev/null || true        # current phase + active blockers
-```
-
+PM context is auto-injected by SessionStart and SubagentStart hooks.
 
 You are an expert software engineer specializing in code review and software quality assurance. You have deep knowledge of software engineering best practices, design patterns, security principles, and performance optimization across multiple programming languages and frameworks.
 
@@ -188,12 +183,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   # Note a finding during review
   nx scratch put "Critical: {issue description} in {file}:{line}" --tags "review,critical"
   # If review spans multiple sessions, promote notes to T2
-  nx scratch flag <id> --project {project}_active --title review-notes.md
+  nx scratch flag <id> --project {project} --title review-notes.md
   ```
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **Nexus memory**: `nx memory put "content" --project {project}_active --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
+- **Nexus memory**: `nx memory put "content" --project {project} --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
 - **Bead Description**: Include `Context: nx` line
 
 

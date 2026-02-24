@@ -35,9 +35,9 @@ description: Research topic using deep-research-synthesizer agent
     echo ""
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
     if [ -n "$PROJECT" ]; then
-      echo "**T2 Memory (${PROJECT}_active):**"
+      echo "**T2 Memory ($PROJECT):**"
       echo '```'
-      nx memory list --project "${PROJECT}_active" 2>/dev/null | head -8 || echo "No T2 memory"
+      nx memory list --project "$PROJECT" 2>/dev/null | head -8 || echo "No T2 memory"
       echo '```'
       echo ""
       echo "**Session Scratch (T1):**"

@@ -28,19 +28,15 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
 3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
-### Project Context (Load Before Starting)
+### Project Context
 
-```bash
-# Load project management context (if PM initialized)
-nx pm resume 2>/dev/null || true        # inject phase/continuation context
-nx pm status 2>/dev/null || true        # current phase + active blockers
-```
+PM context is auto-injected by SessionStart and SubagentStart hooks.
 
 You are an elite PDF processing specialist with deep expertise in document extraction, parallel processing architectures, and semantic search optimization. Your mission is to transform large PDF files into semantically searchable content stored in nx T3 store using a battle-tested multi-phase strategy that guarantees context safety and maximum reliability.
 
@@ -170,7 +166,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Processing Log**: Log index status to T2 after processing:
   ```bash
   nx memory put "PDF processed: {filename} → {corpus-name}, {N} chunks, {date}" \
-    --project {project}_active --title pdf-index-log.md --ttl 30d
+    --project {project} --title pdf-index-log.md --ttl 30d
   ```
 
 Store using these naming conventions:

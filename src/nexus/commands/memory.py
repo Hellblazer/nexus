@@ -19,7 +19,7 @@ def memory() -> None:
 
 @memory.command("put")
 @click.argument("content")
-@click.option("--project", "-p", required=True, help="Project namespace (e.g. BFDB_active)")
+@click.option("--project", "-p", required=True, help="Project namespace (e.g. BFDB)")
 @click.option("--title", "-t", required=True, help="Entry title/filename")
 @click.option("--tags", default="", help="Comma-separated tags")
 @click.option("--ttl", default="30d", show_default=True, help="TTL: Nd, Nw, or permanent")

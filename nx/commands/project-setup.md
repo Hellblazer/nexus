@@ -73,10 +73,10 @@ Complete PM infrastructure: nx pm initialized, T2 documents created (overview, c
 ### Quality Criteria
 - [ ] `nx pm init` completed; `nx pm status` returns project info
 - [ ] T2 documents created: overview, continuation, at least one phase doc
-- [ ] `nx pm resume` injects actionable session context
+- [ ] `nx pm status` returns actionable project context
 - [ ] Epic bead created for the overall project
 - [ ] Phase beads created with inter-phase dependencies
 - [ ] Ready for strategic-planner to begin implementation planning
 
-**IMPORTANT**: After setup completes, run `nx pm resume` to verify the infrastructure loads correctly.
+**IMPORTANT**: After setup completes, run `nx pm status` to verify the infrastructure loads correctly.
 ```

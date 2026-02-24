@@ -80,10 +80,10 @@ Nexus
 PRAGMA journal_mode=WAL;
 
 -- Main table: structured metadata with B-tree indexes
--- project + title are never tokenized (FTS5 would mangle 'BFDB_active' → 'BFDB' + 'active')
+-- project + title are never tokenized (FTS5 would mangle 'BFDB' into substrings)
 CREATE TABLE memory (
     id        INTEGER PRIMARY KEY,
-    project   TEXT    NOT NULL,          -- namespace, e.g. 'BFDB_active'
+    project   TEXT    NOT NULL,          -- namespace, e.g. 'BFDB'
     title     TEXT    NOT NULL,          -- filename/key, e.g. 'active-context.md'
     session   TEXT,                      -- Claude Code session ID (auto-captured)
     agent     TEXT,                      -- agent name (auto-captured)
@@ -469,15 +469,15 @@ T1 in-memory ChromaDB, cleared at session end:
 ```bash
 nx scratch put "content" --tags "hypothesis,phase1"
 nx scratch put "content" --tags "finding" --persist   # flag for auto-flush to T2 on SessionEnd (auto-destination)
-nx scratch put "content" --tags "finding" --persist --project BFDB_active --title findings.md   # explicit T2 destination
+nx scratch put "content" --tags "finding" --persist --project BFDB --title findings.md   # explicit T2 destination
 nx scratch get <id>
 nx scratch search "query"
 nx scratch list
 nx scratch flag <id>                                          # mark for SessionEnd flush; destination: project=scratch_sessions, title={session_id}_{id}
-nx scratch flag <id> --project BFDB_active --title findings.md  # explicit T2 destination
+nx scratch flag <id> --project BFDB --title findings.md  # explicit T2 destination
 nx scratch unflag <id>                     # unmark (clears destination)
 nx scratch clear                           # explicit clear; also happens automatically on SessionEnd
-nx scratch promote <id> --project BFDB_active --title findings.md   # → T2 immediately (manual)
+nx scratch promote <id> --project BFDB --title findings.md   # → T2 immediately (manual)
 ```
 
 - Uses `DefaultEmbeddingFunction` (local ONNX, no API call) — fast, no network dependency
@@ -490,22 +490,22 @@ nx scratch promote <id> --project BFDB_active --title findings.md   # → T2 imm
 
 ```bash
 # Write — named file within a project (maps to memory bank's project+filename key)
-nx memory put "content" --project BFDB_active --title active-context.md --tags "phase1" --ttl 30d
-echo "# Findings..." | nx memory put - --project BFDB_active --title findings.md  # stdin (requires --title)
+nx memory put "content" --project BFDB --title active-context.md --tags "phase1" --ttl 30d
+echo "# Findings..." | nx memory put - --project BFDB --title findings.md  # stdin (requires --title)
 
 # Read by name (primary access pattern — deterministic)
-nx memory get --project BFDB_active --title active-context.md
+nx memory get --project BFDB --title active-context.md
 
 # Read by ID (secondary)
 nx memory get <id>
 
 # Keyword search via FTS5
 nx memory search "query"
-nx memory search "memory leak" --project Prime-Mover_active
+nx memory search "memory leak" --project Prime-Mover
 
 # List entries
 nx memory list --agent codebase-analyzer
-nx memory list --project BFDB_active
+nx memory list --project BFDB
 
 # Promote to T3 for semantic search
 nx memory promote <id> --collection knowledge --tags "architecture"
@@ -522,7 +522,7 @@ nx memory expire          # clean up TTL-expired entries
 
 ## Project Management Infrastructure (`nx pm`)
 
-`nx pm` provides first-class support for the structured `.pm/` project management infrastructure used by Claude Code agents. Active PM documents live in T2 (`nx memory`), under the `{repo}_pm` project namespace — no new storage tier for day-to-day use. However, three commands touch T3 (ChromaDB cloud): `nx pm archive` (writes synthesis chunk), `nx pm reference` (queries archived syntheses), and `nx pm promote` (elevates PM docs to semantic search). T3 access requires `CHROMA_API_KEY` and a live network connection; the T2-only commands (`init`, `resume`, `status`, `phase`, `search`, `expire`, `restore`) work fully offline.
+`nx pm` provides first-class support for the structured `.pm/` project management infrastructure used by Claude Code agents. Active PM documents live in T2 (`nx memory`), under the bare `{repo}` project namespace (tagged with `pm`) — no new storage tier for day-to-day use. However, three commands touch T3 (ChromaDB cloud): `nx pm archive` (writes synthesis chunk), `nx pm reference` (queries archived syntheses), and `nx pm promote` (elevates PM docs to semantic search). T3 access requires `CHROMA_API_KEY` and a live network connection; the T2-only commands (`init`, `resume`, `status`, `phase`, `search`, `expire`, `restore`) work fully offline.
 
 ### Why T2 is the natural fit
 
@@ -538,15 +538,14 @@ T1 (in-memory) is not used — PM docs must survive restarts. T3 is opt-in via `
 
 ### Convention
 
-PM projects use the `{repo}_pm` namespace in T2. Tags follow the pattern `pm,phase:N,<doc-type>` for filtered listing.
+PM projects use the bare `{repo}` namespace in T2 (tagged with `pm`). Tags follow the pattern `pm,phase:N,<doc-type>` for filtered listing.
 
 | Old `.pm/` file | T2 equivalent |
 |---|---|
-| `.pm/CONTINUATION.md` | `nx memory get --project {repo}_pm --title CONTINUATION.md` |
-| `.pm/METHODOLOGY.md` | `nx memory get --project {repo}_pm --title METHODOLOGY.md` |
-| `.pm/AGENT_INSTRUCTIONS.md` | `nx memory get --project {repo}_pm --title AGENT_INSTRUCTIONS.md` |
-| `.pm/CONTEXT_PROTOCOL.md` | `nx memory get --project {repo}_pm --title CONTEXT_PROTOCOL.md` |
-| `.pm/phases/phase-1/context.md` | `nx memory get --project {repo}_pm --title phases/phase-1/context.md` |
+| `.pm/METHODOLOGY.md` | `nx memory get --project {repo} --title METHODOLOGY.md` |
+| `.pm/BLOCKERS.md` | `nx memory get --project {repo} --title BLOCKERS.md` |
+| `.pm/CONTEXT_PROTOCOL.md` | `nx memory get --project {repo} --title CONTEXT_PROTOCOL.md` |
+| `.pm/phases/phase-1/context.md` | `nx memory get --project {repo} --title phases/phase-1/context.md` |
 
 ### Commands
 
@@ -557,10 +556,9 @@ PM projects use the `{repo}_pm` namespace in T2. Tags follow the pattern `pm,pha
 # If auto-detection is ambiguous (e.g. monorepo), --project must be supplied explicitly.
 #
 # Documents created (all: ttl=permanent, tags=pm):
-#   CONTINUATION.md          — "# Continuation\n\nProject: {repo}\nCreated: {date}\n\n## Current State\n(Fill in)\n\n## Next Action\n(Fill in)"
 #   METHODOLOGY.md           — engineering methodology and workflow (standard content embedded in binary)
-#   AGENT_INSTRUCTIONS.md    — "# Agent Instructions\n\nRead CONTINUATION.md first. Use nx pm commands for all PM operations. ..."
-#   CONTEXT_PROTOCOL.md      — "# Context Protocol\n\n## Storage Hierarchy\n1. Beads — task tracking ..."
+#   BLOCKERS.md              — "# Blockers\n" (empty blocker list; also used for PM detection)
+#   CONTEXT_PROTOCOL.md      — "# Context Protocol\n\nContext management rules and relay format."
 #   phases/phase-1/context.md — "# Phase 1 Context\n\n(Describe phase goals and current state here.)" (tags=pm,phase:1,context)
 # Templates are embedded in the nx binary; no external template files are required.
 #
@@ -568,13 +566,13 @@ PM projects use the `{repo}_pm` namespace in T2. Tags follow the pattern `pm,pha
 # `nx pm phase next` works immediately after init without returning NULL.
 nx pm init [--project myrepo]
 
-# Session resumption — outputs CONTINUATION.md content for session injection
+# Session resumption — outputs computed PM resume (phase, blockers, recent activity)
 nx pm resume [--project myrepo]
 
 # Human-readable status: current phase, last-updated agent, open blockers
 # - Current phase: MAX(phase tag integer) across pm-tagged docs
 # - Last-updated agent: agent field on most recently written T2 entry in the project
-# - Open blockers: bullet list from {repo}_pm/BLOCKERS.md in T2
+# - Open blockers: bullet list from {repo}/BLOCKERS.md in T2
 #     missing BLOCKERS.md → "none" (treat absent as zero blockers, same as empty)
 nx pm status [--project myrepo]
 
@@ -583,20 +581,18 @@ nx pm block "waiting on ChromaDB cloud credentials"
 nx pm unblock 1              # remove blocker by line number (as shown by nx pm status)
 
 # Phase management
-nx memory get --project {repo}_pm --title phases/phase-2/context.md  # retrieve phase-2 context doc
+nx memory get --project {repo} --title phases/phase-2/context.md  # retrieve phase-2 context doc
 nx pm phase next                       # transition to next phase:
                                        #   1. reads current N as MAX(phase tag integer) across all docs tagged phase:N in the project
                                        #   2. creates new T2 entry title=phases/phase-{N+1}/context.md,
                                        #      tags=pm,phase:{N+1},context, ttl=permanent
                                        #      initial content: "# Phase {N+1} Context\n\n(Describe phase goals and current state here.)\n\nPrevious phase: {N}"
-                                       #   3. updates CONTINUATION.md to reference phase N+1
                                        #   (does NOT mass-update tags on existing docs)
 
 # FTS5 keyword search scoped to PM docs (no API call)
-# Without --project: searches all T2 entries WHERE project GLOB '*_pm'
-#   (PM namespaces only — does not bleed into BFDB_active or other non-PM projects)
-#   Note: GLOB not LIKE — SQLite LIKE's `_` matches any single char; GLOB's `_` is literal.
-# With --project: adds AND project = '{repo}_pm'
+# Without --project: searches all T2 entries tagged with 'pm'
+#   (PM entries only — does not bleed into non-PM entries in the same project)
+# With --project: adds AND project = '{repo}'
 nx pm search "what did we decide about caching"
 nx pm search "auth" --project myrepo   # scoped to one project
 
@@ -609,12 +605,12 @@ nx pm expire                           # remove TTL-expired phase docs
 
 ### SessionStart hook — PM-aware behavior
 
-The canonical SessionStart hook definition is in the "Agent integration installers" section under Management Commands. Summary: PM detection runs a T2 SQL query (not a filesystem check); if `{repo}_pm/CONTINUATION.md` exists in T2, its content is injected (2000 char cap); otherwise the generic 10-entry memory summary is printed.
+The canonical SessionStart hook definition is in the "Agent integration installers" section under Management Commands. Summary: PM detection queries T2 for entries in the `{repo}` namespace tagged with `pm` (specifically, checks for BLOCKERS.md); if found, computed `pm_resume` output is injected (2000 char cap); otherwise the generic 10-entry memory summary is printed.
 
 ### Slash commands
 
 ```
-/nx:pm resume          — inject CONTINUATION.md into session context
+/nx:pm resume          — inject computed PM resume into session context
 /nx:pm status          — show phase, blockers, last-agent summary
 /nx:pm phase next      — advance to next phase
 /nx:pm search <query>  — FTS5 search across PM docs
@@ -636,14 +632,14 @@ Active ──── nx pm archive ──── Archived (T2, 90d decay) + Synthe
                                            └── Synthesis only (T3, permanent)
 ```
 
-**Active**: T2 `{repo}_pm` namespace, permanent TTL — hot path, fully editable.
+**Active**: T2 `{repo}` namespace (tagged with `pm`), permanent TTL — hot path, fully editable.
 
 **Archive**: `nx pm archive` is a two-phase operation (T2 SQLite and T3 ChromaDB cloud have no shared transaction coordinator — true atomicity is impossible):
 
-1. **Synthesize → T3 first**: Haiku reads all PM docs from T2. Selection: always include the 5 standard init docs (CONTINUATION.md, METHODOLOGY.md, AGENT_INSTRUCTIONS.md, CONTEXT_PROTOCOL.md, phases/phase-1/context.md), then fill remaining capacity with other docs sorted by most-recently-written. Overall cap: 100 docs or 100K total characters (whichever is smaller). Produces a structured synthesis chunk stored in `knowledge__pm__{repo}`. The T3 `title` field is set to `"Archive: {repo}"`.
+1. **Synthesize → T3 first**: Haiku reads all PM docs from T2. Selection: always include the 4 standard init docs (METHODOLOGY.md, BLOCKERS.md, CONTEXT_PROTOCOL.md, phases/phase-1/context.md), then fill remaining capacity with other docs sorted by most-recently-written. Overall cap: 100 docs or 100K total characters (whichever is smaller). Produces a structured synthesis chunk stored in `knowledge__pm__{repo}`. The T3 `title` field is set to `"Archive: {repo}"`.
    - If Haiku synthesis **fails** (API error, rate limit, content policy): the archive is aborted. T2 is left untouched. The error is printed; the user can retry. This is the safe failure mode — raw PM docs remain accessible.
    - If T3 **write fails** after synthesis: same abort behavior.
-2. **Decay T2 second**: Only after T3 write succeeds. Runs as a single SQLite transaction: `UPDATE memory SET ttl = {NX_PM_ARCHIVE_TTL}, tags = replace(tags, 'pm,', 'pm-archived,') WHERE project = '{repo}_pm'`. If this T2 update fails after T3 succeeds: the T3 chunk is orphaned but not harmful — a retry of `nx pm archive` checks for an existing T3 chunk with `title = "Archive: {repo}"` before synthesizing. Idempotency check: query T3 for `title="Archive: {repo}"` ordered by `indexed_at DESC LIMIT 1`; compare `pm_doc_count` and `pm_latest_timestamp` metadata fields against current T2 state (count of active PM docs and MAX(timestamp) of those docs). If they match, the existing synthesis is current — skip re-synthesis regardless of age and proceed directly to the T2 decay step. A time-based window (e.g., "skip if written within 5 minutes") is insufficient because a user investigating a crash for longer than the window would trigger duplicate synthesis accumulation. The T3 synthesis chunk must carry `pm_doc_count` (int) and `pm_latest_timestamp` (ISO 8601 string) metadata fields for this check.
+2. **Decay T2 second**: Only after T3 write succeeds. Runs as a single SQLite transaction: `UPDATE memory SET ttl = {NX_PM_ARCHIVE_TTL}, tags = replace(tags, 'pm,', 'pm-archived,') WHERE project = '{repo}' AND tags LIKE '%pm%'`. If this T2 update fails after T3 succeeds: the T3 chunk is orphaned but not harmful — a retry of `nx pm archive` checks for an existing T3 chunk with `title = "Archive: {repo}"` before synthesizing. Idempotency check: query T3 for `title="Archive: {repo}"` ordered by `indexed_at DESC LIMIT 1`; compare `pm_doc_count` and `pm_latest_timestamp` metadata fields against current T2 state (count of active PM docs and MAX(timestamp) of those docs). If they match, the existing synthesis is current — skip re-synthesis regardless of age and proceed directly to the T2 decay step. A time-based window (e.g., "skip if written within 5 minutes") is insufficient because a user investigating a crash for longer than the window would trigger duplicate synthesis accumulation. The T3 synthesis chunk must carry `pm_doc_count` (int) and `pm_latest_timestamp` (ISO 8601 string) metadata fields for this check.
 
 `NX_PM_ARCHIVE_TTL` accepts an **integer number of days** (e.g. `90`). Default: `90`. Same unit as the T2 `ttl` column.
 
@@ -652,7 +648,8 @@ Active ──── nx pm archive ──── Archived (T2, 90d decay) + Synthe
 UPDATE memory
    SET ttl = NULL,
        tags = replace(tags, 'pm-archived,', 'pm,')
- WHERE project = '{repo}_pm'
+ WHERE project = '{repo}'
+   AND tags LIKE '%pm-archived%'
 ```
 - Does **not** delete the T3 synthesis chunk (it remains as a reference point).
 - If some but not all docs have already TTL-expired (partial decay): restores surviving docs; prints a warning listing the expired titles. Does not abort.
@@ -689,7 +686,7 @@ Target size: **400–800 tokens, hard cap 1200 tokens** — aim for one ChromaDB
 
 T3 metadata: `store_type="pm-archive"`, `project="{repo}"`, `status="completed|paused|cancelled"`, `archived_at` (ISO 8601, same as `indexed_at`), `phase_count` (int), `ttl_days=0` (permanent).
 
-Template variable `{started_at}` in the Haiku prompt is computed as `MIN(timestamp) WHERE project = '{repo}_pm'` from T2 — the timestamp of the oldest PM doc in the project.
+Template variable `{started_at}` in the Haiku prompt is computed as `MIN(timestamp) WHERE project = '{repo}' AND tags LIKE '%pm%'` from T2 — the timestamp of the oldest PM doc in the project.
 
 #### Archive and restore commands
 
@@ -728,7 +725,7 @@ The synthesis-on-archive pattern distills signal from noise: one chunk per compl
 
 ### What changes for the `project-management-setup` agent
 
-The agent calls `nx pm init` instead of writing `.pm/*.md` files directly. The `.pm/` directory is no longer required on disk. Agents that previously read `cat .pm/CONTINUATION.md` use `nx pm resume` instead (or the SessionStart hook injects it automatically). The `/pm-archive`, `/pm-restore`, and `/pm-close` slash commands map directly to `nx pm archive`, `nx pm restore`, and `nx pm close`.
+The agent calls `nx pm init` instead of writing `.pm/*.md` files directly. The `.pm/` directory is no longer required on disk. Agents use `nx pm resume` for session resumption (or the SessionStart hook injects it automatically). The `/pm-archive`, `/pm-restore`, and `/pm-close` slash commands map directly to `nx pm archive`, `nx pm restore`, and `nx pm close`.
 
 ## Agent Memory (`nx store`)
 
@@ -843,15 +840,15 @@ nx install codex            # future integrations
 
 PM detection is a T2 SQL query, not a filesystem check:
 ```sql
-SELECT 1 FROM memory WHERE project = '{repo}_pm' AND title = 'CONTINUATION.md' LIMIT 1
+SELECT 1 FROM memory WHERE project = '{repo}' AND title = 'BLOCKERS.md' AND tags LIKE '%pm%' LIMIT 1
 ```
 where `{repo}` is auto-detected from `git rev-parse --show-toplevel | xargs basename`.
 
 ```
 Nexus ready. T1 scratch initialized (session: {session_id}).
 
-# If {repo}_pm CONTINUATION.md found in T2 (PM project):
-{CONTINUATION.md content, capped at 2000 chars}
+# If {repo} has PM docs (BLOCKERS.md with pm tag found in T2):
+{computed pm_resume output: phase, blockers, recent activity — capped at 2000 chars}
 
 # Otherwise (non-PM project):
 Recent memory ({project}, last 10 entries):
@@ -864,7 +861,7 @@ Recent memory ({project}, last 10 entries):
 
 - Claude Code **plugin** with slash commands (Arcaneum plugin structure: `.claude-plugin/plugin.json` + `commands/*.md`)
 - **SKILL.md** for agents to understand how to use Nexus (mgrep pattern)
-- **SessionStart hook**: initialize T1 scratch; inject CONTINUATION.md if PM project detected (capped at 2000 chars); otherwise print T2 memory summary (capped at 10 entries × 500 chars)
+- **SessionStart hook**: initialize T1 scratch; inject computed `pm_resume` if PM project detected via BLOCKERS.md (capped at 2000 chars); otherwise print T2 memory summary (capped at 10 entries × 500 chars)
 - **SessionEnd hook**: flush T1 scratch to T2 if flagged, expire old T2 entries
 
 ### Slash commands
@@ -880,7 +877,7 @@ Recent memory ({project}, last 10 entries):
 /nx:index pdf <path>            — index PDFs
 /nx:scratch <content>           — write to T1 (session only)
 /nx:doctor                      — health check
-/nx:pm resume                   — inject PM CONTINUATION.md into session context
+/nx:pm resume                   — inject computed PM resume into session context
 /nx:pm status                   — show current phase, last-agent, open blockers
 /nx:pm phase next               — advance to next project phase
 /nx:pm search <query>           — FTS5 keyword search across PM docs

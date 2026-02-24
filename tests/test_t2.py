@@ -194,3 +194,80 @@ def test_t2_delete_removes_from_fts_index(db: T2Database) -> None:
     # FTS should no longer find it
     results = db.search("xyzzy")
     assert len(results) == 0
+
+
+# ── search_by_tag ────────────────────────────────────────────────────────────
+
+def test_t2_search_by_tag(db: T2Database) -> None:
+    """search_by_tag() returns only entries whose tags contain the specified tag."""
+    db.put(project="nexus", title="phase1.md", content="authentication design", tags="pm,phase:1")
+    db.put(project="nexus", title="notes.md", content="authentication notes", tags="notes")
+    db.put(project="arcaneum", title="arch.md", content="authentication architecture", tags="pm,arch")
+
+    results = db.search_by_tag("authentication", "pm")
+    assert len(results) == 2
+    projects = {r["project"] for r in results}
+    assert projects == {"nexus", "arcaneum"}
+
+
+def test_t2_search_by_tag_boundary_matching(db: T2Database) -> None:
+    """search_by_tag() uses boundary matching — 'pm' does not match 'pm-archived'."""
+    db.put(project="myrepo", title="active.md", content="active doc", tags="pm,context")
+    db.put(project="myrepo", title="archived.md", content="archived doc", tags="pm-archived,context")
+
+    results = db.search_by_tag("doc", "pm")
+    assert len(results) == 1
+    assert results[0]["title"] == "active.md"
+
+
+def test_t2_search_by_tag_no_match(db: T2Database) -> None:
+    """search_by_tag() returns empty list when no entries match the tag."""
+    db.put(project="proj", title="notes.md", content="some content", tags="notes")
+
+    results = db.search_by_tag("content", "pm")
+    assert results == []
+
+
+# ── migrate_pm_namespaces ────────────────────────────────────────────────────
+
+def test_t2_migrate_pm_namespaces(db: T2Database) -> None:
+    """migrate_pm_namespaces() renames *_pm projects to bare names for pm-tagged entries."""
+    db.put(project="nexus_pm", title="phase1.md", content="pm content", tags="pm,phase:1")
+    db.put(project="nexus_pm", title="arch.md", content="pm arch", tags="pm,arch")
+    db.put(project="nexus_active", title="notes.md", content="active notes", tags="notes")
+
+    count = db.migrate_pm_namespaces()
+    assert count == 2
+
+    # Verify migration
+    assert db.get(project="nexus", title="phase1.md") is not None
+    assert db.get(project="nexus", title="arch.md") is not None
+    # Non-pm entries should be untouched
+    assert db.get(project="nexus_active", title="notes.md") is not None
+
+
+def test_t2_migrate_pm_namespaces_skips_non_pm_tags(db: T2Database) -> None:
+    """migrate_pm_namespaces() only migrates entries with 'pm' tag."""
+    db.put(project="nexus_pm", title="notes.md", content="not pm tagged", tags="notes")
+    db.put(project="nexus_pm", title="pm.md", content="pm tagged", tags="pm")
+
+    count = db.migrate_pm_namespaces()
+    assert count == 1
+
+    # Non-pm-tagged entry stays in old namespace
+    assert db.get(project="nexus_pm", title="notes.md") is not None
+    # PM-tagged entry was migrated
+    assert db.get(project="nexus", title="pm.md") is not None
+
+
+def test_t2_migrate_pm_namespaces_idempotent(db: T2Database) -> None:
+    """migrate_pm_namespaces() is idempotent — running twice doesn't double-migrate."""
+    db.put(project="nexus_pm", title="phase1.md", content="pm content", tags="pm,phase:1")
+
+    count1 = db.migrate_pm_namespaces()
+    assert count1 == 1
+
+    count2 = db.migrate_pm_namespaces()
+    assert count2 == 0
+
+    assert db.get(project="nexus", title="phase1.md") is not None

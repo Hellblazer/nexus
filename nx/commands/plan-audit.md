@@ -23,7 +23,7 @@ description: Audit a plan using plan-auditor agent
 
     echo "### Continuation Context"
     echo '```'
-    nx pm resume 2>&1 | head -40 || echo "No continuation context available"
+    nx pm status 2>&1 | head -40 || echo "No PM context available"
     echo '```'
     echo ""
   else
@@ -66,7 +66,7 @@ Use the **Task tool** to delegate to plan-auditor:
 ### Plan to Validate
 $ARGUMENTS
 
-[Include full plan from strategic-planner or output of: nx pm resume]
+[Include full plan from strategic-planner or output of: nx pm status]
 
 ### Deliverable
 Validation report with go/no-go decision

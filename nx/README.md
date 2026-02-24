@@ -122,8 +122,6 @@ Defined in `registry.yaml`:
 - `/project-setup` → project-management-setup
 - `/substantive-critique` → substantive-critic
 
-**Session commands**: `/session-save`, `/session-load`, `/session-list`, `/session-delete`
-
 **PM commands**: `/pm-new`, `/pm-status`, `/pm-list`, `/pm-archive`, `/pm-restore`, `/pm-close`
 
 ## Key Concepts
@@ -154,7 +152,7 @@ All agent handoffs use the relay template from `agents/_shared/RELAY_TEMPLATE.md
 ### Storage Naming Conventions
 
 - **nx store titles**: use hyphens — `decision-architect-cache-strategy`, `research-auth-patterns`
-- **nx memory keys**: `{project}_active/{doc}.md` — e.g., `myrepo_active/findings.md`
+- **nx memory keys**: `{project}/{doc}.md` — e.g., `myrepo/findings.md`
 - **Bead IDs**: managed by `bd` CLI — e.g., `beads-abc123`
 
 ### Permission Auto-Approval

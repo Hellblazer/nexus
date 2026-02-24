@@ -90,7 +90,7 @@ def main() -> None:
 
         if project_name:
             memory_output = run_command(
-                ['nx', 'memory', 'list', '--project', f'{project_name}_active'],
+                ['nx', 'memory', 'list', '--project', f'{project_name}'],
                 timeout=NX_TIMEOUT, cwd=cwd
             )
             if memory_output:

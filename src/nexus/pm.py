@@ -2,8 +2,9 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Project Management Infrastructure business logic (`nx pm`).
 
-Active PM docs live in T2 under the ``{repo}_pm`` project namespace.
-Archive synthesis lives in T3 ``knowledge__pm__{repo}`` (permanent, ttl=0).
+Active PM docs live in T2 under the bare ``{repo}`` project namespace
+(tagged with ``pm``).  Archive synthesis lives in T3
+``knowledge__pm__{repo}`` (permanent, ttl=0).
 """
 from __future__ import annotations
 
@@ -24,16 +25,11 @@ if TYPE_CHECKING:
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _STANDARD_DOCS: dict[str, str] = {
-    "CONTINUATION.md": (
-        "# Continuation\n\nProject: {project}\nCreated: {date}\n\n"
-        "## Current State\n(Fill in)\n\n## Next Action\n(Fill in)"
-    ),
     "METHODOLOGY.md": (
         "# Methodology\n\nEngineering discipline and workflow for this project."
     ),
-    "AGENT_INSTRUCTIONS.md": (
-        "# Agent Instructions\n\nRead CONTINUATION.md first. "
-        "Use nx pm commands for all PM operations."
+    "BLOCKERS.md": (
+        "# Blockers\n"
     ),
     "CONTEXT_PROTOCOL.md": (
         "# Context Protocol\n\nContext management rules and relay format."
@@ -48,13 +44,6 @@ _log = structlog.get_logger()
 # ~1200 tokens x 3.3 chars/token ~ 3960 chars. Keeps each chunk
 # within Claude Haiku's comfortable synthesis window.
 _SYNTHESIS_CHAR_LIMIT = 3960
-
-_PM_SUFFIX = "_pm"
-
-
-def _project_ns(project: str) -> str:
-    return project + _PM_SUFFIX
-
 
 def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> str:
     """Call Haiku to synthesize PM docs into a structured archive chunk."""
@@ -151,31 +140,58 @@ def _split_synthesis(text: str) -> list[str]:
 # ── AC1: pm_init ──────────────────────────────────────────────────────────────
 
 def pm_init(db: "T2Database", project: str) -> None:
-    """Create the 5 standard PM docs in T2 under ``{project}_pm``."""
-    ns = _project_ns(project)
+    """Create the 4 standard PM docs in T2 under ``{project}``."""
     date = datetime.now(UTC).strftime("%Y-%m-%d")
     for title, template in _STANDARD_DOCS.items():
         content = template.format(project=project, date=date)
-        db.put(ns, title, content, tags="pm,phase:1,context", ttl=None)
+        db.put(project, title, content, tags="pm,phase:1,context", ttl=None)
 
 
 # ── AC2: pm_resume ────────────────────────────────────────────────────────────
 
 def pm_resume(db: "T2Database", project: str) -> str | None:
-    """Return CONTINUATION.md content capped at 2000 chars, or None if absent."""
-    ns = _project_ns(project)
-    row = db.get(project=ns, title="CONTINUATION.md")
-    if row is None:
+    """Assemble computed continuation from ground truth, capped at 2000 chars.
+
+    Returns structured markdown built from pm_status(), current phase
+    context, and recent activity.  Returns None if no PM docs exist for
+    *project*.
+    """
+    all_rows = db.get_all(project)
+    if not all_rows:
         return None
-    return (row["content"] or "")[:2000]
+
+    status = pm_status(db, project)
+    parts: list[str] = []
+
+    # Header
+    parts.append(f"## PM Resume: {project}")
+    parts.append(f"Phase: {status['phase']}  |  Agent: {status['agent'] or '(none)'}")
+    if status["blockers"]:
+        parts.append("Blockers: " + "; ".join(status["blockers"]))
+
+    # Current phase context
+    phase_title = f"phases/phase-{status['phase']}/context.md"
+    phase_row = db.get(project=project, title=phase_title)
+    if phase_row and phase_row.get("content"):
+        parts.append("")
+        parts.append(phase_row["content"][:600])
+
+    # Recent activity
+    entries = db.list_entries(project=project)[:5]
+    if entries:
+        parts.append("")
+        parts.append("### Recent Activity")
+        for e in entries:
+            parts.append(f"- {e['title']} ({e.get('agent') or '-'}, {e.get('timestamp', '')[:10]})")
+
+    return "\n".join(parts)[:2000]
 
 
 # ── AC3: pm_status / pm_block / pm_unblock ────────────────────────────────────
 
 def pm_status(db: "T2Database", project: str) -> dict[str, Any]:
     """Return status dict with phase, agent, and blockers."""
-    ns = _project_ns(project)
-    all_rows = db.get_all(ns)  # single query replaces N+1 list_entries + get pattern
+    all_rows = db.get_all(project)  # single query replaces N+1 list_entries + get pattern
 
     # Determine current phase: MAX phase tag across all docs
     phase = 1
@@ -215,19 +231,17 @@ def pm_status(db: "T2Database", project: str) -> dict[str, Any]:
 
 def pm_block(db: "T2Database", project: str, blocker: str) -> None:
     """Append a blocker bullet to BLOCKERS.md (create if absent)."""
-    ns = _project_ns(project)
-    row = db.get(project=ns, title="BLOCKERS.md")
+    row = db.get(project=project, title="BLOCKERS.md")
     existing = row["content"] if row and row.get("content") else "# Blockers\n"
     if not existing.endswith("\n"):
         existing += "\n"
     new_content = existing + f"- {blocker}\n"
-    db.put(ns, "BLOCKERS.md", new_content, tags="pm,blockers", ttl=None)
+    db.put(project, "BLOCKERS.md", new_content, tags="pm,blockers", ttl=None)
 
 
 def pm_unblock(db: "T2Database", project: str, line: int) -> None:
     """Remove blocker at 1-based *line* number (as shown by pm_status)."""
-    ns = _project_ns(project)
-    row = db.get(project=ns, title="BLOCKERS.md")
+    row = db.get(project=project, title="BLOCKERS.md")
     if row is None or not row.get("content"):
         return
     bullets = [
@@ -245,7 +259,7 @@ def pm_unblock(db: "T2Database", project: str, line: int) -> None:
     new_content = "\n".join(non_bullets) + "\n" + "\n".join(bullets)
     if bullets:
         new_content += "\n"
-    db.put(ns, "BLOCKERS.md", new_content.strip() + "\n", tags="pm,blockers", ttl=None)
+    db.put(project, "BLOCKERS.md", new_content.strip() + "\n", tags="pm,blockers", ttl=None)
 
 
 # ── AC4: pm_phase_next ────────────────────────────────────────────────────────
@@ -255,13 +269,11 @@ def pm_phase_next(db: "T2Database", project: str) -> int:
 
     1. Reads current phase N as MAX(phase tag) across all docs.
     2. Creates phases/phase-{N+1}/context.md with initial content.
-    3. Updates CONTINUATION.md to reference phase N+1.
 
     Returns the new phase number.
     """
     status = pm_status(db, project)
     n = status["phase"]
-    ns = _project_ns(project)
     new_phase = n + 1
 
     content = (
@@ -270,19 +282,12 @@ def pm_phase_next(db: "T2Database", project: str) -> int:
         f"Previous phase: {n}"
     )
     db.put(
-        ns,
+        project,
         f"phases/phase-{new_phase}/context.md",
         content,
         tags=f"pm,phase:{new_phase},context",
         ttl=None,
     )
-
-    # Update CONTINUATION.md to reference new phase
-    cont_row = db.get(project=ns, title="CONTINUATION.md")
-    if cont_row:
-        existing = cont_row["content"] or ""
-        updated = existing + f"\n\n## Phase Transition\nNow in phase-{new_phase}.\n"
-        db.put(ns, "CONTINUATION.md", updated, tags=f"pm,phase:{new_phase},context", ttl=None)
 
     return new_phase
 
@@ -301,11 +306,10 @@ def pm_archive(
     (by pm_doc_count + pm_latest_timestamp), skip re-synthesis and proceed
     directly to the T2 decay step.
     """
-    ns = _project_ns(project)
     collection = f"knowledge__pm__{project}"
 
     # Gather current T2 state for idempotency check
-    all_docs = db.get_all(ns)
+    all_docs = db.get_all(project)
     if not all_docs:
         raise ValueError(f"No PM docs found for project '{project}'")
 
@@ -328,7 +332,7 @@ def pm_archive(
             and len(existing["ids"]) >= prior_meta.get("chunk_total", 1)
         ):
             # Current and complete — skip synthesis, proceed to T2 decay
-            db.decay_project(ns, archive_ttl)
+            db.decay_project(project, archive_ttl)
             return
 
     # Phase 1: Synthesize → T3
@@ -385,7 +389,7 @@ def pm_archive(
         t3.upsert_chunks(collection=collection, ids=[doc_id], documents=[chunk], metadatas=[full_meta])
 
     # Phase 2: Decay T2 (only after T3 write succeeds)
-    db.decay_project(ns, archive_ttl)
+    db.decay_project(project, archive_ttl)
 
 
 # ── AC6: pm_restore ───────────────────────────────────────────────────────────
@@ -395,8 +399,7 @@ def pm_restore(db: "T2Database", project: str) -> None:
 
     Raises if no docs remain. Warns (prints) if only some docs survived.
     """
-    ns = _project_ns(project)
-    surviving = db.restore_project(ns)
+    surviving = db.restore_project(project)
 
     if not surviving:
         raise RuntimeError(
@@ -480,7 +483,7 @@ def pm_promote(
 ) -> str:
     """Promote a T2 PM document to T3 permanent knowledge storage.
 
-    Fetches *title* from the ``{project}_pm`` T2 namespace and writes it to
+    Fetches *title* from the ``{project}`` T2 namespace and writes it to
     *collection* in T3.  Returns the T3 document ID.
 
     TTL translation:
@@ -490,10 +493,9 @@ def pm_promote(
 
     Raises ``KeyError`` if the document is not found in T2.
     """
-    ns = _project_ns(project)
-    doc = db_t2.get(project=ns, title=title)
+    doc = db_t2.get(project=project, title=title)
     if doc is None:
-        raise KeyError(f"Document '{title}' not found in project '{project}' (namespace '{ns}').")
+        raise KeyError(f"Document '{title}' not found in project '{project}'.")
 
     # TTL translation: caller-supplied ttl_days takes precedence over T2 ttl.
     # When ttl_days=0 (permanent), expires_at is empty.
@@ -522,11 +524,11 @@ def pm_search(
     query: str,
     project: str | None = None,
 ) -> list[dict[str, Any]]:
-    """FTS5 search scoped to *_pm project namespaces.
+    """FTS5 search scoped to PM-tagged entries.
 
-    Without *project*: searches all T2 entries WHERE project GLOB '*_pm'.
-    With *project*: searches only ``{project}_pm``.
+    Without *project*: searches all T2 entries tagged with ``pm``.
+    With *project*: searches only ``{project}``.
     """
     if project is not None:
-        return db.search(query, project=_project_ns(project))
-    return db.search_glob(query, "*_pm")
+        return db.search(query, project=project)
+    return db.search_by_tag(query, "pm")

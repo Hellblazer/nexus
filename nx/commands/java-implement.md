@@ -20,7 +20,7 @@ description: Implement feature using java-developer agent
   if command -v nx &> /dev/null && nx pm status &> /dev/null 2>&1; then
     echo "### Plan Status"
     echo '```'
-    nx pm resume 2>&1 | head -20 || echo "No continuation context available"
+    nx pm status 2>&1 | head -20 || echo "No PM context available"
     echo '```'
     echo ""
     echo "**Note:** Ensure plan has been validated by plan-auditor before implementing."
@@ -55,9 +55,9 @@ description: Implement feature using java-developer agent
   if command -v nx &> /dev/null; then
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
     if [ -n "$PROJECT" ]; then
-      echo "**T2 Memory (${PROJECT}_active):**"
+      echo "**T2 Memory ($PROJECT):**"
       echo '```'
-      nx memory list --project "${PROJECT}_active" 2>/dev/null | head -8 || echo "No T2 memory"
+      nx memory list --project "$PROJECT" 2>/dev/null | head -8 || echo "No T2 memory"
       echo '```'
       echo ""
       echo "**Session Scratch (T1):**"

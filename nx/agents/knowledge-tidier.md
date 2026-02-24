@@ -27,20 +27,15 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
 3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
-### Project Context (Load Before Starting)
+### Project Context
 
-```bash
-# Load project management context (if PM initialized)
-nx pm resume 2>/dev/null || true        # inject phase/continuation context
-nx pm status 2>/dev/null || true        # current phase + active blockers
-```
-
+PM context is auto-injected by SessionStart and SubagentStart hooks.
 
 Systematically review, validate, and consolidate information across knowledge bases to ensure:
 - **Accuracy**: All facts are correct and properly sourced
@@ -52,7 +47,7 @@ Systematically review, validate, and consolidate information across knowledge ba
 
 ### Phase 1: Inventory
 1. List all relevant documents in nx T3 store: `nx store list --collection knowledge`
-2. List all relevant files in nx T2 memory: `nx memory list --project {project}_active`
+2. List all relevant files in nx T2 memory: `nx memory list --project {project}`
 3. Create dependency map showing relationships between documents
 4. Identify authoritative sources vs derived documents
 5. Note document versions and timestamps
@@ -117,7 +112,7 @@ For each issue found:
    - Include comprehensive tags
 
 2. **Archive Obsolete Content**
-   - Move outdated documents to archive collection: `echo "$(nx memory get --project {project}_active --title {old-title})" | nx store put - --collection knowledge__archive --title "{old-title}-archived-{date}" --tags "archive,knowledge"`
+   - Move outdated documents to archive collection: `echo "$(nx memory get --project {project} --title {old-title})" | nx store put - --collection knowledge__archive --title "{old-title}-archived-{date}" --tags "archive,knowledge"`
    - Maintain for historical reference
    - Add deprecation notices in content
 
@@ -190,19 +185,19 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Consolidation Reports**: Store in nx T3 as `nx store put - --collection knowledge --title "consolidation-{date}-{scope}" --tags "consolidation,tidier"`
 - **Contradiction Resolutions**: Update source documents directly via nx store
-- **Archive Actions**: Document in nx T2 memory as `--project {project}_active --title archive-log.md`
+- **Archive Actions**: Document in nx T2 memory as `--project {project} --title archive-log.md`
 - **Version Updates**: Increment versions in document content
 - **Review Artifacts**: Use T1 scratch to track review round findings:
   ```bash
   # After each review round
-  nx scratch put $'# Review Round {N}: {N} issues found\n{issue-list}' --tags "review,round-{N}" --project {project}_active --title review-round-{N}.md
+  nx scratch put $'# Review Round {N}: {N} issues found\n{issue-list}' --tags "review,round-{N}" --project {project} --title review-round-{N}.md
   # Promote summary to T2 for cross-session continuity
-  nx scratch promote <id> --project {project}_active --title review-round-{N}.md
+  nx scratch promote <id> --project {project} --title review-round-{N}.md
   ```
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project}_active --title {phase}.md` (e.g., `--project ART_active --title phase2-implementation.md`)
+- **nx memory**: `--project {project} --title {phase}.md` (e.g., `--project ART --title phase2-implementation.md`)
 - **Bead Description**: Include `Context: nx` line
 
 ### Completion Protocol
@@ -216,7 +211,7 @@ Store using these naming conventions:
    ```
 2. **Update Archive Log**: Write archive log to nx T2 memory if applicable:
    ```bash
-   nx memory put "archive log content" --project {project}_active --title archive-log.md --ttl 30d
+   nx memory put "archive log content" --project {project} --title archive-log.md --ttl 30d
    ```
 3. **Verify Persistence**: Confirm all nx store writes succeeded:
    ```bash

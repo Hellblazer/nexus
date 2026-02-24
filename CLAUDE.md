@@ -45,11 +45,12 @@ See `spec.md` for the full specification.
 
 ## Project Management
 
-PM infrastructure lives in `.pm/`. Use `nx pm` commands once Nexus is built; use `.pm/` files directly during bootstrap.
+PM infrastructure lives in T2 under the bare `{repo}` namespace (tagged with `pm`). Use `nx pm` commands for all PM operations.
 
-- Session resumption: `cat .pm/CONTINUATION.md`
-- Current phase: see `.pm/phases/`
+- Session resumption: `nx pm resume`
+- Current phase/status: `nx pm status`
 - Bead tracking: `bd list` / `bd show <id>`
+- Standard docs (4): METHODOLOGY.md, BLOCKERS.md, CONTEXT_PROTOCOL.md, phases/phase-1/context.md
 
 ## Git
 

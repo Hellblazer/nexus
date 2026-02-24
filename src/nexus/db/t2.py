@@ -233,6 +233,46 @@ class T2Database:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
+    def search_by_tag(self, query: str, tag: str) -> list[dict[str, Any]]:
+        """FTS5 search scoped to entries whose tags contain *tag*.
+
+        Uses boundary matching via ``(',' || tags || ',') LIKE '%,{tag},%'``
+        to avoid false positives (e.g. 'pm' matching 'pm-archived').
+        """
+        sql = """
+            SELECT m.id, m.project, m.title, m.session, m.agent,
+                   m.content, m.tags, m.timestamp, m.ttl
+            FROM memory m
+            JOIN memory_fts ON memory_fts.rowid = m.id
+            WHERE memory_fts MATCH ?
+              AND (',' || m.tags || ',') LIKE ?
+            ORDER BY rank
+        """
+        like_pattern = f"%,{tag},%"
+        with self._lock:
+            try:
+                rows = self.conn.execute(sql, (query, like_pattern)).fetchall()
+            except sqlite3.OperationalError as exc:
+                raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
+        return [dict(zip(_COLUMNS, row)) for row in rows]
+
+    def migrate_pm_namespaces(self) -> int:
+        """Rename ``*_pm`` projects to bare names for PM-tagged entries.
+
+        Only migrates rows whose tags contain 'pm' (boundary-matched).
+        Returns the number of rows updated.
+        """
+        sql = """
+            UPDATE memory
+               SET project = SUBSTR(project, 1, LENGTH(project) - 3)
+             WHERE project LIKE '%\\_pm' ESCAPE '\\'
+               AND (',' || tags || ',') LIKE '%,pm,%'
+        """
+        with self._lock:
+            cursor = self.conn.execute(sql)
+            self.conn.commit()
+        return cursor.rowcount
+
     def decay_project(self, project: str, ttl: int) -> None:
         """Set TTL and flip pm -> pm-archived tags for all docs in *project*."""
         with self._lock, self.conn:

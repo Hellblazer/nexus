@@ -14,13 +14,9 @@ These agents **MUST proactively search** for context before starting:
 
 **Search Sources in Order**:
 1. **Bead**: `bd show <id>` for task context, design field, dependencies
-2. **Project Infrastructure**: load phase context first:
-   ```bash
-   nx pm resume 2>/dev/null || true   # inject phase context
-   nx pm status 2>/dev/null || true   # current phase + blockers
-   ```
+2. **Project Infrastructure**: PM context is auto-injected by SessionStart and SubagentStart hooks
 3. **nx T3 store**: `nx search "[topic]" --corpus knowledge --n 5`
-4. **nx T2 memory**: `nx memory get --project {project}_active --title ACTIVE_INDEX.md`
+4. **nx T2 memory**: `nx memory get --project {project} --title ACTIVE_INDEX.md`
 5. **T1 scratch** (current session): `nx scratch search "[topic]"` for any in-flight notes
 
 ### Relay-Reliant Agents (Execution & Validation)
@@ -92,15 +88,15 @@ Agents produce artifacts based on their specialization:
   # Store ephemeral working note
   nx scratch put "<hypothesis or interim finding>" --tags "hypothesis,phase-N"
   # Flag for auto-flush to T2 at session end
-  nx scratch flag <id> --project {project}_active --title interim-notes.md
+  nx scratch flag <id> --project {project} --title interim-notes.md
   # Or promote immediately
-  nx scratch promote <id> --project {project}_active --title interim-findings.md
+  nx scratch promote <id> --project {project} --title interim-findings.md
   ```
 
 ### Naming Conventions
 
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project}_active --title {phase}.md` (e.g., `--project ART_active --title phase2-implementation.md`)
+- **nx memory**: `--project {project} --title {phase}.md` (e.g., `--project ART --title phase2-implementation.md`)
 - **Bead Description**: Include `Context: nx` line if project uses PM infrastructure
 
 ## nx pm Lifecycle
@@ -108,8 +104,7 @@ Agents produce artifacts based on their specialization:
 When a project has PM infrastructure (`.pm/` directory), use these commands:
 
 ```bash
-nx pm init [--project PROJECT]       # creates CONTINUATION.md, METHODOLOGY.md, AGENT_INSTRUCTIONS.md, CONTEXT_PROTOCOL.md, phases/phase-1/context.md
-nx pm resume [--project PROJECT]     # print CONTINUATION.md (≤2000 chars) for session injection
+nx pm init [--project PROJECT]       # creates METHODOLOGY.md, BLOCKERS.md, phases/phase-1/context.md
 nx pm status [--project PROJECT]     # Phase N, Agent, Blockers
 nx pm block "<text>" [--project PROJECT]     # record blocker
 nx pm unblock <line> [--project PROJECT]     # resolve blocker
@@ -122,7 +117,7 @@ nx pm reference [<query>]                    # search archived PM syntheses in T
 ```
 
 **When to call:**
-- **Session start**: `nx pm resume && nx pm status` (auto-injected by subagent-start hook)
+- **Session start**: PM context auto-injected by SessionStart and SubagentStart hooks
 - **Starting work on a bead**: `nx pm status` to confirm phase alignment
 - **Blocking issue discovered**: `nx pm block "<description>"`
 - **Phase completion**: `nx pm phase next`
@@ -164,7 +159,7 @@ See [RELAY_TEMPLATE.md](./RELAY_TEMPLATE.md) for the full template, extended tem
 
 If expected context not received:
 1. Search nx T3 store for related prior work: `nx search "[topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
 3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
 4. Query `bd list --status=in_progress` for active work
 5. Document assumption in bead notes
@@ -207,27 +202,27 @@ nx store uses `--tags` for categorization (comma-separated strings).
 
 ## nx Memory Organization
 
-Projects use `{repo}_active` naming for session work:
+Projects use bare `{repo}` naming (e.g., `--project nexus`):
 - `--title hypotheses.md` - Current working hypotheses
 - `--title findings.md` - Validated discoveries
 - `--title blockers.md` - Active blockers and impediments
 - `--title relay.md` - Pending relay context
 
-**PM namespace vs. active namespace**: PM projects use `{repo}_pm` (e.g., `--project nexus_pm`); agent working notes use `{repo}_active` (e.g., `--project nexus_active`). These are separate namespaces. `nx pm` commands always operate on `{repo}_pm`; `hypotheses.md`, `findings.md`, and similar working notes go in `{repo}_active`. The session start hook queries `{repo}_active` for general memory; PM continuation comes from `{repo}_pm` via `nx pm resume`.
+All memory -- agent working notes and PM documents -- lives under the bare project name. There is no separate `_active` or `_pm` suffix. `nx pm` commands operate on the same project namespace.
 
 ### Memory Commands
 ```bash
 # Write to memory
-nx memory put "content" --project {project}_active --title phase.md --ttl 30d
+nx memory put "content" --project {project} --title phase.md --ttl 30d
 
 # Read from memory
-nx memory get --project {project}_active --title phase.md
+nx memory get --project {project} --title phase.md
 
 # Search memory
-nx memory search "query" --project {project}_active
+nx memory search "query" --project {project}
 
 # List memory files
-nx memory list --project {project}_active
+nx memory list --project {project}
 ```
 
 ## Usage in Agent Files

@@ -27,21 +27,15 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
 3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
-### Project Context (Load Before Starting)
+### Project Context
 
-```bash
-# Load project management context (if PM initialized)
-nx pm resume 2>/dev/null || true        # inject phase/continuation context
-nx pm status 2>/dev/null || true        # current phase + active blockers
-```
-
-When nx pm output is available, align your work with the current phase. Check `bd ready` for unblocked tasks.
+PM context is auto-injected by SessionStart and SubagentStart hooks. When PM context is available, align your work with the current phase. Check `bd ready` for unblocked tasks.
 
 ## Phase 1: Context Gathering
 
@@ -63,7 +57,7 @@ Verify success with `nx pm status`. If the repo does not have a git root, note t
 
 Store PM phase documents in T2 via `nx memory put`. Use consistent naming:
 
-**Project**: `--project <name>_active`
+**Project**: `--project <name>`
 **Title convention**: `<doc-type>.md`
 
 Examples:
@@ -91,7 +85,7 @@ Examples:
 - Next actions (specific and actionable)
 - Resumption instructions
 
-This document is what `nx pm resume` injects into session context — make it dense and actionable.
+This document is auto-injected by SessionStart and SubagentStart hooks — make it dense and actionable.
 
 **Phase documents** (`phase-N.md`):
 - Phase number and name
@@ -103,7 +97,7 @@ This document is what `nx pm resume` injects into session context — make it de
 
 **Create each document using**:
 ```bash
-nx memory put "<content>" --project <name>_active --title <doc>.md
+nx memory put "<content>" --project <name> --title <doc>.md
 ```
 
 ### Project-Type-Specific Documents
@@ -125,7 +119,7 @@ Beads must be self-contained. An agent picking up a bead should start work immed
 ### Bead Grooming Requirements
 
 Every bead design field MUST include:
-- **Context links**: `nx pm resume` for continuation, `nx memory get --project <name>_active --title <doc>.md` for specific docs, nx store titles, source file paths
+- **Context links**: `nx pm status` for project state, `nx memory get --project <name> --title <doc>.md` for specific docs, nx store titles, source file paths
 - **Success criteria**: Testable, specific, with thresholds
 - **Files to modify**: Source and test files
 - **Patterns to follow**: Link to examples in codebase
@@ -138,9 +132,9 @@ Use `bd dep add <this> <blocker>` for all dependencies. Never use markdown TODOs
 <task description>
 
 Context:
-- Continuation: nx pm resume
-- Phase doc: nx memory get --project <project>_active --title phase-N.md
-- Architecture: nx memory get --project <project>_active --title architecture.md
+- PM context: nx pm status
+- Phase doc: nx memory get --project <project> --title phase-N.md
+- Architecture: nx memory get --project <project> --title architecture.md
 - nx store: <doc-title if applicable>
 
 Success criteria:
@@ -175,7 +169,7 @@ Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **T2 PM Documents**: Created via `nx memory put --project <name>_active --title <doc>.md`
+- **T2 PM Documents**: Created via `nx memory put --project <name> --title <doc>.md`
 - **nx pm init**: Initialized project management for the git repo
 - **Groomed Beads**: Epic/phase beads with context links, success criteria, file paths, patterns
 - **T3 Promotion (optional)**: For architectural decisions worth long-term preservation, use `nx pm promote <title> [--collection C] [--tags T]` — promotes a specific PM document (by title) from T2 to T3 for long-term semantic search
@@ -183,8 +177,8 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 Store using these naming conventions:
 - **nx memory title**: `<doc-type>.md` (e.g., `phase-1.md`, `continuation.md`, `architecture.md`)
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project}_active --title {phase}.md` (e.g., `--project ART_active --title phase2-implementation.md`)
-- **Bead Description**: Include `Context: nx pm resume` line
+- **nx memory**: `--project {project} --title {phase}.md` (e.g., `--project ART --title phase2-implementation.md`)
+- **Bead Description**: Include `Context: nx pm status` line
 
 
 ## Relationship to Other Agents
@@ -197,7 +191,7 @@ Store using these naming conventions:
 
 Before delivering, validate:
 
-1. **Completeness Check**: `nx pm status` returns meaningful output, all phase documents retrievable via `nx memory list --project <name>_active`, continuation document enables seamless resumption.
+1. **Completeness Check**: `nx pm status` returns meaningful output, all phase documents retrievable via `nx memory list --project <name>`, continuation document enables seamless resumption.
 
 2. **Validity Check**: All T2 documents are well-formed markdown, key scheme is consistent, bead descriptions include context links.
 
@@ -213,7 +207,7 @@ Before delivering, validate:
 - Recent learnings must be summarized
 - Active hypotheses must be listed
 - Blockers must be documented
-- Retrieval command: `nx pm resume`
+- Retrieval command: `nx pm status` (PM context auto-injected by hooks)
 
 ### Measurability
 - All success criteria must be quantitative or have clear qualitative measures
@@ -223,13 +217,13 @@ Before delivering, validate:
 ### Actionability
 - Phase documents must be complete and ready to use
 - Next actions must be specific and clear
-- Retrieval pattern documented: `nx memory get --project <name>_active --title <doc>.md`
+- Retrieval pattern documented: `nx memory get --project <name> --title <doc>.md`
 
 ## Success Criteria
 
 1. `nx pm init` completed successfully; `nx pm status` returns project info
-2. Core T2 documents created: overview, continuation, at least one phase document
-3. `nx pm resume` injects actionable context
+2. Core T2 documents created: overview, at least one phase document, blockers
+3. PM context auto-injected by SessionStart and SubagentStart hooks
 4. Beads are groomed and self-contained (agent can start immediately)
 
 You are the expert in creating project management infrastructure that transforms chaotic, ad-hoc tracking into systematic, resumable, measurable progress tracking. Your infrastructure — backed by Nexus T2 SQLite storage and retrievable via `nx pm` — enables teams to build complex systems with confidence, clarity, and continuity.

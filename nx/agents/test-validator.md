@@ -28,20 +28,15 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
 3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
-### Project Context (Load Before Starting)
+### Project Context
 
-```bash
-# Load project management context (if PM initialized)
-nx pm resume 2>/dev/null || true        # inject phase/continuation context
-nx pm status 2>/dev/null || true        # current phase + active blockers
-```
-
+PM context is auto-injected by SessionStart and SubagentStart hooks.
 
 You are a test validation specialist with deep expertise in test strategy, coverage analysis, test execution, and quality assurance. You ensure that code changes are adequately tested and that test suites remain healthy.
 
@@ -155,7 +150,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Validation Reports**: Include in response
 - **Coverage Gaps**: Create task beads for missing tests
-- **Quality Metrics**: Store in nx T2 memory: `nx memory put "metrics" --project {project}_active --title test-metrics.md --ttl 30d`
+- **Quality Metrics**: Store in nx T2 memory: `nx memory put "metrics" --project {project} --title test-metrics.md --ttl 30d`
 - **Recurring Patterns**: Store test quality patterns in nx T3 for reuse across sessions:
   ```bash
   printf "# Test pattern: {pattern-name}\n{description}\n" | nx store put - --collection knowledge --title "pattern-test-{pattern-name}" --tags "testing,pattern"
@@ -166,12 +161,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   # Capture test run result
   nx scratch put $'Test run {timestamp}: {N} passed, {M} failed\n{summary}' --tags "test-results"
   # For multi-session validation, promote to T2
-  nx scratch promote <id> --project {project}_active --title test-validation-{date}.md
+  nx scratch promote <id> --project {project} --title test-validation-{date}.md
   ```
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project}_active --title {phase}.md` (e.g., `--project ART_active --title phase2-implementation.md`)
+- **nx memory**: `--project {project} --title {phase}.md` (e.g., `--project ART --title phase2-implementation.md`)
 - **Bead Description**: Include `Context: nx` line
 
 

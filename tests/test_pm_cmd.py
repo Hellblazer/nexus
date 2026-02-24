@@ -54,7 +54,7 @@ def test_pm_init_default_project(runner: CliRunner) -> None:
     assert result.exit_code == 0, result.output
     mock_init.assert_called_once_with(mock_db, project="myrepo")
     assert "myrepo" in result.output
-    assert "5 standard docs" in result.output
+    assert "4 standard docs" in result.output
 
 
 def test_pm_init_explicit_project(runner: CliRunner) -> None:

@@ -21,9 +21,9 @@ fi
 if command -v nx &> /dev/null && command -v git &> /dev/null; then
   PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
   if [[ -n "$PROJECT" ]]; then
-    T2_LIST=$(nx memory list --project "${PROJECT}_active" 2>/dev/null | head -8)
+    T2_LIST=$(nx memory list --project "$PROJECT" 2>/dev/null | head -8)
     if [[ -n "$T2_LIST" ]]; then
-      echo "## T2 Memory (${PROJECT}_active)"
+      echo "## T2 Memory ($PROJECT)"
       echo "$T2_LIST"
       echo ""
     fi

@@ -27,20 +27,15 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}_active`
+2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
 3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
-### Project Context (Load Before Starting)
+### Project Context
 
-```bash
-# Load project management context (if PM initialized)
-nx pm resume 2>/dev/null || true        # inject phase/continuation context
-nx pm status 2>/dev/null || true        # current phase + active blockers
-```
-
+PM context is auto-injected by SessionStart and SubagentStart hooks.
 
 ## PDF Processing Protocol
 
@@ -68,10 +63,10 @@ You have access to and will actively leverage:
   - `nx search "query" --corpus code --hybrid --n 20` — hybrid semantic + ripgrep
   - `nx search "query" --corpus code__<repo> --hybrid --n 20` — repo-specific
 - **nx T2 memory**: For accessing previous research and contextual information
-  - `nx memory get --project {project}_active --title {filename}` — read
-  - `nx memory put "content" --project {project}_active --title {filename} --ttl 30d` — write
-  - `nx memory list --project {project}_active` — list files
-  - `nx memory search "query" --project {project}_active` — search memory
+  - `nx memory get --project {project} --title {filename}` — read
+  - `nx memory put "content" --project {project} --title {filename} --ttl 30d` — write
+  - `nx memory list --project {project}` — list files
+  - `nx memory search "query" --project {project}` — search memory
 - **Web Resources**: For current information, documentation, and external perspectives
 - **Code Repository** (/Users/hal.hildebrand/git): For analyzing implementation details and code patterns
 - **Sequential Thought MCP Server**: Your primary reasoning engine for structured analysis
@@ -122,12 +117,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   # After each round of research
   nx scratch put $'# Round {N} findings\n{content}' --tags "research,round-{N}"
   # If valuable, flag for T2 persistence
-  nx scratch flag <id> --project {project}_active --title research-round-{N}.md
+  nx scratch flag <id> --project {project} --title research-round-{N}.md
   ```
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project}_active --title {phase}.md` (e.g., `--project ART_active --title phase2-implementation.md`)
+- **nx memory**: `--project {project} --title {phase}.md` (e.g., `--project ART --title phase2-implementation.md`)
 - **Bead Description**: Include `Context: nx` line
 
 
@@ -153,7 +148,7 @@ You will systematically:
 3. Conduct web research for current best practices and external sources
 6. Check nx T2 memory for previous related investigations:
    ```bash
-   nx memory search "topic" --project {project}_active
+   nx memory search "topic" --project {project}
    ```
 7. Track source locations and citations for every piece of information
 

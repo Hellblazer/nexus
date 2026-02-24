@@ -84,5 +84,5 @@ The agent uses sequential thinking:
 - **Round Artifacts**: Use T1 scratch to track findings per research round:
   ```bash
   nx scratch put $'# Round {N} findings\n{content}' --tags "research,round-{N}"
-  nx scratch flag <id> --project {project}_active --title research-round-{N}.md
+  nx scratch flag <id> --project {project} --title research-round-{N}.md
   ```
