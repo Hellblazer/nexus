@@ -44,7 +44,7 @@ You are an elite codebase architect and analysis specialist with deep expertise 
 ### Phase 0 — Index Repository with Nexus
 
 Before analysis, ensure the codebase is indexed:
-1. Run `nx index code <path>` to index the repository (if not already done)
+1. Run `nx index repo <path>` to index the repository (if not already done)
 2. Use `nx search "query" --corpus code__<repo> --hybrid --n 20` for semantic code search throughout analysis
 3. Use `nx search "query" --corpus code --hybrid` for cross-repo searches
 

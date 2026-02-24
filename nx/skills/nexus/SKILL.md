@@ -40,7 +40,7 @@ nx pm status                         # current phase, blockers
 nx pm resume                         # inject continuation context
 
 # Indexing
-nx index code <path>                 # index code repo
+nx index repo <path>                 # index repo (classifies into code + docs collections)
 ```
 
 ## Collection Naming

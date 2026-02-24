@@ -145,7 +145,7 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
                 include=["metadatas"],
             )
             if not existing["ids"]:
-                continue  # not yet indexed — needs full nx index code
+                continue  # not yet indexed — needs full nx index repo
 
             updated_metadatas = [
                 {**m, "frecency_score": float(score)}

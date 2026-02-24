@@ -1,6 +1,6 @@
 # Nexus — Agent Usage Guide
 
-Nexus gives you a single CLI to index code, PDFs, and notes; search across all of them semantically; and manage persistent memory across sessions.
+Nexus gives you a single CLI to index repositories, PDFs, and notes; search across all of them semantically; and manage persistent memory across sessions.
 
 **Three storage tiers:**
 - **T1 scratch** — in-memory, session-scoped (`nx scratch`)
@@ -73,8 +73,8 @@ nx scratch clear
 ## Indexing
 
 ```bash
-nx index code <path>                       # register and index a code repo
-nx index code <path> --frecency-only       # refresh git frecency scores only (fast)
+nx index repo <path>                       # register and index a repo (classifies into code + docs collections)
+nx index repo <path> --frecency-only       # refresh git frecency scores only (fast)
 nx index pdf <path> --corpus my-papers
 nx index md  <path> --corpus notes
 ```
@@ -111,7 +111,7 @@ nx serve logs
 
 **Session lifecycle:**
 1. Search T3 for prior art before starting work: `nx search "topic" --corpus knowledge`
-2. Index the codebase once per repo: `nx index code <path>`
+2. Index the codebase once per repo: `nx index repo <path>`
 3. Use T1 scratch for working notes during the session
 4. Flag important scratch items for auto-promote to T2: `nx scratch flag <id>`
 5. Persist validated findings to T3 at session end: `nx store put`

@@ -165,8 +165,8 @@ WHERE ttl IS NOT NULL
 `nx serve` is a single persistent Flask/Waitress process managing multiple repositories:
 
 - **Repo registry**: `~/.config/nexus/repos.json` — list of registered repo paths with per-repo state
-- `nx index code <path>` adds the path to the registry and triggers initial indexing
-- Each repo has its own T3 collection (`code__{repo-name}`) and ripgrep line cache file
+- `nx index repo <path>` adds the path to the registry and triggers initial indexing
+- Each repo has its own T3 collections (`code__{repo-name}` for source code, `docs__{repo-name}` for documentation) and ripgrep line cache file
 - HEAD polling runs per-repo every 10 seconds (configurable via `server.headPollInterval`); stale repos are re-indexed automatically
 - **Concurrent access**: polling threads and Flask handlers share three resources requiring explicit locking: (1) `repos.json` — use `threading.RLock` + atomic write (`repos.json.tmp` → `os.replace()`); (2) ripgrep cache file — use per-repo `threading.RLock`; exclusive lock during rebuild, shared lock during hybrid search reads; (3) indexing progress counters — update atomically or hold the per-repo lock. Waitress runs with `threads=1` (eliminates Flask-level concurrency) but does not protect against concurrent polling threads
 - Optional: `nx install claude-code` sets a post-commit hook as an additional trigger alongside polling
@@ -174,7 +174,7 @@ WHERE ttl IS NOT NULL
 
 ### Code Repositories
 
-1. `nx index code <path>` registers the repo with the persistent `nx serve` process
+1. `nx index repo <path>` registers the repo with the persistent `nx serve` process
 2. `git log` to compute frecency scores per file: `sum(exp(-0.01 * days_passed))`
 3. Files chunked: AST-first via `llama_index.core.node_parser.CodeSplitter` (which wraps `tree-sitter-language-pack` internally) for 30+ languages including Python, JS/TS, Java, Go, Rust, C, C++, C#, PHP, Ruby, Kotlin, Scala, Swift, and more — line-based fallback for unsupported extensions. Target ~150 lines per chunk; no overlap at function/class boundaries; 15% overlap for line-based fallback. Install: `pip install llama-index-core tree-sitter-language-pack`. **Version pinning required**: known breaking incompatibilities exist between these packages at certain version combinations (see llama_index issues #13521, #17567); pin to a verified-good pair in `pyproject.toml` and test before upgrading.
 4. Chunks embedded via `voyageai.Client().embed(model="voyage-code-3", input_type="document")` (direct SDK call; bypasses ChromaDB's `VoyageAIEmbeddingFunction`). Batched at 128 texts per API call. Stored via `upsert_chunks_with_embeddings()` so ChromaDB's collection EF is not invoked at write time.
@@ -874,7 +874,7 @@ Recent memory ({project}, last 10 entries):
 /nx:search <query> -a           — search + Haiku answer synthesis
 /nx:store <content>             — persist to T3 knowledge
 /nx:memory <content>            — write to T2 SQLite
-/nx:index code <path>           — index a code repo (registers with nx serve)
+/nx:index repo <path>           — index a repo (classifies into code + docs collections)
 /nx:index pdf <path>            — index PDFs
 /nx:scratch <content>           — write to T1 (session only)
 /nx:doctor                      — health check
