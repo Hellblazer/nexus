@@ -40,9 +40,9 @@ Scan `docs/rdr/` for files matching `[0-9][0-9][0-9]-*.md`. Find the highest num
 
 Derive project prefix from repo name:
 ```bash
-basename $(git rev-parse --show-toplevel) | tr '[:lower:]' '[:upper:]' | head -c 3
+basename $(git rev-parse --show-toplevel) | tr '[:lower:]' '[:upper:]' | tr -cd '[:alnum:]' | head -c 3
 ```
-Example: `nexus` → `NEX`, `arcaneum` → `ARC`
+Example: `nexus` → `NEX`, `arcaneum` → `ARC`, `nx-tools` → `NXT` (hyphens stripped)
 
 ### Step 3: Create RDR file
 
@@ -70,8 +70,9 @@ gated: ""
 closed: ""
 close_reason: ""
 superseded_by: ""
+supersedes: ""
 epic_bead: ""
-archived: true
+archived: false
 file_path: "docs/rdr/NNN-kebab-title.md"
 EOF
 ```

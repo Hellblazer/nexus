@@ -8,7 +8,7 @@ allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
 
 # RDR Close Skill
 
-Delegates decomposition and archival to the **knowledge-tidier** agent (haiku). See [registry.yaml](../../registry.yaml).
+Creates beads directly. Optionally delegates post-mortem archival to the **knowledge-tidier** agent (haiku). See [registry.yaml](../../registry.yaml).
 
 ## When This Skill Activates
 
@@ -58,34 +58,24 @@ Create `docs/rdr/post-mortem/NNN-kebab-title.md` from the post-mortem template. 
 
 ### Step 3: Decompose into Beads
 
-Dispatch `knowledge-tidier` agent to parse the Implementation Plan section:
+Parse the Implementation Plan section directly (the skill has Bash access):
 
-```markdown
-## Relay: knowledge-tidier
+1. Read the RDR markdown file's Implementation Plan section
+2. Create epic bead:
+   ```bash
+   bd create --title "PREFIX-NNN: Title" --type epic --priority {priority}
+   ```
+3. For each phase/step in the Implementation Plan, create a child bead:
+   ```bash
+   bd create --title "PREFIX-NNN Phase N: Description" --type task --priority {priority}
+   ```
+4. Wire dependencies:
+   ```bash
+   bd dep add <child-id> <epic-id>
+   ```
+5. Display the bead tree for user confirmation before proceeding
 
-**Task**: Parse RDR NNN Implementation Plan into an epic bead + child beads, then archive RDR to T3.
-**Bead**: none (will create beads)
-
-### Input Artifacts
-- nx store: none
-- nx memory: {repo}_rdr/NNN
-- Files: docs/rdr/NNN-*.md, docs/rdr/post-mortem/NNN-*.md (if exists)
-
-### Deliverable
-1. Epic bead created via `bd create --title "PREFIX-NNN: Title" --type epic --priority {priority}`
-2. Child beads for each Implementation Plan phase/step via `bd create`
-3. Dependencies wired via `bd dep add <child> <epic>`
-4. RDR archived to T3 via `nx store put`
-
-### Quality Criteria
-- [ ] Epic bead title includes RDR prefix and ID
-- [ ] Each Implementation Plan phase has a corresponding child bead
-- [ ] Dependencies correctly wired (children depend on epic)
-- [ ] T3 archive includes full RDR + post-mortem content
-- [ ] T3 tags include divergence categories (if any)
-```
-
-Display the bead tree for user confirmation before proceeding.
+**Note:** Bead creation is done directly by the skill (not delegated to an agent) because it is structured text extraction from a known schema, and the skill already has `Bash` in `allowed-tools`.
 
 ### Step 4: Update State
 
@@ -102,22 +92,20 @@ Display the bead tree for user confirmation before proceeding.
 3. Regenerate `docs/rdr/README.md` index
 4. Run `nx index rdr` to update T3 semantic index
 
-### Step 5: T3 Archive
+### Step 5: T3 Archive (post-mortem only)
 
-```bash
-nx store put docs/rdr/NNN-*.md --collection docs__rdr__{repo} \
-  --title "PREFIX-NNN Title" \
-  --tags "rdr,{type},implemented,diverged:{category1},diverged:{category2}" \
-  --category rdr-archive
-```
+The main RDR is already semantically indexed by Step 4's `nx index rdr` (CCE embeddings, section-level chunks). Do **not** duplicate it with `nx store put` — that would create voyage-4 blob entries in the same collection, degrading search quality.
 
-If post-mortem exists, archive it too:
+If a post-mortem exists, archive it to a separate collection (using the exact file path from Step 2, not a glob):
 ```bash
-nx store put docs/rdr/post-mortem/NNN-*.md --collection docs__rdr__{repo} \
+nx store put "docs/rdr/post-mortem/NNN-kebab-title.md" \
+  --collection knowledge__rdr_postmortem__{repo} \
   --title "PREFIX-NNN Title (post-mortem)" \
   --tags "rdr,post-mortem,{drift-categories}" \
   --category rdr-post-mortem
 ```
+
+Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem contains substantial divergence analysis that benefits from knowledge organization.
 
 ## Flow: Reverted or Abandoned
 
@@ -125,17 +113,18 @@ nx store put docs/rdr/post-mortem/NNN-*.md --collection docs__rdr__{repo} \
 2. Create post-mortem (the rdr process requires post-mortems for reverted/abandoned RDRs)
 3. Update T2 record with close reason
 4. Update markdown metadata
-5. Archive to T3 (research findings are valuable even for failed RDRs)
-6. Do NOT create beads
-7. Regenerate index
+5. Run `nx index rdr` to update T3 semantic index (research findings are valuable even for failed RDRs)
+6. Archive post-mortem to `knowledge__rdr_postmortem__{repo}` (if created)
+7. Do NOT create beads
+8. Regenerate index
 
 ## Flow: Superseded
 
 1. Prompt for superseding RDR ID
-2. Cross-link both RDRs:
-   - In T2: set `superseded_by` on old RDR
-   - In markdown: add "Superseded by RDR-NNN" note to old RDR's metadata
-3. Archive to T3
+2. Cross-link both RDRs (bidirectional):
+   - **Old RDR**: In T2, set `superseded_by: "NNN"`. In markdown, add "Superseded by RDR-NNN" note
+   - **New RDR**: In T2, set `supersedes: "MMM"`. In markdown, add "Supersedes RDR-MMM" note
+3. Run `nx index rdr` to update T3 semantic index
 4. Regenerate index
 
 ## Failure Handling
@@ -148,58 +137,60 @@ The close operation performs multiple state mutations. If any step fails:
 
 ## Relay Template (Use This Format)
 
-When dispatching the knowledge-tidier agent via Task tool for bead decomposition and T3 archival, use this exact structure:
+When dispatching the knowledge-tidier agent via Task tool for post-mortem archival, use this exact structure:
 
 ```markdown
 ## Relay: knowledge-tidier
 
-**Task**: Parse RDR NNN Implementation Plan into an epic bead + child beads, then archive RDR to T3.
-**Bead**: none (will create beads)
+**Task**: Archive RDR NNN post-mortem to T3 with drift classification metadata.
+**Bead**: none
 
 ### Input Artifacts
 - nx store: [prior archived RDRs or "none"]
 - nx memory: {repo}_rdr/NNN (status, research records, close metadata)
 - nx scratch: [scratch IDs or "none"]
-- Files: docs/rdr/NNN-*.md, docs/rdr/post-mortem/NNN-*.md (if exists)
+- Files: docs/rdr/post-mortem/NNN-kebab-title.md
 
 ### Deliverable
-1. Epic bead created with RDR prefix and ID
-2. Child beads for each Implementation Plan phase/step
-3. Dependencies wired (children depend on epic)
-4. RDR archived to T3 with full content and post-mortem
+Post-mortem archived to `knowledge__rdr_postmortem__{repo}` with drift categories as tags.
 
 ### Quality Criteria
-- [ ] Epic bead title includes RDR prefix and ID
-- [ ] Each Implementation Plan phase has a corresponding child bead
-- [ ] Dependencies correctly wired (children depend on epic)
-- [ ] T3 archive includes full RDR + post-mortem content
-- [ ] T3 tags include divergence categories (if any)
+- [ ] Post-mortem content fully archived to T3
+- [ ] Tags include divergence/drift categories
+- [ ] Title includes RDR prefix and ID
 ```
 
 **Required**: All fields must be present. Agent will validate relay before starting.
 
 For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
+**Note:** Bead decomposition is handled directly by this skill (Step 3), not delegated to an agent.
+
 ## Success Criteria
 
 - [ ] Pre-check completed (status verified, warnings issued for non-Final RDRs)
 - [ ] Divergence notes captured from user (if implementation diverged)
 - [ ] Post-mortem created with drift classification (if diverged or reverted/abandoned)
-- [ ] Beads created: epic + child beads matching Implementation Plan phases (Implemented flow only)
+- [ ] Beads created directly: epic + child beads matching Implementation Plan phases (Implemented flow only)
 - [ ] T2 record updated with close reason, date, epic bead ID, and archived flag
-- [ ] T3 archive written for RDR and post-mortem (if exists)
-- [ ] README index regenerated and T3 semantic index updated
+- [ ] T3 semantic index updated via `nx index rdr`
+- [ ] Post-mortem archived to `knowledge__rdr_postmortem__{repo}` (if exists)
+- [ ] README index regenerated
 - [ ] Idempotent: re-running skips completed steps
 
 ## Agent-Specific PRODUCE
 
-Outputs generated by the knowledge-tidier agent:
+Outputs produced by this skill directly:
 
-- **T3 knowledge**: RDR archive via `nx store put docs/rdr/NNN-*.md --collection docs__rdr__{repo} --title "PREFIX-NNN Title" --tags "rdr,{type},implemented"` and post-mortem archive (if exists)
-- **T2 memory**: Close metadata via `nx memory put - --project {repo}_rdr --title NNN --ttl permanent --tags rdr,{type},closed` (status, close reason, epic bead, archived flag)
-- **T1 scratch**: Working notes during decomposition via `nx scratch put "RDR NNN close: decomposing phases" --tags "rdr,close"` (promoted to T2 on completion)
+- **Beads**: Epic + child beads via `bd create` and `bd dep add` (direct, not delegated)
+- **T2 memory**: Close metadata via `nx memory put - --project {repo}_rdr --title NNN --ttl permanent --tags rdr,{type},closed`
+- **T3 semantic index**: Updated via `nx index rdr` (CCE embeddings, section-level chunks)
+- **Filesystem**: Post-mortem at `docs/rdr/post-mortem/NNN-kebab-title.md`, updated README
 
-**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during bead decomposition and archival. Flagged items auto-promote to T2 at session end.
+Outputs generated by the knowledge-tidier agent (post-mortem archival only):
+
+- **T3 knowledge**: Post-mortem archive via `nx store put "docs/rdr/post-mortem/NNN-kebab-title.md" --collection knowledge__rdr_postmortem__{repo}`
+- **T1 scratch**: Working notes via `nx scratch put "RDR NNN close: archiving post-mortem" --tags "rdr,close"`
 
 ## Does NOT
 
