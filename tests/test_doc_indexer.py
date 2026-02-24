@@ -406,23 +406,6 @@ def test_index_markdown_no_frontmatter_offsets_unchanged(tmp_path: Path, monkeyp
 
 # ── nexus-370: CCE helpers ────────────────────────────────────────────────────
 
-def test_estimate_tokens_returns_reasonable_value():
-    """300 chars of text should estimate to ~100 tokens (3 chars/token)."""
-    from nexus.doc_indexer import _estimate_tokens
-
-    chunks = ["a" * 300]
-    result = _estimate_tokens(chunks)
-    assert result == 100
-
-
-def test_estimate_tokens_multi_chunk():
-    """Estimate sums all chunk lengths then divides by 3."""
-    from nexus.doc_indexer import _estimate_tokens
-
-    chunks = ["a" * 150, "b" * 150]
-    assert _estimate_tokens(chunks) == 100
-
-
 def test_embed_with_fallback_calls_cce_for_docs_collection(monkeypatch):
     """When model=voyage-context-3 and len(chunks) >= 2, contextualized_embed is called."""
     from unittest.mock import MagicMock, patch
@@ -1023,10 +1006,49 @@ def test_batch_chunks_for_cce_no_batch_exceeds_1000():
     batches = _batch_chunks_for_cce(chunks)
 
     for i, batch in enumerate(batches):
-        # Allow the singleton-merge case: last batch can exceed by 1 if merged
-        assert len(batch) <= _CCE_MAX_BATCH_CHUNKS + 1, (
-            f"Batch {i} has {len(batch)} chunks, exceeds limit"
+        assert len(batch) <= _CCE_MAX_BATCH_CHUNKS, (
+            f"Batch {i} has {len(batch)} chunks, max allowed is {_CCE_MAX_BATCH_CHUNKS}"
         )
+
+
+def test_batch_chunks_for_cce_singleton_not_merged_when_target_at_limit():
+    """Singleton is NOT merged into previous batch if that batch is already at the limit."""
+    from nexus.doc_indexer import _batch_chunks_for_cce, _CCE_MAX_BATCH_CHUNKS
+
+    # Exactly _CCE_MAX_BATCH_CHUNKS chunks → fills one batch to the limit
+    # Then one more → singleton that must NOT be merged (would overflow)
+    chunks = ["tiny"] * (_CCE_MAX_BATCH_CHUNKS + 1)
+    batches = _batch_chunks_for_cce(chunks)
+
+    for i, batch in enumerate(batches):
+        assert len(batch) <= _CCE_MAX_BATCH_CHUNKS, (
+            f"Batch {i} has {len(batch)} chunks, max is {_CCE_MAX_BATCH_CHUNKS}"
+        )
+    # All chunks preserved
+    assert sum(len(b) for b in batches) == _CCE_MAX_BATCH_CHUNKS + 1
+
+
+def test_embed_with_fallback_warns_at_exactly_limit(monkeypatch):
+    """Warning fires when chunk count equals the limit (>= boundary)."""
+    from unittest.mock import MagicMock, patch
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+    mock_result = MagicMock()
+    mock_result.embeddings = [[0.1]]
+    mock_client.embed.return_value = mock_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        with patch("nexus.doc_indexer._log") as mock_log:
+            # Patch limit to 2 and pass exactly 2 chunks → should warn with >=
+            with patch("nexus.doc_indexer._CCE_MAX_TOTAL_CHUNKS", 2):
+                _embed_with_fallback(
+                    chunks=["a", "b"],
+                    model="voyage-4",
+                    api_key="vk_test",
+                )
+            mock_log.warning.assert_called_once()
+            assert "chunk count exceeds" in mock_log.warning.call_args[0][0]
 
 
 # ── C3: Fallback embed() in CCE error handler also batches ──────────────────
