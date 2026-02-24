@@ -1,4 +1,5 @@
 """T1: indexer.py — status transitions, error path, credential skip, hidden file filter."""
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -23,7 +24,7 @@ def registry():
 # Default config mock that includes the indexing section
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},
-    "indexing": {"code_extensions": [], "prose_extensions": [], "rdr_paths": ["docs/rdr"]},
+    "indexing": {"code_extensions": [], "prose_extensions": [], "rdr_paths": ["docs/rdr"], "include_untracked": False},
 }
 
 
@@ -825,3 +826,73 @@ def test_registry_c2_fallback(tmp_path: Path) -> None:
     assert expected_docs in collection_names_used, (
         f"Expected {expected_docs} in {collection_names_used}"
     )
+
+
+# ── _git_ls_files tests ──────────────────────────────────────────────────────
+
+
+def test_git_ls_files_returns_tracked_files(tmp_path: Path) -> None:
+    """_git_ls_files returns only tracked files, not .gitignored ones."""
+    from nexus.indexer import _git_ls_files
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tracked.py").write_text("x = 1\n")
+    (repo / ".env").write_text("SECRET=abc\n")
+    (repo / ".gitignore").write_text(".env\n")
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    files = _git_ls_files(repo)
+    file_names = {f.name for f in files}
+    assert "tracked.py" in file_names
+    assert ".gitignore" in file_names
+    assert ".env" not in file_names, ".env should be gitignored"
+
+
+def test_git_ls_files_with_untracked(tmp_path: Path) -> None:
+    """include_untracked=True also returns untracked-but-not-ignored files."""
+    from nexus.indexer import _git_ls_files
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tracked.py").write_text("x = 1\n")
+    (repo / ".gitignore").write_text(".env\n")
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "tracked.py", ".gitignore"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    # Create untracked (not ignored) file
+    (repo / "new_file.py").write_text("y = 2\n")
+    # Create ignored file
+    (repo / ".env").write_text("SECRET=abc\n")
+
+    # Without include_untracked
+    files = _git_ls_files(repo, include_untracked=False)
+    file_names = {f.name for f in files}
+    assert "new_file.py" not in file_names
+
+    # With include_untracked
+    files = _git_ls_files(repo, include_untracked=True)
+    file_names = {f.name for f in files}
+    assert "new_file.py" in file_names
+    assert ".env" not in file_names, ".env should still be gitignored"
+
+
+def test_git_ls_files_fallback_on_non_git_dir(tmp_path: Path) -> None:
+    """_git_ls_files returns empty list for non-git directories (triggers fallback)."""
+    from nexus.indexer import _git_ls_files
+
+    non_git = tmp_path / "not-a-repo"
+    non_git.mkdir()
+    (non_git / "file.py").write_text("x = 1\n")
+
+    files = _git_ls_files(non_git)
+    assert files == [], "Non-git directory should return empty list for fallback"

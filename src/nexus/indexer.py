@@ -72,6 +72,30 @@ def _should_ignore(rel_path: Path, patterns: list[str]) -> bool:
     return False
 
 
+def _git_ls_files(repo: Path, *, include_untracked: bool = False) -> list[Path]:
+    """Return repository files using git ls-files, respecting .gitignore.
+
+    By default returns only tracked (committed/staged) files.
+    With *include_untracked*, also includes untracked files that are not
+    ignored by .gitignore / .git/info/exclude / global gitignore.
+    """
+    args = ["git", "ls-files", "--cached", "-z"]
+    if include_untracked:
+        args.extend(["--others", "--exclude-standard"])
+    result = subprocess.run(
+        args, cwd=repo, capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        _log.warning("git ls-files failed, falling back to rglob", error=result.stderr.strip())
+        return []  # caller should fall back
+    # -z uses NUL separators (handles filenames with spaces/newlines)
+    paths = []
+    for rel_str in result.stdout.split("\0"):
+        if rel_str:  # filter empty strings from trailing NUL
+            paths.append(repo / rel_str)
+    return paths
+
+
 def index_repository(repo: Path, registry: "RepoRegistry", *, frecency_only: bool = False) -> None:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
@@ -633,10 +657,22 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     pdf_files: list[tuple[float, Path]] = []
     all_text_scored: list[tuple[float, Path]] = []  # code + prose for ripgrep cache
 
-    for path in sorted(repo.rglob("*")):
-        if not path.is_file() or path.is_symlink():
-            continue
+    # Use git ls-files to respect .gitignore (security + efficiency)
+    include_untracked = indexing_config.get("include_untracked", False)
+    git_files = _git_ls_files(repo, include_untracked=include_untracked)
+
+    if git_files:
+        candidate_files = git_files
+    else:
+        # Fallback to rglob if git ls-files fails (not a git repo, etc.)
+        _log.warning("falling back to rglob file walk", repo=str(repo))
+        candidate_files = sorted(p for p in repo.rglob("*") if p.is_file() and not p.is_symlink())
+
+    for path in candidate_files:
+        if not path.is_file():
+            continue  # git ls-files may list deleted files not yet committed
         rel = path.relative_to(repo)
+        # Defense-in-depth: still filter hidden dirs and ignore patterns
         if any(part.startswith(".") for part in rel.parts):
             continue  # Skip hidden dirs/files
         if _should_ignore(rel, ignore_patterns):

@@ -59,6 +59,7 @@ _DEFAULTS: dict[str, Any] = {
         "code_extensions": [],
         "prose_extensions": [],
         "rdr_paths": ["docs/rdr"],
+        "include_untracked": False,
     },
 }
 
