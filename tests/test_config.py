@@ -1,10 +1,11 @@
 """AC6: Config merges global + per-repo YAML with env var overrides."""
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
 
-from nexus.config import load_config
+from nexus.config import _DEFAULTS, load_config
 
 
 def test_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,7 +91,6 @@ def test_set_credential_cleans_up_temp_on_write_failure(
     """When the temp file write fails, os.unlink is called on the temp file."""
     import os
     import tempfile
-    from unittest.mock import patch
 
     from nexus.config import set_credential
 
@@ -165,3 +165,44 @@ def test_set_credential_unknown_name_raises(
 
     with pytest.raises(ValueError, match="Unknown credential"):
         set_credential("totally_unknown_credential", "some-value")
+
+
+# ── Indexing config section ────────────────────────────────────────────────
+
+
+def test_defaults_include_indexing_section() -> None:
+    """_DEFAULTS contains the indexing section with expected keys."""
+    assert "indexing" in _DEFAULTS
+    assert _DEFAULTS["indexing"]["code_extensions"] == []
+    assert _DEFAULTS["indexing"]["prose_extensions"] == []
+    assert _DEFAULTS["indexing"]["rdr_paths"] == ["docs/rdr"]
+
+
+def test_load_config_returns_indexing_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """load_config returns indexing defaults when no config files exist."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = load_config(repo_root=tmp_path)
+    assert cfg["indexing"]["code_extensions"] == []
+    assert cfg["indexing"]["prose_extensions"] == []
+    assert cfg["indexing"]["rdr_paths"] == ["docs/rdr"]
+
+
+def test_nexus_yml_indexing_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-repo .nexus.yml can override indexing defaults via deep merge."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".nexus.yml").write_text(
+        "indexing:\n"
+        "  code_extensions: [.sql, .proto]\n"
+        "  rdr_paths:\n"
+        "    - docs/rdr\n"
+        "    - design/decisions\n"
+    )
+    cfg = load_config(repo_root=tmp_path)
+    assert cfg["indexing"]["code_extensions"] == [".sql", ".proto"]
+    assert cfg["indexing"]["rdr_paths"] == ["docs/rdr", "design/decisions"]
+    # prose_extensions not set in override → stays default
+    assert cfg["indexing"]["prose_extensions"] == []
