@@ -333,13 +333,13 @@ def test_polling_does_not_record_head_hash_on_credentials_missing(
     )
 
 
-# ── CLI: nx index code ─────────────────────────────────────────────────────────
+# ── CLI: nx index repo ─────────────────────────────────────────────────────────
 
-def test_cli_index_code_registers_and_indexes(
+def test_cli_index_repo_registers_and_indexes(
     mini_repo: Path, tmp_path: Path, local_t3: T3Database,
     monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nx index code <path> registers the repo and indexes it end-to-end."""
+    """nx index repo <path> registers the repo and indexes it end-to-end."""
     from click.testing import CliRunner
     from nexus.cli import main
 
@@ -348,7 +348,7 @@ def test_cli_index_code_registers_and_indexes(
 
     with patch("nexus.db.make_t3", return_value=local_t3), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        result = runner.invoke(main, ["index", "code", str(mini_repo)])
+        result = runner.invoke(main, ["index", "repo", str(mini_repo)])
 
     assert result.exit_code == 0, result.output
     assert "Done" in result.output
@@ -358,7 +358,7 @@ def test_cli_index_then_search_pipeline(
     mini_repo: Path, tmp_path: Path, local_t3: T3Database,
     monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nx index code → nx search: full CLI pipeline returns results."""
+    """nx index repo → nx search: full CLI pipeline returns results."""
     from click.testing import CliRunner
     from nexus.cli import main
 
@@ -376,7 +376,7 @@ def test_cli_index_then_search_pipeline(
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
          patch("nexus.commands.search_cmd._t3", return_value=local_t3):
 
-        index_result = runner.invoke(main, ["index", "code", str(mini_repo)])
+        index_result = runner.invoke(main, ["index", "repo", str(mini_repo)])
         assert index_result.exit_code == 0, index_result.output
 
         search_result = runner.invoke(main, [
@@ -393,7 +393,7 @@ def test_cli_index_frecency_only_flag(
     mini_repo: Path, tmp_path: Path, local_t3: T3Database,
     monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nx index code --frecency-only completes without error after a full index."""
+    """nx index repo --frecency-only completes without error after a full index."""
     from click.testing import CliRunner
     from nexus.cli import main
 
@@ -402,8 +402,8 @@ def test_cli_index_frecency_only_flag(
 
     with patch("nexus.db.make_t3", return_value=local_t3), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        runner.invoke(main, ["index", "code", str(mini_repo)])
-        result = runner.invoke(main, ["index", "code", str(mini_repo), "--frecency-only"])
+        runner.invoke(main, ["index", "repo", str(mini_repo)])
+        result = runner.invoke(main, ["index", "repo", str(mini_repo), "--frecency-only"])
 
     assert result.exit_code == 0, result.output
     assert "Done" in result.output

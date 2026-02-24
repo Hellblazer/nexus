@@ -20,7 +20,7 @@ def index() -> None:
     """Index code repositories for semantic search."""
 
 
-@index.command("code")
+@index.command("repo")
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
     "--frecency-only",
@@ -28,8 +28,13 @@ def index() -> None:
     default=False,
     help="Update frecency scores only; skip re-embedding (faster, for re-ranking refresh).",
 )
-def index_code_cmd(path: Path, frecency_only: bool) -> None:
-    """Register and immediately index a code repository at PATH."""
+def index_repo_cmd(path: Path, frecency_only: bool) -> None:
+    """Register and immediately index a code repository at PATH.
+
+    Classifies files by extension: code files get voyage-code-3 embeddings (code__),
+    prose and PDFs get voyage-context-3 embeddings (docs__), RDR documents are
+    auto-discovered and indexed into docs__rdr__.
+    """
     from nexus.indexer import index_repository
 
     reg = _registry()
