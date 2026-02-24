@@ -36,11 +36,6 @@ def _has_credentials() -> bool:
     return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
 
 
-def _estimate_tokens(chunks: list[str]) -> int:
-    """Rough token estimate: 3 characters per token (conservative; code skews short)."""
-    return sum(len(c) for c in chunks) // 3
-
-
 _CCE_TOKEN_LIMIT = 32_000
 _CCE_TOTAL_TOKEN_LIMIT = 120_000  # Voyage API total token limit across all inputs
 # Note: per-batch limit of 32K means we never hit 120K in a single call
@@ -69,7 +64,8 @@ def _batch_chunks_for_cce(chunks: list[str]) -> list[list[str]]:
             current_tokens += chunk_tokens
     if current:
         # CCE requires >= 2 chunks per batch; merge singletons into previous batch
-        if len(current) < 2 and batches:
+        # but only if that won't exceed the per-batch chunk limit
+        if len(current) < 2 and batches and len(batches[-1]) < _CCE_MAX_BATCH_CHUNKS:
             batches[-1].extend(current)
         else:
             batches.append(current)
@@ -97,7 +93,7 @@ def _embed_with_fallback(
     """
     if not chunks:
         return [], model
-    if len(chunks) > _CCE_MAX_TOTAL_CHUNKS:
+    if len(chunks) >= _CCE_MAX_TOTAL_CHUNKS:
         _log.warning(
             "chunk count exceeds Voyage API limit",
             chunk_count=len(chunks),

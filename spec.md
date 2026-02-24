@@ -200,8 +200,9 @@ ChromaDB natively supports `VoyageAIEmbeddingFunction` (`pip install voyageai`; 
 2. Text extracted and chunked in-process using **ported Arcaneum extraction logic**: PyMuPDF4LLM → markdown (primary), PyMuPDF → normalized text (fallback), Tesseract/EasyOCR (scanned fallback)
 3. **Only the extracted text chunks + embeddings + metadata are stored in T3 ChromaDB** — raw PDF bytes never leave the machine
 4. Chunks embedded via `voyage-context-3` (Contextualized Chunk Embedding — captures cross-chunk context
-   at index time for richer retrieval). Falls back to `voyage-4` if fewer than 2 chunks or estimated
-   tokens exceed 100K. Query-time embedding always uses `voyage-4` (standard; CCE is index-only).
+   at index time for richer retrieval). Large documents are automatically batched into groups fitting
+   the 32K token context window. Falls back to `voyage-4` if fewer than 2 chunks or on CCE API error.
+   Query-time embedding always uses `voyage-4` (standard; CCE is index-only).
 5. Upserted into T3 collection `docs__{corpus-name}`
 
 Arcaneum's extraction and chunking logic (PDFExtractor, PDFChunker, OCREngine) is **ported** — not imported as a library. The storage layer calls (Qdrant `PointStruct`, `upload_points`, scroll-based sync) must be rewritten as ChromaDB `collection.upsert()` calls. The embedding layer (`fastembed` local ONNX) is replaced with `VoyageAIEmbeddingFunction`. The extraction and chunking logic itself (PyMuPDF4LLM calls, OCR orchestration) ports with minimal changes.
