@@ -24,7 +24,7 @@ nx/
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
 │   └── *.md                 # 14 specialized agent definitions
 ├── commands/
-│   └── *.md                 # Slash commands (/research, /plan, /review-code, etc.)
+│   └── *.md                 # Slash commands (/research, /create-plan, /review-code, etc.)
 ├── hooks/
 │   ├── hooks.json           # Hook event → script wiring
 │   └── scripts/
@@ -74,7 +74,7 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | pdf-chromadb-processor | pdf-processing | `/pdf-process` | haiku | Index PDFs into nx store for semantic search |
 | plan-auditor | plan-validation | `/plan-audit` | sonnet | Validate plans before execution |
 | project-management-setup | project-setup | `/project-setup` | haiku | Create PM infrastructure for multi-week projects |
-| strategic-planner | strategic-planning | `/plan` | opus | Implementation planning, task decomposition |
+| strategic-planner | strategic-planning | `/create-plan` | opus | Implementation planning, task decomposition |
 | test-validator | test-validation | `/test-validate` | sonnet | Test coverage and quality validation |
 
 ## Standard Pipelines
@@ -106,7 +106,7 @@ Defined in `registry.yaml`:
 
 **Agent commands** (`/command → agent`):
 - `/research` → deep-research-synthesizer
-- `/plan` → strategic-planner
+- `/create-plan` → strategic-planner
 - `/plan-audit` → plan-auditor
 - `/analyze-code` → codebase-deep-analyzer
 - `/review-code` → code-review-expert

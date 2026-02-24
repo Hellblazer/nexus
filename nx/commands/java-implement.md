@@ -27,7 +27,7 @@ description: Implement feature using java-developer agent
     echo ""
   else
     echo "### Plan Status"
-    echo "No active project found. Run /plan first to create an implementation plan."
+    echo "No active project found. Run /create-plan first to create an implementation plan."
     echo ""
   fi
 
