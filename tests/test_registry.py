@@ -209,3 +209,95 @@ def test_docs_collection_name_function() -> None:
     name = _docs_collection_name(repo)
     assert name.startswith("docs__myrepo-")
     assert len(name.split("-")[-1]) == 8  # 8-char hash
+
+
+# ── worktree-stable hashing ──────────────────────────────────────────────────
+
+
+def test_repo_identity_fallback_without_git(tmp_path: Path) -> None:
+    """_repo_identity falls back to repo path when not a git repo."""
+    from nexus.registry import _repo_identity
+
+    repo = tmp_path / "not-a-git-repo"
+    repo.mkdir()
+    name, hash8 = _repo_identity(repo)
+    assert name == "not-a-git-repo"
+    expected = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+    assert hash8 == expected
+
+
+def test_repo_identity_stable_in_git_repo(tmp_path: Path) -> None:
+    """_repo_identity uses the git common dir for a real git repo."""
+    import subprocess
+
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
+
+    from nexus.registry import _repo_identity
+
+    name, hash8 = _repo_identity(repo)
+    assert name == "myrepo"
+    expected = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+    assert hash8 == expected
+
+
+def test_repo_identity_worktree_matches_main(tmp_path: Path) -> None:
+    """A worktree produces the same identity as the main repo."""
+    import subprocess
+
+    # Create a main repo with an initial commit (required for worktree)
+    main_repo = tmp_path / "main-repo"
+    main_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=main_repo, capture_output=True, check=True)
+    (main_repo / "f.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=main_repo, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=main_repo, capture_output=True, check=True,
+        env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"},
+    )
+
+    # Create a worktree
+    wt = tmp_path / "my-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", str(wt), "-b", "wt-branch"],
+        cwd=main_repo, capture_output=True, check=True,
+    )
+
+    from nexus.registry import _repo_identity
+
+    main_name, main_hash = _repo_identity(main_repo)
+    wt_name, wt_hash = _repo_identity(wt)
+
+    assert main_name == wt_name, f"names differ: {main_name} vs {wt_name}"
+    assert main_hash == wt_hash, f"hashes differ: {main_hash} vs {wt_hash}"
+
+
+def test_collection_names_stable_across_worktrees(tmp_path: Path) -> None:
+    """_collection_name and _docs_collection_name are identical for main and worktree."""
+    import subprocess
+
+    from nexus.registry import _collection_name, _docs_collection_name
+
+    main_repo = tmp_path / "repo"
+    main_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=main_repo, capture_output=True, check=True)
+    (main_repo / "f.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=main_repo, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=main_repo, capture_output=True, check=True,
+        env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"},
+    )
+
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", str(wt), "-b", "wt-branch"],
+        cwd=main_repo, capture_output=True, check=True,
+    )
+
+    assert _collection_name(main_repo) == _collection_name(wt)
+    assert _docs_collection_name(main_repo) == _docs_collection_name(wt)

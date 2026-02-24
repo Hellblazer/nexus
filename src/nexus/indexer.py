@@ -530,9 +530,10 @@ def _discover_and_index_rdrs(
     if not md_paths:
         return
 
-    # Corpus: rdr__{repo_name}-{hash8} → collection docs__rdr__{repo_name}-{hash8}
-    path_hash = _hl.sha256(str(repo).encode()).hexdigest()[:8]
-    corpus = f"rdr__{repo.name}-{path_hash}"
+    # Corpus: rdr__{basename}-{hash8} — uses worktree-stable identity
+    from nexus.registry import _repo_identity
+    basename, path_hash = _repo_identity(repo)
+    corpus = f"rdr__{basename}-{path_hash}"
 
     batch_index_markdowns(md_paths, corpus, t3=db)
 
@@ -616,8 +617,6 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     - PDF files → docs__ collection (PDF extraction + voyage-context-3)
     - RDR markdown → docs__rdr__ collection (via batch_index_markdowns)
     """
-    import hashlib as _hl
-
     from nexus.classifier import ContentClass, classify_file
     from nexus.config import load_config
     from nexus.frecency import batch_frecency
@@ -704,8 +703,9 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     all_text_scored.sort(key=lambda x: x[0], reverse=True)
 
     # Update ripgrep cache (code + prose text files, not PDFs)
-    _repo_hash = _hl.sha256(str(repo).encode()).hexdigest()[:8]
-    cache_path = Path.home() / ".config" / "nexus" / f"{repo.name}-{_repo_hash}.cache"
+    from nexus.registry import _repo_identity
+    _repo_basename, _repo_hash = _repo_identity(repo)
+    cache_path = Path.home() / ".config" / "nexus" / f"{_repo_basename}-{_repo_hash}.cache"
     build_cache(repo, cache_path, all_text_scored)
 
     # Credential check (required for T3 operations)

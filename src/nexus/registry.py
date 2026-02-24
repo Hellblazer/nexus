@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import threading
 from pathlib import Path
@@ -13,25 +14,58 @@ import structlog
 _log = structlog.get_logger()
 
 
+def _repo_identity(repo: Path) -> tuple[str, str]:
+    """Return ``(basename, hash8)`` for collection naming, stable across worktrees.
+
+    Uses ``git rev-parse --git-common-dir`` to resolve the main repository root
+    even when called from a worktree.  Falls back to the given *repo* path when
+    git is unavailable (not installed, not a git repo, etc.).
+
+    The hash is the first 8 hex characters of the SHA-256 digest of the
+    resolved main repo path.  Two worktrees of the same repo produce identical
+    collection names.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            git_common = Path(result.stdout.strip())
+            if not git_common.is_absolute():
+                git_common = (repo / git_common).resolve()
+            main_repo = git_common.parent
+        else:
+            main_repo = repo
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log.debug("git rev-parse failed, using repo path directly", error=str(exc))
+        main_repo = repo
+
+    path_hash = hashlib.sha256(str(main_repo).encode()).hexdigest()[:8]
+    return main_repo.name, path_hash
+
+
 def _collection_name(repo: Path) -> str:
     """Return a unique ChromaDB collection name for *repo*.
 
     The collection name is ``code__{basename}-{hash8}`` where *hash8* is the
-    first 8 hex characters of the SHA-256 digest of the full absolute path.
-    This guarantees uniqueness even when two repos share the same leaf name
-    (e.g. ``/work/a/repo`` and ``/work/b/repo`` both named ``repo``).
+    first 8 hex characters of the SHA-256 digest of the main repository path
+    (resolved via git, stable across worktrees).
     """
-    path_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
-    return f"code__{repo.name}-{path_hash}"
+    name, path_hash = _repo_identity(repo)
+    return f"code__{name}-{path_hash}"
 
 
 def _docs_collection_name(repo: Path) -> str:
     """Return the docs__ ChromaDB collection name for *repo*.
 
-    Uses the same hash scheme as _collection_name() for consistency.
+    Uses the same identity scheme as _collection_name() for consistency.
     """
-    path_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
-    return f"docs__{repo.name}-{path_hash}"
+    name, path_hash = _repo_identity(repo)
+    return f"docs__{name}-{path_hash}"
 
 
 class RepoRegistry:
