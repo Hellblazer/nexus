@@ -7,7 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.search_engine import SearchResult
+from nexus.types import SearchResult
 
 
 @pytest.fixture
@@ -340,7 +340,7 @@ def test_context_C_requires_integer(
 
 def test_format_plain_with_context_shows_correct_lines() -> None:
     """format_plain_with_context shows first line + lines_after additional lines."""
-    from nexus.search_engine import format_plain_with_context
+    from nexus.formatters import format_plain_with_context
 
     content = "\n".join(f"line{i}" for i in range(10))
     result = SearchResult(
@@ -355,7 +355,7 @@ def test_format_plain_with_context_shows_correct_lines() -> None:
 
 def test_format_plain_with_context_no_context_equals_format_plain() -> None:
     """format_plain_with_context(0) produces same output as format_plain."""
-    from nexus.search_engine import format_plain, format_plain_with_context
+    from nexus.formatters import format_plain, format_plain_with_context
 
     content = "alpha\nbeta\ngamma"
     result = SearchResult(

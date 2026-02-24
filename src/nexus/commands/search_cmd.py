@@ -8,16 +8,10 @@ from nexus.corpus import resolve_corpus
 from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
 from nexus.formatters import format_json, format_plain_with_context, format_vimgrep
-from nexus.search_engine import (
-    SearchResult,
-    answer_mode,
-    apply_hybrid_scoring,
-    agentic_search,
-    fetch_mxbai_results,
-    rerank_results,
-    round_robin_interleave,
-    search_cross_corpus,
-)
+from nexus.answer import answer_mode
+from nexus.scoring import apply_hybrid_scoring, rerank_results, round_robin_interleave
+from nexus.search_engine import agentic_search, fetch_mxbai_results, search_cross_corpus
+from nexus.types import SearchResult
 
 
 def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:

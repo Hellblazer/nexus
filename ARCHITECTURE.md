@@ -1,8 +1,7 @@
 # Nexus Architecture
 
-> **Implementation Status**: Sections marked `[v1-actual]` reflect the current implementation.
-> Sections marked `[v2-planned]` describe aspirational design not yet implemented.
-> When in doubt, check `src/nexus/` — the code is the ground truth.
+> This document describes the current implementation. When in doubt,
+> check `src/nexus/` — the code is the ground truth.
 
 ## Executive Summary
 
@@ -24,10 +23,7 @@ persistent server), and Arcaneum (PDF/markdown extraction and chunking).
 
 ## Module/Package Structure
 
-### [v1-actual] Current Flat Layout
-
-The implementation uses a flat module layout, not the hierarchical subpackages described
-in the v2-planned section below. This is the ground truth as of the current codebase.
+### Flat Module Layout
 
 ```
 src/nexus/
@@ -52,7 +48,7 @@ src/nexus/
 |-- registry.py                    # repo registry (~/.config/nexus/repos.json)
 |-- ripgrep_cache.py               # mmap line cache (ported from SeaGOAT)
 |-- scoring.py                     # scoring primitives (min_max_normalize, etc.)
-|-- search_engine.py               # search orchestration (~175 lines, see [v1-actual] below)
+|-- search_engine.py               # search orchestration (~175 lines)
 |-- server.py                      # Flask app factory and routes
 |-- server_main.py                 # server entry point / daemonization
 |-- session.py                     # session ID management (PID-scoped file)
@@ -78,118 +74,7 @@ src/nexus/
     +-- t3.py                      # CloudClient + VoyageAIEmbeddingFunction
 ```
 
-### [v2-planned] Aspirational Hierarchical Layout
-
-The following hierarchical structure was the original design intent. It has NOT been
-implemented. The subpackages `protocols/`, `storage/`, `indexing/`, `search/`, `answer/`,
-`pm/`, `server/`, `cli/`, `formatting/`, and `integration/` do not exist.
-Note: `answer.py`, `formatters.py`, and `scoring.py` NOW EXIST as flat modules (partial
-progress toward the aspirational layout), but the full subpackage structure remains unimplemented.
-
-```
-src/nexus/
-|-- __init__.py                    # version, package metadata
-|-- __main__.py                    # entry point for `python -m nexus`
-|-- types.py                       # shared dataclasses (Chunk, SearchResult, etc.)
-|-- errors.py                      # custom exception hierarchy
-|-- config.py                      # config loading (YAML, env vars, merging)
-|-- session.py                     # session ID management (UUID4)
-|
-|-- protocols/                     # ABCs and Protocols (NO implementations)
-|   |-- __init__.py
-|   |-- storage.py                 # MemoryStore, VectorStore Protocols
-|   |-- embedding.py               # EmbeddingFunction Protocol
-|   |-- chunking.py                # ChunkStrategy Protocol
-|   |-- search.py                  # SearchPipeline Protocol
-|   |-- indexing.py                # IndexPipeline Protocol
-|   +-- formatting.py              # ResultFormatter Protocol
-|
-|-- storage/                       # Storage tier implementations
-|   |-- __init__.py                # tier factory functions
-|   |-- t1_ephemeral.py            # EphemeralClient + DefaultEmbeddingFunction
-|   |-- t2_sqlite.py               # SQLite + FTS5 + WAL
-|   +-- t3_cloud.py                # CloudClient + VoyageAIEmbeddingFunction
-|
-|-- indexing/                      # Indexing pipelines
-|   |-- __init__.py
-|   |-- code/                      # Code indexing pipeline
-|   |   |-- __init__.py
-|   |   |-- pipeline.py            # CodeIndexPipeline orchestrator
-|   |   |-- frecency.py            # git frecency scoring (ported from SeaGOAT)
-|   |   |-- chunker.py             # AST chunker via llama-index CodeSplitter
-|   |   +-- ripgrep_cache.py       # mmap line cache (ported from SeaGOAT)
-|   |-- pdf/                       # PDF indexing pipeline (ported from Arcaneum)
-|   |   |-- __init__.py
-|   |   |-- pipeline.py            # PDFIndexPipeline orchestrator
-|   |   |-- extractor.py           # PyMuPDF4LLM + pdfplumber + OCR
-|   |   |-- chunker.py             # PDF chunker
-|   |   +-- ocr.py                 # OCR engine (Tesseract/EasyOCR)
-|   +-- markdown/                  # Markdown indexing pipeline
-|       |-- __init__.py
-|       |-- pipeline.py            # MarkdownIndexPipeline orchestrator
-|       +-- chunker.py             # SemanticMarkdownChunker (ported from Arcaneum)
-|
-|-- search/                        # Search subsystem
-|   |-- __init__.py
-|   |-- semantic.py                # ChromaDB vector search (T1/T3)
-|   |-- fulltext.py                # ripgrep line cache search
-|   |-- hybrid.py                  # hybrid scoring (0.7*vector + 0.3*frecency)
-|   |-- cross_corpus.py            # cross-corpus retrieval + reranking
-|   |-- agentic.py                 # multi-step query refinement (Haiku)
-|   |-- mxbai.py                   # Mixedbread fan-out (read-only)
-|   +-- scoring.py                 # min_max_normalize, scoring utilities
-|
-|-- answer/                        # Q&A synthesis
-|   |-- __init__.py
-|   +-- synthesizer.py             # Haiku-based answer synthesis with citations
-|
-|-- pm/                            # Project management lifecycle
-|   |-- __init__.py
-|   |-- lifecycle.py               # init/archive/restore/close state machine
-|   |-- templates.py               # embedded PM document templates
-|   +-- synthesis.py               # Haiku archive synthesis
-|
-|-- server/                        # Persistent server
-|   |-- __init__.py
-|   |-- app.py                     # Flask app factory
-|   |-- daemon.py                  # daemonize, PID management
-|   |-- registry.py                # repo registry (~/.config/nexus/repos.json)
-|   +-- polling.py                 # HEAD hash polling, re-index triggers
-|
-|-- cli/                           # Click CLI commands
-|   |-- __init__.py
-|   |-- main.py                    # nx group + top-level commands
-|   |-- search_cmd.py              # nx search
-|   |-- memory_cmd.py              # nx memory put/get/search/list/expire/promote
-|   |-- store_cmd.py               # nx store, nx store expire
-|   |-- scratch_cmd.py             # nx scratch put/get/search/list/clear/flag/promote
-|   |-- index_cmd.py               # nx index code/pdf/md
-|   |-- serve_cmd.py               # nx serve start/stop/status/logs
-|   |-- pm_cmd.py                  # nx pm (all lifecycle subcommands)
-|   |-- collection_cmd.py          # nx collection list/info/delete/verify
-|   |-- config_cmd.py              # nx config show/set
-|   |-- doctor_cmd.py              # nx doctor
-|   +-- install_cmd.py             # nx install/uninstall claude-code
-|
-|-- formatting/                    # Output formatting
-|   |-- __init__.py
-|   |-- plain.py                   # plain text, pipe-friendly
-|   |-- highlighted.py             # bat/pygments syntax highlighting
-|   |-- vimgrep.py                 # path:line:col:content
-|   |-- json_fmt.py                # JSON output
-|   +-- citations.py               # <cite i="N"> formatting for answer mode
-|
-+-- integration/                   # External tool integration
-    |-- __init__.py
-    |-- claude_code/               # Claude Code plugin
-    |   |-- __init__.py
-    |   |-- installer.py           # SKILL.md + hooks installation
-    |   |-- hooks.py               # SessionStart/SessionEnd hook logic
-    |   +-- skill_template.py      # SKILL.md template content
-    +-- git_hooks.py               # post-commit hook for nx serve notification
-```
-
-### [v1-actual] Module Responsibility Summary
+### Module Responsibility Summary
 
 | Module | Responsibility |
 |--------|---------------|
@@ -219,349 +104,30 @@ src/nexus/
 | `errors.py` | Custom exception hierarchy |
 | `commands/` | Click CLI command definitions (one file per command group) |
 
-### [v2-planned] Module Responsibility Summary
-
-This table reflects the aspirational hierarchical layout. In the v1-actual flat layout,
-the responsibilities map to: `db/t1.py`, `db/t2.py`, `db/t3.py` (storage tiers),
-`scoring.py`, `answer.py`, `formatters.py` (search/formatting), `pm.py` (lifecycle),
-`server.py` / `server_main.py` (server), `commands/` (CLI), and flat modules for indexing.
-
-| Module | Responsibility | Dependencies |
-|--------|---------------|--------------|
-| `protocols/` | Abstract interfaces only | `types.py` only |
-| `storage/t1_ephemeral.py` | In-memory ChromaDB scratch | `protocols/`, `types.py`, `chromadb` |
-| `storage/t2_sqlite.py` | SQLite + FTS5 memory bank | `protocols/`, `types.py`, `sqlite3` (stdlib) |
-| `storage/t3_cloud.py` | ChromaDB cloud knowledge | `protocols/`, `types.py`, `chromadb`, `voyageai` |
-| `indexing/code/` | Code repo indexing | `protocols/storage.py (VectorStore)`, `protocols/`, git, llama-index |
-| `indexing/pdf/` | PDF extraction + chunking | `protocols/storage.py (VectorStore)`, `protocols/`, pymupdf4llm |
-| `indexing/markdown/` | Markdown chunking | `protocols/storage.py (VectorStore)`, `protocols/`, markdown-it-py |
-| `search/` | All search strategies | `storage/`, `scoring.py` |
-| `answer/` | Haiku synthesis | `search/`, `anthropic` SDK |
-| `pm/` | Project management lifecycle | `storage/t2_sqlite.py`, `storage/t3_cloud.py`, `answer/` |
-| `server/` | Flask/Waitress persistent process | `indexing/`, `search/`, `storage/` |
-| `cli/` | Click command definitions | Everything above (leaf layer) |
-| `formatting/` | Output rendering | `types.py` only |
-| `integration/` | External tool hooks | `config.py`, `session.py` |
-
-### [v2-planned] Dependency Rules (aspirational import structure)
-
-These rules describe the intended architecture for the hierarchical subpackage layout.
-In the v1-actual flat layout, these rules are approximated but not formally enforced via
-import-linter (the `.importlinter` configuration file does not yet exist).
-
-1. `protocols/` imports NOTHING from `storage/`, `indexing/`, `search/`, `cli/`
-2. `storage/` imports only from `protocols/` and `types.py`
-3. `indexing/` imports from `protocols/` only — **not** from `storage/t3_cloud.py` directly; receives a `VectorStore` protocol via constructor injection from `cli/index_cmd.py`
-4. `search/` imports from `storage/` and `protocols/` (never from `indexing/` or `cli/`)
-5. `cli/` imports from everything but NOTHING imports from `cli/`
-6. `formatting/` imports only from `types.py`
-7. No circular dependency paths exist
-
-These rules are intended to be enforced by `import-linter` (`dev` dependency). Configuration in `.importlinter`. Run `lint-imports` as part of the CI gate alongside pytest, mypy, and ruff.
-
----
-
-## Core Abstractions (Protocols) [v2-planned]
-
-The `protocols/` subpackage described in this section does not exist in the v1-actual
-flat layout. The protocol interfaces below document the intended contracts. In practice,
-the v1-actual implementation wires dependencies via direct imports within the flat module
-structure rather than formal Protocol injection. These definitions remain as the
-aspirational interface specification.
-
-### StorageTier Protocols
-
-T1/T3 both use ChromaDB but differ in client type and embedding function.
-T2 uses SQLite. Rather than forcing a single interface, we define tier-appropriate protocols.
-
-```python
-# protocols/storage.py
-
-from typing import Protocol, runtime_checkable
-from nexus.types import MemoryEntry, VectorResult, SearchResult
-
-@runtime_checkable
-class MemoryStore(Protocol):
-    """T2 SQLite memory bank operations."""
-
-    def put(self, project: str, title: str, content: str, *,
-            tags: str = "", ttl: int | None = 30,
-            session: str = "", agent: str = "") -> int:
-        """Insert or replace a memory entry. Returns row ID."""
-        ...
-
-    def get(self, project: str, title: str) -> MemoryEntry | None:
-        """Retrieve by (project, title) key. Primary access pattern."""
-        ...
-
-    def get_by_id(self, id: int) -> MemoryEntry | None:
-        """Retrieve by row ID. Secondary access pattern."""
-        ...
-
-    def search(self, query: str, *, project: str | None = None) -> list[MemoryEntry]:
-        """FTS5 keyword search. Optionally scoped to a project."""
-        ...
-
-    def list_entries(self, *, project: str | None = None,
-                     agent: str | None = None, limit: int = 100) -> list[MemoryEntry]:
-        """List entries with optional filters."""
-        ...
-
-    def expire(self) -> int:
-        """Delete TTL-expired entries. Returns count deleted."""
-        ...
-
-    def close(self) -> None:
-        """Close the database connection."""
-        ...
-
-
-@runtime_checkable
-class VectorStore(Protocol):
-    """ChromaDB vector store operations (used by both T1 and T3)."""
-
-    def upsert(self, collection: str, ids: list[str],
-               documents: list[str], metadatas: list[dict]) -> None:
-        """Upsert documents into a collection."""
-        ...
-
-    def query(self, collection: str, query_texts: list[str],
-              n_results: int = 10, *,
-              where: dict | None = None) -> list[VectorResult]:
-        """Semantic search within a collection."""
-        ...
-
-    def get(self, collection: str, *,
-            ids: list[str] | None = None,
-            where: dict | None = None) -> list[VectorResult]:
-        """Retrieve documents by ID or metadata filter."""
-        ...
-
-    def delete(self, collection: str, ids: list[str]) -> None:
-        """Delete documents by ID."""
-        ...
-
-    def list_collections(self) -> list[str]:
-        """List all collection names."""
-        ...
-
-    def collection_count(self, collection: str) -> int:
-        """Get document count for a collection."""
-        ...
-```
-
-### EmbeddingFunction Protocol
-
-```python
-# protocols/embedding.py
-
-from typing import Protocol, runtime_checkable
-
-@runtime_checkable
-class EmbeddingFunction(Protocol):
-    """Wraps ChromaDB embedding function interface."""
-
-    def __call__(self, input: list[str]) -> list[list[float]]:
-        """Generate embeddings for a list of texts."""
-        ...
-
-    @property
-    def model_name(self) -> str:
-        """Return the model identifier (e.g., 'voyage-code-3')."""
-        ...
-```
-
-**Implementations:**
-
-| Class | Tier | Model | Network |
-|-------|------|-------|---------|
-| `DefaultEmbedding` | T1 | all-MiniLM-L6-v2 (local ONNX) | No |
-| `VoyageCodeEmbedding` | T3 code | voyage-code-3 | Yes |
-| `VoyageDocsEmbedding` | T3 docs/knowledge | voyage-4 | Yes |
-
-### ChunkStrategy Protocol
-
-```python
-# protocols/chunking.py
-
-from typing import Protocol, runtime_checkable
-from nexus.types import Chunk
-
-@runtime_checkable
-class ChunkStrategy(Protocol):
-    """Strategy for splitting content into embeddable chunks."""
-
-    def chunk(self, content: str, source_path: Path | None, metadata: dict) -> list[Chunk]:
-        """Split content into chunks with metadata.
-
-        source_path: filesystem path to the source file (required by CodeChunker for
-        language detection via file extension and line attribution; ignored by
-        PDFChunker and SemanticMarkdownChunker, which use metadata instead).
-        """
-        ...
-```
-
-**Implementations:**
-
-| Class | Pipeline | Source |
-|-------|----------|--------|
-| `CodeChunker` | Code | llama-index CodeSplitter (AST) + line-based fallback |
-| `PDFChunker` | PDF | Ported from Arcaneum `PDFChunker` |
-| `SemanticMarkdownChunker` | Markdown | Ported from Arcaneum `SemanticMarkdownChunker` |
-
-### IndexPipeline Protocol
-
-```python
-# protocols/indexing.py
-
-from typing import Protocol, runtime_checkable
-from pathlib import Path
-from nexus.types import IndexResult
-
-@runtime_checkable
-class IndexPipeline(Protocol):
-    """Pipeline for indexing content into T3."""
-
-    def index(self, path: Path) -> IndexResult:
-        """Index content at the given path. Returns stats."""
-        ...
-
-    def needs_reindex(self, path: Path) -> bool:
-        """Check if content at path needs re-indexing."""
-        ...
-```
-
-**Implementations:**
-
-| Class | Chunker | Embedding | Collection Pattern |
-|-------|---------|-----------|-------------------|
-| `CodeIndexPipeline` | `CodeChunker` | `VoyageCodeEmbedding` | `code__{repo}` |
-| `PDFIndexPipeline` | `PDFChunker` | `VoyageDocsEmbedding` | `docs__{corpus}` |
-| `MarkdownIndexPipeline` | `SemanticMarkdownChunker` | `VoyageDocsEmbedding` | `docs__{corpus}` |
-
-### SearchPipeline Protocol
-
-```python
-# protocols/search.py
-
-from typing import Protocol, runtime_checkable
-from nexus.types import SearchResult, SearchOptions
-
-@runtime_checkable
-class SearchPipeline(Protocol):
-    """Strategy for searching across storage tiers."""
-
-    def search(self, query: str, options: SearchOptions) -> list[SearchResult]:
-        """Execute a search and return scored results."""
-        ...
-```
-
-**Implementations:**
-
-| Class | Scope | Dependencies |
-|-------|-------|-------------|
-| `SemanticSearch` | T1 or T3 | ChromaDB query |
-| `FulltextSearch` | Ripgrep cache | subprocess + mmap |
-| `HybridSearch` | T3 code + ripgrep | SemanticSearch + FulltextSearch + scoring |
-| `CrossCorpusSearch` | Multiple T3 | Per-corpus retrieval + Voyage rerank-2.5 |
-| `AgenticSearch` | T3 | Haiku refinement loop |
-| `MixedbreadFanout` | Mixedbread cloud | Mixedbread SDK (read-only) |
-
-### ResultFormatter Protocol
-
-```python
-# protocols/formatting.py
-
-from typing import Protocol, runtime_checkable
-from nexus.types import SearchResult, FormatOptions
-
-@runtime_checkable
-class ResultFormatter(Protocol):
-    """Strategy for formatting search results for display."""
-
-    def format(self, results: list[SearchResult], options: FormatOptions) -> str:
-        """Format results into a displayable string."""
-        ...
-```
-
-**Implementations:** `PlainFormatter`, `HighlightedFormatter`, `VimgrepFormatter`,
-`JsonFormatter`, `CitationFormatter`
 
 ---
 
 ## Component Architecture
 
-### CLI Dispatch Flow [v2-planned]
-
-The module paths in this diagram reflect the aspirational hierarchical layout.
-In the v1-actual layout, the equivalent modules are: `commands/search_cmd.py`,
-`commands/memory.py`, `commands/store.py`, `commands/scratch.py`, `commands/index.py`,
-`commands/serve.py`, `commands/pm.py`, `commands/collection.py`, `commands/config_cmd.py`,
-`commands/doctor.py`, `commands/install.py`; storage tiers are in `db/t1.py`, `db/t2.py`,
-`db/t3.py`; and search/answer/formatting live in flat modules `search_engine.py`,
-`answer.py`, `formatters.py`, `scoring.py`.
-
-```
-nx <command> [subcommand] [args] [flags]
-     |
-     v
-cli/main.py (Click group)
-     |
-     +-- search_cmd.py ----> search/ (SemanticSearch | HybridSearch | CrossCorpusSearch)
-     |                            \--> answer/synthesizer.py (if -a)
-     |                            \--> formatting/ (selected by flags)
-     |
-     +-- memory_cmd.py ----> storage/t2_sqlite.py
-     |
-     +-- store_cmd.py -----> storage/t3_cloud.py
-     |
-     +-- scratch_cmd.py ---> storage/t1_ephemeral.py
-     |                            \--> storage/t2_sqlite.py (on promote/flag-flush)
-     |
-     +-- index_cmd.py -----> indexing/{code,pdf,markdown}/pipeline.py
-     |                            \--> storage/t3_cloud.py (upsert)
-     |
-     +-- serve_cmd.py -----> server/daemon.py + server/app.py
-     |
-     +-- pm_cmd.py --------> pm/lifecycle.py
-     |                            \--> storage/t2_sqlite.py (T2 ops)
-     |                            \--> storage/t3_cloud.py (archive to T3)
-     |                            \--> pm/synthesis.py (Haiku synthesis)
-     |
-     +-- collection_cmd.py -> storage/t3_cloud.py
-     +-- config_cmd.py ----> config.py
-     +-- doctor_cmd.py ----> (validates all tiers + APIs)
-     +-- install_cmd.py ---> integration/claude_code/installer.py
-```
-
-### Server Architecture (`nx serve`) [v1-actual: server.py / server_main.py]
-
-The aspirational `server/` subpackage does not exist. The server is implemented in the
-flat modules `src/nexus/server.py` (Flask app factory + routes) and
-`src/nexus/server_main.py` (daemonization/entry point). Registry and polling live in
-`src/nexus/registry.py` and `src/nexus/polling.py` respectively.
+### Server Architecture (`server.py` / `server_main.py`)
 
 ```
 nx serve start
      |
      v
-server_main.py (daemonization)   [v1-actual: server_main.py]
-  |-- check_stale_pid()
+server_main.py (daemonization)     |-- check_stale_pid()
   |-- write PID to ~/.config/nexus/server.pid
   |-- Popen(start_new_session=True) for daemonization
      |
      v
-server.py (Flask app factory)    [v1-actual: server.py]
-  |-- /search          POST  -> search pipeline
+server.py (Flask app factory)      |-- /search          POST  -> search pipeline
   |-- /index/status    GET   -> indexing progress per repo
   |-- /status          GET   -> server health + repo accuracy %
      |
-     +-- registry.py             [v1-actual: registry.py]
-     |     |-- repos.json: [{path, collection, last_head, ...}]
+     +-- registry.py                  |     |-- repos.json: [{path, collection, last_head, ...}]
      |     |-- register(path) / unregister(path)
      |
-     +-- polling.py              [v1-actual: polling.py]
-           |-- per-repo thread: every N seconds (default 10)
+     +-- polling.py                         |-- per-repo thread: every N seconds (default 10)
            |   |-- git rev-parse HEAD
            |   |-- if changed: trigger indexer.py / doc_indexer.py
            |-- accuracy sigmoid (SeaGOAT pattern):
@@ -634,33 +200,31 @@ writes to T2 except `nx pm restore` which operates on T2 metadata only).
                             (after 90d: T2 entries expire, only T3 synthesis remains)
 ```
 
-### Component Ownership [v1-actual: pm.py]
+### Component Ownership
 
-In the v1-actual flat layout, all PM lifecycle logic lives in `src/nexus/pm.py` and the
-CLI commands in `src/nexus/commands/pm.py`. The aspirational `pm/lifecycle.py` and
-`pm/synthesis.py` submodules do not exist.
+All PM lifecycle logic lives in `src/nexus/pm.py` and the CLI commands in
+`src/nexus/commands/pm.py`.
 
 | Operation | Primary Module | Storage Touched |
 |-----------|---------------|-----------------|
-| `nx pm init` | `pm/lifecycle.py` | T2 write (4 standard docs) |
-| `nx pm resume` | `pm/lifecycle.py` | T2 computed resume from phase/blockers/activity |
-| `nx pm status` | `pm/lifecycle.py` | T2 read (phase tags, BLOCKERS.md) |
-| `nx pm phase next` | `pm/lifecycle.py` | T2 write (new phase doc) |
-| `nx pm search` | `pm/lifecycle.py` | T2 FTS5 query (tag-filtered for pm) |
-| `nx pm block/unblock` | `pm/lifecycle.py` | T2 write/update (BLOCKERS.md) |
-| `nx pm archive` | `pm/lifecycle.py` + `pm/synthesis.py` | T2 read (all docs) -> Haiku -> T3 write -> T2 update (decay) |
-| `nx pm close` | `pm/lifecycle.py` | Alias for archive --status=completed |
-| `nx pm restore` | `pm/lifecycle.py` | T2 update (reset ttl + tags) |
-| `nx pm reference` | `pm/lifecycle.py` | T3 query (knowledge__pm__* collections) |
-| `nx pm promote` | `pm/lifecycle.py` | T2 read -> T3 write (knowledge__pm__*) |
-| `nx pm expire` | `pm/lifecycle.py` | T2 delete (TTL-expired entries) |
+| `nx pm init` | `pm.py` | T2 write (4 standard docs) |
+| `nx pm resume` | `pm.py` | T2 computed resume from phase/blockers/activity |
+| `nx pm status` | `pm.py` | T2 read (phase tags, BLOCKERS.md) |
+| `nx pm phase next` | `pm.py` | T2 write (new phase doc) |
+| `nx pm search` | `pm.py` | T2 FTS5 query (tag-filtered for pm) |
+| `nx pm block/unblock` | `pm.py` | T2 write/update (BLOCKERS.md) |
+| `nx pm archive` | `pm.py` | T2 read (all docs) -> Haiku -> T3 write -> T2 update (decay) |
+| `nx pm close` | `pm.py` | Alias for archive --status=completed |
+| `nx pm restore` | `pm.py` | T2 update (reset ttl + tags) |
+| `nx pm reference` | `pm.py` | T3 query (knowledge__pm__* collections) |
+| `nx pm promote` | `pm.py` | T2 read -> T3 write (knowledge__pm__*) |
+| `nx pm expire` | `pm.py` | T2 delete (TTL-expired entries) |
 
 ---
 
 ## Cross-cutting Concerns
 
-### Session ID Management [v1-actual]
-
+### Session ID Management
 Implementation: `src/nexus/session.py`. Uses `os.getsid(0)` as the stable PID anchor
 (with `NX_SESSION_PID` env var override for testing). Session file path:
 `~/.config/nexus/sessions/{pid}.session`.
@@ -716,15 +280,11 @@ Global config: ~/.config/nexus/config.yml (lowest priority)
 
 Loaded by `config.py` with deepmerge (repo overrides global, env overrides both).
 
-### Error Hierarchy [v1-actual]
-
-Implementation: `src/nexus/errors.py`. The actual hierarchy is simpler than originally
-designed. The aspirational `StorageError`, `T2Error`, `T3Error`, `T3OfflineError`,
-`SearchError`, `ConfigError`, `SessionError`, and `SynthesisError` classes do NOT exist.
+### Error Hierarchy
+Implementation: `src/nexus/errors.py`.
 
 ```python
-# errors.py  [v1-actual]
-
+# errors.py 
 class NexusError(Exception):
     """Base exception for all Nexus errors."""
 
@@ -741,34 +301,15 @@ class CollectionNotFoundError(NexusError):
     """The requested ChromaDB collection does not exist."""
 ```
 
-The aspirational (v2-planned) hierarchy below was NOT implemented:
+### Search Engine Split
+Search responsibilities are split into focused flat modules:
 
-```python
-# errors.py  [v2-planned — NOT YET IMPLEMENTED]
-
-class StorageError(NexusError): ...      # not implemented
-class T2Error(StorageError): ...         # not implemented
-class T3Error(StorageError): ...         # not implemented
-class T3OfflineError(T3Error): ...       # not implemented
-class SearchError(NexusError): ...       # not implemented
-class ConfigError(NexusError): ...       # not implemented
-class SessionError(NexusError): ...      # not implemented
-class SynthesisError(NexusError): ...    # not implemented
-```
-
-### Search Engine Split [v1-actual]
-
-The original design described `search_engine.py` as a monolithic search module. As of
-nexus-895, the search responsibilities have been split into focused flat modules:
-
-- `src/nexus/scoring.py` — scoring primitives (min_max_normalize, frecency weighting, etc.)
+- `src/nexus/scoring.py` — scoring primitives (min_max_normalize, frecency weighting, reranking)
 - `src/nexus/answer.py` — answer synthesis (Haiku-based Q&A with `<cite>` formatting)
-- `src/nexus/formatters.py` — output formatters (plain, JSON, vimgrep, highlighted, citations)
-- `src/nexus/search_engine.py` — search orchestration only (~175 lines)
+- `src/nexus/formatters.py` — output formatters (plain, JSON, vimgrep, citations)
+- `src/nexus/search_engine.py` — search orchestration only (cross-corpus, Mixedbread fan-out, agentic search)
 
-The aspirational `search/` subpackage with separate `semantic.py`, `fulltext.py`,
-`hybrid.py`, `cross_corpus.py`, `agentic.py`, and `mxbai.py` modules [v2-planned] does
-not exist. All search orchestration remains in `search_engine.py`.
+Import from the canonical module directly (e.g., `from nexus.scoring import rerank_results`).
 
 > **Original Phased Implementation Plan**: Superseded. See [Appendix A](#appendix-a-original-phased-implementation-plan) for historical phase structure and bead IDs. Current authoritative plan: `.pm/PLAN.md`.
 

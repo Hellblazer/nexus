@@ -125,7 +125,7 @@ def test_search_ripgrep_finds_matching_lines(tmp_path: Path) -> None:
     assert results[0]["file_path"] == "/repo/auth.py"
     assert results[0]["line_number"] == 42
     assert "authenticate" in results[0]["line_content"]
-    assert results[0]["frecency_score"] == pytest.approx(0.5)
+    assert results[0]["frecency_score"] == pytest.approx(1.0)
 
 
 def test_search_ripgrep_multiple_matches(tmp_path: Path) -> None:

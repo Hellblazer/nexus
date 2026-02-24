@@ -65,10 +65,6 @@ class T3Database:
     def _embedding_fn(self, collection_name: str):
         if self._ef_override is not None:
             return self._ef_override
-        # Fast path: dict read without lock. Safe under CPython GIL but
-        # technically a data race in GIL-free Python (3.13+ free-threaded mode).
-        if collection_name in self._ef_cache:
-            return self._ef_cache[collection_name]
         with self._ef_lock:
             if collection_name not in self._ef_cache:
                 model = embedding_model_for_collection(collection_name)
@@ -309,15 +305,29 @@ class T3Database:
     def list_collections(self) -> list[dict]:
         """Return all T3 collections with their document counts.
 
-        Note: makes N+1 API calls (1 list + 1 count per collection).
-        Optimize if the ChromaDB CloudClient exposes batched counts.
+        Count queries are parallelized (up to 8 concurrent requests) to
+        reduce wall-clock time from O(N) sequential HTTP calls to roughly
+        O(N/8).
         """
-        result: list[dict] = []
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        names: list[str] = []
         for col_or_name in self._client.list_collections():
-            name = col_or_name if isinstance(col_or_name, str) else col_or_name.name
+            names.append(col_or_name if isinstance(col_or_name, str) else col_or_name.name)
+
+        if not names:
+            return []
+
+        def _count(name: str) -> dict:
             col = self._client.get_collection(name)
-            result.append({"name": name, "count": col.count()})
-        return result
+            return {"name": name, "count": col.count()}
+
+        result: list[dict] = []
+        with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
+            futures = {pool.submit(_count, n): n for n in names}
+            for future in as_completed(futures):
+                result.append(future.result())
+        return sorted(result, key=lambda r: r["name"])
 
     def collection_exists(self, name: str) -> bool:
         """Return True if the collection already exists in T3 (no create side-effect)."""
