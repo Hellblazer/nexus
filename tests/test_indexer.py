@@ -1,4 +1,5 @@
 """T1: indexer.py — status transitions, error path, credential skip, hidden file filter."""
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -11,8 +12,20 @@ from nexus.indexer import CredentialsMissingError, index_repository
 @pytest.fixture
 def registry():
     mock = MagicMock()
-    mock.get.return_value = {"collection": "code__repo", "status": "registered"}
+    mock.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+        "status": "registered",
+    }
     return mock
+
+
+# Default config mock that includes the indexing section
+_DEFAULT_CONFIG = {
+    "server": {"ignorePatterns": []},
+    "indexing": {"code_extensions": [], "prose_extensions": [], "rdr_paths": ["docs/rdr"], "include_untracked": False},
+}
 
 
 def test_index_sets_indexing_then_ready(tmp_path: Path, registry) -> None:
@@ -55,16 +68,21 @@ def test_run_index_raises_credentials_missing_without_credentials(
     (repo / "hello.py").write_text("print('hi')\n")
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.db.make_t3") as mock_make_t3:
-                with pytest.raises(CredentialsMissingError):
-                    _run_index(repo, registry)
+            with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                with patch("nexus.db.make_t3") as mock_make_t3:
+                    with pytest.raises(CredentialsMissingError):
+                        _run_index(repo, registry)
 
     mock_make_t3.assert_not_called()
 
@@ -100,17 +118,22 @@ def test_cache_path_includes_repo_hash(tmp_path: Path, monkeypatch) -> None:
         seen_paths.append(cache_path)
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__myproject"}
+    registry.get.return_value = {
+        "collection": "code__myproject",
+        "code_collection": "code__myproject",
+        "docs_collection": "docs__myproject",
+    }
 
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache", side_effect=fake_build_cache):
-            with pytest.raises(CredentialsMissingError):
-                _run_index(repo_a, registry)
-            with pytest.raises(CredentialsMissingError):
-                _run_index(repo_b, registry)
+            with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                with pytest.raises(CredentialsMissingError):
+                    _run_index(repo_a, registry)
+                with pytest.raises(CredentialsMissingError):
+                    _run_index(repo_b, registry)
 
     assert len(seen_paths) == 2
     assert seen_paths[0] != seen_paths[1], "Cache paths for same-name repos must differ"
@@ -129,7 +152,11 @@ def test_run_index_skips_hidden_files(tmp_path: Path, monkeypatch) -> None:
     (repo / "main.py").write_text("x = 1\n")
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
@@ -142,8 +169,9 @@ def test_run_index_skips_hidden_files(tmp_path: Path, monkeypatch) -> None:
 
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache", side_effect=fake_build_cache):
-            with pytest.raises(CredentialsMissingError):
-                _run_index(repo, registry)
+            with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                with pytest.raises(CredentialsMissingError):
+                    _run_index(repo, registry)
 
     assert all(".git" not in str(p) for p in seen_paths), f"Hidden files were not filtered: {seen_paths}"
     assert any("main.py" in str(p) for p in seen_paths)
@@ -158,12 +186,16 @@ def test_run_index_source_path_is_absolute(tmp_path: Path) -> None:
     (repo / "main.py").write_text("x = 1\n")
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     captured_metadatas: list = []
 
     mock_col = MagicMock()
-    mock_col.get.return_value = {"metadatas": []}  # no existing data → proceed to upsert
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
 
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
@@ -188,7 +220,7 @@ def test_run_index_source_path_is_absolute(tmp_path: Path) -> None:
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
                     with patch("nexus.config.get_credential", return_value="fake-key"):
                         with patch("nexus.db.make_t3", return_value=mock_db):
                             with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
@@ -213,11 +245,18 @@ def test_run_index_skips_unchanged_content_hash(tmp_path: Path) -> None:
     content_hash = hashlib.sha256(content.encode()).hexdigest()
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     mock_col = MagicMock()
     # Simulate file already indexed with the same content_hash AND same embedding model
-    mock_col.get.return_value = {"metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-code-3"}]}
+    mock_col.get.return_value = {
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-code-3"}],
+        "ids": [],
+    }
 
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
@@ -225,10 +264,11 @@ def test_run_index_skips_unchanged_content_hash(tmp_path: Path) -> None:
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
                     with patch("nexus.config.get_credential", return_value="fake-key"):
                         with patch("nexus.db.make_t3", return_value=mock_db):
-                            _run_index(repo, registry)
+                            with patch("voyageai.Client"):
+                                _run_index(repo, registry)
 
     mock_db.upsert_chunks_with_embeddings.assert_not_called()
 
@@ -245,11 +285,18 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path: Path) -> Non
     content_hash = hashlib.sha256(content.encode()).hexdigest()
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     mock_col = MagicMock()
     # Same content_hash but stale embedding model (voyage-4 from old collection-EF path)
-    mock_col.get.return_value = {"metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-4"}]}
+    mock_col.get.return_value = {
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-4"}],
+        "ids": [],
+    }
 
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
@@ -269,7 +316,7 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path: Path) -> Non
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
                     with patch("nexus.config.get_credential", return_value="fake-key"):
                         with patch("nexus.db.make_t3", return_value=mock_db):
                             with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
@@ -292,7 +339,11 @@ def test_frecency_only_updates_frecency_score(tmp_path: Path) -> None:
     src_file.write_text("x = 1\n")
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     old_meta = {"frecency_score": 0.1, "source_path": str(src_file), "title": "main.py:1-1"}
     mock_col = MagicMock()
@@ -306,8 +357,10 @@ def test_frecency_only_updates_frecency_score(tmp_path: Path) -> None:
             with patch("nexus.db.make_t3", return_value=mock_db):
                 _run_index_frecency_only(repo, registry)
 
-    mock_db.update_chunks.assert_called_once()
-    call_kwargs = mock_db.update_chunks.call_args.kwargs
+    # Called at least once (may be called for both code__ and docs__ collections)
+    assert mock_db.update_chunks.call_count >= 1
+    # Verify the first call has correct data
+    call_kwargs = mock_db.update_chunks.call_args_list[0].kwargs
     assert call_kwargs["ids"] == ["chunk-1"]
     assert call_kwargs["metadatas"][0]["frecency_score"] == 0.75
     # Other metadata fields must be preserved
@@ -324,7 +377,11 @@ def test_frecency_only_skips_unindexed_files(tmp_path: Path) -> None:
     src_file.write_text("y = 2\n")
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     mock_col = MagicMock()
     # No existing chunks for this file
@@ -349,7 +406,11 @@ def test_frecency_only_raises_credentials_missing(tmp_path: Path, monkeypatch) -
     repo.mkdir()
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
@@ -372,10 +433,14 @@ def test_run_index_logs_skipped_binary_files(tmp_path: Path) -> None:
     (repo / "image.bin").write_bytes(b"\x80\x81\x82\x83\xff\xfe")
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     mock_col = MagicMock()
-    mock_col.get.return_value = {"metadatas": []}
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
 
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
@@ -394,7 +459,7 @@ def test_run_index_logs_skipped_binary_files(tmp_path: Path) -> None:
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
                     with patch("nexus.config.get_credential", return_value="fake-key"):
                         with patch("nexus.db.make_t3", return_value=mock_db):
                             with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
@@ -422,10 +487,14 @@ def test_run_index_logs_empty_chunks(tmp_path: Path) -> None:
     (repo / "empty.py").write_text("   \n\n   \n")
 
     registry = MagicMock()
-    registry.get.return_value = {"collection": "code__repo"}
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
 
     mock_col = MagicMock()
-    mock_col.get.return_value = {"metadatas": []}
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
 
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
@@ -433,7 +502,7 @@ def test_run_index_logs_empty_chunks(tmp_path: Path) -> None:
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value={"server": {"ignorePatterns": []}}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
                     with patch("nexus.config.get_credential", return_value="fake-key"):
                         with patch("nexus.db.make_t3", return_value=mock_db):
                             with patch("nexus.chunker.chunk_file", return_value=[]):
@@ -447,3 +516,383 @@ def test_run_index_logs_empty_chunks(tmp_path: Path) -> None:
     assert empty_calls, (
         f"Expected debug log for empty chunks file, got calls: {debug_calls}"
     )
+
+
+# ── Content-class routing tests ──────────────────────────────────────────────
+
+
+def _make_collection_tracking_db():
+    """Create a mock DB that tracks upsert calls by collection name."""
+    upserts_by_collection: dict[str, list] = {}
+    cols_by_name: dict[str, MagicMock] = {}
+
+    def get_or_create(name):
+        if name not in cols_by_name:
+            col = MagicMock()
+            col.get.return_value = {"metadatas": [], "ids": []}
+            cols_by_name[name] = col
+        return cols_by_name[name]
+
+    def capture_upsert(collection_name, ids, documents, embeddings, metadatas):
+        upserts_by_collection.setdefault(collection_name, []).extend(metadatas)
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.side_effect = get_or_create
+    mock_db.upsert_chunks_with_embeddings.side_effect = capture_upsert
+    return mock_db, upserts_by_collection, cols_by_name
+
+
+def _registry_with_dual_collections():
+    """Create a registry mock with both code_collection and docs_collection."""
+    registry = MagicMock()
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
+    return registry
+
+
+def test_run_index_routes_prose_to_docs_collection(tmp_path: Path) -> None:
+    """Markdown files should be indexed into the docs__ collection, not code__."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Hello\n\nThis is a README with enough content to chunk.\n")
+
+    registry = _registry_with_dual_collections()
+    mock_db, upserts, cols = _make_collection_tracking_db()
+
+    mock_embed_result = (
+        [[0.1] * 10],  # embeddings
+        "voyage-context-3",  # actual model
+    )
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("voyageai.Client"):
+                                with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+                                    _run_index(repo, registry)
+
+    # docs__repo should have received chunks
+    assert "docs__repo" in upserts, f"Expected docs__repo to receive chunks, got: {list(upserts.keys())}"
+    assert all(m["category"] == "prose" for m in upserts["docs__repo"])
+    # code__repo should NOT have received any chunks
+    assert "code__repo" not in upserts, f"code__repo should not have chunks for .md files"
+
+
+def test_run_index_routes_code_to_code_collection(tmp_path: Path) -> None:
+    """Python files should be indexed into the code__ collection, not docs__."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    registry = _registry_with_dual_collections()
+    mock_db, upserts, cols = _make_collection_tracking_db()
+
+    fake_chunk = {
+        "line_start": 1, "line_end": 1, "text": "x = 1",
+        "chunk_index": 0, "chunk_count": 1,
+        "ast_chunked": False, "filename": "main.py", "file_extension": ".py",
+    }
+
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+    mock_voyage_client = MagicMock()
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
+                                with patch("voyageai.Client", return_value=mock_voyage_client):
+                                    _run_index(repo, registry)
+
+    # code__repo should have received chunks
+    assert "code__repo" in upserts, f"Expected code__repo to receive chunks, got: {list(upserts.keys())}"
+    assert all(m["category"] == "code" for m in upserts["code__repo"])
+    # docs__repo should NOT have received any chunks
+    assert "docs__repo" not in upserts, f"docs__repo should not have chunks for .py files"
+
+
+def test_run_index_excludes_rdr_paths_from_docs(tmp_path: Path) -> None:
+    """Files under rdr_paths should not be indexed into docs__."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Create a regular markdown file (should be indexed in docs__)
+    (repo / "README.md").write_text("# README\n\nProject description here.\n")
+    # Create an RDR file (should NOT be indexed in docs__)
+    rdr_dir = repo / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "ADR-001.md").write_text("# ADR-001\n\nArchitecture decision.\n")
+
+    registry = _registry_with_dual_collections()
+    mock_db, upserts, cols = _make_collection_tracking_db()
+
+    mock_embed_result = (
+        [[0.1] * 10],
+        "voyage-context-3",
+    )
+
+    # Config with rdr_paths pointing to docs/rdr
+    config_with_rdr = {
+        "server": {"ignorePatterns": []},
+        "indexing": {"code_extensions": [], "prose_extensions": [], "rdr_paths": ["docs/rdr"]},
+    }
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=config_with_rdr):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("voyageai.Client"):
+                                with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+                                    with patch("nexus.doc_indexer.batch_index_markdowns") as mock_batch:
+                                        _run_index(repo, registry)
+
+    # docs__repo should have README but NOT ADR-001
+    if "docs__repo" in upserts:
+        source_paths = [m["source_path"] for m in upserts["docs__repo"]]
+        assert any("README.md" in p for p in source_paths), "README.md should be in docs__repo"
+        assert not any("ADR-001" in p for p in source_paths), "ADR-001 should NOT be in docs__repo"
+    # batch_index_markdowns should have been called for the RDR files
+    mock_batch.assert_called_once()
+    rdr_call_paths = [str(p) for p in mock_batch.call_args[0][0]]
+    assert any("ADR-001.md" in p for p in rdr_call_paths), "ADR-001.md should be in batch_index_markdowns call"
+
+
+def test_run_index_mixed_repo(tmp_path: Path) -> None:
+    """A repo with both code and prose files routes each to the correct collection."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("print('hello')\n")
+    (repo / "README.md").write_text("# Project\n\nA simple project.\n")
+    (repo / "notes.txt").write_text("Some notes about the project.\n")
+
+    registry = _registry_with_dual_collections()
+    mock_db, upserts, cols = _make_collection_tracking_db()
+
+    fake_chunk = {
+        "line_start": 1, "line_end": 1, "text": "print('hello')",
+        "chunk_index": 0, "chunk_count": 1,
+        "ast_chunked": False, "filename": "main.py", "file_extension": ".py",
+    }
+
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+    mock_voyage_client = MagicMock()
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    mock_embed_result = ([[0.1] * 10], "voyage-context-3")
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
+                                with patch("voyageai.Client", return_value=mock_voyage_client):
+                                    with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+                                        _run_index(repo, registry)
+
+    # code__repo should have main.py
+    assert "code__repo" in upserts
+    code_paths = {m["source_path"] for m in upserts["code__repo"]}
+    assert any("main.py" in p for p in code_paths)
+
+    # docs__repo should have README.md and notes.txt
+    assert "docs__repo" in upserts
+    docs_paths = {m["source_path"] for m in upserts["docs__repo"]}
+    assert any("README.md" in p for p in docs_paths)
+    assert any("notes.txt" in p for p in docs_paths)
+
+
+def test_run_index_prune_deleted_files(tmp_path: Path) -> None:
+    """Chunks for files no longer in the repo should be pruned from both collections."""
+    from nexus.indexer import _prune_deleted_files
+
+    # Simulate: only file_a.py is current; file_b.py was deleted
+    all_current = {"/repo/file_a.py"}
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["chunk-a1", "chunk-b1", "chunk-b2"],
+        "metadatas": [
+            {"source_path": "/repo/file_a.py"},
+            {"source_path": "/repo/file_b.py"},
+            {"source_path": "/repo/file_b.py"},
+        ],
+    }
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    _prune_deleted_files("code__repo", "docs__repo", all_current, mock_db)
+
+    # Should delete chunks for file_b.py from both collections
+    delete_calls = mock_col.delete.call_args_list
+    assert len(delete_calls) == 2  # once for code__repo, once for docs__repo
+    for dc in delete_calls:
+        deleted_ids = dc.kwargs.get("ids") or dc[1].get("ids") if dc[1] else dc[0][0]
+        # chunk-b1 and chunk-b2 should be in the deleted set
+        if isinstance(deleted_ids, list):
+            assert "chunk-a1" not in deleted_ids
+            assert "chunk-b1" in deleted_ids or "chunk-b2" in deleted_ids
+
+
+def test_run_index_prune_misclassified(tmp_path: Path) -> None:
+    """Chunks in the wrong collection should be removed after reclassification."""
+    from nexus.indexer import _prune_misclassified
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    code_files = [repo / "main.py"]
+    prose_files = [repo / "README.md"]  # was previously in code__
+    pdf_files: list[Path] = []
+
+    # Mock: docs collection has a chunk for main.py (misclassified)
+    mock_code_col = MagicMock()
+    mock_code_col.get.return_value = {"ids": []}  # README.md not in code__ (clean)
+
+    mock_docs_col = MagicMock()
+    mock_docs_col.get.return_value = {"ids": ["stale-chunk-1"]}  # main.py in docs__ (wrong)
+
+    cols = {"code__repo": mock_code_col, "docs__repo": mock_docs_col}
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.side_effect = lambda name: cols[name]
+
+    _prune_misclassified(repo, "code__repo", "docs__repo", code_files, prose_files, pdf_files, mock_db)
+
+    # main.py chunk should be deleted from docs__repo
+    mock_docs_col.delete.assert_called_once_with(ids=["stale-chunk-1"])
+
+
+def test_registry_c2_fallback(tmp_path: Path) -> None:
+    """When registry lacks docs_collection, the deterministic naming function is used."""
+    from nexus.indexer import _run_index
+    from nexus.registry import _docs_collection_name
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    # Registry without docs_collection key
+    registry = MagicMock()
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        # No docs_collection key
+    }
+
+    expected_docs = _docs_collection_name(repo)
+    collection_names_used: list[str] = []
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    def track_get_or_create(name):
+        collection_names_used.append(name)
+        return mock_col
+
+    mock_db.get_or_create_collection.side_effect = track_get_or_create
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("voyageai.Client"):
+                                _run_index(repo, registry)
+
+    # The deterministic docs collection name should be used
+    assert expected_docs in collection_names_used, (
+        f"Expected {expected_docs} in {collection_names_used}"
+    )
+
+
+# ── _git_ls_files tests ──────────────────────────────────────────────────────
+
+
+def test_git_ls_files_returns_tracked_files(tmp_path: Path) -> None:
+    """_git_ls_files returns only tracked files, not .gitignored ones."""
+    from nexus.indexer import _git_ls_files
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tracked.py").write_text("x = 1\n")
+    (repo / ".env").write_text("SECRET=abc\n")
+    (repo / ".gitignore").write_text(".env\n")
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    files = _git_ls_files(repo)
+    file_names = {f.name for f in files}
+    assert "tracked.py" in file_names
+    assert ".gitignore" in file_names
+    assert ".env" not in file_names, ".env should be gitignored"
+
+
+def test_git_ls_files_with_untracked(tmp_path: Path) -> None:
+    """include_untracked=True also returns untracked-but-not-ignored files."""
+    from nexus.indexer import _git_ls_files
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tracked.py").write_text("x = 1\n")
+    (repo / ".gitignore").write_text(".env\n")
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "tracked.py", ".gitignore"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    # Create untracked (not ignored) file
+    (repo / "new_file.py").write_text("y = 2\n")
+    # Create ignored file
+    (repo / ".env").write_text("SECRET=abc\n")
+
+    # Without include_untracked
+    files = _git_ls_files(repo, include_untracked=False)
+    file_names = {f.name for f in files}
+    assert "new_file.py" not in file_names
+
+    # With include_untracked
+    files = _git_ls_files(repo, include_untracked=True)
+    file_names = {f.name for f in files}
+    assert "new_file.py" in file_names
+    assert ".env" not in file_names, ".env should still be gitignored"
+
+
+def test_git_ls_files_fallback_on_non_git_dir(tmp_path: Path) -> None:
+    """_git_ls_files returns empty list for non-git directories (triggers fallback)."""
+    from nexus.indexer import _git_ls_files
+
+    non_git = tmp_path / "not-a-repo"
+    non_git.mkdir()
+    (non_git / "file.py").write_text("x = 1\n")
+
+    files = _git_ls_files(non_git)
+    assert files == [], "Non-git directory should return empty list for fallback"

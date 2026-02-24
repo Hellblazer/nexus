@@ -1,4 +1,4 @@
-"""T3: commands/index.py — nx index code registration and indexing."""
+"""T3: commands/index.py — nx index repo registration and indexing."""
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -19,8 +19,8 @@ def index_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def test_index_code_registers_and_indexes(runner: CliRunner, index_home: Path) -> None:
-    """nx index code <path> registers the repo and calls index_repository."""
+def test_index_repo_registers_and_indexes(runner: CliRunner, index_home: Path) -> None:
+    """nx index repo <path> registers the repo and calls index_repository."""
     repo = index_home / "myrepo"
     repo.mkdir()
 
@@ -29,7 +29,7 @@ def test_index_code_registers_and_indexes(runner: CliRunner, index_home: Path) -
 
     with patch("nexus.commands.index._registry", return_value=mock_reg):
         with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "code", str(repo)])
+            result = runner.invoke(main, ["index", "repo", str(repo)])
 
     assert result.exit_code == 0
     mock_reg.add.assert_called_once()
@@ -38,7 +38,7 @@ def test_index_code_registers_and_indexes(runner: CliRunner, index_home: Path) -
     assert "Done" in result.output
 
 
-def test_index_code_idempotent_when_already_registered(runner: CliRunner, index_home: Path) -> None:
+def test_index_repo_idempotent_when_already_registered(runner: CliRunner, index_home: Path) -> None:
     """If repo is already registered, skip add() and just re-index."""
     repo = index_home / "myrepo"
     repo.mkdir()
@@ -48,7 +48,7 @@ def test_index_code_idempotent_when_already_registered(runner: CliRunner, index_
 
     with patch("nexus.commands.index._registry", return_value=mock_reg):
         with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "code", str(repo)])
+            result = runner.invoke(main, ["index", "repo", str(repo)])
 
     assert result.exit_code == 0
     mock_reg.add.assert_not_called()
@@ -56,9 +56,9 @@ def test_index_code_idempotent_when_already_registered(runner: CliRunner, index_
     assert "Registered" not in result.output
 
 
-def test_index_code_invalid_path(runner: CliRunner, index_home: Path) -> None:
+def test_index_repo_invalid_path(runner: CliRunner, index_home: Path) -> None:
     """Non-existent path produces a non-zero exit code."""
-    result = runner.invoke(main, ["index", "code", str(index_home / "nonexistent")])
+    result = runner.invoke(main, ["index", "repo", str(index_home / "nonexistent")])
     assert result.exit_code != 0
 
 
@@ -106,8 +106,8 @@ def test_index_md_nonexistent_path_fails(runner: CliRunner, index_home: Path) ->
 
 # ── --frecency-only flag ──────────────────────────────────────────────────────
 
-def test_index_code_frecency_only_flag_passed_through(runner: CliRunner, index_home: Path) -> None:
-    """nx index code <path> --frecency-only passes frecency_only=True to index_repository."""
+def test_index_repo_frecency_only_flag_passed_through(runner: CliRunner, index_home: Path) -> None:
+    """nx index repo <path> --frecency-only passes frecency_only=True to index_repository."""
     repo = index_home / "myrepo"
     repo.mkdir()
 
@@ -116,7 +116,7 @@ def test_index_code_frecency_only_flag_passed_through(runner: CliRunner, index_h
 
     with patch("nexus.commands.index._registry", return_value=mock_reg):
         with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "code", str(repo), "--frecency-only"])
+            result = runner.invoke(main, ["index", "repo", str(repo), "--frecency-only"])
 
     assert result.exit_code == 0, result.output
     mock_index.assert_called_once()
@@ -125,8 +125,8 @@ def test_index_code_frecency_only_flag_passed_through(runner: CliRunner, index_h
     assert "frecency" in result.output.lower()
 
 
-def test_index_code_default_is_full_index(runner: CliRunner, index_home: Path) -> None:
-    """nx index code <path> without --frecency-only passes frecency_only=False."""
+def test_index_repo_default_is_full_index(runner: CliRunner, index_home: Path) -> None:
+    """nx index repo <path> without --frecency-only passes frecency_only=False."""
     repo = index_home / "myrepo"
     repo.mkdir()
 
@@ -135,7 +135,7 @@ def test_index_code_default_is_full_index(runner: CliRunner, index_home: Path) -
 
     with patch("nexus.commands.index._registry", return_value=mock_reg):
         with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "code", str(repo)])
+            result = runner.invoke(main, ["index", "repo", str(repo)])
 
     assert result.exit_code == 0, result.output
     mock_index.assert_called_once()

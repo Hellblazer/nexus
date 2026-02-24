@@ -2,7 +2,7 @@
 
 Self-hosted semantic search and knowledge management for Claude Code agents.
 
-Nexus gives you and your AI agents a single CLI to index code, PDFs, and notes; search across all of them semantically; and manage persistent memory across sessions. Only chunk text and embeddings leave your machine — raw source files stay local.
+Nexus gives you and your AI agents a single CLI to index repositories, PDFs, and notes; search across all of them semantically; and manage persistent memory across sessions. Only chunk text and embeddings leave your machine — raw source files stay local.
 
 ## How it works
 
@@ -20,7 +20,7 @@ Within T3, collections fall into three corpus categories:
 
 | Corpus | Created by | Collection name |
 |--------|-----------|-----------------|
-| `code` | `nx index code` | `code__<repo>` |
+| `code` | `nx index repo` | `code__<repo>`, `docs__<repo>` |
 | `docs` | `nx index pdf` / `nx index md` | `docs__<corpus>` |
 | `knowledge` | `nx store put` | `knowledge__<topic>` |
 
@@ -133,15 +133,15 @@ This writes `~/.claude/skills/nexus/SKILL.md` and registers SessionStart/Session
 
 ```bash
 nx serve start              # start the background server (optional but recommended)
-nx index code .             # index the current repo
-nx index code /path/to/other-repo
+nx index repo .             # index the current repo
+nx index repo /path/to/other-repo
 ```
 
 The server watches registered repos and re-indexes automatically when the git HEAD changes. You don't need it running to search — it just keeps the index fresh.
 
 ```bash
 # Already indexed? Refresh git recency scores without re-embedding (fast)
-nx index code . --frecency-only
+nx index repo . --frecency-only
 ```
 
 > **Frecency** = a blend of recency and frequency derived from git history. Recently-touched files rank higher in hybrid search results.
@@ -381,7 +381,8 @@ T2  sqlite3 + FTS5, WAL mode — ~/.config/nexus/memory.db
 T3  chromadb.CloudClient + VoyageAIEmbeddingFunction — ChromaDB cloud
 
 Indexing pipelines:
-  code   git frecency → tree-sitter AST chunking → voyage-code-3 → T3 code__<repo>
+  repo   git frecency → classify by extension → code files: tree-sitter AST → voyage-code-3 → T3 code__<repo>
+                                               docs files: semantic markdown → voyage-context-3 → T3 docs__<repo>
   PDF    PyMuPDF4LLM extraction → voyage-4 (CCE) → T3 docs__<corpus>
   MD     SemanticMarkdownChunker + SHA256 sync → voyage-4 (CCE) → T3 docs__<corpus>
 

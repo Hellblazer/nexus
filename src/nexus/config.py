@@ -55,6 +55,12 @@ _DEFAULTS: dict[str, Any] = {
     "client": {
         "host": "localhost",
     },
+    "indexing": {
+        "code_extensions": [],
+        "prose_extensions": [],
+        "rdr_paths": ["docs/rdr"],
+        "include_untracked": False,
+    },
 }
 
 # Env var → (section, key, type) mapping

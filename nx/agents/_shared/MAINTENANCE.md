@@ -102,7 +102,7 @@ Update version in frontmatter when making significant changes to an agent.
 - Content comes from original agent's PRODUCE section
 
 **nx search not returning results**:
-- Run `nx index code <path>` first to index the repo
+- Run `nx index repo <path>` first to index the repo
 - Use `--hybrid` flag for best results with code
 - Try broader queries if results are sparse
 - Use `nx doctor` to verify Nexus server is running

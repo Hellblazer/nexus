@@ -59,7 +59,7 @@ src/nexus/
 |   |-- __init__.py
 |   |-- collection.py              # nx collection list/info/delete/verify
 |   |-- config_cmd.py              # nx config show/set
-|   |-- index.py                   # nx index code/pdf/md
+|   |-- index.py                   # nx index repo/pdf/md
 |   |-- memory.py                  # nx memory put/get/search/list/expire/promote
 |   |-- pm.py                      # nx pm (all lifecycle subcommands)
 |   |-- scratch.py                 # nx scratch put/get/search/list/clear/flag/promote
@@ -427,7 +427,7 @@ Phase 2    Phase 3 (T3)
 
 **Deliverables:** `server/app.py`, `server/daemon.py`, `server/registry.py`, `server/polling.py`, `indexing/code/frecency.py`, `indexing/code/chunker.py`, `indexing/code/ripgrep_cache.py`, `indexing/code/pipeline.py`, `cli/serve_cmd.py`, `cli/index_cmd.py` (code), `integration/git_hooks.py`, tests.
 
-**Exit criteria:** Full `nx serve` lifecycle; `nx index code` registers repo + triggers indexing + builds ripgrep cache; HEAD polling detects changes; frecency matches SeaGOAT formula.
+**Exit criteria:** Full `nx serve` lifecycle; `nx index repo` registers repo + triggers indexing + builds ripgrep cache; HEAD polling detects changes; frecency matches SeaGOAT formula.
 
 ### Phase 5: PDF/Markdown Indexing Pipelines
 
