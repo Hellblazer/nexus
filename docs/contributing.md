@@ -75,6 +75,11 @@ Do not bump these without testing the full chunking pipeline.
 - Never push directly to `main` — all changes via PR
 - Use `bd` (beads) for task tracking
 
+The `main` branch requires CI to pass before merging. Configure branch protection at
+https://github.com/Hellblazer/nexus/settings/branches:
+- Require status checks: `pytest (3.12)` and `pytest (3.13)`
+- Require branches to be up to date before merging
+
 ## License
 
 AGPL-3.0-or-later. For Python source files, use the SPDX header:
