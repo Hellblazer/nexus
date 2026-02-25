@@ -19,10 +19,18 @@ claude --plugin-dir ./nx
 
 ## Prerequisites
 
-- [Nexus](https://github.com/Hellblazer/nexus) — `nx` CLI installed and configured
-- [Beads](https://github.com/BeadsProject/beads) — `bd` CLI for task tracking
+The `nx` CLI and plugin work independently, but the plugin's full agent and skill suite requires:
+
+| Dependency | Required for | Install |
+|-----------|-------------|---------|
+| **`nx` CLI** | All hooks and skills that run `nx` commands | See [Getting Started](../docs/getting-started.md) |
+| **`bd` (Beads)** | Task tracking in all agents | [github.com/BeadsProject/beads](https://github.com/BeadsProject/beads) |
+| **superpowers plugin** | Cross-referenced skills (brainstorming, TDD, verification, writing-plans) | `/plugin marketplace add anthropics/claude-plugins-official` |
+
+Run `/nx-preflight` after installing to verify all dependencies are present.
+
+**Also required:**
 - Python 3.12+ (for hook scripts)
-- [superpowers](https://github.com/anthropics/claude-plugins-official/tree/main/superpowers) plugin installed
 
 ## What You Get
 

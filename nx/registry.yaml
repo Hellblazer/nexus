@@ -516,6 +516,48 @@ model_summary:
     - project-management-setup
 
 # =============================================================================
+# UTILITY COMMANDS
+# =============================================================================
+# Standalone slash commands that don't delegate to agents.
+# These are pure bash + model output commands (no agent invocation required).
+
+utility_commands:
+  nx-preflight:
+    slash_command: /nx-preflight
+    description: "Verify nx plugin dependencies: nx CLI, nx doctor, bd (beads), superpowers plugin"
+    disable_model_invocation: false
+
+  pm-new:
+    slash_command: /pm-new
+    description: "Initialize project management for current repo via nx pm"
+    disable_model_invocation: true
+
+  pm-status:
+    slash_command: /pm-status
+    description: "Show current project status via nx pm"
+    disable_model_invocation: true
+
+  pm-list:
+    slash_command: /pm-list
+    description: "List all projects managed by nx pm"
+    disable_model_invocation: true
+
+  pm-archive:
+    slash_command: /pm-archive
+    description: "Archive current project to T3 storage"
+    disable_model_invocation: true
+
+  pm-close:
+    slash_command: /pm-close
+    description: "Mark project complete and archive"
+    disable_model_invocation: true
+
+  pm-restore:
+    slash_command: /pm-restore
+    description: "Restore archived project from T3"
+    disable_model_invocation: true
+
+# =============================================================================
 # LIFECYCLE
 # =============================================================================
 
