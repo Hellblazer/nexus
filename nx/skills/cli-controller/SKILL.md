@@ -138,16 +138,42 @@ tmux kill-pane -t "$PANE"
 ```
 
 ### Spawning Claude Code
+
+**Two gotchas specific to Claude Code:**
+
+1. **Splash screen swallows the first Enter.** Claude shows a welcome splash on first launch that absorbs the keystroke. Always type the prompt first, wait for idle (splash gone), then send a bare `Enter`.
+2. **Persistent footer lines confuse idle detection.** Claude's UI always renders a status footer (`⎇ main`, context %, `bypass permissions on`). The standard hash-based `wait_idle` will never settle on "no changes" while Claude is actively generating. Instead, **poll for content markers** (specific strings you expect in the response) rather than waiting for the output to stop changing.
+
 ```bash
 PANE=$(tmux split-window -h -P -F '#{session_name}:#{window_index}.#{pane_index}' zsh)
 sleep 0.5
-tmux send-keys -t "$PANE" 'cd /path/to/project && claude' Enter
-wait_idle "$PANE" 3 30
-tmux send-keys -t "$PANE" 'Analyze performance in src/processor.py' Enter
-wait_idle "$PANE" 5 120
-analysis=$(tmux capture-pane -t "$PANE" -p -S -200)
-tmux send-keys -t "$PANE" Escape
+tmux send-keys -t "$PANE" 'cd /path/to/project && claude --dangerously-skip-permissions' Enter
+
+# Wait for splash to clear (Claude idle at ❯ prompt)
+sleep 5
+
+# Type prompt text into the input field (no Enter yet)
+tmux send-keys -t "$PANE" 'Analyze performance in src/processor.py'
 sleep 0.3
+# Now send Enter — splash is gone, this goes to Claude
+tmux send-keys -t "$PANE" Enter
+
+# Poll for content markers instead of idle detection
+for i in $(seq 1 60); do
+    sleep 2
+    output=$(tmux capture-pane -t "$PANE" -p -S -100)
+    # Replace with strings you expect to appear in the response
+    if echo "$output" | grep -qE "hotspot|bottleneck|O\(n\)|performance|✓|✗"; then
+        break
+    fi
+done
+
+analysis=$(tmux capture-pane -t "$PANE" -p -S -200)
+# Exit Claude cleanly
+tmux send-keys -t "$PANE" C-c
+sleep 0.3
+tmux send-keys -t "$PANE" '/exit' Enter
+sleep 1
 tmux kill-pane -t "$PANE"
 ```
 
@@ -206,6 +232,8 @@ tmux kill-pane -t "$PANE"
 | Commands not executing | Add sleep/wait_idle between commands |
 | Timeout waiting | Increase timeout or check if process is stuck |
 | Enter key not received | Add `sleep 0.3` between send-keys calls |
+| Claude ignores first prompt | Splash screen absorbs the first Enter — type prompt, wait for splash to clear (`sleep 5`), then send bare `Enter` |
+| Claude idle detection never settles | Footer lines (branch, context %, bypass mode) change constantly — poll for expected response content strings instead of hash-based idle |
 
 ## Best Practices
 
