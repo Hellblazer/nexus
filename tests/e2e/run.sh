@@ -76,6 +76,9 @@ docker run -d --name "$CONTAINER" \
     "$IMAGE" \
     sleep infinity
 
+# Suppress zsh new-user wizard (would absorb keystrokes before Claude starts)
+crun "touch /home/node/.zshrc"
+
 # Start tmux session inside the container
 cexec tmux new-session -d -s e2e -x 220 -y 50
 
