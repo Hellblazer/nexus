@@ -93,8 +93,8 @@ claude_wait() {
 
 # ─── Assertions ──────────────────────────────────────────────────────────────
 
-pass() { echo "    ✓ $1"; (( PASS++ )); }
-fail() { echo "    ✗ $1"; (( FAIL++ )); }
+pass() { echo "    ✓ $1"; PASS=$(( PASS + 1 )); }
+fail() { echo "    ✗ $1"; FAIL=$(( FAIL + 1 )); }
 
 assert_output() {
     local label="$1" pattern="$2"
