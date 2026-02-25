@@ -190,7 +190,7 @@ def test_promote_cmd_no_credentials_raises(runner: CliRunner, mem_home: Path, db
             )
 
     assert result.exit_code != 0
-    assert "credential" in result.output.lower() or "not configured" in result.output.lower()
+    assert "not set" in result.output.lower() or "config init" in result.output.lower()
 
 
 def test_promote_cmd_entry_not_found_exits(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
@@ -294,7 +294,7 @@ def test_promote_cmd_missing_tenant_raises(runner: CliRunner, mem_home: Path, db
 
     assert result.exit_code != 0
     assert "chroma_tenant" in result.output
-    assert "not configured" in result.output.lower()
+    assert "not set" in result.output.lower()
 
 
 def test_promote_cmd_missing_database_raises(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
@@ -312,7 +312,7 @@ def test_promote_cmd_missing_database_raises(runner: CliRunner, mem_home: Path, 
 
     assert result.exit_code != 0
     assert "chroma_database" in result.output
-    assert "not configured" in result.output.lower()
+    assert "not set" in result.output.lower()
 
 
 # ── nexus-huj: promote_cmd expires_at computed from T2 timestamp ───────────────

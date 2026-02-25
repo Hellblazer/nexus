@@ -47,10 +47,10 @@ def main() -> None:
     try:
         port = int(sys.argv[1]) if len(sys.argv) > 1 else port_default
     except ValueError:
-        sys.stderr.write(f"Invalid port: {sys.argv[1]!r}\n")
+        sys.stderr.write(f"invalid port {sys.argv[1]!r} — set NX_SERVER_PORT or update server.port in config.yml\n")
         sys.exit(1)
     if not 1 <= port <= 65535:
-        sys.stderr.write(f"Port must be 1-65535, got {port}\n")
+        sys.stderr.write(f"port {port} out of range — must be 1–65535; set NX_SERVER_PORT or update server.port in config.yml\n")
         sys.exit(1)
     start_server(port=port)
 

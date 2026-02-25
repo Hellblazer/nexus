@@ -53,7 +53,7 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
         else:
             result = db.get(project=project, title=title)
     if result is None:
-        raise click.ClickException("Not found.")
+        raise click.ClickException("entry not found — use: nx memory list to see available entries")
     click.echo(result["content"])
 
 
@@ -116,7 +116,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         ]
         if missing:
             raise click.ClickException(
-                f"T3 credentials not configured: {', '.join(missing)}. Run `nx config init`."
+                f"{', '.join(missing)} not set — run: nx config init"
             )
 
         # Translate TTL: T2 ttl=None (permanent) -> T3 ttl_days=0; T2 ttl=N -> T3 ttl_days=N

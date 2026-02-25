@@ -149,8 +149,13 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     voyage_key = get_credential("voyage_api_key")
     chroma_key = get_credential("chroma_api_key")
     if not voyage_key or not chroma_key:
+        missing = []
+        if not voyage_key:
+            missing.append("voyage_api_key")
+        if not chroma_key:
+            missing.append("chroma_api_key")
         raise CredentialsMissingError(
-            f"T3 credentials missing for frecency reindex of '{repo.name}'"
+            f"{', '.join(missing)} not set — run: nx config init"
         )
 
     frecency_map = batch_frecency(repo)
@@ -713,10 +718,13 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     voyage_key = get_credential("voyage_api_key")
     chroma_key = get_credential("chroma_api_key")
     if not voyage_key or not chroma_key:
+        missing = []
+        if not voyage_key:
+            missing.append("voyage_api_key")
+        if not chroma_key:
+            missing.append("chroma_api_key")
         raise CredentialsMissingError(
-            f"T3 credentials missing for repo '{repo.name}' "
-            f"(voyage_api_key={'set' if voyage_key else 'missing'}, "
-            f"chroma_api_key={'set' if chroma_key else 'missing'})"
+            f"{', '.join(missing)} not set — run: nx config init"
         )
 
     import voyageai

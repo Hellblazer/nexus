@@ -20,16 +20,20 @@ def _t3() -> T3Database:
 
     if not api_key:
         raise click.ClickException(
-            "CHROMA_API_KEY is not set. Run 'nx config init' or set the environment variable."
+            "chroma_api_key not set — run: nx config set chroma_api_key <value>"
         )
     if not voyage_api_key:
         raise click.ClickException(
-            "VOYAGE_API_KEY is not set. Run 'nx config init' or set the environment variable."
+            "voyage_api_key not set — run: nx config set voyage_api_key <value>"
         )
     if not tenant or not database:
+        missing = []
+        if not tenant:
+            missing.append("chroma_tenant")
+        if not database:
+            missing.append("chroma_database")
         raise click.ClickException(
-            "ChromaDB tenant/database not configured. "
-            "Run 'nx config init' or set chroma_tenant/chroma_database via 'nx config set'."
+            f"{', '.join(missing)} not set — run: nx config init"
         )
     return make_t3()
 

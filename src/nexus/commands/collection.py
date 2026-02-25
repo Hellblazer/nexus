@@ -30,7 +30,7 @@ def info_cmd(name: str) -> None:
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
-        raise click.ClickException(f"Collection not found: {name}")
+        raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
 
     query_model = embedding_model_for_collection(name)
     idx_model   = index_model_for_collection(name)
@@ -70,7 +70,7 @@ def verify_cmd(name: str, deep: bool) -> None:
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
-        raise click.ClickException(f"Collection not found: {name}")
+        raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
 
     if not deep:
         click.echo(f"Collection '{name}': {match['count']} documents — OK")
@@ -85,5 +85,5 @@ def verify_cmd(name: str, deep: bool) -> None:
         db.search(query="health check probe", collection_names=[name], n_results=1)
         click.echo(f"Collection '{name}': {count} documents — embedding health OK")
     except Exception as exc:
-        click.echo(f"Error: embedding probe failed for '{name}': {exc}", err=True)
+        click.echo(f"embedding probe failed for '{name}': {exc} — check voyage_api_key with: nx config get voyage_api_key", err=True)
         raise click.exceptions.Exit(1)

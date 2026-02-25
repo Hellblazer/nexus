@@ -156,7 +156,7 @@ def search_cmd(
     target_collections = list(dict.fromkeys(target_collections))
 
     if not target_collections and not mxbai:
-        click.echo("No matching collections found.")
+        click.echo("no matching collections found — use: nx collection list", err=True)
         return
 
     config = load_config()

@@ -48,7 +48,7 @@ def get_cmd(entry_id: str) -> None:
     """Retrieve a scratch entry by ID."""
     result = _t1().get(entry_id)
     if result is None:
-        raise click.ClickException("Not found.")
+        raise click.ClickException(f"scratch entry {entry_id!r} not found — use: nx scratch list")
     click.echo(result["content"])
 
 
