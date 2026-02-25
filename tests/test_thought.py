@@ -242,6 +242,114 @@ def test_session_project_namespace_includes_gid():
     assert "myrepo" in project
 
 
+# ── Category 5 (MCP-mirrored): Direct port of lib.test.ts ─────────────────────
+# Each test below maps 1:1 to a test in the MCP server's own test suite.
+# Where the MCP returns JSON metadata, nx thought emits text fields — we
+# verify the same semantic properties hold.
+
+def test_mcp_mirror_basic_thought_accepted_and_metadata_returned(runner, db):
+    """MCP: 'should accept valid basic thought' — verify all response fields."""
+    result = add(runner,
+        "**Thought 1 of ~3**\nThis is my first thought\nnextThoughtNeeded: true"
+    )
+    assert result.exit_code == 0
+    assert "thoughtNumber: 1" in result.output
+    assert "totalThoughts: 3" in result.output
+    assert "nextThoughtNeeded: true" in result.output
+    assert "thoughtHistoryLength: 1" in result.output
+    assert "branches: []" in result.output
+
+
+def test_mcp_mirror_optional_fields_accepted(runner, db):
+    """MCP: 'should accept thought with optional fields' (isRevision, revisesThought, needsMoreThoughts)."""
+    add(runner, "**Thought 1 of ~3**\nFirst\nnextThoughtNeeded: true")
+    result = add(runner,
+        "**Thought 2 of ~3** [REVISION of Thought 1]\n"
+        "Revising my earlier idea\n"
+        "needsMoreThoughts: false\n"
+        "nextThoughtNeeded: true"
+    )
+    assert result.exit_code == 0
+    assert "thoughtHistoryLength: 2" in result.output
+    assert "[REVISION of Thought 1]" in result.output
+
+
+def test_mcp_mirror_multiple_thoughts_tracked_in_history(runner, db):
+    """MCP: 'should track multiple thoughts in history' — thoughtHistoryLength = 3, nextThoughtNeeded = false."""
+    add(runner, "**Thought 1 of ~3**\nFirst thought\nnextThoughtNeeded: true")
+    add(runner, "**Thought 2 of ~3**\nSecond thought\nnextThoughtNeeded: true")
+    result = add(runner, "**Thought 3 of ~3**\nFinal thought\nnextThoughtNeeded: false")
+    assert "thoughtHistoryLength: 3" in result.output
+    assert "nextThoughtNeeded: false" in result.output
+
+
+def test_mcp_mirror_auto_adjust_totalThoughts_when_number_exceeds(runner, db):
+    """MCP: 'should auto-adjust totalThoughts if thoughtNumber exceeds it' — exact MCP scenario."""
+    # MCP test: thoughtNumber=5, totalThoughts=3 → response totalThoughts should be 5
+    result = add(runner,
+        "**Thought 5 of ~3**\nThought 5 exceeding estimate\nnextThoughtNeeded: true"
+    )
+    assert "totalThoughts: 5" in result.output
+
+
+def test_mcp_mirror_branches_tracked_correctly(runner, db):
+    """MCP: 'should track branches correctly' — both branch IDs in branches list."""
+    add(runner, "**Thought 1 of ~3**\nMain thought\nnextThoughtNeeded: true")
+    add(runner,
+        "**Thought 2 of ~3** [BRANCH from Thought 1 — branch-a]\n"
+        "Branch A thought\nnextThoughtNeeded: true"
+    )
+    result = add(runner,
+        "**Thought 2 of ~3** [BRANCH from Thought 1 — branch-b]\n"
+        "Branch B thought\nnextThoughtNeeded: false"
+    )
+    assert "branch-a" in result.output
+    assert "branch-b" in result.output
+
+
+def test_mcp_mirror_same_branch_id_deduplicated(runner, db):
+    """MCP: 'should allow multiple thoughts in same branch' — branch ID appears only once."""
+    add(runner,
+        "**Thought 1 of ~2** [BRANCH from Thought 1 — branch-a]\n"
+        "Branch thought 1\nnextThoughtNeeded: true"
+    )
+    result = add(runner,
+        "**Thought 2 of ~2** [BRANCH from Thought 1 — branch-a]\n"
+        "Branch thought 2\nnextThoughtNeeded: false"
+    )
+    # branch-a should appear exactly once in the branches list
+    branches_line = next(
+        line for line in result.output.splitlines() if line.startswith("branches:")
+    )
+    assert branches_line.count("branch-a") == 1
+
+
+def test_mcp_mirror_very_long_thought_string(runner, db):
+    """MCP: 'should handle very long thought strings' — no error, metadata correct."""
+    long_content = "a" * 10_000
+    result = add(runner,
+        f"**Thought 1 of ~1**\n{long_content}\nnextThoughtNeeded: false"
+    )
+    assert result.exit_code == 0
+    assert "thoughtHistoryLength: 1" in result.output
+    assert "nextThoughtNeeded: false" in result.output
+
+
+def test_mcp_mirror_single_thought_chain(runner, db):
+    """MCP: 'should handle thoughtNumber = 1, totalThoughts = 1'."""
+    result = add(runner, "**Thought 1 of ~1**\nOnly thought\nnextThoughtNeeded: false")
+    assert result.exit_code == 0
+    assert "thoughtNumber: 1" in result.output
+    assert "totalThoughts: 1" in result.output
+
+
+def test_mcp_mirror_response_has_all_required_fields(runner, db):
+    """MCP: 'should return correct response structure on success' — all fields present."""
+    result = add(runner, "**Thought 1 of ~1**\nTest thought\nnextThoughtNeeded: false")
+    for field in ["thoughtNumber:", "totalThoughts:", "nextThoughtNeeded:", "thoughtHistoryLength:", "branches:"]:
+        assert field in result.output, f"Missing field: {field}"
+
+
 # ── Category 5: Lifecycle ──────────────────────────────────────────────────────
 # Start → add → close matches expected state transitions.
 
