@@ -41,7 +41,7 @@ Collections are namespaced by corpus type using `__` (double underscore) as sepa
 | `code__<repo>-<hash>` | Indexed source code | voyage-code-3 | voyage-4 |
 | `docs__<repo>-<hash>` | Indexed prose files | voyage-context-3 (CCE) | voyage-4 |
 | `rdr__<repo>-<hash>` | Indexed RDR documents | voyage-context-3 (CCE) | voyage-4 |
-| `docs__<corpus>` | Indexed PDFs and markdown | voyage-context-3 / voyage-4 | voyage-4 |
+| `docs__<corpus>` | Indexed PDFs and markdown | voyage-context-3 (CCE) | voyage-4 |
 | `knowledge__<topic>` | Stored agent outputs and notes | voyage-context-3 | voyage-4 |
 
 **TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.

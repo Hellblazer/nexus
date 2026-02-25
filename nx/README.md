@@ -71,7 +71,13 @@ nx/
     ├── project-setup/       # → project-management-setup agent
     ├── research-synthesis/  # → deep-research-synthesizer agent
     ├── strategic-planning/  # → strategic-planner agent
-    └── test-validation/     # → test-validator agent
+    ├── test-validation/     # → test-validator agent
+    ├── rdr-create/          # RDR workflow: create new RDR from template
+    ├── rdr-gate/            # RDR workflow: quality gate before finalizing
+    ├── rdr-research/        # RDR workflow: delegate research to agents
+    ├── rdr-close/           # RDR workflow: close RDR, create beads
+    ├── rdr-list/            # RDR workflow: list RDRs with status
+    └── rdr-show/            # RDR workflow: show RDR details
 ```
 
 ## Superpowers Delegation

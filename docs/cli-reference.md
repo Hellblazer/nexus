@@ -103,11 +103,11 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | `search QUERY` | FTS5 keyword search |
 | `list --project NAME` | List entries in project |
 | `expire` | Remove expired entries |
-| `promote TITLE` | Promote entry to T3 |
+| `promote ID --collection NAME` | Promote entry to T3 by ID |
 
 **`put` flags:** `--tags`, `--ttl`
 
-**`promote` flags:** `--project`, `--collection`, `--ttl`
+**`promote` flags:** `--collection` (required), `--tags`, `--remove`
 
 **`search` flags:** `--project NAME`
 
