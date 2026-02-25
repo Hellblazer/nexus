@@ -4,14 +4,18 @@
 
 ## Installation
 
-Install via the Nexus marketplace:
+**Marketplace** (recommended):
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
-/plugin install nx@Hellblazer-nexus
+/plugin install nx@nexus-plugins
 ```
 
-For repos without the full plugin, `nx install claude-code` provides lightweight CLI hooks (session start/end) and a skill reference — but not the agents, slash commands, or full hook suite.
+**Local development** (from the nexus repo checkout):
+
+```bash
+claude --plugin-dir ./nx
+```
 
 ## Prerequisites
 

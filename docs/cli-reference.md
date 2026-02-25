@@ -242,11 +242,16 @@ Checks: ChromaDB connectivity, Voyage AI key, Anthropic key, ripgrep binary, git
 
 ## nx install / nx uninstall
 
-Lightweight Claude Code integration for repos that don't contain the `nx/` plugin directory.
+Legacy lightweight integration that adds session hooks and a skill reference to `~/.claude/`. Prefer the marketplace plugin instead:
+
+```bash
+/plugin marketplace add Hellblazer/nexus
+/plugin install nx@nexus-plugins
+```
+
+The `install` / `uninstall` commands remain available for environments where the marketplace is not supported:
 
 ```
 nx install claude-code
 nx uninstall claude-code
 ```
-
-Adds or removes `SessionStart`/`SessionEnd` hooks and a Nexus skill reference in `~/.claude/`. Not needed when the full `nx/` plugin is loaded (it provides these hooks and more).

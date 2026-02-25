@@ -84,7 +84,12 @@ That many design documents create an information management problem. Nexus handl
 
 ## The Plugin
 
-The `nx/` directory is a Claude Code plugin. Install it via the Nexus marketplace (see [nx/README.md](nx/README.md) for setup).
+The `nx/` directory is a Claude Code plugin. Install via the marketplace:
+
+```bash
+/plugin marketplace add Hellblazer/nexus
+/plugin install nx@nexus-plugins
+```
 
 The plugin provides:
 
@@ -95,8 +100,6 @@ The plugin provides:
 - **Standard pipelines** — feature, bug, and research workflows with built-in review gates
 
 Each agent runs on a model matched to its task: opus for complex reasoning, sonnet for implementation, haiku for utility. The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task-level tracking — session hooks prime bead context, RDR close decomposes decisions into beads, and branch naming ties back to bead IDs. See [nx/README.md](nx/README.md) for the full plugin documentation.
-
-For repos that don't contain the plugin directory, `nx install claude-code` adds lightweight CLI hooks (session start/end) and a skill reference to `~/.claude/`.
 
 ## Documentation
 
