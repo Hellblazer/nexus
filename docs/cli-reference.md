@@ -76,15 +76,18 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 
 | Flag | Description |
 |------|-------------|
+| `--collection` / `-c` | Collection name or prefix (default: `knowledge`) |
 | `--title TITLE` | Entry title (required for stdin) |
 | `--tags TAG,TAG` | Comma-separated tags |
+| `--category LABEL` | Category label |
 | `--ttl TTL` | Time to live (`30d`, `4w`, `permanent`) |
 
 **`list` flags:**
 
 | Flag | Description |
 |------|-------------|
-| `--collection NAME` | Filter by collection |
+| `--collection` / `-c` | Collection name or prefix (default: `knowledge`) |
+| `--limit` / `-n NUM` | Maximum entries to show (default: 200) |
 
 ---
 
@@ -223,8 +226,14 @@ nx config init
 |------------|-------------|
 | `init` | Interactive credential wizard |
 | `list` | Show all config values |
-| `get KEY` | Get single value |
+| `get KEY` | Get single value (masked by default) |
 | `set KEY VALUE` | Set single value |
+
+**`get` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--show` | Reveal the full value instead of masking |
 
 ---
 
@@ -238,20 +247,3 @@ nx doctor
 
 Checks: ChromaDB connectivity, Voyage AI key, Anthropic key, ripgrep binary, git binary.
 
----
-
-## nx install / nx uninstall
-
-Legacy lightweight integration that adds session hooks and a skill reference to `~/.claude/`. Prefer the marketplace plugin instead:
-
-```bash
-/plugin marketplace add Hellblazer/nexus
-/plugin install nx@nexus-plugins
-```
-
-The `install` / `uninstall` commands remain available for environments where the marketplace is not supported:
-
-```
-nx install claude-code
-nx uninstall claude-code
-```

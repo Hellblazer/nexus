@@ -245,11 +245,3 @@ def expire_cmd() -> None:
     with T2Database(_default_db_path()) as db:
         count = db.expire()
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
-
-
-@pm.command("migrate")
-def migrate_cmd() -> None:
-    """Migrate legacy *_pm namespaces to bare project names."""
-    with T2Database(_default_db_path()) as db:
-        count = db.migrate_pm_namespaces()
-    click.echo(f"Migrated {count} {'entry' if count == 1 else 'entries'}.")

@@ -256,23 +256,6 @@ class T2Database:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
-    def migrate_pm_namespaces(self) -> int:
-        """Rename ``*_pm`` projects to bare names for PM-tagged entries.
-
-        Only migrates rows whose tags contain 'pm' (boundary-matched).
-        Returns the number of rows updated.
-        """
-        sql = """
-            UPDATE OR IGNORE memory
-               SET project = SUBSTR(project, 1, LENGTH(project) - 3)
-             WHERE project LIKE '%\\_pm' ESCAPE '\\'
-               AND (',' || tags || ',') LIKE '%,pm,%'
-        """
-        with self._lock:
-            cursor = self.conn.execute(sql)
-            self.conn.commit()
-        return cursor.rowcount
-
     def decay_project(self, project: str, ttl: int) -> None:
         """Set TTL and flip pm -> pm-archived tags for all docs in *project*."""
         with self._lock, self.conn:
