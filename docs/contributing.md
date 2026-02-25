@@ -127,13 +127,13 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
    The `release.yml` workflow triggers on `v*` tags, runs tests, builds the wheel, publishes to PyPI via OIDC trusted publisher, and creates a GitHub release.
 
 9. **Yank pre-release versions** (if applicable)
-   Go to https://pypi.org/manage/project/nexus/releases/ and yank any versions that should not be resolved by `pip install nexus`.
+   Go to https://pypi.org/manage/project/conexus/releases/ and yank any versions that should not be resolved by `pip install conexus`.
 
 ### One-time PyPI Trusted Publisher Setup
 
 Before the first release, configure PyPI to trust the GitHub Actions OIDC token:
 
-1. Go to https://pypi.org/manage/project/nexus/settings/publishing/
+1. Go to https://pypi.org/manage/project/conexus/settings/publishing/
 2. Click "Add a new publisher"
 3. Fill in:
    - **Owner**: `Hellblazer`

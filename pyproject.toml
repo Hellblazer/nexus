@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "nexus"
+name = "conexus"
 version = "0.3.2"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
