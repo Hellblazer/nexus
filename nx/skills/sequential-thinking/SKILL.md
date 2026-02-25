@@ -111,3 +111,19 @@ nextThoughtNeeded: false
 - Performance analysis: hypothesize bottleneck, measure, iterate
 - Feature design: explore alternatives before committing
 - Any investigation where you might be wrong on first instinct
+
+## Surviving Context Compaction
+
+Active thought chains are lost when context is compacted. Two mechanisms protect them:
+
+**During compaction (preferred):** If you know compaction is coming, run:
+```
+/compact preserve the active sequential thinking chain in full detail
+```
+The compaction LLM receives this as an instruction and keeps the chain verbatim in the summary.
+
+**After automatic compaction:** The PreCompact hook saves the chain to T2 before compaction fires. Retrieve it with:
+```bash
+nx memory get --project <repo>_active --title sequential-thinking-chain.md
+```
+Replace `<repo>` with the git repo name (e.g. `nexus`). On the next session start, the chain is injected automatically.
