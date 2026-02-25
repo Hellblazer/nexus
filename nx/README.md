@@ -45,6 +45,7 @@ nx/
 │       ├── bead_context_hook.py      # Bead context injection
 │       ├── mcp_health_hook.sh        # MCP/nx health checks at session start
 │       ├── permission-request-stdin.sh # Auto-approve safe read-only commands
+│       ├── rdr_hook.py               # Report RDR document count and status
 │       ├── session_start_hook.py     # Load PM context, prime beads
 │       ├── setup.sh                  # One-time setup checks
 │       └── subagent-start.sh         # Context prep for spawned subagents

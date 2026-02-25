@@ -47,7 +47,7 @@ Data flows upward (T1 → T2 → T3). No reverse flow except `nx pm restore`.
 2. **No ORM** — Direct `sqlite3` for T2. Schema is simple; WAL + FTS5 are stdlib.
 3. **Constructor injection** — Dependencies via constructor, no global singletons.
 4. **Ported, not imported** — SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
-5. **Lazy session ID** — Generated on first access via `os.getsid(0)`, not at import time.
+5. **Lazy session ID** — UUID4, generated on first access. File path keyed by `os.getsid(0)` for terminal-session isolation.
 
 ## Heritage
 

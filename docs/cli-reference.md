@@ -21,7 +21,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--agentic` | Multi-step refinement via Haiku |
 | `--hybrid` | Semantic + ripgrep frecency (code corpora only) |
 | `--no-rerank` | Disable Voyage reranking |
-| `--mxbai` | Use mxbai reranker instead of Voyage |
+| `--mxbai` | Fan out to Mixedbread-indexed collections (read-only) |
 | `--where KEY=VALUE` | Metadata filter (repeatable) |
 | `--n` / `-m` / `--max-results NUM` | Max results (default 10) |
 | `-A NUM` | Lines after each match |
