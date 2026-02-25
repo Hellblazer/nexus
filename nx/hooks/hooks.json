@@ -65,5 +65,11 @@
       "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/bead_context_hook.py",
       "matcher": "bd create"
     }
+  ],
+  "UserPromptSubmit": [
+    {
+      "type": "command",
+      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/prompt_submit_thoughts_hook.py"
+    }
   ]
 }

@@ -122,8 +122,4 @@ Active thought chains are lost when context is compacted. Two mechanisms protect
 ```
 The compaction LLM receives this as an instruction and keeps the chain verbatim in the summary.
 
-**After automatic compaction:** The PreCompact hook saves the chain to T2 before compaction fires. Retrieve it with:
-```bash
-nx memory get --project <repo>_active --title sequential-thinking-chain.md
-```
-Replace `<repo>` with the git repo name (e.g. `nexus`). On the next session start, the chain is injected automatically.
+**After automatic compaction:** The PreCompact hook saves the chain to T2 before compaction fires. The chain is re-injected automatically on your next message (via the UserPromptSubmit hook) and on the next session start.

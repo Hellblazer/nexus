@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+SENTINEL = Path.home() / '.config' / 'nexus' / 'thought-chain-pending'
+
 # Matches: **Thought N of ~T** or **Thought N of ~T [flags]**
 THOUGHT_HEADER = re.compile(r'\*\*Thought (\d+) of ~(\d+)\*\*')
 DONE_SIGNAL = re.compile(r'nextThoughtNeeded:\s*false', re.IGNORECASE)
@@ -156,13 +158,15 @@ def main() -> None:
     saved = _save_chain(thoughts, project)
 
     if saved:
+        # Write sentinel so the UserPromptSubmit hook knows to re-inject.
+        try:
+            SENTINEL.parent.mkdir(parents=True, exist_ok=True)
+            SENTINEL.touch()
+        except OSError:
+            pass
         print(
-            f'[nx] Sequential thinking chain saved to T2: '
-            f'Thought {last["number"]} of ~{last["total"]} (incomplete).',
-            file=sys.stderr,
-        )
-        print(
-            f'     After compaction: chain will be re-injected automatically.',
+            f'[nx] Sequential thinking chain saved: '
+            f'Thought {last["number"]} of ~{last["total"]} — will be re-injected on next prompt.',
             file=sys.stderr,
         )
     else:
