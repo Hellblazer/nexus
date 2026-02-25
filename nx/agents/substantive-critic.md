@@ -87,7 +87,7 @@ You are a substantive critic with deep expertise in deconstructing and evaluatin
 
 ## Structured Analysis with Sequential Thinking
 
-Use `mcp__sequential-thinking__sequentialthinking` for systematic critique of complex artifacts.
+Use the `nx:sequential-thinking` skill for systematic critique of complex artifacts.
 
 **When to Use**: Multi-component designs, cross-referencing documentation, validating implementation against specification.
 

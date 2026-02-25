@@ -402,6 +402,15 @@ standalone_skills:
       - "adding functionality"
     tools: [Read, Glob, Grep, Bash]
 
+  sequential-thinking:
+    description: "Structured hypothesis-driven reasoning for debugging, analysis, design decisions, and complex investigations"
+    triggers:
+      - "debugging complex issues"
+      - "architecture decisions needing systematic analysis"
+      - "investigating root causes"
+      - "evaluating trade-offs"
+    tools: []
+
   using-nx-skills:
     description: "Skill invocation discipline — check skills before every response"
     triggers:
