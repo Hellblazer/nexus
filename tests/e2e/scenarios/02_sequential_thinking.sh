@@ -29,7 +29,6 @@ assert_cmd "T2 has active thought chain" \
     "chain|session|thought"
 
 # Capture the chain ID / content so we can verify it survives compaction
-local chain_before
 chain_before=$(crun "nx thought show 2>&1" || true)
 echo "    Chain before compaction: $(echo "$chain_before" | head -3)"
 
@@ -63,10 +62,8 @@ assert_output "Claude continued thinking after compaction" \
     "Thought [0-9]|thought|rate.limit|implement"
 
 # Verify T2 chain grew (more thoughts than before)
-local chain_after
 chain_after=$(crun "nx thought show 2>&1" || true)
 
-local before_count after_count
 before_count=$(echo "$chain_before" | grep -cE "Thought [0-9]" || echo 0)
 after_count=$(echo "$chain_after" | grep -cE "Thought [0-9]" || echo 0)
 

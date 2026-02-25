@@ -43,7 +43,6 @@ scenario "01 smoke: plugin loaded in Claude"
 # Use claude -p (print mode) to check if nx skills are available.
 # Print mode loads plugins from ~/.claude just like interactive mode.
 echo "    Asking Claude to list nx skills (print mode)..."
-local plugin_check
 plugin_check=$(crun "claude --dangerously-skip-permissions -p 'List the names of all skills provided by the nx plugin. Just the names, one per line.' 2>&1" || true)
 
 if echo "$plugin_check" | grep -qiE "nexus|sequential.thinking|rdr|brainstorm"; then

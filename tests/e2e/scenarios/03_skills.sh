@@ -38,7 +38,6 @@ scenario "03 skills: using-nexus skill guidance is correct"
 # Use print mode to ask Claude about when to use the nx:nexus skill.
 # Tests that the skill description itself gives correct, actionable guidance.
 echo "    Asking Claude about the nx:nexus skill in print mode..."
-local skill_check
 skill_check=$(crun "claude --dangerously-skip-permissions -p \
     'Invoke the nx:nexus skill and summarize its key guidance in 3 bullet points.' \
     2>&1" || true)
