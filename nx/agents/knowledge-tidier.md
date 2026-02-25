@@ -45,6 +45,8 @@ Systematically review, validate, and consolidate information across knowledge ba
 
 ## Workflow
 
+Use the `nx:sequential-thinking` skill when making retention decisions: form a hypothesis about whether an entry is stale/redundant ("this entry may be superseded by X"), gather evidence (check dates, cross-reference other entries, search for contradictions), then decide. Prevents discarding information that is still valid.
+
 ### Phase 1: Inventory
 1. List all relevant documents in nx T3 store: `nx store list --collection knowledge`
 2. List all relevant files in nx T2 memory: `nx memory list --project {project}`
