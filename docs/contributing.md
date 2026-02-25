@@ -144,12 +144,7 @@ Before the first release, configure PyPI to trust the GitHub Actions OIDC token:
    - **Owner**: `Hellblazer`
    - **Repository**: `nexus`
    - **Workflow filename**: `release.yml`
-   - **Environment name**: `pypi-release`
+   - **Environment name**: (leave blank)
 4. Click "Add"
 
 This eliminates the need for a `PYPI_API_TOKEN` secret. GitHub Actions authenticates directly via OIDC.
-
-**GitHub Environment setup** (one-time):
-1. Go to https://github.com/Hellblazer/nexus/settings/environments
-2. Create environment named `pypi-release`
-3. Add protection rules as desired (e.g., require review before publish)
