@@ -69,4 +69,28 @@ digraph brainstorming {
 
 **All of these mean: Stop. Follow the process.**
 
+## Relay Template (Use This Format)
+
+When invoking the strategic-planning skill after design approval, use this structure:
+
+```markdown
+## Relay: strategic-planner
+
+**Task**: Create phased implementation plan from approved design.
+**Bead**: [ID] (status: [status]) or 'none'
+
+### Input Artifacts
+- nx store: [prior art or related decisions from T3, or "none"]
+- nx memory: [session state, e.g. "{repo}_active/design.md", or "none"]
+- Files: docs/plans/YYYY-MM-DD-<topic>-design.md
+
+### Deliverable
+Phased implementation plan saved to `docs/plans/YYYY-MM-DD-<topic>-impl-plan.md`
+
+### Quality Criteria
+- [ ] Every task has exact file paths and test commands
+- [ ] TDD: failing test before implementation in each task
+- [ ] Dependencies between tasks are explicit
+```
+
 **REQUIRED SUB-SKILL:** Use nx:strategic-planning after design approval to create the implementation plan.
