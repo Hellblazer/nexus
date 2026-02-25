@@ -90,7 +90,7 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 
 ## nx memory
 
-T2 persistent memory (SQLite + FTS5).
+T2 persistent memory (SQLite + FTS5). See [Storage Tiers](storage-tiers.md) for what T2 holds and how it bridges sessions.
 
 ```
 nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 30d
@@ -136,7 +136,7 @@ nx scratch put "hypothesis: cache invalidation is stale"
 
 ## nx pm
 
-Project management (T2 + T3).
+Project management (T2 + T3). See [Project Management](project-management.md) for the lifecycle and integration details.
 
 ```
 nx pm resume

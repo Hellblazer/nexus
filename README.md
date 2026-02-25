@@ -94,7 +94,7 @@ The plugin provides:
 - **Slash commands** — `/research`, `/create-plan`, `/review-code`, `/rdr-create`, etc.
 - **Standard pipelines** — feature, bug, and research workflows with built-in review gates
 
-Each agent runs on a model matched to its task: opus for complex reasoning, sonnet for implementation, haiku for utility. See [nx/README.md](nx/README.md) for the full plugin documentation.
+Each agent runs on a model matched to its task: opus for complex reasoning, sonnet for implementation, haiku for utility. The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task-level tracking — session hooks prime bead context, RDR close decomposes decisions into beads, and branch naming ties back to bead IDs. See [nx/README.md](nx/README.md) for the full plugin documentation.
 
 For repos that don't contain the plugin directory, `nx install claude-code` adds lightweight CLI hooks (session start/end) and a skill reference to `~/.claude/`.
 
@@ -105,6 +105,7 @@ For repos that don't contain the plugin directory, `nx install claude-code` adds
 | [Getting Started](docs/getting-started.md) | Install, configure, first index and search |
 | [CLI Reference](docs/cli-reference.md) | Every command, every flag |
 | [Storage Tiers](docs/storage-tiers.md) | T1/T2/T3 architecture and data flow |
+| [Project Management](docs/project-management.md) | Phases, blockers, archive, session integration |
 | [Repo Indexing](docs/repo-indexing.md) | Smart file classification, chunking, frecency |
 | [Configuration](docs/configuration.md) | Config hierarchy, .nexus.yml, settings |
 | [Architecture](docs/architecture.md) | Module map, design decisions |

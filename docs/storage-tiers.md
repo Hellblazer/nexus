@@ -18,11 +18,17 @@ Everything is wiped at session end. Use `nx scratch flag` to mark items for auto
 
 ## T2 -- Memory Bank
 
-SQLite database with an FTS5 virtual table, WAL mode enabled for concurrent access. Stored at `~/.config/nexus/memory.db`. No network dependency.
+A local SQLite database that replaced the AllPepper Memory Bank MCP server. Every entry has a project, a title, and content — like a flat filesystem where project is the directory and title is the filename. Entries can have tags and an optional TTL. FTS5 provides keyword search with no API call. Stored at `~/.config/nexus/memory.db`.
 
-Data is organized by project via the `--project` flag. Supports TTL values: `30d`, `4w`, or permanent (default: `30d`). FTS5 enables keyword search with no API call.
+T2 is the persistent local layer that bridges sessions. Notes, project state, and agent relay context survive restarts here. Different usage patterns share the same simple model:
 
-**Use for**: session memory, PM docs, RDR metadata, agent relay state.
+- **Developer notes** — hypotheses, findings, decisions-in-progress via `nx memory put`
+- **Project management** — phase docs, blockers, methodology. `nx pm` commands manage these as T2 entries with specific titles and tags. See [Project Management](project-management.md).
+- **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr/nexus-integration.md).
+- **Agent relay** — context passed between agent invocations
+- **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
+
+Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, or permanent. Default is `30d` for developer notes; PM entries are created permanent and only begin decaying after `nx pm archive`.
 
 ## T3 -- Permanent Knowledge
 
