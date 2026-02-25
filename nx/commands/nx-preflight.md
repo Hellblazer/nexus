@@ -17,7 +17,8 @@ disable-model-invocation: false
   else
     echo "Status: FAIL"
     echo "nx not found in PATH"
-    echo "Install: see docs/getting-started.md"
+    echo "Install: uv tool install conexus  OR  pip install conexus"
+    echo "Docs: https://github.com/Hellblazer/nexus"
   fi
   echo ""
 
@@ -57,12 +58,13 @@ disable-model-invocation: false
   echo "### 4. superpowers plugin"
   echo ""
   PLUGINS_CACHE="${HOME}/.claude/plugins/cache"
-  if [ -d "$PLUGINS_CACHE" ] && ls "$PLUGINS_CACHE" 2>/dev/null | grep -qi superpowers; then
+  SUPERPOWERS_DIR=$(find "$PLUGINS_CACHE" -maxdepth 3 -type d -name "superpowers" 2>/dev/null | head -1)
+  if [ -n "$SUPERPOWERS_DIR" ]; then
     echo "Status: PASS"
-    echo "superpowers directory found in $PLUGINS_CACHE"
+    echo "superpowers found: $SUPERPOWERS_DIR"
   else
     echo "Status: FAIL"
-    echo "superpowers not found in $PLUGINS_CACHE"
+    echo "superpowers plugin not found under $PLUGINS_CACHE"
     echo "Install: /plugin marketplace add anthropics/claude-plugins-official"
   fi
   echo ""
