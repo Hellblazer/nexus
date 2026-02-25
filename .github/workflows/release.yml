@@ -55,7 +55,7 @@ jobs:
         run: uv sync
 
       - name: Build wheel and sdist
-        run: uv run hatch build --clean
+        run: uv build --sdist --wheel
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
