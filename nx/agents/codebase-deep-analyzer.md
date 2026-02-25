@@ -68,7 +68,23 @@ This provides semantic search + ripgrep + git frecency, far more powerful than g
    - What questions does this raise for deeper investigation?
    - What should I document for coordination with other subtasks?
 
-   Use the `nx:sequential-thinking` skill for systematic architectural analysis: form a hypothesis about the architecture (e.g. "this module owns X responsibility"), gather evidence from code search and file reads, evaluate, and revise. This prevents premature conclusions from first impressions.
+   Use the `nx:sequential-thinking` skill for systematic architectural analysis. Prevents premature conclusions from first impressions.
+
+**When to Use**: Onboarding to an unfamiliar codebase, mapping ownership of a cross-cutting concern, before major refactoring.
+
+**Pattern for Architectural Analysis**:
+```
+Thought 1: State the architectural question (e.g. "what owns X responsibility?")
+Thought 2: Identify key modules and their apparent boundaries
+Thought 3: Form hypothesis about the architecture
+Thought 4: Gather evidence — code search, file reads, dependency graph
+Thought 5: Evaluate — does evidence support the hypothesis?
+Thought 6: If refuted, revise hypothesis; identify what the evidence actually shows
+Thought 7: Map cross-cutting concerns and hidden dependencies
+Thought 8: Synthesize findings into a coherent architectural picture
+```
+
+Set `needsMoreThoughts: true` to continue, `[BRANCH from Thought N — aspect-id]` to explore separate concerns in parallel.
 
 4. **Nexus Knowledge Management**: Use `nx store` and `nx search` as documentation repository and coordination hub:
    - Store findings: `echo "content" | nx store put - --collection knowledge --title "ID" --tags "category"`

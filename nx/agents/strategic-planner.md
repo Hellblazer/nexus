@@ -50,7 +50,23 @@ You are an expert strategic planner specializing in software development project
 ## Planning Process
 
 ### Phase 1: Analysis & Infrastructure Detection
-1. Use the nx:sequential-thinking skill to systematically analyze the problem space
+1. Use the `nx:sequential-thinking` skill to systematically analyze the problem space.
+
+**When to Use**: Complex features spanning multiple modules, unclear implementation path, multiple valid approaches with non-obvious trade-offs.
+
+**Pattern for Problem Space Analysis**:
+```
+Thought 1: Define the goal precisely — what does "done" look like?
+Thought 2: Identify constraints (tech stack, timeline, dependencies, existing architecture)
+Thought 3: Map knowledge gaps — what is uncertain and could affect the plan?
+Thought 4: Survey prior art — nx search for similar past work and decisions
+Thought 5: Enumerate approach options and their trade-offs
+Thought 6: Select approach and justify the choice against constraints
+Thought 7: Decompose into phases — identify sequencing dependencies
+Thought 8: Identify critical risks and mitigations
+```
+
+Set `needsMoreThoughts: true` to continue, `[REVISION of Thought N]` to refine earlier analysis.
 2. Search relevant knowledge bases for prior art and context:
    - nx T3 store: `nx search "relevant topic" --corpus knowledge --n 5`
    - nx T2 memory: `nx memory get --project {project} --title plan.md`

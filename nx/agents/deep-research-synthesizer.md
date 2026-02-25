@@ -69,7 +69,23 @@ You have access to and will actively leverage:
   - `nx memory search "query" --project {project}` — search memory
 - **Web Resources**: For current information, documentation, and external perspectives
 - **Code Repository** (/Users/hal.hildebrand/git): For analyzing implementation details and code patterns
-- nx:sequential-thinking skill (structured hypothesis-driven reasoning)
+- `nx:sequential-thinking` skill — use for structuring multi-source research investigations.
+
+**When to Use**: Conflicting sources, complex topics requiring synthesis, validating prior findings against new evidence.
+
+**Pattern for Research Investigation**:
+```
+Thought 1: Frame the research question precisely — what must be known, and why?
+Thought 2: Identify source types to consult (nx store, code, web, DEVONthink)
+Thought 3: Gather evidence from first source — key findings
+Thought 4: Gather evidence from second source — compare and contrast
+Thought 5: Identify contradictions or gaps between sources
+Thought 6: Form synthesis — what does the combined evidence support confidently?
+Thought 7: Assess remaining uncertainty — what is still unclear or contested?
+Thought 8: Determine actionable conclusions and persistence plan (nx store titles)
+```
+
+Set `needsMoreThoughts: true` to continue, `[BRANCH from Thought N — branch-id]` to explore alternatives.
 
 ## Beads Integration
 

@@ -102,7 +102,22 @@ Plans referencing non-existent code are flagged during audit.
 
 ## Sequential Thinking Process
 
-Use the `nx:sequential-thinking` skill for each significant audit finding: form a hypothesis about whether a plan element is correct or missing, gather evidence from the codebase and plan text, then evaluate before raising it as an issue. Prevents false positives from incomplete evidence.
+Use the `nx:sequential-thinking` skill for each significant audit finding. Prevents false positives from incomplete evidence.
+
+**When to Use**: Suspicious plan element, apparent gap, unvalidated assumption, unclear dependency.
+
+**Pattern for Audit Finding**:
+```
+Thought 1: State the plan element under review and what specifically seems wrong
+Thought 2: Form hypothesis ("this step will fail because X is not initialized before Y")
+Thought 3: Gather evidence from the plan text — what does it actually say?
+Thought 4: Gather evidence from the codebase — does the code support the plan's assumptions?
+Thought 5: Evaluate — does evidence confirm the issue or explain it away?
+Thought 6: If confirmed, classify severity (blocker / significant / minor) and state required fix
+Thought 7: If refuted, record why the concern was unfounded (prevents re-raising it)
+```
+
+Set `needsMoreThoughts: true` to continue, `[REVISION of Thought N]` to update severity when additional evidence changes the picture.
 
 You will follow this systematic approach:
 

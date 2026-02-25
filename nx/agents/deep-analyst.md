@@ -132,7 +132,24 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Hypothesis Results**: Document with confidence levels
 - **Relationship Maps**: Include as `--tags` in nx store documents
 - **Recommendations**: Include in relay to downstream agent
-- **Analysis Chain**: Use the `nx:sequential-thinking` skill — each `nx thought add` persists to T2 and survives compaction
+- **Analysis Chain**: Use the `nx:sequential-thinking` skill for hypothesis-driven investigation of complex behaviors.
+
+**When to Use**: Unexplained system behavior, performance mysteries, multi-component interactions, root cause analysis.
+
+**Pattern for Behavioral Investigation**:
+```
+Thought 1: State the phenomenon precisely — what is observed vs. expected?
+Thought 2: Identify all observable symptoms and their characteristics
+Thought 3: Form initial hypothesis about the root mechanism (be specific)
+Thought 4: Identify what evidence would validate or refute this hypothesis
+Thought 5: Gather evidence — code, metrics, architecture, data flows
+Thought 6: Evaluate — does evidence support or refute the hypothesis?
+Thought 7: If refuted, branch to revised hypothesis; if supported, assess confidence
+Thought 8: Identify what could still falsify the explanation
+Thought 9: Synthesize findings with confidence levels and remaining uncertainties
+```
+
+Set `needsMoreThoughts: true` to continue, `[REVISION of Thought N]` to correct earlier reasoning.
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
