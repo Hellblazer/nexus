@@ -1,0 +1,43 @@
+{
+  "name": "Nexus Dev Container",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "TZ": "${localEnv:TZ:America/Los_Angeles}",
+      "CLAUDE_CODE_VERSION": "latest"
+    }
+  },
+  "runArgs": [
+    "--cap-add=NET_ADMIN",
+    "--cap-add=NET_RAW"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "ms-python.python",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "python.defaultInterpreterPath": "/home/node/.local/share/uv/python/cpython-3.12*/bin/python3.12"
+      }
+    }
+  },
+  "remoteUser": "node",
+  "mounts": [
+    "source=nexus-commandhistory,target=/commandhistory,type=volume",
+    "source=nexus-claude-config,target=/home/node/.claude,type=volume"
+  ],
+  "containerEnv": {
+    "NODE_OPTIONS": "--max-old-space-size=4096",
+    "CLAUDE_CONFIG_DIR": "/home/node/.claude",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "VOYAGE_API_KEY": "${localEnv:VOYAGE_API_KEY}",
+    "CHROMA_API_KEY": "${localEnv:CHROMA_API_KEY}",
+    "CHROMA_TENANT": "${localEnv:CHROMA_TENANT}",
+    "CHROMA_DATABASE": "${localEnv:CHROMA_DATABASE:default_database}"
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+  "workspaceFolder": "/workspace"
+}

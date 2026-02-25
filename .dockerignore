@@ -1,0 +1,15 @@
+# Build context for devcontainer — exclude large/sensitive dirs
+.git
+.venv
+__pycache__
+*.pyc
+*.egg-info
+dist/
+.env
+.env.*
+!.env.example
+node_modules/
+.mypy_cache/
+.pytest_cache/
+coverage.json
+htmlcov/
