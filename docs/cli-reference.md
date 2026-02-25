@@ -132,6 +132,10 @@ nx scratch put "hypothesis: cache invalidation is stale"
 | `promote ID --project NAME --title NAME` | Promote to T2 |
 | `clear` | Delete all scratch notes |
 
+**`put` flags:** `--tags` (comma-separated), `--persist` (auto-flush to T2), `--project` / `--title` (explicit T2 destination)
+
+**`flag` flags:** `--project` / `--title` (explicit T2 destination)
+
 ---
 
 ## nx pm

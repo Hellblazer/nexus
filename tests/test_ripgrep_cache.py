@@ -180,3 +180,81 @@ def test_search_ripgrep_fixed_strings_by_default(tmp_path: Path) -> None:
 
     assert len(results) == 1
     assert results[0]["file_path"] == "/repo/a.py"
+
+
+# ── error paths ──────────────────────────────────────────────────────────────
+
+def test_search_ripgrep_timeout_returns_empty(tmp_path: Path) -> None:
+    """search_ripgrep returns [] when rg times out."""
+    cache_path = tmp_path / "cache.txt"
+    cache_path.write_text("/file:1:content\n")
+
+    with patch("nexus.ripgrep_cache.subprocess.run",
+               side_effect=subprocess.TimeoutExpired("rg", 10)):
+        results = search_ripgrep("content", cache_path)
+
+    assert results == []
+
+
+def test_search_ripgrep_returncode_2_returns_empty(tmp_path: Path) -> None:
+    """rg exit code 2 (regex error etc.) returns []."""
+    cache_path = tmp_path / "cache.txt"
+    cache_path.write_text("/file:1:content\n")
+
+    mock_proc = subprocess.CompletedProcess(args=["rg"], returncode=2,
+                                             stdout="", stderr="regex error")
+    with patch("nexus.ripgrep_cache.subprocess.run", return_value=mock_proc):
+        results = search_ripgrep("content", cache_path)
+
+    assert results == []
+
+
+def test_search_ripgrep_malformed_entry_skipped(tmp_path: Path) -> None:
+    """Cache lines with < 3 colon-separated parts are silently skipped."""
+    cache_path = tmp_path / "cache.txt"
+    cache_path.write_text("/file:1:valid\nno-colons-here\n")
+
+    mock_proc = subprocess.CompletedProcess(
+        args=["rg"], returncode=0,
+        stdout="/file:1:valid\nno-colons-here\n", stderr=""
+    )
+    with patch("nexus.ripgrep_cache.subprocess.run", return_value=mock_proc):
+        results = search_ripgrep("query", cache_path)
+
+    assert len(results) == 1
+    assert results[0]["file_path"] == "/file"
+
+
+def test_search_ripgrep_invalid_lineno_skipped(tmp_path: Path) -> None:
+    """Cache lines with non-integer line numbers are silently skipped."""
+    cache_path = tmp_path / "cache.txt"
+    cache_path.write_text("x\n")
+
+    mock_proc = subprocess.CompletedProcess(
+        args=["rg"], returncode=0,
+        stdout="/file:abc:content\n/file:42:valid\n", stderr=""
+    )
+    with patch("nexus.ripgrep_cache.subprocess.run", return_value=mock_proc):
+        results = search_ripgrep("query", cache_path)
+
+    assert len(results) == 1
+    assert results[0]["line_number"] == 42
+
+
+def test_search_ripgrep_frecency_decay(tmp_path: Path) -> None:
+    """Position-based frecency: first hit=1.0, last hit=0.0 for n>1."""
+    cache_path = tmp_path / "cache.txt"
+    cache_path.write_text("x\n")
+
+    mock_proc = subprocess.CompletedProcess(
+        args=["rg"], returncode=0,
+        stdout="/a:1:x\n/b:2:y\n/c:3:z\n", stderr=""
+    )
+    with patch("nexus.ripgrep_cache.subprocess.run", return_value=mock_proc):
+        results = search_ripgrep("query", cache_path)
+
+    assert len(results) == 3
+    # Formula: 1.0 - (i / n) where n=3 → 1.0, 0.667, 0.333
+    assert results[0]["frecency_score"] == pytest.approx(1.0)
+    assert results[1]["frecency_score"] == pytest.approx(1.0 - 1 / 3)
+    assert results[2]["frecency_score"] == pytest.approx(1.0 - 2 / 3)

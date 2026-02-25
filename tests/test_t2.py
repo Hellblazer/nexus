@@ -291,3 +291,147 @@ def test_t2_migrate_pm_namespaces_skips_collisions(db: T2Database) -> None:
     assert row["content"] == "new blockers"
     # Non-colliding entry migrated successfully
     assert db.get(project="nexus", title="phase1.md") is not None
+
+
+# ── TTL edge cases ──────────────────────────────────────────────────────────
+
+def test_t2_expire_permanent_entries_preserved(db: T2Database) -> None:
+    """Entries with ttl=None are permanent and never expire."""
+    db.put(project="proj", title="permanent.md", content="forever", ttl=None)
+
+    # Backdate timestamp by 1000 days
+    past = (datetime.now(UTC) - timedelta(days=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.conn.execute("UPDATE memory SET timestamp=? WHERE title='permanent.md'", (past,))
+    db.conn.commit()
+
+    deleted = db.expire()
+    assert deleted == 0
+    assert db.get(project="proj", title="permanent.md") is not None
+
+
+def test_t2_expire_ttl_zero_expires_immediately(db: T2Database) -> None:
+    """ttl=0 means entry expires as soon as any time passes."""
+    db.put(project="proj", title="zero.md", content="instant expire", ttl=0)
+
+    # Backdate by just 1 minute — julianday diff > 0
+    past = (datetime.now(UTC) - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.conn.execute("UPDATE memory SET timestamp=? WHERE title='zero.md'", (past,))
+    db.conn.commit()
+
+    deleted = db.expire()
+    assert deleted == 1
+
+
+def test_t2_expire_boundary_not_yet_expired(db: T2Database) -> None:
+    """Entry with ttl=30 that is only 29 days old should survive."""
+    db.put(project="proj", title="recent.md", content="not yet", ttl=30)
+
+    # Backdate by 29 days (< 30)
+    past = (datetime.now(UTC) - timedelta(days=29)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.conn.execute("UPDATE memory SET timestamp=? WHERE title='recent.md'", (past,))
+    db.conn.commit()
+
+    deleted = db.expire()
+    assert deleted == 0
+    assert db.get(project="proj", title="recent.md") is not None
+
+
+# ── FTS5 special characters ─────────────────────────────────────────────────
+
+def test_t2_unicode_content_roundtrips(db: T2Database) -> None:
+    """Non-ASCII content (CJK, emoji) round-trips correctly via get()."""
+    db.put(project="proj", title="cn.md", content="训练神经网络 🚀")
+    result = db.get(project="proj", title="cn.md")
+    assert result is not None
+    assert result["content"] == "训练神经网络 🚀"
+
+
+def test_t2_search_accented_latin(db: T2Database) -> None:
+    """FTS5 indexes accented Latin characters (handled by default tokenizer)."""
+    db.put(project="proj", title="fr.md", content="résumé cafetière naïve")
+    results = db.search("resume")
+    assert len(results) == 1
+    assert results[0]["title"] == "fr.md"
+
+
+def test_t2_search_with_quotes_in_content(db: T2Database) -> None:
+    """Content containing double quotes is stored and searchable."""
+    db.put(project="proj", title="quotes.md", content='He said "hello world" to everyone')
+    results = db.search("hello")
+    assert len(results) == 1
+
+
+def test_t2_search_prefix_wildcard(db: T2Database) -> None:
+    """FTS5 prefix search with * works."""
+    db.put(project="proj", title="auth.md", content="authentication authorization tokens")
+    results = db.search("auth*")
+    assert len(results) == 1
+
+
+# ── Tag edge cases ──────────────────────────────────────────────────────────
+
+def test_t2_search_by_tag_single_letter(db: T2Database) -> None:
+    """Single-letter tags are matched correctly by boundary matching."""
+    db.put(project="proj", title="tagged.md", content="searchable content", tags="a,b,c")
+    results = db.search_by_tag("searchable", "b")
+    assert len(results) == 1
+
+
+def test_t2_search_by_tag_no_false_positive(db: T2Database) -> None:
+    """Tag 'pm' does not match 'pm-archived' or 'rpm'."""
+    db.put(project="proj", title="active.md", content="active doc", tags="pm")
+    db.put(project="proj", title="archived.md", content="archived doc", tags="pm-archived")
+    db.put(project="proj", title="rpm.md", content="rpm doc", tags="rpm")
+
+    results = db.search_by_tag("doc", "pm")
+    assert len(results) == 1
+    assert results[0]["title"] == "active.md"
+
+
+# ── Upsert semantics ───────────────────────────────────────────────────────
+
+def test_t2_put_upsert_updates_content(db: T2Database) -> None:
+    """put() with same (project, title) updates the content."""
+    db.put(project="proj", title="doc.md", content="version 1")
+    db.put(project="proj", title="doc.md", content="version 2")
+
+    entry = db.get(project="proj", title="doc.md")
+    assert entry["content"] == "version 2"
+
+    entries = db.list_entries(project="proj")
+    assert len(entries) == 1
+
+
+def test_t2_put_upsert_updates_fts(db: T2Database) -> None:
+    """Upsert updates the FTS5 index so old content is no longer searchable."""
+    db.put(project="proj", title="doc.md", content="unique_keyword_alpha")
+    db.put(project="proj", title="doc.md", content="unique_keyword_beta")
+
+    assert db.search("unique_keyword_alpha") == []
+    assert len(db.search("unique_keyword_beta")) == 1
+
+
+# ── Decay/restore edge cases ───────────────────────────────────────────────
+
+def test_t2_decay_nonexistent_project_is_noop(db: T2Database) -> None:
+    """Decaying a project that doesn't exist doesn't crash."""
+    db.decay_project("nonexistent_project", ttl=90)
+
+
+def test_t2_restore_nonexistent_project_returns_empty(db: T2Database) -> None:
+    """Restoring a never-decayed project returns empty list."""
+    titles = db.restore_project("nonexistent_project")
+    assert titles == []
+
+
+# ── get_all ─────────────────────────────────────────────────────────────────
+
+def test_t2_get_all_returns_full_content(db: T2Database) -> None:
+    db.put(project="proj", title="a.md", content="content a")
+    db.put(project="proj", title="b.md", content="content b")
+
+    entries = db.get_all("proj")
+    assert len(entries) == 2
+    titles = {e["title"] for e in entries}
+    assert titles == {"a.md", "b.md"}
+    assert all("content" in e["content"] for e in entries)

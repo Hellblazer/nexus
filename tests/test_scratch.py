@@ -310,3 +310,66 @@ def test_t1_auto_create_session_when_no_file(
     session_file = tmp_path / ".config" / "nexus" / "sessions" / "12300.session"
     assert session_file.exists()
     assert session_file.read_text().strip() == first._session_id
+
+
+# ── T1 edge cases: flag/unflag sequences ─────────────────────────────────────
+
+def test_scratch_flag_unflag_reflag(t1: T1Database) -> None:
+    """Flag -> unflag -> re-flag works correctly."""
+    doc_id = t1.put("reflag test")
+    t1.flag(doc_id, project="p", title="t.md")
+    assert t1.get(doc_id)["flagged"] is True
+
+    t1.unflag(doc_id)
+    assert t1.get(doc_id)["flagged"] is False
+
+    t1.flag(doc_id, project="p2", title="t2.md")
+    entry = t1.get(doc_id)
+    assert entry["flagged"] is True
+    assert entry["flush_project"] == "p2"
+
+
+def test_scratch_unflag_already_unflagged(t1: T1Database) -> None:
+    """Unflagging an unflagged entry is a no-op (does not crash)."""
+    doc_id = t1.put("not flagged")
+    # Entry starts unflagged (persist=False)
+    t1.unflag(doc_id)  # should not raise
+    assert t1.get(doc_id)["flagged"] is False
+
+
+def test_scratch_unflag_missing_raises(t1: T1Database) -> None:
+    with pytest.raises(KeyError):
+        t1.unflag("no-such-id")
+
+
+# ── T1 edge cases: unicode content ──────────────────────────────────────────
+
+def test_scratch_unicode_content(t1: T1Database) -> None:
+    """Non-ASCII content (CJK, emoji) round-trips correctly."""
+    doc_id = t1.put("训练神经网络 🚀", tags="中文,ML")
+    entry = t1.get(doc_id)
+    assert entry["content"] == "训练神经网络 🚀"
+    assert entry["tags"] == "中文,ML"
+
+
+# ── T1 edge cases: duplicate content ────────────────────────────────────────
+
+def test_scratch_duplicate_content_different_ids(t1: T1Database) -> None:
+    """Two puts with identical content produce different IDs."""
+    id1 = t1.put("same content")
+    id2 = t1.put("same content")
+    assert id1 != id2
+    assert len(t1.list_entries()) == 2
+
+
+# ── T1 edge cases: flagged_entries only returns flagged ─────────────────────
+
+def test_scratch_flagged_entries_excludes_unflagged(t1: T1Database) -> None:
+    t1.put("unflagged one")
+    t1.put("unflagged two")
+    flagged_id = t1.put("will be flagged")
+    t1.flag(flagged_id)
+
+    flagged = t1.flagged_entries()
+    assert len(flagged) == 1
+    assert flagged[0]["id"] == flagged_id

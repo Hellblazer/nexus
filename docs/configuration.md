@@ -2,11 +2,12 @@
 
 ## Config Hierarchy
 
-Three levels, highest priority wins:
+Four levels, highest priority wins:
 
-1. **Environment variables** (highest)
+1. **Environment variables** (`NX_*`) — highest priority
 2. **Per-repo**: `.nexus.yml` in repo root (gitignored by default)
 3. **Global**: `~/.config/nexus/config.yml`
+4. **Built-in defaults** — lowest priority
 
 Each level is deep-merged, with higher-priority values winning.
 

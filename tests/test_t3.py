@@ -797,3 +797,174 @@ def test_t3_context_manager_works_end_to_end(mock_chromadb: tuple) -> None:
         )
         assert isinstance(doc_id, str) and len(doc_id) > 0
     # No exception means __exit__ succeeded
+
+
+# ── T3 expire guard edge cases ──────────────────────────────────────────────
+
+def test_expire_preserves_entry_with_missing_expires_at(mock_chromadb: tuple) -> None:
+    """Entry where expires_at is missing from metadata is preserved (not deleted)."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    # Entry has ttl_days > 0 but no expires_at key at all
+    mock_col.get.return_value = {
+        "ids": ["id-no-expires"],
+        "metadatas": [{"ttl_days": 30}],  # no "expires_at" key
+    }
+    mock_client.list_collections.return_value = ["knowledge__sec"]
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    count = db.expire()
+
+    assert count == 0
+    mock_col.delete.assert_not_called()
+
+
+def test_expire_preserves_entry_with_empty_expires_at(mock_chromadb: tuple) -> None:
+    """Entry with expires_at="" (permanent sentinel) is preserved even if ttl_days > 0."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["id-perm"],
+        "metadatas": [{"expires_at": "", "ttl_days": 30}],
+    }
+    mock_client.list_collections.return_value = ["knowledge__sec"]
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    count = db.expire()
+
+    assert count == 0
+    mock_col.delete.assert_not_called()
+
+
+def test_expire_preserves_future_entry(mock_chromadb: tuple) -> None:
+    """Entry whose expires_at is in the future is preserved."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    future = "2099-12-31T23:59:59+00:00"
+    mock_col.get.return_value = {
+        "ids": ["id-future"],
+        "metadatas": [{"expires_at": future, "ttl_days": 30}],
+    }
+    mock_client.list_collections.return_value = ["knowledge__sec"]
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    count = db.expire()
+
+    assert count == 0
+    mock_col.delete.assert_not_called()
+
+
+def test_expire_mixed_expired_and_permanent(mock_chromadb: tuple) -> None:
+    """Only expired entries are deleted; permanent and future entries survive."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    past = "2020-01-01T00:00:00+00:00"
+    future = "2099-12-31T23:59:59+00:00"
+    mock_col.get.return_value = {
+        "ids": ["expired-1", "perm-1", "future-1"],
+        "metadatas": [
+            {"expires_at": past, "ttl_days": 30},
+            {"expires_at": "", "ttl_days": 30},
+            {"expires_at": future, "ttl_days": 30},
+        ],
+    }
+    mock_client.list_collections.return_value = ["knowledge__sec"]
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    count = db.expire()
+
+    assert count == 1
+    mock_col.delete.assert_called_once_with(ids=["expired-1"])
+
+
+# ── T3 deterministic ID edge cases ──────────────────────────────────────────
+
+def test_put_empty_title_collision(mock_chromadb: tuple) -> None:
+    """Two puts with empty title in same collection produce the same ID (collision)."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    id1 = db.put(collection="knowledge__sec", content="first", title="")
+    id2 = db.put(collection="knowledge__sec", content="second", title="")
+
+    assert id1 == id2  # same hash → upsert overwrites
+
+
+def test_put_same_title_different_collection_different_ids(mock_chromadb: tuple) -> None:
+    """Same title in different collections produces different IDs."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    id1 = db.put(collection="knowledge__sec", content="text", title="shared.md")
+    id2 = db.put(collection="knowledge__ops", content="text", title="shared.md")
+
+    assert id1 != id2
+
+
+# ── T3 collection_info edge cases ───────────────────────────────────────────
+
+def test_collection_info_missing_raises_keyerror(mock_chromadb: tuple) -> None:
+    """collection_info() raises KeyError for non-existent collection."""
+    chromadb_m, mock_client = mock_chromadb
+    mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("not found")
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    with pytest.raises(KeyError, match="Collection not found"):
+        db.collection_info("knowledge__missing")
+
+
+def test_collection_metadata_missing_raises_keyerror(mock_chromadb: tuple) -> None:
+    """collection_metadata() raises KeyError for non-existent collection."""
+    chromadb_m, mock_client = mock_chromadb
+    mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("not found")
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    with pytest.raises(KeyError, match="Collection not found"):
+        db.collection_metadata("knowledge__missing")
+
+
+# ── T3 search with where filter ─────────────────────────────────────────────
+
+def test_search_passes_where_filter(mock_chromadb: tuple) -> None:
+    """search() passes the where filter to col.query."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.count.return_value = 5
+    mock_col.query.return_value = {
+        "ids": [["id-1"]],
+        "documents": [["content"]],
+        "metadatas": [[{"title": "t"}]],
+        "distances": [[0.1]],
+    }
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    where = {"source_agent": "indexer"}
+    db.search("query", ["knowledge__sec"], where=where)
+
+    call_kwargs = mock_col.query.call_args.kwargs
+    assert call_kwargs["where"] == {"source_agent": "indexer"}
+
+
+# ── T3 EF override ─────────────────────────────────────────────────────────
+
+def test_ef_override_bypasses_cache(mock_chromadb: tuple) -> None:
+    """When _ef_override is set, it's returned directly without caching."""
+    _, mock_client = mock_chromadb
+    override_ef = MagicMock(name="override")
+    db = T3Database(tenant="t", database="d", api_key="k", _ef_override=override_ef)
+
+    ef1 = db._embedding_fn("code__repo")
+    ef2 = db._embedding_fn("knowledge__sec")
+
+    assert ef1 is override_ef
+    assert ef2 is override_ef
+    assert db._ef_cache == {}  # cache not populated

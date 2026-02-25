@@ -168,3 +168,44 @@ def test_split_large_section_truncates_oversized_part():
         assert len(chunk.text) <= chunker.max_chars + len("# Big Section") + 4, (
             f"Chunk text exceeds max_chars: {len(chunk.text)} chars"
         )
+
+
+# ── frontmatter edge cases ──────────────────────────────────────────────────
+
+def test_parse_frontmatter_invalid_yaml_returns_empty():
+    """Malformed YAML in frontmatter returns ({}, body)."""
+    text = "---\n: invalid: : yaml: [\n---\nBody text"
+    fm, rest = parse_frontmatter(text)
+    assert fm == {}
+    assert "Body text" in rest
+
+
+def test_parse_frontmatter_non_dict_returns_empty():
+    """YAML parsing to a non-dict (e.g. list) is treated as empty."""
+    text = "---\n- item1\n- item2\n---\nBody text"
+    fm, rest = parse_frontmatter(text)
+    assert fm == {}
+    assert "Body text" in rest
+
+
+def test_parse_frontmatter_unclosed_block():
+    """No closing --- means no frontmatter detected."""
+    text = "---\ntitle: oops\nno closing delimiter"
+    fm, rest = parse_frontmatter(text)
+    assert fm == {}
+    assert rest == text
+
+
+# ── semantic exception fallback ──────────────────────────────────────────────
+
+def test_chunk_semantic_exception_falls_back_to_naive():
+    """When markdown-it parse() raises, chunker falls back to naive splitting."""
+    chunker = SemanticMarkdownChunker(chunk_size=512)
+    original_parse = chunker.md.parse
+    chunker.md.parse = lambda text: (_ for _ in ()).throw(RuntimeError("boom"))
+
+    chunks = chunker.chunk("Some plain text content.", {"source": "test"})
+    assert len(chunks) >= 1
+    assert "plain text" in chunks[0].text
+
+    chunker.md.parse = original_parse
