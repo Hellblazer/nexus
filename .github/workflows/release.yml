@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache ChromaDB ONNX model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Run tests
+        run: uv run pytest tests/ -v
+
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    needs: test
+    environment: pypi-release
+    permissions:
+      id-token: write   # required for OIDC trusted publisher
+      contents: write   # required to create GitHub release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project
+        run: uv sync
+
+      - name: Build wheel and sdist
+        run: uv run hatch build --clean
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No api-token needed — uses OIDC trusted publisher
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ github.event.head_commit.message }}
+          files: dist/*
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
