@@ -75,6 +75,11 @@ Do not bump these without testing the full chunking pipeline.
 - Never push directly to `main` — all changes via PR
 - Use `bd` (beads) for task tracking
 
+The `main` branch requires CI to pass before merging. Configure branch protection at
+https://github.com/Hellblazer/nexus/settings/branches:
+- Require status checks: `pytest (3.12)` and `pytest (3.13)`
+- Require branches to be up to date before merging
+
 ## License
 
 AGPL-3.0-or-later. For Python source files, use the SPDX header:
@@ -139,12 +144,7 @@ Before the first release, configure PyPI to trust the GitHub Actions OIDC token:
    - **Owner**: `Hellblazer`
    - **Repository**: `nexus`
    - **Workflow filename**: `release.yml`
-   - **Environment name**: `pypi-release`
+   - **Environment name**: (leave blank)
 4. Click "Add"
 
 This eliminates the need for a `PYPI_API_TOKEN` secret. GitHub Actions authenticates directly via OIDC.
-
-**GitHub Environment setup** (one-time):
-1. Go to https://github.com/Hellblazer/nexus/settings/environments
-2. Create environment named `pypi-release`
-3. Add protection rules as desired (e.g., require review before publish)

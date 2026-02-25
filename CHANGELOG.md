@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc1] - 2026-02-25
+
 ### Added
 - `nx thought` command group: session-scoped sequential thinking chains backed by T2 SQLite
   - `nx thought add CONTENT` — append thought, return full accumulated chain + MCP-equivalent metadata
@@ -16,16 +18,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `nx:sequential-thinking` skill: replaces external MCP dependency; uses `nx thought add` for compaction-resilient chains
 - `/nx-preflight` slash command: checks all plugin dependencies (nx CLI, nx doctor, bd, superpowers) with PASS/FAIL per check
 - Plugin prerequisites section in `nx/README.md` with dependency table and install commands
-
-### Changed
-- `sequential-thinking` skill now uses `nx thought add` as its tool-call mechanism (compaction-resilient by design)
-- All agents previously using `mcp__sequential-thinking__sequentialthinking` updated to use `nx:sequential-thinking` skill
-- `nx doctor` improved: Python version check, inline credential fix hints, non-fatal server check
-- CLI help text audited and aligned with `docs/cli-reference.md`; 15+ mismatches corrected
-
-## [1.0.0-rc1] - TBD
-
-### Added
 - Smart repository indexing: code routed to `code__` collections, prose to `docs__`, PDFs to `docs__`
 - 12-language AST chunking via tree-sitter (Python, JS, TS, Java, Go, Rust, C, C++, Ruby, C#, Bash, TSX)
 - Semantic markdown chunking via markdown-it-py with section-boundary awareness
@@ -51,6 +43,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Integration test suite with real API keys (`-m integration`)
 
 ### Changed
+- `sequential-thinking` skill now uses `nx thought add` as its tool-call mechanism (compaction-resilient by design)
+- All agents previously using `mcp__sequential-thinking__sequentialthinking` updated to use `nx:sequential-thinking` skill
+- All 11 agents with sequential-thinking now have domain-specific thought patterns, When to Use, and control reminders
+- `nx doctor` improved: Python version check, inline credential fix hints, non-fatal server check
+- CLI help text audited and aligned with `docs/cli-reference.md`; 15+ mismatches corrected
 - Renamed `nx index code` → `nx index repo`
 - Collection names use `__` separator (never `:`)
 - Session ID scoped by `os.getsid(0)` (terminal group leader PID) for worktree isolation
