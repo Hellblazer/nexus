@@ -7,7 +7,7 @@ from nexus.corpus import embedding_model_for_collection, index_model_for_collect
 
 @click.group()
 def collection() -> None:
-    """Manage ChromaDB collections (list, delete, rename)."""
+    """Manage ChromaDB collections (list, info, verify, delete)."""
 
 
 @collection.command("list")
