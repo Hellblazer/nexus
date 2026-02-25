@@ -79,6 +79,13 @@ docker run -d --name "$CONTAINER" \
 # Start tmux session inside the container
 cexec tmux new-session -d -s e2e -x 220 -y 50
 
+# ─── Install conexus from workspace ──────────────────────────────────────────
+# Reinstall from the mounted workspace so we always run local code,
+# not whatever version was baked into the image from PyPI.
+
+echo "Installing conexus from workspace..."
+crun "uv tool install /workspace --force 2>&1 | tail -5"
+
 # ─── Install nx plugin ────────────────────────────────────────────────────────
 # The nx plugin lives at /workspace/nx (the nx/ directory in the repo).
 # claude plugin install accepts a path to a plugin directory or a
