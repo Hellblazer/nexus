@@ -84,3 +84,67 @@ AGPL-3.0-or-later. For Python source files, use the SPDX header:
 ```
 
 Agent files, skill files, config files: no header needed — the LICENSE file covers them.
+
+## Release Process
+
+1. **Verify tests pass**
+   ```bash
+   uv run pytest tests/
+   ```
+
+2. **Update version in `pyproject.toml`**
+   Change the `version` field (e.g. `"1.0.0-rc1"` → `"1.0.0"`).
+
+3. **Update `CHANGELOG.md`**
+   - Rename `[Unreleased]` section to `[X.Y.Z] - YYYY-MM-DD`
+   - Add a new empty `[Unreleased]` section at the top
+   - Update the comparison links at the bottom
+
+4. **Update plugin versions** (if plugin changed)
+   - `nx/CHANGELOG.md`: add release entry
+   - `.claude-plugin/marketplace.json`: bump `"version"` field
+
+5. **Commit the release**
+   ```bash
+   git add pyproject.toml CHANGELOG.md
+   git commit -m "Release vX.Y.Z"
+   ```
+
+6. **Create an annotated tag** (message becomes the GitHub release body)
+   ```bash
+   git tag -a vX.Y.Z -m "Release X.Y.Z
+
+   [Paste the CHANGELOG section for this version here]"
+   ```
+
+7. **Push branch and tag**
+   ```bash
+   git push origin main
+   git push origin vX.Y.Z
+   ```
+
+8. **CI publishes automatically**
+   The `release.yml` workflow triggers on `v*` tags, runs tests, builds the wheel, publishes to PyPI via OIDC trusted publisher, and creates a GitHub release.
+
+9. **Yank pre-release versions** (if applicable)
+   Go to https://pypi.org/manage/project/nexus/releases/ and yank any versions that should not be resolved by `pip install nexus`.
+
+### One-time PyPI Trusted Publisher Setup
+
+Before the first release, configure PyPI to trust the GitHub Actions OIDC token:
+
+1. Go to https://pypi.org/manage/project/nexus/settings/publishing/
+2. Click "Add a new publisher"
+3. Fill in:
+   - **Owner**: `Hellblazer`
+   - **Repository**: `nexus`
+   - **Workflow filename**: `release.yml`
+   - **Environment name**: `pypi-release`
+4. Click "Add"
+
+This eliminates the need for a `PYPI_API_TOKEN` secret. GitHub Actions authenticates directly via OIDC.
+
+**GitHub Environment setup** (one-time):
+1. Go to https://github.com/Hellblazer/nexus/settings/environments
+2. Create environment named `pypi-release`
+3. Add protection rules as desired (e.g., require review before publish)
