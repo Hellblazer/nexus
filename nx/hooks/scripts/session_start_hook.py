@@ -121,6 +121,37 @@ def main() -> None:
         output_lines.append("Flag important scratch entries before session ends: `nx scratch flag <id>`")
         output_lines.append("")
 
+    # --- Sequential thinking chain recovery (post-compaction) ---
+    # If PreCompact hook saved a thought chain, inject it and clear the entry.
+    if which('nx') and project_name:
+        chain = run_command(
+            ['nx', 'memory', 'get',
+             '--project', f'{project_name}_active',
+             '--title', 'sequential-thinking-chain.md'],
+            timeout=NX_TIMEOUT, cwd=cwd,
+        )
+        if chain:
+            # Prepend to output so it's the first thing Claude sees
+            recovery_lines = [
+                "# ⚠ Sequential Thinking Chain Restored",
+                "",
+                "An in-progress sequential thinking chain was saved before context compaction.",
+                "Resume it using the `nx:sequential-thinking` skill.",
+                "",
+                chain,
+                "",
+            ]
+            output_lines = recovery_lines + output_lines
+            # Overwrite with consumed marker so it doesn't re-inject next session.
+            # (nx memory has no delete; overwrite is the clean-up mechanism.)
+            run_command(
+                ['nx', 'memory', 'put', '',
+                 '--project', f'{project_name}_active',
+                 '--title', 'sequential-thinking-chain.md',
+                 '--ttl', '1h'],
+                timeout=NX_TIMEOUT, cwd=cwd,
+            )
+
     if output_lines:
         print("\n".join(output_lines))
 
