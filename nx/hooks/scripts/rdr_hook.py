@@ -27,7 +27,7 @@ def _collection_exists(repo_name: str) -> bool:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
-            target = f"docs__rdr__{repo_name}"
+            target = f"rdr__{repo_name}"
             return target in result.stdout
     except Exception:
         pass
@@ -81,7 +81,7 @@ def main() -> None:
         status_info = f"{len(rdr_files)} document(s)"
 
     if indexed:
-        print(f"RDR: {status_info}, indexed in docs__rdr__{repo_name}")
+        print(f"RDR: {status_info}, indexed in rdr__{repo_name}")
     else:
         print(f"RDR: {status_info} in docs/rdr/ but NOT indexed.")
         print(f"     Run: nx index rdr {root}")

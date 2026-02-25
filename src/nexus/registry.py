@@ -68,6 +68,15 @@ def _docs_collection_name(repo: Path) -> str:
     return f"docs__{name}-{path_hash}"
 
 
+def _rdr_collection_name(repo: Path) -> str:
+    """Return the rdr__ ChromaDB collection name for *repo*.
+
+    Uses the same identity scheme as _collection_name() for consistency.
+    """
+    name, path_hash = _repo_identity(repo)
+    return f"rdr__{name}-{path_hash}"
+
+
 class RepoRegistry:
     """Thread-safe registry of indexed repositories stored as JSON."""
 

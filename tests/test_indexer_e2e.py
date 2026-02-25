@@ -376,18 +376,18 @@ def test_smart_index_rdr_excluded_from_docs(
 def test_smart_index_rdr_in_rdr_collection(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    """RDR files should be indexed into docs__rdr__<repo-name> (M4 fix)."""
+    """RDR files should be indexed into rdr__<basename>-<hash8>."""
     _run_smart_index(rich_repo, rich_registry, local_t3)
 
     path_hash = hashlib.sha256(str(rich_repo).encode()).hexdigest()[:8]
-    rdr_col_name = f"docs__rdr__{rich_repo.name}-{path_hash}"
+    rdr_col_name = f"rdr__{rich_repo.name}-{path_hash}"
     rdr_col = local_t3.get_or_create_collection(rdr_col_name)
-    assert rdr_col.count() > 0, "Expected RDR chunks in docs__rdr__ collection"
+    assert rdr_col.count() > 0, "Expected RDR chunks in rdr__ collection"
 
     result = rdr_col.get(include=["metadatas"])
     source_paths = {m.get("source_path", "") for m in result["metadatas"]}
     assert any("ADR-001" in p for p in source_paths), (
-        f"ADR-001 should be in docs__rdr__ collection; got: {source_paths}"
+        f"ADR-001 should be in rdr__ collection; got: {source_paths}"
     )
 
 

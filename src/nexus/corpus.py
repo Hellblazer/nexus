@@ -44,11 +44,12 @@ def index_model_for_collection(collection_name: str) -> str:
     code__      → voyage-code-3    (code-optimised index; voyage-4 at query time)
     docs__      → voyage-context-3 (CCE for richer cross-chunk context)
     knowledge__ → voyage-context-3 (CCE for richer cross-chunk context)
+    rdr__       → voyage-context-3 (CCE for RDR decision documents)
     all others  → voyage-4         (standard embedding)
     """
     if collection_name.startswith("code__"):
         return "voyage-code-3"
-    if collection_name.startswith(("docs__", "knowledge__")):
+    if collection_name.startswith(("docs__", "knowledge__", "rdr__")):
         return "voyage-context-3"
     return "voyage-4"
 

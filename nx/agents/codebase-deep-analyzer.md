@@ -123,7 +123,7 @@ This provides semantic search + ripgrep + git frecency, far more powerful than g
 
 When analyzing a codebase, check for `docs/rdr/` directory. If present:
 - Note the number of RDRs and their statuses in your analysis
-- Use `--corpus docs__rdr__{repo}` for semantic search of RDR content (if indexed)
+- Use `--corpus rdr` for semantic search of RDR content (if indexed)
 - RDR documents contain architectural decisions, trade-offs, and research — valuable context for codebase understanding
 
 

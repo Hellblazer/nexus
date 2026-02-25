@@ -120,6 +120,11 @@ def test_index_model_knowledge_collection() -> None:
     assert index_model_for_collection("knowledge__wiki") == "voyage-context-3"
 
 
+def test_index_model_rdr_collection() -> None:
+    """rdr__ collections use voyage-context-3 (CCE) at index time."""
+    assert index_model_for_collection("rdr__myrepo-abcdef12") == "voyage-context-3"
+
+
 def test_index_model_scratch_collection_defaults_voyage4() -> None:
     """Unrecognized prefix defaults to voyage-4 at index time."""
     assert index_model_for_collection("scratch__anything") == "voyage-4"
@@ -135,4 +140,25 @@ def test_embedding_model_for_collection_regression() -> None:
     assert embedding_model_for_collection("code__myrepo") == "voyage-4"
     assert embedding_model_for_collection("knowledge__security") == "voyage-4"
     assert embedding_model_for_collection("docs__papers") == "voyage-4"
+    assert embedding_model_for_collection("rdr__myrepo-abcdef12") == "voyage-4"
     assert embedding_model_for_collection("other__collection") == "voyage-4"
+
+
+# ── corpus resolution for RDR ────────────────────────────────────────────────
+
+def test_resolve_corpus_rdr_prefix() -> None:
+    """--corpus rdr matches rdr__* collections."""
+    all_cols = ["code__myrepo", "docs__papers", "rdr__myrepo-abcdef12"]
+    assert resolve_corpus("rdr", all_cols) == ["rdr__myrepo-abcdef12"]
+
+
+def test_resolve_corpus_rdr_does_not_match_docs_rdr() -> None:
+    """--corpus rdr must NOT match docs__rdr__* (the old buggy naming)."""
+    all_cols = ["docs__rdr__myrepo", "rdr__myrepo-abcdef12"]
+    assert resolve_corpus("rdr", all_cols) == ["rdr__myrepo-abcdef12"]
+
+
+def test_resolve_corpus_docs_does_not_match_rdr() -> None:
+    """--corpus docs must NOT match rdr__* collections."""
+    all_cols = ["docs__papers", "rdr__myrepo-abcdef12"]
+    assert resolve_corpus("docs", all_cols) == ["docs__papers"]

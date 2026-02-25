@@ -103,7 +103,7 @@ def index_repository(repo: Path, registry: "RepoRegistry", *, frecency_only: boo
     - Code → code__ collection (voyage-code-3, AST chunking)
     - Prose → docs__ collection (voyage-context-3, semantic chunking)
     - PDF → docs__ collection (PDF extraction + voyage-context-3)
-    - RDR markdown → docs__rdr__ collection
+    - RDR markdown → rdr__ collection
 
     Marks status as 'indexing' while running, 'ready' on success,
     'pending_credentials' when T3 credentials are absent.
@@ -530,12 +530,12 @@ def _discover_and_index_rdrs(
     if not md_paths:
         return
 
-    # Corpus: rdr__{basename}-{hash8} — uses worktree-stable identity
-    from nexus.registry import _repo_identity
-    basename, path_hash = _repo_identity(repo)
-    corpus = f"rdr__{basename}-{path_hash}"
+    # Collection: rdr__{basename}-{hash8} — uses worktree-stable identity
+    from nexus.registry import _repo_identity, _rdr_collection_name
+    basename, _ = _repo_identity(repo)
+    collection = _rdr_collection_name(repo)
 
-    batch_index_markdowns(md_paths, corpus, t3=db)
+    batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection)
 
 
 def _prune_misclassified(
@@ -615,7 +615,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     - Code files → code__ collection (voyage-code-3, AST chunking)
     - Prose files → docs__ collection (voyage-context-3 via CCE)
     - PDF files → docs__ collection (PDF extraction + voyage-context-3)
-    - RDR markdown → docs__rdr__ collection (via batch_index_markdowns)
+    - RDR markdown → rdr__ collection (via batch_index_markdowns)
     """
     from nexus.classifier import ContentClass, classify_file
     from nexus.config import load_config
@@ -677,7 +677,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
         if _should_ignore(rel, ignore_patterns):
             continue  # Skip ignored patterns
 
-        # Skip files under RDR paths — they go to docs__rdr__ separately
+        # Skip files under RDR paths — they go to rdr__ separately
         resolved = path.resolve()
         if any(resolved == rdr or _is_under(resolved, rdr) for rdr in rdr_abs_paths):
             continue
@@ -754,7 +754,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
             voyage_key, git_meta, now_iso, score,
         )
 
-    # Discover and index RDR markdown files → docs__rdr__
+    # Discover and index RDR markdown files → rdr__
     _discover_and_index_rdrs(repo, rdr_abs_paths, db, voyage_key, now_iso)
 
     # Prune misclassified chunks (reclassification cleanup)

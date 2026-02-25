@@ -97,7 +97,7 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 
 **Prior-art search** (within the agent): enumerate RDR collections and search:
 ```bash
-nx collection list | grep docs__rdr__
+nx collection list | grep rdr__
 nx search "relevant query terms from RDR problem statement" --corpus {each_collection} --n 5
 ```
 If no collections found: "No prior RDRs indexed. Cross-project prior-art search will improve as RDRs are indexed and closed."

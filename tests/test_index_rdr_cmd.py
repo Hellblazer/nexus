@@ -50,16 +50,24 @@ def test_index_rdr_discovers_markdown_files(
     assert filenames == ["001-use-sqlite.md", "002-adopt-click.md"]
 
 
-def test_index_rdr_uses_correct_corpus(
+def test_index_rdr_uses_correct_collection_name(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
-    """Corpus is rdr__{dirname} so the full collection becomes docs__rdr__{repo}."""
+    """Collection is rdr__{basename}-{hash8}, not docs__rdr__."""
+    from nexus.registry import _rdr_collection_name
+
+    expected_collection = _rdr_collection_name(repo_with_rdrs)
+    assert expected_collection.startswith("rdr__")
+    assert "-" in expected_collection  # basename-hash8
+
     with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
         result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
 
     assert result.exit_code == 0, result.output
-    corpus_arg = mock_batch.call_args[0][1]
-    assert corpus_arg == f"rdr__{repo_with_rdrs.name}"
+    _, kwargs = mock_batch.call_args
+    assert kwargs["collection_name"] == expected_collection
+    # corpus is the bare basename (metadata only)
+    assert kwargs.get("corpus") or mock_batch.call_args[0][1]
 
 
 def test_index_rdr_no_rdr_dir(runner: CliRunner, tmp_path: Path) -> None:

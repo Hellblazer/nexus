@@ -33,7 +33,7 @@ def index_repo_cmd(path: Path, frecency_only: bool) -> None:
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
     prose and PDFs get voyage-context-3 embeddings (docs__), RDR documents are
-    auto-discovered and indexed into docs__rdr__.
+    auto-discovered and indexed into rdr__.
     """
     from nexus.indexer import index_repository
 
@@ -80,8 +80,9 @@ _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
 @index.command("rdr")
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path), default=".")
 def index_rdr_cmd(path: Path) -> None:
-    """Discover and index RDR documents in docs/rdr/ into T3 docs__rdr__REPO."""
+    """Discover and index RDR documents in docs/rdr/ into T3 rdr__REPO-HASH8."""
     from nexus.doc_indexer import batch_index_markdowns
+    from nexus.registry import _repo_identity, _rdr_collection_name
 
     path = path.resolve()
     rdr_dir = path / "docs" / "rdr"
@@ -100,8 +101,9 @@ def index_rdr_cmd(path: Path) -> None:
         click.echo("0 RDR documents found.")
         return
 
-    corpus = f"rdr__{path.name}"
-    click.echo(f"Indexing {len(rdr_files)} RDR document(s) into docs__{corpus}…")
-    results = batch_index_markdowns(rdr_files, corpus)
+    basename, _ = _repo_identity(path)
+    collection = _rdr_collection_name(path)
+    click.echo(f"Indexing {len(rdr_files)} RDR document(s) into {collection}…")
+    results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection)
     indexed = sum(1 for s in results.values() if s == "indexed")
     click.echo(f"Indexed {indexed} of {len(rdr_files)} RDR document(s).")

@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Document indexing pipeline: PDF and Markdown → T3 docs__ collections."""
+"""Document indexing pipeline: PDF and Markdown → T3 collections.
+
+By default documents are stored in ``docs__`` collections.  Callers can
+override the collection name for other prefixes (e.g. ``rdr__``).
+"""
 from __future__ import annotations
 
 import hashlib
@@ -142,18 +146,25 @@ def _index_document(
     corpus: str,
     chunk_fn: ChunkFn,
     t3: Any = None,
+    *,
+    collection_name: str | None = None,
 ) -> int:
     """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
 
     *chunk_fn(file_path, content_hash, target_model, now_iso)* produces the
     per-format (chunk_id, document_text, metadata_dict) tuples.  Returns the
     number of chunks indexed, or 0 if skipped.
+
+    When *collection_name* is provided it is used as the T3 collection name
+    directly, bypassing the default ``docs__{corpus}`` derivation.  This is
+    used for RDR collections (``rdr__<repo>-<hash8>``).
     """
     if not _has_credentials():
         return 0
 
     content_hash = _sha256(file_path)
-    collection_name = f"docs__{corpus}"
+    if collection_name is None:
+        collection_name = f"docs__{corpus}"
     db = t3 if t3 is not None else make_t3()
     col = db.get_or_create_collection(collection_name)
 
@@ -296,13 +307,22 @@ def index_pdf(pdf_path: Path, corpus: str, t3: Any = None) -> int:
     return _index_document(pdf_path, corpus, _pdf_chunks, t3=t3)
 
 
-def index_markdown(md_path: Path, corpus: str, t3: Any = None) -> int:
-    """Index *md_path* into the T3 ``docs__{corpus}`` collection.
+def index_markdown(
+    md_path: Path,
+    corpus: str,
+    t3: Any = None,
+    *,
+    collection_name: str | None = None,
+) -> int:
+    """Index *md_path* into a T3 collection.
+
+    By default the collection is ``docs__{corpus}``.  Pass *collection_name*
+    to override (e.g. ``rdr__<repo>-<hash8>`` for RDR documents).
 
     YAML frontmatter fields (title, author, date) are stored as metadata.
     Returns the number of chunks indexed, or 0 if skipped.
     """
-    return _index_document(md_path, corpus, _markdown_chunks, t3=t3)
+    return _index_document(md_path, corpus, _markdown_chunks, t3=t3, collection_name=collection_name)
 
 
 def batch_index_pdfs(
@@ -330,8 +350,13 @@ def batch_index_markdowns(
     paths: list[Path],
     corpus: str,
     t3: Any = None,
+    *,
+    collection_name: str | None = None,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
+
+    Pass *collection_name* to override the default ``docs__{corpus}`` target
+    (used for RDR collections).
 
     Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"failed"``.
     Failures are logged and do not abort the remaining paths.
@@ -339,7 +364,7 @@ def batch_index_markdowns(
     results: dict[str, str] = {}
     for path in paths:
         try:
-            count = index_markdown(path, corpus, t3=t3)
+            count = index_markdown(path, corpus, t3=t3, collection_name=collection_name)
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
             _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))
