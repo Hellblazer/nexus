@@ -1,13 +1,27 @@
 # Nexus Claude Code Plugin
 
-A Claude Code plugin that provides a full suite of specialized agents, skills, commands, and hooks for software engineering workflows — all backed by **Nexus** for semantic search, session memory, and persistent knowledge storage.
+15 agents, 26 skills, session hooks, and slash commands for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
 
-## Overview
+## Installation
 
-**Storage tiers:**
-- **T1** — `nx scratch`: ephemeral session scratch, cleared on exit
-- **T2** — `nx memory`: per-project persistent notes (SQLite + FTS5)
-- **T3** — `nx store` / `nx search`: permanent cross-session knowledge (ChromaDB cloud + Voyage AI)
+Claude Code auto-discovers this plugin when you work in a repo that contains the `nx/` directory. No manual installation needed for the nexus repo itself.
+
+For repos without the plugin directory, `nx install claude-code` provides lightweight CLI hooks (session start/end) and a skill reference — but not the agents, slash commands, or full hook suite.
+
+## Prerequisites
+
+- [Nexus](https://github.com/Hellblazer/nexus) — `nx` CLI installed and configured
+- [Beads](https://github.com/BeadsProject/beads) — `bd` CLI for task tracking
+- Python 3.12+ (for hook scripts)
+- [superpowers](https://github.com/anthropics/claude-plugins-official/tree/main/superpowers) plugin installed
+
+## What You Get
+
+- **15 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
+- **26 skills** — 5 standalone (brainstorming gate, CLI control, nx reference) + 21 agent-delegating
+- **5 standard pipelines** — feature, bug, research, onboarding, architecture
+- **Session hooks** — auto-load PM context, prime beads, health-check dependencies
+- **Permission auto-approval** — safe read-only commands skip the confirmation prompt
 
 ## Directory Structure
 
@@ -22,7 +36,7 @@ nx/
 │   │   ├── MAINTENANCE.md       # How to maintain/update agents
 │   │   ├── README.md            # _shared directory guide (this section)
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
-│   └── *.md                 # 14 specialized agent definitions
+│   └── *.md                 # 15 specialized agent definitions
 ├── commands/
 │   └── *.md                 # Slash commands (/research, /create-plan, /review-code, etc.)
 ├── hooks/
@@ -59,9 +73,9 @@ nx/
     └── test-validation/     # → test-validator agent
 ```
 
-## Plugin Dependencies
+## Superpowers Delegation
 
-The nx plugin delegates workflow discipline skills to [superpowers](https://github.com/anthropics/claude-plugins-official/tree/main/superpowers) rather than shadowing them:
+The nx plugin delegates workflow discipline to the [superpowers](https://github.com/anthropics/claude-plugins-official/tree/main/superpowers) plugin rather than reimplementing it:
 
 | Capability | Provided by |
 |-----------|-------------|
@@ -71,8 +85,6 @@ The nx plugin delegates workflow discipline skills to [superpowers](https://gith
 | TDD methodology | `superpowers:test-driven-development` |
 | Git worktrees | `superpowers:using-git-worktrees` |
 | Writing plans | `superpowers:writing-plans` |
-
-**Requires**: superpowers plugin installed (`/install superpowers` or via Claude Code plugin manager).
 
 ## Standalone Skills (5)
 
@@ -86,7 +98,7 @@ Skills that provide guidance directly without delegating to an agent.
 | using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring nx plugin skills |
 
-## Agents (14)
+## Agents (15)
 
 See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, predecessors/successors).
 
@@ -158,9 +170,7 @@ Defined in `registry.yaml`:
 
 ### Agent Relay Format
 
-All agent-delegating skills use a hybrid cross-reference pattern: each skill contains the agent name and deliverable inline, with optional fields deferred to `agents/_shared/RELAY_TEMPLATE.md`. This avoids duplication while keeping essential context in each skill.
-
-Full relay template from `agents/_shared/RELAY_TEMPLATE.md`:
+When skills delegate to agents, they use a standardized relay format defined in `agents/_shared/RELAY_TEMPLATE.md`:
 
 ```markdown
 ## Relay: {agent-name}
@@ -183,22 +193,17 @@ Full relay template from `agents/_shared/RELAY_TEMPLATE.md`:
 
 ### Storage Naming Conventions
 
-- **nx store titles**: use hyphens — `decision-architect-cache-strategy`, `research-auth-patterns`
-- **nx memory keys**: `{project}/{doc}.md` — e.g., `myrepo/findings.md`
-- **Bead IDs**: managed by `bd` CLI — e.g., `beads-abc123`
+- **nx store titles**: hyphens — `decision-cache-strategy`, `research-auth-patterns`
+- **nx memory projects**: `{repo}_active`, `{repo}_rdr`
+- **Bead IDs**: managed by `bd` CLI
 
 ### Permission Auto-Approval
 
-`hooks/scripts/permission-request-stdin.sh` auto-approves safe read-only operations:
-- `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
-- `git log`, `git diff`, `git status`, `git show`, `git branch -a`, `git remote -v`
-- `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx pm status`, `nx doctor`, `nx health`, `nx index`
-- `mvn help:*`, `mvn dependency:tree`, `mvn dependency:analyze`, `mvn versions:display`
+The permission hook auto-approves safe read-only operations:
+
+- **beads**: `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
+- **git**: `git log`, `git diff`, `git status`, `git show`, `git branch -a`
+- **nexus**: `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx pm status`, `nx doctor`
+- **maven**: `mvn help:*`, `mvn dependency:tree`, `mvn dependency:analyze`
 
 Dangerous commands (force-push, `bd delete`, deploys) are always denied.
-
-## Prerequisites
-
-- [Nexus](https://github.com/Hellblazer/nexus) — `nx` CLI installed and configured
-- [Beads](https://github.com/BeadsProject/beads) — `bd` CLI for task tracking
-- Python 3.12+ (for hook scripts)

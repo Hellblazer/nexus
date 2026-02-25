@@ -5,6 +5,8 @@ description: Use when an RDR appears complete and needs finalization validation 
 
 # RDR Gate Skill
 
+Optional validation for high-stakes decisions. Most RDRs don't need a formal gate — use this when the decision is expensive to reverse and you want to confront what you don't actually know before committing.
+
 Delegates Layer 3 to the **substantive-critic** agent (sonnet). See [registry.yaml](../../registry.yaml).
 
 ## When This Skill Activates

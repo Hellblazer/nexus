@@ -19,7 +19,7 @@ Add a copyright line below for substantial new modules (not boilerplate):
 ## Project Overview
 
 Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledge management.
-See `spec.md` for the full specification.
+See `docs/` for full documentation; `docs/architecture.md` for the module map.
 
 **Three storage tiers:**
 - T1: `chromadb.EphemeralClient` + `DefaultEmbeddingFunction` — session scratch (`nx scratch`)

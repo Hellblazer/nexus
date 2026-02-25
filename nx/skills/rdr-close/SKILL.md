@@ -1,6 +1,6 @@
 ---
 name: rdr-close
-description: Use when an RDR has passed its gate and needs to be closed with post-mortem, bead decomposition, and T3 archival
+description: Use when an RDR is done — close it with optional post-mortem, bead decomposition, and T3 archival
 ---
 
 # RDR Close Skill
@@ -107,7 +107,7 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 ## Flow: Reverted or Abandoned
 
 1. Prompt for reason (free text)
-2. Create post-mortem (the rdr process requires post-mortems for reverted/abandoned RDRs)
+2. Offer post-mortem (useful for capturing what was learned, even from abandoned work)
 3. Update T2 record with close reason
 4. Update markdown metadata
 5. Run `nx index rdr` to update T3 semantic index (research findings are valuable even for failed RDRs)

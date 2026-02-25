@@ -1,6 +1,6 @@
 ---
 name: rdr-create
-description: Use when starting a new research-design-review document, before beginning structured investigation
+description: Use when starting a new research-design-review document to think through a technical decision
 ---
 
 # RDR Create Skill
@@ -9,7 +9,7 @@ description: Use when starting a new research-design-review document, before beg
 
 - User says "create an RDR", "new RDR", "start an RDR"
 - User invokes `/rdr-create`
-- User wants to document a technical decision before implementation
+- User wants to think through a technical decision — before, during, or after building
 
 ## Inputs
 
