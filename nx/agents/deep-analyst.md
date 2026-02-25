@@ -132,12 +132,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Hypothesis Results**: Document with confidence levels
 - **Relationship Maps**: Include as `--tags` in nx store documents
 - **Recommendations**: Include in relay to downstream agent
-- **Analysis Chain**: Track hypothesis progression in T1 scratch during investigation:
-  ```bash
-  nx scratch put $'Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}' --tags "analysis,step-{N}"
-  # Promote chain to T2 for cross-session continuity
-  nx scratch promote <id> --project {project} --title analysis-chain.md
-  ```
+- **Analysis Chain**: Use the `nx:sequential-thinking` skill — each `nx thought add` persists to T2 and survives compaction
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
