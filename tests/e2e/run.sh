@@ -76,6 +76,15 @@ docker run -d --name "$CONTAINER" \
     "$IMAGE" \
     sleep infinity
 
+# Copy host ~/.claude.json (contains oauthAccount session token) into the
+# container so Claude Code can authenticate without an interactive OAuth flow.
+if [[ -f "$HOME/.claude.json" ]]; then
+    docker cp "$HOME/.claude.json" "$CONTAINER:/home/node/.claude.json"
+    echo "Auth state copied from host."
+else
+    echo "WARNING: ~/.claude.json not found — Claude interactive mode may prompt for OAuth."
+fi
+
 # Suppress zsh new-user wizard (would absorb keystrokes before Claude starts)
 crun "touch /home/node/.zshrc"
 
