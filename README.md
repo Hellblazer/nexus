@@ -105,7 +105,7 @@ For repos that don't contain the plugin directory, `nx install claude-code` adds
 | [Getting Started](docs/getting-started.md) | Install, configure, first index and search |
 | [CLI Reference](docs/cli-reference.md) | Every command, every flag |
 | [Storage Tiers](docs/storage-tiers.md) | T1/T2/T3 architecture and data flow |
-| [Project Management](docs/project-management.md) | Phases, blockers, archive, session integration |
+| [Project Management](docs/project-management.md) | Progress tracking, blockers, archive, session integration |
 | [Repo Indexing](docs/repo-indexing.md) | Smart file classification, chunking, frecency |
 | [Configuration](docs/configuration.md) | Config hierarchy, .nexus.yml, settings |
 | [Architecture](docs/architecture.md) | Module map, design decisions |

@@ -109,7 +109,7 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | deep-analyst | deep-analysis | `/deep-analysis` | opus | Complex problem investigation, root cause |
 | substantive-critic | substantive-critique | `/substantive-critique` | sonnet | Constructive critique of plans/designs/code |
 | deep-research-synthesizer | research-synthesis | `/research` | sonnet | Multi-source research with synthesis |
-| java-architect-planner | java-architecture | `/java-architecture` | opus | Java architecture design, phased plans |
+| java-architect-planner | java-architecture | `/java-architecture` | opus | Java architecture design, execution plans |
 | java-debugger | java-debugging | `/java-debug` | opus | Hypothesis-driven Java debugging |
 | java-developer | java-development | `/java-implement` | sonnet | TDD implementation, test-first methodology |
 | knowledge-tidier | knowledge-tidying | `/knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
@@ -138,6 +138,7 @@ Defined in `registry.yaml`:
 | `SessionStart` | `nx hook session-start` | Initialize nx session |
 | `SessionStart` | `mcp_health_hook.sh` | Verify nx and bd are healthy |
 | `SessionStart` | `session_start_hook.py` | Load PM context, prime bead state |
+| `SessionStart` | `rdr_hook.py` | Report RDR document count and status |
 | `SessionStart` | `bd prime` | Load beads context into session |
 | `SessionStart` | `using-nx-skills/SKILL.md` | Inject skill invocation discipline |
 | `SessionEnd` | `nx hook session-end` | Flush nx session state |

@@ -146,8 +146,8 @@ nx pm resume
 |------------|-------------|
 | `init` | Initialize PM for current git repo |
 | `resume` | Inject continuation context into session |
-| `status` | Show phase, blockers, active work |
-| `phase next` | Advance to next phase |
+| `status` | Show project status, blockers, active work |
+| `phase next` | Snapshot current context and start new phase |
 | `block "REASON"` | Record a blocker |
 | `unblock ID` | Remove a blocker |
 | `search QUERY` | FTS5 search across PM docs |
