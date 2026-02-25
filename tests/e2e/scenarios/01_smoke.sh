@@ -25,13 +25,13 @@ assert_cmd "nx doctor: git found" \
 if [[ -n "${VOYAGE_API_KEY:-}" ]]; then
     assert_cmd "nx doctor: Voyage AI key present" \
         "nx doctor 2>&1" \
-        "Voyage AI.*✓|voyage.*ok"
+        "Voyage AI.*set|✓.*Voyage"
 fi
 
 if [[ -n "${CHROMA_API_KEY:-}" ]]; then
     assert_cmd "nx doctor: ChromaDB keys present" \
         "nx doctor 2>&1" \
-        "ChromaDB.*✓|chroma.*ok"
+        "ChromaDB.*set|✓.*ChromaDB"
 fi
 
 scenario_end
