@@ -69,8 +69,7 @@ You have access to and will actively leverage:
   - `nx memory search "query" --project {project}` — search memory
 - **Web Resources**: For current information, documentation, and external perspectives
 - **Code Repository** (/Users/hal.hildebrand/git): For analyzing implementation details and code patterns
-- **Sequential Thought MCP Server**: Your primary reasoning engine for structured analysis
-  - mcp__sequential-thinking__sequentialthinking
+- nx:sequential-thinking skill (structured hypothesis-driven reasoning)
 
 ## Beads Integration
 

@@ -25,6 +25,7 @@ T2 is the persistent local layer that bridges sessions. Notes, project state, an
 - **Developer notes** — hypotheses, findings, decisions-in-progress via `nx memory put`
 - **Project management** — project context, blockers, methodology. `nx pm` commands manage these as T2 entries with specific titles and tags. See [Project Management](project-management.md).
 - **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr/nexus-integration.md).
+- **Sequential thinking chains** — `nx thought` stores session-scoped chains under `{repo}_thoughts_{gid}` with a 24-hour TTL. Each `add` persists the full accumulated chain so it survives context compaction. Chains are isolated per Claude Code window via `os.getsid(0)`. See [CLI Reference: nx thought](cli-reference.md#nx-thought).
 - **Agent relay** — context passed between agent invocations
 - **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
 
@@ -78,6 +79,7 @@ T3 (knowledge)
 |----------|------|-----|
 | Quick note during debugging | T1 | Ephemeral, no setup |
 | Project decisions that survive restarts | T2 | Local, fast, searchable |
+| Sequential thinking chain (survives compaction) | T2 | Externalized from context window; auto-expires 24h |
 | Research findings for future sessions | T3 | Semantic search across time |
 | Indexed code/docs | T3 | Vector similarity + reranking |
 

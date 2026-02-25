@@ -17,7 +17,7 @@ def _registry() -> RepoRegistry:
 
 @click.group()
 def index() -> None:
-    """Index code repositories for semantic search."""
+    """Index repositories, PDFs, and Markdown into T3 collections."""
 
 
 @index.command("repo")

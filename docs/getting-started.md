@@ -23,6 +23,14 @@ Scratch and memory commands work with zero API keys (see [Local-only quick start
 
 ## Install
 
+**From PyPI** (recommended):
+
+```bash
+uv tool install conexus
+```
+
+**From source**:
+
 ```bash
 git clone https://github.com/Hellblazer/nexus.git
 cd nexus
@@ -164,7 +172,7 @@ For local development, load the plugin directly from the repo checkout:
 claude --plugin-dir ./nx
 ```
 
-The plugin provides 15 agents, 26 skills, session hooks, slash commands, and standard pipelines. See [nx/README.md](../nx/README.md) for details.
+The plugin provides 15 agents, 27 skills, session hooks, slash commands, and standard pipelines. See [nx/README.md](../nx/README.md) for details.
 
 ## Next steps
 

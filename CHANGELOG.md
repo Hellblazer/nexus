@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `nx thought` command group: session-scoped sequential thinking chains backed by T2 SQLite
+  - `nx thought add CONTENT` — append thought, return full accumulated chain + MCP-equivalent metadata
+  - `nx thought show` / `close` / `list` — chain lifecycle management
+  - Chains scoped per session via `os.getsid(0)`, expire after 24 hours
+  - Semantic equivalence with sequential-thinking MCP server: `thoughtHistoryLength`, `branches[]`, `nextThoughtNeeded`, `totalThoughts` auto-adjustment
+  - Compaction-resilient: state stored externally in T2, not in Claude's context window
+- `nx:sequential-thinking` skill: replaces external MCP dependency; uses `nx thought add` for compaction-resilient chains
+- `/nx-preflight` slash command: checks all plugin dependencies (nx CLI, nx doctor, bd, superpowers) with PASS/FAIL per check
+- Plugin prerequisites section in `nx/README.md` with dependency table and install commands
+
+### Changed
+- `sequential-thinking` skill now uses `nx thought add` as its tool-call mechanism (compaction-resilient by design)
+- All agents previously using `mcp__sequential-thinking__sequentialthinking` updated to use `nx:sequential-thinking` skill
+- `nx doctor` improved: Python version check, inline credential fix hints, non-fatal server check
+- CLI help text audited and aligned with `docs/cli-reference.md`; 15+ mismatches corrected
+
 ## [1.0.0-rc1] - TBD
 
 ### Added

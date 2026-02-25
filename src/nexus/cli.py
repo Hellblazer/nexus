@@ -12,6 +12,7 @@ from nexus.commands.scratch import scratch
 from nexus.commands.search_cmd import search_cmd
 from nexus.commands.serve import serve
 from nexus.commands.store import store
+from nexus.commands.thought import thought_group
 
 
 @click.group()
@@ -32,3 +33,4 @@ main.add_command(scratch)
 main.add_command(search_cmd, name="search")
 main.add_command(serve)
 main.add_command(store)
+main.add_command(thought_group, name="thought")

@@ -102,6 +102,8 @@ Plans referencing non-existent code are flagged during audit.
 
 ## Sequential Thinking Process
 
+Use the `nx:sequential-thinking` skill for each significant audit finding: form a hypothesis about whether a plan element is correct or missing, gather evidence from the codebase and plan text, then evaluate before raising it as an issue. Prevents false positives from incomplete evidence.
+
 You will follow this systematic approach:
 
 1. **Decomposition Phase**

@@ -110,7 +110,7 @@ def stop_cmd() -> None:
     """Stop the running Nexus server."""
     pid = _read_pid()
     if pid is None:
-        raise click.ClickException("No server running (no PID file found).")
+        raise click.ClickException("no server running — start it with: nx serve start")
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as e:

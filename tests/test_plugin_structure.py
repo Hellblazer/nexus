@@ -305,6 +305,7 @@ class TestSkillStructure:
         "brainstorming-gate", "using-nx-skills",
         "writing-nx-skills",
         "rdr-list", "rdr-show", "rdr-create",
+        "sequential-thinking",
     }
 
     REQUIRED_SKILL_SECTIONS = [
@@ -320,6 +321,7 @@ class TestSkillStructure:
             "brainstorming-gate", "using-nx-skills",
             "writing-nx-skills",
             "rdr-list", "rdr-show", "rdr-create",
+            "sequential-thinking",
         }
     ])
     def test_skill_has_relay_template(self, skill_path: Path) -> None:
@@ -342,6 +344,7 @@ class TestSkillStructure:
             "brainstorming-gate", "using-nx-skills",
             "writing-nx-skills",
             "rdr-list", "rdr-show", "rdr-create",
+            "sequential-thinking",
         }
     ])
     def test_agent_skill_has_produce_section(self, skill_path: Path) -> None:
@@ -359,6 +362,7 @@ class TestSkillStructure:
             "brainstorming-gate", "using-nx-skills",
             "writing-nx-skills",
             "rdr-list", "rdr-show", "rdr-create",
+            "sequential-thinking",
         }
     ])
     def test_skill_mentions_t1_scratch(self, skill_path: Path) -> None:

@@ -59,7 +59,7 @@ def test_scratch_get_missing_entry_shows_error(runner: CliRunner, fake_home: Pat
         result = runner.invoke(main, ["scratch", "get", "nonexistent-id-000"])
 
     assert result.exit_code != 0
-    assert "Not found" in result.output
+    assert "not found" in result.output.lower()
 
 
 # ── search no results ─────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ All commands use the `nx` binary. Global flags: `--help`, `--version`.
 
 ## nx search
 
-Semantic search across T3 cloud collections.
+Semantic search across T3 knowledge collections.
 
 ```
 nx search "authentication middleware" --corpus code --hybrid --n 20
@@ -15,19 +15,19 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | Flag | Description |
 |------|-------------|
 | `QUERY` (positional) | Search query text |
-| `PATH` (positional, optional) | Scope search to a directory |
-| `--corpus NAME` | Collection to search (repeatable; default: `knowledge`, `code`, `docs`) |
-| `-a` / `--answer` | Synthesize cited answer (requires Anthropic key) |
-| `--agentic` | Multi-step refinement via Haiku |
-| `--hybrid` | Semantic + ripgrep frecency (code corpora only) |
-| `--no-rerank` | Disable Voyage reranking |
+| `PATH` (positional, optional) | Scope search to files under that directory |
+| `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
+| `-a` / `--answer` | Synthesize cited answer via Haiku after retrieval |
+| `--agentic` | Multi-step Haiku query refinement before returning results |
+| `--hybrid` | Merge semantic + ripgrep results for code (0.7*vector + 0.3*frecency) |
+| `--no-rerank` | Disable cross-corpus reranking (use round-robin instead) |
 | `--mxbai` | Fan out to Mixedbread-indexed collections (read-only) |
-| `--where KEY=VALUE` | Metadata filter (repeatable) |
-| `--n` / `-m` / `--max-results NUM` | Max results (default 10) |
-| `-A NUM` | Lines after each match |
-| `-C NUM` | Lines after each match (alias for `-A`) |
-| `-c` / `--content` | Show matched text inline |
-| `-r` / `--reverse` | Reverse result order |
+| `--where KEY=VALUE` | Metadata filter (repeatable; multiple flags are ANDed) |
+| `-m` / `--n` / `--max-results NUM` | Max results (default 10) |
+| `-A N` | Show N lines of context after each result chunk |
+| `-C N` | Show N lines of context after each result chunk (alias for `-A`) |
+| `-c` / `--content` | Show matched text inline under each result (truncated at 200 chars) |
+| `-r` / `--reverse` | Reverse result order (highest-scoring last) |
 | `--vimgrep` | Output as `path:line:col:content` |
 | `--json` | JSON array output |
 | `--files` | Unique file paths only |
@@ -45,16 +45,22 @@ nx index repo ./my-project
 
 | Subcommand | Description |
 |------------|-------------|
-| `repo PATH` | Index code repository (smart classification: code to `code__`, prose to `docs__`) |
+| `repo PATH` | Index code repository (smart classification: code to `code__`, prose to `docs__`, RDRs to `rdr__`) |
 | `rdr [PATH]` | Index RDR documents in `docs/rdr/` into `rdr__` collection (default: current dir) |
-| `pdf PATH --corpus NAME` | Index a PDF file |
-| `md PATH --corpus NAME` | Index a markdown file |
+| `pdf PATH` | Index a PDF document into T3 `docs__CORPUS` |
+| `md PATH` | Index a Markdown file into T3 `docs__CORPUS` |
 
 **`repo` flags:**
 
 | Flag | Description |
 |------|-------------|
-| `--frecency-only` | Refresh git scores without re-embedding |
+| `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh) |
+
+**`pdf` and `md` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--corpus NAME` | Corpus name for the `docs__` collection (default: `default`) |
 
 ---
 
@@ -68,7 +74,7 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 
 | Subcommand | Description |
 |------------|-------------|
-| `put FILE_OR_DASH --collection NAME` | Store document (use `-` for stdin) |
+| `put FILE_OR_DASH` | Store document (use `-` for stdin) |
 | `list` | List stored entries |
 | `expire` | Remove expired entries |
 
@@ -76,18 +82,18 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 
 | Flag | Description |
 |------|-------------|
-| `--collection` / `-c` | Collection name or prefix (default: `knowledge`) |
-| `--title TITLE` | Entry title (required for stdin) |
+| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
+| `-t` / `--title TITLE` | Entry title (required when SOURCE is `-`) |
 | `--tags TAG,TAG` | Comma-separated tags |
 | `--category LABEL` | Category label |
-| `--ttl TTL` | Time to live (`30d`, `4w`, `permanent`) |
+| `--ttl TTL` | Time to live (`30d`, `4w`, `permanent`; default: `permanent`) |
 
 **`list` flags:**
 
 | Flag | Description |
 |------|-------------|
-| `--collection` / `-c` | Collection name or prefix (default: `knowledge`) |
-| `--limit` / `-n NUM` | Maximum entries to show (default: 200) |
+| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
+| `-n` / `--limit NUM` | Maximum entries to show (default: 200) |
 
 ---
 
@@ -102,18 +108,63 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | Subcommand | Description |
 |------------|-------------|
 | `put CONTENT --project NAME --title NAME` | Write a memory entry |
-| `get ID` | Read entry by numeric ID |
+| `get [ID]` | Read entry by numeric ID |
 | `get --project NAME --title NAME` | Read entry by project + title |
 | `search QUERY` | FTS5 keyword search |
-| `list --project NAME` | List entries in project |
+| `list` | List entries |
 | `expire` | Remove expired entries |
 | `promote ID --collection NAME` | Promote entry to T3 by ID |
 
-**`put` flags:** `--tags`, `--ttl`
+**`put` flags:** `--tags`, `--ttl` (default: `30d`)
+
+**`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name)
 
 **`promote` flags:** `--collection` (required), `--tags`, `--remove`
 
 **`search` flags:** `--project NAME`
+
+---
+
+## nx thought
+
+Session-scoped sequential thinking chains backed by T2 (SQLite). Survives context compaction — each `add` returns the full accumulated chain from storage so Claude always has complete context in the tool result, identical to the sequential-thinking MCP server but without the external dependency.
+
+Chains are scoped per session via `os.getsid(0)` and expire after 24 hours. Different Claude Code windows are fully isolated.
+
+```
+nx thought add "**Thought 1 of ~4**
+Frame: why is the frecency score doubling after re-indexing?
+nextThoughtNeeded: true"
+```
+
+Output includes full chain text **and** MCP-equivalent metadata on every call:
+```
+Chain: 20260225-143022
+════════════════════════════════════════════════════
+**Thought 1 of ~4**
+Frame: why is the frecency score doubling after re-indexing?
+nextThoughtNeeded: true
+════════════════════════════════════════════════════
+thoughtNumber: 1
+totalThoughts: 4
+nextThoughtNeeded: true
+thoughtHistoryLength: 1
+branches: []
+Next: nx thought add "**Thought 2 of ~4** ..."
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `add CONTENT` | Append thought, return full chain + metadata |
+| `show` | Print current chain without adding |
+| `close` | Mark chain complete, clear active pointer |
+| `list` | List chains for current session |
+
+**`add` / `show` / `close` flags:** `-c` / `--chain TEXT` — target a specific chain ID (defaults to current active chain)
+
+**Thought format:** Each thought should open with `**Thought N of ~T**` followed by content and `nextThoughtNeeded: true|false`. Use `[REVISION of Thought N]`, `[BRANCH from Thought N — id]`, and `[needsMoreThoughts]` annotations as needed — all are tracked automatically.
+
+**`totalThoughts` auto-adjustment:** If `thoughtNumber` exceeds `totalThoughts` in the content, `totalThoughts` is adjusted upward automatically (matches MCP server behaviour).
 
 ---
 
@@ -136,9 +187,9 @@ nx scratch put "hypothesis: cache invalidation is stale"
 | `promote ID --project NAME --title NAME` | Promote to T2 |
 | `clear` | Delete all scratch notes |
 
-**`put` flags:** `--tags` (comma-separated), `--persist` (auto-flush to T2), `--project` / `--title` (explicit T2 destination)
+**`put` flags:** `--tags` (comma-separated), `--persist` (auto-flush to T2), `-p` / `--project` / `-t` / `--title` (explicit T2 destination)
 
-**`flag` flags:** `--project` / `--title` (explicit T2 destination)
+**`flag` flags:** `-p` / `--project` / `-t` / `--title` (explicit T2 destination)
 
 ---
 
@@ -153,18 +204,24 @@ nx pm resume
 | Subcommand | Description |
 |------------|-------------|
 | `init` | Initialize PM for current git repo |
-| `resume` | Inject continuation context into session |
-| `status` | Show project status, blockers, active work |
-| `phase next` | Snapshot current context and start new phase |
-| `block "REASON"` | Record a blocker |
-| `unblock ID` | Remove a blocker |
+| `resume` | Print computed PM continuation (phase, blockers, recent activity) |
+| `status` | Show current phase, last-updated agent, and open blockers |
+| `phase next` | Snapshot current context and advance to the next phase |
+| `block BLOCKER` | Record a blocker |
+| `unblock LINE` | Remove a blocker by 1-based line number |
 | `search QUERY` | FTS5 search across PM docs |
 | `promote TITLE` | Promote PM doc to T3 |
 | `archive` | Synthesize to T3, start 90-day T2 decay |
 | `close` | Archive + mark project completed |
 | `restore PROJECT` | Restore within 90-day decay window |
-| `reference QUERY` | Search archived syntheses |
-| `expire` | Remove decayed PM entries |
+| `reference [QUERY]` | Search archived syntheses in T3 |
+| `expire` | Remove TTL-expired PM entries from T2 |
+
+**`init`, `resume`, `status`, `block`, `unblock`, `close` flags:** `--project NAME` (defaults to current git repo name)
+
+**`archive` flags:** `--project NAME`, `--status [completed|paused|cancelled]` (default: `completed`)
+
+**`promote` flags:** `--project NAME`, `--collection NAME` (default: `knowledge__pm__{project}`), `--ttl DAYS` (default: `0` = permanent)
 
 ---
 
@@ -181,13 +238,19 @@ nx collection list
 | `list` | All cloud collections with document counts |
 | `info NAME` | Details for one collection |
 | `verify NAME` | Existence check + document count |
-| `delete NAME --yes` | Delete collection (irreversible); aliases: `-y`, `--confirm` |
+| `delete NAME` | Delete collection (irreversible) |
 
 **`verify` flags:**
 
 | Flag | Description |
 |------|-------------|
 | `--deep` | Probe embeddings in addition to count |
+
+**`delete` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-y` / `--yes` / `--confirm` | Skip interactive confirmation prompt |
 
 ---
 
@@ -204,13 +267,13 @@ nx serve start
 | `start` | Start background daemon |
 | `stop` | Stop daemon |
 | `status` | Uptime and per-repo indexing state |
-| `logs` | Last 20 lines of daemon log |
+| `logs` | Recent server log output (last 20 lines by default) |
 
 **`logs` flags:**
 
 | Flag | Description |
 |------|-------------|
-| `-n NUM` | Number of log lines to show |
+| `-n` / `--lines NUM` | Number of log lines to show (default: 20) |
 
 ---
 
@@ -227,7 +290,7 @@ nx config init
 | `init` | Interactive credential wizard |
 | `list` | Show all config values |
 | `get KEY` | Get single value (masked by default) |
-| `set KEY VALUE` | Set single value |
+| `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form |
 
 **`get` flags:**
 
@@ -245,5 +308,4 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks: ChromaDB connectivity, Voyage AI key, Anthropic key, ripgrep binary, git binary.
-
+Checks: ChromaDB API key, ChromaDB tenant, ChromaDB database, Voyage AI key, Anthropic key, ripgrep binary, git binary, Nexus server, Mixedbread key (optional).

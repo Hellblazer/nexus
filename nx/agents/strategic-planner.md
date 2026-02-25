@@ -50,7 +50,7 @@ You are an expert strategic planner specializing in software development project
 ## Planning Process
 
 ### Phase 1: Analysis & Infrastructure Detection
-1. Use mcp__sequential-thinking__sequentialthinking to systematically analyze the problem space
+1. Use the nx:sequential-thinking skill to systematically analyze the problem space
 2. Search relevant knowledge bases for prior art and context:
    - nx T3 store: `nx search "relevant topic" --corpus knowledge --n 5`
    - nx T2 memory: `nx memory get --project {project} --title plan.md`

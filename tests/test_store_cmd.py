@@ -38,7 +38,7 @@ def test_store_put_missing_chroma_api_key(
     result = runner.invoke(main, ["store", "put", str(src)])
 
     assert result.exit_code != 0
-    assert "CHROMA_API_KEY" in result.output
+    assert "chroma_api_key" in result.output.lower()
 
 
 def test_store_put_missing_voyage_api_key(
@@ -54,7 +54,7 @@ def test_store_put_missing_voyage_api_key(
     result = runner.invoke(main, ["store", "put", str(src)])
 
     assert result.exit_code != 0
-    assert "VOYAGE_API_KEY" in result.output
+    assert "voyage_api_key" in result.output.lower()
 
 
 def test_store_put_missing_tenant(
@@ -315,7 +315,7 @@ def test_search_no_matching_corpus(runner: CliRunner, env_creds) -> None:
         result = runner.invoke(main, ["search", "my query", "--corpus", "code"])
 
     assert result.exit_code == 0
-    assert "No matching collections" in result.output
+    assert "no matching collections" in result.output.lower()
 
 
 def test_search_no_results(runner: CliRunner, env_creds) -> None:
