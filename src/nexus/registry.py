@@ -48,15 +48,29 @@ def _repo_identity(repo: Path) -> tuple[str, str]:
     return main_repo.name, path_hash
 
 
+def _safe_collection(prefix: str, name: str, path_hash: str) -> str:
+    """Build ``{prefix}{name}-{hash8}``, truncating *name* to stay within 63 chars.
+
+    ChromaDB enforces a 63-character limit on collection names.  The fixed
+    overhead is ``len(prefix) + 1 (hyphen) + 8 (hash)``, leaving the remainder
+    for the basename.  When truncation occurs the full name is still recoverable
+    via the hash.
+    """
+    max_name = 63 - len(prefix) - 1 - len(path_hash)  # 1 for the hyphen
+    truncated = name[:max_name]
+    return f"{prefix}{truncated}-{path_hash}"
+
+
 def _collection_name(repo: Path) -> str:
     """Return a unique ChromaDB collection name for *repo*.
 
     The collection name is ``code__{basename}-{hash8}`` where *hash8* is the
     first 8 hex characters of the SHA-256 digest of the main repository path
-    (resolved via git, stable across worktrees).
+    (resolved via git, stable across worktrees).  Long basenames are truncated
+    to stay within the 63-character ChromaDB limit.
     """
     name, path_hash = _repo_identity(repo)
-    return f"code__{name}-{path_hash}"
+    return _safe_collection("code__", name, path_hash)
 
 
 def _docs_collection_name(repo: Path) -> str:
@@ -65,7 +79,7 @@ def _docs_collection_name(repo: Path) -> str:
     Uses the same identity scheme as _collection_name() for consistency.
     """
     name, path_hash = _repo_identity(repo)
-    return f"docs__{name}-{path_hash}"
+    return _safe_collection("docs__", name, path_hash)
 
 
 def _rdr_collection_name(repo: Path) -> str:
@@ -74,7 +88,7 @@ def _rdr_collection_name(repo: Path) -> str:
     Uses the same identity scheme as _collection_name() for consistency.
     """
     name, path_hash = _repo_identity(repo)
-    return f"rdr__{name}-{path_hash}"
+    return _safe_collection("rdr__", name, path_hash)
 
 
 class RepoRegistry:

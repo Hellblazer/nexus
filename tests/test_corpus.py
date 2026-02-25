@@ -162,3 +162,80 @@ def test_resolve_corpus_docs_does_not_match_rdr() -> None:
     """--corpus docs must NOT match rdr__* collections."""
     all_cols = ["docs__papers", "rdr__myrepo-abcdef12"]
     assert resolve_corpus("docs", all_cols) == ["docs__papers"]
+
+
+# ── validate_collection_name boundary & edge cases ──────────────────────────
+
+def test_validate_collection_name_exactly_63_chars() -> None:
+    """Maximum valid length is exactly 63 characters."""
+    name = "a" * 63
+    validate_collection_name(name)  # should not raise
+
+
+def test_validate_collection_name_exactly_3_chars() -> None:
+    """Minimum valid length is exactly 3 characters."""
+    validate_collection_name("a1b")
+
+
+def test_validate_collection_name_empty_string() -> None:
+    with pytest.raises(ValueError, match="3"):
+        validate_collection_name("")
+
+
+def test_validate_collection_name_single_char() -> None:
+    with pytest.raises(ValueError, match="3"):
+        validate_collection_name("a")
+
+
+def test_validate_collection_name_double_underscore_valid() -> None:
+    """Double underscores in the middle are valid — used by all collection prefixes."""
+    validate_collection_name("code__myrepo")
+    validate_collection_name("a__b")
+
+
+@pytest.mark.parametrize("char", [".", " ", "/", "@", "+", "%", "=", "!", "~"])
+def test_validate_collection_name_rejects_special_chars(char: str) -> None:
+    with pytest.raises(ValueError, match="alphanumeric"):
+        validate_collection_name(f"bad{char}name")
+
+
+def test_validate_collection_name_starts_with_underscore() -> None:
+    with pytest.raises(ValueError, match="alphanumeric"):
+        validate_collection_name("_badstart")
+
+
+def test_validate_collection_name_ends_with_underscore() -> None:
+    with pytest.raises(ValueError, match="alphanumeric"):
+        validate_collection_name("badend_")
+
+
+def test_validate_collection_name_digits_at_boundaries() -> None:
+    """Names starting and ending with digits are valid."""
+    validate_collection_name("1abc9")
+    validate_collection_name("123")
+
+
+# ── resolve_corpus edge cases ────────────────────────────────────────────────
+
+def test_resolve_corpus_prefix_requires_double_underscore() -> None:
+    """--corpus code must NOT match 'codebase__x' (only 'code__*')."""
+    all_cols = ["codebase__myrepo", "code__myrepo"]
+    assert resolve_corpus("code", all_cols) == ["code__myrepo"]
+
+
+def test_resolve_corpus_multiple_separators_exact_match() -> None:
+    """Corpus arg with __ uses exact match, even with multiple __ separators."""
+    all_cols = ["code__repo__extra", "code__repo"]
+    assert resolve_corpus("code__repo__extra", all_cols) == ["code__repo__extra"]
+
+
+# ── t3_collection_name edge cases ────────────────────────────────────────────
+
+def test_t3_collection_name_already_prefixed_knowledge() -> None:
+    """Arg already containing __ is used as-is, even if knowledge__ prefix."""
+    assert t3_collection_name("knowledge__existing") == "knowledge__existing"
+
+
+def test_t3_collection_name_other_prefix_passthrough() -> None:
+    """Arg with code__ prefix is preserved as-is."""
+    assert t3_collection_name("code__myrepo") == "code__myrepo"

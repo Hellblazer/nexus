@@ -301,3 +301,89 @@ def test_collection_names_stable_across_worktrees(tmp_path: Path) -> None:
 
     assert _collection_name(main_repo) == _collection_name(wt)
     assert _docs_collection_name(main_repo) == _docs_collection_name(wt)
+
+
+# ── _rdr_collection_name ─────────────────────────────────────────────────────
+
+
+def test_rdr_collection_name_function() -> None:
+    from nexus.registry import _rdr_collection_name
+
+    repo = Path("/some/path/myrepo")
+    name = _rdr_collection_name(repo)
+    assert name.startswith("rdr__myrepo-")
+    assert len(name.split("-")[-1]) == 8  # 8-char hash
+
+
+def test_rdr_collection_name_same_hash_as_code_and_docs() -> None:
+    """All three collection functions use the same identity → same hash suffix."""
+    from nexus.registry import _collection_name, _docs_collection_name, _rdr_collection_name
+
+    repo = Path("/some/path/myrepo")
+    code_suffix = _collection_name(repo).split("-")[-1]
+    docs_suffix = _docs_collection_name(repo).split("-")[-1]
+    rdr_suffix = _rdr_collection_name(repo).split("-")[-1]
+    assert code_suffix == docs_suffix == rdr_suffix
+
+
+# ── long basename truncation ─────────────────────────────────────────────────
+
+
+def test_collection_name_truncates_long_basename() -> None:
+    """Repo basenames exceeding 48 chars are truncated to stay within 63-char limit."""
+    from nexus.registry import _collection_name
+
+    long_name = "a" * 60
+    repo = Path(f"/tmp/{long_name}")
+    col_name = _collection_name(repo)
+    assert len(col_name) <= 63
+    assert col_name.startswith("code__")
+
+
+def test_docs_collection_name_truncates_long_basename() -> None:
+    from nexus.registry import _docs_collection_name
+
+    long_name = "a" * 60
+    repo = Path(f"/tmp/{long_name}")
+    col_name = _docs_collection_name(repo)
+    assert len(col_name) <= 63
+    assert col_name.startswith("docs__")
+
+
+def test_rdr_collection_name_truncates_long_basename() -> None:
+    from nexus.registry import _rdr_collection_name
+
+    long_name = "a" * 60
+    repo = Path(f"/tmp/{long_name}")
+    col_name = _rdr_collection_name(repo)
+    assert len(col_name) <= 63
+    assert col_name.startswith("rdr__")
+
+
+def test_truncated_name_still_valid_collection_name() -> None:
+    """Truncated collection names must pass ChromaDB validation."""
+    from nexus.corpus import validate_collection_name
+    from nexus.registry import _collection_name, _docs_collection_name, _rdr_collection_name
+
+    long_name = "a" * 60
+    repo = Path(f"/tmp/{long_name}")
+    for fn in (_collection_name, _docs_collection_name, _rdr_collection_name):
+        validate_collection_name(fn(repo))  # should not raise
+
+
+def test_short_basename_not_truncated() -> None:
+    """Normal-length basenames are not affected by truncation logic."""
+    from nexus.registry import _collection_name
+
+    repo = Path("/tmp/myrepo")
+    col_name = _collection_name(repo)
+    assert "myrepo" in col_name  # full name preserved
+
+
+def test_truncated_names_still_unique_for_same_prefix() -> None:
+    """Two repos with long basenames sharing a prefix still differ (hash differs)."""
+    from nexus.registry import _collection_name
+
+    repo_a = Path("/tmp/" + "a" * 60)
+    repo_b = Path("/other/" + "a" * 60)
+    assert _collection_name(repo_a) != _collection_name(repo_b)

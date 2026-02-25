@@ -34,7 +34,8 @@ Each indexed repository produces two T3 (ChromaDB Cloud) collections:
 | `docs__<name>-<hash8>` | `voyage-context-3` (CCE) | `voyage-4` | Prose + PDF files |
 
 `<name>` is the repository basename; `<hash8>` is the first 8 hex characters of the
-SHA-256 digest of the main repository path. Collection names are **stable across git
+SHA-256 digest of the main repository path. Long basenames are truncated to stay within
+ChromaDB's 63-character collection name limit. Collection names are **stable across git
 worktrees** -- `git rev-parse --git-common-dir` resolves to the shared `.git` directory,
 so a worktree and its parent produce identical collection names.
 
