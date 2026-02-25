@@ -63,7 +63,21 @@ poll_until_gone() {
 #   4. Send bare Enter
 claude_start() {
     send_keys "claude --dangerously-skip-permissions" Enter
-    sleep 6  # wait for splash to clear
+    sleep 4
+
+    # If Claude shows the login method selector, choose option 2
+    # (Anthropic Console account / API usage billing) which uses ANTHROPIC_API_KEY.
+    if capture | grep -q "Select login method"; then
+        send_keys "2" Enter   # select "Anthropic Console account"
+        sleep 4
+        # It may ask to confirm/proceed — send Enter again if still on auth screen
+        if capture | grep -qE "login method|API key|Console"; then
+            send_keys "" Enter
+            sleep 3
+        fi
+    fi
+
+    sleep 2  # wait for splash/prompt to fully render
 }
 
 # Send a prompt to an already-running Claude session.
