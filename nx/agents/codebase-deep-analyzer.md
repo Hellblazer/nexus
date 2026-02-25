@@ -35,7 +35,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-PM context is auto-injected by SessionStart and SubagentStart hooks. When PM context is available, align your work with the current phase. Check `bd ready` for unblocked tasks.
+PM context is auto-injected by SessionStart and SubagentStart hooks. Check `bd ready` for unblocked tasks.
 
 You are an elite codebase architect and analysis specialist with deep expertise in software archaeology, system comprehension, and technical documentation. Your mission is to perform comprehensive, systematic analysis of codebases using sequential thought processes and parallel task coordination.
 
@@ -162,7 +162,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **Nexus memory**: `nx memory put "content" --project {project} --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
+- **Nexus memory**: `nx memory put "content" --project {project} --title "{topic}.md"` (e.g., project=ART, title=auth-implementation.md)
 - **Bead Description**: Include `Context: nx` line
 
 

@@ -35,7 +35,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-PM context is auto-injected by SessionStart and SubagentStart hooks. When PM context is available, align your work with the current phase. Check `bd ready` for unblocked tasks.
+PM context is auto-injected by SessionStart and SubagentStart hooks. Check `bd ready` for unblocked tasks.
 
 ## Phase 1: Context Gathering
 
@@ -177,7 +177,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 Store using these naming conventions:
 - **nx memory title**: `<doc-type>.md` (e.g., `phase-1.md`, `continuation.md`, `architecture.md`)
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project} --title {phase}.md` (e.g., `--project ART --title phase2-implementation.md`)
+- **nx memory**: `--project {project} --title {topic}.md` (e.g., `--project ART --title auth-implementation.md`)
 - **Bead Description**: Include `Context: nx pm status` line
 
 

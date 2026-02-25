@@ -175,7 +175,7 @@ See [CONTEXT_PROTOCOL.md](./CONTEXT_PROTOCOL.md) RECOVER section for details.
 
 **Validation is non-optional**. Agents must check relay structure before executing work.
 
-**Note on nx pm context**: The subagent-start hook automatically injects current phase and blockers from `nx pm status` into agent sessions when a `.pm/` directory is present. Agents typically do not need to manually add `nx pm context` to relays — it is pre-populated by the hook. Include it explicitly only when passing non-default phase context or when the relay crosses project boundaries.
+**Note on nx pm context**: The subagent-start hook automatically injects project context and blockers from `nx pm status` into agent sessions. Agents typically do not need to manually add `nx pm context` to relays — it is pre-populated by the hook. Include it explicitly only when the relay crosses project boundaries.
 
 ## Relationship to Context Protocol
 

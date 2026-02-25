@@ -31,7 +31,7 @@ Delegates to the **java-architect-planner** agent (model: opus).
 ## When This Skill Activates
 
 - Before implementing complex features requiring architecture design
-- When planning multi-phase implementations
+- When planning multi-step implementations
 - Before major refactoring efforts
 - When system design decisions are needed
 - When establishing module boundaries or interfaces
@@ -56,12 +56,12 @@ Use the Task tool to invoke **java-architect-planner**:
 - Files: [relevant files]
 
 ### Deliverable
-Architecture design with phased execution plan
+Architecture design with execution plan
 
 ### Quality Criteria
 - [ ] Component boundaries clearly defined
 - [ ] Interfaces specified
-- [ ] Execution plan with phases created
+- [ ] Execution plan created with beads
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
@@ -72,7 +72,7 @@ The java-architect-planner uses `nx search --corpus code --hybrid` for discovery
 1. Understand system architecture and integration patterns
 2. Synthesize findings into architectural approach
 3. Define component boundaries and interfaces
-4. Create phased execution plan with beads
+4. Create execution plan with beads
 5. Identify risks and mitigations
 
 ## Success Criteria
@@ -80,7 +80,7 @@ The java-architect-planner uses `nx search --corpus code --hybrid` for discovery
 - [ ] All requirements addressed in design
 - [ ] Component boundaries clearly defined
 - [ ] Interfaces specified
-- [ ] Execution plan with phases created
+- [ ] Execution plan created with beads
 - [ ] Beads created for trackable work
 - [ ] Risks identified with mitigations
 - [ ] Ready for plan-auditor validation
@@ -88,7 +88,7 @@ The java-architect-planner uses `nx search --corpus code --hybrid` for discovery
 ## Agent-Specific PRODUCE
 
 - **Architecture Designs**: Store in nx T3 as `printf "# Architecture: {component}\n{design}\n" | nx store put - --collection knowledge --title "architecture-{project}-{component}" --tags "architecture,design"`
-- **Execution Plans**: Store in nx T2 memory as `nx memory put "plan" --project {project} --title phase-N.md --ttl 30d`
+- **Execution Plans**: Store in nx T2 memory as `nx memory put "plan" --project {project} --title plan-{component}.md --ttl 30d`
 - **Design Decisions**: Store in nx T3 as `printf "# Decision: {topic}\n{rationale}\n" | nx store put - --collection knowledge --title "decision-architect-{topic}" --tags "decision,architecture"`
 - **Beads**: Epic → Phase → Task hierarchy with `bd dep add` for dependencies
 - **Design Notes**: Use T1 scratch for working notes during architecture analysis:

@@ -83,7 +83,7 @@ You are an elite Java architect and strategic planner with deep expertise in Jav
 
 **Documentation Requirements:**
 - Store architectural decisions and rationale: `echo "..." | nx store put - --collection knowledge --title "decision-architect-{component}" --tags "architecture"`
-- Maintain execution progress and learnings: `nx memory put "content" --project {project} --title "plan-{phase}.md"`
+- Maintain execution progress and learnings: `nx memory put "content" --project {project} --title "plan-{component}.md"`
 - Create correlation maps between related concepts and components
 - Document alternative paths and decision criteria
 - Track metrics and success indicators throughout execution
@@ -160,7 +160,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - **Architectural Decisions**: Store via `echo "..." | nx store put - --collection knowledge --title "decision-architect-{component}" --tags "architecture"`
-- **Execution Plans**: Store via `nx memory put "content" --project {project} --title "plan-{phase}.md"`
+- **Execution Plans**: Store via `nx memory put "content" --project {project} --title "plan-{component}.md"`
 - **Dependency Maps**: Include in bead design field
 - **Risk Assessments**: Store via `echo "..." | nx store put - --collection knowledge --title "risk-architect-{topic}" --tags "risk"`
 - **Design Working Notes**: Use T1 scratch during architectural design exploration:
@@ -172,7 +172,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **Nexus memory**: `nx memory put "content" --project {project} --title "{phase}.md"` (e.g., project=ART, title=phase2-implementation.md)
+- **Nexus memory**: `nx memory put "content" --project {project} --title "{topic}.md"` (e.g., project=ART, title=auth-implementation.md)
 - **Bead Description**: Include `Context: nx` line
 
 

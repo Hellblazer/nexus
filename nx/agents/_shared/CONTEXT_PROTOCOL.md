@@ -66,14 +66,14 @@ The SessionEnd hook (`nx hook session-end`) runs automatically at session close 
 **Promote to T2 when:**
 - Hypothesis validated (worth preserving across sessions)
 - Interim findings that a future session may need
-- Working notes that inform next-phase work
+- Working notes that inform future work
 
 ## Storage Tier Quick Reference
 
 | Tier | Name | Scope | CLI Entry | Use Cases | TTL |
 |------|------|-------|-----------|-----------|-----|
 | T1 | nx scratch | Session (ephemeral) | `nx scratch put` | Working notes, hypotheses, debug traces | Wiped on SessionEnd (flag to survive) |
-| T2 | nx memory | Per-project, persistent | `nx memory put` | Session state, phase docs, agent relay, active work | 30d default; `permanent` available |
+| T2 | nx memory | Per-project, persistent | `nx memory put` | Session state, project context, agent relay, active work | 30d default; `permanent` available |
 | T3 | nx store / nx search | Permanent, cross-session | `nx store put` | Research findings, architectural decisions, validated patterns | `permanent` or explicit TTL |
 
 ## PRODUCE
@@ -86,7 +86,7 @@ Agents produce artifacts based on their specialization:
 - **Interim Working Notes**: Use T1 scratch for session-scoped state; promote to T2 when validated:
   ```bash
   # Store ephemeral working note
-  nx scratch put "<hypothesis or interim finding>" --tags "hypothesis,phase-N"
+  nx scratch put "<hypothesis or interim finding>" --tags "hypothesis"
   # Flag for auto-flush to T2 at session end
   nx scratch flag <id> --project {project} --title interim-notes.md
   # Or promote immediately
@@ -96,7 +96,7 @@ Agents produce artifacts based on their specialization:
 ### Naming Conventions
 
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project} --title {phase}.md` (e.g., `--project ART --title phase2-implementation.md`)
+- **nx memory**: `--project {project} --title {topic}.md` (e.g., `--project ART --title auth-implementation.md`)
 - **Bead Description**: Include `Context: nx` line if project uses PM infrastructure
 
 ## nx pm Lifecycle
@@ -118,10 +118,9 @@ nx pm reference [<query>]                    # search archived PM syntheses in T
 
 **When to call:**
 - **Session start**: PM context auto-injected by SessionStart and SubagentStart hooks
-- **Starting work on a bead**: `nx pm status` to confirm phase alignment
 - **Blocking issue discovered**: `nx pm block "<description>"`
-- **Phase completion**: `nx pm phase next`
-- **Session end**: `nx pm archive` for completed projects
+- **Project focus shifts**: `nx pm phase next` to snapshot current context and start a new one
+- **Project done or paused**: `nx pm archive` for completed projects
 - **Finding past work**: `nx pm reference "<topic>"` to search T3 archived syntheses
 - **Resuming an old project**: `nx pm restore <project>` (within 90 days of archiving)
 
@@ -213,10 +212,10 @@ All memory -- agent working notes and PM documents -- lives under the bare proje
 ### Memory Commands
 ```bash
 # Write to memory
-nx memory put "content" --project {project} --title phase.md --ttl 30d
+nx memory put "content" --project {project} --title findings.md --ttl 30d
 
 # Read from memory
-nx memory get --project {project} --title phase.md
+nx memory get --project {project} --title findings.md
 
 # Search memory
 nx memory search "query" --project {project}

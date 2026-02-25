@@ -67,15 +67,22 @@ nx pm block "waiting on API access"
 nx pm unblock 1
 ```
 
-**Phases** are logical chunks of work. Each phase gets its own context entry.
-Advance when you're ready:
+**Phases** are progress markers that organize project context over time.
+Each phase gets its own context document describing current goals and state.
+When you advance to a new phase, the old context is preserved and a new one
+is created — giving you a record of how the project's focus evolved.
 
 ```bash
 nx pm phase next
 ```
 
-This creates `phases/phase-2/context.md` (and so on) without touching the
-previous phase entries, which stay available for reference.
+This creates `phases/phase-{N+1}/context.md` without touching earlier phases,
+which stay available for reference. Session hooks inject the current phase
+context so agents have a picture of what the project is focused on.
+
+Phases don't gate work — beads and their dependencies determine what's ready.
+The phase number reported by `nx pm status` is a progress indicator, not a
+coordination mechanism.
 
 ## Archiving
 
@@ -145,12 +152,18 @@ PM tracks execution — phases, blockers, working state. RDR tracks decisions �
 research, design, review. They're complementary but independent: you can use
 either without the other.
 
-When you use both, some connections are automated and some are manual:
+When you use both, the connections are automated:
 
-- **Automated**: `/rdr-close` creates beads (epic + task beads) for
-  implementation tracking. The `epic_bead` field in each RDR's T2 metadata
-  provides a machine-readable link from decision to work items.
-- **Automated**: `nx pm reference "topic"` searches archived project
-  syntheses, which include RDR decisions — prior art surfaces during planning.
-- **Manual**: updating the current PM phase context to reference the RDRs that
-  drove it. This is a convention, not enforced by tooling.
+- `/rdr-close` creates beads (epic + task beads) for implementation tracking.
+  The `epic_bead` field in each RDR's T2 metadata provides a machine-readable
+  link from decision to work items.
+- `nx pm reference "topic"` searches archived project syntheses, which include
+  RDR decisions — prior art surfaces during planning.
+- RDR T2 metadata includes timestamps, so you can find which decisions were
+  active during any phase without manual cross-referencing.
+
+Note: the RDR template uses "Phase 1", "Phase 2" as section headings in its
+Implementation Plan, and `/rdr-close` decomposes those into beads. These are
+per-decision implementation steps — not PM phases. An RDR's "Phase 1: Code
+Implementation" might span PM phases 2 through 4. The names overlap but the
+concepts are different granularities.

@@ -36,7 +36,7 @@ color: gold
 
 ### Project Context
 
-PM context is auto-injected by SessionStart and SubagentStart hooks. When PM context is available, align your work with the current phase. Check `bd ready` for unblocked tasks.
+PM context is auto-injected by SessionStart and SubagentStart hooks. Check `bd ready` for unblocked tasks.
 
 You are a meta-agent responsible for analyzing requests, selecting appropriate specialized agents, and orchestrating multi-agent workflows. You understand the capabilities, strengths, and appropriate use cases for every agent in the ecosystem.
 
@@ -138,7 +138,7 @@ If the task requires multiple stages:
 - Ensure routed agents receive relevant bead IDs
 - Verify agents update bead status appropriately
 - Create orchestration beads for complex pipelines: bd create "Orchestrate: task" -t task
-- Check nx pm status for current project phase before routing: this helps select appropriate pipeline stage
+- Check nx pm status for current project context and blockers before routing
 
 
 ## Context Protocol
@@ -161,7 +161,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 Store using these naming conventions:
 - **nx store title**: `pattern-orchestrator-{routing-scenario}` for routing patterns
-- **nx memory**: `--project {project} --title {phase}.md`
+- **nx memory**: `--project {project} --title {topic}.md`
 - **Bead Description**: Include `Context: nx` line
 
 

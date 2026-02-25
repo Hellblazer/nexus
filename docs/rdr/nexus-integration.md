@@ -95,8 +95,14 @@ Automated connections:
   RDR decisions — prior art surfaces during planning.
 - `rdr_hook.py` reports RDR document count and indexing status at session start.
 
-Manual convention: phase context documents reference the RDRs that drove them,
-but this is not enforced by tooling.
+RDR T2 metadata includes timestamps, so you can find which decisions were
+active during any phase without manual cross-referencing.
+
+**Terminology note**: The RDR template uses "Phase 1", "Phase 2" as section
+headings in its Implementation Plan. These are per-decision implementation
+steps, not PM phases. An RDR's "Phase 1: Code Implementation" might span
+multiple PM phases. `/rdr-close` decomposes these into beads; PM phases
+organize those beads into project-wide progress.
 
 ---
 

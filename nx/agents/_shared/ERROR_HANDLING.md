@@ -112,13 +112,13 @@ ttl_days > 0 AND expires_at < now
 
 **Missing PM context**:
 - Error: `nx pm status` returns empty even though PM was initialized
-- Fix: Run `nx pm status` to check phase; phase docs may need to be written
+- Fix: Run `nx pm status` to check current state; context docs may need to be written
 - Note: PM context is auto-injected by SessionStart and SubagentStart hooks
 
-**PM phase mismatch**:
-- Symptom: `nx pm status` shows unexpected phase or blockers
+**PM context stale or unexpected**:
+- Symptom: `nx pm status` shows unexpected state or blockers
 - Fix: Run `nx pm status` to get current state; check `nx pm search "topic"` for relevant docs
-- Never advance phase manually — use `nx pm phase next` to maintain consistency
+- Use `nx pm phase next` to snapshot current context and start fresh when project focus shifts
 
 **nx pm archive fails**:
 - Error: Archive fails with "no active project"
