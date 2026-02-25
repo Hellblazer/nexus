@@ -102,7 +102,7 @@ active during any phase without manual cross-referencing.
 headings in its Implementation Plan. These are per-decision implementation
 steps, not PM phases. An RDR's "Phase 1: Code Implementation" might span
 multiple PM phases. `/rdr-close` decomposes these into beads; PM phases
-organize those beads into project-wide progress.
+provide project-wide progress context alongside those beads.
 
 ---
 

@@ -17,7 +17,7 @@ CLI (cli.py + commands/)
     │     code: tree-sitter AST → voyage-code-3 → code__<repo>
     │     prose: markdown splitter → voyage-context-3 → docs__<repo>
     │     rdr:   markdown splitter → voyage-context-3 → rdr__<repo>
-    │     pdf:   PyMuPDF4LLM → voyage-4 → docs__<corpus>
+    │     pdf:   PyMuPDF4LLM → voyage-context-3 → docs__<corpus>
     │
     ├── Search: query → retrieve → rerank → format
     │     semantic, hybrid (+ frecency), answer (+ Haiku), agentic
