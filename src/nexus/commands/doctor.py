@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx doctor — health check for all required services."""
 import shutil
+import sys
 
 import click
 
@@ -9,17 +10,8 @@ from nexus.config import get_credential
 _CHECK = "✓"
 _WARN  = "✗"
 
-_SIGNUP = {
-    "CHROMA_API_KEY":      "https://trychroma.com",
-    "CHROMA_TENANT":       "https://trychroma.com",
-    "CHROMA_DATABASE":     "https://trychroma.com",
-    "VOYAGE_API_KEY":      "https://voyageai.com",
-    "ANTHROPIC_API_KEY":   "https://console.anthropic.com",
-    "MXBAI_API_KEY":       "https://mixedbread.ai",
-}
 
-
-def _check(label: str, ok: bool, detail: str = "") -> str:
+def _check_line(label: str, ok: bool, detail: str = "") -> str:
     status = _CHECK if ok else _WARN
     msg = f"  {status} {label}"
     if detail:
@@ -27,86 +19,139 @@ def _check(label: str, ok: bool, detail: str = "") -> str:
     return msg
 
 
+def _fix(lines: list[str], *fix_lines: str) -> None:
+    """Append indented Fix: lines after a failure entry."""
+    first = True
+    for fix_line in fix_lines:
+        if first:
+            lines.append(f"    Fix: {fix_line}")
+            first = False
+        else:
+            lines.append(f"         {fix_line}")
+
+
+def _python_ok() -> tuple[bool, str]:
+    """Return (meets_requirement, version_string) for the running Python."""
+    vi = sys.version_info
+    ver = f"{vi.major}.{vi.minor}.{vi.micro}"
+    return vi >= (3, 12), ver
+
+
+# Keep old name so existing tests importing `_check` still work.
+def _check(label: str, ok: bool, detail: str = "") -> str:
+    return _check_line(label, ok, detail)
+
+
 @click.command("doctor")
 def doctor_cmd() -> None:
     """Verify that all required services and credentials are available."""
     lines: list[str] = ["Nexus health check:\n"]
-    missing: list[str] = []
-    missing_tools: list[str] = []
+    failed = False
 
-    # CHROMA_API_KEY
+    # ── Python version ────────────────────────────────────────────────────────
+    py_ok, py_ver = _python_ok()
+    lines.append(_check_line(
+        "Python ≥ 3.12",
+        py_ok,
+        py_ver if py_ok else f"{py_ver} — 3.12+ required",
+    ))
+    if not py_ok:
+        failed = True
+        _fix(lines,
+             "https://www.python.org/downloads/",
+             "brew install python@3.12         (macOS)",
+             "apt install python3.12           (Ubuntu/Debian)")
+
+    # ── CHROMA_API_KEY ────────────────────────────────────────────────────────
     chroma_key = get_credential("chroma_api_key")
-    lines.append(_check("ChromaDB  (CHROMA_API_KEY)",  bool(chroma_key),
-                        "set" if chroma_key else "not set"))
+    lines.append(_check_line("ChromaDB  (CHROMA_API_KEY)",  bool(chroma_key),
+                              "set" if chroma_key else "not set"))
     if not chroma_key:
-        missing.append("CHROMA_API_KEY")
+        failed = True
+        _fix(lines,
+             "nx config set chroma_api_key <your-key>",
+             "Get key: https://trychroma.com")
 
-    # CHROMA_TENANT
+    # ── CHROMA_TENANT ─────────────────────────────────────────────────────────
     chroma_tenant = get_credential("chroma_tenant")
-    lines.append(_check("ChromaDB  (CHROMA_TENANT)",   bool(chroma_tenant),
-                        "set" if chroma_tenant else "not set"))
+    lines.append(_check_line("ChromaDB  (CHROMA_TENANT)",   bool(chroma_tenant),
+                              "set" if chroma_tenant else "not set"))
     if not chroma_tenant:
-        missing.append("CHROMA_TENANT")
+        failed = True
+        _fix(lines,
+             "nx config set chroma_tenant <your-tenant>",
+             "Get value: https://trychroma.com  (Dashboard → Settings)")
 
-    # CHROMA_DATABASE
+    # ── CHROMA_DATABASE ───────────────────────────────────────────────────────
     chroma_database = get_credential("chroma_database")
-    lines.append(_check("ChromaDB  (CHROMA_DATABASE)", bool(chroma_database),
-                        "set" if chroma_database else "not set"))
+    lines.append(_check_line("ChromaDB  (CHROMA_DATABASE)", bool(chroma_database),
+                              "set" if chroma_database else "not set"))
     if not chroma_database:
-        missing.append("CHROMA_DATABASE")
+        failed = True
+        _fix(lines,
+             "nx config set chroma_database <your-database>",
+             "Get value: https://trychroma.com  (Dashboard → Settings)")
 
-    # VOYAGE_API_KEY
+    # ── VOYAGE_API_KEY ────────────────────────────────────────────────────────
     voyage_key = get_credential("voyage_api_key")
-    lines.append(_check("Voyage AI (VOYAGE_API_KEY)",  bool(voyage_key),
-                        "set" if voyage_key else "not set"))
+    lines.append(_check_line("Voyage AI (VOYAGE_API_KEY)",  bool(voyage_key),
+                              "set" if voyage_key else "not set"))
     if not voyage_key:
-        missing.append("VOYAGE_API_KEY")
+        failed = True
+        _fix(lines,
+             "nx config set voyage_api_key <your-key>",
+             "Get key: https://www.voyageai.com")
 
-    # ANTHROPIC_API_KEY
+    # ── ANTHROPIC_API_KEY ─────────────────────────────────────────────────────
     anthropic_key = get_credential("anthropic_api_key")
-    lines.append(_check("Anthropic (ANTHROPIC_API_KEY)", bool(anthropic_key),
-                        "set" if anthropic_key else "not set"))
+    lines.append(_check_line("Anthropic (ANTHROPIC_API_KEY)", bool(anthropic_key),
+                              "set" if anthropic_key else "not set"))
     if not anthropic_key:
-        missing.append("ANTHROPIC_API_KEY")
+        failed = True
+        _fix(lines,
+             "nx config set anthropic_api_key <your-key>",
+             "Get key: https://console.anthropic.com")
 
-    # ripgrep
+    # ── ripgrep ───────────────────────────────────────────────────────────────
     rg_path = shutil.which("rg")
-    lines.append(_check("ripgrep   (rg)",              bool(rg_path),
-                        rg_path or "not found on PATH — install ripgrep"))
+    lines.append(_check_line("ripgrep   (rg)",              bool(rg_path),
+                              rg_path or "not found — hybrid search disabled"))
     if not rg_path:
-        missing_tools.append("rg")
+        failed = True
+        _fix(lines,
+             "brew install ripgrep                      (macOS)",
+             "apt install ripgrep                       (Ubuntu/Debian)",
+             "https://github.com/BurntSushi/ripgrep#installation")
 
-    # git
+    # ── git ───────────────────────────────────────────────────────────────────
     git_path = shutil.which("git")
-    lines.append(_check("git",                         bool(git_path),
-                        git_path or "not found on PATH"))
+    lines.append(_check_line("git",                         bool(git_path),
+                              git_path or "not found on PATH"))
     if not git_path:
-        missing_tools.append("git")
+        failed = True
+        _fix(lines,
+             "brew install git                          (macOS)",
+             "apt install git                           (Ubuntu/Debian)",
+             "https://git-scm.com/downloads")
 
-    # server running check
+    # ── Nexus server ──────────────────────────────────────────────────────────
+    # Server is optional for most commands; report status but do not fail.
     from nexus.commands.serve import _read_pid, _process_running
     pid = _read_pid()
     server_running = pid is not None and _process_running(pid)
-    lines.append(_check("Nexus server",                server_running,
-                        f"running (PID {pid})" if server_running else "not running — use 'nx serve start'"))
+    lines.append(_check_line("Nexus server",                server_running,
+                              f"running (PID {pid})" if server_running else
+                              "not running (optional — needed for search-over-HTTP)"))
+    if not server_running:
+        _fix(lines, "nx serve start")
 
-    # Mixedbread (optional)
+    # ── Mixedbread (optional) ─────────────────────────────────────────────────
     mxbai_key = get_credential("mxbai_api_key")
-    lines.append(_check("Mixedbread (MXBAI_API_KEY, optional)", True,
-                        "set" if mxbai_key else "not set — only needed for --mxbai flag"))
+    lines.append(_check_line("Mixedbread (MXBAI_API_KEY, optional)", True,
+                              "set" if mxbai_key else "not set — only needed for --mxbai flag"))
 
     click.echo("\n".join(lines))
 
-    if missing:
-        click.echo("\nMissing credentials — get them here:")
-        for key in missing:
-            click.echo(f"  {key:<24} {_SIGNUP.get(key, '')}")
+    if failed:
         click.echo("\nRun 'nx config init' for an interactive setup wizard.")
-
-    if missing_tools:
-        click.echo("\nMissing tools:")
-        for tool in missing_tools:
-            click.echo(f"  • {tool} — install via your system package manager")
-
-    if missing or missing_tools:
         raise click.exceptions.Exit(1)
