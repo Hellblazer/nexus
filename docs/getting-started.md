@@ -151,7 +151,12 @@ nx memory list -p myproject
 
 ## Claude Code integration
 
-The `nx/` directory in this repo is a Claude Code plugin. Claude Code auto-discovers it when you work in any repo that contains it — no extra installation needed.
+The `nx/` directory in this repo is a Claude Code plugin. Install it via the Nexus marketplace:
+
+```bash
+/plugin marketplace add Hellblazer/nexus
+/plugin install nx@Hellblazer-nexus
+```
 
 The plugin provides 15 agents, 26 skills, session hooks, slash commands, and standard pipelines. See [nx/README.md](../nx/README.md) for details.
 

@@ -84,7 +84,7 @@ That many design documents create an information management problem. Nexus handl
 
 ## The Plugin
 
-The `nx/` directory is a Claude Code plugin. Claude Code auto-discovers it when you work in any repo that contains it. For the nexus repo itself, this happens automatically.
+The `nx/` directory is a Claude Code plugin. Install it via the Nexus marketplace (see [nx/README.md](nx/README.md) for setup).
 
 The plugin provides:
 
