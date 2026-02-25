@@ -18,7 +18,7 @@ For repos without the plugin directory, `nx install claude-code` provides lightw
 ## What You Get
 
 - **15 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **26 skills** — 5 standalone (brainstorming gate, CLI control, nx reference) + 21 agent-delegating
+- **26 skills** — 5 standalone + 15 agent-delegating + 6 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — auto-load PM context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe read-only commands skip the confirmation prompt
@@ -163,6 +163,7 @@ Defined in `registry.yaml`:
 - `/knowledge-tidy` → knowledge-tidier
 - `/pdf-process` → pdf-chromadb-processor
 - `/project-setup` → project-management-setup
+- `/deep-analysis` → deep-analyst
 - `/substantive-critique` → substantive-critic
 
 **PM commands**: `/pm-new`, `/pm-status`, `/pm-list`, `/pm-archive`, `/pm-restore`, `/pm-close`

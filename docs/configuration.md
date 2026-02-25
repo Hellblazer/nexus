@@ -19,6 +19,7 @@ Each level is deep-merged, with higher-priority values winning.
 | `chroma_database` | `CHROMA_DATABASE` | T3 |
 | `voyage_api_key` | `VOYAGE_API_KEY` | T3 (embeddings) |
 | `anthropic_api_key` | `ANTHROPIC_API_KEY` | Answer mode, PM archive |
+| `mxbai_api_key` | `MXBAI_API_KEY` | Mixedbread search (optional) |
 
 Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.config/nexus/config.yml`.
 
@@ -40,11 +41,13 @@ Place `.nexus.yml` at repo root. It is gitignored by default.
 
 ```yaml
 indexing:
-  code_extensions: [".proto", ".thrift"]    # replaces the default code extension list
-  prose_extensions: [".txt.j2", ".md.tmpl"] # replaces the default prose extension list
+  code_extensions: [".proto", ".thrift"]    # added to the built-in code set
+  prose_extensions: [".txt.j2", ".md.tmpl"] # forced to prose (wins over code)
+  rdr_paths: ["docs/rdr", "decisions"]      # directories indexed into rdr__ collection
+  include_untracked: true                   # also index untracked (but not .gitignored) files
 ```
 
-Merge behavior: nested dict keys are **additive** (both global and per-repo keys are retained). Scalar values and lists are **replacement** (the per-repo value wins entirely). For example, setting `code_extensions` replaces the global list — it does not append to it. See [Repo Indexing](repo-indexing.md) for the full extension list and override semantics.
+Merge behavior: nested dict keys are **additive** (both global and per-repo keys are retained). Scalar values and lists are **replacement** (the per-repo value wins entirely between config levels). However, `code_extensions` is additive to the **built-in** extension set — it extends the defaults, it does not replace them. `prose_extensions` wins over everything: if an extension appears in both lists, it is classified as prose. See [Repo Indexing](repo-indexing.md) for the full extension list and override semantics.
 
 ## File Locations
 

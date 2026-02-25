@@ -155,8 +155,7 @@ nx search "query" --corpus code                    # search code collections onl
 nx search "query" --corpus docs                    # search prose collections only
 nx search "query" --corpus code --corpus docs      # both, merged via reranker
 nx search "query" --corpus code --hybrid           # semantic + frecency blend
-nx search "query" --corpus code --rerank           # Voyage rerank-2.5 reranking
-nx search "query" --corpus code --hybrid --rerank  # hybrid scoring then reranking
+nx search "query" --corpus code --hybrid --no-rerank  # hybrid without cross-corpus reranking
 ```
 
 `--corpus` resolves as a prefix: `code` matches all `code__*` collections, `docs` matches
