@@ -60,5 +60,5 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN /home/node/.local/bin/uv python install 3.12 \
     && /home/node/.local/bin/uv tool install conexus --python 3.12
 
-# Verify installs
-RUN claude --version && nx --version
+# Smoke-check the installs
+RUN claude --version && nx --help | head -3

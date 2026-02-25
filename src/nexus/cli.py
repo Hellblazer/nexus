@@ -16,7 +16,7 @@ from nexus.commands.thought import thought_group
 
 
 @click.group()
-@click.version_option(package_name="nexus", prog_name="nx")
+@click.version_option(package_name="conexus", prog_name="nx")
 def main() -> None:
     """Nexus — self-hosted semantic search and knowledge management."""
 
