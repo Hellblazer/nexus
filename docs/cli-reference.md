@@ -125,6 +125,49 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 ---
 
+## nx thought
+
+Session-scoped sequential thinking chains backed by T2 (SQLite). Survives context compaction — each `add` returns the full accumulated chain from storage so Claude always has complete context in the tool result, identical to the sequential-thinking MCP server but without the external dependency.
+
+Chains are scoped per session via `os.getsid(0)` and expire after 24 hours. Different Claude Code windows are fully isolated.
+
+```
+nx thought add "**Thought 1 of ~4**
+Frame: why is the frecency score doubling after re-indexing?
+nextThoughtNeeded: true"
+```
+
+Output includes full chain text **and** MCP-equivalent metadata on every call:
+```
+Chain: 20260225-143022
+════════════════════════════════════════════════════
+**Thought 1 of ~4**
+Frame: why is the frecency score doubling after re-indexing?
+nextThoughtNeeded: true
+════════════════════════════════════════════════════
+thoughtNumber: 1
+totalThoughts: 4
+nextThoughtNeeded: true
+thoughtHistoryLength: 1
+branches: []
+Next: nx thought add "**Thought 2 of ~4** ..."
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `add CONTENT` | Append thought, return full chain + metadata |
+| `show` | Print current chain without adding |
+| `close` | Mark chain complete, clear active pointer |
+| `list` | List chains for current session |
+
+**`add` / `show` / `close` flags:** `-c` / `--chain TEXT` — target a specific chain ID (defaults to current active chain)
+
+**Thought format:** Each thought should open with `**Thought N of ~T**` followed by content and `nextThoughtNeeded: true|false`. Use `[REVISION of Thought N]`, `[BRANCH from Thought N — id]`, and `[needsMoreThoughts]` annotations as needed — all are tracked automatically.
+
+**`totalThoughts` auto-adjustment:** If `thoughtNumber` exceeds `totalThoughts` in the content, `totalThoughts` is adjusted upward automatically (matches MCP server behaviour).
+
+---
+
 ## nx scratch
 
 T1 ephemeral session notes (in-memory ChromaDB).

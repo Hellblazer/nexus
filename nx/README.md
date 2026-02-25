@@ -118,7 +118,7 @@ Skills that provide guidance directly without delegating to an agent.
 | brainstorming-gate | Design gate — requires exploration and user approval before implementation |
 | cli-controller | Expert guidance for controlling interactive CLI applications via tmux |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
-| sequential-thinking | Structured hypothesis-driven reasoning for debugging, analysis, and design |
+| sequential-thinking | Structured hypothesis-driven reasoning using `nx thought` — compaction-resilient, MCP-equivalent |
 | using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring nx plugin skills |
 
@@ -221,6 +221,7 @@ When skills delegate to agents, they use a standardized relay format defined in 
 
 - **nx store titles**: hyphens — `decision-cache-strategy`, `research-auth-patterns`
 - **nx memory projects**: `{repo}_active`, `{repo}_rdr`
+- **nx thought projects**: `{repo}_thoughts_{gid}` — session-scoped via `os.getsid(0)`, auto-expires 24h
 - **Bead IDs**: managed by `bd` CLI
 
 ### Permission Auto-Approval
@@ -229,7 +230,7 @@ The permission hook auto-approves safe read-only operations:
 
 - **beads**: `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
 - **git**: `git log`, `git diff`, `git status`, `git show`, `git branch -a`
-- **nexus**: `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx pm status`, `nx doctor`
+- **nexus**: `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx thought show/list`, `nx pm status`, `nx doctor`
 - **maven**: `mvn help:*`, `mvn dependency:tree`, `mvn dependency:analyze`
 
 Dangerous commands (force-push, `bd delete`, deploys) are always denied.
