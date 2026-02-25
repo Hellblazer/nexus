@@ -143,7 +143,8 @@ nx scratch flag <ID>          # auto-promote to T2 on session end
 
 ```bash
 nx memory put "auth uses JWT with 24h expiry" -p myproject -t auth-notes
-nx memory get -p myproject -t auth-notes
+nx memory get -p myproject -t auth-notes       # by project + title
+nx memory get 42                                # or by numeric ID
 nx memory search "JWT" -p myproject
 nx memory list -p myproject
 ```

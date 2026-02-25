@@ -590,3 +590,46 @@ def test_nx_answer_empty_string_does_not_enable_answer_mode(
         "answer_mode() should NOT be called when NX_ANSWER is empty string, "
         f"but was called {len(answer_called)} times. Output: {result.output}"
     )
+
+
+# ── _parse_where edge cases ──────────────────────────────────────────────────
+
+
+from nexus.commands.search_cmd import _parse_where
+
+
+def test_parse_where_empty_tuple_returns_none() -> None:
+    assert _parse_where(()) is None
+
+
+def test_parse_where_single_pair() -> None:
+    assert _parse_where(("lang=python",)) == {"lang": "python"}
+
+
+def test_parse_where_multiple_equals_uses_first_partition() -> None:
+    """'key=a=b=c' → key='a=b=c' (partition splits on first '=')."""
+    result = _parse_where(("key=a=b=c",))
+    assert result == {"key": "a=b=c"}
+
+
+def test_parse_where_empty_value() -> None:
+    """'key=' → key='' (empty value)."""
+    result = _parse_where(("key=",))
+    assert result == {"key": ""}
+
+
+def test_parse_where_empty_key() -> None:
+    """'=value' → ''='value' (empty key accepted by parser)."""
+    result = _parse_where(("=value",))
+    assert result == {"": "value"}
+
+
+def test_parse_where_missing_equals_raises() -> None:
+    from click import BadParameter
+    with pytest.raises(BadParameter, match="KEY=VALUE"):
+        _parse_where(("no-equals-here",))
+
+
+def test_parse_where_multiple_pairs_merged() -> None:
+    result = _parse_where(("lang=python", "type=code"))
+    assert result == {"lang": "python", "type": "code"}

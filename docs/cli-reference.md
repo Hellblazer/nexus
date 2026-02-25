@@ -16,7 +16,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 |------|-------------|
 | `QUERY` (positional) | Search query text |
 | `PATH` (positional, optional) | Scope search to a directory |
-| `--corpus NAME` | Collection to search (repeatable: `code`, `docs`, `knowledge`, `code__myrepo`) |
+| `--corpus NAME` | Collection to search (repeatable; default: `knowledge`, `code`, `docs`) |
 | `-a` / `--answer` | Synthesize cited answer (requires Anthropic key) |
 | `--agentic` | Multi-step refinement via Haiku |
 | `--hybrid` | Semantic + ripgrep frecency (code corpora only) |
@@ -99,7 +99,8 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | Subcommand | Description |
 |------------|-------------|
 | `put CONTENT --project NAME --title NAME` | Write a memory entry |
-| `get --project NAME --title NAME` | Read entry by name |
+| `get ID` | Read entry by numeric ID |
+| `get --project NAME --title NAME` | Read entry by project + title |
 | `search QUERY` | FTS5 keyword search |
 | `list --project NAME` | List entries in project |
 | `expire` | Remove expired entries |
@@ -177,7 +178,7 @@ nx collection list
 | `list` | All cloud collections with document counts |
 | `info NAME` | Details for one collection |
 | `verify NAME` | Existence check + document count |
-| `delete NAME --confirm` | Delete collection (irreversible) |
+| `delete NAME --yes` | Delete collection (irreversible); aliases: `-y`, `--confirm` |
 
 **`verify` flags:**
 

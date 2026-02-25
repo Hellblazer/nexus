@@ -28,6 +28,86 @@ def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CHROMA_DATABASE", "test-db")
 
 
+# ── list ─────────────────────────────────────────────────────────────────────
+
+
+def test_list_empty(runner: CliRunner, env_creds) -> None:
+    """Empty cloud returns 'No collections' message."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = []
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "list"])
+    assert result.exit_code == 0
+    assert "No collections" in result.output
+
+
+def test_list_shows_names_and_counts(runner: CliRunner, env_creds) -> None:
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [
+        {"name": "code__myrepo", "count": 42},
+        {"name": "knowledge__topic", "count": 7},
+    ]
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "list"])
+    assert result.exit_code == 0
+    assert "code__myrepo" in result.output
+    assert "42" in result.output
+    assert "knowledge__topic" in result.output
+
+
+# ── info not found ───────────────────────────────────────────────────────────
+
+
+def test_info_not_found(runner: CliRunner, env_creds) -> None:
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = []
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "info", "no_such"])
+    assert result.exit_code != 0
+    assert "not found" in result.output.lower()
+
+
+# ── delete ───────────────────────────────────────────────────────────────────
+
+
+def test_delete_with_yes_flag(runner: CliRunner, env_creds) -> None:
+    mock_db = MagicMock()
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "old", "--yes"])
+    assert result.exit_code == 0
+    assert "Deleted" in result.output
+    mock_db.delete_collection.assert_called_once_with("old")
+
+
+def test_delete_aborts_without_confirmation(runner: CliRunner, env_creds) -> None:
+    mock_db = MagicMock()
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "old"], input="n\n")
+    assert result.exit_code != 0
+    mock_db.delete_collection.assert_not_called()
+
+
+def test_delete_confirm_alias(runner: CliRunner, env_creds) -> None:
+    """--confirm is accepted as alias for --yes."""
+    mock_db = MagicMock()
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "c", "--confirm"])
+    assert result.exit_code == 0
+    mock_db.delete_collection.assert_called_once()
+
+
+# ── verify not found ─────────────────────────────────────────────────────────
+
+
+def test_verify_not_found(runner: CliRunner, env_creds) -> None:
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = []
+    with patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "verify", "missing"])
+    assert result.exit_code != 0
+    assert "not found" in result.output.lower()
+
+
 # ── nexus-sg7: verify --deep ──────────────────────────────────────────────────
 
 

@@ -143,3 +143,55 @@ def test_toml_uses_line_chunking_not_ast() -> None:
     chunks = chunk_file(Path("pyproject.toml"), content)
     assert chunks
     assert not chunks[0].get("ast_chunked", False)
+
+
+# ── Edge cases: empty / whitespace / single-line ─────────────────────────────
+
+
+def test_line_chunk_empty_string_returns_empty() -> None:
+    assert _line_chunk("") == []
+
+
+def test_chunk_file_empty_content_returns_empty(tmp_path: Path) -> None:
+    """Truly empty content (no lines at all) produces no chunks."""
+    f = tmp_path / "blank.txt"
+    f.write_text("")
+    assert chunk_file(f, f.read_text()) == []
+
+
+def test_chunk_file_single_line(tmp_path: Path) -> None:
+    """Single-line file produces exactly one chunk."""
+    f = tmp_path / "one.txt"
+    f.write_text("only line")
+    chunks = chunk_file(f, f.read_text())
+    assert len(chunks) == 1
+    assert chunks[0]["line_start"] == 1
+    assert chunks[0]["line_end"] == 1
+    assert "only line" in chunks[0]["text"]
+
+
+def test_chunk_file_ast_returns_empty_nodes_falls_back(tmp_path: Path) -> None:
+    """When AST splitter returns empty node list, fall back to line chunks."""
+    f = tmp_path / "empty_ast.py"
+    f.write_text("x = 1\n")
+    with patch("nexus.chunker._make_code_splitter", return_value=[]):
+        chunks = chunk_file(f, f.read_text())
+    assert len(chunks) >= 1
+    assert all(c["ast_chunked"] is False for c in chunks)
+
+
+def test_line_chunk_file_shorter_than_chunk_lines() -> None:
+    """File with fewer lines than chunk_lines → single chunk covering all lines."""
+    content = "\n".join(f"line {i}" for i in range(5))
+    chunks = _line_chunk(content, chunk_lines=150)
+    assert len(chunks) == 1
+    assert chunks[0][0] == 1
+    assert chunks[0][1] == 5
+
+
+def test_line_chunk_exact_chunk_lines() -> None:
+    """File with exactly chunk_lines lines → single chunk."""
+    content = "\n".join(f"line {i}" for i in range(10))
+    chunks = _line_chunk(content, chunk_lines=10)
+    assert len(chunks) == 1
+    assert chunks[0][1] == 10
