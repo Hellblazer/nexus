@@ -81,12 +81,22 @@ is already indexed and findable by agents working on related problems.
 
 ## Project Management Integration
 
-- `nx pm` tracks RDR-driven project phases. An RDR can represent a phase gate
-  or a prerequisite for entering the next phase.
-- `/rdr-close` creates beads (epic + tasks) that integrate with `bd` for
-  implementation tracking.
-- `nx pm reference "topic"` searches across all archived project syntheses,
-  including RDR decisions, surfacing relevant context for planning.
+PM tracks execution (phases, blockers, working state); RDR tracks decisions
+(research, design, review). They share T2 as a substrate but live in separate
+namespaces — `{repo}` for PM entries (tagged `pm`) and `{repo}_rdr` for RDR
+metadata.
+
+Automated connections:
+
+- `/rdr-close` creates beads (epic + task beads) for implementation tracking.
+  The `epic_bead` field in each RDR's T2 record links the decision to its
+  work items.
+- `nx pm reference "topic"` searches archived project syntheses, which include
+  RDR decisions — prior art surfaces during planning.
+- `rdr_hook.py` reports RDR document count and indexing status at session start.
+
+Manual convention: phase context documents reference the RDRs that drove them,
+but this is not enforced by tooling.
 
 ---
 
@@ -101,8 +111,9 @@ write another RDR:
 2. **During research**: `/rdr-research` can delegate to `deep-research-synthesizer`
    or `codebase-deep-analyzer` for heavy investigation.
 3. **At gate time**: the `substantive-critic` agent provides independent review.
-4. **After close**: implementation agents receive RDR context via the
-   `SubagentStart` hook, which injects T2 metadata so spawned agents know
-   about active and recently-closed RDRs.
+4. **After close**: `/rdr-close` creates beads (epic + tasks), giving
+   implementation agents concrete work items tracked via `bd`. The
+   `SubagentStart` hook injects PM context and the active bead, so spawned
+   agents know what task they're continuing.
 5. **Post-implementation**: the post-mortem template captures what was learned,
    which often feeds into the next RDR.

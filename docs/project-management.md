@@ -145,6 +145,12 @@ PM tracks execution — phases, blockers, working state. RDR tracks decisions �
 research, design, review. They're complementary but independent: you can use
 either without the other.
 
-When you do use both, the connection is manual: close an RDR, then update the
-current PM phase context to reference it. There's no automated link between
-the two — just a convention that phase docs mention the RDRs that drove them.
+When you use both, some connections are automated and some are manual:
+
+- **Automated**: `/rdr-close` creates beads (epic + task beads) for
+  implementation tracking. The `epic_bead` field in each RDR's T2 metadata
+  provides a machine-readable link from decision to work items.
+- **Automated**: `nx pm reference "topic"` searches archived project
+  syntheses, which include RDR decisions — prior art surfaces during planning.
+- **Manual**: updating the current PM phase context to reference the RDRs that
+  drove it. This is a convention, not enforced by tooling.
