@@ -1,11 +1,22 @@
+import logging
+
 import pytest
 from pathlib import Path
 
 import chromadb
+import structlog
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
+
+
+def pytest_configure(config):
+    """Configure structlog at DEBUG level so warnings/errors surface during tests."""
+    logging.basicConfig(level=logging.DEBUG, format="%(message)s")
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+    )
 
 
 @pytest.fixture
