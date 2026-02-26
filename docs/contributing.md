@@ -77,8 +77,14 @@ Do not bump these without testing the full chunking pipeline.
 
 The `main` branch requires CI to pass before merging. Configure branch protection at
 https://github.com/Hellblazer/nexus/settings/branches:
-- Require status checks: `pytest (3.12)` and `pytest (3.13)`
+
+- **Rule**: `main`
+- Require a pull request before merging
+- Require status checks to pass before merging:
+  - `pytest (3.12)`
+  - `pytest (3.13)`
 - Require branches to be up to date before merging
+- Do not allow bypassing the above settings
 
 ## License
 
@@ -115,12 +121,11 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
    git commit -m "Release vX.Y.Z"
    ```
 
-6. **Create an annotated tag** (message becomes the GitHub release body)
+6. **Create a tag**
    ```bash
-   git tag -a vX.Y.Z -m "Release X.Y.Z
-
-   [Paste the CHANGELOG section for this version here]"
+   git tag vX.Y.Z
    ```
+   Release notes are extracted automatically from the matching `## [X.Y.Z]` section in `CHANGELOG.md`.
 
 7. **Push branch and tag**
    ```bash
@@ -134,9 +139,22 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
 9. **Yank pre-release versions** (if applicable)
    Go to https://pypi.org/manage/project/conexus/releases/ and yank any versions that should not be resolved by `pip install conexus`.
 
-### One-time PyPI Trusted Publisher Setup
+### One-time Release Infrastructure Setup
 
-Before the first release, configure PyPI to trust the GitHub Actions OIDC token:
+Two things to configure before the first automated release:
+
+#### 1. GitHub `pypi-release` Environment
+
+The release workflow uses a GitHub Actions environment named `pypi-release` to gate PyPI publishing. Create it at https://github.com/Hellblazer/nexus/settings/environments:
+
+1. Click "New environment"
+2. Name: `pypi-release`
+3. Optionally add required reviewers (manual approval gate before publish)
+4. Save
+
+#### 2. PyPI Trusted Publisher
+
+Configure PyPI to accept OIDC tokens from the `pypi-release` environment:
 
 1. Go to https://pypi.org/manage/project/conexus/settings/publishing/
 2. Click "Add a new publisher"
@@ -144,7 +162,7 @@ Before the first release, configure PyPI to trust the GitHub Actions OIDC token:
    - **Owner**: `Hellblazer`
    - **Repository**: `nexus`
    - **Workflow filename**: `release.yml`
-   - **Environment name**: (leave blank)
+   - **Environment name**: `pypi-release`
 4. Click "Add"
 
-This eliminates the need for a `PYPI_API_TOKEN` secret. GitHub Actions authenticates directly via OIDC.
+The environment name in PyPI must match exactly — `pypi-release` — or OIDC authentication will fail. This eliminates the need for a `PYPI_API_TOKEN` secret.
