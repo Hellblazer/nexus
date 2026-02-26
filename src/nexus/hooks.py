@@ -11,7 +11,10 @@ import sqlite3
 import structlog
 
 from nexus.db.t2 import T2Database
-from nexus.session import generate_session_id, session_file_path, write_session_file
+from nexus.session import (
+    generate_session_id, session_file_path, write_session_file,
+    write_claude_session_id,
+)
 
 
 _log = structlog.get_logger()
@@ -45,17 +48,23 @@ def _infer_repo() -> str:
 
 # -- SessionStart -------------------------------------------------------------
 
-def session_start() -> str:
+def session_start(claude_session_id: str | None = None) -> str:
     """Execute the SessionStart hook.
 
-    1. Generate UUID4 session ID and write to getsid(0)-scoped session file.
+    1. Write stable session ID so all Bash subprocesses share one namespace.
+       Uses the Claude session ID if provided (from hook stdin JSON), otherwise
+       generates a UUID4. Written to both the flat current_session file and the
+       legacy getsid-keyed file.
     2. Detect PM project via T2 query.
     3. If PM: inject computed PM resume (<=2000 chars) via pm_resume().
        Else: print recent memory summary (<=10 entries x 500 chars).
 
     Returns the output string to be printed.
     """
-    session_id = generate_session_id()
+    session_id = claude_session_id or generate_session_id()
+    # Write flat file — stable across all Bash subprocesses (thought, scratch)
+    write_claude_session_id(session_id)
+    # Write legacy getsid-keyed file — used by SessionEnd for T1 flush
     write_session_file(session_id)
 
     lines: list[str] = [f"Nexus ready. T1 scratch initialized (session: {session_id})."]

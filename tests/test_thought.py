@@ -34,12 +34,13 @@ def runner():
 
 @pytest.fixture()
 def db(tmp_path):
-    """Isolated T2 database with fixed repo name and session GID."""
+    """Isolated T2 database with fixed repo name and session ID."""
     db_path = tmp_path / "memory.db"
     with (
         patch("nexus.commands.thought.default_db_path", return_value=db_path),
         patch("nexus.commands.thought._repo_name", return_value="testrepo"),
-        patch("os.getsid", return_value=42),
+        patch("nexus.commands.thought.read_claude_session_id", return_value="test-session-42"),
+        patch("nexus.commands.thought.write_claude_session_id"),
     ):
         yield db_path
 
@@ -197,21 +198,21 @@ def test_parse_thoughts_returns_correct_metadata():
 
 
 # ── Category 4: Session isolation ─────────────────────────────────────────────
-# Different session GIDs must be fully isolated — same guarantee as separate
+# Different session IDs must be fully isolated — same guarantee as separate
 # MCP server instances.
 
-def test_session_different_gids_fully_isolated(runner, db):
-    with patch("os.getsid", return_value=1111):
+def test_session_different_ids_fully_isolated(runner, db):
+    with patch.dict(os.environ, {"NEXUS_SESSION_ID": "session-A"}):
         add(runner, "**Thought 1 of ~2**\nSession A\nnextThoughtNeeded: true")
-    with patch("os.getsid", return_value=2222):
+    with patch.dict(os.environ, {"NEXUS_SESSION_ID": "session-B"}):
         result = runner.invoke(thought_group, ["show"])
     assert "No active thought chain" in result.output
 
 
-def test_session_same_gid_shares_state(runner, db):
-    with patch("os.getsid", return_value=9999):
+def test_session_same_id_shares_state(runner, db):
+    with patch.dict(os.environ, {"NEXUS_SESSION_ID": "shared-session"}):
         add(runner, "**Thought 1 of ~2**\nShared\nnextThoughtNeeded: true")
-    with patch("os.getsid", return_value=9999):
+    with patch.dict(os.environ, {"NEXUS_SESSION_ID": "shared-session"}):
         result = runner.invoke(thought_group, ["show"])
     assert "**Thought 1 of ~2**" in result.output
 
@@ -233,42 +234,40 @@ def test_session_multiple_chains_coexist_in_same_session(runner, db):
     assert "beta" in list_result.output
 
 
-def test_session_project_namespace_includes_gid():
-    """Project namespace must embed the session GID to guarantee isolation."""
+def test_session_project_namespace_includes_session_id():
+    """Project namespace must embed the Claude session ID to guarantee isolation."""
     from nexus.commands.thought import _session_project
-    with patch("os.getsid", return_value=12345):
+    with (
+        patch("nexus.commands.thought.read_claude_session_id", return_value="test-sid-123"),
+        patch("nexus.commands.thought.write_claude_session_id"),
+    ):
         project = _session_project("myrepo")
-    assert "12345" in project
+    assert "test-sid-123" in project
     assert "myrepo" in project
 
 
-def test_session_nexus_session_id_overrides_getsid():
-    """NEXUS_SESSION_ID env var must override os.getsid for cross-process sharing."""
+def test_session_nexus_session_id_overrides_claude_session():
+    """NEXUS_SESSION_ID env var must override read_claude_session_id for cross-process sharing."""
     from nexus.commands.thought import _session_project
     with (
-        patch("os.getsid", return_value=99999),
+        patch("nexus.commands.thought.read_claude_session_id", return_value="from-file"),
+        patch("nexus.commands.thought.write_claude_session_id"),
         patch.dict(os.environ, {"NEXUS_SESSION_ID": "e2e-test-12345"}),
     ):
         project = _session_project("myrepo")
     assert "e2e-test-12345" in project
-    assert "99999" not in project
+    assert "from-file" not in project
     assert "myrepo" in project
 
 
 def test_session_nexus_session_id_cross_process_sharing(runner, db):
-    """Two processes with different GIDs but same NEXUS_SESSION_ID share the chain."""
-    # "Process A" (gid 1111) writes a thought with shared session ID
-    with (
-        patch("os.getsid", return_value=1111),
-        patch.dict(os.environ, {"NEXUS_SESSION_ID": "shared-e2e-key"}),
-    ):
+    """Two subprocesses with different session files but same NEXUS_SESSION_ID share the chain."""
+    # "Process A" writes a thought with shared session ID
+    with patch.dict(os.environ, {"NEXUS_SESSION_ID": "shared-e2e-key"}):
         add(runner, "**Thought 1 of ~2**\nFrom process A\nnextThoughtNeeded: true")
 
-    # "Process B" (gid 2222, different GID) reads via same session ID
-    with (
-        patch("os.getsid", return_value=2222),
-        patch.dict(os.environ, {"NEXUS_SESSION_ID": "shared-e2e-key"}),
-    ):
+    # "Process B" reads via same session ID (NEXUS_SESSION_ID overrides any file read)
+    with patch.dict(os.environ, {"NEXUS_SESSION_ID": "shared-e2e-key"}):
         result = runner.invoke(thought_group, ["show"])
 
     assert "From process A" in result.output

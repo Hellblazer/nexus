@@ -26,6 +26,7 @@ import click
 
 from nexus.commands._helpers import default_db_path
 from nexus.db.t2 import T2Database
+from nexus.session import read_claude_session_id, write_claude_session_id
 
 _DIVIDER = "═" * 52
 _TTL_CHAIN = 1      # days — session lifetime
@@ -80,10 +81,31 @@ def _extract_branches(thoughts: list[dict]) -> list[str]:
 # ── Session / storage helpers ─────────────────────────────────────────────────
 
 def _session_project(repo: str) -> str:
-    # Allow override via env var for testing (e.g., e2e tests that run nx from
-    # a different process than Claude's Bash subprocesses).
-    session_key = os.environ.get("NEXUS_SESSION_ID") or str(os.getsid(0))
-    return f"{repo}_thoughts_{session_key}"
+    """Return the T2 project namespace for the current session.
+
+    Priority:
+    1. NEXUS_SESSION_ID env var (e2e tests / explicit override)
+    2. ~/.config/nexus/current_session file written by SessionStart hook
+       with the Claude session ID — stable across all Bash subprocesses.
+    3. Fallback: generate a timestamp ID and write it so subsequent calls
+       in the same subprocess chain share it.
+
+    os.getsid(0) is intentionally NOT used: Claude Code spawns each Bash(...)
+    tool call in its own process session, so getsid differs per invocation.
+    """
+    if key := os.environ.get("NEXUS_SESSION_ID"):
+        return f"{repo}_thoughts_{key}"
+
+    if key := read_claude_session_id():
+        return f"{repo}_thoughts_{key}"
+
+    # No session file yet — generate one and write it for subsequent calls.
+    key = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S%f")
+    try:
+        write_claude_session_id(key)
+    except OSError:
+        pass
+    return f"{repo}_thoughts_{key}"
 
 
 def _repo_name() -> str:
