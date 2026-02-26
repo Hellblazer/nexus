@@ -17,3 +17,4 @@ htmlcov/
 .ruff_cache/
 .env
 /coverage.json
+tests/e2e/.claude-auth/

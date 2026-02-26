@@ -80,8 +80,10 @@ def _extract_branches(thoughts: list[dict]) -> list[str]:
 # ── Session / storage helpers ─────────────────────────────────────────────────
 
 def _session_project(repo: str) -> str:
-    gid = os.getsid(0)
-    return f"{repo}_thoughts_{gid}"
+    # Allow override via env var for testing (e.g., e2e tests that run nx from
+    # a different process than Claude's Bash subprocesses).
+    session_key = os.environ.get("NEXUS_SESSION_ID") or str(os.getsid(0))
+    return f"{repo}_thoughts_{session_key}"
 
 
 def _repo_name() -> str:

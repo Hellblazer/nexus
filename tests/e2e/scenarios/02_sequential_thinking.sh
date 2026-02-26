@@ -10,23 +10,29 @@ scenario "02 sequential-thinking: build a thought chain"
 claude_start
 
 # Ask Claude to work through a problem using nx:sequential-thinking.
-# We want it to actually invoke the skill and call nx thought add.
-claude_prompt "Use nx:sequential-thinking to think through this problem: how should the nx CLI handle rate limiting from Voyage AI during bulk indexing? Work through at least 4 thoughts."
+# We explicitly tell Claude to use nx thought add (Bash tool) so it stores
+# thoughts in T2 rather than writing them only as conversational text.
+claude_prompt "Use the nx:sequential-thinking skill (from the nx plugin). Think through: how should the nx CLI handle rate limiting from Voyage AI during bulk indexing? For each thought, call Bash to run: nx thought add \"**Thought N of ~5** [content] nextThoughtNeeded: true\". Do at least 4 thoughts."
 
 echo "    Waiting for thought chain to build (up to 3 min)..."
-if poll_for "Thought [0-9]|thought.*[0-9]|nx thought add|✓.*thought" 180 "thought chain building"; then
-    pass "Claude invoked sequential-thinking and built thoughts"
+# Require evidence of the actual Bash tool call, not just text containing "thought"
+if poll_for "nx thought add|Bash.*thought add|✓.*Bash" 180 "thought chain building"; then
+    pass "Claude called nx thought add to build thoughts"
 else
     fail "No evidence of thought chain being built"
+    echo "    --- pane at timeout ---"
+    capture -30 | sed 's/^/    | /'
+    echo "    ---"
 fi
 
 claude_wait 60
 
-# Verify T2 has the chain
+# Verify T2 has the chain — nx thought show returns "totalThoughts: N" only
+# when a real chain exists. "No active thought chain." does NOT contain that.
 echo "    Verifying T2 has the thought chain..."
 assert_cmd "T2 has active thought chain" \
-    "nx thought list 2>&1" \
-    "chain|session|thought"
+    "nx thought show 2>&1" \
+    "totalThoughts: [0-9]"
 
 # Capture the chain ID / content so we can verify it survives compaction
 chain_before=$(crun "nx thought show 2>&1" || true)
@@ -47,10 +53,11 @@ sleep 5
 poll_for "❯|compacted|summarized|context" 60 "compaction complete" || true
 sleep 3
 
-# Verify T2 chain still exists after compaction
+# Verify T2 chain still exists after compaction.
+# "totalThoughts: N" only appears in real chain output; not in the no-chain message.
 assert_cmd "T2 chain persists after /compact" \
     "nx thought show 2>&1" \
-    "Thought [0-9]|thought.*[0-9]|totalThoughts"
+    "totalThoughts: [0-9]"
 
 # Ask Claude to continue — it should be able to resume the chain
 echo "    Asking Claude to add more thoughts after compaction..."

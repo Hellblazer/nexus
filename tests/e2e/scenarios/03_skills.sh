@@ -8,8 +8,8 @@
 scenario "03 skills: nx:nexus triggers and searches codebase"
 
 # First, index the workspace so there's something to search
-echo "    Indexing /workspace (this may take a minute)..."
-crun "nx index repo /workspace --no-frecency 2>&1 | tail -5" || true
+echo "    Indexing $REPO_ROOT (this may take a minute)..."
+crun "nx index repo '$REPO_ROOT' 2>&1 | tail -5" || true
 
 claude_start
 

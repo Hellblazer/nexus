@@ -242,6 +242,38 @@ def test_session_project_namespace_includes_gid():
     assert "myrepo" in project
 
 
+def test_session_nexus_session_id_overrides_getsid():
+    """NEXUS_SESSION_ID env var must override os.getsid for cross-process sharing."""
+    from nexus.commands.thought import _session_project
+    with (
+        patch("os.getsid", return_value=99999),
+        patch.dict(os.environ, {"NEXUS_SESSION_ID": "e2e-test-12345"}),
+    ):
+        project = _session_project("myrepo")
+    assert "e2e-test-12345" in project
+    assert "99999" not in project
+    assert "myrepo" in project
+
+
+def test_session_nexus_session_id_cross_process_sharing(runner, db):
+    """Two processes with different GIDs but same NEXUS_SESSION_ID share the chain."""
+    # "Process A" (gid 1111) writes a thought with shared session ID
+    with (
+        patch("os.getsid", return_value=1111),
+        patch.dict(os.environ, {"NEXUS_SESSION_ID": "shared-e2e-key"}),
+    ):
+        add(runner, "**Thought 1 of ~2**\nFrom process A\nnextThoughtNeeded: true")
+
+    # "Process B" (gid 2222, different GID) reads via same session ID
+    with (
+        patch("os.getsid", return_value=2222),
+        patch.dict(os.environ, {"NEXUS_SESSION_ID": "shared-e2e-key"}),
+    ):
+        result = runner.invoke(thought_group, ["show"])
+
+    assert "From process A" in result.output
+
+
 # ── Category 5 (MCP-mirrored): Direct port of lib.test.ts ─────────────────────
 # Each test below maps 1:1 to a test in the MCP server's own test suite.
 # Where the MCP returns JSON metadata, nx thought emits text fields — we
