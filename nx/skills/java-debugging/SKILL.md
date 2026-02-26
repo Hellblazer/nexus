@@ -25,7 +25,7 @@ Delegates to the **java-debugger** agent (model: opus).
 3. Use LSP.findReferences to trace usage
 4. Use LSP.hover for type information
 5. Form hypothesis based on LSP evidence
-6. Validate with sequential thinking
+6. Validate with `mcp__sequential-thinking__sequentialthinking`
 ```
 
 ## When This Skill Activates
@@ -63,7 +63,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Debugging Methodology
 
-The java-debugger uses sequential thinking:
+The java-debugger uses `mcp__sequential-thinking__sequentialthinking`:
 1. Form initial hypotheses about root cause
 2. Identify evidence needed to validate/refute each hypothesis
 3. Gather evidence from code, tests, logs

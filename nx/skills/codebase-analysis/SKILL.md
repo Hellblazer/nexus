@@ -42,7 +42,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Analysis Methodology
 
-The codebase-deep-analyzer uses sequential thinking:
+The codebase-deep-analyzer uses `mcp__sequential-thinking__sequentialthinking`:
 1. Form hypothesis about architecture (e.g., "This appears to be MVC pattern")
 2. Gather evidence from code structure, naming, dependencies
 3. Validate/refute hypothesis against actual code

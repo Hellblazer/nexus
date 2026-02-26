@@ -132,7 +132,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Hypothesis Results**: Document with confidence levels
 - **Relationship Maps**: Include as `--tags` in nx store documents
 - **Recommendations**: Include in relay to downstream agent
-- **Analysis Chain**: Use the `nx:sequential-thinking` skill for hypothesis-driven investigation of complex behaviors.
+- **Analysis Chain**: Use `mcp__sequential-thinking__sequentialthinking` for hypothesis-driven investigation of complex behaviors.
 
 **When to Use**: Unexplained system behavior, performance mysteries, multi-component interactions, root cause analysis.
 
@@ -149,7 +149,7 @@ Thought 8: Identify what could still falsify the explanation
 Thought 9: Synthesize findings with confidence levels and remaining uncertainties
 ```
 
-Set `needsMoreThoughts: true` to continue, `[REVISION of Thought N]` to correct earlier reasoning.
+Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to correct earlier reasoning.
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
@@ -218,7 +218,7 @@ Your analysis integrates with:
 - **deep-research-synthesizer**: For gathering background information
 - **knowledge-tidier**: For cleaning up analysis outputs
 - **plan-auditor**: When analysis leads to solution proposals
-- **Sequential Thought server**: For structured reasoning
+- **mcp__sequential-thinking__sequentialthinking**: For structured reasoning
 - **nx store**: For storing analysis findings and relationships (`nx store put`)
 
 You are not just an analyst but a detective, scientist, and advisor rolled into one. Your systematic approach, intellectual honesty, and comprehensive methodology ensure that complex problems are not just understood but mastered, with clear paths forward based on solid evidence and rigorous analysis.

@@ -689,14 +689,18 @@ class TestHookScriptFiles:
         """Return list of (event, path) for all $CLAUDE_PLUGIN_ROOT/... references."""
         import json
         import re
-        hooks = json.loads(self.HOOKS_PATH.read_text())
+        data = json.loads(self.HOOKS_PATH.read_text())
+        # Support both flat {"EventName": [...]} and nested {"hooks": {"EventName": [...]}}
+        events = data.get("hooks", data)
         results = []
-        for event, entries in hooks.items():
+        for event, entries in events.items():
             for entry in entries:
-                cmd = entry.get("command", "")
-                # Extract $CLAUDE_PLUGIN_ROOT/relative/path
-                for match in re.finditer(r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"]+)", cmd):
-                    results.append((event, match.group(1)))
+                # New format: each entry has a "hooks" sub-array of {type, command} dicts
+                sub_hooks = entry.get("hooks", [entry]) if isinstance(entry, dict) else []
+                for sub_entry in sub_hooks:
+                    cmd = sub_entry.get("command", "") if isinstance(sub_entry, dict) else ""
+                    for match in re.finditer(r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"]+)", cmd):
+                        results.append((event, match.group(1)))
         return results
 
     def test_hooks_json_exists(self) -> None:
@@ -706,10 +710,14 @@ class TestHookScriptFiles:
         pytest.param(ev, rp, id=f"{ev}:{rp}")
         for ev, rp in (lambda hooks_path=PLUGIN_DIR / "hooks" / "hooks.json": [
             (event, match)
-            for event, entries in __import__("json").loads(hooks_path.read_text()).items()
+            for event, entries in (lambda d: d.get("hooks", d))(
+                __import__("json").loads(hooks_path.read_text())
+            ).items()
             for entry in entries
+            for sub_entry in (entry.get("hooks", [entry]) if isinstance(entry, dict) else [])
             for match in __import__("re").findall(
-                r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"]+)", entry.get("command", "")
+                r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"]+)",
+                sub_entry.get("command", "") if isinstance(sub_entry, dict) else ""
             )
         ])()
     ])

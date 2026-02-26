@@ -45,7 +45,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Critique Methodology
 
-The agent uses sequential thinking:
+The agent uses `mcp__sequential-thinking__sequentialthinking`:
 1. Establish context and purpose of artifact
 2. Identify criteria/specifications it should conform to
 3. Gather evidence from nx store (`nx search --corpus knowledge`) and related artifacts

@@ -98,7 +98,7 @@ Your review format should be:
 
 ## Structured Review with Sequential Thinking
 
-Use the `nx:sequential-thinking` skill for systematic review of complex code changes.
+Use `mcp__sequential-thinking__sequentialthinking` for systematic review of complex code changes.
 
 **When to Use**: Large PRs, architectural changes, security-sensitive code, unfamiliar codebases.
 

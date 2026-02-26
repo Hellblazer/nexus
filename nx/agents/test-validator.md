@@ -109,7 +109,7 @@ For Maven projects:
 
 ## Systematic Analysis with Sequential Thinking
 
-Use the `nx:sequential-thinking` skill for systematic test failure analysis and coverage assessment.
+Use `mcp__sequential-thinking__sequentialthinking` for systematic test failure analysis and coverage assessment.
 
 **When to Use**: Multiple test failures, flaky tests, coverage gap analysis, test suite health assessment.
 
@@ -133,7 +133,7 @@ Thought 3: Analyze why gaps exist (hard to test? untestable design?)
 Thought 4: Recommend test additions with specific scenarios
 ```
 
-Set `needsMoreThoughts: true` to continue analysis, `isRevision: true` to correct earlier assessment.
+Set `needsMoreThoughts: true` to continue analysis, use `isRevision: true, revisesThought: N` to correct earlier assessment.
 
 ## Beads Integration
 

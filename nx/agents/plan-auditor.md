@@ -102,7 +102,7 @@ Plans referencing non-existent code are flagged during audit.
 
 ## Sequential Thinking Process
 
-Use the `nx:sequential-thinking` skill for each significant audit finding. Prevents false positives from incomplete evidence.
+Use `mcp__sequential-thinking__sequentialthinking` for each significant audit finding. Prevents false positives from incomplete evidence.
 
 **When to Use**: Suspicious plan element, apparent gap, unvalidated assumption, unclear dependency.
 
@@ -117,7 +117,7 @@ Thought 6: If confirmed, classify severity (blocker / significant / minor) and s
 Thought 7: If refuted, record why the concern was unfounded (prevents re-raising it)
 ```
 
-Set `needsMoreThoughts: true` to continue, `[REVISION of Thought N]` to update severity when additional evidence changes the picture.
+Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to update severity when additional evidence changes the picture.
 
 You will follow this systematic approach:
 

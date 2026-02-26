@@ -31,5 +31,11 @@ if command -v bd &> /dev/null; then
   echo "  Blocked: $BLOCKED"
 fi
 
+# 3. Install sequential-thinking MCP server
+echo 'Installing sequential-thinking MCP server...'
+claude mcp add sequential-thinking -- npx -y @modelcontextprotocol/server-sequential-thinking 2>/dev/null \
+  && echo '✓ sequential-thinking MCP server registered' \
+  || echo '✓ sequential-thinking MCP server already registered'
+
 echo ''
 echo '=== Setup Complete ==='

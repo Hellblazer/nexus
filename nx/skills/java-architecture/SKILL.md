@@ -24,7 +24,7 @@ Delegates to the **java-architect-planner** agent (model: opus).
 2. Use LSP.documentSymbol to map key classes
 3. Use LSP.goToImplementation to trace patterns
 4. Use LSP.findReferences to understand usage
-5. Synthesize findings with sequential thinking
+5. Synthesize findings with `mcp__sequential-thinking__sequentialthinking`
 6. Design architecture with clear boundaries
 ```
 
@@ -68,7 +68,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Architecture Methodology
 
-The java-architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then sequential thinking:
+The java-architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then `mcp__sequential-thinking__sequentialthinking`:
 1. Understand system architecture and integration patterns
 2. Synthesize findings into architectural approach
 3. Define component boundaries and interfaces

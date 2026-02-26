@@ -45,7 +45,7 @@ Systematically review, validate, and consolidate information across knowledge ba
 
 ## Workflow
 
-Use the `nx:sequential-thinking` skill when making retention decisions. Prevents discarding information that is still valid.
+Use `mcp__sequential-thinking__sequentialthinking` when making retention decisions. Prevents discarding information that is still valid.
 
 **When to Use**: Ambiguous staleness, apparent contradictions between entries, entries that may be superseded.
 
@@ -60,7 +60,7 @@ Thought 6: Evaluate — is the hypothesis supported? Is the entry still valid?
 Thought 7: Decide: keep, update, merge, or discard — with explicit justification
 ```
 
-Set `needsMoreThoughts: true` to continue, `[REVISION of Thought N]` to update reasoning when new evidence changes the picture.
+Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to update reasoning when new evidence changes the picture.
 
 ### Phase 1: Inventory
 1. List all relevant documents in nx T3 store: `nx store list --collection knowledge`

@@ -42,7 +42,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Investigation Methodology
 
-The deep-analyst uses sequential thinking:
+The deep-analyst uses `mcp__sequential-thinking__sequentialthinking`:
 1. Form initial hypothesis about the problem
 2. Identify evidence needed to validate/refute
 3. Gather evidence systematically (code, logs, metrics)
