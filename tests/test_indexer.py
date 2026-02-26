@@ -929,3 +929,90 @@ def test_should_not_ignore_regular_files() -> None:
 
     for name in ("main.py", "README.md", "pyproject.toml", "go.mod"):
         assert not _should_ignore(Path(name), DEFAULT_IGNORE), f"{name} should not be ignored"
+
+
+# ── empty-string filtering ────────────────────────────────────────────────────
+
+def _make_voyage_mock(n_embeddings: int) -> MagicMock:
+    mock_result = MagicMock(spec=EmbeddingsObject)
+    mock_result.embeddings = [[float(i)] * 3 for i in range(n_embeddings)]
+    mock_voyage = MagicMock()
+    mock_voyage.embed.return_value = mock_result
+    return mock_voyage
+
+
+def test_index_code_file_skips_empty_text_chunks(tmp_path: Path) -> None:
+    """Chunks with empty text are silently filtered before embedding.
+
+    Regression test for: voyageai.error.InvalidRequestError: Input cannot contain
+    empty strings or empty lists.
+    """
+    from nexus.indexer import _index_code_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "main.py"
+    file_.write_text("x = 1\n")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    # chunker returns two chunks: one valid, one empty
+    chunks = [
+        {"line_start": 1, "line_end": 1, "text": "x = 1",
+         "chunk_index": 0, "chunk_count": 2, "ast_chunked": False,
+         "filename": "main.py", "file_extension": ".py"},
+        {"line_start": 2, "line_end": 2, "text": "",   # <-- empty
+         "chunk_index": 1, "chunk_count": 2, "ast_chunked": False,
+         "filename": "main.py", "file_extension": ".py"},
+    ]
+    mock_voyage = _make_voyage_mock(1)  # only 1 valid chunk after filtering
+
+    with patch("nexus.chunker.chunk_file", return_value=chunks):
+        result = _index_code_file(
+            file_, repo, "code__repo", "voyage-code-3",
+            mock_col, mock_db, mock_voyage,
+            git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+        )
+
+    assert result is True
+    # embed must have been called with only the non-empty chunk
+    assert mock_voyage.embed.called
+    call_args = mock_voyage.embed.call_args
+    texts = call_args[1].get("texts") or call_args[0][0]
+    assert "" not in texts
+    assert "x = 1" in texts
+
+
+def test_index_code_file_returns_false_when_all_chunks_empty(tmp_path: Path) -> None:
+    """If every chunk has empty text, _index_code_file returns False without calling embed."""
+    from nexus.indexer import _index_code_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "empty.py"
+    file_.write_text("\n\n\n")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    empty_chunks = [
+        {"line_start": i, "line_end": i, "text": "",
+         "chunk_index": i, "chunk_count": 3, "ast_chunked": False,
+         "filename": "empty.py", "file_extension": ".py"}
+        for i in range(3)
+    ]
+    mock_voyage = _make_voyage_mock(0)
+
+    with patch("nexus.chunker.chunk_file", return_value=empty_chunks):
+        result = _index_code_file(
+            file_, repo, "code__repo", "voyage-code-3",
+            mock_col, mock_db, mock_voyage,
+            git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+        )
+
+    assert result is False
+    mock_voyage.embed.assert_not_called()
+    mock_db.upsert_chunks_with_embeddings.assert_not_called()

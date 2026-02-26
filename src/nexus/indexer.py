@@ -270,6 +270,12 @@ def _index_code_file(
         documents.append(chunk["text"])
         metadatas.append(metadata)
 
+    # Filter out empty documents before embedding (Voyage AI rejects empty strings)
+    valid = [(i, d, m) for i, d, m in zip(ids, documents, metadatas) if d and d.strip()]
+    if not valid:
+        return False
+    ids, documents, metadatas = map(list, zip(*valid))
+
     # Embed with voyage-code-3 direct call; batch per API limit
     embeddings: list[list[float]] = []
     for batch_start in range(0, len(documents), _VOYAGE_EMBED_BATCH_SIZE):

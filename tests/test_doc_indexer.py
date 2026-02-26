@@ -1314,3 +1314,54 @@ def test_embed_with_fallback_empty_chunks():
     )
     assert embeddings == []
     assert actual_model == "voyage-context-3"
+
+
+# ── B6: empty-string filtering ───────────────────────────────────────────────
+
+def test_embed_with_fallback_filters_empty_strings(monkeypatch):
+    """Empty strings and whitespace-only strings are removed before embedding.
+
+    Voyage AI raises InvalidRequestError if the input list contains empty strings.
+    Regression test for: voyageai.error.InvalidRequestError: Input cannot contain
+    empty strings or empty lists.
+    """
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_result = MagicMock(spec=EmbeddingsObject)
+    mock_result.embeddings = [[0.1, 0.2]]  # only 1 valid chunk after filtering
+
+    mock_client = MagicMock()
+    mock_client.embed.return_value = mock_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        embeddings, _ = _embed_with_fallback(
+            chunks=["", "   ", "real content", "\t\n"],
+            model="voyage-4",
+            api_key="vk_test",
+        )
+
+    # embed() must have been called only with the non-empty chunk
+    assert mock_client.embed.called
+    call_kwargs = mock_client.embed.call_args
+    passed_texts = call_kwargs[1].get("texts") or call_kwargs[0][0]
+    assert "" not in passed_texts
+    assert "   " not in passed_texts
+    assert "real content" in passed_texts
+    assert len(embeddings) == 1
+
+
+def test_embed_with_fallback_all_empty_strings():
+    """If all chunks are empty strings, returns ([], model) without calling embed."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+
+    with patch("voyageai.Client", return_value=mock_client):
+        embeddings, model = _embed_with_fallback(
+            chunks=["", "   ", "\n"],
+            model="voyage-4",
+            api_key="vk_test",
+        )
+
+    assert embeddings == []
+    mock_client.embed.assert_not_called()

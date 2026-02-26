@@ -95,6 +95,8 @@ def _embed_with_fallback(
     under model context limits, so truncation should never activate. If it does,
     the embedding is still usable (just based on truncated text).
     """
+    # Filter out empty strings — Voyage AI rejects them
+    chunks = [c for c in chunks if c and c.strip()]
     if not chunks:
         return [], model
     if len(chunks) >= _CCE_MAX_TOTAL_CHUNKS:
