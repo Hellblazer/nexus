@@ -24,6 +24,9 @@ def _configure_logging(verbose: bool) -> None:
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(level),
     )
+    # Suppress noisy HTTP wire-trace loggers even in verbose mode
+    for noisy in ("httpx", "httpcore", "chromadb.telemetry", "opentelemetry"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 @click.group()
