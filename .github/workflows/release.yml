@@ -96,5 +96,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body_path: /tmp/release_notes.md
-          files: dist/*
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
