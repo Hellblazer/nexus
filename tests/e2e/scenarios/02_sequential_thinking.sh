@@ -15,20 +15,30 @@ claude_start
 claude_prompt "Use the nx:sequential-thinking skill (from the nx plugin). Think through: how should the nx CLI handle rate limiting from Voyage AI during bulk indexing? For each thought, call Bash to run: nx thought add \"**Thought N of ~5** [content] nextThoughtNeeded: true\". Do at least 4 thoughts."
 
 echo "    Waiting for thought chain to build (up to 3 min)..."
-# Require evidence of the actual Bash tool call, not just text containing "thought"
-if poll_for "nx thought add|Bash.*thought add|✓.*Bash" 180 "thought chain building"; then
+# Poll T2 directly via crun rather than scraping pane output.
+# Pane scraping produces false positives: the prompt text contains
+# "nx thought add" so any grep against it matches immediately.
+# T2 polling is unambiguous: totalThoughts only appears after a real
+# nx thought add call writes to the database.
+_chain_built=0
+for _i in $(seq 1 90); do   # 90 × 2 s = 180 s max
+    sleep 2
+    if crun "nx thought show 2>&1" | grep -qE "totalThoughts: [0-9]"; then
+        _chain_built=1
+        break
+    fi
+done
+if [[ $_chain_built -eq 1 ]]; then
     pass "Claude called nx thought add to build thoughts"
 else
-    fail "No evidence of thought chain being built"
+    fail "No evidence of thought chain being built (T2 still empty after 3 min)"
     echo "    --- pane at timeout ---"
     capture -30 | sed 's/^/    | /'
     echo "    ---"
 fi
 
-claude_wait 60
-
-# Verify T2 has the chain — nx thought show returns "totalThoughts: N" only
-# when a real chain exists. "No active thought chain." does NOT contain that.
+# Verify T2 has the chain (redundant after the loop above, but makes the
+# assertion explicit and preserves the output format).
 echo "    Verifying T2 has the thought chain..."
 assert_cmd "T2 has active thought chain" \
     "nx thought show 2>&1" \
