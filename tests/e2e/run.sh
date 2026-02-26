@@ -163,7 +163,7 @@ REAL_UV="${HOME}/.local/bin/uv"
 if [[ ! -x "$REAL_UV" ]]; then
     REAL_UV="$(command -v uv)"
 fi
-HOME="$TEST_HOME" "$REAL_UV" tool install "$REPO_ROOT" --force 2>&1 | tail -5
+HOME="$TEST_HOME" "$REAL_UV" tool install "$REPO_ROOT" --force --python 3.12 2>&1 | tail -5
 echo "nx installed at $TEST_HOME/.local/bin/nx"
 
 # ─── Write test-home env file ─────────────────────────────────────────────────
