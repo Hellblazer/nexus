@@ -6,6 +6,39 @@
 #   Part 2: Hook scripts execute directly and produce correct output
 #   Part 3: Claude can discover all expected agents and skills via -p mode
 
+# ─── Guard: verify isolation before any Claude invocation ────────────────────
+# If TEST_HOME is unset, crun falls back to real $HOME and the locally-installed
+# v1 plugin bleeds into the test — giving false positives or wrong-version results.
+
+scenario "00 debug-load: isolation guard"
+
+if [[ -z "${TEST_HOME:-}" ]]; then
+    fail "TEST_HOME is not set — run via tests/e2e/run.sh, not directly"
+    echo "    Aborting scenario 00 to prevent testing against live v1 installation."
+    return 0
+fi
+
+# Confirm the isolated installed_plugins.json points at the dev repo, not a cache path
+plugins_json="$TEST_HOME/.claude/plugins/installed_plugins.json"
+if [[ ! -f "$plugins_json" ]]; then
+    fail "Isolated installed_plugins.json not found at $plugins_json"
+else
+    if grep -q "$REPO_ROOT/nx" "$plugins_json"; then
+        pass "isolated installed_plugins.json points to dev repo ($REPO_ROOT/nx)"
+    else
+        fail "installed_plugins.json does NOT point to dev repo — may be testing v1"
+        echo "    content: $(cat "$plugins_json")"
+    fi
+    # Must NOT reference the plugin cache (which would be the live installed v1)
+    if grep -q "plugins/cache" "$plugins_json"; then
+        fail "installed_plugins.json references plugin cache — live v1 may be active"
+    else
+        pass "installed_plugins.json does not reference plugin cache"
+    fi
+fi
+
+scenario_end
+
 # ─── Part 1: Plugin load via --debug ─────────────────────────────────────────
 
 scenario "00 debug-load: plugin load diagnostics (claude --debug -p)"
@@ -40,6 +73,15 @@ if echo "$debug_out" | grep -qiE "\bOK\b|okay"; then
     pass "Claude responded successfully with plugin loaded"
 else
     fail "Claude did not respond — plugin may have prevented startup"
+fi
+
+# Confirm we loaded from dev repo, not the cached v1
+if echo "$debug_out" | grep -qiE "plugins/cache.*nexus|nexus.*plugins/cache"; then
+    fail "Debug output shows plugin loading from cache — may be testing v1, not dev"
+elif echo "$debug_out" | grep -q "$REPO_ROOT"; then
+    pass "Debug output confirms plugin loading from dev repo"
+else
+    pass "No cache path in debug output (install path check inconclusive — see dump above)"
 fi
 
 scenario_end
