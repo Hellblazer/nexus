@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import logging
+
 import click
+import structlog
 
 from nexus.commands.collection import collection
 from nexus.commands.config_cmd import config_group
@@ -15,10 +18,23 @@ from nexus.commands.store import store
 from nexus.commands.thought import thought_group
 
 
+def _configure_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.WARNING
+    logging.basicConfig(level=level, format="%(message)s")
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+    )
+
+
 @click.group()
 @click.version_option(package_name="conexus", prog_name="nx")
-def main() -> None:
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Enable debug logging.")
+@click.pass_context
+def main(ctx: click.Context, verbose: bool) -> None:
     """Nexus — self-hosted semantic search and knowledge management."""
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+    _configure_logging(verbose)
 
 
 main.add_command(collection)
