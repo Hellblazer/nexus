@@ -1,65 +1,110 @@
 {
-  "SessionStart": [
-    {
-      "type": "command",
-      "command": "nx hook session-start"
-    },
-    {
-      "type": "command",
-      "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/mcp_health_hook.sh"
-    },
-    {
-      "type": "command",
-      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/session_start_hook.py"
-    },
-    {
-      "type": "command",
-      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/rdr_hook.py"
-    },
-    {
-      "type": "command",
-      "command": "bd prime"
-    },
-    {
-      "type": "command",
-      "command": "cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md"
-    }
-  ],
-  "SessionEnd": [
-    {
-      "type": "command",
-      "command": "nx hook session-end"
-    }
-  ],
-  "PreCompact": [
-    {
-      "type": "command",
-      "command": "bd prime"
-    }
-  ],
-  "Setup": [
-    {
-      "type": "command",
-      "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/setup.sh"
-    }
-  ],
-  "SubagentStart": [
-    {
-      "type": "command",
-      "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start.sh"
-    }
-  ],
-  "PermissionRequest": [
-    {
-      "type": "command",
-      "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/permission-request-stdin.sh"
-    }
-  ],
-  "PostToolUse": [
-    {
-      "type": "command",
-      "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/bead_context_hook.py",
-      "matcher": "bd create"
-    }
-  ]
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nx hook session-start",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/mcp_health_hook.sh",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/session_start_hook.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/rdr_hook.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bd prime"
+          },
+          {
+            "type": "command",
+            "command": "cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nx hook session-end",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bd prime"
+          }
+        ]
+      }
+    ],
+    "Setup": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/setup.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/permission-request-stdin.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "bd create",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/bead_context_hook.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
 }
