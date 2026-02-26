@@ -41,8 +41,12 @@ def _make_code_splitter(language: str, content: str) -> list:
     Uses tree-sitter-language-pack to obtain the parser, passing it explicitly
     to CodeSplitter (which otherwise tries the deprecated tree_sitter_languages).
     """
-    from llama_index.core import Document  # type: ignore[import]
-    from llama_index.core.node_parser import CodeSplitter  # type: ignore[import]
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*validate_default.*")
+        from llama_index.core import Document  # type: ignore[import]
+        from llama_index.core.node_parser import CodeSplitter  # type: ignore[import]
     from tree_sitter_language_pack import get_parser  # type: ignore[import]
 
     parser = get_parser(language)
