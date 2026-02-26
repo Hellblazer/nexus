@@ -278,11 +278,14 @@ def _index_code_file(
 
     # Embed with voyage-code-3 direct call; batch per API limit
     embeddings: list[list[float]] = []
-    for batch_start in range(0, len(documents), _VOYAGE_EMBED_BATCH_SIZE):
+    total_chunks = len(documents)
+    for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
         batch = documents[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
+        _log.debug("embedding batch", file=str(file), batch=f"{batch_start+1}-{min(batch_start+len(batch), total_chunks)}/{total_chunks}")
         result = voyage_client.embed(texts=batch, model=target_model, input_type="document")
         embeddings.extend(result.embeddings)
 
+    _log.debug("upserting", file=str(file), chunks=total_chunks)
     db.upsert_chunks_with_embeddings(
         collection_name=collection_name,
         ids=ids,
@@ -740,32 +743,42 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     from datetime import UTC, datetime as _dt
     from nexus.db import make_t3
 
+    _log.debug("connecting to ChromaDB Cloud")
     db = make_t3()
+    _log.debug("ChromaDB connected")
     now_iso = _dt.now(UTC).isoformat()
 
     # Initialize collections and models
     code_model = index_model_for_collection(code_collection)
     docs_model = index_model_for_collection(docs_collection)
     voyage_client = voyageai.Client(api_key=voyage_key)
+    _log.debug("creating collections", code=code_collection, docs=docs_collection)
     code_col = db.get_or_create_collection(code_collection)
     docs_col = db.get_or_create_collection(docs_collection)
+    _log.debug("collections ready")
 
     # Index code files → code__ (voyage-code-3, AST chunking)
+    _log.debug("indexing code files", count=len(code_files))
     for score, file in code_files:
+        _log.debug("indexing", file=str(file))
         _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
         )
 
     # Index prose files → docs__ (voyage-context-3 via CCE)
+    _log.debug("indexing prose files", count=len(prose_files))
     for score, file in prose_files:
+        _log.debug("indexing", file=str(file))
         _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
         )
 
     # Index PDF files → docs__ (PDF extraction + voyage-context-3)
+    _log.debug("indexing PDF files", count=len(pdf_files))
     for score, file in pdf_files:
+        _log.debug("indexing", file=str(file))
         _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
