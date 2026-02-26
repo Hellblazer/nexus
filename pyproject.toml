@@ -63,6 +63,7 @@ packages = ["src/nexus"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+log_level = "WARNING"
 markers = [
     "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
 ]

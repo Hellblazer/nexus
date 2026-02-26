@@ -12,10 +12,22 @@ from nexus.db.t3 import T3Database
 
 
 def pytest_configure(config):
-    """Configure structlog at DEBUG level so warnings/errors surface during tests."""
-    logging.basicConfig(level=logging.DEBUG, format="%(message)s")
+    """Configure structlog level to match pytest's --log-level.
+
+    Default run: WARNING level — quiet, no clutter.
+    Validation run: pytest --log-level=DEBUG — full structlog output to stdout.
+
+    Example:
+        uv run pytest                          # quiet (WARNING)
+        uv run pytest --log-level=DEBUG        # full debug output
+    """
+    try:
+        level_str = (config.getoption("log_level") or "WARNING").upper()
+    except (ValueError, AttributeError):
+        level_str = "WARNING"
+    level = getattr(logging, level_str, logging.WARNING)
     structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+        wrapper_class=structlog.make_filtering_bound_logger(level),
     )
 
 
