@@ -44,7 +44,19 @@ def index_repo_cmd(path: Path, frecency_only: bool) -> None:
         click.echo(f"Registered {path}.")
 
     click.echo(f"{'Updating frecency scores' if frecency_only else 'Indexing'} {path}…")
-    index_repository(path, reg, frecency_only=frecency_only)
+    stats = index_repository(path, reg, frecency_only=frecency_only)
+    if not frecency_only and stats:
+        rdr_indexed = stats.get("rdr_indexed", 0)
+        rdr_current = stats.get("rdr_current", 0)
+        rdr_failed = stats.get("rdr_failed", 0)
+        total_rdr = rdr_indexed + rdr_current + rdr_failed
+        if total_rdr:
+            parts = [f"{rdr_indexed} indexed"]
+            if rdr_current:
+                parts.append(f"{rdr_current} up to date")
+            if rdr_failed:
+                parts.append(f"{rdr_failed} failed")
+            click.echo(f"  RDR documents: {', '.join(parts)} (collection rdr__)")
     click.echo("Done.")
 
 

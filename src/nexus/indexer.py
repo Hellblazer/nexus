@@ -99,7 +99,12 @@ def _git_ls_files(repo: Path, *, include_untracked: bool = False) -> list[Path]:
     return paths
 
 
-def index_repository(repo: Path, registry: "RepoRegistry", *, frecency_only: bool = False) -> None:
+def index_repository(
+    repo: Path,
+    registry: "RepoRegistry",
+    *,
+    frecency_only: bool = False,
+) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
     Files are classified and routed:
@@ -113,14 +118,19 @@ def index_repository(repo: Path, registry: "RepoRegistry", *, frecency_only: boo
 
     *frecency_only* skips re-chunking and re-embedding; only updates the
     ``frecency_score`` metadata field on existing T3 chunks.
+
+    Returns a stats dict (empty for frecency_only runs) with keys:
+    ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
     registry.update(repo, status="indexing")
     try:
         if frecency_only:
             _run_index_frecency_only(repo, registry)
+            stats: dict[str, int] = {}
         else:
-            _run_index(repo, registry)
+            stats = _run_index(repo, registry)
         registry.update(repo, status="ready")
+        return stats
     except CredentialsMissingError:
         registry.update(repo, status="pending_credentials")
         # Re-raise so the polling loop skips recording head_hash for this repo.
@@ -525,16 +535,18 @@ def _discover_and_index_rdrs(
     db: object,
     voyage_key: str,
     now_iso: str,
-) -> None:
+) -> tuple[int, int, int]:
     """Find .md files under RDR paths and index them via batch_index_markdowns.
 
     M2: passes t3=db to avoid creating a redundant T3 client.
+
+    Returns (indexed, skipped, failed) counts.
     """
-    import hashlib as _hl
     from nexus.doc_indexer import batch_index_markdowns
 
     if not rdr_abs_paths:
-        return
+        _log.debug("RDR indexing skipped — no rdr_paths configured")
+        return 0, 0, 0
 
     md_paths: list[Path] = []
     for rdr_dir in rdr_abs_paths:
@@ -545,14 +557,21 @@ def _discover_and_index_rdrs(
                 md_paths.append(path)
 
     if not md_paths:
-        return
+        _log.debug("no RDR files found", rdr_paths=[str(p) for p in rdr_abs_paths])
+        return 0, 0, 0
 
     # Collection: rdr__{basename}-{hash8} — uses worktree-stable identity
     from nexus.registry import _repo_identity, _rdr_collection_name
     basename, _ = _repo_identity(repo)
     collection = _rdr_collection_name(repo)
 
-    batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection)
+    _log.info("indexing RDR files", count=len(md_paths), collection=collection)
+    results = batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection)
+    indexed = sum(1 for s in results.values() if s == "indexed")
+    skipped = sum(1 for s in results.values() if s == "skipped")
+    failed = sum(1 for s in results.values() if s == "failed")
+    _log.info("RDR indexing complete", indexed=indexed, current=skipped, failed=failed)
+    return indexed, skipped, failed
 
 
 def _prune_misclassified(
@@ -625,7 +644,7 @@ def _prune_deleted_files(
 # ── Main indexing pipeline ───────────────────────────────────────────────────
 
 
-def _run_index(repo: Path, registry: "RepoRegistry") -> None:
+def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
     Routes files to the appropriate collection based on content classification:
@@ -633,6 +652,8 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     - Prose files → docs__ collection (voyage-context-3 via CCE)
     - PDF files → docs__ collection (PDF extraction + voyage-context-3)
     - RDR markdown → rdr__ collection (via batch_index_markdowns)
+
+    Returns a stats dict with ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
     from nexus.classifier import ContentClass, classify_file
     from nexus.config import load_config
@@ -785,7 +806,9 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
         )
 
     # Discover and index RDR markdown files → rdr__
-    _discover_and_index_rdrs(repo, rdr_abs_paths, db, voyage_key, now_iso)
+    rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
+        repo, rdr_abs_paths, db, voyage_key, now_iso
+    )
 
     # Prune misclassified chunks (reclassification cleanup)
     _prune_misclassified(
@@ -805,6 +828,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> None:
     for _, f in pdf_files:
         all_current_paths.add(str(f))
     _prune_deleted_files(code_collection, docs_collection, all_current_paths, db)
+    return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
 
 
 def _is_under(child: Path, parent: Path) -> bool:
