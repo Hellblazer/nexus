@@ -631,3 +631,82 @@ class TestSharedResources:
         assert len(content) > 100, (
             "RELAY_TEMPLATE.md exists but appears empty or trivially short"
         )
+
+
+# ── Hook script file existence ────────────────────────────────────────────────
+
+
+class TestHookScriptFiles:
+    """Every script referenced in hooks.json must exist on disk."""
+
+    HOOKS_PATH = PLUGIN_DIR / "hooks" / "hooks.json"
+    SCRIPTS_DIR = PLUGIN_DIR / "hooks" / "scripts"
+
+    def _referenced_scripts(self) -> list[tuple[str, str]]:
+        """Return list of (event, path) for all $CLAUDE_PLUGIN_ROOT/... references."""
+        import json
+        import re
+        hooks = json.loads(self.HOOKS_PATH.read_text())
+        results = []
+        for event, entries in hooks.items():
+            for entry in entries:
+                cmd = entry.get("command", "")
+                # Extract $CLAUDE_PLUGIN_ROOT/relative/path
+                for match in re.finditer(r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"]+)", cmd):
+                    results.append((event, match.group(1)))
+        return results
+
+    def test_hooks_json_exists(self) -> None:
+        assert self.HOOKS_PATH.exists(), f"hooks.json not found at {self.HOOKS_PATH}"
+
+    @pytest.mark.parametrize("event,rel_path", [
+        pytest.param(ev, rp, id=f"{ev}:{rp}")
+        for ev, rp in (lambda hooks_path=PLUGIN_DIR / "hooks" / "hooks.json": [
+            (event, match)
+            for event, entries in __import__("json").loads(hooks_path.read_text()).items()
+            for entry in entries
+            for match in __import__("re").findall(
+                r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"]+)", entry.get("command", "")
+            )
+        ])()
+    ])
+    def test_hook_script_exists(self, event: str, rel_path: str) -> None:
+        """Every $CLAUDE_PLUGIN_ROOT/... path in hooks.json must exist in nx/."""
+        full_path = PLUGIN_DIR / rel_path
+        assert full_path.exists(), (
+            f"hooks.json [{event}] references missing file: {rel_path}\n"
+            f"  Expected at: {full_path}"
+        )
+
+
+# ── Marketplace version sync ──────────────────────────────────────────────────
+
+
+class TestMarketplaceVersion:
+    """marketplace.json plugin version should match pyproject.toml."""
+
+    MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
+    PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
+
+    def test_marketplace_json_exists(self) -> None:
+        assert self.MARKETPLACE_PATH.exists(), (
+            f"marketplace.json not found at {self.MARKETPLACE_PATH}"
+        )
+
+    def test_marketplace_version_matches_pyproject(self) -> None:
+        """Plugin version in marketplace.json should match pyproject.toml version."""
+        import json
+        import tomllib
+
+        marketplace = json.loads(self.MARKETPLACE_PATH.read_text())
+        with self.PYPROJECT_PATH.open("rb") as f:
+            pyproject = tomllib.load(f)
+
+        pyproject_version = pyproject["project"]["version"]
+        for plugin in marketplace.get("plugins", []):
+            plugin_version = plugin.get("version", "")
+            assert plugin_version == pyproject_version, (
+                f"marketplace.json plugin '{plugin['name']}' version "
+                f"{plugin_version!r} != pyproject.toml {pyproject_version!r}. "
+                f"Update .claude-plugin/marketplace.json when bumping version."
+            )
