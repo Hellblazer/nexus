@@ -13,6 +13,10 @@ Optionally delegates to **deep-research-synthesizer** (sonnet) for evidence gath
 - User invokes `/rdr-research`
 - User wants to record or classify a discovery during RDR planning
 
+## Path Detection
+
+Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`. All file paths below use `$RDR_DIR` in place of `docs/rdr`.
+
 ## Subcommands
 
 ### `/rdr-research add <id>`
@@ -92,7 +96,7 @@ When dispatching agents (deep-research-synthesizer or codebase-deep-analyzer) vi
 - nx store: [document titles or "none"]
 - nx memory: {repo}_rdr/NNN (RDR metadata and existing research records)
 - nx scratch: [scratch IDs or "none"]
-- Files: docs/rdr/NNN-*.md
+- Files: $RDR_DIR/NNN-*.md
 
 ### Deliverable
 Research finding with classification, verification method, and source reference ready for T2 storage.

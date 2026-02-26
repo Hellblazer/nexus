@@ -21,19 +21,40 @@ Prompt the user for:
 
 ## Behavior
 
+### Step 0: Resolve RDR directory
+
+Read the RDR base directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`:
+
+```bash
+python3 -c "
+import os, re, sys
+f = '.nexus.yml'
+if not os.path.exists(f): print('docs/rdr'); sys.exit()
+t = open(f).read()
+try:
+    import yaml; d = yaml.safe_load(t) or {}; paths = (d.get('indexing') or {}).get('rdr_paths', ['docs/rdr']); print(paths[0] if paths else 'docs/rdr')
+except ImportError:
+    m = re.search(r'rdr_paths[^\[]*\[([^\]]+)\]', t) or re.search(r'rdr_paths:\s*\n\s+-\s*(.+)', t)
+    v = m.group(1) if m else ''; parts = re.findall(r'[a-z][a-z0-9/_-]+', v)
+    print(parts[0] if parts else 'docs/rdr')
+" 2>/dev/null || echo "docs/rdr"
+```
+
+Use this value as `RDR_DIR` throughout all steps below (wherever `docs/rdr` appears).
+
 ### Step 1: Bootstrap (first use only)
 
-If `docs/rdr/` does not exist:
-1. Create `docs/rdr/` and `docs/rdr/post-mortem/` directories
-2. Copy RDR template from `$CLAUDE_PLUGIN_ROOT/resources/rdr/TEMPLATE.md` to `docs/rdr/TEMPLATE.md`
-3. Copy post-mortem template from `$CLAUDE_PLUGIN_ROOT/resources/rdr/post-mortem/TEMPLATE.md` to `docs/rdr/post-mortem/TEMPLATE.md`
-4. Create `docs/rdr/README.md` from `$CLAUDE_PLUGIN_ROOT/resources/rdr/README-TEMPLATE.md`
+If `$RDR_DIR` does not exist:
+1. Create `$RDR_DIR/` and `$RDR_DIR/post-mortem/` directories
+2. Copy RDR template from `$CLAUDE_PLUGIN_ROOT/resources/rdr/TEMPLATE.md` to `$RDR_DIR/TEMPLATE.md`
+3. Copy post-mortem template from `$CLAUDE_PLUGIN_ROOT/resources/rdr/post-mortem/TEMPLATE.md` to `$RDR_DIR/post-mortem/TEMPLATE.md`
+4. Create `$RDR_DIR/README.md` from `$CLAUDE_PLUGIN_ROOT/resources/rdr/README-TEMPLATE.md`
 
 If `$CLAUDE_PLUGIN_ROOT` is not available, use the templates inline (they are embedded below in the Templates section).
 
 ### Step 2: Assign ID
 
-Scan `docs/rdr/` for files matching `[0-9][0-9][0-9]-*.md`. Find the highest number. Next ID = max + 1, zero-padded to 3 digits. If no files exist, start at `001`.
+Scan `$RDR_DIR/` for files matching `[0-9][0-9][0-9]-*.md`. Find the highest number. Next ID = max + 1, zero-padded to 3 digits. If no files exist, start at `001`.
 
 Derive project prefix from repo name:
 ```bash
@@ -43,7 +64,7 @@ Example: `nexus` → `NEX`, `arcaneum` → `ARC`, `nx-tools` → `NXT` (hyphens 
 
 ### Step 3: Create RDR file
 
-Create `docs/rdr/NNN-kebab-case-title.md` from the template with these metadata fields pre-filled:
+Create `$RDR_DIR/NNN-kebab-case-title.md` from the template with these metadata fields pre-filled:
 - **Date**: today's date (YYYY-MM-DD)
 - **Status**: Draft
 - **Type**: user's choice
@@ -70,21 +91,21 @@ superseded_by: ""
 supersedes: ""
 epic_bead: ""
 archived: false
-file_path: "docs/rdr/NNN-kebab-title.md"
+file_path: "$RDR_DIR/NNN-kebab-title.md"
 EOF
 ```
 
 ### Step 5: Regenerate README index
 
-Read all T2 records for `{repo}_rdr` project via `nx memory list --project {repo}_rdr`. If T2 is empty (first create before T2 write completes), also scan filesystem frontmatter. Generate the index table and update `docs/rdr/README.md`.
+Read all T2 records for `{repo}_rdr` project via `nx memory list --project {repo}_rdr`. If T2 is empty (first create before T2 write completes), also scan filesystem frontmatter. Generate the index table and update `$RDR_DIR/README.md`.
 
 ### Step 6: Stage files
 
 ```bash
-git add docs/rdr/NNN-kebab-title.md docs/rdr/README.md
+git add $RDR_DIR/NNN-kebab-title.md $RDR_DIR/README.md
 ```
 
-If bootstrap ran, also stage: `docs/rdr/TEMPLATE.md`, `docs/rdr/post-mortem/TEMPLATE.md`
+If bootstrap ran, also stage: `$RDR_DIR/TEMPLATE.md`, `$RDR_DIR/post-mortem/TEMPLATE.md`
 
 ### Output
 
@@ -99,10 +120,11 @@ Next: Fill in Problem Statement and Context, then use /rdr-research to add findi
 
 ## Success Criteria
 
-- [ ] RDR file created at `docs/rdr/NNN-kebab-title.md` with correct metadata
+- [ ] RDR directory resolved from `.nexus.yml` `indexing.rdr_paths[0]` (default `docs/rdr`)
+- [ ] RDR file created at `$RDR_DIR/NNN-kebab-title.md` with correct metadata
 - [ ] Sequential ID assigned (no collisions with existing RDRs)
 - [ ] T2 record written to `{repo}_rdr` project with all required fields
-- [ ] `docs/rdr/README.md` index regenerated with new entry
+- [ ] `$RDR_DIR/README.md` index regenerated with new entry
 - [ ] Files staged via `git add`
 - [ ] Bootstrap completed on first use (template and directory structure)
 

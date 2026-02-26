@@ -14,10 +14,12 @@ description: Use when needing to see all RDRs in the project with their status, 
 ## Behavior
 
 1. **Detect repo root**: `git rev-parse --show-toplevel`
-2. **Check for docs/rdr/**: If absent, report "No RDRs found in this project."
-3. **Scan RDR files**: Glob `docs/rdr/[0-9]*.md` (excludes README.md, TEMPLATE.md)
+2. **Resolve RDR directory**: Read from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`.
+3. **Check for `$RDR_DIR/`**: If absent, report "No RDRs found in this project."
+4. **Scan RDR files**: Glob `$RDR_DIR/[0-9]*.md` (excludes README.md, TEMPLATE.md)
 4. **Parse metadata**: Read each file's YAML frontmatter for: Status, Type, Priority
 5. **Check T2 for structured data**: `nx memory list --project {repo}_rdr`
+
    - If T2 has records, merge with filesystem data (T2 takes precedence for status)
    - If T2 is empty, use frontmatter only
 6. **Display index table**:
@@ -38,7 +40,8 @@ If the user specifies filters, apply them:
 
 ## Success Criteria
 
-- [ ] All RDR files in `docs/rdr/` discovered and parsed
+- [ ] RDR directory resolved from `.nexus.yml` `indexing.rdr_paths[0]` (default `docs/rdr`)
+- [ ] All RDR files in `$RDR_DIR/` discovered and parsed
 - [ ] T2 records merged with filesystem data (T2 takes precedence for status)
 - [ ] Index table displayed with ID, Title, Status, Type, Priority columns
 - [ ] Filters applied correctly if user specified `--status`, `--type`, or `--has-assumptions`

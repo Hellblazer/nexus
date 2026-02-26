@@ -319,8 +319,13 @@ agents:
 # =============================================================================
 
 rdr_skills:
+  # Each rdr_skill has a corresponding commands/*.md file that injects live context
+  # (RDR dir from .nexus.yml, existing RDRs, T2 state, beads) before invoking the skill.
+  # RDR directory is read from .nexus.yml indexing.rdr_paths[0]; default docs/rdr.
+
   rdr-create:
     slash_command: /rdr-create
+    command_file: commands/rdr-create.md
     description: "Scaffold new RDR from template, assign ID, register in T2"
     triggers:
       - "create an RDR"
@@ -329,6 +334,7 @@ rdr_skills:
 
   rdr-research:
     slash_command: /rdr-research
+    command_file: commands/rdr-research.md
     description: "Add, track, and verify structured research findings"
     triggers:
       - "add research finding"
@@ -338,6 +344,7 @@ rdr_skills:
 
   rdr-gate:
     slash_command: /rdr-gate
+    command_file: commands/rdr-gate.md
     description: "Run finalization gate: structural + assumption + AI critique"
     triggers:
       - "gate this RDR"
@@ -347,6 +354,7 @@ rdr_skills:
 
   rdr-close:
     slash_command: /rdr-close
+    command_file: commands/rdr-close.md
     description: "Close RDR with post-mortem, bead decomposition, T3 archive"
     triggers:
       - "close this RDR"
@@ -356,6 +364,7 @@ rdr_skills:
 
   rdr-list:
     slash_command: /rdr-list
+    command_file: commands/rdr-list.md
     description: "List all RDRs with status, type, priority"
     triggers:
       - "list RDRs"
@@ -363,6 +372,7 @@ rdr_skills:
 
   rdr-show:
     slash_command: /rdr-show
+    command_file: commands/rdr-show.md
     description: "Display detailed RDR information"
     triggers:
       - "show RDR"

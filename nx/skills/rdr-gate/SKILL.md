@@ -19,6 +19,10 @@ Delegates Layer 3 to the **substantive-critic** agent (sonnet). See [registry.ya
 
 - RDR ID (required) — e.g., `003`
 
+## Path Detection
+
+Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`. All file paths below use `$RDR_DIR` in place of `docs/rdr`.
+
 ## Three Validation Layers (run in sequence)
 
 ### Layer 1 — Structural Validation (no AI)
@@ -162,6 +166,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 
 ## Success Criteria
 
+- [ ] RDR directory resolved from `.nexus.yml` `indexing.rdr_paths[0]` (default `docs/rdr`)
 - [ ] Layer 1 structural validation completed (all required sections present and non-empty)
 - [ ] Layer 2 assumption audit completed (findings counted by classification and method)
 - [ ] High-risk items flagged (classification=assumed AND verification_method=docs_only)

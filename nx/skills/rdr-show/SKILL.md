@@ -13,11 +13,12 @@ description: Use when needing detailed information about a specific RDR includin
 
 ## Behavior
 
-1. **Determine RDR ID**: From user's argument, or default to most recently modified RDR in `docs/rdr/`
-2. **Read the markdown file**: `docs/rdr/NNN-*.md`
-3. **Read T2 metadata** (if available): `nx memory get --project {repo}_rdr --title NNN`
-4. **Read research findings** (if available): `nx memory list --project {repo}_rdr` and filter titles matching `NNN-research-*`
-5. **Display unified view**:
+1. **Resolve RDR directory**: Read from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`.
+2. **Determine RDR ID**: From user's argument, or default to most recently modified RDR in `$RDR_DIR/`
+3. **Read the markdown file**: `$RDR_DIR/NNN-*.md`
+4. **Read T2 metadata** (if available): `nx memory get --project {repo}_rdr --title NNN`
+5. **Read research findings** (if available): `nx memory list --project {repo}_rdr` and filter titles matching `NNN-research-*`
+6. **Display unified view**:
 
 ### Output Format
 
@@ -44,7 +45,7 @@ description: Use when needing detailed information about a specific RDR includin
 (not closed yet)
 ```
 
-6. If the RDR ID is not found, list available RDRs (delegate to `/rdr-list` behavior).
+7. If the RDR ID is not found, list available RDRs (delegate to `/rdr-list` behavior).
 
 ## Success Criteria
 
