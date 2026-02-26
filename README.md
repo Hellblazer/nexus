@@ -15,15 +15,14 @@ Use just the CLI. Add the plugin. Adopt RDR later, or never. Each layer amplifie
 ## Quick Start
 
 ```bash
-git clone https://github.com/Hellblazer/nexus.git
-cd nexus && uv sync
+uv tool install conexus          # install the nx CLI from PyPI
 
-nx config init                  # configure API keys
-nx doctor                       # verify setup
+nx config init                   # configure API keys
+nx doctor                        # verify setup
 
-nx index repo .                 # index current repo
-nx search "authentication flow" # semantic search
-nx search "auth" --hybrid       # semantic + git frecency
+nx index repo .                  # index current repo
+nx search "authentication flow"  # semantic search
+nx search "auth" --hybrid        # semantic + git frecency
 nx search "how does auth work" --answer  # synthesized answer with citations
 ```
 
@@ -118,7 +117,7 @@ Each agent runs on a model matched to its task: opus for complex reasoning, sonn
 
 ## Prerequisites
 
-- Python 3.12+, [`uv`](https://docs.astral.sh/uv/), `git`
+- Python 3.12+, [`uv`](https://docs.astral.sh/uv/) (for install), `git` (for repo indexing)
 - [ChromaDB cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) for T3
 - [Anthropic](https://www.anthropic.com/) API key for answer mode
 - `ripgrep` for hybrid search
