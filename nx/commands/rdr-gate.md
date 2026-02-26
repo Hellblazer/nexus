@@ -146,8 +146,14 @@ print(f"### RDR File: {rdr_file.name}")
 print(f"**Title:** {title}  **Status:** {fm.get('status', '?')}  **Type:** {fm.get('type', '?')}")
 print()
 
+# Strip fenced code blocks before extracting headings (avoids # comment false positives)
+def strip_code_blocks(src):
+    return re.sub(r'```.*?```', '', src, flags=re.DOTALL)
+
+clean = strip_code_blocks(text)
+
 # Section headings (structural completeness check — Layer 1)
-headings = re.findall(r'^(#{1,3} .+)', text, re.MULTILINE)
+headings = re.findall(r'^(#{1,3} .+)', clean, re.MULTILINE)
 print("#### Section Structure (for completeness check)")
 print()
 for h in headings:
@@ -157,7 +163,7 @@ print()
 # Section summaries: first non-empty, non-heading line of each ## section
 print("#### Section Summaries")
 print()
-sections = re.split(r'^(## .+)', text, flags=re.MULTILINE)
+sections = re.split(r'^(## .+)', clean, flags=re.MULTILINE)
 for i in range(1, len(sections) - 1, 2):
     heading = sections[i].strip()
     body = sections[i + 1]
