@@ -5,9 +5,11 @@ description: List all RDRs with status, type, and priority
 # RDR List
 
 !{
-python3 << 'PYEOF'
+NEXUS_RDR_ARGS="${ARGUMENTS:-}" python3 << 'PYEOF'
 import os, sys, re, subprocess
 from pathlib import Path
+
+args = os.environ.get('NEXUS_RDR_ARGS', '').strip()
 
 # Repo root and name
 try:
@@ -30,14 +32,15 @@ if nexus_yml.exists():
         paths = (d.get('indexing') or {}).get('rdr_paths', ['docs/rdr'])
         rdr_dir = paths[0] if paths else 'docs/rdr'
     except ImportError:
-        m = (re.search(r'rdr_paths[^\[]*\[([^\]]+)\]', content) or
-             re.search(r'rdr_paths:\s*\n\s+-\s*(.+)', content))
-        if m:
-            v = m.group(1)
+        m_yml = (re.search(r'rdr_paths[^\[]*\[([^\]]+)\]', content) or
+                 re.search(r'rdr_paths:\s*\n\s+-\s*(.+)', content))
+        if m_yml:
+            v = m_yml.group(1)
             parts = re.findall(r'[a-z][a-z0-9/_-]+', v)
             rdr_dir = parts[0] if parts else 'docs/rdr'
 
 rdr_path = Path(repo_root) / rdr_dir
+
 print(f"**Repo:** `{repo_name}`  **RDR directory:** `{rdr_dir}`")
 print()
 
@@ -45,66 +48,87 @@ if not rdr_path.exists():
     print(f"> No RDRs found — `{rdr_dir}` does not exist in this repo.")
     sys.exit(0)
 
-# Find RDR files — any .md that looks like an RDR (has number prefix or RDR- prefix)
-# Excludes README.md, TEMPLATE.md, INDEX.md, and prose docs
-EXCLUDED = {'readme.md', 'template.md', 'index.md', 'overview.md',
-            'workflow.md', 'templates.md'}
-all_md = sorted(rdr_path.glob('*.md'))
-rdr_files = [f for f in all_md if f.name.lower() not in EXCLUDED]
-
 
 def parse_frontmatter(filepath):
-    """Parse YAML frontmatter or ## Metadata section; fall back to H1 for title."""
     text = filepath.read_text(errors='replace')
     meta = {}
-
-    # YAML frontmatter (--- ... ---)
     if text.startswith('---'):
         parts = text.split('---', 2)
         if len(parts) >= 3:
             block = parts[1]
             try:
-                import yaml
-                meta = yaml.safe_load(block) or {}
+                import yaml; meta = yaml.safe_load(block) or {}
             except Exception:
                 for line in block.splitlines():
                     if ':' in line:
                         k, _, v = line.partition(':')
                         meta[k.strip().lower()] = v.strip()
     else:
-        # ## Metadata section with "- **Key**: Value" lines
-        m = re.search(r'^## Metadata\s*\n(.*?)(?=^##|\Z)', text,
-                      re.MULTILINE | re.DOTALL)
+        m = re.search(r'^## Metadata\s*\n(.*?)(?=^##|\Z)', text, re.MULTILINE | re.DOTALL)
         if m:
             for line in m.group(1).splitlines():
                 kv = re.match(r'-?\s*\*\*(\w[\w\s]*?)\*\*:\s*(.+)', line.strip())
                 if kv:
                     meta[kv.group(1).strip().lower()] = kv.group(2).strip()
-
-    # Fall back to H1 heading for title if metadata has none
     if 'title' not in meta and 'name' not in meta:
         h1 = re.search(r'^#\s+(.+)', text, re.MULTILINE)
         if h1:
             meta['title'] = h1.group(1).strip()
+    return meta, text
 
-    return meta
+
+def find_rdr_file(rdr_path, id_str):
+    m = re.search(r'\d+', id_str)
+    if not m:
+        return None
+    num_int = int(m.group(0))
+    for f in sorted(rdr_path.glob('*.md')):
+        nums = re.findall(r'\d+', f.stem)
+        if nums and int(nums[0]) == num_int:
+            return f
+    return None
 
 
-rdrs = []
-for f in rdr_files:
-    fm = parse_frontmatter(f)
-    rtype = fm.get('type', '?')
-    doc_status = fm.get('status', '?')
-    # Skip prose docs that lack RDR metadata (no status or type field)
-    if doc_status == '?' and rtype == '?':
-        continue
-    rdrs.append({
-        'file': f.name,
-        'title': fm.get('title', fm.get('name', f.stem)),
-        'status': doc_status,
-        'rtype': rtype,
-        'priority': fm.get('priority', '?'),
-    })
+def get_excerpt(text):
+    # Strip frontmatter or metadata section, return 250-char excerpt
+    if text.startswith('---'):
+        parts = text.split('---', 2)
+        text = parts[2] if len(parts) >= 3 else text
+    else:
+        m = re.search(r'^## Metadata\s*\n.*?(?=^##)', text, re.MULTILINE | re.DOTALL)
+        if m:
+            text = text[m.end():]
+    lines = [l.strip() for l in text.splitlines() if l.strip() and not l.startswith('#')]
+    return ' '.join(lines)[:250]
+
+
+EXCLUDED = {'readme.md', 'template.md', 'index.md', 'overview.md', 'workflow.md', 'templates.md'}
+
+def get_all_rdrs(rdr_path):
+    """Return list of dicts for all RDRs in the directory."""
+    all_md = sorted(rdr_path.glob('*.md'))
+    rdrs = []
+    for f in all_md:
+        if f.name.lower() in EXCLUDED:
+            continue
+        fm, text = parse_frontmatter(f)
+        rtype = fm.get('type', '?')
+        doc_status = fm.get('status', '?')
+        if doc_status == '?' and rtype == '?':
+            continue  # prose doc, not an RDR
+        rdrs.append({
+            'file': f.name,
+            'path': f,
+            'text': text,
+            'title': fm.get('title', fm.get('name', f.stem)),
+            'status': doc_status,
+            'rtype': rtype,
+            'priority': fm.get('priority', '?'),
+        })
+    return rdrs
+
+
+rdrs = get_all_rdrs(rdr_path)
 
 print(f"### RDR Files ({len(rdrs)} found)")
 print()
@@ -116,6 +140,15 @@ if rdrs:
 else:
     print(f"No RDR files found in `{rdr_dir}`")
 print()
+
+# Content index for keyword/topic filtering without additional bash calls
+if rdrs:
+    print("### Content Index (for keyword and topic filtering)")
+    print()
+    for r in rdrs:
+        excerpt = get_excerpt(r['text'])
+        print(f"**{r['file']}**: {excerpt}")
+    print()
 
 # T2 records
 print("### T2 Records")
@@ -136,6 +169,6 @@ $ARGUMENTS
 
 ## Action
 
-All RDR data is pre-loaded above — no additional tool calls needed.
+All data is pre-loaded above — no additional tool calls needed.
 
-Format the pre-gathered data as a clean index table. Apply any filters from `$ARGUMENTS` (e.g. `--status=draft`, `--type=feature`, `--has-assumptions`) to the table. Emit drift warnings if T2 records exist without corresponding files, or vice versa.
+Format the pre-gathered data as a clean index table. Apply any filters from `$ARGUMENTS` (e.g. `--status=draft`, `--type=feature`, `--has-assumptions`) to the table. Use the Content Index section for keyword or topic filtering. Emit drift warnings if T2 records exist without corresponding files, or vice versa.

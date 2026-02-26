@@ -5,67 +5,193 @@ description: Run finalization gate on an RDR — structural, assumption audit, a
 # RDR Gate
 
 !{
-  # Detect RDR directory from .nexus.yml (fallback: docs/rdr)
-  RDR_DIR=$(python3 -c "
-import os, re, sys
-f = '.nexus.yml'
-if not os.path.exists(f): print('docs/rdr'); sys.exit()
-t = open(f).read()
+NEXUS_RDR_ARGS="${ARGUMENTS:-}" python3 << 'PYEOF'
+import os, sys, re, subprocess
+from pathlib import Path
+
+args = os.environ.get('NEXUS_RDR_ARGS', '').strip()
+
+# Repo root and name
 try:
-    import yaml; d = yaml.safe_load(t) or {}; paths = (d.get('indexing') or {}).get('rdr_paths', ['docs/rdr']); print(paths[0] if paths else 'docs/rdr')
-except ImportError:
-    m = re.search(r'rdr_paths[^\[]*\[([^\]]+)\]', t) or re.search(r'rdr_paths:\s*\n\s+-\s*(.+)', t)
-    v = m.group(1) if m else ''; parts = re.findall(r'[a-z][a-z0-9/_-]+', v)
-    print(parts[0] if parts else 'docs/rdr')
-" 2>/dev/null || echo "docs/rdr")
+    repo_root = subprocess.check_output(
+        ['git', 'rev-parse', '--show-toplevel'],
+        stderr=subprocess.DEVNULL, text=True).strip()
+    repo_name = os.path.basename(repo_root)
+except Exception:
+    repo_root = os.getcwd()
+    repo_name = os.path.basename(repo_root)
 
-  RDR_ID=$(echo "${ARGUMENTS:-}" | grep -o '[0-9]\+' | head -1)
-  REPO=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
+# Resolve RDR directory from .nexus.yml (default: docs/rdr)
+rdr_dir = 'docs/rdr'
+nexus_yml = Path(repo_root) / '.nexus.yml'
+if nexus_yml.exists():
+    content = nexus_yml.read_text()
+    try:
+        import yaml
+        d = yaml.safe_load(content) or {}
+        paths = (d.get('indexing') or {}).get('rdr_paths', ['docs/rdr'])
+        rdr_dir = paths[0] if paths else 'docs/rdr'
+    except ImportError:
+        m_yml = (re.search(r'rdr_paths[^\[]*\[([^\]]+)\]', content) or
+                 re.search(r'rdr_paths:\s*\n\s+-\s*(.+)', content))
+        if m_yml:
+            v = m_yml.group(1)
+            parts = re.findall(r'[a-z][a-z0-9/_-]+', v)
+            rdr_dir = parts[0] if parts else 'docs/rdr'
 
-  echo "**RDR directory:** \`$RDR_DIR\`"
-  echo ""
+rdr_path = Path(repo_root) / rdr_dir
 
-  if [ -z "$RDR_ID" ]; then
-    echo "> **Usage**: \`/rdr-gate <id>\` — e.g. \`/rdr-gate 003\`"
-    echo ""
-    echo "### Available RDRs"
-    echo '```'
-    ls "$RDR_DIR"/[0-9]*.md 2>/dev/null | xargs -I{} basename {} || echo "No RDRs found"
-    echo '```'
-    exit 0
-  fi
+print(f"**Repo:** `{repo_name}`  **RDR directory:** `{rdr_dir}`")
+print()
 
-  RDR_FILE=$(ls "$RDR_DIR"/${RDR_ID}-*.md 2>/dev/null | head -1)
-  if [ -z "$RDR_FILE" ]; then
-    echo "> RDR $RDR_ID not found in \`$RDR_DIR\`"
-    exit 0
-  fi
 
-  echo "### RDR File: $(basename "$RDR_FILE")"
-  echo '```'
-  # Show section headings to check structural completeness
-  grep '^## ' "$RDR_FILE" 2>/dev/null
-  echo '```'
-  echo ""
+def parse_frontmatter(filepath):
+    text = filepath.read_text(errors='replace')
+    meta = {}
+    if text.startswith('---'):
+        parts = text.split('---', 2)
+        if len(parts) >= 3:
+            block = parts[1]
+            try:
+                import yaml; meta = yaml.safe_load(block) or {}
+            except Exception:
+                for line in block.splitlines():
+                    if ':' in line:
+                        k, _, v = line.partition(':')
+                        meta[k.strip().lower()] = v.strip()
+    else:
+        m = re.search(r'^## Metadata\s*\n(.*?)(?=^##|\Z)', text, re.MULTILINE | re.DOTALL)
+        if m:
+            for line in m.group(1).splitlines():
+                kv = re.match(r'-?\s*\*\*(\w[\w\s]*?)\*\*:\s*(.+)', line.strip())
+                if kv:
+                    meta[kv.group(1).strip().lower()] = kv.group(2).strip()
+    if 'title' not in meta and 'name' not in meta:
+        h1 = re.search(r'^#\s+(.+)', text, re.MULTILINE)
+        if h1:
+            meta['title'] = h1.group(1).strip()
+    return meta, text
 
-  echo "### T2 Metadata"
-  echo '```'
-  if command -v nx &> /dev/null && [ -n "$REPO" ]; then
-    nx memory get --project "${REPO}_rdr" --title "$RDR_ID" 2>/dev/null || echo "No T2 record"
-  else
-    echo "T2 not available"
-  fi
-  echo '```'
-  echo ""
 
-  echo "### Research Findings Summary (T2)"
-  echo '```'
-  if command -v nx &> /dev/null && [ -n "$REPO" ]; then
-    nx memory list --project "${REPO}_rdr" 2>/dev/null | grep "^${RDR_ID}-research" || echo "No research findings"
-  else
-    echo "T2 not available"
-  fi
-  echo '```'
+def find_rdr_file(rdr_path, id_str):
+    m = re.search(r'\d+', id_str)
+    if not m:
+        return None
+    num_int = int(m.group(0))
+    for f in sorted(rdr_path.glob('*.md')):
+        nums = re.findall(r'\d+', f.stem)
+        if nums and int(nums[0]) == num_int:
+            return f
+    return None
+
+
+EXCLUDED = {'readme.md', 'template.md', 'index.md', 'overview.md', 'workflow.md', 'templates.md'}
+
+def get_all_rdrs(rdr_path):
+    """Return list of dicts for all RDRs in the directory."""
+    all_md = sorted(rdr_path.glob('*.md'))
+    rdrs = []
+    for f in all_md:
+        if f.name.lower() in EXCLUDED:
+            continue
+        fm, text = parse_frontmatter(f)
+        rtype = fm.get('type', '?')
+        doc_status = fm.get('status', '?')
+        if doc_status == '?' and rtype == '?':
+            continue  # prose doc, not an RDR
+        rdrs.append({
+            'file': f.name,
+            'path': f,
+            'text': text,
+            'title': fm.get('title', fm.get('name', f.stem)),
+            'status': doc_status,
+            'rtype': rtype,
+            'priority': fm.get('priority', '?'),
+        })
+    return rdrs
+
+
+if not rdr_path.exists():
+    print(f"> No RDRs found — `{rdr_dir}` does not exist in this repo.")
+    sys.exit(0)
+
+id_match = re.search(r'\d+', args)
+
+if not id_match:
+    print("> **Usage**: `/rdr-gate <id>` — e.g. `/rdr-gate 003` or `/rdr-gate RDR-003`")
+    print()
+    rdrs = get_all_rdrs(rdr_path)
+    print("### Available RDRs")
+    print()
+    if rdrs:
+        print("| File | Title | Status | Type |")
+        print("|------|-------|--------|------|")
+        for r in rdrs:
+            print(f"| {r['file']} | {r['title']} | {r['status']} | {r['rtype']} |")
+    else:
+        print(f"No RDRs found in `{rdr_dir}`")
+    sys.exit(0)
+
+rdr_file = find_rdr_file(rdr_path, id_match.group(0))
+if not rdr_file:
+    print(f"> RDR not found for ID: `{id_match.group(0)}`")
+    sys.exit(0)
+
+fm, text = parse_frontmatter(rdr_file)
+title = fm.get('title', fm.get('name', rdr_file.stem))
+rdr_num = re.search(r'\d+', rdr_file.stem)
+t2_key = rdr_num.group(0) if rdr_num else rdr_file.stem
+
+print(f"### RDR File: {rdr_file.name}")
+print(f"**Title:** {title}  **Status:** {fm.get('status', '?')}  **Type:** {fm.get('type', '?')}")
+print()
+
+# Section headings (structural completeness check — Layer 1)
+headings = re.findall(r'^(#{1,3} .+)', text, re.MULTILINE)
+print("#### Section Structure (for completeness check)")
+print()
+for h in headings:
+    print(h)
+print()
+
+# Section summaries: first non-empty, non-heading line of each ## section
+print("#### Section Summaries")
+print()
+sections = re.split(r'^(## .+)', text, flags=re.MULTILINE)
+for i in range(1, len(sections) - 1, 2):
+    heading = sections[i].strip()
+    body = sections[i + 1]
+    first_lines = [l.strip() for l in body.splitlines()
+                   if l.strip() and not l.strip().startswith('#')]
+    summary = first_lines[0][:120] if first_lines else '_empty_'
+    print(f"**{heading}**: {summary}")
+print()
+
+# T2 metadata
+print("### T2 Metadata")
+try:
+    result = subprocess.run(
+        ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', t2_key],
+        capture_output=True, text=True, timeout=10)
+    t2_out = (result.stdout or '').strip()
+    print(t2_out if t2_out else f"No T2 record for RDR {t2_key}")
+except Exception as exc:
+    print(f"T2 not available: {exc}")
+print()
+
+# T2 research findings
+print("### T2 Research Findings")
+try:
+    result = subprocess.run(
+        ['nx', 'memory', 'list', '--project', f'{repo_name}_rdr'],
+        capture_output=True, text=True, timeout=10)
+    list_out = (result.stdout or '').strip()
+    research_lines = [l for l in list_out.splitlines()
+                      if re.match(rf'^{t2_key}-research', l)]
+    print('\n'.join(research_lines) if research_lines else "No research findings recorded")
+except Exception as exc:
+    print(f"T2 not available: {exc}")
+PYEOF
 }
 
 ## RDR to Gate
@@ -74,10 +200,11 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **rdr-gate** skill using the context above:
+All data is pre-loaded above — no additional tool calls needed.
 
-- RDR directory is the `RDR_DIR` shown above (from `.nexus.yml` `indexing.rdr_paths[0]`)
-- Run all three layers in sequence: structural validation → assumption audit → AI critique
-- Use the section headings above for Layer 1 pre-check (completeness check)
-- Use the T2 research findings above for Layer 2 assumption audit
-- Layer 3 dispatches the `substantive-critic` agent via Task tool
+- RDR directory is shown above (from `.nexus.yml` `indexing.rdr_paths[0]`).
+- Run all three gate layers in sequence:
+  - **Layer 1 — Structural**: Use the Section Structure and Section Summaries above to check completeness (required headings present, no empty sections).
+  - **Layer 2 — Assumption audit**: Use T2 Research Findings above to verify assumptions are evidenced.
+  - **Layer 3 — AI critique**: Dispatch the `deep-critic` agent via Task tool with the full RDR content.
+- If no ID given, show the available RDR table above and prompt for an ID.

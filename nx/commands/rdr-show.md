@@ -5,71 +5,243 @@ description: Show detailed information about a specific RDR including content, r
 # RDR Show
 
 !{
-  # Detect RDR directory from .nexus.yml (fallback: docs/rdr)
-  RDR_DIR=$(python3 -c "
-import os, re, sys
-f = '.nexus.yml'
-if not os.path.exists(f): print('docs/rdr'); sys.exit()
-t = open(f).read()
+NEXUS_RDR_ARGS="${ARGUMENTS:-}" python3 << 'PYEOF'
+import os, sys, re, subprocess
+from pathlib import Path
+
+args = os.environ.get('NEXUS_RDR_ARGS', '').strip()
+
+# Repo root and name
 try:
-    import yaml; d = yaml.safe_load(t) or {}; paths = (d.get('indexing') or {}).get('rdr_paths', ['docs/rdr']); print(paths[0] if paths else 'docs/rdr')
-except ImportError:
-    m = re.search(r'rdr_paths[^\[]*\[([^\]]+)\]', t) or re.search(r'rdr_paths:\s*\n\s+-\s*(.+)', t)
-    v = m.group(1) if m else ''; parts = re.findall(r'[a-z][a-z0-9/_-]+', v)
-    print(parts[0] if parts else 'docs/rdr')
-" 2>/dev/null || echo "docs/rdr")
+    repo_root = subprocess.check_output(
+        ['git', 'rev-parse', '--show-toplevel'],
+        stderr=subprocess.DEVNULL, text=True).strip()
+    repo_name = os.path.basename(repo_root)
+except Exception:
+    repo_root = os.getcwd()
+    repo_name = os.path.basename(repo_root)
 
-  # Determine RDR ID from arguments
-  RDR_ID="${ARGUMENTS:-}"
-  RDR_NUM=$(echo "$RDR_ID" | grep -o '[0-9]\+' | head -1)
+# Resolve RDR directory from .nexus.yml (default: docs/rdr)
+rdr_dir = 'docs/rdr'
+nexus_yml = Path(repo_root) / '.nexus.yml'
+if nexus_yml.exists():
+    content = nexus_yml.read_text()
+    try:
+        import yaml
+        d = yaml.safe_load(content) or {}
+        paths = (d.get('indexing') or {}).get('rdr_paths', ['docs/rdr'])
+        rdr_dir = paths[0] if paths else 'docs/rdr'
+    except ImportError:
+        m_yml = (re.search(r'rdr_paths[^\[]*\[([^\]]+)\]', content) or
+                 re.search(r'rdr_paths:\s*\n\s+-\s*(.+)', content))
+        if m_yml:
+            v = m_yml.group(1)
+            parts = re.findall(r'[a-z][a-z0-9/_-]+', v)
+            rdr_dir = parts[0] if parts else 'docs/rdr'
 
-  echo "**RDR directory:** \`$RDR_DIR\`"
-  echo ""
+rdr_path = Path(repo_root) / rdr_dir
 
-  if [ ! -d "$RDR_DIR" ]; then
-    echo "> No RDRs found — \`$RDR_DIR\` does not exist in this repo."
-    exit 0
-  fi
+print(f"**Repo:** `{repo_name}`  **RDR directory:** `{rdr_dir}`")
+print()
 
-  if [ -n "$RDR_NUM" ]; then
-    # Find the specific RDR file
-    RDR_FILE=$(ls "$RDR_DIR"/${RDR_NUM}-*.md 2>/dev/null | head -1)
-    if [ -n "$RDR_FILE" ]; then
-      echo "### RDR File: $(basename "$RDR_FILE")"
-      echo '```'
-      head -80 "$RDR_FILE"
-      echo '```'
-      echo ""
-    else
-      echo "> RDR $RDR_NUM not found in \`$RDR_DIR\`"
-      echo ""
-    fi
-  fi
 
-  echo "### T2 Metadata"
-  echo '```'
-  REPO=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
-  if [ -n "$REPO" ] && [ -n "$RDR_NUM" ] && command -v nx &> /dev/null; then
-    nx memory get --project "${REPO}_rdr" --title "$RDR_NUM" 2>/dev/null || echo "No T2 record for RDR $RDR_NUM"
-    echo ""
-    echo "# Research findings:"
-    nx memory list --project "${REPO}_rdr" 2>/dev/null | grep "^${RDR_NUM}-research" | head -20 || echo "No research findings"
-  else
-    echo "T2 not available or no RDR ID specified"
-  fi
-  echo '```'
+def parse_frontmatter(filepath):
+    text = filepath.read_text(errors='replace')
+    meta = {}
+    if text.startswith('---'):
+        parts = text.split('---', 2)
+        if len(parts) >= 3:
+            block = parts[1]
+            try:
+                import yaml; meta = yaml.safe_load(block) or {}
+            except Exception:
+                for line in block.splitlines():
+                    if ':' in line:
+                        k, _, v = line.partition(':')
+                        meta[k.strip().lower()] = v.strip()
+    else:
+        m = re.search(r'^## Metadata\s*\n(.*?)(?=^##|\Z)', text, re.MULTILINE | re.DOTALL)
+        if m:
+            for line in m.group(1).splitlines():
+                kv = re.match(r'-?\s*\*\*(\w[\w\s]*?)\*\*:\s*(.+)', line.strip())
+                if kv:
+                    meta[kv.group(1).strip().lower()] = kv.group(2).strip()
+    if 'title' not in meta and 'name' not in meta:
+        h1 = re.search(r'^#\s+(.+)', text, re.MULTILINE)
+        if h1:
+            meta['title'] = h1.group(1).strip()
+    return meta, text
 
-  if [ -n "$RDR_NUM" ]; then
-    echo "### Linked Beads"
-    echo '```'
-    if command -v bd &> /dev/null; then
-      # Show in-progress and open beads referencing this RDR number
-      bd list --status=open --limit=10 2>/dev/null | grep -i "rdr.*$RDR_NUM\|$RDR_NUM.*rdr" || echo "No beads linked (check epic_bead in T2)"
-    else
-      echo "Beads not available"
-    fi
-    echo '```'
-  fi
+
+def find_rdr_file(rdr_path, id_str):
+    m = re.search(r'\d+', id_str)
+    if not m:
+        return None
+    num_int = int(m.group(0))
+    for f in sorted(rdr_path.glob('*.md')):
+        nums = re.findall(r'\d+', f.stem)
+        if nums and int(nums[0]) == num_int:
+            return f
+    return None
+
+
+def get_excerpt(text):
+    # Strip frontmatter or metadata section, return 250-char excerpt
+    if text.startswith('---'):
+        parts = text.split('---', 2)
+        text = parts[2] if len(parts) >= 3 else text
+    else:
+        m = re.search(r'^## Metadata\s*\n.*?(?=^##)', text, re.MULTILINE | re.DOTALL)
+        if m:
+            text = text[m.end():]
+    lines = [l.strip() for l in text.splitlines() if l.strip() and not l.startswith('#')]
+    return ' '.join(lines)[:250]
+
+
+EXCLUDED = {'readme.md', 'template.md', 'index.md', 'overview.md', 'workflow.md', 'templates.md'}
+
+def get_all_rdrs(rdr_path):
+    """Return list of dicts for all RDRs in the directory."""
+    all_md = sorted(rdr_path.glob('*.md'))
+    rdrs = []
+    for f in all_md:
+        if f.name.lower() in EXCLUDED:
+            continue
+        fm, text = parse_frontmatter(f)
+        rtype = fm.get('type', '?')
+        doc_status = fm.get('status', '?')
+        if doc_status == '?' and rtype == '?':
+            continue  # prose doc, not an RDR
+        rdrs.append({
+            'file': f.name,
+            'path': f,
+            'text': text,
+            'title': fm.get('title', fm.get('name', f.stem)),
+            'status': doc_status,
+            'rtype': rtype,
+            'priority': fm.get('priority', '?'),
+        })
+    return rdrs
+
+
+if not rdr_path.exists():
+    print(f"> No RDRs found — `{rdr_dir}` does not exist in this repo.")
+    sys.exit(0)
+
+if args:
+    # Show specific RDR
+    rdr_file = find_rdr_file(rdr_path, args)
+    if rdr_file:
+        fm, text = parse_frontmatter(rdr_file)
+        print(f"### RDR: {rdr_file.name}")
+        print()
+
+        # Metadata table
+        print("#### Metadata")
+        print()
+        print("| Field | Value |")
+        print("|-------|-------|")
+        for key in ('status', 'type', 'priority', 'title', 'author', 'date', 'supersedes', 'superseded-by'):
+            val = fm.get(key)
+            if val:
+                print(f"| {key.title()} | {val} |")
+        print()
+
+        # Full content
+        print("#### Content")
+        print()
+        print(text)
+        print()
+
+        # T2 metadata
+        print("### T2 Metadata")
+        rdr_num = re.search(r'\d+', rdr_file.stem)
+        t2_key = rdr_num.group(0) if rdr_num else rdr_file.stem
+        try:
+            result = subprocess.run(
+                ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', t2_key],
+                capture_output=True, text=True, timeout=10)
+            t2_out = (result.stdout or '').strip()
+            print(t2_out if t2_out else f"No T2 record for RDR {t2_key}")
+        except Exception as exc:
+            print(f"T2 not available: {exc}")
+        print()
+
+        # T2 research findings
+        print("### T2 Research Findings")
+        try:
+            result = subprocess.run(
+                ['nx', 'memory', 'list', '--project', f'{repo_name}_rdr'],
+                capture_output=True, text=True, timeout=10)
+            list_out = (result.stdout or '').strip()
+            research_lines = [l for l in list_out.splitlines()
+                              if re.match(rf'^{t2_key}-research', l)]
+            print('\n'.join(research_lines) if research_lines else "No research findings recorded")
+        except Exception as exc:
+            print(f"T2 not available: {exc}")
+        print()
+
+        # Linked beads
+        print("### Linked Beads")
+        try:
+            result = subprocess.run(
+                ['bd', 'list', '--status=open', '--limit=20'],
+                capture_output=True, text=True, timeout=10)
+            bd_out = (result.stdout or '').strip()
+            matching = [l for l in bd_out.splitlines()
+                        if re.search(rf'rdr.*{t2_key}|{t2_key}.*rdr', l, re.IGNORECASE)]
+            print('\n'.join(matching) if matching else "No beads linked (check epic_bead in T2)")
+        except Exception as exc:
+            print(f"Beads not available: {exc}")
+    else:
+        print(f"> RDR not found for: `{args}`")
+        print()
+        print("Available RDRs:")
+        rdrs = get_all_rdrs(rdr_path)
+        if rdrs:
+            print()
+            print("| File | Title | Status | Type | Priority |")
+            print("|------|-------|--------|------|----------|")
+            for r in rdrs:
+                print(f"| {r['file']} | {r['title']} | {r['status']} | {r['rtype']} | {r['priority']} |")
+else:
+    # No ID — show list (most recently modified first) + content index
+    all_md = [f for f in rdr_path.glob('*.md') if f.name.lower() not in EXCLUDED]
+    all_md_sorted = sorted(all_md, key=lambda f: f.stat().st_mtime, reverse=True)
+
+    rdrs = []
+    for f in all_md_sorted:
+        fm, text = parse_frontmatter(f)
+        rtype = fm.get('type', '?')
+        doc_status = fm.get('status', '?')
+        if doc_status == '?' and rtype == '?':
+            continue
+        rdrs.append({
+            'file': f.name,
+            'path': f,
+            'text': text,
+            'title': fm.get('title', fm.get('name', f.stem)),
+            'status': doc_status,
+            'rtype': rtype,
+            'priority': fm.get('priority', '?'),
+        })
+
+    print(f"### RDR Files ({len(rdrs)} found, most recently modified first)")
+    print()
+    if rdrs:
+        print("| File | Title | Status | Type | Priority |")
+        print("|------|-------|--------|------|----------|")
+        for r in rdrs:
+            print(f"| {r['file']} | {r['title']} | {r['status']} | {r['rtype']} | {r['priority']} |")
+        print()
+        print("### Content Index (for keyword and topic filtering)")
+        print()
+        for r in rdrs:
+            excerpt = get_excerpt(r['text'])
+            print(f"**{r['file']}**: {excerpt}")
+    else:
+        print(f"No RDR files found in `{rdr_dir}`")
+PYEOF
 }
 
 ## RDR to Show
@@ -78,10 +250,9 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **rdr-show** skill using the context above.
+All data is pre-loaded above — no additional tool calls needed.
 
-- RDR directory is the `RDR_DIR` shown above (from `.nexus.yml` `indexing.rdr_paths[0]`)
-- RDR ID is parsed from `$ARGUMENTS` (e.g. `003` or `NX-003`)
-- If no ID given, default to the most recently modified RDR in the directory
-- Display: metadata, research findings by classification, linked beads, supersedes/superseded-by
-- If ID not found, fallback to rdr-list behavior
+- If an RDR ID was given: display metadata table, full content, T2 metadata, research findings, and linked beads.
+- If no ID given: display the list table + content index (most recently modified first).
+- RDR ID is parsed from `$ARGUMENTS` (e.g. `003`, `RDR-003`, or `NX-003`).
+- If the ID is not found, show the available RDR list as fallback.
