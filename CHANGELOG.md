@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc2] - 2026-02-26
+
+### Added
+- Six RDR slash commands with live context injection (`/rdr-create`, `/rdr-list`, `/rdr-show`, `/rdr-research`, `/rdr-gate`, `/rdr-close`)
+  - Each command pre-fetches project state (RDR dir, existing IDs, T2 metadata, active beads, git branch) before invoking the corresponding skill
+  - Mirrors the context-injection pattern used by agent commands (`/review-code`, `/create-plan`, etc.)
+- Plugin test suite: 752 unit + structural tests covering install simulation, `$CLAUDE_PLUGIN_ROOT` reference integrity, markdown link resolution, hook script presence, and marketplace version consistency
+- E2E debug-load scenario (scenario 00): validates plugin load diagnostics, hook script execution, and component discovery via Claude `-p` mode without a live interactive session
+- E2E test sandbox now includes locally-cached superpowers plugin alongside nx, enabling cross-plugin skill validation
+- E2E isolation guard: verifies `nx@nexus-plugins` loads from dev repo, not the installed v1 cache
+
+### Changed
+- RDR skills now read the RDR directory from `.nexus.yml` `indexing.rdr_paths[0]` (default: `docs/rdr`) instead of hardcoding the path — consistent with the nx repo indexer config
+- `registry.yaml` RDR skill entries updated with `command_file` references linking skills to their context-injecting command counterparts
+
+### Fixed
+- Marketplace version corrected from `1.0.0-rc1` to `1.0.0-rc2` (plugin structure test caught mismatch)
+- E2E test harness: Python 3.14 incompatibility with chromadb/pydantic resolved by pinning install to Python 3.12
+
 ## [1.0.0-rc1] - 2026-02-25
 
 ### Added
