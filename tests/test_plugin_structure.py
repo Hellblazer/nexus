@@ -753,3 +753,142 @@ class TestMarketplaceVersion:
                 f"{plugin_version!r} != pyproject.toml {pyproject_version!r}. "
                 f"Update .claude-plugin/marketplace.json when bumping version."
             )
+
+
+# ── Plugin root manifest ──────────────────────────────────────────────────────
+
+
+class TestPluginRootManifest:
+    """Required top-level plugin files must exist after install (source: ./nx)."""
+
+    REQUIRED_ROOT_FILES = [
+        "registry.yaml",
+        "README.md",
+        "CHANGELOG.md",
+        "hooks/hooks.json",
+    ]
+
+    REQUIRED_ROOT_DIRS = [
+        "agents",
+        "agents/_shared",
+        "skills",
+        "commands",
+        "hooks/scripts",
+        "resources/rdr",
+        "resources/rdr/post-mortem",
+    ]
+
+    @pytest.mark.parametrize("rel_path", REQUIRED_ROOT_FILES)
+    def test_required_root_file_exists(self, rel_path: str) -> None:
+        """Required plugin root file must exist."""
+        full = PLUGIN_DIR / rel_path
+        assert full.exists(), (
+            f"Required plugin file missing: {rel_path}\n"
+            f"  Expected at: {full}"
+        )
+        assert full.stat().st_size > 0, f"{rel_path} exists but is empty"
+
+    @pytest.mark.parametrize("rel_dir", REQUIRED_ROOT_DIRS)
+    def test_required_root_dir_exists(self, rel_dir: str) -> None:
+        """Required plugin directory must exist and be non-empty."""
+        full = PLUGIN_DIR / rel_dir
+        assert full.is_dir(), f"Required plugin directory missing: {rel_dir}"
+        assert any(full.iterdir()), f"Required plugin directory is empty: {rel_dir}"
+
+
+# ── $CLAUDE_PLUGIN_ROOT references across all plugin files ───────────────────
+
+
+def _collect_plugin_root_refs() -> list[tuple[str, str]]:
+    """Scan every file under nx/ for $CLAUDE_PLUGIN_ROOT/... references."""
+    results = []
+    for src_file in sorted(PLUGIN_DIR.rglob("*")):
+        if not src_file.is_file():
+            continue
+        try:
+            text = src_file.read_text()
+        except UnicodeDecodeError:
+            continue
+        label = str(src_file.relative_to(PLUGIN_DIR))
+        for match in re.finditer(r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"`)]+)", text):
+            results.append((label, match.group(1)))
+    return results
+
+
+class TestPluginRootRefs:
+    """Every $CLAUDE_PLUGIN_ROOT/... reference in any plugin file must resolve."""
+
+    @pytest.mark.parametrize("source,rel_path", [
+        pytest.param(src, rp, id=f"{src}→{rp}")
+        for src, rp in _collect_plugin_root_refs()
+    ])
+    def test_plugin_root_ref_resolves(self, source: str, rel_path: str) -> None:
+        """$CLAUDE_PLUGIN_ROOT/{rel_path} must exist under nx/."""
+        full = PLUGIN_DIR / rel_path
+        assert full.exists(), (
+            f"{source}: $CLAUDE_PLUGIN_ROOT/{rel_path} does not exist\n"
+            f"  Expected at: {full}"
+        )
+
+
+# ── Bidirectional registry coverage ──────────────────────────────────────────
+
+
+class TestBidirectionalRegistry:
+    """Every agent/skill/command file on disk must have a registry entry."""
+
+    def test_every_agent_file_has_registry_entry(self) -> None:
+        """No agent .md file should exist without a corresponding registry entry."""
+        registry = yaml.safe_load(REGISTRY_PATH.read_text())
+        registered = set(registry.get("agents", {}).keys())
+        for agent_file in agent_files():
+            name = agent_file.stem
+            assert name in registered, (
+                f"agents/{agent_file.name} exists on disk but has no entry in "
+                f"registry.yaml 'agents' section. Add it or remove the file."
+            )
+
+    def test_every_skill_dir_has_registry_entry(self) -> None:
+        """No skill directory should exist without a registry entry."""
+        registry = yaml.safe_load(REGISTRY_PATH.read_text())
+        registered_agent_skills = {
+            meta["skill"]
+            for meta in registry.get("agents", {}).values()
+            if meta.get("skill")
+        }
+        registered_standalone = set(registry.get("standalone_skills", {}).keys())
+        registered_rdr = set(registry.get("rdr_skills", {}).keys())
+        all_registered = registered_agent_skills | registered_standalone | registered_rdr
+
+        for skill_md in skill_skill_mds():
+            skill_name = skill_md.parent.name
+            assert skill_name in all_registered, (
+                f"skills/{skill_name}/SKILL.md exists on disk but '{skill_name}' "
+                f"is not registered in registry.yaml (agents[*].skill, "
+                f"standalone_skills, or rdr_skills). Add it or remove the directory."
+            )
+
+    def test_every_command_file_has_registry_entry(self) -> None:
+        """No command .md file should exist without a registry entry."""
+        registry = yaml.safe_load(REGISTRY_PATH.read_text())
+        # Commands are registered via slash_command field on agents, rdr_skills,
+        # standalone_skills, or utility_commands
+        registered_commands: set[str] = set()
+        for meta in registry.get("agents", {}).values():
+            if sc := meta.get("slash_command"):
+                registered_commands.add(sc.lstrip("/"))
+        for meta in registry.get("rdr_skills", {}).values():
+            if sc := meta.get("slash_command"):
+                registered_commands.add(sc.lstrip("/"))
+        for name in registry.get("standalone_skills", {}):
+            registered_commands.add(name)
+        for name in registry.get("utility_commands", {}):
+            registered_commands.add(name)
+
+        for cmd_file in command_files():
+            name = cmd_file.stem
+            assert name in registered_commands, (
+                f"commands/{cmd_file.name} exists on disk but '{name}' has no "
+                f"matching slash_command entry in registry.yaml. "
+                f"Add it to agents, rdr_skills, standalone_skills, or utility_commands."
+            )
