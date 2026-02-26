@@ -618,18 +618,61 @@ class TestStandaloneSkillRegistry:
 
 
 class TestSharedResources:
-    """Shared resources referenced by skills must exist."""
+    """Shared resources referenced by skills must exist and be non-empty."""
 
-    def test_relay_template_exists(self) -> None:
-        """RELAY_TEMPLATE.md must exist — all hybrid relay cross-references point to it."""
-        relay_template = SHARED_DIR / "RELAY_TEMPLATE.md"
-        assert relay_template.exists(), (
-            f"RELAY_TEMPLATE.md not found at {relay_template}. "
-            f"All agent-delegating skills cross-reference this file."
+    EXPECTED_SHARED_FILES = [
+        "RELAY_TEMPLATE.md",
+        "CONTEXT_PROTOCOL.md",
+        "ERROR_HANDLING.md",
+        "MAINTENANCE.md",
+        "README.md",
+    ]
+
+    @pytest.mark.parametrize("filename", EXPECTED_SHARED_FILES)
+    def test_shared_file_exists_and_non_empty(self, filename: str) -> None:
+        """Every known _shared/ file must exist and have substantive content."""
+        path = SHARED_DIR / filename
+        assert path.exists(), f"_shared/{filename} missing"
+        content = path.read_text()
+        assert len(content) > 100, f"_shared/{filename} exists but is nearly empty"
+
+    def test_no_unregistered_shared_files(self) -> None:
+        """Every file in _shared/ must be in the expected list (no orphans)."""
+        actual = {p.name for p in SHARED_DIR.glob("*.md")}
+        expected = set(self.EXPECTED_SHARED_FILES)
+        orphans = actual - expected
+        assert not orphans, (
+            f"Unexpected files in _shared/ not covered by tests: {orphans}. "
+            f"Add them to EXPECTED_SHARED_FILES or remove them."
         )
-        content = relay_template.read_text()
-        assert len(content) > 100, (
-            "RELAY_TEMPLATE.md exists but appears empty or trivially short"
+
+
+def _collect_shared_links() -> list[tuple[Path, str]]:
+    """Walk all md files in nx/ and extract links pointing into _shared/."""
+    results = []
+    for md_file in sorted(PLUGIN_DIR.rglob("*.md")):
+        if "_shared" in md_file.parts:
+            continue  # skip _shared/ files referencing each other
+        text = md_file.read_text()
+        for match in re.finditer(r"\[([^\]]*)\]\(([^)]*_shared/[^)]*)\)", text):
+            results.append((md_file, match.group(2)))
+    return results
+
+
+class TestSharedRelativePaths:
+    """Markdown links to _shared/ files must resolve correctly from every referencing file."""
+
+    @pytest.mark.parametrize("source_file,raw_path", [
+        pytest.param(src, rp, id=f"{src.relative_to(PLUGIN_DIR)}→{rp}")
+        for src, rp in _collect_shared_links()
+    ])
+    def test_shared_link_resolves(self, source_file: Path, raw_path: str) -> None:
+        """A markdown link to _shared/ must resolve to an existing file."""
+        path_part = raw_path.split("#")[0]  # strip any #fragment
+        resolved = (source_file.parent / path_part).resolve()
+        assert resolved.exists(), (
+            f"{source_file.relative_to(PLUGIN_DIR)}: link {raw_path!r} "
+            f"resolves to {resolved} which does not exist"
         )
 
 
