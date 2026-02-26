@@ -9,7 +9,7 @@
       "name": "nx",
       "source": "./nx",
       "description": "Self-hosted semantic search, memory, and knowledge management for Claude Code agents.",
-      "version": "1.0.0rc3"
+      "version": "1.0.0-rc3"
     }
   ]
 }
