@@ -674,6 +674,94 @@ def test_run_index_excludes_rdr_paths_from_docs(tmp_path: Path) -> None:
     assert any("ADR-001.md" in p for p in rdr_call_paths), "ADR-001.md should be in batch_index_markdowns call"
 
 
+def test_run_index_returns_rdr_stats(tmp_path: Path) -> None:
+    """_run_index returns a dict with rdr_indexed / rdr_current / rdr_failed counts."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# README\n")
+    rdr_dir = repo / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "001-decision.md").write_text("# Decision\n")
+    (rdr_dir / "002-decision.md").write_text("# Decision 2\n")
+
+    registry = _registry_with_dual_collections()
+    mock_db, _, _ = _make_collection_tracking_db()
+    config_with_rdr = {
+        "server": {"ignorePatterns": []},
+        "indexing": {"code_extensions": [], "prose_extensions": [], "rdr_paths": ["docs/rdr"]},
+    }
+    # batch_index_markdowns returns: 1 indexed, 1 skipped (already current), 0 failed
+    mock_results = {
+        str(rdr_dir / "001-decision.md"): "indexed",
+        str(rdr_dir / "002-decision.md"): "skipped",
+    }
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=config_with_rdr):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("voyageai.Client"):
+                                with patch("nexus.doc_indexer.batch_index_markdowns", return_value=mock_results):
+                                    stats = _run_index(repo, registry)
+
+    assert stats["rdr_indexed"] == 1
+    assert stats["rdr_current"] == 1
+    assert stats["rdr_failed"] == 0
+
+
+def test_index_repo_cmd_shows_rdr_summary(tmp_path: Path) -> None:
+    """nx index repo prints an RDR summary line when RDR documents exist."""
+    from click.testing import CliRunner
+
+    from nexus.cli import main
+    from nexus.registry import RepoRegistry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# README\n")
+    rdr_dir = repo / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "001-decision.md").write_text("# Decision\n")
+
+    registry_path = tmp_path / "repos.json"
+    mock_results = {str(rdr_dir / "001-decision.md"): "indexed"}
+    mock_stats = {"rdr_indexed": 1, "rdr_current": 0, "rdr_failed": 0}
+
+    runner = CliRunner()
+    with patch("nexus.commands.index._registry_path", return_value=registry_path):
+        with patch("nexus.indexer.index_repository", return_value=mock_stats):
+            result = runner.invoke(main, ["index", "repo", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    assert "RDR documents" in result.output
+    assert "1 indexed" in result.output
+
+
+def test_index_repo_cmd_no_rdr_summary_when_no_rdrs(tmp_path: Path) -> None:
+    """nx index repo omits the RDR summary line when no RDR documents are found."""
+    from click.testing import CliRunner
+
+    from nexus.cli import main
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    registry_path = tmp_path / "repos.json"
+    mock_stats: dict = {"rdr_indexed": 0, "rdr_current": 0, "rdr_failed": 0}
+
+    runner = CliRunner()
+    with patch("nexus.commands.index._registry_path", return_value=registry_path):
+        with patch("nexus.indexer.index_repository", return_value=mock_stats):
+            result = runner.invoke(main, ["index", "repo", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    assert "RDR documents" not in result.output
+
+
 def test_run_index_mixed_repo(tmp_path: Path) -> None:
     """A repo with both code and prose files routes each to the correct collection."""
     from nexus.indexer import _run_index
