@@ -29,6 +29,9 @@ _AST_EXTENSIONS: dict[str, str] = {
 
 _CHUNK_LINES = 150
 _OVERLAP = 0.15
+# ChromaDB Cloud enforces a 16 384-byte per-document hard limit.
+# Keep a small buffer so metadata serialisation overhead doesn't tip us over.
+_CHUNK_MAX_BYTES = 16_000
 
 
 def _make_code_splitter(language: str, content: str) -> list:
@@ -57,8 +60,18 @@ def _line_chunk(
     content: str,
     chunk_lines: int = _CHUNK_LINES,
     overlap: float = _OVERLAP,
+    max_bytes: int = _CHUNK_MAX_BYTES,
 ) -> list[tuple[int, int, str]]:
     """Split *content* into overlapping line-based chunks.
+
+    Each chunk contains at most *chunk_lines* lines and at most *max_bytes*
+    bytes (UTF-8 encoded).  When a window of *chunk_lines* would exceed
+    *max_bytes*, the window is shrunk via binary search until it fits.
+    A single line that is itself larger than *max_bytes* is emitted as-is
+    (the byte limit cannot be honoured without splitting the line).
+
+    The step between chunk starts is derived from the *actual* chunk size
+    written, preserving the overlap ratio regardless of byte-capping.
 
     Returns list of (line_start, line_end, text) tuples (1-indexed).
     """
@@ -67,17 +80,79 @@ def _line_chunk(
     if n == 0:
         return []
 
-    step = max(1, int(chunk_lines * (1 - overlap)))
     chunks: list[tuple[int, int, str]] = []
     start = 0
     while start < n:
         end = min(start + chunk_lines, n)
         chunk_text = "\n".join(lines[start:end])
+
+        # Byte cap: binary-search for the largest window that fits.
+        if len(chunk_text.encode()) > max_bytes:
+            lo, hi = 1, end - start
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if len("\n".join(lines[start : start + mid]).encode()) <= max_bytes:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            # Always emit at least 1 line even if it alone exceeds max_bytes.
+            end = start + max(1, lo)
+            chunk_text = "\n".join(lines[start:end])
+
         chunks.append((start + 1, end, chunk_text))  # 1-indexed
         if end == n:
             break
-        start += step
+        # Step is relative to actual chunk size to preserve overlap ratio.
+        actual_lines = end - start
+        start += max(1, int(actual_lines * (1 - overlap)))
     return chunks
+
+
+def _enforce_byte_cap(
+    chunks: list[dict[str, Any]],
+    max_bytes: int = _CHUNK_MAX_BYTES,
+) -> list[dict[str, Any]]:
+    """Post-process a chunk list and split any entry that exceeds *max_bytes*.
+
+    Used for AST-produced chunks where CodeSplitter may emit a single node
+    (e.g. a 400-line function body) that is larger than the storage limit.
+    Renumbers chunk_index and chunk_count across the returned list.
+    """
+    result: list[dict[str, Any]] = []
+    for chunk in chunks:
+        text: str = chunk["text"]
+        if len(text.encode()) <= max_bytes:
+            result.append(chunk)
+            continue
+
+        # Oversized node: re-split line-by-line with binary-search byte cap.
+        base_ls: int = chunk.get("line_start", 1)
+        lines = text.splitlines()
+        pos = 0
+        while pos < len(lines):
+            lo, hi = 1, len(lines) - pos
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if len("\n".join(lines[pos : pos + mid]).encode()) <= max_bytes:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            take = max(1, lo)
+            sub_text = "\n".join(lines[pos : pos + take])
+            result.append({
+                **chunk,
+                "text": sub_text,
+                "line_start": base_ls + pos,
+                "line_end": base_ls + pos + take - 1,
+            })
+            pos += take
+
+    # Renumber indices across the (possibly expanded) list.
+    total = len(result)
+    for i, c in enumerate(result):
+        c["chunk_index"] = i
+        c["chunk_count"] = total
+    return result
 
 
 def chunk_file(file: Path, content: str) -> list[dict[str, Any]]:
@@ -109,7 +184,9 @@ def chunk_file(file: Path, content: str) -> list[dict[str, Any]]:
                     meta.setdefault("line_end", len(content.splitlines()))
                     meta["text"] = node.text
                     result.append(meta)
-                return result
+                # Post-process: split any AST node that exceeds the byte cap
+                # (e.g. a single function body longer than _CHUNK_MAX_BYTES).
+                return _enforce_byte_cap(result)
         except Exception:
             _log.debug("AST chunking failed, falling back to line chunks", file=str(file), exc_info=True)
 

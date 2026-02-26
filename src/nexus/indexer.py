@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 
 DEFAULT_IGNORE: list[str] = [
     "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", ".git",
+    # Dependency lock / checksum files: auto-generated, not semantically useful,
+    # and can produce chunks that exceed storage per-document size limits.
+    "*.lock", "go.sum",
 ]
 
 # Voyage AI embed() API limit: https://docs.voyageai.com/reference/embeddings-api

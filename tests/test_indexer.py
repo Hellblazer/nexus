@@ -896,3 +896,36 @@ def test_git_ls_files_fallback_on_non_git_dir(tmp_path: Path) -> None:
 
     files = _git_ls_files(non_git)
     assert files == [], "Non-git directory should return empty list for fallback"
+
+
+# ── DEFAULT_IGNORE / _should_ignore ──────────────────────────────────────────
+
+def test_should_ignore_lock_files() -> None:
+    """*.lock files are ignored by default (uv.lock, yarn.lock, Gemfile.lock, etc.)."""
+    from nexus.indexer import DEFAULT_IGNORE, _should_ignore
+
+    for name in ("uv.lock", "yarn.lock", "poetry.lock", "Gemfile.lock", "Cargo.lock"):
+        assert _should_ignore(Path(name), DEFAULT_IGNORE), f"{name} should be ignored"
+
+
+def test_should_ignore_go_sum() -> None:
+    """go.sum is ignored by default."""
+    from nexus.indexer import DEFAULT_IGNORE, _should_ignore
+
+    assert _should_ignore(Path("go.sum"), DEFAULT_IGNORE)
+
+
+def test_should_ignore_lock_files_in_subdirectory() -> None:
+    """*.lock files are ignored regardless of directory depth."""
+    from nexus.indexer import DEFAULT_IGNORE, _should_ignore
+
+    assert _should_ignore(Path("subdir/uv.lock"), DEFAULT_IGNORE)
+    assert _should_ignore(Path("a/b/c/yarn.lock"), DEFAULT_IGNORE)
+
+
+def test_should_not_ignore_regular_files() -> None:
+    """Normal source files are not caught by the lock/sum patterns."""
+    from nexus.indexer import DEFAULT_IGNORE, _should_ignore
+
+    for name in ("main.py", "README.md", "pyproject.toml", "go.mod"):
+        assert not _should_ignore(Path(name), DEFAULT_IGNORE), f"{name} should not be ignored"
