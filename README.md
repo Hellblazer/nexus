@@ -6,7 +6,7 @@ Three layers, each useful on its own, each building on the last:
 
 1. **Semantic search and repository indexing** (`nx`) — Index any repo: code is chunked with tree-sitter AST parsing, prose with semantic markdown splitting, PDFs with layout-aware extraction. Search across all of it with a single command. Three storage tiers let you start local with zero API keys and add cloud search when you're ready.
 
-2. **A Claude Code plugin** (`nx/`) — 15 agents, 26 skills, session hooks, and slash commands. Agents search indexed code before proposing changes and coordinate through standard pipelines (plan, implement, review, test). Works with the CLI; does not require RDR.
+2. **A Claude Code plugin** (`nx/`) — 15 agents, 27 skills, session hooks, slash commands, and a bundled MCP server. Agents search indexed code before proposing changes and coordinate through standard pipelines (plan, implement, review, test). Works with the CLI; does not require RDR.
 
 3. **A structured decision framework** ([RDR](docs/rdr/README.md)) — Research-Design-Review documents: the traction control for agentic development. Each decision is a short document with classified evidence (Verified, Documented, or Assumed). Write one, build it, learn something, write another. Nexus keeps the growing corpus searchable and navigable. Fully optional.
 
@@ -79,7 +79,7 @@ Each finding is classified so readers know what is solid and what is a guess:
 
 RDRs are iterative, not waterfall. You write one, build it, learn something, and write another. A real project might produce 20+ RDRs over its lifetime — foundation decisions, mid-project pivots when assumptions break, performance fixes from real usage, quality refinements from actual data. Each one builds on what you learned implementing the last.
 
-That many design documents create an information management problem. Nexus handles it: every RDR is semantically searchable the moment it is committed, metadata is queryable without parsing markdown, and agents receive prior-art context automatically. The corpus stays navigable as it grows. See [RDR Overview](docs/rdr/overview.md).
+That many design documents create an information management problem. Nexus handles it: every RDR is semantically searchable the moment it is committed, metadata is queryable without parsing markdown, and agents receive prior-art context automatically. The corpus stays navigable as it grows. See [RDR Overview](docs/rdr-overview.md).
 
 ## The Plugin
 
@@ -93,10 +93,11 @@ The `nx/` directory is a Claude Code plugin. Install via the marketplace:
 The plugin provides:
 
 - **15 agents** — code review, debugging, architecture planning, research synthesis, strategic planning, and more
-- **26 skills** — RDR workflow, TDD discipline, brainstorming gates, nexus CLI reference
+- **27 skills** — RDR workflow, TDD discipline, brainstorming gates, nexus CLI reference
 - **Session hooks** — auto-initialize scratch, load PM context, health-check dependencies, prime beads
-- **Slash commands** — `/research`, `/create-plan`, `/review-code`, `/rdr-create`, etc.
+- **Slash commands** — `/research`, `/create-plan`, `/review-code`, `/rdr-create`, `/rdr-accept`, etc.
 - **Standard pipelines** — feature, bug, and research workflows with built-in review gates
+- **Bundled MCP server** — sequential-thinking via `.mcp.json`, no separate install
 
 Each agent runs on a model matched to its task: opus for complex reasoning, sonnet for implementation, haiku for utility. The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task-level tracking — session hooks prime bead context, RDR close decomposes decisions into beads, and branch naming ties back to bead IDs. See [nx/README.md](nx/README.md) for the full plugin documentation.
 
@@ -113,7 +114,7 @@ Each agent runs on a model matched to its task: opus for complex reasoning, sonn
 | [Architecture](docs/architecture.md) | Module map, design decisions |
 | [Contributing](docs/contributing.md) | Dev setup, testing, code style |
 
-**[RDR (Research-Design-Review)](docs/rdr/README.md):** Overview, workflow, Nexus integration, template reference.
+**RDR (Research-Design-Review):** [Overview](docs/rdr-overview.md) · [Workflow](docs/rdr-workflow.md) · [Nexus Integration](docs/rdr-nexus-integration.md) · [Templates](docs/rdr-templates.md) · [Project RDR Index](docs/rdr/README.md)
 
 ## Prerequisites
 
