@@ -23,9 +23,11 @@ T2 metadata records for RDRs go stale when status changes happen outside of
 implemented but their T2 records still showed "DRAFT" — discovered only when
 querying T2 after the session.
 
-The root cause: status transitions that happen by editing YAML frontmatter
-(draft → accepted, accepted → implemented) have no corresponding T2 update.
-Only `/rdr-close` writes back to T2. Every other status change is invisible.
+The root cause: the pilot RDRs were accepted and implemented but never
+`/rdr-close`d — they remained open. Status transitions happened by editing
+YAML frontmatter (draft → accepted, accepted → implemented) with no
+corresponding T2 update. Only `/rdr-create` and `/rdr-close` write T2;
+every intermediate status change is invisible.
 
 ## Context
 
@@ -41,8 +43,9 @@ T2 query revealed all records still showed their initial draft status.
   to check RDR status will act on wrong information
 - **`/rdr-list` shows wrong statuses** — it reads T2 for fast response
   without parsing markdown files, so it reports stale statuses
-- **Audit trail has holes** — no record of when acceptance or
-  implementation happened
+- **Audit trail has holes** — no record of when acceptance happened
+  (sync-on-read cannot recover this; only an explicit accept command
+  can record the actual acceptance timestamp)
 - **Cross-RDR dependency checking** is unreliable if status is wrong
 
 ### Technical Environment
@@ -58,7 +61,8 @@ T2 query revealed all records still showed their initial draft status.
 
 ### Investigation
 
-Reviewed all RDR skill commands to identify which ones read/write T2:
+Reviewed all RDR skill commands to identify which ones read/write T2
+(pre-implementation state — Phase 2 will add T2 writes to read commands):
 
 | Command | Reads T2? | Writes T2? | Status change? |
 |---------|-----------|------------|----------------|
@@ -87,8 +91,9 @@ manual frontmatter edit with no T2 update.
 ### Critical Assumptions
 
 - [x] `parse_frontmatter()` reliably extracts status from both YAML
-  frontmatter and markdown-list metadata — **Status**: Verified
-  — **Method**: Source Search (reviewed all command implementations)
+  frontmatter (new standard per RDR-001 P4) and legacy markdown-list
+  metadata (`## Metadata` with `- **Key**: Value` items) — **Status**:
+  Verified — **Method**: Source Search (reviewed all command implementations)
 - [ ] A sync-on-read approach won't create performance issues for repos
   with many RDRs — **Status**: Unverified
   — **Method**: Docs Only (no repos with >20 RDRs exist yet)
@@ -109,22 +114,52 @@ manual frontmatter edit with no T2 update.
 
 ### Technical Design
 
+#### Gate result storage
+
+Gate outcomes must be stored to enable `/rdr-accept` verification. The
+gate command (`/rdr-gate`) will write a T2 record after each gate run:
+
+```bash
+nx memory put - --project {repo}_rdr --title {id}-gate-latest <<'EOF'
+outcome: "PASSED"  # or "BLOCKED"
+date: "YYYY-MM-DD"
+critical_count: 0
+significant_count: 2
+EOF
+```
+
+This is a new T2 write in `/rdr-gate` (currently it writes nothing).
+The record is overwritten on each gate/re-gate run.
+
 #### `/rdr-accept` command
 
 ```
 /rdr-accept <id> [--reviewed-by <name>]
 ```
 
-- Reads the RDR file, verifies a gate has passed (gate findings exist
-  with no unresolved critical issues, or `--force`)
-- Updates frontmatter: `status: accepted`, `reviewed-by: <name|self>`
-- Writes T2: status, accepted date, reviewed-by
+- Reads the RDR file
+- Reads T2 gate record (`{id}-gate-latest`). If no gate record exists
+  or outcome is BLOCKED, **refuse to accept** — no `--force` override.
+  The gate must pass before acceptance. This preserves the invariant
+  that RDR-001 P1 relies on: accepted status means gated.
+- Updates frontmatter: `status: accepted`, `reviewed-by: <name|self>`,
+  `accepted_date: YYYY-MM-DD`
+- Writes T2: status, accepted_date, reviewed-by
 - Prints confirmation
+- **Idempotency**: If already accepted, print current acceptance info
+  and exit. To change `reviewed-by`, edit frontmatter directly — the
+  accept ceremony is one-time.
+
+If frontmatter write succeeds but T2 write fails, print a warning:
+`T2 update failed — acceptance recorded in frontmatter only. Next
+/rdr-show or /rdr-list will sync T2.` This ensures the user knows
+the state is divergent, and sync-on-read will eventually fix it.
 
 #### Sync-on-read (defensive)
 
 Add to `parse_frontmatter()` callers in `/rdr-gate`, `/rdr-show`,
-`/rdr-list`:
+`/rdr-list`. When file status diverges from T2, update T2 to match
+file and **print a visible notice**:
 
 ```python
 # After reading file and T2:
@@ -132,15 +167,26 @@ if file_status != t2_status:
     # Update T2 to match file (file is source of truth)
     subprocess.run(['nx', 'memory', 'put', updated_record,
         '--project', f'{repo}_rdr', '--title', t2_key])
-    print(f"> T2 status corrected: {t2_status} → {file_status}")
+    print(f"> T2 synced: {t2_status} → {file_status}")
 ```
+
+For `/rdr-list` with multiple stale records, print a summary line:
+`> Synced N stale T2 records`
+
+**Limitation**: Sync-on-read corrects status but cannot recover audit
+timestamps (accepted_date, etc.). It stamps T2 with the current time.
+This is an acknowledged gap — the accept command is the authoritative
+source for acceptance timestamps. Sync-on-read is a status cache
+correction, not an audit trail recovery mechanism.
 
 ### Decision Rationale
 
-The accept command addresses the primary gap (no ceremony for acceptance).
-Sync-on-read is defensive — it catches any remaining divergence from manual
-edits or future status transitions we haven't anticipated. File frontmatter
-is always the source of truth; T2 is a queryable cache.
+The accept command addresses the primary gap: gate enforcement at the
+acceptance moment, automatic T2 sync with correct timing, and ceremonial
+visibility of the acceptance event. Sync-on-read is defensive — it
+catches status divergence from manual edits or future transitions we
+haven't anticipated, but does not fabricate audit timestamps. File
+frontmatter is always the source of truth; T2 is a queryable cache.
 
 ## Alternatives Considered
 
@@ -151,8 +197,10 @@ is always the source of truth; T2 is a queryable cache.
 **Cons**: Acceptance still has no ceremony, no reviewed-by record,
 no audit trail of when acceptance happened
 
-**Reason for rejection**: Misses the reviewed-by tracking that RDR-001
-P4 requires
+**Reason for rejection**: Misses gate enforcement at acceptance time
+(sync-on-read can't verify gate state retroactively), doesn't record
+accurate acceptance timestamps, and provides no ceremonial visibility
+of the acceptance decision
 
 ### Alternative 2: File watcher / git hook
 
@@ -186,37 +234,60 @@ per-clone (not portable), adds infrastructure complexity
 
 ### Failure Modes
 
-- If sync-on-read fails (T2 unavailable), commands still work — they
-  just use file data directly. T2 stays stale until next successful sync.
-- If `/rdr-accept` is skipped, sync-on-read catches the divergence on
-  next gate/show/list.
+- **Sync-on-read T2 unavailable**: Read commands still work from file
+  data. T2 stays stale until next successful sync. Correction is
+  visible when it happens ("T2 synced: ...").
+- **`/rdr-accept` skipped**: Sync-on-read catches status divergence on
+  next gate/show/list. Status is corrected but accepted_date is stamped
+  with current time (not actual acceptance time) — this is an acknowledged
+  limitation, not a silent corruption.
+- **`/rdr-accept` partial write**: Frontmatter succeeds but T2 fails.
+  User sees explicit warning. Sync-on-read fixes T2 on next read command.
+- **`/rdr-accept` on already-accepted RDR**: No-op, prints current
+  acceptance info.
 
 ## Implementation Plan
 
-### Phase 1: Accept Command
+### Phase 0: Verify Root Cause
 
-1. Create `/rdr-accept` command (`nx/commands/rdr-accept.md`)
-2. Update `/rdr-gate` to print accept prompt when gate returns PASSED
-3. Register command in skill definitions
+0. Confirm that `/rdr-close` correctly updates T2 by running it on a
+   test RDR. Rule out a bug in close itself — the pilot RDRs were never
+   closed, so this should work, but verify before building on the
+   assumption.
+
+### Phase 1: Gate Result Storage + Accept Command
+
+1. Update `/rdr-gate` to write T2 gate result record (`{id}-gate-latest`)
+   after each gate run with outcome, date, and finding counts
+2. Update `/rdr-gate` to print accept prompt when gate returns PASSED:
+   "Run `/rdr-accept <id>` to accept this RDR."
+3. Create `/rdr-accept` command (`nx/commands/rdr-accept.md`) — reads
+   gate result from T2, blocks if no PASSED gate, updates frontmatter
+   (`status`, `reviewed-by`, `accepted_date`) and T2, handles partial
+   write failure with explicit warning
+4. Register command in skill definitions
 
 ### Phase 2: Sync-on-Read
 
-4. Add T2 freshness check to `/rdr-show`
-5. Add T2 freshness check to `/rdr-list`
-6. Add T2 freshness check to `/rdr-gate`
+5. Add T2 freshness check to `/rdr-show` — visible notice on correction
+6. Add T2 freshness check to `/rdr-list` — summary line for batch corrections
+7. Add T2 freshness check to `/rdr-gate` — visible notice on correction
 
 ### Phase 3: Documentation
 
-7. Add `/rdr-accept` to `docs/rdr/workflow.md`
-8. Update status model to show accept as an explicit step
+8. Add `/rdr-accept` to `docs/rdr/workflow.md` as an explicit lifecycle step
+9. Document `accepted_date` frontmatter field in `docs/rdr/templates.md`
 
 ## Test Plan
 
-- Run `/rdr-accept` on a draft RDR without gate — verify it blocks
-- Run `/rdr-accept` on a gated RDR — verify frontmatter and T2 both update
-- Manually edit frontmatter status, then run `/rdr-show` — verify T2 corrects
-- Run `/rdr-list` after manual edit — verify corrected status appears
-- Run `/rdr-accept` with `--reviewed-by alice` — verify field is set
+- Phase 0: Run `/rdr-close` on a test RDR — verify T2 updates correctly
+- Run `/rdr-accept` on a draft RDR without gate — verify it blocks (no `--force` available)
+- Run `/rdr-gate`, verify T2 gate result record written (`{id}-gate-latest`)
+- Run `/rdr-accept` on a gated RDR — verify frontmatter and T2 both update, `accepted_date` set
+- Run `/rdr-accept` on already-accepted RDR — verify no-op, prints current info
+- Run `/rdr-accept` with `--reviewed-by alice` — verify field is set in frontmatter and T2
+- Manually edit frontmatter status, then run `/rdr-show` — verify visible "T2 synced" notice
+- Run `/rdr-list` with multiple stale records — verify "Synced N stale T2 records" summary
 
 ## Validation
 
@@ -224,10 +295,13 @@ per-clone (not portable), adds infrastructure complexity
 
 1. **Scenario**: Accept a gated RDR
    **Expected**: Frontmatter status = accepted, T2 status = accepted,
-   reviewed-by field populated
+   reviewed-by field populated, accepted_date set to today
 
 2. **Scenario**: Query T2 after manual frontmatter edit
-   **Expected**: Next read command corrects T2 silently
+   **Expected**: Next read command corrects T2 with visible notice
+
+3. **Scenario**: Accept without gate
+   **Expected**: Command refuses — no override available
 
 ## References
 
@@ -236,4 +310,51 @@ per-clone (not portable), adds infrastructure complexity
 
 ## Revision History
 
-[Gate findings will be appended here.]
+### Gate Review (2026-02-27)
+
+### Critical — Resolved
+
+**C1. `--force` undermines RDR-001 P1 gate enforcement — RESOLVED.** If
+`/rdr-accept --force` bypasses gate verification, then accepted status no
+longer implies gated, and RDR-001 P1's hard-block on close is invalidated.
+Fixed: removed `--force` from `/rdr-accept` entirely. Gate must pass before
+acceptance — no override.
+
+**C2. Gate verification mechanism unspecified — RESOLVED.** The design said
+"verifies gate has passed" but never defined where gate results are stored
+or how they are checked. Fixed: `/rdr-gate` now writes a T2 record
+(`{id}-gate-latest`) with outcome, date, and finding counts. `/rdr-accept`
+reads this record to verify.
+
+**C3. Sync-on-read fabricates audit timestamps — RESOLVED.** Sync-on-read
+stamps T2 with current time, not actual acceptance time, creating a false
+audit trail. Fixed: acknowledged as a limitation — sync-on-read is a status
+cache correction, not an audit trail recovery. Added `accepted_date` to
+frontmatter so the accept command records the real timestamp. Removed
+audit trail recovery from sync-on-read's claimed benefits.
+
+### Significant — Resolved
+
+**S1. Partial write failure during `/rdr-accept` unhandled — RESOLVED.**
+Fixed: if frontmatter succeeds but T2 fails, print explicit warning.
+Sync-on-read will eventually correct T2 on next read command.
+
+**S2. Idempotency undefined — RESOLVED.** Fixed: `/rdr-accept` on an
+already-accepted RDR is a no-op that prints current acceptance info.
+Added test case.
+
+**S3. Silent T2 mutation in `/rdr-list` — RESOLVED.** Fixed: all
+sync-on-read corrections print visible notices. `/rdr-list` prints
+"Synced N stale T2 records" summary line for batch corrections.
+
+**S4. Root cause assumed, not verified — RESOLVED.** Fixed: clarified
+that the pilot RDRs were never `/rdr-close`d (they remained open after
+acceptance). Added Phase 0 to verify `/rdr-close` works correctly
+before building on that assumption.
+
+### Observations — Applied
+
+- O1: Investigation table labeled "pre-implementation state"
+- O2: "Both formats" clarified as YAML frontmatter (new) and markdown-list metadata (legacy)
+- O3: Phase 3 step 8 corrected from "update status model" to "document accepted_date field"
+- O4: Alternative 1 rejection rationale restated — gate enforcement, accurate timestamps, and ceremonial visibility, not just reviewed-by tracking
