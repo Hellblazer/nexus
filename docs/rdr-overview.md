@@ -76,13 +76,13 @@ A project prefix derived from the repository name scopes IDs across projects.
 ## Statuses
 
 ```
-Draft --> Final --> Implemented
-                       |
-                   Reverted / Abandoned / Superseded
+Draft --> Accepted --> Implemented
+                           |
+                       Reverted / Abandoned / Superseded
 ```
 
 - **Draft**: initial skeleton created, research in progress
-- **Final**: gate passed, decision approved for implementation
+- **Accepted**: gate passed and author/reviewer explicitly accepted the decision
 - **Implemented**: implementation complete, archived to T3
 - **Reverted**: implementation was rolled back
 - **Abandoned**: decision was dropped before implementation
@@ -102,7 +102,8 @@ For decisions that carry real risk, Nexus provides two additional layers:
 
 - **Gate** (`/rdr-gate`): structural check, assumption audit, and AI critique.
   Forces you to confront what you don't actually know before committing. Use this
-  when the decision is expensive to reverse.
+  when the decision is expensive to reverse. On pass, run `/rdr-accept` to
+  formally accept the decision before implementation begins.
 - **Post-mortem** (created by `/rdr-close`): drift analysis comparing what was
   decided to what was actually built. Useful for improving future RDRs.
 
