@@ -344,3 +344,18 @@ All C1–C3 and S1–S4 fixes verified correct against codebase. No new critical
 - S-NEW-2 RESOLVED: `nx memory promote --collection` added to Affected Commands and Infrastructure Audit.
 - M1 RESOLVED: Removed nonexistent `nx store get` from Affected Commands. Replaced `nx store delete` with `nx collection delete` in Day 2 Operations table.
 - M2 RESOLVED: Step 3 now explicitly distinguishes `_client.get_collection()` (in `list_store()`) from `get_or_create_collection()` (in `put()`).
+
+### Re-gate 3 (2026-02-27) — PASSED
+
+All S-NEW-1, S-NEW-2, M1, M2 fixes verified correct. No new critical issues.
+
+#### Significant — Should Fix Before Implementation
+
+**Sig-1. `resolve_collection_name()` calling convention is unspecified — `corpus.py` has no ChromaDB imports.** The Technical Design defines `resolve_collection_name(client: ChromaClient, name: str) -> str` as a free function. However, `corpus.py` currently imports no ChromaDB types — `resolve_corpus()` takes `(corpus: str)` with no client parameter, obtaining collections via `T3Database` internally. Adding a `ChromaClient` parameter to a free function in `corpus.py` would introduce a new import dependency and break symmetry with `resolve_corpus()`. Fix: redesign the signature to accept `list[str]` (pre-fetched collection names) instead of `ChromaClient`, keeping `_client.list_collections()` calls inside `T3Database.list_store()` and `T3Database.put()`. This preserves the existing corpus.py calling convention and avoids leaking ChromaDB types into the free-function layer.
+
+**Sig-2. `nx search --corpus` Step 4 has an unresolved "or" — approach is not specified.** The implementation plan says "extend `resolve_corpus()` or add a post-step" without resolving which. The current `resolve_corpus()` exact-match branch uses `t3_collection_name()` directly; a corpus name containing `__` (e.g., `code__ART`) reaches the exact-match branch and bypasses the prefix logic entirely. Fix: specify the approach explicitly — either (a) modify the exact-match branch in `resolve_corpus()` to call `resolve_collection_name_for_write()` after `t3_collection_name()`, or (b) add a post-resolution step in `nx search --corpus` before passing to ChromaDB. Choose one and update Step 4 accordingly.
+
+#### Observations
+
+- O-new-1: The exact-match check in the resolution algorithm adds a `get_collection()` round-trip before the prefix scan. If the caller has already fetched the collection list (as Step 3 proposes with `_client.list_collections()`), the exact-match check is redundant — membership in the list suffices. Simplifying to a single list-scan would eliminate the extra round-trip.
+- O-new-2: `T3Database` methods `expire_cmd` and collection `info` are not addressed by the implementation plan. Acceptable if explicitly noted as out of scope.
