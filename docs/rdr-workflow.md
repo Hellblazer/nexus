@@ -215,3 +215,10 @@ using the **monotonic-advance rule**: status always advances, never regresses.
 - If both sides have different terminal states, the file wins with a warning.
 
 This ensures T2 stays in sync without file watchers or git hooks.
+
+---
+
+## References
+
+- **[RDR-001: RDR Process Validation](rdr/rdr-001-rdr-process-validation.md)** — Empirical validation of this process across three complete RDR lifecycles. Source of P1–P7 improvements (enforcement gaps, template updates, status model, cross-RDR consistency). The gate outcomes, status model, Layer 1 research requirement, `reviewed-by` field, `## Test Plan` section, and `## Revision History` appendix in this workflow all originate from RDR-001.
+- **[RDR-002: T2 Status Synchronization](rdr/rdr-002-t2-status-synchronization.md)** — Design for T2-primary process authority, `/rdr-accept` command, gate result storage, and SessionStart reconciliation.
