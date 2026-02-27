@@ -6,7 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.0.0-rc3] - unreleased
+## [1.0.0rc4] - 2026-02-27
+
+### Added
+- `/rdr-accept` slash command with gate-result verification and T2 status synchronization
+- `rdr-accept` skill: accepts gated RDRs, updates T2 and file frontmatter atomically (RDR-002)
+- `-v`/`--verbose` flag for `nx` CLI: enables debug logging for network calls and index operations
+- RDR indexing status shown in `nx index repo` output (count of RDRs indexed)
+- MCP sequential-thinking server (`.mcp.json`): replaces `nx thought` for compaction-resilient reasoning chains
+
+### Changed
+- `nx thought` session isolation now uses Claude session ID instead of `getsid(0)` (RDR-002)
+- SessionStart hook: T2 session records synchronized on startup (RDR-002)
+- Sequential-thinking skill updated to use `mcp__sequential-thinking__sequentialthinking` instead of `nx thought add`
+
+### Fixed
+- `rdr-gate`: strip fenced code blocks before extracting section headings (false negatives on structured RDRs)
+- `rdr-list` and all RDR commands: handle `RDR-NNN` naming convention; single-pass Python heredoc
+- `hooks.json` format: wrap in `{hooks:{}}` with matcher/hooks nesting (plugin hook discovery was silently failing)
+- Empty strings filtered from embedding batches before Voyage AI calls (prevented API errors on sparse content)
+- Suppressed `llama_index` pydantic `validate_default` warning and `httpx`/`httpcore` wire-trace noise in `-v` mode
+- structlog level in tests follows `pytest --log-level` (default: WARNING); debug logs surface on failure
+- `rdr-accept` skill: description, relay template, PRODUCE section, and `nx scratch` reference now conform to plugin structure tests
+
+## [1.0.0rc3] - 2026-02-26
 
 ## [1.0.0-rc2] - 2026-02-26
 
