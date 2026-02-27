@@ -60,35 +60,27 @@ def _parse_t2_field(content, field):
 
 
 def get_rdrs_from_t2(repo_name):
-    """Read RDR list from T2 (process authority). Returns list of dicts."""
+    """Read RDR list from T2 (process authority) using batch API. Returns list of dicts."""
     rdrs = []
     try:
-        result = subprocess.run(
-            ['nx', 'memory', 'list', '--project', f'{repo_name}_rdr'],
-            capture_output=True, text=True, timeout=10)
-        list_out = (result.stdout or '').strip()
-        if not list_out:
-            return rdrs
-        # Each line is a T2 record title; filter to RDR records (pure numeric IDs)
-        for line in list_out.splitlines():
-            title = line.strip().split()[0] if line.strip() else ''
-            if not re.match(r'^\d+$', title):
-                continue  # skip gate-latest, research, etc.
-            # Fetch full record
-            rec = subprocess.run(
-                ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', title],
-                capture_output=True, text=True, timeout=10)
-            content = (rec.stdout or '').strip()
-            if not content:
-                continue
-            rdrs.append({
-                'id': title,
-                'title': _parse_t2_field(content, 'title') or title,
-                'status': _parse_t2_field(content, 'status') or '?',
-                'rtype': _parse_t2_field(content, 'type') or '?',
-                'priority': _parse_t2_field(content, 'priority') or '?',
-                'file_path': _parse_t2_field(content, 'file_path') or f'{rdr_dir}/{title}-*.md',
-            })
+        from nexus.commands._helpers import default_db_path
+        from nexus.db.t2 import T2Database
+
+        with T2Database(default_db_path()) as db:
+            entries = db.get_all(project=f"{repo_name}_rdr")
+            for entry in entries:
+                title = entry.get("title", "")
+                if not re.match(r'^\d+$', title):
+                    continue  # skip gate-latest, research, etc.
+                content = entry.get("content", "")
+                rdrs.append({
+                    'id': title,
+                    'title': _parse_t2_field(content, 'title') or title,
+                    'status': _parse_t2_field(content, 'status') or '?',
+                    'rtype': _parse_t2_field(content, 'type') or '?',
+                    'priority': _parse_t2_field(content, 'priority') or '?',
+                    'file_path': _parse_t2_field(content, 'file_path') or f'{rdr_dir}/{title}-*.md',
+                })
     except Exception:
         pass
     return rdrs

@@ -77,24 +77,30 @@ def _extract_rdr_id(filepath: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def _t2_status(repo_name: str, rdr_id: str) -> str | None:
-    """Read status from a single T2 RDR record."""
+def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
+    """Batch-load all T2 RDR statuses. Returns {rdr_id: status}."""
+    statuses: dict[str, str] = {}
     try:
-        result = subprocess.run(
-            ["nx", "memory", "get", "--project", f"{repo_name}_rdr", "--title", rdr_id],
-            capture_output=True, text=True, timeout=10,
-        )
-        content = (result.stdout or "").strip()
-        if not content:
-            return None
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("status:"):
-                val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-                return val.lower() if val else None
+        from nexus.commands._helpers import default_db_path
+        from nexus.db.t2 import T2Database
+
+        with T2Database(default_db_path()) as db:
+            entries = db.get_all(project=f"{repo_name}_rdr")
+            for entry in entries:
+                title = entry.get("title", "")
+                if "-" in title:
+                    continue  # skip gate-latest, research, etc.
+                content = entry.get("content", "")
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("status:"):
+                        val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            statuses[title] = val.lower()
+                        break
     except Exception:
         pass
-    return None
+    return statuses
 
 
 def _update_t2_status(repo_name: str, rdr_id: str, new_status: str) -> bool:
@@ -142,14 +148,15 @@ def _update_file_status(filepath: Path, new_status: str) -> bool:
                 new_fm.append(f"status: {new_status}")
             else:
                 new_fm.append(line)
-        new_text = "---" + "\n".join(new_fm) + "---" + parts[2]
+        new_text = "---" + "\n".join(new_fm) + "\n---" + parts[2]
         filepath.write_text(new_text)
         return True
     except Exception:
         return False
 
 
-def _reconcile(root: Path, repo_name: str, rdr_files: list[Path]) -> int:
+def _reconcile(root: Path, repo_name: str, rdr_files: list[Path],
+               t2_statuses: dict[str, str]) -> int:
     """Reconcile file↔T2 status. Returns count of reconciled records."""
     reconciled = 0
     for filepath in rdr_files:
@@ -158,7 +165,7 @@ def _reconcile(root: Path, repo_name: str, rdr_files: list[Path]) -> int:
             continue
 
         file_status = _parse_frontmatter_status(filepath)
-        t2_status = _t2_status(repo_name, rdr_id)
+        t2_status = t2_statuses.get(rdr_id)
 
         if file_status is None or t2_status is None:
             continue
@@ -186,29 +193,10 @@ def _reconcile(root: Path, repo_name: str, rdr_files: list[Path]) -> int:
     return reconciled
 
 
-def _rdr_status_counts(repo_name: str) -> Counter[str]:
-    """Query T2 for RDR status counts. Returns empty Counter on failure."""
-    counts: Counter[str] = Counter()
-    try:
-        from nexus.commands._helpers import default_db_path
-        from nexus.db.t2 import T2Database
-
-        with T2Database(default_db_path()) as db:
-            entries = db.get_all(project=f"{repo_name}_rdr")
-            for entry in entries:
-                # Skip non-RDR records (gate results, research, etc.)
-                title = entry.get("title", "")
-                if "-" in title:
-                    continue  # gate-latest, research, etc.
-                for line in entry["content"].splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("status:"):
-                        status = stripped.split('"')[1] if '"' in stripped else stripped.split(":")[1].strip()
-                        counts[status] += 1
-                        break
-    except Exception:
-        pass
-    return counts
+def _rdr_status_counts(repo_name: str, preloaded: dict[str, str] | None = None) -> Counter[str]:
+    """Status counts from T2. Uses preloaded statuses if available."""
+    statuses = preloaded if preloaded is not None else _load_all_t2_statuses(repo_name)
+    return Counter(statuses.values())
 
 
 def main() -> None:
@@ -231,13 +219,18 @@ def main() -> None:
     repo_name = root.name
     indexed = _collection_exists(repo_name)
 
+    # Batch-load T2 statuses once (used by both reconcile and status counts)
+    t2_statuses = _load_all_t2_statuses(repo_name)
+
     # Reconcile file↔T2 status (monotonic-advance rule)
-    reconciled = _reconcile(root, repo_name, rdr_files)
+    reconciled = _reconcile(root, repo_name, rdr_files, t2_statuses)
     if reconciled:
         print(f"RDR sync: {reconciled} record(s) reconciled")
+        # Reload after reconciliation changed statuses
+        t2_statuses = _load_all_t2_statuses(repo_name)
 
     # Status breakdown from T2 (post-reconciliation)
-    counts = _rdr_status_counts(repo_name)
+    counts = _rdr_status_counts(repo_name, preloaded=t2_statuses)
     if counts:
         breakdown = ", ".join(f"{n} {s}" for s, n in counts.most_common())
         status_info = f"{len(rdr_files)} documents ({breakdown})"

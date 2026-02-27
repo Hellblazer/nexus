@@ -59,13 +59,6 @@ def parse_frontmatter(filepath):
                     if ':' in line:
                         k, _, v = line.partition(':')
                         meta[k.strip().lower()] = v.strip()
-    else:
-        m = re.search(r'^## Metadata\s*\n(.*?)(?=^##|\Z)', text, re.MULTILINE | re.DOTALL)
-        if m:
-            for line in m.group(1).splitlines():
-                kv = re.match(r'-?\s*\*\*(\w[\w\s]*?)\*\*:\s*(.+)', line.strip())
-                if kv:
-                    meta[kv.group(1).strip().lower()] = kv.group(2).strip()
     if 'title' not in meta and 'name' not in meta:
         h1 = re.search(r'^#\s+(.+)', text, re.MULTILINE)
         if h1:

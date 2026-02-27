@@ -140,13 +140,40 @@ print(f"### RDR: {rdr_file.name}")
 print(f"**Title:** {title}  **Current Status:** {current_status}")
 print()
 
-# Check current status — only Draft can be accepted
-if current_status.lower() == 'accepted':
-    print(f"> RDR is already accepted. Nothing to do.")
-    sys.exit(0)
-elif current_status.lower() not in ('draft',):
+# Check current status — only Draft can be accepted (but check T2 for two-way idempotency)
+if current_status.lower() not in ('draft', 'accepted'):
     print(f"> **BLOCKED**: RDR status is `{current_status}`. Only Draft RDRs can be accepted.")
     sys.exit(0)
+
+# Check T2 status for idempotency / self-healing
+t2_status = None
+try:
+    t2_result = subprocess.run(
+        ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', t2_key],
+        capture_output=True, text=True, timeout=10)
+    t2_content = (t2_result.stdout or '').strip()
+    if t2_content:
+        for t2_line in t2_content.splitlines():
+            if t2_line.strip().startswith('status:'):
+                t2_status = t2_line.strip().split(':', 1)[1].strip().strip('"').strip("'").lower()
+                break
+except Exception:
+    pass
+
+# Two-way idempotency: both agree on accepted → true no-op
+if current_status.lower() == 'accepted' and t2_status == 'accepted':
+    print(f"> RDR is already accepted (file and T2 agree). Nothing to do.")
+    sys.exit(0)
+# Self-healing: file=accepted but T2 behind → flag for Action to repair T2
+elif current_status.lower() == 'accepted' and t2_status != 'accepted':
+    print(f"> **Self-healing needed**: file shows `accepted` but T2 shows `{t2_status}`.")
+    print(f"> Action will update T2 to match file.")
+    print()
+# Self-healing: T2=accepted but file behind → flag for Action to repair file
+elif t2_status == 'accepted' and current_status.lower() != 'accepted':
+    print(f"> **Self-healing needed**: T2 shows `accepted` but file shows `{current_status}`.")
+    print(f"> Action will update file to match T2.")
+    print()
 
 # Check T2 gate result
 print("### T2 Gate Result")
@@ -165,7 +192,7 @@ try:
 except Exception as exc:
     print(f"T2 not available: {exc}")
     print()
-    print("> **Warning**: Cannot verify gate result. Proceeding based on file content.")
+    print("> **Warning**: Cannot verify gate result from T2. The Action section will check gate status.")
 print()
 
 # T2 metadata (for context)

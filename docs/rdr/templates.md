@@ -29,6 +29,7 @@ priority: high | medium | low
 author: Author Name
 reviewed-by: self | reviewer name(s)
 created: YYYY-MM-DD
+accepted_date: # YYYY-MM-DD, set by /rdr-accept
 related_issues: []
 ---
 ```
