@@ -226,4 +226,28 @@ Document is appropriately sized for a UX/API convenience feature.
 
 ## Revision History
 
-- 2026-02-27: Initial draft created
+### Gate Review (2026-02-27) — BLOCKED
+
+#### Critical — Must Fix Before Re-gate
+
+**C1. Hash is path-based, not remote-URL-based — root cause is wrong.** The RDR states `_repo_identity()` hashes the git remote URL. Confirmed by reading `registry.py`: the hash is SHA-256 of the **filesystem path** to the main repo root (resolved via `git rev-parse --git-common-dir`). Consequences: (1) hash is not stable across machines — definitively false, not merely unverified; (2) the Alternative 1 rejection ("breaks for repos accessed from a new machine") applies equally to the proposed solution; (3) cross-machine collection sharing is not solved by prefix resolution.
+
+**C2. `resolve_corpus()` already exists — infrastructure audit is materially incomplete.** `corpus.py` already contains `resolve_corpus()` (lines 68–82) used by `nx search --corpus`. It handles type-prefix resolution (`code` → all `code__*` collections) but not basename+suffix resolution (`code__ART` → `code__ART-{hash}`). The audit table lists the new utility as "None" without mentioning this existing function. The implementation must extend or companion `resolve_corpus()`, not create a parallel pathway.
+
+**C3. Wrong insertion point — `nx store list` routes through `t3_collection_name()` then `T3Database.list_store()`.** There is no bare `get_collection()` call in `commands/store.py` to replace. The actual fix must go inside `T3Database.list_store()` or at the `t3_collection_name()` call site. Also: `nx store put --collection` has the same resolution failure (silently creates a new misnamed collection) but is not in scope — this must be addressed.
+
+#### Significant — Should Fix Before Re-gate
+
+**S1. Test plan does not distinguish empty-collection from not-found-collection.** Both currently print "No entries in {name}" — the test plan should verify the zero-match case produces a distinct error message.
+
+**S2. Prefix resolution scope for `nx collection delete` is unspecified and dangerous.** Applying resolution to `delete` means a typo could produce an ambiguous-match error rather than a safe "not found." The implementation plan must enumerate which subcommands get resolution (list, info, verify) vs. which require exact names (delete).
+
+**S3. `list_collections()` makes N+1 HTTP calls (count per collection) — not one round-trip.** `T3Database.list_collections()` calls `col.count()` for every collection in a thread pool. For prefix matching, use `self._client.list_collections()` directly (names only, no count calls).
+
+**S4. Hash stability is definitively false for cross-machine use, not "low risk".** Restate as: cross-machine collection portability is not supported by the current path-based hashing scheme. Prefix resolution works correctly within a single machine.
+
+#### Observations
+
+- `rdr__` collections (produced by `nx index`) use the same `{type}__{basename}-{hash}` scheme but are not covered by this RDR's scope — will become a user-facing gap soon.
+- `AmbiguousCollectionError` does not exist in `errors.py` — must be added; not mentioned in implementation plan.
+- `RepoRegistry` already stores `code_collection` and `docs_collection` per registered repo path. An O(1) local registry lookup by basename is a viable alternative to ChromaDB prefix scanning for `nx index`-registered repos — worth brief evaluation even if rejected for the same cross-machine reason.
