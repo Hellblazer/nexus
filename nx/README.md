@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-15 agents, 26 skills, session hooks, and slash commands for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
+15 agents, 27 skills, session hooks, slash commands, and a bundled MCP server for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
 
 ## Installation
 
@@ -35,10 +35,11 @@ Run `/nx-preflight` after installing to verify all dependencies are present.
 ## What You Get
 
 - **15 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **26 skills** — 5 standalone + 15 agent-delegating + 6 RDR workflow
+- **27 skills** — 5 standalone + 15 agent-delegating + 7 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — auto-load PM context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe read-only commands skip the confirmation prompt
+- **Bundled MCP server** — sequential-thinking via `.mcp.json` (no separate install)
 
 ## Directory Structure
 
@@ -64,8 +65,9 @@ nx/
 │       ├── session_start_hook.py     # Load PM context, prime beads
 │       ├── setup.sh                  # One-time setup checks
 │       └── subagent-start.sh         # Context prep for spawned subagents
+├── .mcp.json                # Bundled MCP servers (sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
-├── CHANGELOG.md            # Version history (Keep a Changelog format)
+├── CHANGELOG.md             # Version history (Keep a Changelog format)
 └── skills/
     ├── brainstorming-gate/  # Standalone: design gate before implementation
     ├── cli-controller/      # Standalone: tmux-based interactive CLI control
@@ -87,11 +89,12 @@ nx/
     ├── research-synthesis/  # → deep-research-synthesizer agent
     ├── strategic-planning/  # → strategic-planner agent
     ├── test-validation/     # → test-validator agent
+    ├── rdr-accept/          # RDR workflow: accept a gated RDR
+    ├── rdr-close/           # RDR workflow: close RDR, create beads
     ├── rdr-create/          # RDR workflow: create new RDR from template
     ├── rdr-gate/            # RDR workflow: quality gate before finalizing
-    ├── rdr-research/        # RDR workflow: delegate research to agents
-    ├── rdr-close/           # RDR workflow: close RDR, create beads
     ├── rdr-list/            # RDR workflow: list RDRs with status
+    ├── rdr-research/        # RDR workflow: delegate research to agents
     └── rdr-show/            # RDR workflow: show RDR details
 ```
 
@@ -188,7 +191,19 @@ Defined in `registry.yaml`:
 - `/deep-analysis` → deep-analyst
 - `/substantive-critique` → substantive-critic
 
+**RDR commands**: `/rdr-create`, `/rdr-list`, `/rdr-show`, `/rdr-research`, `/rdr-gate`, `/rdr-accept`, `/rdr-close`
+
 **PM commands**: `/pm-new`, `/pm-status`, `/pm-list`, `/pm-archive`, `/pm-restore`, `/pm-close`
+
+## MCP Servers
+
+The plugin ships `.mcp.json` which Claude Code picks up automatically on install:
+
+| Server | Purpose |
+|--------|---------|
+| `sequential-thinking` | Compaction-resilient reasoning chains via `mcp__sequential-thinking__sequentialthinking` |
+
+No separate install required — `npx` fetches `@modelcontextprotocol/server-sequential-thinking` on first use.
 
 ## Key Concepts
 
