@@ -2,7 +2,7 @@
 title: "RDR Process Validation"
 id: RDR-001
 type: architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 created: 2026-02-27
