@@ -1,6 +1,6 @@
 # Nexus CLI Reference
 
-All commands use the `nx` binary. Global flags: `--help`, `--version`.
+All commands use the `nx` binary. Global flags: `--help`, `--version`, `-v`/`--verbose` (enable debug logging).
 
 ---
 
