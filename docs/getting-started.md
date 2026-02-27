@@ -172,7 +172,7 @@ For local development, load the plugin directly from the repo checkout:
 claude --plugin-dir ./nx
 ```
 
-The plugin provides 15 agents, 27 skills, session hooks, slash commands, and standard pipelines. See [nx/README.md](../nx/README.md) for details.
+The plugin provides 15 agents, 27 skills, session hooks, slash commands, a bundled MCP server (sequential-thinking), and standard pipelines. See [nx/README.md](../nx/README.md) for details.
 
 ## Next steps
 
