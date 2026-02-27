@@ -96,6 +96,8 @@ Layer 1 (structural validation) caught nothing substantive in any RDR. It verifi
 
 **Recommendation**: Option A with discoverability fix. The structured T2 records are more auditable and feed the post-mortem's drift classification. The `--skip-research` bypass is acceptable — it creates an explicit paper trail of the skip decision.
 
+**Relationship to existing Layer 2 logic**: Option A supplements the existing assumption-audit behavior described in `workflow.md` (checking that Assumed findings have risk assessments). The discoverability prompt is a prerequisite gate — it ensures findings exist before the audit runs. The existing audit logic is retained unchanged.
+
 ### P3. Add Test Plan section to RDR template (Significant)
 
 **Problem**: No RDR had a test plan section. Tests were added during implementation but the gate never evaluated whether tests cover the design.
@@ -124,6 +126,11 @@ RDR statuses (what the document records):
 - **Draft** — in progress, not yet gated
 - **Accepted** — author/reviewer decision after gate passes
 - **Implemented** — code matches accepted design
+- **Reverted** — implemented but rolled back
+- **Abandoned** — work stopped before implementation
+- **Superseded** — replaced by a later RDR
+
+The first three are the primary lifecycle. The last three are terminal states for RDRs that don't reach or stay at Implemented. The `rdr-close` command's close reasons (Implemented, Reverted, Abandoned, Superseded) map directly to the terminal statuses.
 
 Remove "Conditional Accept" as a concept. The gate either blocks or passes. Acceptance is a separate decision by the author/reviewer after the gate passes.
 
@@ -201,7 +208,7 @@ The RDR process is more rigorous than ADRs (which are just decision records with
 
 ### Phase 3: Process Documentation
 
-8. Define gate outcomes (BLOCKED, PASSED) and RDR statuses (Draft, Accepted, Implemented) in `docs/rdr/workflow.md` (P5)
+8. Define gate outcomes (BLOCKED, PASSED) and RDR statuses (Draft, Accepted, Implemented, Reverted, Abandoned, Superseded) in `docs/rdr/workflow.md` (P5)
 9. Update `rdr-gate` Layer 3 prompt to check related RDRs for consistency (P7)
 10. Add this RDR's findings as a "Process Validation" reference
 
@@ -213,6 +220,7 @@ The RDR process is more rigorous than ADRs (which are just decision records with
 - P4: Create a new RDR — verify `reviewed-by` field is in YAML frontmatter.
 - P5: Run a gate — verify output uses BLOCKED/PASSED terminology, not "Conditional Accept."
 - P6: Run a gate — verify findings are appended to `## Revision History`, not inline.
+- P7: Create an RDR with a `related_issues` reference to an accepted RDR — verify gate Layer 3 prompt includes the related RDR content and checks for consistency.
 
 ## Open Questions
 
@@ -221,7 +229,9 @@ The RDR process is more rigorous than ADRs (which are just decision records with
 - Should the gate prompt include performance and security checklists, or are those separate review processes?
 - Is the Layer 3 AI critique stable across model versions? The entire process depends on critique quality — this is the highest-stakes unacknowledged dependency.
 
-## Gate Review Findings (2026-02-27)
+## Revision History
+
+### Gate Review (2026-02-27)
 
 ### Critical — Resolved
 
@@ -248,3 +258,19 @@ The RDR process is more rigorous than ADRs (which are just decision records with
 - O3: Added Test Plan section to this RDR (the gap this RDR identified in P3)
 - O4: Industry comparison post-mortem entry corrected to "Template exists (not used in pilot)"
 - O5: Added retroactive remediation path for under-classified issues (spawn new RDR)
+
+### Re-gate (2026-02-27)
+
+All prior findings (C1, C2, S1–S5, O1–O5) verified resolved. No new critical issues.
+
+### Significant — Resolved
+
+**S-new-1. P5 status model incomplete — RESOLVED.** Terminal states (Reverted, Abandoned, Superseded) from existing `workflow.md` and `rdr-close` were omitted. Fixed: added all three terminal states to P5, mapped `rdr-close` close reasons to statuses.
+
+**S-new-2. P2 Option A leaves existing Layer 2 audit logic unspecified — RESOLVED.** Fixed: added clarification that Option A supplements (not replaces) the existing assumption-audit behavior. Discoverability prompt is a prerequisite gate; existing audit logic is retained.
+
+### Observations — Applied
+
+- O-new-1: Added P7 test case (cross-RDR consistency check)
+- O-new-2: Layer 3 model stability remains as an open question — no mitigation warranted now given insufficient data on cross-model variation
+- O-new-3: Renamed gate findings section to "Revision History" to demonstrate P6 convention
