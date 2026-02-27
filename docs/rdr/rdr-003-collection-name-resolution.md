@@ -299,3 +299,19 @@ All prior findings (C1, C2, C3, S1–S4, O1–O3) addressed:
 - S2 RESOLVED: `nx collection delete` explicitly excluded from prefix resolution; requires exact name
 - S3 RESOLVED: Technical design updated to use `client.list_collections()` directly (name-only, no count calls)
 - S4 RESOLVED: Hash stability reframed as verified known limitation, not "low risk unverified assumption"
+
+### Re-gate 2 (2026-02-27) — PASSED
+
+All C1–C3 and S1–S4 fixes verified correct against codebase. No new critical issues.
+
+#### Significant — Should Fix Before Implementation
+
+**S-NEW-1. Write-path resolution breaks new collection creation.** `T3Database.put()` calls `get_or_create_collection()`, not `get_collection()`. If `resolve_collection_name()` with zero-match → error is applied uniformly to `put()`, then `nx store put --collection knowledge__new-topic` will fail with `CollectionNotFoundError` when the collection does not yet exist — breaking all first writes to new collections. Fix: differentiate read vs. write resolution: for `list_store()`, zero-match is an error; for `put()`, zero-match falls through to `get_or_create_collection()` with the original name. Add test scenario: "first write to nonexistent collection → new collection created."
+
+**S-NEW-2. `nx memory promote` missing from infrastructure audit.** `commands/memory.py` `promote_cmd` accepts `--collection` and calls `T3Database.put()` directly, bypassing `t3_collection_name()`. It is not listed in Affected Commands or the audit table. Must be accounted for.
+
+#### Minor — Fix Before Implementation
+
+**M1. Stale command references.** `nx store get` in Affected Commands does not exist (valid commands: `put`, `list`, `expire`). `nx store delete` in Day 2 Operations table does not exist — correct command is `nx collection delete`.
+
+**M2. Implementation Plan Step 3 says `get_collection()` in `put()`.** `T3Database.put()` calls `get_or_create_collection()`, not `get_collection()`. Step 3 should distinguish: resolution before `_client.get_collection()` in `list_store()`, and resolution with write-path semantics before `get_or_create_collection()` in `put()`.
