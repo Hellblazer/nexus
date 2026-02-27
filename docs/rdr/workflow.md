@@ -123,6 +123,27 @@ Do not use "Conditional Accept" or other ad-hoc outcomes. The gate either
 blocks or passes. Acceptance is a separate decision by the author/reviewer
 after the gate passes.
 
+The gate writes its result to T2 as `{id}-gate-latest` for verification by
+`/rdr-accept`.
+
+---
+
+## Accept (`/rdr-accept`)
+
+Accepts an RDR after the gate passes. This is the author/reviewer decision
+point — the gate validates, but acceptance is a deliberate human action.
+
+1. Verifies the **T2 gate result** shows `outcome: "PASSED"`. Blocks if the
+   gate has not passed or no gate result exists.
+2. Updates **T2 first** (process authority): sets `status: "accepted"` and
+   `accepted_date`.
+3. Updates the **RDR file** frontmatter to match.
+4. Regenerates `docs/rdr/README.md`.
+5. Stages modified files via `git add`.
+
+Self-healing: if T2 already shows `accepted` but the file still shows `draft`,
+`/rdr-accept` repairs the file to match T2.
+
 ---
 
 ## Close (`/rdr-close`)
@@ -174,3 +195,23 @@ Includes: metadata summary, research findings table with classifications,
 gate status, linked beads (if closed), and post-mortem status (if exists).
 Combines data from the markdown file and T2 metadata into a single readable
 output.
+
+---
+
+## T2 Synchronization
+
+T2 is the **process authority** for RDR status. Agents read and write T2;
+files are the git-versioned human-editable persistence layer.
+
+### SessionStart Reconciliation
+
+On every session start, the `rdr_hook.py` hook reconciles file and T2 status
+using the **monotonic-advance rule**: status always advances, never regresses.
+
+- If the file has a more advanced status than T2 (e.g., human edited
+  `draft` → `accepted`), T2 is updated to match.
+- If T2 has a more advanced status than the file (e.g., file write failed),
+  the file is repaired to match T2.
+- If both sides have different terminal states, the file wins with a warning.
+
+This ensures T2 stays in sync without file watchers or git hooks.

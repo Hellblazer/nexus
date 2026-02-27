@@ -352,6 +352,15 @@ rdr_skills:
       - "is this RDR ready"
     dispatches_to: [substantive-critic]
 
+  rdr-accept:
+    slash_command: /rdr-accept
+    command_file: commands/rdr-accept.md
+    description: "Accept a gated RDR — verify gate PASSED, update T2 and file status"
+    triggers:
+      - "accept this RDR"
+      - "mark RDR as accepted"
+      - "approve RDR"
+
   rdr-close:
     slash_command: /rdr-close
     command_file: commands/rdr-close.md

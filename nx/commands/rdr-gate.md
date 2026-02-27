@@ -221,4 +221,17 @@ All data is pre-loaded above — no additional tool calls needed.
   - **Layer 2 — Assumption audit**: Use T2 Research Findings above to verify assumptions are evidenced. Every finding classified as "Assumed" must have an explicit risk assessment.
   - **Layer 3 — AI critique**: Dispatch the `substantive-critic` agent via Task tool with the full RDR content. If the RDR has `related_issues` listing other RDR IDs, read those RDRs and include their content in the critique prompt — the critic should check for consistency and contradictions between related RDRs (P7).
 - Gate outcomes: **BLOCKED** (critical issues found, must fix and re-gate) or **PASSED** (no critical issues). Do not use "Conditional Accept" or other ad-hoc outcomes.
+- **Write T2 gate result** after completing all layers. Use the repo name from above:
+  ```bash
+  nx memory put - --project {repo_name}_rdr --title {id}-gate-latest --ttl permanent --tags rdr,gate <<'EOF'
+  outcome: "PASSED"  # or "BLOCKED"
+  date: "YYYY-MM-DD"
+  critical_count: 0
+  significant_count: 2
+  observation_count: 3
+  summary: "One-sentence summary of gate result"
+  EOF
+  ```
+  This overwrites any previous gate result for this RDR, so only the latest gate run is stored.
+- **If PASSED**, print: `> Run '/rdr-accept <id>' to accept this RDR.`
 - If no ID given, show the available RDR table above and prompt for an ID.

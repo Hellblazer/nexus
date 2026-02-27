@@ -49,6 +49,51 @@ if not rdr_path.exists():
     sys.exit(0)
 
 
+def _parse_t2_field(content, field):
+    """Extract a field value from T2 content."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"{field}:"):
+            val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+            return val
+    return None
+
+
+def get_rdrs_from_t2(repo_name):
+    """Read RDR list from T2 (process authority). Returns list of dicts."""
+    rdrs = []
+    try:
+        result = subprocess.run(
+            ['nx', 'memory', 'list', '--project', f'{repo_name}_rdr'],
+            capture_output=True, text=True, timeout=10)
+        list_out = (result.stdout or '').strip()
+        if not list_out:
+            return rdrs
+        # Each line is a T2 record title; filter to RDR records (pure numeric IDs)
+        for line in list_out.splitlines():
+            title = line.strip().split()[0] if line.strip() else ''
+            if not re.match(r'^\d+$', title):
+                continue  # skip gate-latest, research, etc.
+            # Fetch full record
+            rec = subprocess.run(
+                ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', title],
+                capture_output=True, text=True, timeout=10)
+            content = (rec.stdout or '').strip()
+            if not content:
+                continue
+            rdrs.append({
+                'id': title,
+                'title': _parse_t2_field(content, 'title') or title,
+                'status': _parse_t2_field(content, 'status') or '?',
+                'rtype': _parse_t2_field(content, 'type') or '?',
+                'priority': _parse_t2_field(content, 'priority') or '?',
+                'file_path': _parse_t2_field(content, 'file_path') or f'{rdr_dir}/{title}-*.md',
+            })
+    except Exception:
+        pass
+    return rdrs
+
+
 def parse_frontmatter(filepath):
     text = filepath.read_text(errors='replace')
     meta = {}
@@ -63,13 +108,6 @@ def parse_frontmatter(filepath):
                     if ':' in line:
                         k, _, v = line.partition(':')
                         meta[k.strip().lower()] = v.strip()
-    else:
-        m = re.search(r'^## Metadata\s*\n(.*?)(?=^##|\Z)', text, re.MULTILINE | re.DOTALL)
-        if m:
-            for line in m.group(1).splitlines():
-                kv = re.match(r'-?\s*\*\*(\w[\w\s]*?)\*\*:\s*(.+)', line.strip())
-                if kv:
-                    meta[kv.group(1).strip().lower()] = kv.group(2).strip()
     if 'title' not in meta and 'name' not in meta:
         h1 = re.search(r'^#\s+(.+)', text, re.MULTILINE)
         if h1:
@@ -77,35 +115,11 @@ def parse_frontmatter(filepath):
     return meta, text
 
 
-def find_rdr_file(rdr_path, id_str):
-    m = re.search(r'\d+', id_str)
-    if not m:
-        return None
-    num_int = int(m.group(0))
-    for f in sorted(rdr_path.glob('*.md')):
-        nums = re.findall(r'\d+', f.stem)
-        if nums and int(nums[0]) == num_int:
-            return f
-    return None
-
-
-def get_excerpt(text):
-    # Strip frontmatter or metadata section, return 250-char excerpt
-    if text.startswith('---'):
-        parts = text.split('---', 2)
-        text = parts[2] if len(parts) >= 3 else text
-    else:
-        m = re.search(r'^## Metadata\s*\n.*?(?=^##)', text, re.MULTILINE | re.DOTALL)
-        if m:
-            text = text[m.end():]
-    lines = [l.strip() for l in text.splitlines() if l.strip() and not l.startswith('#')]
-    return ' '.join(lines)[:250]
-
-
 EXCLUDED = {'readme.md', 'template.md', 'index.md', 'overview.md', 'workflow.md', 'templates.md'}
 
-def get_all_rdrs(rdr_path):
-    """Return list of dicts for all RDRs in the directory."""
+
+def get_all_rdrs_from_files(rdr_path):
+    """Fallback: read RDR list from files."""
     all_md = sorted(rdr_path.glob('*.md'))
     rdrs = []
     for f in all_md:
@@ -115,11 +129,11 @@ def get_all_rdrs(rdr_path):
         rtype = fm.get('type', '?')
         doc_status = fm.get('status', '?')
         if doc_status == '?' and rtype == '?':
-            continue  # prose doc, not an RDR
+            continue
+        nums = re.findall(r'\d+', f.stem)
         rdrs.append({
+            'id': nums[0] if nums else f.stem,
             'file': f.name,
-            'path': f,
-            'text': text,
             'title': fm.get('title', fm.get('name', f.stem)),
             'status': doc_status,
             'rtype': rtype,
@@ -128,38 +142,24 @@ def get_all_rdrs(rdr_path):
     return rdrs
 
 
-rdrs = get_all_rdrs(rdr_path)
+# Primary: read from T2
+rdrs = get_rdrs_from_t2(repo_name)
+source = 'T2'
 
-print(f"### RDR Files ({len(rdrs)} found)")
+# Fallback: read from files if T2 is empty
+if not rdrs:
+    rdrs = get_all_rdrs_from_files(rdr_path)
+    source = 'files'
+
+print(f"### RDRs ({len(rdrs)} found, source: {source})")
 print()
 if rdrs:
-    print("| File | Title | Status | Type | Priority |")
-    print("|------|-------|--------|------|----------|")
+    print("| ID | Title | Status | Type | Priority |")
+    print("|----|-------|--------|------|----------|")
     for r in rdrs:
-        print(f"| {r['file']} | {r['title']} | {r['status']} | {r['rtype']} | {r['priority']} |")
+        print(f"| {r['id']} | {r['title']} | {r['status']} | {r['rtype']} | {r['priority']} |")
 else:
-    print(f"No RDR files found in `{rdr_dir}`")
-print()
-
-# Content index for keyword/topic filtering without additional bash calls
-if rdrs:
-    print("### Content Index (for keyword and topic filtering)")
-    print()
-    for r in rdrs:
-        excerpt = get_excerpt(r['text'])
-        print(f"**{r['file']}**: {excerpt}")
-    print()
-
-# T2 records
-print("### T2 Records")
-try:
-    result = subprocess.run(
-        ['nx', 'memory', 'list', '--project', f'{repo_name}_rdr'],
-        capture_output=True, text=True, timeout=10)
-    t2_out = (result.stdout or '').strip()
-    print(t2_out if t2_out else "No T2 RDR records")
-except Exception as exc:
-    print(f"T2 not available: {exc}")
+    print(f"No RDRs found in `{rdr_dir}`")
 PYEOF
 }
 
@@ -171,4 +171,4 @@ $ARGUMENTS
 
 All data is pre-loaded above — no additional tool calls needed.
 
-Format the pre-gathered data as a clean index table. Apply any filters from `$ARGUMENTS` (e.g. `--status=draft`, `--type=feature`, `--has-assumptions`) to the table. Use the Content Index section for keyword or topic filtering. Emit drift warnings if T2 records exist without corresponding files, or vice versa.
+Format the pre-gathered data as a clean index table. Apply any filters from `$ARGUMENTS` (e.g. `--status=draft`, `--type=feature`) to the table. The data source is shown (T2 or files fallback). T2 is the process authority; SessionStart reconciliation keeps it in sync with files.
