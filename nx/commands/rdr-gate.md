@@ -194,7 +194,14 @@ try:
     list_out = (result.stdout or '').strip()
     research_lines = [l for l in list_out.splitlines()
                       if re.match(rf'^{t2_key}-research', l)]
-    print('\n'.join(research_lines) if research_lines else "No research findings recorded")
+    if research_lines:
+        print('\n'.join(research_lines))
+    else:
+        print("No research findings recorded")
+        print()
+        print("> **Layer 1 check**: No research findings exist for this RDR.")
+        print(f"> Run `/rdr-research add {t2_key}` to record findings before gating.")
+        print("> Use `--skip-research` in your gate command to override.")
 except Exception as exc:
     print(f"T2 not available: {exc}")
 PYEOF
@@ -210,7 +217,8 @@ All data is pre-loaded above — no additional tool calls needed.
 
 - RDR directory is shown above (from `.nexus.yml` `indexing.rdr_paths[0]`).
 - Run all three gate layers in sequence:
-  - **Layer 1 — Structural**: Use the Section Structure and Section Summaries above to check completeness (required headings present, no empty sections).
-  - **Layer 2 — Assumption audit**: Use T2 Research Findings above to verify assumptions are evidenced.
-  - **Layer 3 — AI critique**: Dispatch the `deep-critic` agent via Task tool with the full RDR content.
+  - **Layer 1 — Structural**: Use the Section Structure and Section Summaries above to check completeness (required headings present, no empty sections). **If no research findings exist** and `--skip-research` was NOT passed, report **BLOCKED** and stop — do not proceed to Layer 2 or 3. If `--skip-research` was passed, note the override and continue.
+  - **Layer 2 — Assumption audit**: Use T2 Research Findings above to verify assumptions are evidenced. Every finding classified as "Assumed" must have an explicit risk assessment.
+  - **Layer 3 — AI critique**: Dispatch the `substantive-critic` agent via Task tool with the full RDR content. If the RDR has `related_issues` listing other RDR IDs, read those RDRs and include their content in the critique prompt — the critic should check for consistency and contradictions between related RDRs (P7).
+- Gate outcomes: **BLOCKED** (critical issues found, must fix and re-gate) or **PASSED** (no critical issues). Do not use "Conditional Accept" or other ad-hoc outcomes.
 - If no ID given, show the available RDR table above and prompt for an ID.

@@ -1,17 +1,19 @@
-# Recommendation [NUMBER]: [TITLE]
+---
+title: "[TITLE]"
+id: RDR-[NUMBER]
+type: # Feature | Bug Fix | Technical Debt | Framework Workaround | Architecture
+status: draft
+priority: # high | medium | low
+author: # Your name
+reviewed-by: # self (solo) or reviewer name(s)
+created: # YYYY-MM-DD
+related_issues: []
+---
+
+# RDR-[NUMBER]: [TITLE]
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
-
-## Metadata
-
-- **Date**: YYYY-MM-DD
-- **Status**: Draft | Final | Implemented | Reverted |
-  Abandoned | Superseded
-- **Type**: Feature | Bug Fix | Technical Debt |
-  Framework Workaround | Architecture
-- **Priority**: High | Medium | Low
-- **Related Issues**: [Links to related issues/tickets]
 
 ## Problem Statement
 
@@ -207,6 +209,16 @@ it is not needed for initial usability.]
 [Dependencies to add/update. For third-party: note
 license and whether legal review is required.]
 
+## Test Plan
+
+[How will you verify the design works? List specific test
+scenarios that cover the design's edge cases and failure
+modes. The gate (Layer 3) will evaluate whether this plan
+covers the design adequately.]
+
+- **Scenario**: [Description] — **Verify**: [Expected result]
+- **Scenario**: [Description] — **Verify**: [Expected result]
+
 ## Validation
 
 ### Testing Strategy
@@ -230,7 +242,7 @@ chosen approach over a rejected one.]
 ## Finalization Gate
 
 > Complete each item with a written response before
-> marking this RDR as **Final**. Written responses
+> marking this RDR as **Accepted**. Written responses
 > prevent rubber-stamping and produce a review record.
 
 ### Contradiction Check
@@ -285,3 +297,8 @@ any sections that should be trimmed before locking.]
 - [Dependency docs, source paths reviewed]
 - [Dependency repos searched (clone + code search)]
 - [Related issues, articles, discussions]
+
+## Revision History
+
+[Gate findings are appended here to keep the design
+sections clean. Each gate round gets a dated subsection.]

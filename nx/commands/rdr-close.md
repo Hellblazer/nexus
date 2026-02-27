@@ -115,10 +115,12 @@ if not rdr_path.exists():
     print(f"> No RDRs found — `{rdr_dir}` does not exist in this repo.")
     sys.exit(0)
 
-# Strip --reason flag from args before extracting ID
+# Strip flags from args before extracting ID
 reason_match = re.search(r'--reason\s+(\S+)', args)
 close_reason = reason_match.group(1) if reason_match else None
-args_clean = re.sub(r'--reason\s+\S+', '', args).strip()
+force = bool(re.search(r'--force', args))
+args_clean = re.sub(r'--reason\s+\S+', '', args)
+args_clean = re.sub(r'--force', '', args_clean).strip()
 
 id_match = re.search(r'\d+', args_clean)
 
@@ -154,10 +156,16 @@ if close_reason:
     print(f"**Close Reason:** {close_reason}")
 print()
 
-# Pre-check: warn if closing as Implemented but status is not Final
-if close_reason and close_reason.lower() == 'implemented' and current_status.lower() not in ('final',):
-    print(f"> **Warning**: RDR status is `{current_status}`, not `Final`. Consider running `/rdr-gate` first.")
-    print()
+# Hard-block: refuse to close unless status is accepted or final (P1 from RDR-001)
+if current_status.lower() not in ('accepted', 'final'):
+    if force:
+        print(f"> **Override**: RDR status is `{current_status}` (not accepted/final). Proceeding with `--force`.")
+        print()
+    else:
+        print(f"> **BLOCKED**: RDR status is `{current_status}`. Close requires status `accepted` or `final`.")
+        print(f"> Run `/rdr-gate` to validate, or use `--force` to override.")
+        print()
+        sys.exit(0)
 
 # T2 metadata (current status)
 print("### T2 Metadata (current status)")

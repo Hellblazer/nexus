@@ -17,17 +17,25 @@ Location: `docs/rdr/TEMPLATE.md` (copied from `nx/resources/rdr/TEMPLATE.md` on 
 
 ### Metadata
 
-The template uses a `## Metadata` section with markdown list items (not YAML frontmatter):
+The template uses YAML frontmatter for structured metadata:
 
-```markdown
-## Metadata
-
-- **Date**: YYYY-MM-DD
-- **Status**: Draft | Final | Implemented | Reverted | Abandoned | Superseded
-- **Type**: Feature | Bug Fix | Technical Debt | Framework Workaround | Architecture
-- **Priority**: High | Medium | Low
-- **Related Issues**: [Links to related issues/tickets]
+```yaml
+---
+title: "RDR Title"
+id: RDR-NNN
+type: Feature | Bug Fix | Technical Debt | Framework Workaround | Architecture
+status: draft | accepted | implemented | reverted | abandoned | superseded
+priority: high | medium | low
+author: Author Name
+reviewed-by: self | reviewer name(s)
+created: YYYY-MM-DD
+related_issues: []
+---
 ```
+
+The `reviewed-by` field records who approved the RDR. For solo projects,
+`reviewed-by: self` is acceptable. For collaborative projects, at least one
+reviewer other than the author is required.
 
 ### Sections
 
@@ -42,9 +50,11 @@ The template contains these sections, each with guidance comments:
 | **Alternatives Considered** | Full analysis for serious alternatives, one-sentence rejection for trivial ones |
 | **Trade-offs** | Consequences, risks and mitigations, failure modes |
 | **Implementation Plan** | Prerequisites, minimum viable validation, phased steps, Day 2 operations, new dependencies |
+| **Test Plan** | Specific test scenarios covering edge cases and failure modes |
 | **Validation** | Testing strategy and performance expectations |
 | **Finalization Gate** | Contradiction check, assumption verification, scope verification, cross-cutting concerns, proportionality |
 | **References** | Requirements, dependency docs, related issues |
+| **Revision History** | Gate findings appendix — keeps design sections clean |
 
 ### Critical Assumptions
 

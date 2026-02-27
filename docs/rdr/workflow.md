@@ -16,6 +16,26 @@ All operations are invoked via Claude Code slash commands.
 
 ---
 
+## Status Model
+
+RDR statuses (what the document records):
+
+| Status | Meaning |
+|--------|---------|
+| **Draft** | In progress, not yet gated |
+| **Accepted** | Author/reviewer decision after gate passes |
+| **Implemented** | Code matches accepted design |
+| **Reverted** | Implemented but rolled back |
+| **Abandoned** | Work stopped before implementation |
+| **Superseded** | Replaced by a later RDR |
+
+The first three are the primary lifecycle. The last three are terminal states
+for RDRs that don't reach or stay at Implemented. The `/rdr-close` command's
+close reasons (Implemented, Reverted, Abandoned, Superseded) map directly to
+the terminal statuses.
+
+---
+
 ## Create (`/rdr-create`)
 
 Creates a new RDR document and registers it in Nexus.
@@ -35,7 +55,8 @@ Creates a new RDR document and registers it in Nexus.
 7. Stages the new files via `git add`.
 
 After creation the RDR has status **Draft**. The document contains section
-headings but no research content yet.
+headings but no research content yet. Run `/rdr-research add <id>` to record
+findings before gating.
 
 ---
 
@@ -94,15 +115,20 @@ Three-layer validation that determines whether an RDR is ready for implementatio
 
 ### Outcomes
 
-- **Gate pass**: status transitions to **Final**. The decision is approved.
-- **Gate fail**: specific remediation steps are provided. The RDR remains in
-  Draft status until issues are addressed and the gate is re-run.
+Gate outcomes (what the gate returns):
+- **BLOCKED** — critical issues found, must fix and re-gate
+- **PASSED** — no critical issues (may have significant/observations)
+
+Do not use "Conditional Accept" or other ad-hoc outcomes. The gate either
+blocks or passes. Acceptance is a separate decision by the author/reviewer
+after the gate passes.
 
 ---
 
 ## Close (`/rdr-close`)
 
-Finalizes a gated RDR and sets up implementation tracking. Requires status: Final.
+Finalizes a gated RDR and sets up implementation tracking. Requires status:
+Accepted or Final — close is hard-blocked otherwise. Use `--force` to override.
 Close reasons: Implemented, Reverted, Abandoned, or Superseded.
 
 1. Creates a **post-mortem template** at `docs/rdr/post-mortem/NNN-kebab-title.md`
