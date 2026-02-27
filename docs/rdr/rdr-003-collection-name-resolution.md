@@ -89,7 +89,7 @@ Resolution semantics differ by operation type:
 3. Zero matches → fall through; `get_or_create_collection()` creates it with the original name (preserves current creation behavior)
 4. Multiple prefix matches → `AmbiguousCollectionError` (user must disambiguate before writing)
 
-The resolution should be implemented as two functions in `corpus.py` alongside the existing `resolve_corpus()`, not duplicated across subcommands. Both accept a pre-fetched `names: list[str]` of collection names — callers in `T3Database` fetch via `self._client.list_collections()` before calling these functions. This avoids adding a ChromaDB import to `corpus.py` and makes the exact-match check a simple `in` membership test (no extra `get_collection()` round-trip).
+The resolution should be implemented as two functions in `corpus.py` alongside the existing `resolve_corpus()`, not duplicated across subcommands. Both accept a `names: list[str]` of collection names, where `names` is fetched by the caller **lazily** — only when an exact match via `_client.get_collection()` fails. This avoids a `list_collections()` round-trip when the user already supplies a fully-qualified name (the common case for programmatic callers), while still resolving prefixes for user-supplied partial names. Note: `self._client.list_collections()` returns objects with a `.name` attribute; callers must normalize via `[c.name for c in self._client.list_collections()]` before passing to these functions.
 
 ```text
 // Illustrative — verify signatures during implementation
@@ -116,16 +116,23 @@ def resolve_collection_name_for_write(names: list[str], name: str) -> str:
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| `resolve_collection_name()` | `src/nexus/corpus.py` — `resolve_corpus()` handles type-prefix (`code` → all `code__*`), not basename+suffix | Add companion function in `corpus.py`; takes `names: list[str]` (not `ChromaClient`) — no ChromaDB import in `corpus.py`; callers in `T3Database` fetch names first |
+| `resolve_collection_name()` | `src/nexus/corpus.py` — `resolve_corpus()` handles type-prefix (`code` → all `code__*`), not basename+suffix | Add companion function in `corpus.py`; takes `names: list[str]` (not `ChromaClient`) — no ChromaDB import in `corpus.py`; callers in `T3Database` fetch names lazily on miss |
 | `t3_collection_name()` | `src/nexus/corpus.py` — adds `knowledge__` prefix for bare names; no suffix resolution | Call `resolve_collection_name()` after `t3_collection_name()` in `T3Database.list_store()` and `T3Database.put()` |
 | `AmbiguousCollectionError` | `src/nexus/errors.py` — `CollectionNotFoundError` exists; `AmbiguousCollectionError` does not | Add `AmbiguousCollectionError` to `errors.py` |
 | `nx store list --collection` | `commands/store.py` → `t3_collection_name()` → `T3Database.list_store()` | Fix at `T3Database.list_store()` call site; not in `commands/store.py` directly |
-| `nx store put --collection` | `commands/store.py` → `t3_collection_name()` → `T3Database.put()` → `get_or_create_collection()` | Fix at `T3Database.put()` using write-path semantics; zero-match falls through to create |
+| `nx store put --collection` | `commands/store.py` → `t3_collection_name()` → `T3Database.put()` → `get_or_create_collection()` | Fix at `T3Database.put()` using write-path semantics; **resolution must be the first operation**, before `doc_id` computation |
 | `nx memory promote --collection` | `commands/memory.py` `promote_cmd` → `T3Database.put()` directly (no `t3_collection_name()`) | Same write-path fix as `T3Database.put()`; covered automatically by Step 3 |
-| `nx search --corpus` | `commands/search_cmd.py` — already uses `resolve_corpus()` for type-prefix | Modify exact-match branch in `resolve_corpus()` to call `resolve_collection_name()` when corpus name contains `__` — no changes to `search_cmd.py` |
-| `nx collection list/info/verify` | `commands/collection.py` | Add read-path resolution; these are read-only — safe to error on zero matches |
+| `nx search --corpus` | `commands/search_cmd.py` — already uses `resolve_corpus()` for type-prefix; `resolve_corpus()` takes `all_collections: list[str]` | Use already-available `all_collections` param in `resolve_corpus()` exact-match branch — no T3Database call inside `corpus.py`, no changes to `search_cmd.py` |
+| `nx collection list/verify` | `commands/collection.py` | Add read-path resolution at command layer; these are read-only — safe to error on zero matches |
+| `nx collection info` | `commands/collection.py:38` → `T3Database.collection_info()` | Fix at `T3Database.collection_info()` level (consistent with T3Database-layer strategy). **Also**: `info_cmd` currently calls `get_or_create_collection()` — must be changed to `get_collection()` to avoid write side-effect on a read-only command |
 | `nx collection delete` | `commands/collection.py` | **Exact names only** — do not apply prefix resolution; require user to supply full name |
-| `nx collection expire`, `nx collection info` | `commands/collection.py` | **Out of scope** for this RDR — not covered by the implementation plan |
+| `upsert_chunks(collection, ...)` | `db/t3.py` — called from `pm.py:389`, indexer pipeline | Always receives fully-qualified names from internal code — no user input reaches this method. **No resolution needed.** |
+| `upsert_chunks_with_embeddings(collection_name, ...)` | `db/t3.py` — called from `indexer.py:299,444,522`, `doc_indexer.py:204` | Always receives fully-qualified names generated by `_safe_collection()` / `_repo_identity()`. **No resolution needed.** |
+| `update_chunks(collection, ...)` | `db/t3.py` — frecency reindex path | Always receives fully-qualified names from internal pipeline. **No resolution needed.** |
+| `delete_by_source(collection_name, ...)` | `db/t3.py` — indexer incremental update | Always receives fully-qualified names from indexer. **No resolution needed.** |
+| `collection_info(name)` | `db/t3.py` — called from `collection.py:38` | User-facing (via `nx collection info`); add read-path resolution inside `T3Database.collection_info()` — consistent with T3Database-layer strategy |
+| `collection_exists(name)` | `db/t3.py` — called from `pm.py:457` | Called with fully-qualified names from PM search path — not user-facing. **No resolution needed.** |
+| `nx collection expire` | `commands/collection.py` | **Out of scope** for this RDR |
 
 ### Decision Rationale
 
@@ -173,14 +180,15 @@ Prefix resolution is the minimal change that fixes the UX without breaking any e
 ### Consequences
 
 - `nx store list --collection code__ART` and `nx store put --collection code__ART` will work as expected (no hash needed)
-- `client.list_collections()` is called on any unresolved name — one HTTP request returning collection names (no count calls); negligible overhead
+- `client.list_collections()` is called only when exact match fails (lazy evaluation) — zero extra HTTP overhead for fully-qualified names; one extra round-trip for prefix resolution
 - Ambiguous prefix errors give users actionable information
 - Cross-machine collection portability remains unsupported (hash is path-based by design)
+- `rdr__` collections (created by `_rdr_collection_name()` in `registry.py`) have the same hash-suffix scheme and the same UX problem — excluded from this RDR's scope as a future gap
 
 ### Risks and Mitigations
 
 - **Risk**: `client.list_collections()` is slow on large ChromaDB instances with many collections
-  **Mitigation**: Only invoked when exact match fails; not in the hot path. Uses name-only listing (no count calls) to minimize overhead.
+  **Mitigation**: Lazy evaluation ensures the call is only made when `get_collection()` fails (i.e., the name is not fully qualified). Programmatic callers that always supply fully-qualified names incur no overhead. Uses name-only listing (no count calls) to minimize the payload.
 
 ### Failure Modes
 
@@ -207,19 +215,33 @@ Add the new exception class alongside the existing `CollectionNotFoundError`.
 
 Implement both functions as companions to the existing `resolve_corpus()`. Both accept a `names: list[str]` parameter (pre-fetched collection names); no ChromaDB import is added to `corpus.py`. This is consistent with `resolve_corpus()`'s calling convention — `corpus.py` stays free of direct ChromaDB client dependencies. Read-path raises `CollectionNotFoundError` on zero matches; write-path returns the original name on zero matches (preserving `get_or_create_collection()` semantics). Exact-match check is `name in names` — no extra round-trip.
 
-#### Step 3: Wire into `T3Database.list_store()` and `T3Database.put()`
+#### Step 3: Wire into `T3Database.list_store()`, `T3Database.put()`, and `T3Database.collection_info()`
 
-These are the actual call sites in `src/nexus/db/t3.py`.
-- `list_store()`: fetch `names = [c.name for c in self._client.list_collections()]`, call `resolve_collection_name(names, col_name)` (read-path) before the `_client.get_collection()` call.
-- `put()`: same `names` fetch, call `resolve_collection_name_for_write(names, col_name)` (write-path) before the `get_or_create_collection()` call. Zero matches fall through to create; ambiguous matches raise `AmbiguousCollectionError`.
+These are the actual call sites in `src/nexus/db/t3.py`. All three use the same **lazy evaluation pattern** to avoid an unconditional `list_collections()` round-trip on every invocation:
 
-This covers `nx store list`, `nx store put`, `nx memory promote`, and any other command routing through `T3Database`.
+```text
+# Lazy resolution pattern (read-path example):
+try:
+    col = self._client.get_collection(col_name)  # fast path — no extra HTTP
+except ChromaNotFoundError:
+    names = [c.name for c in self._client.list_collections()]  # only on miss
+    col_name = resolve_collection_name(names, col_name)        # raises on 0 or >1 match
+    col = self._client.get_collection(col_name)
+```
 
-#### Step 4: Wire into `nx search --corpus` and `nx collection list/info/verify`
+- **`list_store()`**: Apply lazy read-path resolution as above before the `_client.get_collection()` call.
+- **`put()`**: **Resolution must be the first operation**, before `doc_id` derivation (`sha256(f"{collection}:{title}")[:16]`). If resolution happens after ID computation, a write via prefix `code__ART` and a prior write via full name `code__ART-8c2e74c0` will produce different IDs and create silent duplicates. Apply lazy write-path resolution using `resolve_collection_name_for_write()`: zero matches return the original name (falls through to `get_or_create_collection()`); multiple matches raise `AmbiguousCollectionError`.
+- **`collection_info()`**: Apply lazy read-path resolution before the ChromaDB call. This covers `nx collection info` at the T3Database layer — consistent with the overall strategy that `T3Database` callers get resolution automatically.
 
-**`nx search --corpus`**: Modify the exact-match branch in `resolve_corpus()` in `corpus.py`. When the corpus name contains `__` (indicating a type+basename pattern such as `code__ART`), fetch collection names via `T3Database` and call `resolve_collection_name()` to resolve the hash suffix before returning. This keeps all resolution logic in `corpus.py` with no changes to `search_cmd.py`.
+This covers `nx store list`, `nx store put`, `nx memory promote`, `nx collection info`, and any other command routing through these three `T3Database` methods.
 
-**`nx collection list/info/verify`**: Apply read-path resolution in `collection.py`'s `list_cmd`, `info_cmd`, and `verify_cmd`. Fetch names and call `resolve_collection_name()` before the ChromaDB call.
+#### Step 4: Wire into `nx search --corpus` and `nx collection list/verify`
+
+**`nx search --corpus`**: Modify the exact-match branch in `resolve_corpus()` in `corpus.py`. `resolve_corpus()` already receives `all_collections: list[str]` as a parameter from its caller in `search_cmd.py` — no new ChromaDB or T3Database call inside `corpus.py`. When the corpus name contains `__` (indicating a type+basename pattern such as `code__ART`), call `resolve_collection_name(all_collections, corpus)` using that already-available list to resolve the hash suffix. No changes to `search_cmd.py`.
+
+**`nx collection list/verify`**: Apply read-path resolution in `collection.py`'s `list_cmd` and `verify_cmd` (lazy pattern: try exact match first, fetch names on miss, call `resolve_collection_name()`).
+
+**`nx collection info`**: Covered by `T3Database.collection_info()` resolution in Step 3. Additionally, `info_cmd` in `collection.py` currently calls `get_or_create_collection()` — change this to `get_collection()` (or route through `collection_info()`) to eliminate the write side-effect on a read-only command.
 
 **`nx collection delete` — exact names only**: Do not apply prefix resolution to `delete_cmd`. Require the user to supply the full resolved name. This prevents accidental deletion via ambiguous prefix match.
 
@@ -239,6 +261,7 @@ This covers `nx store list`, `nx store put`, `nx memory promote`, and any other 
 - **Scenario**: `nx store put file.txt --collection knowledge__new-topic` where no matching collection exists → **Verify**: New collection `knowledge__new-topic` created (write-path zero-match falls through to `get_or_create_collection`)
 - **Scenario**: `nx memory promote --collection knowledge__new-topic` where no matching collection exists → **Verify**: New collection created (same write-path semantics)
 - **Scenario**: `nx collection delete code__ART` (without full hash) → **Verify**: Rejected with "exact name required for delete" — no prefix resolution applied
+- **Scenario**: `nx store put file.txt --collection code__ART` where two repos with same basename are indexed → **Verify**: `AmbiguousCollectionError` raised on write-path (same as read-path — write-path ambiguity must not silently pick one)
 
 ## Finalization Gate
 
@@ -409,3 +432,16 @@ The plan must address each: either add resolution, document that call sites alwa
 - O2: `list_collections()` in `T3Database` returns objects with a `.name` attribute; normalization to `list[str]` must happen at the caller before passing to `resolve_collection_name()`. The existing `list_collections()` method handles this polymorphism — implementers must match the pattern.
 - O3: Alternative 2 (RepoRegistry) rejection understates the registry's value for the primary indexed-repo use case. A hybrid approach (registry first for O(1) lookup on indexed repos, prefix-scan fallback for unregistered collections) would eliminate the HTTP round-trip for the common case. Not a blocker but worth revisiting if performance becomes a concern.
 - O4: Test plan has no negative case for `nx store put` with an ambiguous prefix. Write-path ambiguity should be verified explicitly.
+
+### Re-gate 4 — Critical/Significant/Observations Resolved (2026-02-27)
+
+- C1 RESOLVED: Step 3 now explicitly states resolution is the first operation in `put()`, before `doc_id` derivation. Lazy evaluation pseudocode added. Infrastructure Audit decision column for `nx store put` updated.
+- C2 RESOLVED: Infrastructure Audit extended with all 6 omitted T3Database methods. `upsert_chunks()`, `upsert_chunks_with_embeddings()`, `update_chunks()`, `delete_by_source()`, `collection_exists()` — all receive fully-qualified names from internal pipelines, no resolution needed (documented). `collection_info()` — user-facing, added read-path resolution at T3Database layer.
+- C3 RESOLVED: Step 4 now uses `all_collections: list[str]` already passed to `resolve_corpus()` — no T3Database fetch inside `corpus.py`. Infrastructure Audit `nx search --corpus` decision updated.
+- S1 RESOLVED: Step 4 now explicitly requires `info_cmd` to use `get_collection()` (not `get_or_create_collection()`) to eliminate the write side-effect on a read-only command.
+- S2 RESOLVED: Technical Design description and Step 3 now specify lazy evaluation — `list_collections()` only called after exact match via `get_collection()` fails. Trade-offs updated to accurately reflect the performance characteristic.
+- S3 RESOLVED: `collection_info()` resolution moved into `T3Database.collection_info()` (Step 3), consistent with the T3Database-layer strategy. Command-layer resolution for `info` removed from Step 4.
+- O1 APPLIED: `rdr__` collections explicitly noted as out of scope in Trade-offs/Consequences.
+- O2 APPLIED: `.name` attribute normalization noted in Technical Design description.
+- O3 NOTED: RepoRegistry hybrid noted as optimization opportunity in Trade-offs; not a blocker.
+- O4 APPLIED: Test plan now includes `nx store put` with ambiguous prefix scenario.
