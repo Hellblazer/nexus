@@ -371,3 +371,41 @@ All S-NEW-1, S-NEW-2, M1, M2 fixes verified correct. No new critical issues.
 - Sig-2 RESOLVED: Step 4 now specifies a single approach — modify the exact-match branch in `resolve_corpus()` when corpus name contains `__`; no changes to `search_cmd.py`. Infrastructure Audit `nx search --corpus` decision updated.
 - O-new-1 APPLIED: Pseudocode now uses `name in names` for exact-match check; no separate `get_collection()` call. Single list-scan eliminates the extra round-trip.
 - O-new-2 APPLIED: `nx collection expire` and `nx collection info` explicitly noted as out of scope in Infrastructure Audit table.
+
+### Re-gate 4 (2026-02-27) — BLOCKED
+
+Source files verified against RDR claims: `corpus.py`, `db/t3.py`, `commands/store.py`, `commands/collection.py`, `commands/memory.py`, `commands/search_cmd.py`, `registry.py`.
+
+#### Critical — Must Fix Before Re-gate
+
+**C1. `doc_id` derivation in `put()` uses the user-supplied name — silent duplicate documents on prefix write.** `T3Database.put()` derives `doc_id` as `sha256(f"{collection}:{title}")[:16]`. If a document was previously stored using the full name `code__ART-8c2e74c0` and is now written again using the prefix `code__ART` (which resolves to the same collection), the IDs differ — the second write does not upsert over the first. Two documents with identical content and different IDs coexist silently. No error is raised. The RDR's primary write scenario (`nx store put --collection code__ART`) will produce silent duplicates unless resolution happens at the top of `put()` before the `doc_id` computation, not after. Implementation plan must explicitly document that resolution is the first step in `put()`, preceding all ID derivation.
+
+**C2. Six T3Database write methods omitted from the implementation plan — silent failures after fix.** The Infrastructure Audit covers only `list_store()` and `put()`. Verified in source: six additional methods accept unresolved collection names:
+
+| Method | Call Sites |
+|--------|-----------|
+| `upsert_chunks(collection, ...)` | `pm.py:389`, indexer pipeline |
+| `upsert_chunks_with_embeddings(collection_name, ...)` | `indexer.py:299,444,522`, `doc_indexer.py:204` |
+| `update_chunks(collection, ...)` | frecency reindex path |
+| `delete_by_source(collection_name, ...)` | indexer incremental update |
+| `collection_info(name)` | `collection.py:38` — raises `KeyError` on miss |
+| `collection_exists(name)` | `pm.py:457` — exact match only |
+
+The plan must address each: either add resolution, document that call sites always supply fully-qualified names, or explicitly mark as out of scope with rationale.
+
+**C3. Step 4 `nx search --corpus` fix contradicts the "no T3Database import in corpus.py" design principle.** Step 4 says to "fetch collection names via `T3Database`" inside `resolve_corpus()`. But `corpus.py` must not import `T3Database` (the RDR's own constraint in Step 2; a `corpus → t3 → corpus` circular import risk exists). Verified: `resolve_corpus()` already receives `all_collections: list[str]` as a parameter from its caller — no additional fetch is needed. The `__`-containing exact-match branch in `resolve_corpus()` should call `resolve_collection_name(all_collections, corpus)` using the already-available list. The instruction to fetch from `T3Database` is both redundant and a violation of the module invariant.
+
+#### Significant — Should Fix Before Re-gate
+
+**S1. `nx collection info` calls `get_or_create_collection()` — write side-effect on a read-only command.** Verified: `collection.py:40` calls `db.get_or_create_collection(name)`. After prefix resolution is applied, a misresolved or ambiguous name will silently create a new empty collection in ChromaDB. The RDR does not acknowledge this pre-existing issue. The implementation must not worsen it — either note it explicitly, or change `info_cmd` to use `get_collection()` (read-only, raises on miss).
+
+**S2. `list_store()` resolution placement makes the `list_collections()` call unconditional for all invocations.** Step 3 says `list_store()` fetches `names = [c.name for c in self._client.list_collections()]` and then calls `resolve_collection_name(names, col_name)`. If `col_name` is already fully qualified (exact match), the `name in names` check short-circuits — but the fetch happens unconditionally. The RDR claims the round-trip only happens "when exact match fails," which is inconsistent with the proposed implementation. Either lazy-evaluate (try exact match via `get_collection()` first, only fetch names list on miss), or acknowledge that one `list_collections()` call now occurs on every `list_store()` and `put()` invocation, and update the performance analysis in Trade-offs accordingly.
+
+**S3. Resolution for `collection_info()` placed at command layer — inconsistent with the T3Database-layer architecture decision.** The RDR places resolution for `list_store()` and `put()` inside `T3Database` so all callers benefit automatically. But Step 4 places resolution for `collection list/info/verify` at the command layer in `collection.py`. This creates two resolution code paths. A direct caller of `T3Database.collection_info()` (e.g., a future command or PM integration) bypasses command-layer resolution and sees unresolved names again. Either move resolution for `collection_info()` into `T3Database`, or document explicitly why the command-layer approach is preferred for these methods.
+
+#### Observations
+
+- O1: `rdr__` collections (via `_rdr_collection_name()` in `registry.py`) use the same hash-suffix scheme and would have the same UX problem. Scope exclusion is reasonable but should be explicitly documented.
+- O2: `list_collections()` in `T3Database` returns objects with a `.name` attribute; normalization to `list[str]` must happen at the caller before passing to `resolve_collection_name()`. The existing `list_collections()` method handles this polymorphism — implementers must match the pattern.
+- O3: Alternative 2 (RepoRegistry) rejection understates the registry's value for the primary indexed-repo use case. A hybrid approach (registry first for O(1) lookup on indexed repos, prefix-scan fallback for unregistered collections) would eliminate the HTTP round-trip for the common case. Not a blocker but worth revisiting if performance becomes a concern.
+- O4: Test plan has no negative case for `nx store put` with an ambiguous prefix. Write-path ambiguity should be verified explicitly.
