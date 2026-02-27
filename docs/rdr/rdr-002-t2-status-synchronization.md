@@ -61,8 +61,9 @@ This means:
   next session start.
 - **Source of truth**: T2 for process state during a session. Files for
   content and for persistence across sessions (git-versioned). When they
-  diverge, reconciliation favors the more recent write — typically the
-  file after human edits between sessions, or T2 during an active session.
+  diverge, reconciliation always advances to the more advanced status
+  (monotonic-advance rule). Deliberate status regression goes through
+  `/rdr-close --force`, not direct frontmatter edits.
 
 ### Technical Environment
 
@@ -174,8 +175,11 @@ pre-loaded Python script. Implementation is a prompt/instruction update.
 - Then updates file frontmatter: `status: accepted`,
   `reviewed-by: <name|self>`, `accepted_date: YYYY-MM-DD`
 - Prints confirmation
-- **Idempotency**: If T2 already shows accepted, print current
-  acceptance info and exit. The accept ceremony is one-time.
+- **Idempotency**: If T2 already shows accepted and file also shows
+  accepted, print current acceptance info and exit. If T2 shows accepted
+  but file does not (prior partial write failure), repair the file
+  frontmatter and report what was fixed. The accept ceremony is one-time
+  but self-healing.
 
 **Partial write failure**: If T2 write succeeds but frontmatter update
 fails, print a warning. The SessionStart reconciliation will propagate
@@ -204,9 +208,11 @@ Status ordering for "more advanced" comparison:
 draft < accepted < implemented < {reverted, abandoned, superseded}
 
 Terminal states (reverted, abandoned, superseded) are all equivalent in
-advancement — if file and T2 disagree on terminal state, favor the more
-recent write (compare timestamps if available, otherwise favor file as
-the human-editable layer).
+advancement. If both sides carry different terminal states (e.g.,
+T2=abandoned, file=superseded), favor the file and emit a warning:
+`"RDR NNN: terminal state conflict (T2=abandoned, file=superseded) —
+using file."` This preserves human intent while making the override
+visible.
 
 **Output**: The hook prints a summary line only when reconciliation
 happens. Silent when everything is in sync.
@@ -314,9 +320,12 @@ daemons or per-clone setup.
   acceptance info.
 - **Conflicting edits**: User edits file to "accepted" between sessions,
   but T2 still shows "draft" (no gate). Reconciliation advances T2 to
-  match file. The gate invariant is not enforced in this path — this is
-  the same class of escape as `/rdr-close --force`. Reconciliation
-  trusts human edits.
+  match file. This bypasses gate enforcement — an accepted limitation
+  of the file-editable model. Unlike `/rdr-close --force`, this leaves
+  no explicit paper trail in command output.
+- **Human edits file mid-session**: T2 reflects pre-edit state until
+  next SessionStart. Agent commands reading T2 will see stale status
+  for the remainder of the session.
 
 ## Implementation Plan
 
@@ -332,11 +341,11 @@ daemons or per-clone setup.
    the `## Action` section, not a Python code change
 2. Update `/rdr-gate` action instructions to print accept prompt when
    gate returns PASSED: "Run `/rdr-accept <id>` to accept this RDR."
-3. Create `/rdr-accept` command (`nx/commands/rdr-accept.md`) — reads
-   gate result from T2, blocks if no PASSED gate, writes T2 first
+3. Create `/rdr-accept` command file (`nx/commands/rdr-accept.md`) and
+   corresponding skill definition (`nx/skills/rdr-accept/SKILL.md`) —
+   reads gate result from T2, blocks if no PASSED gate, writes T2 first
    (`status`, `reviewed-by`, `accepted_date`), then updates file
-   frontmatter
-4. Register `/rdr-accept` in skill definitions
+   frontmatter, self-heals on re-run if file update failed previously
 
 ### Phase 2: SessionStart Reconciliation
 
@@ -356,19 +365,32 @@ daemons or per-clone setup.
 
 ## Test Plan
 
-- Phase 0: Run `/rdr-close` on a test RDR — verify T2 updates correctly
+### Phase 0
+
+- Run `/rdr-close` on a test RDR — verify T2 updates correctly
+
+### Phase 1
+
 - Run `/rdr-gate`, verify T2 gate result record written (`{id}-gate-latest`)
 - Run `/rdr-accept` on a draft RDR without gate — verify it blocks
 - Run `/rdr-accept` on a gated RDR — verify T2 updated first, then
   frontmatter updated, `accepted_date` set
-- Run `/rdr-accept` on already-accepted RDR — verify no-op
+- Run `/rdr-accept` on already-accepted RDR (T2=accepted, file=accepted)
+  — verify no-op
+- Run `/rdr-accept` on already-accepted RDR (T2=accepted, file=draft)
+  — verify file repaired
 - Run `/rdr-accept` with `--reviewed-by alice` — verify field set in
   both T2 and frontmatter
+
+### Phase 2
+
 - Edit file frontmatter between sessions, start new session — verify
   SessionStart reconciliation updates T2 and prints summary
 - Edit T2 status (simulating failed frontmatter write), start new
   session — verify reconciliation updates file to match T2
-- Run `/rdr-list` after Phase 2 — verify it reads status from T2
+- Set T2=abandoned and file=superseded, start session — verify file
+  wins with warning
+- Run `/rdr-list` — verify status column populated from T2
 
 ## Validation
 
@@ -474,3 +496,37 @@ ungated RDRs, which are legitimate operations.
   changes to `rdr-gate.md` `## Action` section, not Python code changes
 - O-NEW-3: Reconciliation handles re-gate of accepted RDRs — status ordering
   makes this a no-op (accepted is already advanced past draft)
+
+### Second re-gate (2026-02-27)
+
+All prior findings verified resolved. Architectural revision (T2-primary)
+reviewed for internal consistency.
+
+### Significant — Resolved
+
+**S-NEW-3. Reconciliation policy contradiction — RESOLVED.** Architectural
+Principle said "favor more recent write" but Technical Design said "update
+the less-advanced side." These are different policies that diverge on status
+regression. Fixed: committed to monotonic-advance rule throughout. Deliberate
+regression goes through `/rdr-close --force`.
+
+**S-NEW-4. Terminal state conflict handling incomplete — RESOLVED.** Both
+sides carrying different terminal states (e.g., T2=abandoned, file=superseded)
+was unhandled. Fixed: favor file and emit warning for terminal-vs-terminal
+conflicts.
+
+**S-NEW-5. Idempotency skips file repair — RESOLVED.** If T2=accepted but
+file=draft (prior partial write), re-running `/rdr-accept` exited with no
+repair. Fixed: idempotency now checks both sides — repairs file if T2 is
+ahead, true no-op only when both agree.
+
+### Observations — Applied
+
+- O-NEW-4: "Same class as --force" corrected — direct file edits leave no
+  paper trail unlike --force. Documented as accepted limitation of
+  file-editable model.
+- O-NEW-5: Mid-session file edits documented — T2 reflects pre-edit state
+  until next SessionStart.
+- O-NEW-6: Implementation plan step 3 now explicitly names both command file
+  and skill definition creation.
+- O-NEW-7: Test plan organized by phase to prevent cross-phase test confusion.
