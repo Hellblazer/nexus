@@ -39,7 +39,7 @@ This was discovered when running `nx store list --collection code__ART` after in
 - ChromaDB Cloud for T3 storage
 - Collection naming: `{type}__{basename}-{hash8}` (e.g., `code__ART-8c2e74c0`)
 - Repo identity computed by `_repo_identity()` in `src/nexus/registry.py`
-- Affected commands: `nx store list`, `nx store put`, `nx store get`, `nx search --corpus`, `nx collection` subcommands
+- Affected commands: `nx store list`, `nx store put`, `nx memory promote`, `nx search --corpus`, `nx collection` subcommands
 
 ## Research Findings
 
@@ -75,23 +75,38 @@ Add a **prefix resolution layer** to the CLI's collection name handling. When a 
 
 ### Technical Design
 
-Resolution priority for a given `name`:
-1. Exact match → use as-is
-2. Single prefix match (one collection starts with `name`) → use it, log a note
-3. Zero matches → error: "no collection matching `{name}` or `{name}-*`"
-4. Multiple prefix matches → error listing all matches (disambiguation required)
+Resolution semantics differ by operation type:
 
-The resolution should be a shared utility function in `corpus.py` alongside the existing `resolve_corpus()`, not duplicated across subcommands. For prefix scanning, it must call `_client.list_collections()` directly (returns names only) rather than `T3Database.list_collections()` which makes N+1 HTTP calls (one `count()` per collection).
+**Read-path** (`list_store`, `nx collection list/info/verify`, `nx search --corpus`):
+1. Exact match → use as-is
+2. Single prefix match → use it, log a note
+3. Zero matches → `CollectionNotFoundError`
+4. Multiple prefix matches → `AmbiguousCollectionError` listing candidates
+
+**Write-path** (`put()`, `nx memory promote`):
+1. Exact match → use as-is
+2. Single prefix match → use the resolved name (write into the existing collection)
+3. Zero matches → fall through; `get_or_create_collection()` creates it with the original name (preserves current creation behavior)
+4. Multiple prefix matches → `AmbiguousCollectionError` (user must disambiguate before writing)
+
+The resolution should be implemented as two functions in `corpus.py` alongside the existing `resolve_corpus()`, not duplicated across subcommands. For prefix scanning, both must call `_client.list_collections()` directly (returns names only) rather than `T3Database.list_collections()` which makes N+1 HTTP calls (one `count()` per collection).
 
 ```text
 // Illustrative — verify signatures during implementation
 def resolve_collection_name(client: ChromaClient, name: str) -> str:
-    """Return exact collection name, resolving by prefix if needed.
-    Raises CollectionNotFoundError | AmbiguousCollectionError.
-    Uses client.list_collections() directly to avoid N+1 count calls."""
+    """Read-path resolution: exact → prefix → error on zero matches.
+    Raises CollectionNotFoundError | AmbiguousCollectionError."""
     # 1. Exact match via client.get_collection(name) — if found, return
     # 2. Prefix scan: [c.name for c in client.list_collections() if c.name.startswith(name)]
     # 3. Zero matches → CollectionNotFoundError
+    # 4. Multiple matches → AmbiguousCollectionError(matches)
+
+def resolve_collection_name_for_write(client: ChromaClient, name: str) -> str:
+    """Write-path resolution: exact → prefix → original name on zero matches.
+    Raises AmbiguousCollectionError only. Never raises CollectionNotFoundError."""
+    # 1. Exact match — return as-is
+    # 2. Single prefix match — return resolved name
+    # 3. Zero matches — return original name (let get_or_create_collection handle it)
     # 4. Multiple matches → AmbiguousCollectionError(matches)
 ```
 
@@ -103,9 +118,10 @@ def resolve_collection_name(client: ChromaClient, name: str) -> str:
 | `t3_collection_name()` | `src/nexus/corpus.py` — adds `knowledge__` prefix for bare names; no suffix resolution | Call `resolve_collection_name()` after `t3_collection_name()` in `T3Database.list_store()` and `T3Database.put()` |
 | `AmbiguousCollectionError` | `src/nexus/errors.py` — `CollectionNotFoundError` exists; `AmbiguousCollectionError` does not | Add `AmbiguousCollectionError` to `errors.py` |
 | `nx store list --collection` | `commands/store.py` → `t3_collection_name()` → `T3Database.list_store()` | Fix at `T3Database.list_store()` call site; not in `commands/store.py` directly |
-| `nx store put --collection` | `commands/store.py` → `t3_collection_name()` → `T3Database.put()` | Fix at `T3Database.put()` call site; silently creates misnamed collection without fix |
+| `nx store put --collection` | `commands/store.py` → `t3_collection_name()` → `T3Database.put()` → `get_or_create_collection()` | Fix at `T3Database.put()` using write-path semantics; zero-match falls through to create |
+| `nx memory promote --collection` | `commands/memory.py` `promote_cmd` → `T3Database.put()` directly (no `t3_collection_name()`) | Same write-path fix as `T3Database.put()`; covered automatically by Step 3 |
 | `nx search --corpus` | `commands/search_cmd.py` — already uses `resolve_corpus()` for type-prefix | Extend `resolve_corpus()` or add post-step for basename+suffix resolution |
-| `nx collection list/info/verify` | `commands/collection.py` | Add resolution; these are read-only — safe to resolve by prefix |
+| `nx collection list/info/verify` | `commands/collection.py` | Add read-path resolution; these are read-only — safe to error on zero matches |
 | `nx collection delete` | `commands/collection.py` | **Exact names only** — do not apply prefix resolution; require user to supply full name |
 
 ### Decision Rationale
@@ -184,13 +200,17 @@ Prefix resolution is the minimal change that fixes the UX without breaking any e
 
 Add the new exception class alongside the existing `CollectionNotFoundError`.
 
-#### Step 2: Add `resolve_collection_name()` to `src/nexus/corpus.py`
+#### Step 2: Add `resolve_collection_name()` and `resolve_collection_name_for_write()` to `src/nexus/corpus.py`
 
-Implement the 4-case resolution logic (exact → prefix → zero → ambiguous) as a companion to the existing `resolve_corpus()`. Use `client.list_collections()` directly (not `T3Database.list_collections()`) to avoid N+1 count calls.
+Implement both functions as companions to the existing `resolve_corpus()`. Both use `client.list_collections()` directly (not `T3Database.list_collections()`) to avoid N+1 count calls. Read-path raises `CollectionNotFoundError` on zero matches; write-path returns the original name on zero matches (preserving `get_or_create_collection()` semantics).
 
 #### Step 3: Wire into `T3Database.list_store()` and `T3Database.put()`
 
-These are the actual call sites in `src/nexus/db/t3.py` where `get_collection(name)` is called. Apply `resolve_collection_name()` before the `get_collection()` call in both methods. This covers `nx store list`, `nx store put`, and any other command that routes through `T3Database`.
+These are the actual call sites in `src/nexus/db/t3.py`.
+- `list_store()`: apply `resolve_collection_name()` (read-path) before the `_client.get_collection()` call.
+- `put()`: apply `resolve_collection_name_for_write()` (write-path) before the `get_or_create_collection()` call. Zero matches fall through to create; ambiguous matches raise `AmbiguousCollectionError`.
+
+This covers `nx store list`, `nx store put`, `nx memory promote`, and any other command routing through `T3Database`.
 
 #### Step 4: Wire into `nx search --corpus` and `nx collection list/info/verify`
 
@@ -202,7 +222,7 @@ Extend `resolve_corpus()` in `corpus.py` or add a post-step in `search_cmd.py` t
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| ChromaDB collections | `nx store list` | N/A | `nx store delete` | `nx search` | N/A |
+| ChromaDB collections | `nx store list` | N/A | `nx collection delete` (exact name required) | `nx search` | N/A |
 
 ## Test Plan
 
@@ -211,6 +231,8 @@ Extend `resolve_corpus()` in `corpus.py` or add a post-step in `search_cmd.py` t
 - **Scenario**: `nx store list --collection code__NONEXISTENT` (no matching collection) → **Verify**: Error message is `CollectionNotFoundError` (distinct from "No entries in {name}" for an existing empty collection)
 - **Scenario**: `nx store list --collection code__ART` against an existing but empty collection → **Verify**: "No entries" message (not an error — collection exists)
 - **Scenario**: Two repos with same basename both indexed → `nx store list --collection code__ART` → **Verify**: `AmbiguousCollectionError` listing both candidates
+- **Scenario**: `nx store put file.txt --collection knowledge__new-topic` where no matching collection exists → **Verify**: New collection `knowledge__new-topic` created (write-path zero-match falls through to `get_or_create_collection`)
+- **Scenario**: `nx memory promote --collection knowledge__new-topic` where no matching collection exists → **Verify**: New collection created (same write-path semantics)
 - **Scenario**: `nx collection delete code__ART` (without full hash) → **Verify**: Rejected with "exact name required for delete" — no prefix resolution applied
 
 ## Finalization Gate
@@ -315,3 +337,10 @@ All C1–C3 and S1–S4 fixes verified correct against codebase. No new critical
 **M1. Stale command references.** `nx store get` in Affected Commands does not exist (valid commands: `put`, `list`, `expire`). `nx store delete` in Day 2 Operations table does not exist — correct command is `nx collection delete`.
 
 **M2. Implementation Plan Step 3 says `get_collection()` in `put()`.** `T3Database.put()` calls `get_or_create_collection()`, not `get_collection()`. Step 3 should distinguish: resolution before `_client.get_collection()` in `list_store()`, and resolution with write-path semantics before `get_or_create_collection()` in `put()`.
+
+### Re-gate 2 — Significant/Minor Resolved (2026-02-27)
+
+- S-NEW-1 RESOLVED: Technical Design now defines separate read-path and write-path resolution semantics. `resolve_collection_name_for_write()` returns original name on zero matches (preserving `get_or_create_collection()` behavior). Infrastructure Audit and Implementation Plan Step 3 updated accordingly. Test scenarios added for first-write-to-nonexistent-collection.
+- S-NEW-2 RESOLVED: `nx memory promote --collection` added to Affected Commands and Infrastructure Audit.
+- M1 RESOLVED: Removed nonexistent `nx store get` from Affected Commands. Replaced `nx store delete` with `nx collection delete` in Day 2 Operations table.
+- M2 RESOLVED: Step 3 now explicitly distinguishes `_client.get_collection()` (in `list_store()`) from `get_or_create_collection()` (in `put()`).
