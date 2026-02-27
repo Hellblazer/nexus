@@ -44,25 +44,42 @@ T2 query revealed all records still showed their initial draft status.
 - **`/rdr-list` shows wrong statuses** — it reads T2 for fast response
   without parsing markdown files, so it reports stale statuses
 - **Audit trail has holes** — no record of when acceptance happened
-  (sync-on-read cannot recover this; only an explicit accept command
-  can record the actual acceptance timestamp)
 - **Cross-RDR dependency checking** is unreliable if status is wrong
+
+### Architectural Principle
+
+**T2 is the process authority; files are the human-editable persistence
+layer.** Agent interactions with RDR process state (status, gate results,
+acceptance, reviewed-by) should flow through `nx` and the nx plugin. Files
+are the git-versioned merge state — editable by humans, diffable, reviewable
+— but Claude's primary interface for process metadata is T2.
+
+This means:
+- **Agent reads**: T2 first. File content for the design body.
+- **Agent writes**: T2 first, then propagate to file frontmatter.
+- **Human edits**: File frontmatter directly. Reconciled into T2 on
+  next session start.
+- **Source of truth**: T2 for process state during a session. Files for
+  content and for persistence across sessions (git-versioned). When they
+  diverge, reconciliation favors the more recent write — typically the
+  file after human edits between sessions, or T2 during an active session.
 
 ### Technical Environment
 
 - RDR tooling: nexus plugin skill commands (`/rdr-create`, `/rdr-gate`,
   `/rdr-close`, `/rdr-research`, `/rdr-list`, `/rdr-show`)
 - T2 storage: `nx memory put/get` with project `{repo}_rdr`
-- Status source of truth: YAML frontmatter in the RDR markdown file
 - Current T2 update points: `/rdr-create` (initial write), `/rdr-close`
   (final write)
+- SessionStart hook: `nx/hooks/scripts/rdr_hook.py` — runs at session
+  start, currently reports RDR count and indexing status
 
 ## Research Findings
 
 ### Investigation
 
 Reviewed all RDR skill commands to identify which ones read/write T2
-(pre-implementation state — Phase 2 will add T2 writes to read commands):
+(pre-implementation state):
 
 | Command | Reads T2? | Writes T2? | Status change? |
 |---------|-----------|------------|----------------|
@@ -73,17 +90,22 @@ Reviewed all RDR skill commands to identify which ones read/write T2
 | `/rdr-list` | Yes (all records) | No | No |
 | `/rdr-show` | Yes (single record) | No | No |
 
-Gap: no command writes T2 for the **draft → accepted** transition. The gate
-reports BLOCKED/PASSED but does not change the RDR's status. Acceptance is a
-manual frontmatter edit with no T2 update.
+**Gap**: No command writes T2 for the draft → accepted transition. The gate
+reports BLOCKED/PASSED but does not store its outcome. Acceptance is a manual
+frontmatter edit with no T2 update.
+
+**Note on `/rdr-list`**: The workflow doc says it "reads from T2 metadata for
+fast response" but the actual implementation (`rdr-list.md`) parses markdown
+files via `parse_frontmatter()` and `get_all_rdrs()` for the status table,
+calling `nx memory list` only to display raw T2 records as a secondary
+section. This divergence is addressed in the proposed solution.
 
 ### Key Discoveries
 
-- **Documented**: The `parse_frontmatter()` function in every command already
-  reads the current status from the file. T2 and file status can diverge
-  silently.
-- **Documented**: `/rdr-list` reads T2 for speed but could fall back to
-  filesystem parsing. Currently it only uses T2.
+- **Documented**: `parse_frontmatter()` in every command reads current status
+  from the file. T2 and file status can diverge silently.
+- **Documented**: `/rdr-list` currently reads files, not T2, for its primary
+  status display (contradicts workflow doc claim).
 - **Assumed**: Most status transitions happen during interactive sessions
   where the user is present. Batch/CI status changes are not a current
   use case.
@@ -94,23 +116,25 @@ manual frontmatter edit with no T2 update.
   frontmatter (new standard per RDR-001 P4) and legacy markdown-list
   metadata (`## Metadata` with `- **Key**: Value` items) — **Status**:
   Verified — **Method**: Source Search (reviewed all command implementations)
-- [ ] A sync-on-read approach won't create performance issues for repos
-  with many RDRs — **Status**: Unverified
+- [ ] SessionStart hook reconciliation won't create noticeable latency
+  for repos with many RDRs — **Status**: Unverified
   — **Method**: Docs Only (no repos with >20 RDRs exist yet)
 
 ## Proposed Solution
 
 ### Approach
 
-**Sync-on-read with explicit accept command.** Two complementary fixes:
+**T2-primary with SessionStart reconciliation.** Three complementary pieces:
 
-1. **`/rdr-accept` command**: New command that sets status to `accepted` in
-   both frontmatter and T2. Records acceptance date and reviewer.
+1. **`/rdr-accept` command**: Writes T2 first (status, accepted_date,
+   reviewed-by, gate verification), then propagates to file frontmatter.
 
-2. **T2 freshness check in `/rdr-gate` and `/rdr-show`**: When these
-   commands read T2 metadata, compare `status` against the file's
-   frontmatter. If they diverge, update T2 silently and note the
-   correction in output.
+2. **Gate result storage**: `/rdr-gate` writes outcome to T2 after each
+   run. Enables `/rdr-accept` to verify gate passed.
+
+3. **SessionStart reconciliation**: Extend the existing `rdr_hook.py` to
+   compare file frontmatter against T2 on session start. Catches human
+   edits made between sessions (direct frontmatter edits, `git pull`).
 
 ### Technical Design
 
@@ -129,7 +153,12 @@ EOF
 ```
 
 This is a new T2 write in `/rdr-gate` (currently it writes nothing).
-The record is overwritten on each gate/re-gate run.
+The record is overwritten on each gate/re-gate run (last-write-wins,
+no history — the current gate state is what matters for acceptance).
+
+The gate outcome is written by Claude as part of the gate action
+instructions (the `## Action` section of `rdr-gate.md`), not by the
+pre-loaded Python script. Implementation is a prompt/instruction update.
 
 #### `/rdr-accept` command
 
@@ -137,79 +166,111 @@ The record is overwritten on each gate/re-gate run.
 /rdr-accept <id> [--reviewed-by <name>]
 ```
 
-- Reads the RDR file
 - Reads T2 gate record (`{id}-gate-latest`). If no gate record exists
   or outcome is BLOCKED, **refuse to accept** — no `--force` override.
   The gate must pass before acceptance. This preserves the invariant
   that RDR-001 P1 relies on: accepted status means gated.
-- Updates frontmatter: `status: accepted`, `reviewed-by: <name|self>`,
-  `accepted_date: YYYY-MM-DD`
-- Writes T2: status, accepted_date, reviewed-by
+- Writes T2 first: status=accepted, accepted_date, reviewed-by
+- Then updates file frontmatter: `status: accepted`,
+  `reviewed-by: <name|self>`, `accepted_date: YYYY-MM-DD`
 - Prints confirmation
-- **Idempotency**: If already accepted, print current acceptance info
-  and exit. To change `reviewed-by`, edit frontmatter directly — the
-  accept ceremony is one-time.
+- **Idempotency**: If T2 already shows accepted, print current
+  acceptance info and exit. The accept ceremony is one-time.
 
-If frontmatter write succeeds but T2 write fails, print a warning:
-`T2 update failed — acceptance recorded in frontmatter only. Next
-/rdr-show or /rdr-list will sync T2.` This ensures the user knows
-the state is divergent, and sync-on-read will eventually fix it.
+**Partial write failure**: If T2 write succeeds but frontmatter update
+fails, print a warning. The SessionStart reconciliation will propagate
+T2 state to the file on next session. If T2 write fails, do not proceed
+to frontmatter — report the error. T2 is the process authority.
 
-#### Sync-on-read (defensive)
+#### SessionStart reconciliation
 
-Add to `parse_frontmatter()` callers in `/rdr-gate`, `/rdr-show`,
-`/rdr-list`. When file status diverges from T2, update T2 to match
-file and **print a visible notice**:
+Extend `nx/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on every
+session start:
 
 ```python
-# After reading file and T2:
-if file_status != t2_status:
-    # Update T2 to match file (file is source of truth)
-    subprocess.run(['nx', 'memory', 'put', updated_record,
-        '--project', f'{repo}_rdr', '--title', t2_key])
-    print(f"> T2 synced: {t2_status} → {file_status}")
+# For each RDR file in docs/rdr/:
+#   1. Parse frontmatter status from file
+#   2. Read T2 status for this RDR
+#   3. If they differ:
+#      - If file has a more advanced status (e.g., file=accepted, T2=draft),
+#        update T2 to match file (human edited between sessions)
+#      - If T2 has a more advanced status (e.g., T2=accepted, file=draft),
+#        update file frontmatter to match T2 (rare — T2 write succeeded
+#        but file write failed in a previous session)
+#   4. Print summary: "RDR sync: N records reconciled"
 ```
 
-For `/rdr-list` with multiple stale records, print a summary line:
-`> Synced N stale T2 records`
+Status ordering for "more advanced" comparison:
+draft < accepted < implemented < {reverted, abandoned, superseded}
 
-**Limitation**: Sync-on-read corrects status but cannot recover audit
-timestamps (accepted_date, etc.). It stamps T2 with the current time.
-This is an acknowledged gap — the accept command is the authoritative
-source for acceptance timestamps. Sync-on-read is a status cache
-correction, not an audit trail recovery mechanism.
+Terminal states (reverted, abandoned, superseded) are all equivalent in
+advancement — if file and T2 disagree on terminal state, favor the more
+recent write (compare timestamps if available, otherwise favor file as
+the human-editable layer).
+
+**Output**: The hook prints a summary line only when reconciliation
+happens. Silent when everything is in sync.
+
+#### `/rdr-close --force` and the gate invariant
+
+RDR-001 P1 added `--force` to `/rdr-close` to allow closing without
+accepted/final status. This creates a path that bypasses both
+`/rdr-accept` and the gate: a user can go directly to
+`/rdr-close --force` on a draft RDR.
+
+This is an intentional escape hatch, not a bug. The `--force` flag
+creates an explicit paper trail (the override is visible in the close
+output). The invariant "accepted means gated" holds for the normal path;
+`--force` is the documented override for exceptional cases (e.g.,
+abandoning an RDR that was never gated). Removing `--force` from close
+would prevent abandoning or superseding ungated RDRs, which are
+legitimate operations.
 
 ### Decision Rationale
 
-The accept command addresses the primary gap: gate enforcement at the
-acceptance moment, automatic T2 sync with correct timing, and ceremonial
-visibility of the acceptance event. Sync-on-read is defensive — it
-catches status divergence from manual edits or future transitions we
-haven't anticipated, but does not fabricate audit timestamps. File
-frontmatter is always the source of truth; T2 is a queryable cache.
+T2-primary aligns with the nx architecture: agents interact through
+`nx`, humans interact through files. The accept command provides gate
+enforcement, accurate timestamps, and ceremonial visibility. SessionStart
+reconciliation catches human edits without file watchers or git hooks —
+it runs in the existing hook infrastructure, is portable across clones,
+and fails gracefully (if the hook fails, commands still work from
+whichever source they can reach).
 
 ## Alternatives Considered
 
-### Alternative 1: Sync-on-read only (no accept command)
+### Alternative 1: File-primary with T2 as cache
+
+**Pros**: Simple mental model — file is always truth
+
+**Cons**: Every command must read files, T2 is perpetually stale
+between writes, agents can't trust T2 without cross-checking files
+
+**Reason for rejection**: This was the original RDR-002 design. The
+re-gate revealed it creates complexity: `/rdr-list` already reads files
+(contradicting the workflow doc), sync-on-read in read commands violates
+expectations, and timestamp fabrication corrupts audit trails. T2-primary
+with reconciliation is cleaner.
+
+### Alternative 2: Sync-on-read only (no accept command)
 
 **Pros**: No new command to learn
 
-**Cons**: Acceptance still has no ceremony, no reviewed-by record,
-no audit trail of when acceptance happened
+**Cons**: No gate enforcement at acceptance time, no accurate acceptance
+timestamps, no ceremonial visibility of the acceptance decision
 
-**Reason for rejection**: Misses gate enforcement at acceptance time
-(sync-on-read can't verify gate state retroactively), doesn't record
-accurate acceptance timestamps, and provides no ceremonial visibility
-of the acceptance decision
+**Reason for rejection**: Missed the core problem — acceptance needs
+ceremony and gate verification, not just status propagation
 
-### Alternative 2: File watcher / git hook
+### Alternative 3: File watcher / git hook
 
-**Pros**: Fully automatic, catches every change
+**Pros**: Fully automatic, catches every change in real time
 
-**Cons**: Fragile (file watchers fail silently), git hooks are
-per-clone (not portable), adds infrastructure complexity
+**Cons**: File watchers fail silently, git hooks are per-clone (not
+portable), adds infrastructure complexity
 
-**Reason for rejection**: Over-engineered for the current scale
+**Reason for rejection**: Over-engineered. SessionStart reconciliation
+achieves the same goal using existing hook infrastructure with no new
+daemons or per-clone setup.
 
 ### Briefly Rejected
 
@@ -220,10 +281,13 @@ per-clone (not portable), adds infrastructure complexity
 
 ### Consequences
 
-- Positive: T2 always matches file status, agents get accurate data
-- Positive: Acceptance has an explicit ceremony with audit trail
+- Positive: T2 is authoritative for agents — reliable, fast reads
+- Positive: Acceptance has an explicit ceremony with gate enforcement
+- Positive: Human edits caught on session start — no manual sync needed
 - Negative: One more command to remember (mitigated by gate output
   prompting the user)
+- Negative: Brief window where file and T2 can diverge (between human
+  edit and next session start) — acceptable for the current scale
 
 ### Risks and Mitigations
 
@@ -231,77 +295,98 @@ per-clone (not portable), adds infrastructure complexity
   `/rdr-research`
   **Mitigation**: When gate returns PASSED, print: "Run `/rdr-accept <id>`
   to accept this RDR."
+- **Risk**: SessionStart reconciliation has wrong "more advanced" logic
+  **Mitigation**: Status ordering is explicit and simple. Edge cases
+  (conflicting terminal states) favor the file as the human-editable layer.
 
 ### Failure Modes
 
-- **Sync-on-read T2 unavailable**: Read commands still work from file
-  data. T2 stays stale until next successful sync. Correction is
-  visible when it happens ("T2 synced: ...").
-- **`/rdr-accept` skipped**: Sync-on-read catches status divergence on
-  next gate/show/list. Status is corrected but accepted_date is stamped
-  with current time (not actual acceptance time) — this is an acknowledged
-  limitation, not a silent corruption.
-- **`/rdr-accept` partial write**: Frontmatter succeeds but T2 fails.
-  User sees explicit warning. Sync-on-read fixes T2 on next read command.
+- **T2 unavailable at session start**: Reconciliation skipped, hook
+  prints warning. Commands fall back to file reads. T2 stays stale until
+  next successful session start.
+- **`/rdr-accept` T2 write fails**: Command reports error, does not
+  update file. User retries or proceeds manually.
+- **`/rdr-accept` skipped**: SessionStart reconciliation catches the
+  divergence on next session. Status is corrected but accepted_date is
+  set to reconciliation time, not actual acceptance time — acknowledged
+  limitation.
 - **`/rdr-accept` on already-accepted RDR**: No-op, prints current
   acceptance info.
+- **Conflicting edits**: User edits file to "accepted" between sessions,
+  but T2 still shows "draft" (no gate). Reconciliation advances T2 to
+  match file. The gate invariant is not enforced in this path — this is
+  the same class of escape as `/rdr-close --force`. Reconciliation
+  trusts human edits.
 
 ## Implementation Plan
 
 ### Phase 0: Verify Root Cause
 
 0. Confirm that `/rdr-close` correctly updates T2 by running it on a
-   test RDR. Rule out a bug in close itself — the pilot RDRs were never
-   closed, so this should work, but verify before building on the
-   assumption.
+   test RDR. Rule out a bug in close itself.
 
 ### Phase 1: Gate Result Storage + Accept Command
 
-1. Update `/rdr-gate` to write T2 gate result record (`{id}-gate-latest`)
-   after each gate run with outcome, date, and finding counts
-2. Update `/rdr-gate` to print accept prompt when gate returns PASSED:
-   "Run `/rdr-accept <id>` to accept this RDR."
+1. Update `/rdr-gate` action instructions to write T2 gate result record
+   (`{id}-gate-latest`) after each gate run — this is a prompt change in
+   the `## Action` section, not a Python code change
+2. Update `/rdr-gate` action instructions to print accept prompt when
+   gate returns PASSED: "Run `/rdr-accept <id>` to accept this RDR."
 3. Create `/rdr-accept` command (`nx/commands/rdr-accept.md`) — reads
-   gate result from T2, blocks if no PASSED gate, updates frontmatter
-   (`status`, `reviewed-by`, `accepted_date`) and T2, handles partial
-   write failure with explicit warning
-4. Register command in skill definitions
+   gate result from T2, blocks if no PASSED gate, writes T2 first
+   (`status`, `reviewed-by`, `accepted_date`), then updates file
+   frontmatter
+4. Register `/rdr-accept` in skill definitions
 
-### Phase 2: Sync-on-Read
+### Phase 2: SessionStart Reconciliation
 
-5. Add T2 freshness check to `/rdr-show` — visible notice on correction
-6. Add T2 freshness check to `/rdr-list` — summary line for batch corrections
-7. Add T2 freshness check to `/rdr-gate` — visible notice on correction
+5. Extend `nx/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on
+   session start — compare statuses, update the less-advanced side,
+   print summary only when changes occur
+6. Update `/rdr-list` to read process metadata from T2 (not files) for
+   its primary status display, matching the workflow doc's stated behavior
 
 ### Phase 3: Documentation
 
-8. Add `/rdr-accept` to `docs/rdr/workflow.md` as an explicit lifecycle step
-9. Document `accepted_date` frontmatter field in `docs/rdr/templates.md`
+7. Add `/rdr-accept` to `docs/rdr/workflow.md` as an explicit lifecycle
+   step between Gate and Close
+8. Document `accepted_date` frontmatter field in `docs/rdr/templates.md`
+9. Update workflow doc's `/rdr-list` description to accurately reflect
+   its T2-primary behavior after Phase 2
 
 ## Test Plan
 
 - Phase 0: Run `/rdr-close` on a test RDR — verify T2 updates correctly
-- Run `/rdr-accept` on a draft RDR without gate — verify it blocks (no `--force` available)
 - Run `/rdr-gate`, verify T2 gate result record written (`{id}-gate-latest`)
-- Run `/rdr-accept` on a gated RDR — verify frontmatter and T2 both update, `accepted_date` set
-- Run `/rdr-accept` on already-accepted RDR — verify no-op, prints current info
-- Run `/rdr-accept` with `--reviewed-by alice` — verify field is set in frontmatter and T2
-- Manually edit frontmatter status, then run `/rdr-show` — verify visible "T2 synced" notice
-- Run `/rdr-list` with multiple stale records — verify "Synced N stale T2 records" summary
+- Run `/rdr-accept` on a draft RDR without gate — verify it blocks
+- Run `/rdr-accept` on a gated RDR — verify T2 updated first, then
+  frontmatter updated, `accepted_date` set
+- Run `/rdr-accept` on already-accepted RDR — verify no-op
+- Run `/rdr-accept` with `--reviewed-by alice` — verify field set in
+  both T2 and frontmatter
+- Edit file frontmatter between sessions, start new session — verify
+  SessionStart reconciliation updates T2 and prints summary
+- Edit T2 status (simulating failed frontmatter write), start new
+  session — verify reconciliation updates file to match T2
+- Run `/rdr-list` after Phase 2 — verify it reads status from T2
 
 ## Validation
 
 ### Testing Strategy
 
 1. **Scenario**: Accept a gated RDR
-   **Expected**: Frontmatter status = accepted, T2 status = accepted,
-   reviewed-by field populated, accepted_date set to today
+   **Expected**: T2 status = accepted (written first), frontmatter
+   status = accepted, reviewed-by populated, accepted_date set to today
 
-2. **Scenario**: Query T2 after manual frontmatter edit
-   **Expected**: Next read command corrects T2 with visible notice
+2. **Scenario**: Human edits frontmatter between sessions
+   **Expected**: SessionStart reconciliation updates T2, prints
+   "RDR sync: 1 record reconciled"
 
 3. **Scenario**: Accept without gate
    **Expected**: Command refuses — no override available
+
+4. **Scenario**: `/rdr-list` after Phase 2
+   **Expected**: Status column populated from T2, not file parsing
 
 ## References
 
@@ -336,25 +421,56 @@ audit trail recovery from sync-on-read's claimed benefits.
 ### Significant — Resolved
 
 **S1. Partial write failure during `/rdr-accept` unhandled — RESOLVED.**
-Fixed: if frontmatter succeeds but T2 fails, print explicit warning.
-Sync-on-read will eventually correct T2 on next read command.
+Fixed: if T2 write fails, do not proceed to frontmatter — report error.
+T2 is the process authority.
 
 **S2. Idempotency undefined — RESOLVED.** Fixed: `/rdr-accept` on an
 already-accepted RDR is a no-op that prints current acceptance info.
-Added test case.
 
-**S3. Silent T2 mutation in `/rdr-list` — RESOLVED.** Fixed: all
-sync-on-read corrections print visible notices. `/rdr-list` prints
-"Synced N stale T2 records" summary line for batch corrections.
+**S3. Silent T2 mutation in `/rdr-list` — RESOLVED.** Fixed: replaced
+sync-on-read with SessionStart reconciliation. `/rdr-list` will read T2
+directly after Phase 2, no longer mutating T2 as a side effect.
 
 **S4. Root cause assumed, not verified — RESOLVED.** Fixed: clarified
 that the pilot RDRs were never `/rdr-close`d (they remained open after
-acceptance). Added Phase 0 to verify `/rdr-close` works correctly
-before building on that assumption.
+acceptance). Added Phase 0 to verify `/rdr-close` works correctly.
 
 ### Observations — Applied
 
 - O1: Investigation table labeled "pre-implementation state"
 - O2: "Both formats" clarified as YAML frontmatter (new) and markdown-list metadata (legacy)
-- O3: Phase 3 step 8 corrected from "update status model" to "document accepted_date field"
-- O4: Alternative 1 rejection rationale restated — gate enforcement, accurate timestamps, and ceremonial visibility, not just reviewed-by tracking
+- O3: Phase 3 corrected — documents `accepted_date` field, not "update status model"
+- O4: Alternative 1 rejection rationale restated accurately
+
+### Re-gate (2026-02-27)
+
+All prior findings (C1–C3, S1–S4, O1–O4) verified resolved.
+
+**Architectural revision**: Flipped from "file-primary, T2 as cache" to
+"T2-primary, file as human-editable persistence." Agent reads/writes flow
+through T2; human edits reconciled on SessionStart. This resolved S-NEW-1
+(no more sync-on-read in read commands) and simplified the failure model.
+
+### Significant — Resolved
+
+**S-NEW-1. `/rdr-list` sync-on-read requires behavioral change not
+reflected in design — RESOLVED.** The original sync-on-read design required
+`/rdr-list` to start reading T2 per-record, which contradicted its actual
+implementation (it reads files). Fixed: replaced sync-on-read with
+SessionStart reconciliation. `/rdr-list` will read T2 directly (Phase 2,
+step 6), matching the workflow doc's stated behavior.
+
+**S-NEW-2. `/rdr-close --force` bypasses gate invariant — RESOLVED.**
+`/rdr-close --force` can close an ungated RDR, bypassing both `/rdr-accept`
+and the gate. Fixed: documented as an intentional escape hatch with explicit
+paper trail, not a bug. Removing it would prevent abandoning/superseding
+ungated RDRs, which are legitimate operations.
+
+### Observations — Applied
+
+- O-NEW-1: Gate-latest record documented as intentionally last-write-wins
+  with no history
+- O-NEW-2: Gate result write and accept prompt clarified as prompt/instruction
+  changes to `rdr-gate.md` `## Action` section, not Python code changes
+- O-NEW-3: Reconciliation handles re-gate of accepted RDRs — status ordering
+  makes this a no-op (accepted is already advanced past draft)
