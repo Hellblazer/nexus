@@ -104,7 +104,7 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
    ```
 
 2. **Update version in `pyproject.toml`**
-   Change the `version` field (e.g. `"1.0.0-rc1"` → `"1.0.0"`).
+   Change the `version` field (e.g. `"1.0.0rc4"` → `"1.0.0"`).
 
 3. **Update `CHANGELOG.md`**
    - Rename `[Unreleased]` section to `[X.Y.Z] - YYYY-MM-DD`
@@ -117,7 +117,7 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
 
 5. **Commit the release**
    ```bash
-   git add pyproject.toml CHANGELOG.md
+   git add pyproject.toml CHANGELOG.md .claude-plugin/marketplace.json
    git commit -m "Release vX.Y.Z"
    ```
 

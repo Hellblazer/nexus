@@ -215,7 +215,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0-rc1...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc4...HEAD
+[1.0.0rc4]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc3...v1.0.0rc4
+[1.0.0rc3]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc2...v1.0.0rc3
+[1.0.0rc2]: https://github.com/Hellblazer/nexus/compare/v1.0.0-rc1...v1.0.0rc2
 [1.0.0-rc1]: https://github.com/Hellblazer/nexus/compare/v0.4.0...v1.0.0-rc1
 [0.4.0]: https://github.com/Hellblazer/nexus/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Hellblazer/nexus/compare/v0.3.1...v0.3.2
