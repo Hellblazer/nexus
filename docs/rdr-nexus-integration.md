@@ -24,11 +24,12 @@ Each RDR has a T2 record in the `{repo}_rdr` project. Fields:
 | `id` | Sequential number (e.g., `007`) |
 | `prefix` | Project prefix derived from repo name |
 | `title` | Human-readable title |
-| `status` | Draft, Final, Implemented, Reverted, Abandoned, Superseded |
+| `status` | Draft, Accepted, Implemented, Reverted, Abandoned, Superseded |
 | `type` | Feature, Bug Fix, Technical Debt, Framework Workaround, Architecture |
 | `priority` | High, Medium, Low |
 | `created` | ISO timestamp |
 | `gated` | ISO timestamp of gate pass (empty if not gated) |
+| `accepted_date` | ISO date set by `/rdr-accept` (empty if not accepted) |
 | `closed` | ISO timestamp of close (empty if open) |
 | `close_reason` | Why the RDR was closed |
 | `superseded_by` | ID of the replacing RDR (if superseded) |
@@ -117,7 +118,10 @@ write another RDR:
 2. **During research**: `/rdr-research` can delegate to `deep-research-synthesizer`
    or `codebase-deep-analyzer` for heavy investigation.
 3. **At gate time**: the `substantive-critic` agent provides independent review.
-4. **After close**: `/rdr-close` creates beads (epic + tasks), giving
+4. **At accept time**: `/rdr-accept` verifies the gate result, updates T2
+   first (process authority), then repairs the file to match. T2 is the
+   authoritative source; the file is the human-readable persistence layer.
+5. **After close**: `/rdr-close` creates beads (epic + tasks), giving
    implementation agents concrete work items tracked via `bd`. The
    `SubagentStart` hook injects PM context and the active bead, so spawned
    agents know what task they're continuing.
