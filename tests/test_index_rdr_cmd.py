@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx index rdr — RDR document discovery and indexing command tests."""
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -40,7 +40,8 @@ def test_index_rdr_discovers_markdown_files(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
     """nx index rdr discovers .md files in docs/rdr/, excluding README.md and TEMPLATE.md."""
-    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+    with patch("nexus.commands.index.t3_rdr", return_value=MagicMock()), \
+         patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
         result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
 
     assert result.exit_code == 0, result.output
@@ -60,7 +61,8 @@ def test_index_rdr_uses_correct_collection_name(
     assert expected_collection.startswith("rdr__")
     assert "-" in expected_collection  # basename-hash8
 
-    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+    with patch("nexus.commands.index.t3_rdr", return_value=MagicMock()), \
+         patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
         result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
 
     assert result.exit_code == 0, result.output
@@ -97,7 +99,8 @@ def test_index_rdr_excludes_postmortem_dir(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
     """Files in docs/rdr/post-mortem/ subdirectory are not included."""
-    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+    with patch("nexus.commands.index.t3_rdr", return_value=MagicMock()), \
+         patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
         result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
 
     assert result.exit_code == 0, result.output

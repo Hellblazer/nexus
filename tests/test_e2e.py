@@ -369,6 +369,7 @@ def test_pm_archive_with_mocked_haiku(
         runner.invoke(main, ["pm", "init", "--project", "archive-proj"])
 
     with patch("nexus.pm.t3_knowledge", return_value=local_t3), \
+         patch("nexus.pm.get_credential", return_value="mock-anthropic-key"), \
          patch("anthropic.Anthropic") as mock_cls:
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
