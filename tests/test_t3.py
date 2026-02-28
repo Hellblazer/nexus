@@ -626,7 +626,7 @@ def test_delete_by_source_removes_correct_chunks(mock_chromadb: tuple) -> None:
     count = db.delete_by_source("code__myrepo", "src/foo.py")
 
     mock_col.get.assert_called_once_with(
-        where={"source_path": "src/foo.py"}, include=[]
+        where={"source_path": "src/foo.py"}, include=[], limit=300, offset=0
     )
     mock_col.delete.assert_called_once_with(ids=["a1", "a2", "a3"])
     assert count == 3

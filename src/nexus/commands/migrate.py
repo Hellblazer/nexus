@@ -9,6 +9,7 @@ import structlog
 
 from nexus.config import get_credential
 from nexus.db import make_t3
+from nexus.db.chroma_quotas import QUOTAS
 from nexus.db.t3 import _STORE_TYPES
 
 if TYPE_CHECKING:
@@ -16,9 +17,9 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
-# Maximum documents fetched per page during migration.  Keeps memory usage
-# bounded even for very large collections.
-_PAGE_SIZE = 5_000
+# Maximum documents fetched/written per page: must not exceed the ChromaDB Cloud
+# 300-record-per-write limit (RDR-005).
+_PAGE_SIZE = QUOTAS.MAX_RECORDS_PER_WRITE
 
 
 def _cloud_admin_client(api_key: str) -> "chromadb.AdminClient":
@@ -120,7 +121,6 @@ def migrate_t3_collections(
             pass  # collection not found in dest; proceed to copy
 
         try:
-            dest_col = dest.get_or_create_collection(name)
             page_offset = 0
             copied = 0
             while page_offset < src_count:
@@ -132,7 +132,8 @@ def migrate_t3_collections(
                 )
                 if not data["ids"]:
                     break
-                dest_col.upsert(
+                dest.upsert_chunks_with_embeddings(
+                    collection_name=name,
                     ids=data["ids"],
                     documents=data["documents"],
                     embeddings=data["embeddings"],

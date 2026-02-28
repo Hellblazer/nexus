@@ -15,6 +15,7 @@ from chromadb.errors import NotFoundError as _ChromaNotFoundError
 import structlog
 
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
+from nexus.db.chroma_quotas import QUOTAS, QuotaValidator
 
 _log = structlog.get_logger(__name__)
 
@@ -60,6 +61,10 @@ class T3Database:
         self._ef_override = _ef_override
         self._ef_cache: dict[str, object] = {}
         self._ef_lock = threading.Lock()
+        self._write_sems: dict[str, threading.BoundedSemaphore] = {}
+        self._read_sems: dict[str, threading.BoundedSemaphore] = {}
+        self._sems_lock = threading.Lock()
+        self._quota_validator = QuotaValidator()
         self._voyage_client: voyageai.Client | None = (
             voyageai.Client(api_key=voyage_api_key) if voyage_api_key else None
         )
@@ -165,6 +170,72 @@ class T3Database:
         assert result.results, "voyageai CCE returned empty results"
         return result.results[0].embeddings[0]
 
+    def _write_sem(self, name: str) -> threading.BoundedSemaphore:
+        """Return the per-collection write semaphore, lazily initialised."""
+        with self._sems_lock:
+            if name not in self._write_sems:
+                self._write_sems[name] = threading.BoundedSemaphore(QUOTAS.MAX_CONCURRENT_WRITES)
+            return self._write_sems[name]
+
+    def _read_sem(self, name: str) -> threading.BoundedSemaphore:
+        """Return the per-collection read semaphore, lazily initialised."""
+        with self._sems_lock:
+            if name not in self._read_sems:
+                self._read_sems[name] = threading.BoundedSemaphore(QUOTAS.MAX_CONCURRENT_READS)
+            return self._read_sems[name]
+
+    def _validate_record(
+        self,
+        id: str,
+        document: str,
+        embedding: list[float] | None,
+        metadata: dict,
+        uri: str | None = None,
+    ) -> None:
+        """Validate a single record against ChromaDB Cloud quota limits."""
+        self._quota_validator.validate_record(
+            id=id, document=document, embedding=embedding, metadata=metadata, uri=uri
+        )
+
+    def _write_batch(
+        self,
+        col,
+        collection_name: str,
+        ids: list[str],
+        documents: list[str],
+        metadatas: list[dict],
+        embeddings: list[list[float]] | None = None,
+    ) -> None:
+        """Split into ≤300-record chunks and upsert each.
+
+        Acquires the per-collection write semaphore for the duration of all chunks.
+        """
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        with self._write_sem(collection_name):
+            for start in range(0, len(ids), size):
+                chunk_ids = ids[start : start + size]
+                chunk_docs = documents[start : start + size]
+                chunk_metas = metadatas[start : start + size]
+                if embeddings is not None:
+                    col.upsert(
+                        ids=chunk_ids,
+                        documents=chunk_docs,
+                        embeddings=embeddings[start : start + size],
+                        metadatas=chunk_metas,
+                    )
+                else:
+                    col.upsert(ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
+
+    def _delete_batch(self, col, collection_name: str, ids: list[str]) -> None:
+        """Split *ids* into ≤300-record chunks and delete each.
+
+        Acquires the per-collection write semaphore for the duration of all chunks.
+        """
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        with self._write_sem(collection_name):
+            for start in range(0, len(ids), size):
+                col.delete(ids=ids[start : start + size])
+
     # ── Collection access ─────────────────────────────────────────────────────
 
     def get_or_create_collection(self, name: str) -> chromadb.Collection:
@@ -238,9 +309,9 @@ class T3Database:
         col = self.get_or_create_collection(collection)
         if is_cce:
             vec = self._cce_embed(content)
-            col.upsert(ids=[doc_id], documents=[content], embeddings=[vec], metadatas=[metadata])
+            self._write_batch(col, collection, [doc_id], [content], [metadata], embeddings=[vec])
         else:
-            col.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
+            self._write_batch(col, collection, [doc_id], [content], [metadata])
         return doc_id
 
     def upsert_chunks(
@@ -252,13 +323,14 @@ class T3Database:
     ) -> None:
         """Upsert a batch of pre-chunked documents into *collection*.
 
-        All metadata fields are passed through verbatim — nothing is added,
-        removed, or truncated.  This preserves any atomicity semantics
-        (delete-then-add) applied by the caller and passes through the full
-        metadata schema emitted by the indexing pipeline.
+        Validates each record against ChromaDB Cloud quota limits before any
+        network call.  Splits the batch into ≤300-record chunks automatically.
+        All metadata fields are passed through verbatim.
         """
+        for doc_id, doc, meta in zip(ids, documents, metadatas):
+            self._validate_record(id=doc_id, document=doc, embedding=None, metadata=meta)
         col = self.get_or_create_collection(collection)
-        col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+        self._write_batch(col, collection, ids, documents, metadatas)
 
     def upsert_chunks_with_embeddings(
         self,
@@ -277,14 +349,12 @@ class T3Database:
 
         ChromaDB accepts pre-computed embeddings when ``embeddings=`` is supplied
         to ``col.upsert()``, even when the collection was created with an EF attached.
+
+        Note: Per-record quota validation is intentionally skipped — callers are
+        responsible for compliance (source data, e.g. from migration, is presumed valid).
         """
         col = self.get_or_create_collection(collection_name)
-        col.upsert(
-            ids=ids,
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-        )
+        self._write_batch(col, collection_name, ids, documents, metadatas, embeddings=embeddings)
 
     def update_chunks(
         self,
@@ -299,7 +369,13 @@ class T3Database:
         triggering expensive re-embedding.
         """
         col = self.get_or_create_collection(collection)
-        col.update(ids=ids, metadatas=metadatas)
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        with self._write_sem(collection):
+            for start in range(0, len(ids), size):
+                col.update(
+                    ids=ids[start : start + size],
+                    metadatas=metadatas[start : start + size],
+                )
 
     # ── Read ──────────────────────────────────────────────────────────────────
 
@@ -340,7 +416,14 @@ class T3Database:
             count = col.count()
             if count == 0:
                 continue
-            actual_n = min(n_results, count)
+            actual_n = min(n_results, count, QUOTAS.MAX_QUERY_RESULTS)
+            if n_results > QUOTAS.MAX_QUERY_RESULTS:
+                _log.warning(
+                    "search_n_results_clamped",
+                    requested=n_results,
+                    actual=actual_n,
+                    collection=name,
+                )
             if is_cce:
                 query_kwargs: dict = {
                     "query_embeddings": [self._cce_embed(query, input_type="query")],
@@ -401,14 +484,29 @@ class T3Database:
             if not name.startswith("knowledge__"):
                 continue
             col = kc.get_collection(name)
-            result = col.get(where=ttl_where, include=["metadatas"])
-            expired_ids = [
-                doc_id
-                for doc_id, meta in zip(result["ids"], result["metadatas"])
-                if meta.get("expires_at", "") and meta["expires_at"] < now_iso
-            ]
+            # Paginated accumulation: gather all expired IDs before deleting.
+            # A single col.get() without limit silently truncates beyond 300
+            # (ChromaDB Cloud hard limit).  Pagination stops when the returned
+            # page is shorter than the limit (i.e. it was the last page).
+            expired_ids: list[str] = []
+            offset = 0
+            page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+            while True:
+                result = col.get(
+                    where=ttl_where,
+                    include=["metadatas"],
+                    limit=page_limit,
+                    offset=offset,
+                )
+                page_ids = result["ids"]
+                for doc_id, meta in zip(page_ids, result["metadatas"]):
+                    if meta.get("expires_at", "") and meta["expires_at"] < now_iso:
+                        expired_ids.append(doc_id)
+                offset += len(page_ids)
+                if len(page_ids) < page_limit:
+                    break  # last page (short or empty)
             if expired_ids:
-                col.delete(ids=expired_ids)
+                self._delete_batch(col, name, expired_ids)
             total += len(expired_ids)
         return total
 
@@ -425,7 +523,9 @@ class T3Database:
             col = self._client_for(collection).get_collection(collection)
         except _ChromaNotFoundError:
             return []
-        result = col.get(include=["metadatas"], limit=limit)
+        clamped = min(limit, QUOTAS.MAX_QUERY_RESULTS)
+        with self._read_sem(collection):
+            result = col.get(include=["metadatas"], limit=clamped)
         return [
             {"id": doc_id, **meta}
             for doc_id, meta in zip(result["ids"], result["metadatas"])
@@ -488,15 +588,32 @@ class T3Database:
         self._client_for(name).delete_collection(name)
 
     def delete_by_source(self, collection_name: str, source_path: str) -> int:
-        """Delete all chunks for a given source path. Returns count deleted."""
+        """Delete all chunks for a given source path. Returns count deleted.
+
+        Uses paginated ``col.get()`` to avoid the ChromaDB Cloud 300-record
+        truncation limit.  Same short-page termination pattern as ``expire()``.
+        """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
             return 0
-        existing = col.get(where={"source_path": source_path}, include=[])
-        ids = existing["ids"]
+        ids: list[str] = []
+        offset = 0
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        while True:
+            result = col.get(
+                where={"source_path": source_path},
+                include=[],
+                limit=page_limit,
+                offset=offset,
+            )
+            page_ids = result["ids"]
+            ids.extend(page_ids)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break  # last page (short or empty)
         if ids:
-            col.delete(ids=ids)
+            self._delete_batch(col, collection_name, ids)
         return len(ids)
 
     def collection_info(self, name: str) -> dict:
