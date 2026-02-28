@@ -95,6 +95,11 @@ def test_results_exceed_limit_is_quota_violation() -> None:
     assert issubclass(ResultsExceedLimit, QuotaViolation)
 
 
+def test_query_string_too_long_is_quota_violation() -> None:
+    from nexus.db.chroma_quotas import QueryStringTooLong, QuotaViolation
+    assert issubclass(QueryStringTooLong, QuotaViolation)
+
+
 def test_quota_violation_carries_field_and_limit() -> None:
     from nexus.db.chroma_quotas import RecordTooLarge
     exc = RecordTooLarge(field="document", actual=20_000, limit=16_384)
@@ -240,10 +245,10 @@ def test_validate_query_passes_none_where() -> None:
 
 
 def test_validate_query_raises_on_query_string_too_long() -> None:
-    from nexus.db.chroma_quotas import QuotaValidator, RecordTooLarge, QUOTAS
+    from nexus.db.chroma_quotas import QuotaValidator, QueryStringTooLong, QUOTAS
     v = QuotaValidator()
     long_query = "x" * (QUOTAS.MAX_QUERY_STRING_CHARS + 1)
-    with pytest.raises(RecordTooLarge) as exc_info:
+    with pytest.raises(QueryStringTooLong) as exc_info:
         v.validate_query(query_text=long_query, where=None, n_results=10)
     assert "query_text" in exc_info.value.field
 

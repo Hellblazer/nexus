@@ -113,16 +113,17 @@ def test_upsert_chunks_raises_name_too_long_for_oversized_id() -> None:
 
 
 def test_delete_batch_500_ids_makes_two_delete_calls() -> None:
-    """delete_by_source() with 500 matching IDs → 2 delete() calls (300 + 200)."""
+    """delete_by_source() with 500 IDs → paginated get(), then 2 delete() calls (300 + 200)."""
     db, mock_col = _make_db_with_mock_col()
-    n = 500
-    mock_col.get.return_value = {
-        "ids": [f"id-{i}" for i in range(n)],
-        "metadatas": [{}] * n,
-    }
+    # Use side_effect so each col.get() call returns a fresh page (not the same 500 IDs).
+    # page1: 300 IDs (full page → continue); page2: 200 IDs (short page → stop).
+    page1 = {"ids": [f"id-{i}" for i in range(300)]}
+    page2 = {"ids": [f"id-{i}" for i in range(300, 500)]}
+    mock_col.get.side_effect = [page1, page2]
 
     deleted = db.delete_by_source(collection_name="knowledge__test", source_path="/some/file.py")
 
+    assert mock_col.get.call_count == 2
     assert mock_col.delete.call_count == 2
     first_ids = mock_col.delete.call_args_list[0][1]["ids"]
     second_ids = mock_col.delete.call_args_list[1][1]["ids"]
@@ -192,30 +193,31 @@ def test_expire_accumulates_then_deletes_not_interleaved() -> None:
     now = datetime.now(UTC)
     past = (now - timedelta(days=1)).isoformat()
 
+    # page1: 300 IDs (full page → continue); page2: 50 IDs (short page → stop).
     page1 = {
         "ids": [f"id-{i}" for i in range(300)],
         "metadatas": [{"ttl_days": 1, "expires_at": past}] * 300,
     }
-    page2 = {"ids": [f"id-{i}" for i in range(300, 350)], "metadatas": [{"ttl_days": 1, "expires_at": past}] * 50}
-    empty = {"ids": [], "metadatas": []}
-    mock_col.get.side_effect = [page1, page2, empty]
+    page2 = {
+        "ids": [f"id-{i}" for i in range(300, 350)],
+        "metadatas": [{"ttl_days": 1, "expires_at": past}] * 50,
+    }
+    mock_col.get.side_effect = [page1, page2]
 
     mock_client = db._clients["knowledge"]
     mock_client.list_collections.return_value = [MagicMock(name="knowledge__test")]
 
-    call_order: list[str] = []
-    original_get = mock_col.get.side_effect
-
-    def tracked_get(**kwargs):
-        call_order.append("get")
-        return next(iter(original_get))  # won't work — keep it simple
-
     db.expire()
 
-    # All get() calls must precede all delete() calls.
-    # Verify by checking that no delete was called before all pages were fetched.
-    # Simplified: verify total get calls > 1 and delete happened after.
-    assert mock_col.get.call_count >= 2
+    # Verify ordering: all get() calls must precede all delete() calls.
+    call_names = [c[0] for c in mock_col.method_calls]
+    get_indices = [i for i, name in enumerate(call_names) if name == "get"]
+    delete_indices = [i for i, name in enumerate(call_names) if name == "delete"]
+    assert len(get_indices) >= 2, "Expected multiple get() calls for pagination"
+    assert delete_indices, "Expected at least one delete() call"
+    assert max(get_indices) < min(delete_indices), (
+        "All get() calls must precede all delete() calls"
+    )
 
 
 # ── Phase 3: query validation and n_results clamping ─────────────────────────
@@ -339,4 +341,46 @@ def test_read_semaphore_limits_concurrent_reads_to_10() -> None:
 
     assert max(active_at_once) <= QUOTAS.MAX_CONCURRENT_READS, (
         f"Max concurrent reads was {max(active_at_once)}, expected ≤ {QUOTAS.MAX_CONCURRENT_READS}"
+    )
+
+
+def test_put_write_semaphore_limits_concurrent_puts_to_10() -> None:
+    """Concurrent put() calls on same collection are bounded to 10 concurrent writes."""
+    from nexus.db.chroma_quotas import QUOTAS
+
+    active_at_once: list[int] = []
+    active_count = 0
+    lock = threading.Lock()
+
+    def counting_upsert(**kwargs):
+        nonlocal active_count
+        with lock:
+            active_count += 1
+            active_at_once.append(active_count)
+        time.sleep(0.05)
+        with lock:
+            active_count -= 1
+
+    db, mock_col = _make_db_with_mock_col()
+    mock_col.upsert.side_effect = counting_upsert
+
+    threads = []
+    for i in range(15):
+        t = threading.Thread(
+            target=db.put,
+            kwargs={
+                "collection": "knowledge__test",
+                "content": f"content {i}",
+                "title": f"title {i}",
+            },
+        )
+        threads.append(t)
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert max(active_at_once) <= QUOTAS.MAX_CONCURRENT_WRITES, (
+        f"Max concurrent writes was {max(active_at_once)}, expected ≤ {QUOTAS.MAX_CONCURRENT_WRITES}"
     )

@@ -309,9 +309,9 @@ class T3Database:
         col = self.get_or_create_collection(collection)
         if is_cce:
             vec = self._cce_embed(content)
-            col.upsert(ids=[doc_id], documents=[content], embeddings=[vec], metadatas=[metadata])
+            self._write_batch(col, collection, [doc_id], [content], [metadata], embeddings=[vec])
         else:
-            col.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
+            self._write_batch(col, collection, [doc_id], [content], [metadata])
         return doc_id
 
     def upsert_chunks(
@@ -349,6 +349,9 @@ class T3Database:
 
         ChromaDB accepts pre-computed embeddings when ``embeddings=`` is supplied
         to ``col.upsert()``, even when the collection was created with an EF attached.
+
+        Note: Per-record quota validation is intentionally skipped — callers are
+        responsible for compliance (source data, e.g. from migration, is presumed valid).
         """
         col = self.get_or_create_collection(collection_name)
         self._write_batch(col, collection_name, ids, documents, metadatas, embeddings=embeddings)
@@ -585,13 +588,30 @@ class T3Database:
         self._client_for(name).delete_collection(name)
 
     def delete_by_source(self, collection_name: str, source_path: str) -> int:
-        """Delete all chunks for a given source path. Returns count deleted."""
+        """Delete all chunks for a given source path. Returns count deleted.
+
+        Uses paginated ``col.get()`` to avoid the ChromaDB Cloud 300-record
+        truncation limit.  Same short-page termination pattern as ``expire()``.
+        """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
             return 0
-        existing = col.get(where={"source_path": source_path}, include=[])
-        ids = existing["ids"]
+        ids: list[str] = []
+        offset = 0
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        while True:
+            result = col.get(
+                where={"source_path": source_path},
+                include=[],
+                limit=page_limit,
+                offset=offset,
+            )
+            page_ids = result["ids"]
+            ids.extend(page_ids)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break  # last page (short or empty)
         if ids:
             self._delete_batch(col, collection_name, ids)
         return len(ids)

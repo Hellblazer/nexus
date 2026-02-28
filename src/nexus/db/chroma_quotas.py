@@ -88,6 +88,10 @@ class ResultsExceedLimit(QuotaViolation):
     """Raised when ``n_results`` exceeds the per-query result cap."""
 
 
+class QueryStringTooLong(QuotaViolation):
+    """Raised when a query string exceeds the character limit."""
+
+
 # ── Validator ─────────────────────────────────────────────────────────────────
 
 class QuotaValidator:
@@ -236,7 +240,7 @@ class QuotaValidator:
             )
 
         if query_text is not None and len(query_text) > q.MAX_QUERY_STRING_CHARS:
-            raise RecordTooLarge(
+            raise QueryStringTooLong(
                 field="query_text",
                 actual=len(query_text),
                 limit=q.MAX_QUERY_STRING_CHARS,
