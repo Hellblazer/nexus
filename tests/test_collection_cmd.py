@@ -35,7 +35,10 @@ def test_list_empty(runner: CliRunner, env_creds) -> None:
     """Empty cloud returns 'No collections' message."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = []
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db), \
+         patch("nexus.commands.collection.t3_code", return_value=mock_db), \
+         patch("nexus.commands.collection.t3_docs", return_value=mock_db), \
+         patch("nexus.commands.collection.t3_rdr", return_value=mock_db):
         result = runner.invoke(main, ["collection", "list"])
     assert result.exit_code == 0
     assert "No collections" in result.output
@@ -47,8 +50,8 @@ def test_list_shows_names_and_counts(runner: CliRunner, env_creds) -> None:
         {"name": "code__myrepo", "count": 42},
         {"name": "knowledge__topic", "count": 7},
     ]
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
-        result = runner.invoke(main, ["collection", "list"])
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "list", "--type", "knowledge"])
     assert result.exit_code == 0
     assert "code__myrepo" in result.output
     assert "42" in result.output
@@ -61,7 +64,7 @@ def test_list_shows_names_and_counts(runner: CliRunner, env_creds) -> None:
 def test_info_not_found(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_collections.return_value = []
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "no_such"])
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
@@ -72,7 +75,7 @@ def test_info_not_found(runner: CliRunner, env_creds) -> None:
 
 def test_delete_with_yes_flag(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "old", "--yes"])
     assert result.exit_code == 0
     assert "Deleted" in result.output
@@ -81,7 +84,7 @@ def test_delete_with_yes_flag(runner: CliRunner, env_creds) -> None:
 
 def test_delete_aborts_without_confirmation(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "old"], input="n\n")
     assert result.exit_code != 0
     mock_db.delete_collection.assert_not_called()
@@ -90,7 +93,7 @@ def test_delete_aborts_without_confirmation(runner: CliRunner, env_creds) -> Non
 def test_delete_confirm_alias(runner: CliRunner, env_creds) -> None:
     """--confirm is accepted as alias for --yes."""
     mock_db = MagicMock()
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "c", "--confirm"])
     assert result.exit_code == 0
     mock_db.delete_collection.assert_called_once()
@@ -102,7 +105,7 @@ def test_delete_confirm_alias(runner: CliRunner, env_creds) -> None:
 def test_verify_not_found(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_collections.return_value = []
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "verify", "missing"])
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
@@ -120,7 +123,7 @@ def test_verify_without_deep_preserves_existing_behavior(
         {"name": "knowledge__test", "count": 42},
     ]
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "verify", "knowledge__test"])
 
     assert result.exit_code == 0, result.output
@@ -142,7 +145,7 @@ def test_verify_deep_calls_search_and_reports_health(
         {"id": "doc1", "content": "some text", "distance": 0.1}
     ]
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(
             main, ["collection", "verify", "knowledge__test", "--deep"]
         )
@@ -165,7 +168,7 @@ def test_verify_deep_empty_collection_warns_but_exits_zero(
         {"name": "knowledge__empty", "count": 0},
     ]
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(
             main, ["collection", "verify", "knowledge__empty", "--deep"]
         )
@@ -187,7 +190,7 @@ def test_verify_deep_search_raises_exits_one(
     ]
     mock_db.search.side_effect = RuntimeError("embedding service unavailable")
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(
             main, ["collection", "verify", "knowledge__broken", "--deep"]
         )
@@ -214,7 +217,7 @@ def test_info_shows_embedding_model_for_code_collection(
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "code__nexus"])
 
     assert result.exit_code == 0, result.output
@@ -235,7 +238,7 @@ def test_info_shows_embedding_model_for_knowledge_collection(
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__research"])
 
     assert result.exit_code == 0, result.output
@@ -262,7 +265,7 @@ def test_info_shows_last_indexed_when_metadata_exists(
     }
     mock_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__test"])
 
     assert result.exit_code == 0, result.output
@@ -289,8 +292,122 @@ def test_info_shows_unknown_when_no_indexed_at_metadata(
     }
     mock_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__legacy"])
 
     assert result.exit_code == 0, result.output
     assert "unknown" in result.output.lower()
+
+
+# ── nexus-pjsc.4: --type flag + multi-store list ──────────────────────────────
+
+
+def test_list_type_knowledge_routes_to_knowledge_store(runner: CliRunner) -> None:
+    """list --type knowledge uses t3_knowledge() only."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__x", "count": 3}]
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "list", "--type", "knowledge"])
+    assert result.exit_code == 0, result.output
+    assert "knowledge__x" in result.output
+
+
+def test_list_no_type_enumerates_all_four_stores(runner: CliRunner) -> None:
+    """list (no --type) calls all 4 store factories and merges results."""
+    def make_mock(names):
+        m = MagicMock()
+        m.list_collections.return_value = [{"name": n, "count": 1} for n in names]
+        return m
+
+    mock_code = make_mock(["code__a"])
+    mock_docs = make_mock(["docs__b"])
+    mock_rdr = make_mock(["rdr__c"])
+    mock_know = make_mock(["knowledge__d"])
+
+    with patch("nexus.commands.collection.t3_code", return_value=mock_code), \
+         patch("nexus.commands.collection.t3_docs", return_value=mock_docs), \
+         patch("nexus.commands.collection.t3_rdr", return_value=mock_rdr), \
+         patch("nexus.commands.collection.t3_knowledge", return_value=mock_know):
+        result = runner.invoke(main, ["collection", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "code__a" in result.output
+    assert "docs__b" in result.output
+    assert "rdr__c" in result.output
+    assert "knowledge__d" in result.output
+
+
+def test_list_type_code_routes_to_code_store(runner: CliRunner) -> None:
+    """list --type code uses t3_code() only."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "code__myrepo", "count": 99}]
+    with patch("nexus.commands.collection.t3_code", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "list", "--type", "code"])
+    assert result.exit_code == 0, result.output
+    assert "code__myrepo" in result.output
+
+
+def test_info_default_uses_knowledge_store(runner: CliRunner) -> None:
+    """info without --type uses t3_knowledge()."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
+    mock_db.collection_info.return_value = {"count": 5, "metadata": {}}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_db.get_or_create_collection.return_value = mock_col
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "info", "knowledge__test"])
+    assert result.exit_code == 0, result.output
+    mock_db.list_collections.assert_called_once()
+
+
+def test_info_type_code_routes_to_code_store(runner: CliRunner) -> None:
+    """info --type code uses t3_code()."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "code__nexus", "count": 10}]
+    mock_db.collection_info.return_value = {"count": 10, "metadata": {}}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_db.get_or_create_collection.return_value = mock_col
+    with patch("nexus.commands.collection.t3_code", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "info", "code__nexus", "--type", "code"])
+    assert result.exit_code == 0, result.output
+    mock_db.list_collections.assert_called_once()
+
+
+def test_delete_default_uses_knowledge_store(runner: CliRunner) -> None:
+    """delete without --type uses t3_knowledge()."""
+    mock_db = MagicMock()
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "knowledge__old", "--yes"])
+    assert result.exit_code == 0, result.output
+    mock_db.delete_collection.assert_called_once_with("knowledge__old")
+
+
+def test_delete_type_rdr_routes_to_rdr_store(runner: CliRunner) -> None:
+    """delete --type rdr uses t3_rdr()."""
+    mock_db = MagicMock()
+    with patch("nexus.commands.collection.t3_rdr", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "rdr__old", "--yes", "--type", "rdr"])
+    assert result.exit_code == 0, result.output
+    mock_db.delete_collection.assert_called_once_with("rdr__old")
+
+
+def test_verify_default_uses_knowledge_store(runner: CliRunner) -> None:
+    """verify without --type uses t3_knowledge()."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__chk", "count": 2}]
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "verify", "knowledge__chk"])
+    assert result.exit_code == 0, result.output
+    mock_db.list_collections.assert_called_once()
+
+
+def test_verify_type_docs_routes_to_docs_store(runner: CliRunner) -> None:
+    """verify --type docs uses t3_docs()."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "docs__corpus", "count": 7}]
+    with patch("nexus.commands.collection.t3_docs", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "verify", "docs__corpus", "--type", "docs"])
+    assert result.exit_code == 0, result.output
+    mock_db.list_collections.assert_called_once()

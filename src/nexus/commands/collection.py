@@ -1,8 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+from __future__ import annotations
+
+from typing import Callable
+
 import click
 
-from nexus.commands.store import _t3
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
+from nexus.db.t3 import T3Database
+from nexus.db.t3_stores import t3_code, t3_docs, t3_knowledge, t3_rdr
+
+_STORE_FACTORIES: dict[str, Callable[[], T3Database]] = {
+    "code": lambda: t3_code(),
+    "docs": lambda: t3_docs(),
+    "rdr": lambda: t3_rdr(),
+    "knowledge": lambda: t3_knowledge(),
+}
+
+_TYPE_CHOICE = click.Choice(list(_STORE_FACTORIES))
 
 
 @click.group()
@@ -11,9 +25,21 @@ def collection() -> None:
 
 
 @collection.command("list")
-def list_cmd() -> None:
+@click.option("--type", "store_type", type=_TYPE_CHOICE, default=None,
+              help="Limit to a specific store (code, docs, rdr, knowledge). Default: all 4.")
+def list_cmd(store_type: str | None) -> None:
     """List all T3 collections with document counts."""
-    cols = _t3().list_collections()
+    if store_type is not None:
+        db = _STORE_FACTORIES[store_type]()
+        cols = db.list_collections()
+    else:
+        cols = []
+        for factory in _STORE_FACTORIES.values():
+            try:
+                cols.extend(factory().list_collections())
+            except RuntimeError:
+                pass  # unconfigured store — skip silently
+
     if not cols:
         click.echo("No collections found.")
         return
@@ -24,9 +50,11 @@ def list_cmd() -> None:
 
 @collection.command("info")
 @click.argument("name")
-def info_cmd(name: str) -> None:
+@click.option("--type", "store_type", type=_TYPE_CHOICE, default=None,
+              help="Store to query (default: knowledge).")
+def info_cmd(name: str, store_type: str | None) -> None:
     """Show details for a single collection."""
-    db = _t3()
+    db = _STORE_FACTORIES[store_type or "knowledge"]()
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
@@ -53,20 +81,24 @@ def info_cmd(name: str) -> None:
 @collection.command("delete")
 @click.argument("name")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
-def delete_cmd(name: str, yes: bool) -> None:
+@click.option("--type", "store_type", type=_TYPE_CHOICE, default=None,
+              help="Store to target (default: knowledge).")
+def delete_cmd(name: str, yes: bool, store_type: str | None) -> None:
     """Delete a T3 collection (irreversible)."""
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
-    _t3().delete_collection(name)
+    _STORE_FACTORIES[store_type or "knowledge"]().delete_collection(name)
     click.echo(f"Deleted: {name}")
 
 
 @collection.command("verify")
 @click.argument("name")
 @click.option("--deep", is_flag=True, help="Run embedding probe query to verify index health")
-def verify_cmd(name: str, deep: bool) -> None:
+@click.option("--type", "store_type", type=_TYPE_CHOICE, default=None,
+              help="Store to query (default: knowledge).")
+def verify_cmd(name: str, deep: bool, store_type: str | None) -> None:
     """Verify a collection exists and report its document count."""
-    db = _t3()
+    db = _STORE_FACTORIES[store_type or "knowledge"]()
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
