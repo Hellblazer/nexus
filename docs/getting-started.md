@@ -76,6 +76,8 @@ Credentials are stored in `~/.config/nexus/config.yml`. Environment variables al
 
 **Creating the four databases**: In the ChromaDB Cloud dashboard, create four databases named `{base}_code`, `{base}_docs`, `{base}_rdr`, and `{base}_knowledge` (where `{base}` is your chosen base name). Run `nx doctor` to verify all four are reachable.
 
+**Upgrading from an older single-database setup**: If you have existing data in a single ChromaDB database from a pre-four-store version of Nexus, run `nx migrate t3` to copy your collections to the new layout. The operation is idempotent — already-migrated collections are skipped.
+
 ## Verify
 
 ```bash

@@ -257,6 +257,39 @@ nx config init
 
 ---
 
+## nx migrate
+
+Migrate T3 collections between store layouts.
+
+```
+nx migrate t3
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `t3` | Copy all collections from the old single-database ChromaDB store to the new four-store layout (`{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`) |
+
+**`t3` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-v` / `--verbose` | Print per-collection progress |
+
+**Behaviour:**
+
+- **Non-destructive** — the source database is never modified.
+- **Idempotent** — collections already present in the destination with the same document count are silently skipped.
+- **Verbatim** — embeddings are copied as-is; no re-embedding is performed.
+- **Auto-create** — attempts to create the four destination databases automatically. On Chroma Cloud free-tier plans that restrict `AdminClient`, a warning is printed and migration continues; create the databases manually in the ChromaDB Cloud dashboard first if that happens.
+
+**Prerequisites:**
+
+1. The original single database (e.g. `nexus`) must still exist as the source.
+2. Run `nx config init` (or `nx config set`) so `chroma_database` holds the **base name** used for the original database.
+3. Optionally create the four destination databases in the ChromaDB Cloud dashboard before running.
+
+---
+
 ## nx doctor
 
 Health check for all dependencies.
@@ -265,4 +298,4 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks: ChromaDB API key, ChromaDB tenant, ChromaDB database, Voyage AI key, Anthropic key, ripgrep binary, git binary, Nexus server, Mixedbread key (optional).
+Checks: ChromaDB API key, ChromaDB tenant, all four T3 databases (`{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`), Voyage AI key, Anthropic key, ripgrep binary, git binary, Nexus server, Mixedbread key (optional).
