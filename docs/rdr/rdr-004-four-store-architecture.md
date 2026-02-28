@@ -377,7 +377,7 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
 9. `pm.py` and `commands/pm.py`: replace all `make_t3()` / `_t3()` calls with `t3_knowledge()`.
 10. `indexer.py`:
     - `_run_index_frecency_only()`: replace the single `make_t3()` call (line 175) with a split-loop pattern — `db_code = t3_code(); db_docs = t3_docs()` — then iterate `for (col_name, db) in [(code_collection, db_code), (docs_collection, db_docs)]:`, calling `db.get_or_create_collection(col_name)` and `db.update_chunks(collection=col_name, ...)` on each pair. Do not use a single `db` for both.
-    - `_run_index()`: rewrite to call `db_code = t3_code()`, `db_docs = t3_docs()`, `db_rdr = t3_rdr()` separately at the top of the function; replace the single `make_t3()` call (line 768). Route `code_collection` to `db_code`, `docs_collection` to `db_docs`. The helper calls (`_discover_and_index_rdrs`, `_prune_deleted_files`, `_prune_misclassified`) no longer take a `db` argument — call them with no `db` param after updating them in sub-bullets below.
+    - `_run_index()`: rewrite to call `db_code = t3_code()`, `db_docs = t3_docs()`, `db_rdr = t3_rdr()` separately at the top of the function; replace the single `make_t3()` call (line 768). Route each `db` use explicitly: `code_col = db_code.get_or_create_collection(code_collection)`; `docs_col = db_docs.get_or_create_collection(docs_collection)`; pass `db_code` to each `_index_code_file(...)` call; pass `db_docs` to each `_index_prose_file(...)` and `_index_pdf_file(...)` call. The three helper calls (`_discover_and_index_rdrs`, `_prune_deleted_files`, `_prune_misclassified`) no longer take a `db` argument — call them with no `db` param after updating them in sub-bullets below.
     - `_discover_and_index_rdrs()`: remove `db` parameter; call `t3_rdr()` internally. Update `_run_index()` call site to drop the `db` argument.
     - `_prune_deleted_files()`: remove `db` parameter; call `t3_code()` and `t3_docs()` internally. Update all call sites.
     - `_prune_misclassified()`: same — remove `db` parameter, call stores internally.
@@ -572,6 +572,20 @@ Critic read source files: `db/t3.py`, `config.py`, `corpus.py`, `registry.py`, `
 - O3: `pm.py:pm_reference()` double-entry in routing table is correct and accurate — no change
 - O4: `expire()` docstring handled in Phase 1 Step 4 — no change
 - O5: Deployment ordering note expanded to state that CloudClient users must retain `chroma_*` credentials until migration completes
+
+### Gate 6 (2026-02-27) — PASSED
+
+**0 critical, 1 significant, 0 observations.**
+
+Critic read source files: `db/t3.py`, `config.py`, `indexer.py`, `commands/store.py`, `commands/memory.py`, `commands/pm.py`, `pm.py`, `db/__init__.py`, `commands/index.py`, `doc_indexer.py`, `search_engine.py`.
+
+#### Significant
+
+**S1. Phase 2 Step 10 `_run_index()` rewrite omits per-file helper routing — "helper functions" language is ambiguous.** Step 10 specifies that `_run_index()` passes the three `T3Database` objects to "helper functions" without naming them or specifying which store each receives. An implementor reading the spec cannot determine whether `_index_prose_file` routes to `db_docs` or `db_code`, or whether `_index_pdf_file` follows the same routing as `_index_prose_file`. The ambiguity is a latent routing bug — incorrect assignment would silently deposit prose or PDF chunks into the wrong store, breaking collection-type dispatch. Fix: Step 10 must name each per-file helper and its target store explicitly.
+
+#### Significant — Resolved
+
+**S1 — RESOLVED.** Phase 2 Step 10 updated to explicitly name `_index_code_file` (receives `db_code`), `_index_prose_file` (receives `db_docs`), and `_index_pdf_file` (receives `db_docs`). Ambiguous "helper functions" language replaced with explicit per-function routing.
 
 ### Gate 5 (2026-02-27) — BLOCKED
 
