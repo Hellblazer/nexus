@@ -6,6 +6,7 @@ import hashlib
 import os
 import threading
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import chromadb
 import chromadb.errors
@@ -59,6 +60,9 @@ class T3Database:
         self._ef_override = _ef_override
         self._ef_cache: dict[str, object] = {}
         self._ef_lock = threading.Lock()
+        self._voyage_client: voyageai.Client | None = (
+            voyageai.Client(api_key=voyage_api_key) if voyage_api_key else None
+        )
         if _client is not None:
             # Test injection: single client serves all store types.
             self._clients: dict[str, object] = {t: _client for t in _STORE_TYPES}
@@ -137,7 +141,9 @@ class T3Database:
                 )
             return self._ef_cache[collection_name]
 
-    def _cce_embed(self, text: str, input_type: str = "query") -> list[float]:
+    def _cce_embed(
+        self, text: str, input_type: Literal["query", "document"] = "document"
+    ) -> list[float]:
         """Embed *text* via the Voyage AI Contextualized Chunk Embedding API.
 
         CCE collections (docs__, knowledge__, rdr__) use voyage-context-3 at
@@ -145,15 +151,18 @@ class T3Database:
         vector spaces (cross-model cosine similarity ≈ 0.05, i.e. random noise).
 
         ``inputs=[[text]]`` — one inner list — embeds the text independently,
-        with no cross-chunk context propagation.  Use ``input_type="query"``
-        for search queries and ``input_type=None`` (default) for documents.
+        with no cross-chunk context propagation.  Use ``input_type="document"``
+        (default) for documents being stored and ``input_type="query"`` for
+        search queries.  Using the wrong subtype is the same class of bug as
+        the original CCE/voyage-4 mismatch.
         """
-        vo = voyageai.Client(api_key=self._voyage_api_key)
-        result = vo.contextualized_embed(
+        assert self._voyage_client is not None, "_cce_embed called without voyage_api_key"
+        result = self._voyage_client.contextualized_embed(
             inputs=[[text]],
             model="voyage-context-3",
             input_type=input_type,
         )
+        assert result.results, "voyageai CCE returned empty results"
         return result.results[0].embeddings[0]
 
     # ── Collection access ─────────────────────────────────────────────────────

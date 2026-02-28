@@ -225,7 +225,7 @@ def test_info_shows_embedding_model_for_code_collection(
 def test_info_shows_embedding_model_for_knowledge_collection(
     runner: CliRunner, env_creds
 ) -> None:
-    """info shows voyage-4 for knowledge__ collections."""
+    """info shows voyage-context-3 for knowledge__ collections (CCE)."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = [
         {"name": "knowledge__research", "count": 88},

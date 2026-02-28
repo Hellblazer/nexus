@@ -6,8 +6,8 @@ introduced: "053f54d — 2026-02-22"
 discovered: "2026-02-28 (post rc5 release)"
 affected_releases: [rc1, rc2, rc3, rc4, rc5]
 affected_collections: [docs__, knowledge__, rdr__]
-status: identified
-fix_pr: pending
+status: resolved
+fix_pr: "https://github.com/Hellblazer/nexus/pull/33"
 ---
 
 # Post-Mortem: CCE Query Model Mismatch

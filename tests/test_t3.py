@@ -335,6 +335,42 @@ def test_search_cce_skipped_without_voyage_api_key(mock_chromadb: tuple) -> None
     assert "query_embeddings" not in call_kwargs
 
 
+def test_put_cce_collection_uses_document_input_type(mock_chromadb: tuple) -> None:
+    """put() embeds CCE collections with input_type='document', not 'query'.
+
+    Regression guard for C1 from code review: _cce_embed() default was 'query',
+    causing put() to embed documents in query-vector space — the same class of
+    semantic mismatch as the original CCE/voyage-4 bug.
+    """
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.db.t3.voyageai") as mock_vo_mod:
+        mock_vo_inst = MagicMock()
+        mock_vo_mod.Client.return_value = mock_vo_inst
+        mock_vo_inst.contextualized_embed.return_value = MagicMock()
+
+        db = T3Database(
+            tenant="t", database="d", api_key="k", voyage_api_key="vkey"
+        )
+        db.put(
+            collection="knowledge__security",
+            content="some document text about security findings",
+            title="finding.md",
+        )
+
+    # Documents must be embedded with input_type="document", not "query"
+    mock_vo_inst.contextualized_embed.assert_called_once_with(
+        inputs=[["some document text about security findings"]],
+        model="voyage-context-3",
+        input_type="document",
+    )
+    # put() must pass pre-computed embeddings to bypass the voyage-4 EF
+    call_kwargs = mock_col.upsert.call_args.kwargs
+    assert "embeddings" in call_kwargs, "CCE put() must pass pre-computed embeddings"
+
+
 # ── AC7: collection list ──────────────────────────────────────────────────────
 
 def test_list_collections_returns_names_and_counts(mock_chromadb: tuple) -> None:
