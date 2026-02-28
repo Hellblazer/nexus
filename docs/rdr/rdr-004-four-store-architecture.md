@@ -2,12 +2,12 @@
 title: "Four-Store T3 Architecture"
 id: RDR-004
 type: architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-02-27
-accepted_date:
+accepted_date: 2026-02-27
 close_date:
 close_reason:
 supersedes: RDR-003
