@@ -197,13 +197,15 @@ def test_run_index_source_path_is_absolute(tmp_path: Path) -> None:
     mock_col = MagicMock()
     mock_col.get.return_value = {"metadatas": [], "ids": []}
 
-    mock_db = MagicMock()
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
 
     def capture_upsert(collection_name, ids, documents, embeddings, metadatas):
         captured_metadatas.extend(metadatas)
 
-    mock_db.upsert_chunks_with_embeddings.side_effect = capture_upsert
+    mock_code_db.upsert_chunks_with_embeddings.side_effect = capture_upsert
 
     fake_chunk = {
         "line_start": 1, "line_end": 1, "text": "x = 1",
@@ -217,15 +219,17 @@ def test_run_index_source_path_is_absolute(tmp_path: Path) -> None:
     mock_voyage_client = MagicMock()
     mock_voyage_client.embed.return_value = mock_voyage_result
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
-                                with patch("voyageai.Client", return_value=mock_voyage_client):
-                                    _run_index(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("nexus.chunker.chunk_file", return_value=[fake_chunk]), \
+         patch("voyageai.Client", return_value=mock_voyage_client):
+        _run_index(repo, registry)
 
     assert captured_metadatas, "Expected upsert_chunks_with_embeddings to be called for main.py"
     source_path = captured_metadatas[0]["source_path"]
@@ -258,19 +262,23 @@ def test_run_index_skips_unchanged_content_hash(tmp_path: Path) -> None:
         "ids": [],
     }
 
-    mock_db = MagicMock()
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("voyageai.Client"):
-                                _run_index(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("voyageai.Client"):
+        _run_index(repo, registry)
 
-    mock_db.upsert_chunks_with_embeddings.assert_not_called()
+    mock_code_db.upsert_chunks_with_embeddings.assert_not_called()
 
 
 def test_run_index_reindexes_when_embedding_model_changed(tmp_path: Path) -> None:
@@ -298,8 +306,10 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path: Path) -> Non
         "ids": [],
     }
 
-    mock_db = MagicMock()
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
 
     mock_voyage_result = MagicMock(spec=EmbeddingsObject)
     mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
@@ -313,18 +323,20 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path: Path) -> Non
         "ast_chunked": False, "filename": "main.py", "file_extension": ".py",
     }
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
-                                with patch("voyageai.Client", return_value=mock_voyage_client):
-                                    _run_index(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("nexus.chunker.chunk_file", return_value=[fake_chunk]), \
+         patch("voyageai.Client", return_value=mock_voyage_client):
+        _run_index(repo, registry)
 
     # Must re-embed even though content_hash matches, because embedding_model differs
-    mock_db.upsert_chunks_with_embeddings.assert_called_once()
+    mock_code_db.upsert_chunks_with_embeddings.assert_called_once()
 
 
 # ── _run_index_frecency_only ──────────────────────────────────────────────────
@@ -349,18 +361,21 @@ def test_frecency_only_updates_frecency_score(tmp_path: Path) -> None:
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": ["chunk-1"], "metadatas": [old_meta]}
 
-    mock_db = MagicMock()
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.75}):
-        with patch("nexus.config.get_credential", return_value="fake-key"):
-            with patch("nexus.db.make_t3", return_value=mock_db):
-                _run_index_frecency_only(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.75}), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
+        _run_index_frecency_only(repo, registry)
 
-    # Called at least once (may be called for both code__ and docs__ collections)
-    assert mock_db.update_chunks.call_count >= 1
+    # Called at least once for the code collection
+    assert mock_code_db.update_chunks.call_count >= 1
     # Verify the first call has correct data
-    call_kwargs = mock_db.update_chunks.call_args_list[0].kwargs
+    call_kwargs = mock_code_db.update_chunks.call_args_list[0].kwargs
     assert call_kwargs["ids"] == ["chunk-1"]
     assert call_kwargs["metadatas"][0]["frecency_score"] == 0.75
     # Other metadata fields must be preserved
@@ -387,15 +402,19 @@ def test_frecency_only_skips_unindexed_files(tmp_path: Path) -> None:
     # No existing chunks for this file
     mock_col.get.return_value = {"ids": [], "metadatas": []}
 
-    mock_db = MagicMock()
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.5}):
-        with patch("nexus.config.get_credential", return_value="fake-key"):
-            with patch("nexus.db.make_t3", return_value=mock_db):
-                _run_index_frecency_only(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.5}), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
+        _run_index_frecency_only(repo, registry)
 
-    mock_db.update_chunks.assert_not_called()
+    mock_code_db.update_chunks.assert_not_called()
+    mock_docs_db.update_chunks.assert_not_called()
 
 
 def test_frecency_only_raises_credentials_missing(tmp_path: Path, monkeypatch) -> None:
@@ -456,16 +475,23 @@ def test_run_index_logs_skipped_binary_files(tmp_path: Path) -> None:
     mock_voyage_client = MagicMock()
     mock_voyage_client.embed.return_value = mock_voyage_result
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
-                                with patch("voyageai.Client", return_value=mock_voyage_client):
-                                    with patch("nexus.indexer._log") as mock_log:
-                                        _run_index(repo, registry)
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("nexus.chunker.chunk_file", return_value=[fake_chunk]), \
+         patch("voyageai.Client", return_value=mock_voyage_client), \
+         patch("nexus.indexer._log") as mock_log:
+        _run_index(repo, registry)
 
     # Verify debug was called for the skipped binary file
     debug_calls = mock_log.debug.call_args_list
@@ -499,16 +525,23 @@ def test_run_index_logs_empty_chunks(tmp_path: Path) -> None:
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("nexus.chunker.chunk_file", return_value=[]):
-                                with patch("voyageai.Client"):
-                                    with patch("nexus.indexer._log") as mock_log:
-                                        _run_index(repo, registry)
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("nexus.chunker.chunk_file", return_value=[]), \
+         patch("voyageai.Client"), \
+         patch("nexus.indexer._log") as mock_log:
+        _run_index(repo, registry)
 
     # Verify debug was called for the empty-chunks file
     debug_calls = mock_log.debug.call_args_list
@@ -542,6 +575,37 @@ def _make_collection_tracking_db():
     return mock_db, upserts_by_collection, cols_by_name
 
 
+def _make_split_tracking_dbs():
+    """Create two mock DBs (code, docs) sharing a upserts_by_collection tracker.
+
+    Returns (mock_code_db, mock_docs_db, upserts_by_collection, cols_by_name).
+    Code upserts go to mock_code_db; docs upserts go to mock_docs_db.
+    Both share the same upserts_by_collection dict for easy assertion.
+    """
+    upserts_by_collection: dict[str, list] = {}
+    cols_by_name: dict[str, MagicMock] = {}
+
+    def get_or_create(name):
+        if name not in cols_by_name:
+            col = MagicMock()
+            col.get.return_value = {"metadatas": [], "ids": []}
+            cols_by_name[name] = col
+        return cols_by_name[name]
+
+    def capture_upsert(collection_name, ids, documents, embeddings, metadatas):
+        upserts_by_collection.setdefault(collection_name, []).extend(metadatas)
+
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.side_effect = get_or_create
+    mock_code_db.upsert_chunks_with_embeddings.side_effect = capture_upsert
+
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.side_effect = get_or_create
+    mock_docs_db.upsert_chunks_with_embeddings.side_effect = capture_upsert
+
+    return mock_code_db, mock_docs_db, upserts_by_collection, cols_by_name
+
+
 def _registry_with_dual_collections():
     """Create a registry mock with both code_collection and docs_collection."""
     registry = MagicMock()
@@ -562,22 +626,24 @@ def test_run_index_routes_prose_to_docs_collection(tmp_path: Path) -> None:
     (repo / "README.md").write_text("# Hello\n\nThis is a README with enough content to chunk.\n")
 
     registry = _registry_with_dual_collections()
-    mock_db, upserts, cols = _make_collection_tracking_db()
+    mock_code_db, mock_docs_db, upserts, _ = _make_split_tracking_dbs()
 
     mock_embed_result = (
         [[0.1] * 10],  # embeddings
         "voyage-context-3",  # actual model
     )
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("voyageai.Client"):
-                                with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
-                                    _run_index(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("voyageai.Client"), \
+         patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+        _run_index(repo, registry)
 
     # docs__repo should have received chunks
     assert "docs__repo" in upserts, f"Expected docs__repo to receive chunks, got: {list(upserts.keys())}"
@@ -595,7 +661,7 @@ def test_run_index_routes_code_to_code_collection(tmp_path: Path) -> None:
     (repo / "main.py").write_text("x = 1\n")
 
     registry = _registry_with_dual_collections()
-    mock_db, upserts, cols = _make_collection_tracking_db()
+    mock_code_db, mock_docs_db, upserts, _ = _make_split_tracking_dbs()
 
     fake_chunk = {
         "line_start": 1, "line_end": 1, "text": "x = 1",
@@ -608,15 +674,17 @@ def test_run_index_routes_code_to_code_collection(tmp_path: Path) -> None:
     mock_voyage_client = MagicMock()
     mock_voyage_client.embed.return_value = mock_voyage_result
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
-                                with patch("voyageai.Client", return_value=mock_voyage_client):
-                                    _run_index(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("nexus.chunker.chunk_file", return_value=[fake_chunk]), \
+         patch("voyageai.Client", return_value=mock_voyage_client):
+        _run_index(repo, registry)
 
     # code__repo should have received chunks
     assert "code__repo" in upserts, f"Expected code__repo to receive chunks, got: {list(upserts.keys())}"
@@ -639,7 +707,7 @@ def test_run_index_excludes_rdr_paths_from_docs(tmp_path: Path) -> None:
     (rdr_dir / "ADR-001.md").write_text("# ADR-001\n\nArchitecture decision.\n")
 
     registry = _registry_with_dual_collections()
-    mock_db, upserts, cols = _make_collection_tracking_db()
+    mock_code_db, mock_docs_db, upserts, _ = _make_split_tracking_dbs()
 
     mock_embed_result = (
         [[0.1] * 10],
@@ -652,16 +720,18 @@ def test_run_index_excludes_rdr_paths_from_docs(tmp_path: Path) -> None:
         "indexing": {"code_extensions": [], "prose_extensions": [], "rdr_paths": ["docs/rdr"]},
     }
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=config_with_rdr):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("voyageai.Client"):
-                                with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
-                                    with patch("nexus.doc_indexer.batch_index_markdowns") as mock_batch:
-                                        _run_index(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=config_with_rdr), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("voyageai.Client"), \
+         patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result), \
+         patch("nexus.doc_indexer.batch_index_markdowns") as mock_batch:
+        _run_index(repo, registry)
 
     # docs__repo should have README but NOT ADR-001
     if "docs__repo" in upserts:
@@ -687,26 +757,28 @@ def test_run_index_returns_rdr_stats(tmp_path: Path) -> None:
     (rdr_dir / "002-decision.md").write_text("# Decision 2\n")
 
     registry = _registry_with_dual_collections()
-    mock_db, _, _ = _make_collection_tracking_db()
+    mock_code_db, mock_docs_db, _, _ = _make_split_tracking_dbs()
     config_with_rdr = {
         "server": {"ignorePatterns": []},
         "indexing": {"code_extensions": [], "prose_extensions": [], "rdr_paths": ["docs/rdr"]},
     }
     # batch_index_markdowns returns: 1 indexed, 1 skipped (already current), 0 failed
-    mock_results = {
+    rdr_results = {
         str(rdr_dir / "001-decision.md"): "indexed",
         str(rdr_dir / "002-decision.md"): "skipped",
     }
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=config_with_rdr):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("voyageai.Client"):
-                                with patch("nexus.doc_indexer.batch_index_markdowns", return_value=mock_results):
-                                    stats = _run_index(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=config_with_rdr), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("voyageai.Client"), \
+         patch("nexus.doc_indexer.batch_index_markdowns", return_value=rdr_results):
+        stats = _run_index(repo, registry)
 
     assert stats["rdr_indexed"] == 1
     assert stats["rdr_current"] == 1
@@ -773,7 +845,7 @@ def test_run_index_mixed_repo(tmp_path: Path) -> None:
     (repo / "notes.txt").write_text("Some notes about the project.\n")
 
     registry = _registry_with_dual_collections()
-    mock_db, upserts, cols = _make_collection_tracking_db()
+    mock_code_db, mock_docs_db, upserts, _ = _make_split_tracking_dbs()
 
     fake_chunk = {
         "line_start": 1, "line_end": 1, "text": "print('hello')",
@@ -788,16 +860,18 @@ def test_run_index_mixed_repo(tmp_path: Path) -> None:
 
     mock_embed_result = ([[0.1] * 10], "voyage-context-3")
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
-                                with patch("voyageai.Client", return_value=mock_voyage_client):
-                                    with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
-                                        _run_index(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("nexus.chunker.chunk_file", return_value=[fake_chunk]), \
+         patch("voyageai.Client", return_value=mock_voyage_client), \
+         patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+        _run_index(repo, registry)
 
     # code__repo should have main.py
     assert "code__repo" in upserts
@@ -828,10 +902,14 @@ def test_run_index_prune_deleted_files(tmp_path: Path) -> None:
         ],
     }
 
-    mock_db = MagicMock()
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
 
-    _prune_deleted_files("code__repo", "docs__repo", all_current, mock_db)
+    with patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
+        _prune_deleted_files("code__repo", "docs__repo", all_current)
 
     # Should delete chunks for file_b.py from both collections
     delete_calls = mock_col.delete.call_args_list
@@ -862,11 +940,14 @@ def test_run_index_prune_misclassified(tmp_path: Path) -> None:
     mock_docs_col = MagicMock()
     mock_docs_col.get.return_value = {"ids": ["stale-chunk-1"]}  # main.py in docs__ (wrong)
 
-    cols = {"code__repo": mock_code_col, "docs__repo": mock_docs_col}
-    mock_db = MagicMock()
-    mock_db.get_or_create_collection.side_effect = lambda name: cols[name]
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_code_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_docs_col
 
-    _prune_misclassified(repo, "code__repo", "docs__repo", code_files, prose_files, pdf_files, mock_db)
+    with patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
+        _prune_misclassified(repo, "code__repo", "docs__repo", code_files, prose_files, pdf_files)
 
     # main.py chunk should be deleted from docs__repo
     mock_docs_col.delete.assert_called_once_with(ids=["stale-chunk-1"])
@@ -893,22 +974,26 @@ def test_registry_c2_fallback(tmp_path: Path) -> None:
 
     mock_col = MagicMock()
     mock_col.get.return_value = {"metadatas": [], "ids": []}
-    mock_db = MagicMock()
+    mock_code_db = MagicMock()
+    mock_docs_db = MagicMock()
 
     def track_get_or_create(name):
         collection_names_used.append(name)
         return mock_col
 
-    mock_db.get_or_create_collection.side_effect = track_get_or_create
+    mock_code_db.get_or_create_collection.side_effect = track_get_or_create
+    mock_docs_db.get_or_create_collection.side_effect = track_get_or_create
 
-    with patch("nexus.frecency.batch_frecency", return_value={}):
-        with patch("nexus.ripgrep_cache.build_cache"):
-            with patch("nexus.indexer._git_metadata", return_value={}):
-                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                    with patch("nexus.config.get_credential", return_value="fake-key"):
-                        with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("voyageai.Client"):
-                                _run_index(repo, registry)
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db), \
+         patch("nexus.indexer.t3_rdr"), \
+         patch("voyageai.Client"):
+        _run_index(repo, registry)
 
     # The deterministic docs collection name should be used
     assert expected_docs in collection_names_used, (
@@ -1103,4 +1188,142 @@ def test_index_code_file_returns_false_when_all_chunks_empty(tmp_path: Path) -> 
 
     assert result is False
     mock_voyage.embed.assert_not_called()
-    mock_db.upsert_chunks_with_embeddings.assert_not_called()
+
+
+# ── nexus-pjsc.8: Multi-store routing RED tests ───────────────────────────────
+
+
+def test_run_index_frecency_only_uses_t3_code_and_t3_docs(tmp_path: Path) -> None:
+    """_run_index_frecency_only should call t3_code() and t3_docs() not make_t3()."""
+    from nexus.indexer import _run_index_frecency_only
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    registry = MagicMock()
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
+
+    mock_code_db = MagicMock()
+    mock_docs_db = MagicMock()
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db) as mock_t3_code, \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db) as mock_t3_docs:
+        _run_index_frecency_only(repo, registry)
+
+    mock_t3_code.assert_called_once()
+    mock_t3_docs.assert_called_once()
+
+
+def test_prune_deleted_files_uses_internal_stores(tmp_path: Path) -> None:
+    """_prune_deleted_files should call t3_code() and t3_docs() internally (no db param)."""
+    from nexus.indexer import _prune_deleted_files
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_code_db = MagicMock()
+    mock_docs_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db.get_or_create_collection.return_value = mock_col
+
+    # New signature: no db param — should call t3_code() / t3_docs() internally
+    with patch("nexus.indexer.t3_code", return_value=mock_code_db) as mock_t3_code, \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db) as mock_t3_docs:
+        _prune_deleted_files("code__repo", "docs__repo", {"/repo/file.py"})
+
+    mock_t3_code.assert_called_once()
+    mock_t3_docs.assert_called_once()
+
+
+def test_prune_misclassified_uses_internal_stores(tmp_path: Path) -> None:
+    """_prune_misclassified should call t3_code() and t3_docs() internally (no db param)."""
+    from nexus.indexer import _prune_misclassified
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": []}
+    mock_code_db = MagicMock()
+    mock_docs_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db.get_or_create_collection.return_value = mock_col
+
+    # New signature: no db param
+    with patch("nexus.indexer.t3_code", return_value=mock_code_db) as mock_t3_code, \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db) as mock_t3_docs:
+        _prune_misclassified(repo, "code__repo", "docs__repo", [], [], [])
+
+    mock_t3_code.assert_called_once()
+    mock_t3_docs.assert_called_once()
+
+
+def test_discover_and_index_rdrs_uses_t3_rdr(tmp_path: Path) -> None:
+    """_discover_and_index_rdrs should call t3_rdr() internally (no db param)."""
+    from nexus.indexer import _discover_and_index_rdrs
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rdr_dir = repo / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "rdr-001.md").write_text("# RDR-001\n\nTest\n")
+
+    mock_rdr_db = MagicMock()
+
+    with patch("nexus.indexer.t3_rdr", return_value=mock_rdr_db) as mock_t3_rdr, \
+         patch("nexus.doc_indexer.batch_index_markdowns", return_value={"rdr-001.md": "indexed"}):
+        # New signature: (repo, rdr_abs_paths, voyage_key, now_iso) — no db
+        _discover_and_index_rdrs(repo, {rdr_dir}, "fake-key", "2026-01-01T00:00:00")
+
+    mock_t3_rdr.assert_called_once()
+
+
+def test_run_index_uses_separate_stores(tmp_path: Path) -> None:
+    """_run_index should call t3_code(), t3_docs(), and t3_rdr() (not make_t3())."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Create an RDR file so t3_rdr() is triggered inside _discover_and_index_rdrs
+    rdr_dir = repo / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "rdr-001.md").write_text("# RDR-001\n\nTest RDR\n")
+
+    registry = MagicMock()
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_code_db = MagicMock()
+    mock_docs_db = MagicMock()
+    mock_rdr_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db.get_or_create_collection.return_value = mock_col
+    mock_rdr_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.ripgrep_cache.build_cache"), \
+         patch("nexus.indexer._git_metadata", return_value={}), \
+         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.indexer.t3_code", return_value=mock_code_db) as mock_tc, \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db) as mock_td, \
+         patch("nexus.indexer.t3_rdr", return_value=mock_rdr_db) as mock_tr, \
+         patch("nexus.doc_indexer.batch_index_markdowns", return_value={"rdr-001.md": "indexed"}), \
+         patch("voyageai.Client"):
+        _run_index(repo, registry)
+
+    mock_tc.assert_called()
+    mock_td.assert_called()
+    mock_tr.assert_called()

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nexus.corpus import index_model_for_collection
+from nexus.db.t3_stores import t3_code, t3_docs, t3_rdr
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 
 _log = structlog.get_logger(__name__)
@@ -148,7 +149,6 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     """
     from nexus.config import get_credential
     from nexus.frecency import batch_frecency
-    from nexus.db import make_t3
     from nexus.registry import _docs_collection_name
 
     info = registry.get(repo)
@@ -166,15 +166,16 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
         )
 
     frecency_map = batch_frecency(repo)
-    db = make_t3()
+    db_code = t3_code()
+    db_docs = t3_docs()
 
-    # Update frecency in both collections
-    collection_names = [code_collection]
+    # Update frecency in code and docs collections (each in their own store)
+    store_cols: list[tuple[object, str]] = [(db_code, code_collection)]
     if docs_collection:
-        collection_names.append(docs_collection)
+        store_cols.append((db_docs, docs_collection))
 
-    for collection_name in collection_names:
-        col = db.get_or_create_collection(collection_name)
+    for store, collection_name in store_cols:
+        col = store.get_or_create_collection(collection_name)
         for file, score in frecency_map.items():
             existing = col.get(
                 where={"source_path": str(file)},
@@ -187,7 +188,7 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
                 {**m, "frecency_score": float(score)}
                 for m in existing["metadatas"]
             ]
-            db.update_chunks(collection=collection_name, ids=existing["ids"], metadatas=updated_metadatas)
+            store.update_chunks(collection=collection_name, ids=existing["ids"], metadatas=updated_metadatas)
 
 
 # ── Per-file indexing helpers ────────────────────────────────────────────────
@@ -526,13 +527,12 @@ def _index_pdf_file(
 def _discover_and_index_rdrs(
     repo: Path,
     rdr_abs_paths: set[Path],
-    db: object,
     voyage_key: str,
     now_iso: str,
 ) -> tuple[int, int, int]:
     """Find .md files under RDR paths and index them via batch_index_markdowns.
 
-    M2: passes t3=db to avoid creating a redundant T3 client.
+    Uses t3_rdr() to write into the rdr__ store.
 
     Returns (indexed, skipped, failed) counts.
     """
@@ -559,6 +559,7 @@ def _discover_and_index_rdrs(
     basename, _ = _repo_identity(repo)
     collection = _rdr_collection_name(repo)
 
+    db = t3_rdr()
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
     results = batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection)
     indexed = sum(1 for s in results.values() if s == "indexed")
@@ -575,15 +576,16 @@ def _prune_misclassified(
     code_files: list[Path],
     prose_files: list[Path],
     pdf_files: list[Path],
-    db: object,
 ) -> None:
     """Remove chunks from the wrong collection after reclassification.
 
     If a file was previously classified as code but is now prose (or vice versa),
     its chunks in the old collection must be removed.
     """
-    code_col = db.get_or_create_collection(code_collection)
-    docs_col = db.get_or_create_collection(docs_collection)
+    db_code = t3_code()
+    db_docs = t3_docs()
+    code_col = db_code.get_or_create_collection(code_collection)
+    docs_col = db_docs.get_or_create_collection(docs_collection)
 
     # Prose + PDF files should NOT have chunks in the code__ collection
     docs_paths = {str(f) for f in prose_files} | {str(f) for f in pdf_files}
@@ -608,15 +610,16 @@ def _prune_deleted_files(
     code_collection: str,
     docs_collection: str,
     all_current_paths: set[str],
-    db: object,
 ) -> None:
     """Remove chunks for files that no longer exist in the repo (C3 fix).
 
     Queries each collection for all distinct source_paths and deletes chunks
     for any path not in *all_current_paths*.
     """
-    for collection_name in (code_collection, docs_collection):
-        col = db.get_or_create_collection(collection_name)
+    db_code = t3_code()
+    db_docs = t3_docs()
+    for store, collection_name in ((db_code, code_collection), (db_docs, docs_collection)):
+        col = store.get_or_create_collection(collection_name)
         # Get all chunks to find unique source_paths
         all_chunks = col.get(include=["metadatas"])
         if not all_chunks["ids"]:
@@ -750,20 +753,20 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
 
     import voyageai
     from datetime import UTC, datetime as _dt
-    from nexus.db import make_t3
 
-    _log.debug("connecting to ChromaDB Cloud")
-    db = make_t3()
-    _log.debug("ChromaDB connected")
     now_iso = _dt.now(UTC).isoformat()
+
+    # Open per-type stores
+    db_code = t3_code()
+    db_docs = t3_docs()
 
     # Initialize collections and models
     code_model = index_model_for_collection(code_collection)
     docs_model = index_model_for_collection(docs_collection)
     voyage_client = voyageai.Client(api_key=voyage_key)
     _log.debug("creating collections", code=code_collection, docs=docs_collection)
-    code_col = db.get_or_create_collection(code_collection)
-    docs_col = db.get_or_create_collection(docs_collection)
+    code_col = db_code.get_or_create_collection(code_collection)
+    docs_col = db_docs.get_or_create_collection(docs_collection)
     _log.debug("collections ready")
 
     # Index code files → code__ (voyage-code-3, AST chunking)
@@ -771,7 +774,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
     for score, file in code_files:
         _log.debug("indexing", file=str(file))
         _index_code_file(
-            file, repo, code_collection, code_model, code_col, db,
+            file, repo, code_collection, code_model, code_col, db_code,
             voyage_client, git_meta, now_iso, score,
         )
 
@@ -780,7 +783,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
     for score, file in prose_files:
         _log.debug("indexing", file=str(file))
         _index_prose_file(
-            file, repo, docs_collection, docs_model, docs_col, db,
+            file, repo, docs_collection, docs_model, docs_col, db_docs,
             voyage_key, git_meta, now_iso, score,
         )
 
@@ -789,13 +792,13 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
     for score, file in pdf_files:
         _log.debug("indexing", file=str(file))
         _index_pdf_file(
-            file, repo, docs_collection, docs_model, docs_col, db,
+            file, repo, docs_collection, docs_model, docs_col, db_docs,
             voyage_key, git_meta, now_iso, score,
         )
 
     # Discover and index RDR markdown files → rdr__
     rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
-        repo, rdr_abs_paths, db, voyage_key, now_iso
+        repo, rdr_abs_paths, voyage_key, now_iso
     )
 
     # Prune misclassified chunks (reclassification cleanup)
@@ -804,7 +807,6 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
         [f for _, f in code_files],
         [f for _, f in prose_files],
         [f for _, f in pdf_files],
-        db,
     )
 
     # C3: Prune deleted files — remove chunks for files no longer in the repo
@@ -815,7 +817,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
         all_current_paths.add(str(f))
     for _, f in pdf_files:
         all_current_paths.add(str(f))
-    _prune_deleted_files(code_collection, docs_collection, all_current_paths, db)
+    _prune_deleted_files(code_collection, docs_collection, all_current_paths)
     return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
 
 

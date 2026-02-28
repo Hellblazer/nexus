@@ -195,11 +195,13 @@ def test_index_creates_chunks_in_t3(
     """index_repository() chunks corpus files and stores them in T3."""
     from nexus.indexer import index_repository
 
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=MagicMock()), \
+         patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(mini_repo, registry)
 
-    col_name = registry.get(mini_repo)["collection"]
+    col_name = registry.get(mini_repo)["code_collection"]
     col = local_t3.get_or_create_collection(col_name)
     assert col.count() > 0, "Expected at least one chunk in T3 after indexing"
 
@@ -212,7 +214,9 @@ def test_index_status_transitions_to_ready(
 
     assert registry.get(mini_repo)["status"] == "registered"
 
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=MagicMock()), \
+         patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(mini_repo, registry)
 
@@ -225,11 +229,13 @@ def test_index_chunks_carry_source_path_metadata(
     """Every chunk has a source_path pointing at the original file."""
     from nexus.indexer import index_repository
 
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=MagicMock()), \
+         patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(mini_repo, registry)
 
-    col_name = registry.get(mini_repo)["collection"]
+    col_name = registry.get(mini_repo)["code_collection"]
     col = local_t3.get_or_create_collection(col_name)
     result = col.get(include=["metadatas"])
     source_paths = {m.get("source_path", "") for m in result["metadatas"]}
@@ -244,10 +250,12 @@ def test_index_staleness_check_skips_unchanged_files(
     """Second index run skips files whose content_hash is unchanged."""
     from nexus.indexer import index_repository
 
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=MagicMock()), \
+         patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(mini_repo, registry)
-        col_name = registry.get(mini_repo)["collection"]
+        col_name = registry.get(mini_repo)["code_collection"]
         col = local_t3.get_or_create_collection(col_name)
         count_after_first = col.count()
 
@@ -266,10 +274,12 @@ def test_index_frecency_only_preserves_chunk_count(
     """--frecency-only reindex updates scores without adding or removing chunks."""
     from nexus.indexer import index_repository
 
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=MagicMock()), \
+         patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(mini_repo, registry)
-        col_name = registry.get(mini_repo)["collection"]
+        col_name = registry.get(mini_repo)["code_collection"]
         col = local_t3.get_or_create_collection(col_name)
         count_before = col.count()
 
@@ -281,10 +291,17 @@ def test_index_frecency_only_preserves_chunk_count(
 # ── Smart indexing: dual collection tests ────────────────────────────────────
 
 def _run_smart_index(repo: Path, registry: RepoRegistry, local_t3: T3Database) -> None:
-    """Helper: run index_repository with standard test patches."""
+    """Helper: run index_repository with standard test patches.
+
+    All three content-type stores are mapped to local_t3 so that code__,
+    docs__, and rdr__ collections all land in the same EphemeralClient,
+    making assertions straightforward.
+    """
     from nexus.indexer import index_repository
 
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=local_t3), \
+         patch("nexus.indexer.t3_rdr", return_value=local_t3), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(repo, registry)
 
@@ -539,7 +556,9 @@ def test_migration_moves_prose_from_code_to_docs(
     assert len(pre_result["ids"]) == 1, "Fake prose chunk must exist before migration"
 
     # Run the new unified indexer
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=local_t3), \
+         patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(rich_repo, reg)
 
@@ -573,11 +592,13 @@ def test_index_then_search_ttl_content(
     """Index corpus, then search for TTL-related content — ttl.py should rank."""
     from nexus.indexer import index_repository
 
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=MagicMock()), \
+         patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(mini_repo, registry)
 
-    col_name = registry.get(mini_repo)["collection"]
+    col_name = registry.get(mini_repo)["code_collection"]
     results = local_t3.search("parse TTL days weeks permanent", [col_name], n_results=5)
 
     assert len(results) > 0, "Expected search results after indexing"
@@ -593,11 +614,13 @@ def test_index_then_search_session_content(
     """Search for session/getsid content — session.py should be in results."""
     from nexus.indexer import index_repository
 
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=MagicMock()), \
+         patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(mini_repo, registry)
 
-    col_name = registry.get(mini_repo)["collection"]
+    col_name = registry.get(mini_repo)["code_collection"]
     results = local_t3.search("session identifier process group ID", [col_name], n_results=5)
 
     assert len(results) > 0
@@ -613,11 +636,13 @@ def test_index_then_search_corpus_naming(
     """Search for collection naming logic — corpus.py should appear."""
     from nexus.indexer import index_repository
 
-    with patch("nexus.db.make_t3", return_value=local_t3), \
+    with patch("nexus.indexer.t3_code", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs", return_value=MagicMock()), \
+         patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(mini_repo, registry)
 
-    col_name = registry.get(mini_repo)["collection"]
+    col_name = registry.get(mini_repo)["code_collection"]
     results = local_t3.search("collection name prefix code docs knowledge", [col_name], n_results=5)
 
     assert len(results) > 0
