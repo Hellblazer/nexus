@@ -16,7 +16,6 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 from nexus.corpus import index_model_for_collection
-from nexus.db import make_t3
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor
@@ -167,7 +166,12 @@ def _index_document(
     content_hash = _sha256(file_path)
     if collection_name is None:
         collection_name = f"docs__{corpus}"
-    db = t3 if t3 is not None else make_t3()
+    if t3 is None:
+        raise RuntimeError(
+            "doc_indexer._index_document: t3 argument is required — "
+            "caller must pass an explicit T3Database (use t3_docs() or t3_rdr())"
+        )
+    db = t3
     col = db.get_or_create_collection(collection_name)
 
     target_model = index_model_for_collection(collection_name)

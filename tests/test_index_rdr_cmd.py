@@ -104,3 +104,22 @@ def test_index_rdr_excludes_postmortem_dir(
     paths_arg = mock_batch.call_args[0][0]
     for p in paths_arg:
         assert "post-mortem" not in str(p), f"Unexpected subdirectory file: {p}"
+
+
+# ── P9: index rdr passes t3=t3_rdr() ─────────────────────────────────────────
+
+def test_index_rdr_cmd_passes_t3_rdr_store(
+    runner: CliRunner, repo_with_rdrs: Path
+) -> None:
+    """P9: nx index rdr passes t3=t3_rdr() so RDR docs go to the rdr store."""
+    from unittest.mock import MagicMock
+
+    mock_db = MagicMock()
+    with patch("nexus.commands.index.t3_rdr", return_value=mock_db) as mock_factory, \
+         patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
+
+    assert result.exit_code == 0, result.output
+    mock_factory.assert_called_once()
+    _, kwargs = mock_batch.call_args
+    assert kwargs.get("t3") is mock_db

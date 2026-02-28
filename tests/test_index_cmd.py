@@ -141,3 +141,37 @@ def test_index_repo_default_is_full_index(runner: CliRunner, index_home: Path) -
     mock_index.assert_called_once()
     _, call_kwargs = mock_index.call_args
     assert call_kwargs.get("frecency_only") is False
+
+
+# ── P9: index pdf/md pass t3_docs(); index rdr passes t3_rdr() ───────────────
+
+def test_index_pdf_cmd_passes_t3_docs_store(runner: CliRunner, index_home: Path) -> None:
+    """P9: nx index pdf passes t3=t3_docs() so PDF goes to the docs store."""
+    pdf = index_home / "doc.pdf"
+    pdf.write_bytes(b"fake pdf")
+
+    mock_db = MagicMock()
+    with patch("nexus.commands.index.t3_docs", return_value=mock_db) as mock_factory, \
+         patch("nexus.doc_indexer.index_pdf", return_value=1) as mock_index:
+        result = runner.invoke(main, ["index", "pdf", str(pdf)])
+
+    assert result.exit_code == 0, result.output
+    mock_factory.assert_called_once()
+    _, kwargs = mock_index.call_args
+    assert kwargs.get("t3") is mock_db
+
+
+def test_index_md_cmd_passes_t3_docs_store(runner: CliRunner, index_home: Path) -> None:
+    """P9: nx index md passes t3=t3_docs() so markdown goes to the docs store."""
+    md = index_home / "doc.md"
+    md.write_text("# Hello\n\nWorld.\n")
+
+    mock_db = MagicMock()
+    with patch("nexus.commands.index.t3_docs", return_value=mock_db) as mock_factory, \
+         patch("nexus.doc_indexer.index_markdown", return_value=1) as mock_index:
+        result = runner.invoke(main, ["index", "md", str(md)])
+
+    assert result.exit_code == 0, result.output
+    mock_factory.assert_called_once()
+    _, kwargs = mock_index.call_args
+    assert kwargs.get("t3") is mock_db
