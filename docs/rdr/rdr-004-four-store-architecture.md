@@ -151,7 +151,7 @@ def _persistent_t3(path_key: str, legacy_key: str | None = None) -> T3Database:
     if not raw_path:
         raise RuntimeError(f"T3 store not configured: set chromadb.{path_key} in config")
     path = str(Path(raw_path).expanduser())
-    voyage_api_key = get_credential(cfg, "voyage_api_key")
+    voyage_api_key = get_credential("voyage_api_key")   # one-arg signature; reads config internally
     if not voyage_api_key:
         raise RuntimeError("voyage_api_key not configured — required for embeddings")
     return T3Database(
@@ -194,7 +194,7 @@ chromadb:
   path: ""  # if set, used as fallback for knowledge_path
 ```
 
-All four `*_path` keys are added to `_DEFAULTS["chromadb"]` in `config.py` with empty-string defaults (no default paths — an absent value raises a clear `RuntimeError` rather than silently using a path that has never been initialised). The `~` in path values is expanded by `_persistent_t3()` via `Path.expanduser()` before passing to `PersistentClient`.
+All four `*_path` keys are added to `_DEFAULTS["chromadb"]` in `config.py` using the paths shown in the table above as defaults (e.g. `~/.config/nexus/chroma_code`). A user who sets none of these keys gets the defaults automatically on first run — `PersistentClient` creates the directory if absent. The `~` in path values is expanded by `_persistent_t3()` via `Path.expanduser()` before passing to `PersistentClient`. A user who explicitly sets a key to empty string `""` still triggers the `RuntimeError("T3 store not configured: ...")` in `_persistent_t3()`.
 
 Existing `tenant`, `database`, `api_key` keys remain for CloudClient access during migration.
 
@@ -220,20 +220,22 @@ All commands that currently call `_t3()` or `make_t3()` are updated to call the 
 | `nx index` (code) | `make_t3()` | `t3_code()` |
 | `nx index` (docs) | `make_t3()` | `t3_docs()` |
 | `nx index` (rdr) | `make_t3()` | `t3_rdr()` |
-| `_discover_and_index_rdrs()` (inside `_run_index()`) | receives `db` from caller | call `t3_rdr()` directly — do not pass `db` from code/docs path |
+| `_discover_and_index_rdrs()` | receives `db` from caller | remove `db` param; call `t3_rdr()` internally; `_run_index()` call site drops the `db` arg |
+| `nx index pdf` (`index_pdf_cmd`) | no `t3=` passed to `index_pdf()` | pass `t3=t3_docs()` explicitly |
+| `nx index md` (`index_md_cmd`) | no `t3=` passed to `index_markdown()` | pass `t3=t3_docs()` explicitly |
+| `_prune_deleted_files()` | receives `db` from caller | remove `db` param; call `t3_code()` + `t3_docs()` internally |
+| `_prune_misclassified()` | receives `db` from caller | remove `db` param; call `t3_code()` + `t3_docs()` internally |
 | `nx store put` | `_t3()` | `t3_knowledge()` |
 | `nx store list` | `_t3()` | `t3_knowledge()` |
 | `nx store expire` | `_t3()` | `t3_knowledge()` |
 | `nx collection list` (no `--type`) | `_t3()` | enumerate all 4 stores (see below) |
-| `nx collection info/delete/verify` (no `--type`) | `_t3()` | `t3_knowledge()` default; `--type` routes to specified store |
+| `nx collection info/delete/verify` (no `--type`) | `_t3()` | `t3_knowledge()` default; `--type` routes to specified store; on "not found" error suggest `--type <code\|docs\|rdr>` |
 | `nx search` (default) | `make_t3()` | fan-out to all 4 stores (see below) |
 | `nx memory promote` | direct `T3Database(...)` | `t3_knowledge()` |
 | `pm.py:archive()` | `make_t3()` | `t3_knowledge()` |
 | `pm.py:reference()` (semantic path) | `make_t3()` | `t3_knowledge()` |
 | `pm.py:reference()` (project-name path) | `make_t3()` | `t3_knowledge()` |
-| `commands/pm.py` | `_t3()` | `t3_knowledge()` |
-| `_prune_deleted_files()` | `make_t3()` | `t3_code()` + `t3_docs()` |
-| `_prune_misclassified()` | `make_t3()` | `t3_code()` + `t3_docs()` |
+| `commands/pm.py:promote_cmd` | `_t3()` | `t3_knowledge()` |
 
 ### search Routing
 
@@ -255,10 +257,11 @@ stores = [("code", t3_code()), ("docs", t3_docs()),
           ("rdr", t3_rdr()), ("knowledge", t3_knowledge())]
 all_results = []
 for store_type, db in stores:
-    collections = db.list_collections()
-    targets = resolve_corpus(corpus, collections) if corpus else collections
+    # list_collections() returns list[dict] with "name" and "count" keys
+    collection_names = [c["name"] for c in db.list_collections()]
+    targets = resolve_corpus(corpus, collection_names) if corpus else collection_names
     if targets:
-        results = db.search(query, target_collections=targets, n_results=n)
+        results = db.search(query, collection_names=targets, n_results=n)  # param is collection_names=
         for r in results:
             r["store"] = store_type  # tag for display
         all_results.extend(results)
@@ -314,9 +317,10 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
    - `rdr__*` → copy to rdr store
    - `knowledge__*` → copy to knowledge store
    - Unrecognised prefix → warn, copy to knowledge store with metadata tag `migrated_unknown_prefix: true`
-4. **Idempotency**: If a collection already exists in the destination, compare document count. If equal, skip. If different, warn and overwrite (do not silently double-insert).
-5. **Per-type count verification**: After migration, assert that the count of `code__*` docs in the code store equals the count of `code__*` docs in the source, and similarly for each other type. Total count invariant is insufficient — per-type verification catches cross-type routing errors.
-6. Print per-type migration report; do not delete source store (user removes manually after verifying).
+4. **Copy mechanism**: Read with `source_col.get(limit=None, include=["documents", "embeddings", "metadatas", "ids"])` — `limit=None` is required to avoid ChromaDB's default row limit truncating large collections. Write with `dest_col.upsert(ids=..., documents=..., embeddings=..., metadatas=...)` — upsert is safe and idempotent.
+5. **Idempotency**: If collection already exists in destination, compare document count. If equal, skip. If different, upsert all source documents into destination (re-upserts existing docs and adds missing ones — no data loss, safe on partial-failure re-run).
+6. **Per-type count verification**: After migration, assert that the count of `code__*` docs in the code store equals the count of `code__*` docs in the source, and similarly for docs, rdr, and knowledge. Per-type verification catches cross-type routing errors; total-only would not.
+7. Print per-type migration report; do not delete source store (user removes manually after verifying).
 
 **Deployment ordering**: Phase 4 migration must be run by existing users before Phases 2+3 are deployed. Deploying Phases 2+3 first on a machine with existing cloud data leaves the new PersistentClient stores empty. Document this in the release notes.
 
@@ -337,31 +341,40 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
 ## Implementation Plan
 
 ### Phase 1 — Config, Factories, and Credential Guards
-1. Add `code_path`, `docs_path`, `rdr_path`, `knowledge_path` to `_DEFAULTS["chromadb"]` in `src/nexus/config.py` with empty-string defaults. Add `path` as deprecated legacy alias for `knowledge_path`.
-2. Create `src/nexus/db/t3_stores.py` with `_persistent_t3()` (including `Path.expanduser()` and `voyage_api_key` guard), `t3_code()`, `t3_docs()`, `t3_rdr()`, `t3_knowledge()`.
+1. Add `code_path`, `docs_path`, `rdr_path`, `knowledge_path` to `_DEFAULTS["chromadb"]` in `src/nexus/config.py` using the default paths from the Four Stores table (`~/.config/nexus/chroma_code`, etc.). Add `path` as deprecated legacy alias for `knowledge_path` with empty-string default.
+2. Create `src/nexus/db/t3_stores.py` with `_persistent_t3()` (including `Path.expanduser()`, `voyage_api_key = get_credential("voyage_api_key")` with one-arg call, and `voyage_api_key` guard), `t3_code()`, `t3_docs()`, `t3_rdr()`, `t3_knowledge()`.
 3. Update credential gates:
    - `doc_indexer._has_credentials()`: check only `voyage_api_key`; remove `chroma_api_key` requirement.
    - `indexer.py:163` and `indexer.py:752`: replace `chroma_api_key` guard with `voyage_api_key` guard; keep `CredentialsMissingError` as the exception type.
    - `store._t3()`: credential validation will be replaced when `_t3()` is removed in Phase 3.
+4. Update `T3Database.expire()` docstring and `__exit__` comment to reflect that the client may be `PersistentClient` or `CloudClient`. (Moving from Phase 3 to eliminate the incorrect-docstring window.)
 
 ### Phase 2 — Command Routing (deploy atomically with Phase 3)
-4. `commands/store.py`: `put_cmd`, `list_cmd`, `expire_cmd` → `t3_knowledge()`.
-5. `commands/collection.py`: `list_cmd` enumerates all 4 stores by default (grouped output); `info_cmd`, `delete_cmd`, `verify_cmd` → `t3_knowledge()` default; add `--type` flag routing to all four stores for all subcommands.
-6. `commands/search_cmd.py`: add `--type` flag; implement fan-out algorithm (four `T3Database` instances, `resolve_corpus()` per store, merge by distance); `--corpus` applies per-store as specified.
-7. `commands/memory.py` (`promote_cmd`): replace direct `T3Database(...)` construction with `t3_knowledge()`.
-8. `pm.py` and `commands/pm.py`: replace all `make_t3()` / `_t3()` calls with `t3_knowledge()`.
-9. `indexer.py`:
-   - `_prune_deleted_files()` and `_prune_misclassified()` → `t3_code()` + `t3_docs()`.
-   - `_discover_and_index_rdrs()`: call `t3_rdr()` directly instead of receiving `db` from caller.
-10. `index.py` entry point: route `nx index` to `t3_code()` (code collections), `t3_docs()` (docs collections), `t3_rdr()` (rdr collections).
+5. `commands/store.py`: `put_cmd`, `list_cmd`, `expire_cmd` → `t3_knowledge()`.
+6. `commands/collection.py`: `list_cmd` enumerates all 4 stores by default (grouped output); `info_cmd`, `delete_cmd`, `verify_cmd` → `t3_knowledge()` default; on "collection not found", error message suggests `--type <code|docs|rdr>`; add `--type` flag routing to all four stores for all subcommands.
+7. `commands/search_cmd.py`: add `--type` flag; implement fan-out algorithm (four `T3Database` instances, extract names via `[c["name"] for c in db.list_collections()]`, `resolve_corpus()` per store with `list[str]`, `db.search(collection_names=targets, ...)`, merge by distance); `--corpus` applies per-store as specified.
+8. `commands/memory.py` (`promote_cmd`): replace direct `T3Database(...)` construction with `t3_knowledge()`.
+9. `pm.py` and `commands/pm.py`: replace all `make_t3()` / `_t3()` calls with `t3_knowledge()`.
+10. `indexer.py`:
+    - `_discover_and_index_rdrs()`: remove `db` parameter; call `t3_rdr()` internally. Update `_run_index()` call site to drop the `db` argument.
+    - `_prune_deleted_files()`: remove `db` parameter; call `t3_code()` and `t3_docs()` internally. Update all call sites.
+    - `_prune_misclassified()`: same — remove `db` parameter, call stores internally.
+11. `commands/index.py`: `index_pdf_cmd` and `index_md_cmd` pass `t3=t3_docs()` explicitly to `index_pdf()`/`index_markdown()`.
+12. `index.py` entry point: route `nx index` to `t3_code()` (code collections), `t3_docs()` (docs collections), `t3_rdr()` (rdr collections).
 
 ### Phase 3 — Cleanup (deploy atomically with Phase 2)
-11. Update `T3Database.expire()` docstring and `__exit__` comment to reflect that the client may be `PersistentClient` or `CloudClient`.
-12. Remove or deprecate `make_t3()` / `_t3()` single-store factory; replace all remaining callers (except `nx migrate t3` which retains `make_t3()` for CloudClient source access).
+13. Remove or deprecate `make_t3()` / `_t3()` single-store factory; replace all remaining callers (except `nx migrate t3` which retains `make_t3()` for CloudClient source access).
+14. Remove stale `from nexus.db import make_t3` import from `commands/pm.py` (import is dead code after step 9).
 
 ### Phase 4 — Migration
-13. Implement `nx migrate t3` subcommand: CloudClient or legacy-path source; four destination stores; per-type count verification; idempotent re-run; migration report.
-14. Update `docs/architecture.md` T3 section; update `docs/cli-reference.md` for new `--type` flag and `nx migrate t3`; document migration deployment ordering in release notes.
+15. Implement `nx migrate t3` subcommand:
+    - Source: `PersistentClient(legacy_path)` if `chromadb.path` is set; otherwise `make_t3()` (CloudClient).
+    - Copy each collection using `source_col.get(limit=None, include=["documents", "embeddings", "metadatas", "ids"])` — use `limit=None` to avoid default row limits truncating large collections.
+    - Destination write: `dest_col.upsert(ids=..., documents=..., embeddings=..., metadatas=...)` — upsert semantics are idempotent and safe on re-run.
+    - Idempotency on re-run: if collection already exists and has same doc count, skip; if count differs, upsert (adds missing, re-upserts existing — no data loss).
+    - Per-type count verification after migration: assert `code__*` count in code store equals source count, and similarly for each type.
+    - Print per-type report; do not delete source.
+16. Update `docs/architecture.md` T3 section; update `docs/cli-reference.md` for new `--type` flag and `nx migrate t3`; document migration deployment ordering in release notes.
 
 ## Test Plan
 
@@ -524,3 +537,29 @@ results = db.search(query, collection_names=targets, n_results=n)
 - O3: `index_pdf_cmd` and `index_md_cmd` absent from routing table (addressed in C3 above as Critical).
 - O4: `nx collection info/delete/verify` defaulting to knowledge store will give confusing "Collection not found" errors for code/docs/rdr collections. Specify that the error message should suggest `--type`.
 - O5: `_prune_deleted_files` and `_prune_misclassified` routing ambiguity (one `db` → two db objects) same pattern as `_discover_and_index_rdrs`. Specify that each function is updated to call `t3_code()` and `t3_docs()` internally.
+
+#### Critical — Resolved
+
+**C1 — RESOLVED.** Factory `_persistent_t3()` corrected to `get_credential("voyage_api_key")` (one-arg signature). Added inline comment noting the one-arg call.
+
+**C2 — RESOLVED.** Routing table row for `_discover_and_index_rdrs()` now specifies: "remove `db` param; call `t3_rdr()` internally; `_run_index()` call site drops the `db` arg." Phase 2 step 10 explicitly covers all three functions (`_discover_and_index_rdrs`, `_prune_deleted_files`, `_prune_misclassified`) with the same pattern.
+
+**C3 — RESOLVED.** Added `nx index pdf` and `nx index md` to routing table with `t3=t3_docs()` explicit pass. Phase 2 step 11 covers `commands/index.py`.
+
+#### Significant — Resolved
+
+**S1 — RESOLVED.** Contradiction eliminated: `_DEFAULTS["chromadb"]` uses the default paths from the Four Stores table. Users with no config get working defaults. Empty-string overrides still trigger `RuntimeError`. Config Schema text updated to match.
+
+**S2 — RESOLVED.** Fan-out pseudocode corrected: `[c["name"] for c in db.list_collections()]` extracts `list[str]`; `db.search(collection_names=targets, ...)` uses correct parameter name.
+
+**S3 — RESOLVED.** Phase 3 step 14 explicitly removes stale `from nexus.db import make_t3` import from `commands/pm.py`.
+
+**S4 — RESOLVED.** Migration steps 4–5 specify `limit=None` for `.get()`, `upsert()` for write, and upsert-on-count-mismatch for idempotent re-run (no data loss). Phase 4 step 15 reflects this.
+
+#### Observations — Applied
+
+- O1: `T3Database.__exit__` docstring fix moved to Phase 1 step 4 (no longer a deferred Phase 3 task)
+- O2: Server-path connection pooling noted; no action for CLI tool
+- O3: `index_pdf_cmd` and `index_md_cmd` addressed in C3
+- O4: "not found" error message suggestion added to collection routing table row and Phase 2 step 6
+- O5: `_prune_deleted_files` and `_prune_misclassified` addressed in C2 pattern; Phase 2 step 10
