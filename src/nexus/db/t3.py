@@ -279,7 +279,8 @@ class T3Database:
             if not name.startswith("knowledge__"):
                 continue
             col = self._client.get_collection(name)
-            result = col.get(where=ttl_where, include=["metadatas"])
+            # Cap at 10 000 to avoid loading an entire collection into memory.
+            result = col.get(where=ttl_where, include=["metadatas"], limit=10000)
             expired_ids = [
                 doc_id
                 for doc_id, meta in zip(result["ids"], result["metadatas"])

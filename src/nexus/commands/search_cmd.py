@@ -38,6 +38,11 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
                 param_hint="'--where'",
             )
         key, _, value = pair.partition("=")
+        if not key:
+            raise click.BadParameter(
+                f"--where value {pair!r} has an empty key — KEY must be non-empty",
+                param_hint="'--where'",
+            )
         result[key] = value
     return result
 
@@ -45,6 +50,9 @@ _CONTENT_MAX_CHARS: int = 200
 
 # Lambda wrapping is intentional: it provides late name binding so that
 # `patch("nexus.commands.search_cmd.t3_code", ...)` intercepts calls in tests.
+# The same factories appear in nexus.commands.collection._STORE_FACTORIES — the
+# duplication is intentional: each module needs its own module-scoped names so
+# that per-module patching works correctly in tests.
 _SEARCH_FACTORIES: dict[str, Callable[[], T3Database]] = {
     "code": lambda: t3_code(),
     "docs": lambda: t3_docs(),

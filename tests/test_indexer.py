@@ -1335,3 +1335,59 @@ def test_run_index_uses_separate_stores(tmp_path: Path) -> None:
     mock_tc.assert_called()
     mock_td.assert_called()
     mock_tr.assert_called()
+
+
+
+# ── I1: _prune_deleted_files must pass limit to col.get() ─────────────────────
+
+
+def test_prune_deleted_files_uses_bounded_col_get() -> None:
+    """I1: _prune_deleted_files col.get() must pass limit= to prevent unbounded fetches."""
+    from nexus.indexer import _prune_deleted_files
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.indexer.t3_code", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
+        _prune_deleted_files("code__repo", "docs__repo", {"/repo/file.py"})
+
+    for call in mock_col.get.call_args_list:
+        call_kwargs = call.kwargs if call.kwargs else {}
+        assert "limit" in call_kwargs, "col.get() in _prune_deleted_files must pass limit="
+
+
+# ── S5: _discover_and_index_rdrs must not recurse into subdirectories ──────────
+
+
+def test_discover_and_index_rdrs_does_not_recurse_into_subdirectories(
+    tmp_path: Path,
+) -> None:
+    """S5: _discover_and_index_rdrs uses top-level glob, consistent with index_rdr_cmd."""
+    from nexus.indexer import _discover_and_index_rdrs
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rdr_dir = repo / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+
+    # Top-level RDR file — should be indexed
+    (rdr_dir / "rdr-001-feature.md").write_text("# RDR-001\nTest\n")
+
+    # Subdir file (post-mortem) — must NOT be indexed
+    subdir = rdr_dir / "post-mortem"
+    subdir.mkdir()
+    (subdir / "pm-001.md").write_text("# Post-mortem\n")
+
+    with patch("nexus.indexer.t3_rdr"), \
+         patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        _discover_and_index_rdrs(repo, {rdr_dir}, "fake-key", "2026-01-01T00:00:00")
+
+    assert mock_batch.called, "batch_index_markdowns should be called for top-level RDR"
+    indexed_paths = mock_batch.call_args[0][0]
+    for p in indexed_paths:
+        assert p.parent == rdr_dir, f"Subdir file should not be indexed: {p}"

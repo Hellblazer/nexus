@@ -631,9 +631,10 @@ def test_parse_where_empty_value() -> None:
 
 
 def test_parse_where_empty_key() -> None:
-    """'=value' → ''='value' (empty key accepted by parser)."""
-    result = _parse_where(("=value",))
-    assert result == {"": "value"}
+    """S2: '=value' → BadParameter (empty key is invalid for ChromaDB where filters)."""
+    from click import BadParameter
+    with pytest.raises(BadParameter, match="empty key"):
+        _parse_where(("=value",))
 
 
 def test_parse_where_missing_equals_raises() -> None:

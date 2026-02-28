@@ -212,10 +212,9 @@ def test_info_shows_embedding_model_for_code_collection(
         {"name": "code__nexus", "count": 1247},
     ]
     mock_db.collection_info.return_value = {"count": 1247, "metadata": {}}
-    # Mock get_or_create_collection to return a collection with no indexed_at in metadata
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_db._client.get_collection.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_code", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "code__nexus", "--type", "code"])
@@ -236,7 +235,7 @@ def test_info_shows_embedding_model_for_knowledge_collection(
     mock_db.collection_info.return_value = {"count": 88, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_db._client.get_collection.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__research"])
@@ -263,7 +262,7 @@ def test_info_shows_last_indexed_when_metadata_exists(
             {"indexed_at": "2026-02-21T12:00:00+00:00", "title": "doc3"},
         ],
     }
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_db._client.get_collection.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__test"])
@@ -290,7 +289,7 @@ def test_info_shows_unknown_when_no_indexed_at_metadata(
             {"title": "another_without_ts"},
         ],
     }
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_db._client.get_collection.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__legacy"])
@@ -411,3 +410,135 @@ def test_verify_type_docs_routes_to_docs_store(runner: CliRunner) -> None:
         result = runner.invoke(main, ["collection", "verify", "docs__corpus", "--type", "docs"])
     assert result.exit_code == 0, result.output
     mock_db.list_collections.assert_called_once()
+
+
+# ── C2: info_cmd must not call get_or_create_collection ──────────────────────
+
+
+def test_info_does_not_call_get_or_create_collection(
+    runner: CliRunner, env_creds
+) -> None:
+    """C2: info_cmd uses _client.get_collection, not get_or_create_collection."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
+    mock_db.collection_info.return_value = {}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_db._client.get_collection.return_value = mock_col
+
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "info", "knowledge__test"])
+
+    assert result.exit_code == 0, result.output
+    mock_db.get_or_create_collection.assert_not_called()
+    mock_db._client.get_collection.assert_called_once_with("knowledge__test")
+
+
+# ── S3: info_cmd caps metadata fetch with limit ───────────────────────────────
+
+
+def test_info_fetches_metadata_with_limit(runner: CliRunner, env_creds) -> None:
+    """S3: col.get() in info_cmd must pass limit= to prevent unbounded fetches."""
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
+    mock_db.collection_info.return_value = {}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_db._client.get_collection.return_value = mock_col
+
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "info", "knowledge__test"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_col.get.called, "col.get() should have been called"
+    call_kwargs = mock_col.get.call_args.kwargs
+    assert "limit" in call_kwargs, "col.get() must pass limit= to avoid unbounded fetches"
+
+
+# ── I4: info/delete/verify infer store from collection name prefix ────────────
+
+
+def test_info_infers_code_store_from_prefix(runner: CliRunner, env_creds) -> None:
+    """I4: info code__repo without --type infers code store from prefix."""
+    mock_code_db = MagicMock()
+    mock_code_db.list_collections.return_value = [{"name": "code__repo", "count": 10}]
+    mock_code_db.collection_info.return_value = {}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_code_db._client.get_collection.return_value = mock_col
+    mock_knowledge_db = MagicMock()
+
+    with patch("nexus.commands.collection.t3_code", return_value=mock_code_db) as m_code, \
+         patch("nexus.commands.collection.t3_knowledge", return_value=mock_knowledge_db) as m_k:
+        result = runner.invoke(main, ["collection", "info", "code__repo"])
+
+    assert result.exit_code == 0, result.output
+    m_code.assert_called_once()
+    m_k.assert_not_called()
+
+
+def test_info_infers_docs_store_from_prefix(runner: CliRunner, env_creds) -> None:
+    """I4: info docs__corpus without --type infers docs store from prefix."""
+    mock_docs_db = MagicMock()
+    mock_docs_db.list_collections.return_value = [{"name": "docs__corpus", "count": 7}]
+    mock_docs_db.collection_info.return_value = {}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_docs_db._client.get_collection.return_value = mock_col
+    mock_knowledge_db = MagicMock()
+
+    with patch("nexus.commands.collection.t3_docs", return_value=mock_docs_db) as m_docs, \
+         patch("nexus.commands.collection.t3_knowledge", return_value=mock_knowledge_db) as m_k:
+        result = runner.invoke(main, ["collection", "info", "docs__corpus"])
+
+    assert result.exit_code == 0, result.output
+    m_docs.assert_called_once()
+    m_k.assert_not_called()
+
+
+def test_info_infers_rdr_store_from_prefix(runner: CliRunner, env_creds) -> None:
+    """I4: info rdr__nexus without --type infers rdr store from prefix."""
+    mock_rdr_db = MagicMock()
+    mock_rdr_db.list_collections.return_value = [{"name": "rdr__nexus-abc12345", "count": 3}]
+    mock_rdr_db.collection_info.return_value = {}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_rdr_db._client.get_collection.return_value = mock_col
+    mock_knowledge_db = MagicMock()
+
+    with patch("nexus.commands.collection.t3_rdr", return_value=mock_rdr_db) as m_rdr, \
+         patch("nexus.commands.collection.t3_knowledge", return_value=mock_knowledge_db) as m_k:
+        result = runner.invoke(main, ["collection", "info", "rdr__nexus-abc12345"])
+
+    assert result.exit_code == 0, result.output
+    m_rdr.assert_called_once()
+    m_k.assert_not_called()
+
+
+def test_delete_infers_code_store_from_prefix(runner: CliRunner, env_creds) -> None:
+    """I4: delete code__repo without --type infers code store from prefix."""
+    mock_code_db = MagicMock()
+    mock_knowledge_db = MagicMock()
+
+    with patch("nexus.commands.collection.t3_code", return_value=mock_code_db) as m_code, \
+         patch("nexus.commands.collection.t3_knowledge", return_value=mock_knowledge_db) as m_k:
+        result = runner.invoke(main, ["collection", "delete", "code__repo", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    m_code.assert_called_once()
+    m_k.assert_not_called()
+
+
+def test_verify_infers_code_store_from_prefix(runner: CliRunner, env_creds) -> None:
+    """I4: verify code__repo without --type infers code store from prefix."""
+    mock_code_db = MagicMock()
+    mock_code_db.list_collections.return_value = [{"name": "code__repo", "count": 5}]
+    mock_knowledge_db = MagicMock()
+
+    with patch("nexus.commands.collection.t3_code", return_value=mock_code_db) as m_code, \
+         patch("nexus.commands.collection.t3_knowledge", return_value=mock_knowledge_db) as m_k:
+        result = runner.invoke(main, ["collection", "verify", "code__repo"])
+
+    assert result.exit_code == 0, result.output
+    m_code.assert_called_once()
+    m_k.assert_not_called()

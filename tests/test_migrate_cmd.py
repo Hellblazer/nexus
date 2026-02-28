@@ -230,6 +230,23 @@ def test_migrate_t3_unknown_prefix_goes_to_knowledge_store(runner: CliRunner) ->
     dest_code.get_or_create_collection.assert_not_called()
 
 
+# ── I2: _open_source_db must not fall back to CloudClient ────────────────────
+
+
+def test_open_source_db_raises_when_no_path_configured() -> None:
+    """I2: _open_source_db raises ClickException when chromadb.path is empty.
+
+    Post-migration, there is no legacy path — falling back silently to
+    CloudClient would be a misleading and risky default.
+    """
+    import click
+    from nexus.commands.migrate import _open_source_db
+
+    with patch("nexus.config.load_config", return_value={"chromadb": {}}):
+        with pytest.raises(click.ClickException, match="chromadb.path"):
+            _open_source_db()
+
+
 # ── S3: empty source guard ────────────────────────────────────────────────────
 
 def test_migrate_t3_empty_source_exits_cleanly(runner: CliRunner) -> None:

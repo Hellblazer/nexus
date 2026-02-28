@@ -110,3 +110,9 @@ def t3_docs_local() -> T3Database:
     Uses ``DefaultEmbeddingFunction`` — suitable for metadata-only operations.
     """
     return _persistent_t3("docs_path", embeddings_required=False)
+
+
+# Note: t3_rdr_local() and t3_knowledge_local() are intentionally absent.
+# Frecency updates (the only metadata-only bulk operation) apply exclusively to
+# file-based code__ and docs__ collections.  RDR and knowledge collections are
+# written via normal embedding operations that already require voyage_api_key.

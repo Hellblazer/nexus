@@ -968,3 +968,22 @@ def test_ef_override_bypasses_cache(mock_chromadb: tuple) -> None:
     assert ef1 is override_ef
     assert ef2 is override_ef
     assert db._ef_cache == {}  # cache not populated
+
+
+# ── I5: expire() must pass limit to col.get() ─────────────────────────────────
+
+
+def test_expire_passes_limit_to_col_get(mock_chromadb: tuple) -> None:
+    """I5: expire() col.get() must use limit= to prevent unbounded memory use on large collections."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_client.list_collections.return_value = ["knowledge__test"]
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    db.expire()
+
+    assert mock_col.get.called, "col.get() should be called during expire()"
+    call_kwargs = mock_col.get.call_args.kwargs
+    assert "limit" in call_kwargs, "expire() col.get() must pass limit= to avoid unbounded fetches"

@@ -540,7 +540,7 @@ def _discover_and_index_rdrs(
     for rdr_dir in rdr_abs_paths:
         if not rdr_dir.is_dir():
             continue
-        for path in sorted(rdr_dir.rglob("*.md")):
+        for path in sorted(rdr_dir.glob("*.md")):
             if path.is_file() and not path.is_symlink():
                 md_paths.append(path)
 
@@ -614,8 +614,8 @@ def _prune_deleted_files(
     db_docs = t3_docs()
     for store, collection_name in ((db_code, code_collection), (db_docs, docs_collection)):
         col = store.get_or_create_collection(collection_name)
-        # Get all chunks to find unique source_paths
-        all_chunks = col.get(include=["metadatas"])
+        # Cap at 50 000 to avoid loading an entire large collection into memory.
+        all_chunks = col.get(include=["metadatas"], limit=50000)
         if not all_chunks["ids"]:
             continue
 

@@ -26,21 +26,23 @@ def _dest_store_for(col_name: str) -> str:
 def _open_source_db() -> T3Database:
     """Open the source T3 store for migration.
 
-    Uses the legacy ``chromadb.path`` if set (PersistentClient), otherwise
-    falls back to the CloudClient via ``make_t3()``.
+    Requires ``chromadb.path`` to be set in config (legacy single-store path).
+    Post-migration there is no legacy path, so this raises ``ClickException``
+    rather than silently falling back to CloudClient.
     """
     from pathlib import Path as _Path
     from nexus.config import load_config
     cfg = load_config()
     legacy_path = cfg.get("chromadb", {}).get("path", "")
-    if legacy_path:
-        import chromadb
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-        client = chromadb.PersistentClient(path=str(_Path(legacy_path).expanduser()))
-        return T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
-    else:
-        from nexus.db import make_t3
-        return make_t3()
+    if not legacy_path:
+        raise click.ClickException(
+            "chromadb.path not configured — nothing to migrate "
+            "(set chromadb.path to the legacy single-store directory)"
+        )
+    import chromadb
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+    client = chromadb.PersistentClient(path=str(_Path(legacy_path).expanduser()))
+    return T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
 
 
 def _open_dest_db(path_key: str) -> T3Database:
@@ -120,6 +122,8 @@ def migrate_t3_cmd() -> None:
         src_count = source_col.count()
         dst_count = dest_col.count()
 
+        # Idempotency: skip if counts match and collection is non-empty.
+        # Note: count-based — re-upserts if counts differ (partial migration).
         if src_count == dst_count and src_count > 0:
             counts[store_key]["skipped"] += 1
             click.echo(f"  {col_name}: skipped ({src_count} docs already present)")

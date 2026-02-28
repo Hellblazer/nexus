@@ -24,6 +24,28 @@ _STORE_FACTORIES: dict[str, Callable[[], T3Database]] = {
 
 _TYPE_CHOICE = click.Choice(list(_STORE_FACTORIES))
 
+# Prefix → store key mapping used by _infer_store_type.
+_PREFIX_TO_STORE: tuple[tuple[str, str], ...] = (
+    ("code__", "code"),
+    ("docs__", "docs"),
+    ("rdr__", "rdr"),
+)
+
+
+def _infer_store_type(name: str, explicit: str | None) -> str:
+    """Return store key for *name*, honouring an explicit ``--type`` if given.
+
+    When no explicit type is provided, the prefix of *name* is used to infer
+    the store (``code__`` → code, ``docs__`` → docs, ``rdr__`` → rdr).
+    Everything else falls back to the knowledge store.
+    """
+    if explicit is not None:
+        return explicit
+    for prefix, key in _PREFIX_TO_STORE:
+        if name.startswith(prefix):
+            return key
+    return "knowledge"
+
 
 @click.group()
 def collection() -> None:
@@ -57,10 +79,10 @@ def list_cmd(store_type: str | None) -> None:
 @collection.command("info")
 @click.argument("name")
 @click.option("--type", "store_type", type=_TYPE_CHOICE, default=None,
-              help="Store to query (default: knowledge).")
+              help="Store to query (inferred from collection name prefix when absent).")
 def info_cmd(name: str, store_type: str | None) -> None:
     """Show details for a single collection."""
-    db = _STORE_FACTORIES[store_type or "knowledge"]()
+    db = _STORE_FACTORIES[_infer_store_type(name, store_type)]()
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
@@ -71,8 +93,10 @@ def info_cmd(name: str, store_type: str | None) -> None:
 
     info = db.collection_info(name)
 
-    col = db.get_or_create_collection(name)
-    result = col.get(include=["metadatas"])
+    # Use get_collection (read-only) not get_or_create_collection (has side-effect).
+    # Cap the fetch at 5000 docs — sufficient for last-indexed heuristic.
+    col = db._client.get_collection(name)
+    result = col.get(include=["metadatas"], limit=5000)
     metadatas: list[dict] = result.get("metadatas") or []
     timestamps = [m["indexed_at"] for m in metadatas if m and "indexed_at" in m]
     last_indexed = max(timestamps) if timestamps else "unknown"
@@ -88,12 +112,12 @@ def info_cmd(name: str, store_type: str | None) -> None:
 @click.argument("name")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
 @click.option("--type", "store_type", type=_TYPE_CHOICE, default=None,
-              help="Store to target (default: knowledge).")
+              help="Store to target (inferred from collection name prefix when absent).")
 def delete_cmd(name: str, yes: bool, store_type: str | None) -> None:
     """Delete a T3 collection (irreversible)."""
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
-    _STORE_FACTORIES[store_type or "knowledge"]().delete_collection(name)
+    _STORE_FACTORIES[_infer_store_type(name, store_type)]().delete_collection(name)
     click.echo(f"Deleted: {name}")
 
 
@@ -101,10 +125,10 @@ def delete_cmd(name: str, yes: bool, store_type: str | None) -> None:
 @click.argument("name")
 @click.option("--deep", is_flag=True, help="Run embedding probe query to verify index health")
 @click.option("--type", "store_type", type=_TYPE_CHOICE, default=None,
-              help="Store to query (default: knowledge).")
+              help="Store to query (inferred from collection name prefix when absent).")
 def verify_cmd(name: str, deep: bool, store_type: str | None) -> None:
     """Verify a collection exists and report its document count."""
-    db = _STORE_FACTORIES[store_type or "knowledge"]()
+    db = _STORE_FACTORIES[_infer_store_type(name, store_type)]()
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
