@@ -9,6 +9,7 @@ from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.config import get_credential
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
+from nexus.db.t3_stores import t3_knowledge
 from nexus.ttl import parse_ttl
 
 
@@ -109,16 +110,6 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         if entry is None:
             raise click.ClickException(f"Entry {entry_id} not found in T2 memory.")
 
-        missing = [
-            k
-            for k in ("chroma_api_key", "voyage_api_key", "chroma_tenant", "chroma_database")
-            if not get_credential(k)
-        ]
-        if missing:
-            raise click.ClickException(
-                f"{', '.join(missing)} not set — run: nx config init"
-            )
-
         # Translate TTL: T2 ttl=None (permanent) -> T3 ttl_days=0; T2 ttl=N -> T3 ttl_days=N
         ttl_days: int = entry["ttl"] if entry["ttl"] is not None else 0  # type: ignore[assignment]
         merged_tags = tags if tags else (entry.get("tags") or "")
@@ -131,20 +122,18 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         else:
             expires_at = ""  # permanent
 
-        with T3Database(
-            tenant=get_credential("chroma_tenant"),
-            database=get_credential("chroma_database"),
-            api_key=get_credential("chroma_api_key"),
-            voyage_api_key=get_credential("voyage_api_key"),
-        ) as t3:
-            doc_id = t3.put(
-                collection=collection,
-                content=entry["content"],
-                title=entry["title"],
-                tags=merged_tags,
-                ttl_days=ttl_days,
-                expires_at=expires_at,
-            )
+        try:
+            t3 = t3_knowledge()
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
+        doc_id = t3.put(
+            collection=collection,
+            content=entry["content"],
+            title=entry["title"],
+            tags=merged_tags,
+            ttl_days=ttl_days,
+            expires_at=expires_at,
+        )
 
         if remove:
             db.delete(entry["project"], entry["title"])

@@ -968,3 +968,84 @@ def test_ef_override_bypasses_cache(mock_chromadb: tuple) -> None:
     assert ef1 is override_ef
     assert ef2 is override_ef
     assert db._ef_cache == {}  # cache not populated
+
+
+# ── I5: expire() must pass limit to col.get() ─────────────────────────────────
+
+
+def test_expire_passes_limit_to_col_get(mock_chromadb: tuple) -> None:
+    """I5: expire() col.get() must use limit= to prevent unbounded memory use on large collections."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_client.list_collections.return_value = ["knowledge__test"]
+    mock_client.get_collection.return_value = mock_col
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    db.expire()
+
+    assert mock_col.get.called, "col.get() should be called during expire()"
+    call_kwargs = mock_col.get.call_args.kwargs
+    assert "limit" in call_kwargs, "expire() col.get() must pass limit= to avoid unbounded fetches"
+
+
+# ── C3: list_collections thread-pool race ─────────────────────────────────────
+
+def test_list_collections_tolerates_not_found_race() -> None:
+    """C3: list_collections() skips a collection that disappears between list and count.
+
+    When a collection is listed but then deleted before the count query runs,
+    future.result() re-raises NotFoundError.  The fixed implementation must
+    catch it so the other collections are still returned.
+    """
+    from chromadb.errors import NotFoundError
+
+    mock_client = MagicMock()
+    col_stable = MagicMock()
+    col_stable.name = "knowledge__stable"
+    col_gone = MagicMock()
+    col_gone.name = "knowledge__gone"
+    mock_client.list_collections.return_value = [col_stable, col_gone]
+
+    stable_col = MagicMock()
+    stable_col.count.return_value = 3
+
+    def _get(name: str):
+        if name == "knowledge__gone":
+            raise NotFoundError("gone")
+        return stable_col
+
+    mock_client.get_collection.side_effect = _get
+
+    db = T3Database(_client=mock_client)
+    result = db.list_collections()
+
+    # Only the stable collection; no exception raised
+    assert result == [{"name": "knowledge__stable", "count": 3}]
+
+
+def test_t3database_get_collection_raw_delegates_to_client() -> None:
+    """Style: T3Database.get_collection_raw(name) must exist and delegate to
+    _client.get_collection(name) without side-effects."""
+    mock_client = MagicMock()
+    mock_raw_col = MagicMock()
+    mock_client.get_collection.return_value = mock_raw_col
+
+    db = T3Database(_client=mock_client)
+    result = db.get_collection_raw("knowledge__test")
+
+    mock_client.get_collection.assert_called_once_with("knowledge__test")
+    assert result is mock_raw_col
+
+
+def test_get_collection_raw_rejects_invalid_name() -> None:
+    """S1: get_collection_raw must validate the collection name and raise ValueError
+    for invalid names before ever touching the underlying client."""
+    mock_client = MagicMock()
+    db = T3Database(_client=mock_client)
+
+    # "bad" is only 3 chars but starts/ends ok. Use a name with colons (invalid charset).
+    with pytest.raises(ValueError):
+        db.get_collection_raw("invalid:name")
+
+    mock_client.get_collection.assert_not_called()

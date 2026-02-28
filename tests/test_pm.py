@@ -178,7 +178,7 @@ def test_pm_archive_calls_haiku_then_t3(db) -> None:
     mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku", return_value="# Archive summary") as mock_h:
-        with patch("nexus.pm.make_t3", return_value=mock_t3):
+        with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
     mock_h.assert_called_once()
@@ -196,7 +196,7 @@ def test_pm_archive_decays_t2_after_t3(db) -> None:
     mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku", return_value="# summary"):
-        with patch("nexus.pm.make_t3", return_value=mock_t3):
+        with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
     # All docs should now have ttl set (decay applied)
@@ -231,7 +231,7 @@ def test_pm_archive_idempotent_skips_synthesis(db) -> None:
     mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku") as mock_h:
-        with patch("nexus.pm.make_t3", return_value=mock_t3):
+        with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
     mock_h.assert_not_called()
@@ -248,7 +248,7 @@ def test_pm_archive_aborts_on_haiku_failure(db) -> None:
     mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku", side_effect=RuntimeError("API error")):
-        with patch("nexus.pm.make_t3", return_value=mock_t3):
+        with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
             with pytest.raises(RuntimeError, match="API error"):
                 pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
@@ -318,7 +318,7 @@ def test_pm_reference_dispatch_semantic_for_quoted_query(db) -> None:
     ]
     mock_t3.search.return_value = [{"content": "result", "distance": 0.1}]
 
-    with patch("nexus.pm.make_t3", return_value=mock_t3):
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
         results = pm_reference(db, query='"caching decisions"')
 
     mock_t3.search.assert_called_once()
@@ -332,7 +332,7 @@ def test_pm_reference_semantic_returns_empty_when_no_pm_collections(db) -> None:
     mock_t3 = MagicMock()
     mock_t3.list_collections.return_value = []  # no pm collections
 
-    with patch("nexus.pm.make_t3", return_value=mock_t3):
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
         results = pm_reference(db, query='"caching decisions"')
 
     assert results == []
@@ -347,7 +347,7 @@ def test_pm_reference_dispatch_semantic_for_question(db) -> None:
     ]
     mock_t3.search.return_value = []
 
-    with patch("nexus.pm.make_t3", return_value=mock_t3):
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
         pm_reference(db, query="how did we handle auth?")
 
     mock_t3.search.assert_called_once()
@@ -363,7 +363,7 @@ def test_pm_reference_dispatch_project_name_for_bare_word(db) -> None:
                                     "metadatas": [{"project": "myrepo"}]})
     )
 
-    with patch("nexus.pm.make_t3", return_value=mock_t3):
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
         results = pm_reference(db, query="myrepo")
 
     # Should use collection.get with where filter, not col.query (semantic)
@@ -408,7 +408,7 @@ def test_pm_archive_raises_value_error_for_empty_project(db) -> None:
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
 
-    with patch("nexus.pm.make_t3", return_value=mock_t3):
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
         with pytest.raises(ValueError, match="No PM docs found"):
             pm_archive(db, project="nonexistent", status="completed", archive_ttl=90)
 
@@ -426,7 +426,7 @@ def test_pm_archive_upsert_includes_required_metadata(db) -> None:
     mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku", return_value="# summary"):
-        with patch("nexus.pm.make_t3", return_value=mock_t3):
+        with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
     mock_t3.upsert_chunks.assert_called_once()
@@ -483,7 +483,7 @@ def test_pm_archive_writes_chunk_total_in_metadata(db) -> None:
 
     synthesis = "# Archive\n\n## Key Decisions\n- Used SQLite"
     with patch("nexus.pm._synthesize_haiku", return_value=synthesis):
-        with patch("nexus.pm.make_t3", return_value=mock_t3):
+        with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
     assert len(upserted_metadatas) >= 1
@@ -499,7 +499,7 @@ def test_pm_reference_returns_empty_when_collection_does_not_exist(db) -> None:
     mock_t3 = MagicMock()
     mock_t3.collection_exists.return_value = False  # collection not yet created
 
-    with patch("nexus.pm.make_t3", return_value=mock_t3):
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
         results = pm_reference(db, query="myrepo")
 
     assert results == []
@@ -751,7 +751,7 @@ def test_pm_reference_no_collection_returns_early(db) -> None:
     mock_t3 = MagicMock()
     mock_t3.collection_exists.return_value = False
 
-    with patch("nexus.pm.make_t3", return_value=mock_t3):
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
         results = pm_reference(db, query="nonexistent_project")
 
     assert results == []
@@ -829,7 +829,7 @@ def test_pm_archive_handles_non_integer_phase_tag(db) -> None:
     mock_t3.get_or_create_collection.return_value = mock_col
 
     with patch("nexus.pm._synthesize_haiku", return_value="# Archive summary"):
-        with patch("nexus.pm.make_t3", return_value=mock_t3):
+        with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
             # Should not raise — gracefully ignores the bad phase tag
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
@@ -867,7 +867,7 @@ def test_pm_archive_stores_multiple_chunks_for_long_synthesis(db) -> None:
     mock_t3.upsert_chunks.side_effect = capture_upsert
 
     with patch("nexus.pm._synthesize_haiku", return_value=long_synthesis):
-        with patch("nexus.pm.make_t3", return_value=mock_t3):
+        with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
     # Should have been called multiple times (once per chunk)
@@ -879,3 +879,114 @@ def test_pm_archive_stores_multiple_chunks_for_long_synthesis(db) -> None:
         meta = call_data["metadatas"][0]
         assert meta["chunk_total"] == len(upserted_calls)
         assert meta["chunk_index"] == i
+
+
+# ── nexus-pjsc.7: PM functions route to t3_knowledge() ───────────────────────
+
+def test_pm_archive_uses_t3_knowledge(db) -> None:
+    """P2: pm_archive calls t3_knowledge() not make_t3()."""
+    pm_init(db, project="myrepo")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.pm._synthesize_haiku", return_value="# summary"):
+        with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
+            pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
+
+    mock_t3.upsert_chunks.assert_called_once()
+
+
+def test_pm_reference_uses_t3_knowledge(db) -> None:
+    """P2: pm_reference calls t3_knowledge() not make_t3()."""
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = []
+
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
+        result = pm_reference(db, query='"caching decisions"')
+
+    assert result == []
+
+
+# ── I5: pm_search uses get_collection_raw not get_or_create_collection ───────
+
+def test_pm_reference_uses_get_collection_not_get_or_create(db) -> None:
+    """I5: pm_reference reads an existing T3 collection without the side effect of creating it.
+
+    After the collection_exists() guard confirms the collection is present,
+    the code should use get_collection_raw() (read-only) rather than
+    get_or_create_collection() which can silently create an empty collection
+    if it lost a race or the existence check is wrong.
+    """
+    mock_t3 = MagicMock()
+    mock_t3.collection_exists.return_value = True
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
+    mock_t3.get_collection_raw.return_value = mock_col
+
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
+        result = pm_reference(db, "myproject")
+
+    mock_t3.get_or_create_collection.assert_not_called()
+    mock_t3.get_collection_raw.assert_called_with("knowledge__pm__myproject")
+    assert result == []
+
+
+# ── C4: pm_reference must not open two t3_knowledge() instances ───────────────
+
+
+def test_pm_reference_single_t3_instance_semantic(db) -> None:
+    """C4: pm_reference creates exactly one t3_knowledge() for a semantic query."""
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = []
+
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3) as mock_factory:
+        pm_reference(db, "how do I configure nexus?")
+
+    mock_factory.assert_called_once()
+
+
+def test_pm_reference_single_t3_instance_project(db) -> None:
+    """C4: pm_reference creates exactly one t3_knowledge() for a project-name query."""
+    mock_t3 = MagicMock()
+    mock_t3.collection_exists.return_value = False
+
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3) as mock_factory:
+        pm_reference(db, "myproject")
+
+    mock_factory.assert_called_once()
+
+
+# ── I12: pm_archive idempotency must tolerate float pm_doc_count ──────────────
+
+
+def test_pm_archive_idempotent_with_float_pm_doc_count(db) -> None:
+    """I12: pm_archive skips synthesis when pm_doc_count stored as float (ChromaDB Cloud)."""
+    pm_init(db, project="myrepo")
+    entries = db.list_entries(project="myrepo")
+    doc_count = len(entries)
+    rows = [db.get(project="myrepo", title=e["title"]) for e in entries]
+    max_ts = max(r["timestamp"] for r in rows if r)
+
+    # Simulate ChromaDB returning int metadata as float (known Cloud client behaviour)
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["existing-id"],
+        "metadatas": [{
+            "store_type": "pm-archive",
+            "pm_doc_count": float(doc_count),   # ← float, not int
+            "pm_latest_timestamp": max_ts,
+            "chunk_total": 1,
+        }],
+    }
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.pm._synthesize_haiku") as mock_h, \
+         patch("nexus.pm.t3_knowledge", return_value=mock_t3):
+        pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
+
+    # float(4) == int(4) in Python, so idempotency should fire and skip synthesis
+    mock_h.assert_not_called()

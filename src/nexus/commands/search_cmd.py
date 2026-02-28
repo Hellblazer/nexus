@@ -1,17 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Callable
 
 import click
 
+import structlog
+
 from nexus.config import load_config
 from nexus.corpus import resolve_corpus
-from nexus.commands.store import _t3
+from nexus.db.t3 import T3Database
+from nexus.db.t3_stores import t3_code, t3_docs, t3_knowledge, t3_rdr
 from nexus.ripgrep_cache import search_ripgrep
 from nexus.formatters import format_json, format_plain_with_context, format_vimgrep
 from nexus.answer import answer_mode
 from nexus.scoring import apply_hybrid_scoring, rerank_results, round_robin_interleave
 from nexus.search_engine import agentic_search, fetch_mxbai_results, search_cross_corpus
 from nexus.types import SearchResult
+
+_log = structlog.get_logger(__name__)
 
 
 def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
@@ -30,10 +38,28 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
                 param_hint="'--where'",
             )
         key, _, value = pair.partition("=")
+        if not key:
+            raise click.BadParameter(
+                f"--where value {pair!r} has an empty key — KEY must be non-empty",
+                param_hint="'--where'",
+            )
         result[key] = value
     return result
 
+
 _CONTENT_MAX_CHARS: int = 200
+
+# Lambda wrapping is intentional: it provides late name binding so that
+# `patch("nexus.commands.search_cmd.t3_code", ...)` intercepts calls in tests.
+# The same factories appear in nexus.commands.collection._STORE_FACTORIES — the
+# duplication is intentional: each module needs its own module-scoped names so
+# that per-module patching works correctly in tests.
+_SEARCH_FACTORIES: dict[str, Callable[[], T3Database]] = {
+    "code": lambda: t3_code(),
+    "docs": lambda: t3_docs(),
+    "rdr": lambda: t3_rdr(),
+    "knowledge": lambda: t3_knowledge(),
+}
 
 # Directory where ripgrep cache files are stored (overridable in tests via monkeypatch)
 _CONFIG_DIR: Path = Path.home() / ".config" / "nexus"
@@ -68,7 +94,8 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
 @click.argument("query")
 @click.argument("path", required=False, default=None)
 @click.option("--corpus", multiple=True, default=("knowledge", "code", "docs"),
-              show_default=True, help="Corpus prefix or full collection name (repeatable)")
+              show_default=True, help="Corpus prefix or full collection name (repeatable). "
+              "Note: rdr is excluded from the default set; use --corpus rdr or --type rdr to search it.")
 @click.option("--n", "-m", "--max-results", "n", default=10, show_default=True,
               help="Max results to return")
 @click.option("--hybrid", is_flag=True, default=False,
@@ -100,6 +127,10 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               help="Show N lines of context after each result chunk (alias for -A N)")
 @click.option("--reverse", "-r", is_flag=True, default=False,
               help="Reverse output order (highest-scoring last)")
+@click.option("--type", "store_type",
+              type=click.Choice(["code", "docs", "rdr", "knowledge"]),
+              default=None,
+              help="Limit search to a specific store (default: all 4).")
 def search_cmd(
     query: str,
     path: str | None,
@@ -119,6 +150,7 @@ def search_cmd(
     lines_after: int,
     lines_context: int,
     reverse: bool,
+    store_type: str | None,
 ) -> None:
     """Semantic search across T3 knowledge collections.
 
@@ -143,19 +175,35 @@ def search_cmd(
     except click.BadParameter as exc:
         raise click.ClickException(str(exc)) from exc
 
-    db = _t3()
-    all_collections = [c["name"] for c in db.list_collections()]
+    # Build (db, target_collections) pairs — one per store selected by --type.
+    candidate_factories = (
+        {store_type: _SEARCH_FACTORIES[store_type]}
+        if store_type is not None
+        else _SEARCH_FACTORIES
+    )
+    store_entries: list[tuple[T3Database, list[str]]] = []
+    for _stype, factory in candidate_factories.items():
+        try:
+            db = factory()
+            all_cols = [c["name"] for c in db.list_collections()]
+            if store_type is not None:
+                # --type already constrains to one store; corpus filter is irrelevant.
+                target: list[str] = all_cols
+            else:
+                target = []
+                for c in corpus:
+                    matched = resolve_corpus(c, all_cols)
+                    target.extend(matched)
+                target = list(dict.fromkeys(target))
+            if target:
+                store_entries.append((db, target))
+        except RuntimeError as exc:
+            if store_type is not None:
+                # User explicitly named this store — surface the credential error.
+                raise click.ClickException(str(exc)) from exc
+            _log.debug("store not configured, skipping", store_type=_stype)
 
-    target_collections: list[str] = []
-    for c in corpus:
-        matched = resolve_corpus(c, all_collections)
-        if not matched:
-            click.echo(f"Warning: no collections match --corpus {c!r}", err=True)
-        target_collections.extend(matched)
-
-    target_collections = list(dict.fromkeys(target_collections))
-
-    if not target_collections and not mxbai:
+    if not store_entries and not mxbai:
         click.echo("no matching collections found — use: nx collection list", err=True)
         return
 
@@ -163,10 +211,12 @@ def search_cmd(
     reranker_model = config["embeddings"]["rerankerModel"]
 
     def _retrieve(q: str) -> list[SearchResult]:
-        raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter)
+        raw: list[SearchResult] = []
+        for _db, _cols in store_entries:
+            raw.extend(search_cross_corpus(q, _cols, n_results=n, t3=_db, where=where_filter))
         if mxbai:
             stores = config.get("mxbai", {}).get("stores", [])
-            num = len(target_collections) or 1
+            num = sum(len(cols) for _, cols in store_entries) or 1
             per_k = max(5, (n // num) * 2)
             mxbai_results = fetch_mxbai_results(q, stores=stores, per_k=per_k)
             raw.extend(mxbai_results)

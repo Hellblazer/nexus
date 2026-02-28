@@ -309,7 +309,7 @@ def test_pm_promote_success(runner: CliRunner) -> None:
     with (
         db_patch,
         _patch_infer("proj"),
-        patch("nexus.commands.store._t3", return_value=mock_t3),
+        patch("nexus.commands.pm.t3_knowledge", return_value=mock_t3),
         patch("nexus.commands.pm.pm_promote", return_value="abc123def456") as mock_promote,
     ):
         result = runner.invoke(main, ["pm", "promote", "METHODOLOGY.md"])
@@ -332,7 +332,7 @@ def test_pm_promote_key_error(runner: CliRunner) -> None:
     with (
         db_patch,
         _patch_infer("proj"),
-        patch("nexus.commands.store._t3"),
+        patch("nexus.commands.pm.t3_knowledge"),
         patch("nexus.commands.pm.pm_promote", side_effect=KeyError("'MISSING.md' not found")),
     ):
         result = runner.invoke(main, ["pm", "promote", "MISSING.md"])
@@ -348,7 +348,7 @@ def test_pm_promote_custom_collection_and_ttl(runner: CliRunner) -> None:
     with (
         db_patch,
         _patch_infer("proj"),
-        patch("nexus.commands.store._t3", return_value=mock_t3),
+        patch("nexus.commands.pm.t3_knowledge", return_value=mock_t3),
         patch("nexus.commands.pm.pm_promote", return_value="someid") as mock_promote,
     ):
         result = runner.invoke(
@@ -498,3 +498,23 @@ def test_infer_project_fallback_to_cwd() -> None:
             name = _infer_project()
 
     assert name == "fallback-dir"
+
+
+# ── nexus-pjsc.7: promote_cmd routes to t3_knowledge() ───────────────────────
+
+def test_pm_promote_cmd_uses_t3_knowledge(runner: CliRunner) -> None:
+    """P2: pm promote_cmd calls t3_knowledge() not store._t3()."""
+    with patch("nexus.pm.pm_promote", return_value="doc-id-xyz") as mock_pm_promote:
+        with patch("nexus.commands.pm.t3_knowledge") as mock_t3_fn:
+            mock_t3 = MagicMock()
+            mock_t3_fn.return_value = mock_t3
+            with patch("nexus.commands.pm.T2Database") as mock_t2_cls:
+                mock_db = MagicMock()
+                mock_t2_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+                mock_t2_cls.return_value.__exit__ = MagicMock(return_value=False)
+                result = runner.invoke(
+                    main,
+                    ["pm", "promote", "METHODOLOGY.md", "--project", "myrepo"],
+                )
+    assert result.exit_code == 0, result.output
+    mock_t3_fn.assert_called_once()
