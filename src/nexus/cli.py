@@ -10,6 +10,7 @@ from nexus.commands.doctor import doctor_cmd
 from nexus.commands.hook import hook_group
 from nexus.commands.index import index
 from nexus.commands.memory import memory
+from nexus.commands.migrate import migrate
 from nexus.commands.pm import pm
 from nexus.commands.scratch import scratch
 from nexus.commands.search_cmd import search_cmd
@@ -45,6 +46,7 @@ hook_group.hidden = True
 main.add_command(hook_group, name="hook")
 main.add_command(index)
 main.add_command(memory)
+main.add_command(migrate)
 main.add_command(pm)
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")

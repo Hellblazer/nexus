@@ -72,7 +72,9 @@ Credentials are stored in `~/.config/nexus/config.yml`. Environment variables al
 | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 
 **ChromaDB tenant** is the UUID shown on your Cloud settings page, not the URL slug.
-**ChromaDB database** is usually `default_database`.
+**ChromaDB database** is the base name for your four T3 databases. If you set `chroma_database = nexus`, Nexus will use `nexus_code`, `nexus_docs`, `nexus_rdr`, and `nexus_knowledge`. You must create all four in your ChromaDB Cloud dashboard before running `nx index` or `nx store`.
+
+**Creating the four databases**: In the ChromaDB Cloud dashboard, create four databases named `{base}_code`, `{base}_docs`, `{base}_rdr`, and `{base}_knowledge` (where `{base}` is your chosen base name). Run `nx doctor` to verify all four are reachable.
 
 ## Verify
 

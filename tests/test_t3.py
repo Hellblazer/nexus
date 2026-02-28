@@ -21,12 +21,16 @@ def mock_chromadb():
 # ── AC1: CloudClient init ─────────────────────────────────────────────────────
 
 def test_cloudclient_init(mock_chromadb: tuple) -> None:
-    """CloudClient receives the correct tenant, database, api_key arguments."""
+    """CloudClient is constructed four times — once per store type with a suffixed database name."""
     chromadb_m, _ = mock_chromadb
     T3Database(tenant="my-tenant", database="my-db", api_key="secret")
-    chromadb_m.CloudClient.assert_called_once_with(
-        tenant="my-tenant", database="my-db", api_key="secret"
-    )
+    assert chromadb_m.CloudClient.call_count == 4
+    calls = chromadb_m.CloudClient.call_args_list
+    databases = {c.kwargs["database"] for c in calls}
+    assert databases == {"my-db_code", "my-db_docs", "my-db_rdr", "my-db_knowledge"}
+    for call in calls:
+        assert call.kwargs["tenant"] == "my-tenant"
+        assert call.kwargs["api_key"] == "secret"
 
 
 # ── AC2: VoyageAI embedding function selection ────────────────────────────────
@@ -390,7 +394,7 @@ def test_make_t3_returns_t3database(mock_chromadb: tuple) -> None:
 
 
 def test_make_t3_uses_credentials(mock_chromadb: tuple) -> None:
-    """make_t3() passes all four credentials to T3Database."""
+    """make_t3() passes credentials to T3Database, which creates four CloudClients."""
     from nexus.db import make_t3
 
     creds = {
@@ -402,15 +406,15 @@ def test_make_t3_uses_credentials(mock_chromadb: tuple) -> None:
     with patch("nexus.db.get_credential", side_effect=lambda k: creds.get(k, "")):
         db = make_t3()
 
-    mock_chromadb[0].CloudClient.assert_called_once_with(
-        tenant="my-tenant", database="my-db", api_key="ck-abc"
-    )
+    assert mock_chromadb[0].CloudClient.call_count == 4
+    calls = mock_chromadb[0].CloudClient.call_args_list
+    databases = {c.kwargs["database"] for c in calls}
+    assert databases == {"my-db_code", "my-db_docs", "my-db_rdr", "my-db_knowledge"}
     assert db._voyage_api_key == "vk-xyz"
 
 
 def test_make_t3_client_injection(mock_chromadb: tuple) -> None:
     """make_t3(_client=...) injects a test client, bypassing CloudClient."""
-    import chromadb as _chromadb
     from nexus.db import make_t3
 
     fake_client = MagicMock()
@@ -419,7 +423,9 @@ def test_make_t3_client_injection(mock_chromadb: tuple) -> None:
 
     # CloudClient should NOT have been called because _client was injected
     mock_chromadb[0].CloudClient.assert_not_called()
-    assert db._client is fake_client
+    # All four store types mapped to the same injected client
+    assert all(c is fake_client for c in db._clients.values())
+    assert set(db._clients.keys()) == {"code", "docs", "rdr", "knowledge"}
 
 
 # ── nexus-tyo: upsert_chunks() ────────────────────────────────────────────────
@@ -968,3 +974,145 @@ def test_ef_override_bypasses_cache(mock_chromadb: tuple) -> None:
     assert ef1 is override_ef
     assert ef2 is override_ef
     assert db._ef_cache == {}  # cache not populated
+
+
+# ── RDR-004: Four-store routing (P1–P8) ─────────────────────────────────────
+
+@pytest.fixture
+def four_clients():
+    """Four distinct mock ChromaDB clients for routing tests.
+
+    Uses CloudClient.side_effect so each of the four CloudClient() constructor
+    calls in T3Database.__init__ returns a different mock.  The dict is keyed
+    by store type name ("code", "docs", "rdr", "knowledge") so test assertions
+    can say ``clients["code"].get_or_create_collection.assert_called_once()``.
+    """
+    clients = {t: MagicMock(name=f"client_{t}") for t in ("code", "docs", "rdr", "knowledge")}
+    with patch("nexus.db.t3.chromadb") as m:
+        m.CloudClient.side_effect = [
+            clients["code"], clients["docs"], clients["rdr"], clients["knowledge"]
+        ]
+        db = T3Database(tenant="t", database="d", api_key="k")
+        yield db, clients
+
+
+# P1
+def test_t3_routes_code_collection_to_code_client(four_clients) -> None:
+    """get_or_create_collection routes code__ to the code client only."""
+    db, clients = four_clients
+    db.get_or_create_collection("code__myrepo")
+    clients["code"].get_or_create_collection.assert_called_once()
+    clients["docs"].get_or_create_collection.assert_not_called()
+    clients["rdr"].get_or_create_collection.assert_not_called()
+    clients["knowledge"].get_or_create_collection.assert_not_called()
+
+
+# P2
+def test_t3_routes_docs_collection_to_docs_client(four_clients) -> None:
+    """get_or_create_collection routes docs__ to the docs client only."""
+    db, clients = four_clients
+    db.get_or_create_collection("docs__corpus")
+    clients["docs"].get_or_create_collection.assert_called_once()
+    clients["code"].get_or_create_collection.assert_not_called()
+    clients["rdr"].get_or_create_collection.assert_not_called()
+    clients["knowledge"].get_or_create_collection.assert_not_called()
+
+
+# P3
+def test_t3_routes_rdr_collection_to_rdr_client(four_clients) -> None:
+    """get_or_create_collection routes rdr__ to the rdr client only."""
+    db, clients = four_clients
+    db.get_or_create_collection("rdr__nexus")
+    clients["rdr"].get_or_create_collection.assert_called_once()
+    clients["code"].get_or_create_collection.assert_not_called()
+    clients["docs"].get_or_create_collection.assert_not_called()
+    clients["knowledge"].get_or_create_collection.assert_not_called()
+
+
+# P4
+def test_t3_routes_knowledge_collection_to_knowledge_client(four_clients) -> None:
+    """get_or_create_collection routes knowledge__ to the knowledge client only."""
+    db, clients = four_clients
+    db.get_or_create_collection("knowledge__notes")
+    clients["knowledge"].get_or_create_collection.assert_called_once()
+    clients["code"].get_or_create_collection.assert_not_called()
+    clients["docs"].get_or_create_collection.assert_not_called()
+    clients["rdr"].get_or_create_collection.assert_not_called()
+
+
+# P5
+def test_t3_unknown_prefix_falls_back_to_knowledge_client(four_clients) -> None:
+    """An unrecognised prefix silently routes to the knowledge client."""
+    db, clients = four_clients
+    db.get_or_create_collection("unknown__something")
+    clients["knowledge"].get_or_create_collection.assert_called_once()
+    clients["code"].get_or_create_collection.assert_not_called()
+    clients["docs"].get_or_create_collection.assert_not_called()
+    clients["rdr"].get_or_create_collection.assert_not_called()
+
+
+# P6
+def test_t3_list_collections_fans_out_across_all_four_clients(four_clients) -> None:
+    """list_collections() queries all four clients and merges deduplicated results."""
+    db, clients = four_clients
+    clients["code"].list_collections.return_value = ["code__repo1"]
+    clients["docs"].list_collections.return_value = ["docs__corpus1"]
+    clients["rdr"].list_collections.return_value = []
+    clients["knowledge"].list_collections.return_value = ["knowledge__notes"]
+    mock_col = MagicMock()
+    mock_col.count.return_value = 3
+    for c in clients.values():
+        c.get_collection.return_value = mock_col
+
+    result = db.list_collections()
+
+    names = {r["name"] for r in result}
+    assert "code__repo1" in names
+    assert "docs__corpus1" in names
+    assert "knowledge__notes" in names
+    # All four clients must have been queried for collection names
+    for c in clients.values():
+        c.list_collections.assert_called_once()
+
+
+# P7
+def test_t3_expire_only_touches_knowledge_client(four_clients) -> None:
+    """expire() only queries the knowledge client — never code, docs, or rdr."""
+    db, clients = four_clients
+    clients["knowledge"].list_collections.return_value = ["knowledge__notes"]
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    clients["knowledge"].get_collection.return_value = mock_col
+
+    db.expire()
+
+    clients["knowledge"].list_collections.assert_called_once()
+    clients["code"].list_collections.assert_not_called()
+    clients["docs"].list_collections.assert_not_called()
+    clients["rdr"].list_collections.assert_not_called()
+
+
+# P8
+def test_t3_single_mock_injection_still_works(mock_chromadb: tuple) -> None:
+    """_client=mock injection maps all four store types to the same client (backward compat)."""
+    _, mock_client = mock_chromadb
+    db = T3Database(_client=mock_client)
+    assert all(c is mock_client for c in db._clients.values())
+    assert set(db._clients.keys()) == {"code", "docs", "rdr", "knowledge"}
+
+
+# Critic Issue 3: constructor creates four distinct clients (not same return_value)
+def test_t3_constructor_creates_four_distinct_clients(mock_chromadb: tuple) -> None:
+    """T3Database(tenant, database, api_key) creates four *distinct* CloudClient instances."""
+    chromadb_m, _ = mock_chromadb
+    distinct_mocks = [MagicMock(name=f"client_{i}") for i in range(4)]
+    chromadb_m.CloudClient.side_effect = distinct_mocks
+
+    db = T3Database(tenant="t", database="nexus", api_key="k")
+
+    client_list = list(db._clients.values())
+    assert len(set(id(c) for c in client_list)) == 4, "All four clients must be distinct"
+    calls = chromadb_m.CloudClient.call_args_list
+    assert len(calls) == 4
+    databases = {c.kwargs["database"] for c in calls}
+    assert databases == {"nexus_code", "nexus_docs", "nexus_rdr", "nexus_knowledge"}

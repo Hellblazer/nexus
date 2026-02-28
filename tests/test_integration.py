@@ -17,16 +17,36 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 
+
+def _t3_reachable() -> bool:
+    """Return True only when all T3 env vars are set AND the four cloud databases exist."""
+    if not all([
+        os.environ.get("CHROMA_API_KEY"),
+        os.environ.get("VOYAGE_API_KEY"),
+        os.environ.get("CHROMA_TENANT"),
+        os.environ.get("CHROMA_DATABASE"),
+    ]):
+        return False
+    try:
+        from nexus.db import make_t3
+        make_t3()
+        return True
+    except Exception:
+        return False
+
+
+# Cache the result so the check is only performed once per test session.
+_T3_AVAILABLE: bool = _t3_reachable()
+
 # ── Marks ─────────────────────────────────────────────────────────────────────
 
 requires_t3 = pytest.mark.skipif(
-    not (
-        os.environ.get("CHROMA_API_KEY")
-        and os.environ.get("VOYAGE_API_KEY")
-        and os.environ.get("CHROMA_TENANT")
-        and os.environ.get("CHROMA_DATABASE")
+    not _T3_AVAILABLE,
+    reason=(
+        "T3 integration requires CHROMA_API_KEY, VOYAGE_API_KEY, CHROMA_TENANT, "
+        "CHROMA_DATABASE, and the four ChromaDB Cloud databases "
+        "({base}_code, _docs, _rdr, _knowledge) to exist"
     ),
-    reason="T3 integration requires CHROMA_API_KEY, VOYAGE_API_KEY, CHROMA_TENANT, CHROMA_DATABASE",
 )
 
 requires_anthropic = pytest.mark.skipif(

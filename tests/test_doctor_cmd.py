@@ -21,6 +21,7 @@ def test_doctor_all_healthy() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.serve._read_pid", return_value=12345),
         patch("nexus.commands.serve._process_running", return_value=True),
+        patch("chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -63,6 +64,7 @@ def test_doctor_missing_rg() -> None:
         patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
         patch("nexus.commands.serve._read_pid", return_value=None),
         patch("nexus.commands.serve._process_running", return_value=False),
+        patch("chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -82,6 +84,7 @@ def test_doctor_server_not_running() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.serve._read_pid", return_value=None),
         patch("nexus.commands.serve._process_running", return_value=False),
+        patch("chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -127,6 +130,7 @@ def test_doctor_python_version_shown() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.serve._read_pid", return_value=12345),
         patch("nexus.commands.serve._process_running", return_value=True),
+        patch("chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -143,6 +147,7 @@ def test_doctor_python_version_too_old_fails() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.serve._read_pid", return_value=12345),
         patch("nexus.commands.serve._process_running", return_value=True),
+        patch("chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -182,6 +187,7 @@ def test_doctor_missing_rg_shows_platform_hints() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value=None),
         patch("nexus.commands.serve._read_pid", return_value=None),
         patch("nexus.commands.serve._process_running", return_value=False),
+        patch("chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 

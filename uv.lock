@@ -447,7 +447,7 @@ wheels = [
 
 [[package]]
 name = "conexus"
-version = "1.0.0rc3"
+version = "1.0.0rc5"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },

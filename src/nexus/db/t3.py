@@ -16,19 +16,32 @@ from nexus.corpus import embedding_model_for_collection, index_model_for_collect
 
 _log = structlog.get_logger(__name__)
 
+# The four ChromaDB Cloud databases, one per content type.
+# ``chroma_database`` in config is the *base name*; each store is
+# ``{base}_{type}``.  Example: base="nexus" → nexus_code, nexus_docs,
+# nexus_rdr, nexus_knowledge.
+_STORE_TYPES: tuple[str, ...] = ("code", "docs", "rdr", "knowledge")
+
 
 class T3Database:
     """T3 ChromaDB CloudClient permanent knowledge store.
 
-    Uses ``chromadb.CloudClient`` + ``VoyageAIEmbeddingFunction`` (voyage-4
-    universally for all collection types at query time).
+    Uses four separate ``chromadb.CloudClient`` instances — one per content
+    type — derived from the ``chroma_database`` base name:
 
-    Each collection is namespaced by type: ``code__{repo}``, ``docs__{corpus}``,
-    ``knowledge__{topic}``.
+    - ``{base}_code``      for ``code__*`` collections
+    - ``{base}_docs``      for ``docs__*`` collections
+    - ``{base}_rdr``       for ``rdr__*`` collections
+    - ``{base}_knowledge`` for ``knowledge__*`` collections and fallback
 
-    The ``_client`` and ``_ef_override`` keyword arguments are injection points
-    for testing — pass an ``EphemeralClient`` and ``DefaultEmbeddingFunction``
-    to run the full code path without any API keys.
+    All routing is internal to this class.  Every public caller
+    (``search_cmd``, ``indexer``, ``pm``, etc.) remains unchanged.
+
+    The ``_client`` and ``_ef_override`` keyword arguments are injection
+    points for testing — pass an ``EphemeralClient`` and
+    ``DefaultEmbeddingFunction`` to run the full code path without any API
+    keys.  When ``_client`` is provided, all four store types are mapped to
+    the same client (single-mock backward compatibility).
     """
 
     def __init__(
@@ -46,11 +59,23 @@ class T3Database:
         self._ef_cache: dict[str, object] = {}
         self._ef_lock = threading.Lock()
         if _client is not None:
-            self._client = _client
+            # Test injection: single client serves all store types.
+            self._clients: dict[str, object] = {t: _client for t in _STORE_TYPES}
         else:
-            self._client = chromadb.CloudClient(
-                tenant=tenant, database=database, api_key=api_key
-            )
+            _clients: dict[str, object] = {}
+            for t in _STORE_TYPES:
+                db_name = f"{database}_{t}"
+                try:
+                    _clients[t] = chromadb.CloudClient(
+                        tenant=tenant, database=db_name, api_key=api_key
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to connect to ChromaDB Cloud database {db_name!r}: {exc}\n"
+                        f"Ensure these four databases exist in your ChromaDB Cloud dashboard:\n"
+                        + "\n".join(f"  - {database}_{t2}" for t2 in _STORE_TYPES)
+                    ) from exc
+            self._clients = _clients
 
     # ── Context manager (no-op: CloudClient is stateless REST) ───────────────
 
@@ -61,6 +86,27 @@ class T3Database:
         pass  # ChromaDB CloudClient is HTTP-based; no persistent connection to close.
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _client_for(self, collection_name: str) -> object:
+        """Route a collection name to the correct ChromaDB client.
+
+        Routing is by prefix (the part before ``__``):
+        - ``code__*``      → code client
+        - ``docs__*``      → docs client
+        - ``rdr__*``       → rdr client
+        - ``knowledge__*`` → knowledge client
+        - no ``__`` or unknown prefix → knowledge client (with a warning)
+        """
+        prefix = collection_name.split("__")[0] if "__" in collection_name else "knowledge"
+        client = self._clients.get(prefix)
+        if client is None:
+            _log.warning(
+                "unknown_collection_prefix",
+                prefix=prefix,
+                collection=collection_name,
+            )
+            client = self._clients["knowledge"]
+        return client
 
     def _embedding_fn(self, collection_name: str):
         if self._ef_override is not None:
@@ -81,7 +127,7 @@ class T3Database:
         """Get or create a T3 collection with the appropriate embedding function."""
         from nexus.corpus import validate_collection_name
         validate_collection_name(name)
-        return self._client.get_or_create_collection(
+        return self._client_for(name).get_or_create_collection(
             name, embedding_function=self._embedding_fn(name)
         )
 
@@ -221,7 +267,7 @@ class T3Database:
         results: list[dict] = []
         for name in collection_names:
             try:
-                col = self._client.get_collection(
+                col = self._client_for(name).get_collection(
                     name, embedding_function=self._embedding_fn(name)
                 )
             except _ChromaNotFoundError:
@@ -252,12 +298,17 @@ class T3Database:
     def expire(self) -> int:
         """Delete all expired entries from ``knowledge__*`` collections.
 
+        Only queries the knowledge store — TTL-managed entries are written
+        via ``nx store put`` which routes to the knowledge store.
+
+        **Precondition**: the ``{base}_knowledge`` ChromaDB Cloud database must
+        exist before calling this method.  If the database has not yet been
+        created (e.g. the user upgraded but has not run ``nx migrate t3``),
+        the method logs a warning and returns 0 rather than raising.
+
         Only removes entries where ``ttl_days > 0`` AND ``expires_at != ""``
         AND ``expires_at < now``. Permanent entries (``ttl_days=0``,
         ``expires_at=""``) are always preserved.
-
-        Note: Intentionally bypasses _embedding_fn / _ef_cache since expire()
-        only needs metadata-only operations (get + delete), not embedding queries.
 
         Returns the total number of deleted documents.
         """
@@ -267,11 +318,17 @@ class T3Database:
         now_iso = datetime.now(UTC).isoformat()
         ttl_where: dict = {"ttl_days": {"$gt": 0}}
         total = 0
-        for col_or_name in self._client.list_collections():
+        kc = self._clients["knowledge"]
+        try:
+            collections = kc.list_collections()
+        except _ChromaNotFoundError:
+            _log.warning("expire_skipped_knowledge_store_not_found")
+            return 0
+        for col_or_name in collections:
             name = col_or_name if isinstance(col_or_name, str) else col_or_name.name
             if not name.startswith("knowledge__"):
                 continue
-            col = self._client.get_collection(name)
+            col = kc.get_collection(name)
             result = col.get(where=ttl_where, include=["metadatas"])
             expired_ids = [
                 doc_id
@@ -293,7 +350,7 @@ class T3Database:
         list when the collection does not exist.
         """
         try:
-            col = self._client.get_collection(collection)
+            col = self._client_for(collection).get_collection(collection)
         except _ChromaNotFoundError:
             return []
         result = col.get(include=["metadatas"], limit=limit)
@@ -305,21 +362,34 @@ class T3Database:
     def list_collections(self) -> list[dict]:
         """Return all T3 collections with their document counts.
 
-        Count queries are parallelized (up to 8 concurrent requests) to
-        reduce wall-clock time from O(N) sequential HTTP calls to roughly
-        O(N/8).
+        Fans out across all four store clients, deduplicates by collection
+        name (relevant when all four clients are the same mock in tests), and
+        parallelizes count queries up to 8 concurrent requests.
+
+        Note: The enumeration phase makes four sequential HTTP calls (one per
+        store client) before the parallel count phase begins.  This is
+        acceptable because ``list_collections`` is only called from
+        non-hot-path commands (``nx collections``, ``nx store list``).
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        seen: set[str] = set()
         names: list[str] = []
-        for col_or_name in self._client.list_collections():
-            names.append(col_or_name if isinstance(col_or_name, str) else col_or_name.name)
+        for client in self._clients.values():
+            try:
+                for col_or_name in client.list_collections():
+                    n = col_or_name if isinstance(col_or_name, str) else col_or_name.name
+                    if n not in seen:
+                        names.append(n)
+                        seen.add(n)
+            except _ChromaNotFoundError:
+                continue  # store not yet created, skip gracefully
 
         if not names:
             return []
 
         def _count(name: str) -> dict:
-            col = self._client.get_collection(name)
+            col = self._client_for(name).get_collection(name)
             return {"name": name, "count": col.count()}
 
         result: list[dict] = []
@@ -332,19 +402,19 @@ class T3Database:
     def collection_exists(self, name: str) -> bool:
         """Return True if the collection already exists in T3 (no create side-effect)."""
         try:
-            self._client.get_collection(name)
+            self._client_for(name).get_collection(name)
             return True
         except _ChromaNotFoundError:
             return False
 
     def delete_collection(self, name: str) -> None:
         """Delete a T3 collection entirely."""
-        self._client.delete_collection(name)
+        self._client_for(name).delete_collection(name)
 
     def delete_by_source(self, collection_name: str, source_path: str) -> int:
         """Delete all chunks for a given source path. Returns count deleted."""
         try:
-            col = self._client.get_collection(collection_name)
+            col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
             return 0
         existing = col.get(where={"source_path": source_path}, include=[])
@@ -359,7 +429,7 @@ class T3Database:
         Raises KeyError if the collection does not exist.
         """
         try:
-            col = self._client.get_collection(name)
+            col = self._client_for(name).get_collection(name)
         except _ChromaNotFoundError:
             raise KeyError(f"Collection not found: {name!r}") from None
         return {"count": col.count(), "metadata": col.metadata or {}}
@@ -373,7 +443,7 @@ class T3Database:
         Raises KeyError if the collection does not exist.
         """
         try:
-            col = self._client.get_collection(collection_name)
+            col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
             raise KeyError(f"Collection not found: {collection_name!r}") from None
         return {

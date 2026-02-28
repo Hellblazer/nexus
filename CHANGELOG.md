@@ -8,6 +8,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.0.0rc5] - 2026-02-28
 
+### Added
+- **Four-store T3 architecture** (RDR-004): T3 now routes collections to four dedicated
+  ChromaDB Cloud databases (`{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`),
+  one per content type. All routing is internal to `T3Database`; no CLI commands change.
+- `nx migrate t3`: new command that copies collections from an old single-database T3 store
+  to the new four-store layout. Idempotent; copies embeddings verbatim (no re-embedding).
+- `nx doctor` now checks connectivity to all four T3 databases when credentials are present.
+
 ### Fixed
 - Eliminated spurious per-corpus warning noise during `nx search`: warnings now fire once per unmatched corpus term across all collections, not once per internal resolver call
 

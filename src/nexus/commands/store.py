@@ -35,7 +35,10 @@ def _t3() -> T3Database:
         raise click.ClickException(
             f"{', '.join(missing)} not set — run: nx config init"
         )
-    return make_t3()
+    try:
+        return make_t3()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @click.group()

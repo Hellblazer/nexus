@@ -85,12 +85,35 @@ def doctor_cmd() -> None:
     # ── CHROMA_DATABASE ───────────────────────────────────────────────────────
     chroma_database = get_credential("chroma_database")
     lines.append(_check_line("ChromaDB  (CHROMA_DATABASE)", bool(chroma_database),
-                              "set" if chroma_database else "not set"))
+                              chroma_database if chroma_database else "not set"))
     if not chroma_database:
         failed = True
         _fix(lines,
              "nx config set chroma_database <your-database>",
              "Get value: https://trychroma.com  (Dashboard → Settings)")
+
+    # ── ChromaDB four-store databases ────────────────────────────────────────
+    if chroma_key and chroma_tenant and chroma_database:
+        from nexus.db.t3 import _STORE_TYPES
+        import chromadb
+        db_ok = True
+        for t in _STORE_TYPES:
+            db_name = f"{chroma_database}_{t}"
+            try:
+                chromadb.CloudClient(
+                    tenant=chroma_tenant, database=db_name, api_key=chroma_key
+                )
+                lines.append(_check_line(f"ChromaDB  ({db_name})", True, "reachable"))
+            except Exception as exc:
+                db_ok = False
+                failed = True
+                lines.append(_check_line(f"ChromaDB  ({db_name})", False,
+                                          f"not reachable: {exc}"))
+        if not db_ok:
+            _fix(lines,
+                 f"Create these databases in your ChromaDB Cloud dashboard:",
+                 *[f"  - {chroma_database}_{t}" for t in _STORE_TYPES],
+                 "Then run: nx migrate t3  (to copy data from the old single store)")
 
     # ── VOYAGE_API_KEY ────────────────────────────────────────────────────────
     voyage_key = get_credential("voyage_api_key")
