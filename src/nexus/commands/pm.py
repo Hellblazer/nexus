@@ -7,7 +7,6 @@ import click
 from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.config import load_config
 from nexus.db.t2 import T2Database
-from nexus.db import make_t3
 from nexus.db.t3_stores import t3_knowledge
 from nexus.pm import (
     pm_archive,

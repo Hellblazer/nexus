@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from nexus.config import HAIKU_MODEL, get_credential
-from nexus.db import make_t3
 from nexus.db.t3_stores import t3_knowledge
 
 if TYPE_CHECKING:

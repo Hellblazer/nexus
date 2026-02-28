@@ -5,38 +5,8 @@ from pathlib import Path
 import click
 
 from nexus.corpus import t3_collection_name
-from nexus.db import make_t3
-from nexus.db.t3 import T3Database
 from nexus.db.t3_stores import t3_knowledge
 from nexus.ttl import parse_ttl
-
-
-def _t3() -> T3Database:
-    from nexus.config import get_credential
-
-    tenant = get_credential("chroma_tenant")
-    database = get_credential("chroma_database")
-    api_key = get_credential("chroma_api_key")
-    voyage_api_key = get_credential("voyage_api_key")
-
-    if not api_key:
-        raise click.ClickException(
-            "chroma_api_key not set — run: nx config set chroma_api_key <value>"
-        )
-    if not voyage_api_key:
-        raise click.ClickException(
-            "voyage_api_key not set — run: nx config set voyage_api_key <value>"
-        )
-    if not tenant or not database:
-        missing = []
-        if not tenant:
-            missing.append("chroma_tenant")
-        if not database:
-            missing.append("chroma_database")
-        raise click.ClickException(
-            f"{', '.join(missing)} not set — run: nx config init"
-        )
-    return make_t3()
 
 
 @click.group()

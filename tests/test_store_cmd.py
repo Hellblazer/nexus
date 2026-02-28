@@ -35,6 +35,17 @@ def _patch_search_knowledge(mock_db: MagicMock):
         yield
 
 
+@contextmanager
+def _patch_collection_knowledge(mock_db: MagicMock):
+    """Patch all 4 collection store factories: knowledge → mock_db, others → RuntimeError."""
+    _re = RuntimeError("not configured")
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db), \
+         patch("nexus.commands.collection.t3_code", side_effect=_re), \
+         patch("nexus.commands.collection.t3_docs", side_effect=_re), \
+         patch("nexus.commands.collection.t3_rdr", side_effect=_re):
+        yield
+
+
 # ── t3_knowledge() credential guard ───────────────────────────────────────────
 
 def test_store_put_missing_voyage_api_key(
@@ -239,7 +250,7 @@ def test_collection_list_empty(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_collections.return_value = []
 
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+    with _patch_collection_knowledge(mock_db):
         result = runner.invoke(main, ["collection", "list"])
 
     assert result.exit_code == 0
@@ -253,7 +264,7 @@ def test_collection_list_shows_names_and_counts(runner: CliRunner, env_creds) ->
         {"name": "knowledge__sec", "count": 7},
     ]
 
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+    with _patch_collection_knowledge(mock_db):
         result = runner.invoke(main, ["collection", "list"])
 
     assert result.exit_code == 0
