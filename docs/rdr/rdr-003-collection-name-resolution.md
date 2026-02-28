@@ -445,3 +445,27 @@ The plan must address each: either add resolution, document that call sites alwa
 - O2 APPLIED: `.name` attribute normalization noted in Technical Design description.
 - O3 NOTED: RepoRegistry hybrid noted as optimization opportunity in Trade-offs; not a blocker.
 - O4 APPLIED: Test plan now includes `nx store put` with ambiguous prefix scenario.
+
+### Re-gate 5 (2026-02-27) — BLOCKED
+
+Source files re-verified: `corpus.py`, `db/t3.py`, `commands/collection.py`, `commands/store.py`, `commands/memory.py`, `commands/search_cmd.py`, `registry.py`.
+
+#### Critical — Must Fix Before Re-gate
+
+**C1. `list_store()` swallows `_ChromaNotFoundError` before lazy resolution fires.** Verified: the current `list_store()` catches `_ChromaNotFoundError` and returns `[]`. The RDR's lazy resolution pseudocode wraps `get_collection()` in a try/except, but that inner catch intercepts the exception first — the resolution attempt never executes. The fix is not a simple wrap: the existing `return []` path must be replaced so that resolution is attempted first; only after resolution fails (zero matches) should `CollectionNotFoundError` be raised. The RDR must also explicitly specify the post-resolution contract: after a real not-found, does `list_store()` raise `CollectionNotFoundError` or return `[]`? The call site at `store.py:116-118` currently handles both differently.
+
+**C2. `resolve_collection_name()` raises inside `resolve_corpus()` breaks `search_cmd`'s graceful degradation.** Verified: `resolve_corpus()` returns `[]` with a warning on zero matches; `search_cmd.py:151-154` handles the empty-list case and continues to other corpora. If `resolve_collection_name()` raises `CollectionNotFoundError` inside `resolve_corpus()`'s `__`-branch, the exception propagates unhandled. The RDR constraint "No changes to `search_cmd.py`" is incompatible with `resolve_collection_name()` raising. Fix: catch `CollectionNotFoundError` inside the `__`-branch of `resolve_corpus()` and return `[]` to preserve the existing zero-match contract — OR relax the no-`search_cmd.py`-changes constraint and handle the exception there. Pick one.
+
+#### Significant — Should Fix Before Implementation
+
+**S1. `info_cmd` has an exact-match guard at line 31 that bypasses the T3Database fix.** Verified: `info_cmd` calls `list_collections()` at line 30 and does an exact-match check at line 31. A prefix input fails the guard before ever reaching `T3Database.collection_info()`. The T3Database-layer fix is correct but invisible to `info_cmd`. Both the guard (line 31) and the `get_or_create_collection()` call (line 40) must be changed; the RDR currently only mentions the latter.
+
+**S2. `list_cmd` and `verify_cmd` already call `list_collections()` unconditionally — lazy pattern is inapplicable.** Verified: both commands call `db.list_collections()` at their top level and do exact-match filtering. There is no `get_collection()` fast path to fall back from. The lazy pattern (try `get_collection()` first) does not apply here. The correct fix is to call `resolve_collection_name(names, name)` against the already-fetched names list. The RDR's lazy-pattern instruction for these two commands will produce incorrect code.
+
+**S3. `promote_cmd` passes raw `--collection` string to `T3Database.put()` with no `t3_collection_name()` wrapping.** Verified: `commands/memory.py:140` passes the user argument directly to `t3.put()`. Bare names like `--collection myproject` are not canonicalized to `knowledge__myproject`, unlike `nx store put --collection myproject` which routes through `t3_collection_name()`. Either add `t3_collection_name()` canonicalization in `promote_cmd`, or document that `--collection` requires a fully-qualified name.
+
+#### Observations
+
+- O1: `T3Database.collection_metadata()` not in audit — not user-facing today, acceptable omission, but worth a note in the plan so the gap is not silently inherited by future commands.
+- O2: `info_cmd` calls `collection_info()` at line 38 but never uses the result — dead call, pre-existing. Clean up during the same pass.
+- O3: Test plan covers write-path ambiguity (`AmbiguousCollectionError`) but not write-path success (`nx store put` resolves and writes into the correct existing collection). Add the success scenario.
