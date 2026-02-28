@@ -741,6 +741,44 @@ def test_search_warns_when_corpus_term_unmatched(runner: CliRunner) -> None:
     assert "badcorpus" in result.output
 
 
+# ── I4b: no spurious warnings when all corpus terms match somewhere ───────────
+
+
+def test_search_no_spurious_warnings_when_all_corpus_terms_match(runner: CliRunner) -> None:
+    """I4b: when every corpus term matches in at least one store, no warning fires.
+
+    Pre-fix: resolve_corpus() warned once per store that didn't have the term,
+    producing up to 6 spurious 'no collections matched' messages per search.
+    Post-fix: warnings only fire when a term matches ZERO stores globally.
+    """
+    from nexus.types import SearchResult
+
+    mock_code = _mock_t3(collections=["code__myrepo-abc"])
+    mock_docs = _mock_t3(collections=["docs__myrepo-abc"])
+    mock_knowledge = _mock_t3(collections=["knowledge__notes"])
+    hit = SearchResult(id="r1", content="result", distance=0.1,
+                       collection="code__myrepo-abc", metadata={})
+
+    with patch("nexus.commands.search_cmd.t3_code", return_value=mock_code), \
+         patch("nexus.commands.search_cmd.t3_docs", return_value=mock_docs), \
+         patch("nexus.commands.search_cmd.t3_knowledge", return_value=mock_knowledge), \
+         patch("nexus.commands.search_cmd.t3_rdr",
+               side_effect=RuntimeError("not configured")), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[hit]), \
+         patch("nexus.commands.search_cmd.rerank_results", return_value=[hit]):
+        result = runner.invoke(main, [
+            "search", "query",
+            "--corpus", "code",       # matches code__myrepo-abc
+            "--corpus", "docs",       # matches docs__myrepo-abc
+            "--corpus", "knowledge",  # matches knowledge__notes
+            "--no-rerank",
+        ])
+
+    assert result.exit_code == 0
+    # No corpus term was globally unmatched — no warning should appear
+    assert "no collections matched" not in result.output
+
+
 # ── I9: explicit --type RuntimeError must surface credential hint ─────────────
 
 

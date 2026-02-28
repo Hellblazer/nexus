@@ -182,6 +182,8 @@ def search_cmd(
         else _SEARCH_FACTORIES
     )
     store_entries: list[tuple[T3Database, list[str]]] = []
+    # Track which corpus terms matched in at least one store (for post-loop warning).
+    globally_matched: set[str] = set()
     for _stype, factory in candidate_factories.items():
         try:
             db = factory()
@@ -193,6 +195,8 @@ def search_cmd(
                 target = []
                 for c in corpus:
                     matched = resolve_corpus(c, all_cols)
+                    if matched:
+                        globally_matched.add(c)
                     target.extend(matched)
                 target = list(dict.fromkeys(target))
             if target:
@@ -202,6 +206,12 @@ def search_cmd(
                 # User explicitly named this store — surface the credential error.
                 raise click.ClickException(str(exc)) from exc
             _log.debug("store not configured, skipping", store_type=_stype)
+
+    # Warn once per corpus term that matched no collection anywhere.
+    if store_type is None:
+        for c in corpus:
+            if c not in globally_matched:
+                _log.warning("corpus term matched no collections", corpus=c)
 
     if not store_entries and not mxbai:
         click.echo("no matching collections found — use: nx collection list", err=True)
