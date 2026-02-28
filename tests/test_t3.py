@@ -1022,3 +1022,17 @@ def test_list_collections_tolerates_not_found_race() -> None:
 
     # Only the stable collection; no exception raised
     assert result == [{"name": "knowledge__stable", "count": 3}]
+
+
+def test_t3database_get_collection_raw_delegates_to_client() -> None:
+    """Style: T3Database.get_collection_raw(name) must exist and delegate to
+    _client.get_collection(name) without side-effects."""
+    mock_client = MagicMock()
+    mock_raw_col = MagicMock()
+    mock_client.get_collection.return_value = mock_raw_col
+
+    db = T3Database(_client=mock_client)
+    result = db.get_collection_raw("knowledge__test")
+
+    mock_client.get_collection.assert_called_once_with("knowledge__test")
+    assert result is mock_raw_col

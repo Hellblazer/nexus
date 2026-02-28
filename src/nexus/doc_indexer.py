@@ -34,7 +34,6 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-
 _CCE_TOKEN_LIMIT = 32_000
 _CCE_TOTAL_TOKEN_LIMIT = 120_000  # Voyage API total token limit across all inputs
 # Note: per-batch limit of 32K means we never hit 120K in a single call
@@ -189,6 +188,18 @@ def _index_document(
     ids = [p[0] for p in prepared]
     documents = [p[1] for p in prepared]
     metadatas = [p[2] for p in prepared]
+
+    # Augment with T3 schema fields required by frecency and expire consumers.
+    # setdefault preserves values set by the chunk function (e.g. store_type, tags).
+    for m in metadatas:
+        m.setdefault("frecency_score", 0.0)
+        m.setdefault("ttl_days", 0)
+        m.setdefault("expires_at", "")
+        m.setdefault("session_id", "")
+        m.setdefault("source_agent", "")
+        m.setdefault("category", "")
+        m.setdefault("title", "")
+        m.setdefault("tags", "")
 
     embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
     if actual_model != target_model:

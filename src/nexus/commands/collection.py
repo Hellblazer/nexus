@@ -104,9 +104,9 @@ def info_cmd(name: str, store_type: str | None) -> None:
     query_model = embedding_model_for_collection(name)
     idx_model   = index_model_for_collection(name)
 
-    # Use get_collection (read-only) not get_or_create_collection (has side-effect).
+    # Use get_collection_raw (read-only) not get_or_create_collection (has side-effect).
     # Cap the fetch at 5000 docs — sufficient for last-indexed heuristic.
-    col = db._client.get_collection(name)
+    col = db.get_collection_raw(name)
     result = col.get(include=["metadatas"], limit=5000)
     metadatas: list[dict] = result.get("metadatas") or []
     timestamps = [m["indexed_at"] for m in metadatas if m and "indexed_at" in m]

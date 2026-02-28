@@ -213,7 +213,7 @@ def test_info_shows_embedding_model_for_code_collection(
     ]
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_collection_raw.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_code", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "code__nexus", "--type", "code"])
@@ -233,7 +233,7 @@ def test_info_shows_embedding_model_for_knowledge_collection(
     ]
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_collection_raw.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__research"])
@@ -259,7 +259,7 @@ def test_info_shows_last_indexed_when_metadata_exists(
             {"indexed_at": "2026-02-21T12:00:00+00:00", "title": "doc3"},
         ],
     }
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_collection_raw.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__test"])
@@ -285,7 +285,7 @@ def test_info_shows_unknown_when_no_indexed_at_metadata(
             {"title": "another_without_ts"},
         ],
     }
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_collection_raw.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__legacy"])
@@ -412,19 +412,19 @@ def test_verify_type_docs_routes_to_docs_store(runner: CliRunner) -> None:
 def test_info_does_not_call_get_or_create_collection(
     runner: CliRunner, env_creds
 ) -> None:
-    """C2: info_cmd uses _client.get_collection, not get_or_create_collection."""
+    """C2: info_cmd uses get_collection_raw, not get_or_create_collection."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_collection_raw.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__test"])
 
     assert result.exit_code == 0, result.output
     mock_db.get_or_create_collection.assert_not_called()
-    mock_db._client.get_collection.assert_called_once_with("knowledge__test")
+    mock_db.get_collection_raw.assert_called_once_with("knowledge__test")
 
 
 # ── S3: info_cmd caps metadata fetch with limit ───────────────────────────────
@@ -436,7 +436,7 @@ def test_info_fetches_metadata_with_limit(runner: CliRunner, env_creds) -> None:
     mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_collection_raw.return_value = mock_col
 
     with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__test"])
@@ -456,7 +456,7 @@ def test_info_infers_code_store_from_prefix(runner: CliRunner, env_creds) -> Non
     mock_code_db.list_collections.return_value = [{"name": "code__repo", "count": 10}]
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_code_db._client.get_collection.return_value = mock_col
+    mock_code_db.get_collection_raw.return_value = mock_col
     mock_knowledge_db = MagicMock()
 
     with patch("nexus.commands.collection.t3_code", return_value=mock_code_db) as m_code, \
@@ -474,7 +474,7 @@ def test_info_infers_docs_store_from_prefix(runner: CliRunner, env_creds) -> Non
     mock_docs_db.list_collections.return_value = [{"name": "docs__corpus", "count": 7}]
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_docs_db._client.get_collection.return_value = mock_col
+    mock_docs_db.get_collection_raw.return_value = mock_col
     mock_knowledge_db = MagicMock()
 
     with patch("nexus.commands.collection.t3_docs", return_value=mock_docs_db) as m_docs, \
@@ -492,7 +492,7 @@ def test_info_infers_rdr_store_from_prefix(runner: CliRunner, env_creds) -> None
     mock_rdr_db.list_collections.return_value = [{"name": "rdr__nexus-abc12345", "count": 3}]
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_rdr_db._client.get_collection.return_value = mock_col
+    mock_rdr_db.get_collection_raw.return_value = mock_col
     mock_knowledge_db = MagicMock()
 
     with patch("nexus.commands.collection.t3_rdr", return_value=mock_rdr_db) as m_rdr, \

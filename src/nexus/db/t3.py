@@ -86,6 +86,14 @@ class T3Database:
             name, embedding_function=self._embedding_fn(name)
         )
 
+    def get_collection_raw(self, name: str) -> chromadb.Collection:
+        """Return an existing collection without creating it (read-only access).
+
+        Use this instead of accessing ``_client`` directly so callers stay within
+        the T3Database API layer.
+        """
+        return self._client.get_collection(name)
+
     # ── Write ─────────────────────────────────────────────────────────────────
 
     def put(

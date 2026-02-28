@@ -1400,3 +1400,55 @@ def test_index_markdown_requires_t3_argument(sample_md, monkeypatch):
     _set_credentials(monkeypatch)
     with pytest.raises(TypeError):
         index_markdown(sample_md, corpus="docs")  # type: ignore[call-arg]
+
+
+def test_index_markdown_metadata_includes_t3_schema_fields(sample_md, monkeypatch):
+    """S2: standalone index_markdown path must include T3 schema fields required by
+    frecency and expire consumers (frecency_score, ttl_days, expires_at, session_id,
+    source_agent, category, title, tags)."""
+    _set_credentials(monkeypatch)
+
+    t3_schema_fields = {
+        "frecency_score", "ttl_days", "expires_at",
+        "session_id", "source_agent", "category", "title", "tags",
+    }
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    captured_metadatas: list[dict] = []
+
+    def capture_upsert(collection, ids, documents, embeddings, metadatas):
+        captured_metadatas.extend(metadatas)
+
+    mock_chunk = MagicMock()
+    mock_chunk.text = "chunk text"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {
+        "chunk_start_char": 0,
+        "chunk_end_char": 10,
+        "page_number": 0,
+        "header_path": "Hello",
+    }
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert
+
+    with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
+        with patch("voyageai.Client", return_value=mock_voyage_client):
+            mock_chunker = MagicMock()
+            mock_chunker_class.return_value = mock_chunker
+            mock_chunker.chunk.return_value = [mock_chunk]
+
+            index_markdown(sample_md, corpus="docs", t3=mock_t3)
+
+    assert len(captured_metadatas) >= 1, "Expected at least one chunk to be upserted"
+    meta = captured_metadatas[0]
+    missing = t3_schema_fields - meta.keys()
+    assert not missing, f"Missing T3 schema fields in standalone index_markdown path: {missing}"
