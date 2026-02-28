@@ -749,7 +749,8 @@ def test_cli_index_repo_registers_and_indexes(
 
     with patch("nexus.indexer.t3_code", return_value=local_t3), \
          patch("nexus.indexer.t3_docs", return_value=local_t3), \
-         patch("nexus.indexer.t3_rdr", return_value=local_t3):
+         patch("nexus.indexer.t3_rdr", return_value=local_t3), \
+         patch("nexus.config.get_credential", return_value="test-key"):
         result = runner.invoke(main, ["index", "repo", str(mini_repo)])
 
     assert result.exit_code == 0, result.output
@@ -778,6 +779,7 @@ def test_cli_index_then_search_pipeline(
     with patch("nexus.indexer.t3_code", return_value=local_t3), \
          patch("nexus.indexer.t3_docs", return_value=local_t3), \
          patch("nexus.indexer.t3_rdr", return_value=local_t3), \
+         patch("nexus.config.get_credential", return_value="test-key"), \
          patch("nexus.commands.search_cmd.t3_knowledge", return_value=local_t3), \
          patch("nexus.commands.search_cmd.t3_code", side_effect=_re), \
          patch("nexus.commands.search_cmd.t3_docs", side_effect=_re), \
@@ -809,7 +811,8 @@ def test_cli_index_frecency_only_flag(
 
     with patch("nexus.indexer.t3_code", return_value=local_t3), \
          patch("nexus.indexer.t3_docs", return_value=local_t3), \
-         patch("nexus.indexer.t3_rdr", return_value=local_t3):
+         patch("nexus.indexer.t3_rdr", return_value=local_t3), \
+         patch("nexus.config.get_credential", return_value="test-key"):
         runner.invoke(main, ["index", "repo", str(mini_repo)])
         result = runner.invoke(main, ["index", "repo", str(mini_repo), "--frecency-only"])
 
