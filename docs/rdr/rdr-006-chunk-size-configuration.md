@@ -1,5 +1,5 @@
 ---
-title: "Chunk Size Configuration for nx index repo"
+title: "Chunk Size Configuration and File-Size Scoring for Code Search"
 type: feature
 status: draft
 priority: P2
@@ -8,7 +8,7 @@ date: 2026-02-28
 related_issues: []
 ---
 
-# RDR-006: Chunk Size Configuration for `nx index repo`
+# RDR-006: Chunk Size Configuration and File-Size Scoring for Code Search
 
 ## Problem
 
@@ -31,51 +31,113 @@ tighter conceptual scope, improving precision.
 
 ## Proposed Solution
 
-Expose `--chunk-size` (and optionally `--chunk-overlap`) as options on `nx index repo`,
-passing them through to the underlying code indexer.
+Two complementary tracks that address the same root cause at different layers:
 
-### Interface
+**Track A — Search-time: file-size scoring penalty** (no re-indexing, immediate effect)
+**Track B — Index-time: chunk-size presets for code** (requires `--force` re-index, improves long-term precision)
 
-```bash
-nx index repo <path> [--chunk-size INT] [--chunk-overlap INT]
+Both tracks are code-only (`code__*` collections). Markdown and PDF chunkers use different
+units (tokens/chars) and are out of scope.
 
-# Examples
-nx index repo .                          # default (current behaviour)
-nx index repo . --chunk-size 150         # tighter chunks, higher precision
-nx index repo . --chunk-size 150 --chunk-overlap 20
+### Track A: File-Size Scoring Penalty
+
+Every chunk already stores `chunk_count` (total chunks the source file was split into) as
+metadata. Large files produce many chunks; a file with `chunk_count=80` is dominating results
+because all 80 of its chunks have broad semantic surface area.
+
+Apply a `file_size_factor` multiplier to `hybrid_score` for `code__` results in
+`scoring.py:apply_hybrid_scoring()`:
+
+```python
+import math
+
+_FILE_SIZE_THRESHOLD = 10  # chunks; files ≤ this are not penalised
+
+def _file_size_factor(chunk_count: int) -> float:
+    """Return a [0,1] penalty: 1.0 for small files, diminishing for large."""
+    return min(1.0, _FILE_SIZE_THRESHOLD / max(1, chunk_count))
 ```
 
-### Behaviour
+With this factor:
+- `chunk_count ≤ 10` → factor = 1.0 (no penalty)
+- `chunk_count = 20` → factor = 0.50
+- `chunk_count = 50` → factor = 0.20
+- `chunk_count = 80` → factor = 0.125
 
-- `--chunk-size` controls the target token count per chunk (default: current indexer default,
-  likely 400)
-- `--chunk-overlap` controls token overlap between adjacent chunks (default: current indexer
-  default)
-- Both parameters are forwarded to the code indexer; prose/docs files use the same values
-- When `--chunk-size` is specified, the collection is re-indexed from scratch for the code
-  collection (implies `--force` semantics for that collection)
+The final `code__` hybrid score becomes:
+```
+hybrid_score = (0.7 * vector_norm + 0.3 * frecency_norm) * file_size_factor(chunk_count)
+```
+
+This is applied **before** Voyage reranking, so the reranker still has final say over order
+but works from a pre-filtered set that doesn't skew toward large files.
+
+An optional `--max-file-chunks N` flag on `nx search` can add a hard `where` filter:
+`{"chunk_count": {"$lte": N}}`, eliminating very large files entirely from candidate set.
+
+### Track B: Chunk-Size Presets for Code
+
+Expose named presets on `nx index repo`:
+
+```bash
+nx index repo <path> [--chunk-size small|medium|default] [--force]
+
+# Examples
+nx index repo .                          # default (150 lines, current behaviour)
+nx index repo . --chunk-size small       # 60 lines, high precision
+nx index repo . --chunk-size medium      # 100 lines, balanced
+nx index repo . --chunk-size small --force  # re-index entire code collection
+```
+
+Preset line counts (code only, `_CHUNK_LINES` in `chunker.py`):
+
+| Preset    | Lines | Overlap (15%) | Use case |
+|-----------|-------|---------------|----------|
+| `small`   | 60    | 9 lines       | Large repos with many files; maximise precision |
+| `medium`  | 100   | 15 lines      | Balanced: good precision, fewer chunks to embed |
+| `default` | 150   | 22 lines      | Current behaviour (backward-compatible) |
+
+When `--chunk-size` differs from `default`, `--force` is **required** (not implied):
+the user must explicitly pass `--force` to delete-and-recreate the code collection.
+This avoids silent destructive re-index on a mistyped flag.
 
 ### Implementation Notes
 
-`nx index repo` delegates to the internal `IndexRepo` pipeline in
-`src/nexus/commands/index.py` (or equivalent). The chunk size needs to be threaded through
-to wherever `chromadb_index_code()` (or equivalent) splits file content into chunks before
-embedding.
+**Track A touch-points (scoring.py only):**
+- `src/nexus/scoring.py:apply_hybrid_scoring()` — add `_file_size_factor` call for `code__` results
+- `src/nexus/commands/search_cmd.py` — add `--max-file-chunks INT` option, pass as `where` filter
 
-The ChromaDB Cloud hard limit on document size is 16,384 bytes (RDR-005). Chunk size
-validation should guard against values that could produce chunks exceeding this limit given
-typical token-to-byte ratios (~4 bytes/token → max safe chunk size ≈ 4,000 tokens).
+**Track B touch-points:**
+1. `src/nexus/commands/index.py:index_repo_cmd()` — add `--chunk-size [small|medium|default]` option
+2. `src/nexus/indexer.py:index_repository()` — add `chunk_lines: int` kwarg
+3. `src/nexus/indexer.py:_run_index()` — thread through to file dispatchers
+4. `src/nexus/indexer.py:_index_code_file()` — pass to `chunk_file()`
+5. `src/nexus/chunker.py:chunk_file()` — accept `chunk_lines` / `overlap` override params
+
+ChromaDB Cloud document hard limit: 16,384 bytes (RDR-005). Max safe preset is `default`
+(150 lines ≈ 3,600 bytes typical). The `small` preset (60 lines) is well within limits.
 
 ## Alternatives Considered
 
-### Re-index with `--force` (rejected)
-Re-embedding with identical chunk sizes produces identical embeddings and identical precision.
+### Re-index with `--force` at identical chunk size (rejected)
+Re-embedding at the same 150-line size produces identical embeddings and identical precision.
 No improvement.
 
 ### `--hybrid` search mode (insufficient)
 Tested: hybrid search (semantic + ripgrep) returned the same files as semantic-only for the
-failing queries. The problem is that the broad chunks score high semantically; ripgrep
-re-ranking does not overcome this.
+failing queries. The problem is that broad chunks score high semantically; ripgrep re-ranking
+does not overcome a dominant vector score.
+
+### Raw `--chunk-size INT` instead of presets (rejected for UX)
+Exposes an internal implementation detail (line count) without guidance on what values work.
+Presets (`small`/`medium`/`default`) provide guardrails and encode empirically validated
+configurations. A `--chunk-lines INT` escape hatch can be added later if needed.
+
+### Voyage reranker as sole fix (insufficient)
+The reranker operates on the top-K candidates returned by ChromaDB. If the top-K is already
+dominated by large-file chunks (because ChromaDB returns the highest-similarity results
+regardless of source size), the reranker has no small-file candidates to surface. The scoring
+penalty must be applied before or instead of relying on the reranker.
 
 ### Accept current behaviour (rejected)
 Workaround is to write more specific, term-rich queries. This shifts the burden to users and
@@ -145,16 +207,61 @@ This needs clarification before implementation (see Open Questions).
 
 The RDR says specifying `--chunk-size` "implies `--force` semantics for that collection." Currently `nx index repo` is incremental — it skips files whose `content_hash` hasn't changed. Re-chunking at a new size requires full re-index because the chunk IDs embed line ranges and must be regenerated. **Implementation must clear/recreate the collection when chunk_size differs from the indexed default.** Mechanism: delete-and-recreate the collection before indexing.
 
-## Open Questions
+### R7: `chunk_count` metadata available for filtering and scoring (Confirmed)
 
-1. **What chunk-size actually fixes the failing queries?** The Validation table uses `--chunk-size 150` (current default). Should it be 60 or 80? Needs empirical testing against the Arcaneum collection.
-2. **Scope for prose/docs:** Should `--chunk-size` also control `SemanticMarkdownChunker` and `PDFChunker`? They use different units (tokens/chars vs lines). Recommend separate flags (`--prose-chunk-size`, `--pdf-chunk-size`) or restricting to code only for v1.
-3. **Collection invalidation:** When chunk size changes, should `nx index repo` warn + require `--force`, or auto-clear? Auto-clear is safer UX but destructive.
+**Source:** `src/nexus/indexer.py:269`, `src/nexus/db/t3.py:306–366`, `src/nexus/scoring.py`
+
+`chunk_count` is stored on every code chunk at index time. The `search()` method spreads all
+metadata into results, so `chunk_count` is available in every `SearchResult.metadata`.
+
+`where` filters are fully supported and passed directly to ChromaDB:
+```python
+# Hard filter: exclude files with > 20 chunks
+t3.search(query, collections, where={"chunk_count": {"$lte": 20}})
+```
+
+The `apply_hybrid_scoring()` function in `scoring.py` already receives full `SearchResult`
+objects including metadata — adding a `file_size_factor` requires only adding the penalty
+formula and one multiply at line 76.
+
+### R8: Scoring pipeline integration point (Confirmed)
+
+**Source:** `src/nexus/scoring.py:40–80`
+
+The penalty slot is at line 76 inside `apply_hybrid_scoring()`:
+```python
+# Current (line 76):
+r.hybrid_score = hybrid_score(v_norm, f_norm)
+
+# Proposed:
+chunk_count = r.metadata.get("chunk_count", 1)
+size_factor = min(1.0, _FILE_SIZE_THRESHOLD / max(1, chunk_count))
+r.hybrid_score = hybrid_score(v_norm, f_norm) * size_factor
+```
+
+The Voyage reranker (`rerank_results()`, lines 100–134) runs after `apply_hybrid_scoring()`
+and overwrites `hybrid_score` with its own `relevance_score`. This means the size penalty
+affects **which chunks enter the reranker's candidate window** (via pre-sort and top-K
+selection) but not the final reranker scores. This is the correct integration point.
+
+## Open Questions (Resolved)
+
+1. **What chunk size fixes the failing queries?** *(Open — empirical)* The Validation table
+   must use `small` (60 lines) not `default` (150) — spec defect confirmed in R5. Empirical
+   validation against the Arcaneum collection is part of the Validation section.
+2. **Scope for prose/docs:** *(Resolved)* **Code only.** Markdown and PDF chunkers are out of
+   scope for this RDR.
+3. **Collection invalidation:** *(Resolved)* **Require explicit `--force`.** Users must pass
+   `--force` when specifying a non-default chunk size. Silent auto-clear is too destructive.
 
 ## Validation
 
-Re-index `code__arcaneum` with `--chunk-size 150` and verify the following queries return
-the canonical file as a top-3 result:
+**Track A (scoring penalty):** Enable the `file_size_factor` penalty and verify on the
+existing `code__arcaneum` collection (no re-index required) that the following queries return
+the canonical file as a top-3 result.
+
+**Track B (chunk size):** Re-index `code__arcaneum` with `--chunk-size small --force` and
+verify the same queries:
 
 | Query | Expected canonical file |
 |-------|------------------------|
