@@ -13,7 +13,15 @@ _COLLECTION_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,61}[a-zA-Z0-9]$")
 
 
 def validate_collection_name(name: str) -> None:
-    """Raise ValueError if *name* violates ChromaDB collection name constraints."""
+    """Raise ValueError if *name* violates ChromaDB collection name constraints.
+
+    Enforces two sets of rules:
+    1. Structural (open-source ChromaDB): 3–63 characters, alphanumeric + hyphens/underscores,
+       must start and end with alphanumeric.
+    2. Cloud byte-length limit: name must not exceed 128 bytes when UTF-8 encoded.
+       Relevant if names ever contain multi-byte characters; all current ASCII names
+       are well within this limit since they cap at 63 chars = 63 bytes.
+    """
     # Length check fires first for <3 chars; regex rejects other invalid patterns.
     # Both gates are needed: length for clear error messages, regex for charset/boundary validation.
     if not (3 <= len(name) <= 63):
@@ -24,6 +32,13 @@ def validate_collection_name(name: str) -> None:
         raise ValueError(
             f"Collection name {name!r} must start and end with an alphanumeric character "
             "and contain only alphanumeric characters, hyphens, or underscores"
+        )
+    # ChromaDB Cloud additional constraint: 128-byte limit (byte length, not char length).
+    name_bytes = len(name.encode())
+    if name_bytes > 128:
+        raise ValueError(
+            f"Collection name {name!r} exceeds ChromaDB Cloud 128-byte limit "
+            f"(encoded as {name_bytes} bytes)"
         )
 
 
