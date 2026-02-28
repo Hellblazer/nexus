@@ -1,5 +1,10 @@
 # Nexus
 
+[![CI](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml/badge.svg)](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/conexus)](https://pypi.org/project/conexus/)
+[![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 Nexus is a support framework and tooling foundation for systematic development with evolving semantic knowledge. It gives teams and individual developers a way to index what they build, search what they know, and maintain coherent direction as projects grow in complexity — especially under the speed and pressure of LLM-driven agentic coding.
 
 Three layers, each useful on its own, each building on the last:
