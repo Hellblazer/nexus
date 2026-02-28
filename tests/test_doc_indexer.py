@@ -37,7 +37,7 @@ def _set_credentials(monkeypatch):
 # ── credential guard ──────────────────────────────────────────────────────────
 
 def test_index_pdf_skips_without_credentials(sample_pdf, monkeypatch):
-    """Without VOYAGE_API_KEY + CHROMA_API_KEY, returns 0 and never touches T3."""
+    """Without VOYAGE_API_KEY, returns 0 and never touches T3."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     with patch("nexus.doc_indexer.make_t3") as mock_factory:
@@ -47,13 +47,59 @@ def test_index_pdf_skips_without_credentials(sample_pdf, monkeypatch):
 
 
 def test_index_markdown_skips_without_credentials(sample_md, monkeypatch):
-    """Without credentials, index_markdown returns 0."""
+    """Without VOYAGE_API_KEY, index_markdown returns 0."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     with patch("nexus.doc_indexer.make_t3") as mock_factory:
         result = index_markdown(sample_md, corpus="test")
     assert result == 0
     mock_factory.assert_not_called()
+
+
+# P14: voyage_api_key alone is sufficient — chroma_api_key is no longer required
+
+def test_has_credentials_true_with_only_voyage_key(monkeypatch):
+    """P14: _has_credentials() returns True when only voyage_api_key is set."""
+    from nexus.doc_indexer import _has_credentials
+    monkeypatch.setenv("VOYAGE_API_KEY", "vkey-test")
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    assert _has_credentials() is True
+
+
+def test_has_credentials_false_when_voyage_key_missing(monkeypatch):
+    """P14: _has_credentials() returns False when voyage_api_key is absent."""
+    from nexus.doc_indexer import _has_credentials
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.setenv("CHROMA_API_KEY", "ckey-test")  # chroma set but voyage missing
+    assert _has_credentials() is False
+
+
+def test_index_markdown_proceeds_with_only_voyage_key(sample_md, monkeypatch):
+    """P14: index_markdown proceeds past credential check with only voyage_api_key set."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "vkey-test")
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    mock_t3 = MagicMock()
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_chunk = MagicMock()
+    mock_chunk.text = "content"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 7, "page_number": 0, "header_path": ""}
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock()
+    mock_voyage_result.embeddings = [[0.1, 0.2]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
+            with patch("voyageai.Client", return_value=mock_voyage_client):
+                mock_chunker_class.return_value.chunk.return_value = [mock_chunk]
+                index_markdown(sample_md, corpus="test", t3=mock_t3)
+    # get_or_create_collection was called — credential check did NOT block
+    mock_t3.get_or_create_collection.assert_called()
 
 
 # ── SHA256 incremental sync ───────────────────────────────────────────────────

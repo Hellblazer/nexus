@@ -52,13 +52,14 @@ class T3Database:
                 tenant=tenant, database=database, api_key=api_key
             )
 
-    # ── Context manager (no-op: CloudClient is stateless REST) ───────────────
+    # ── Context manager (no-op: ChromaDB manages its own lifecycle) ─────────
 
     def __enter__(self) -> "T3Database":
         return self
 
     def __exit__(self, *_) -> None:
-        pass  # ChromaDB CloudClient is HTTP-based; no persistent connection to close.
+        pass  # ChromaDB manages its own lifecycle; explicit close is not required
+              # for PersistentClient or CloudClient.
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -251,6 +252,12 @@ class T3Database:
 
     def expire(self) -> int:
         """Delete all expired entries from ``knowledge__*`` collections.
+
+        This method is intended to be called on a ``T3Database`` instance backed
+        by the knowledge store (via ``t3_knowledge()``). In the four-store layout,
+        only the knowledge store holds TTL-expirable entries; the ``knowledge__``
+        prefix filter is retained for safety but is now redundant since all
+        collections in the knowledge store already start with ``knowledge__``.
 
         Only removes entries where ``ttl_days > 0`` AND ``expires_at != ""``
         AND ``expires_at < now``. Permanent entries (``ttl_days=0``,

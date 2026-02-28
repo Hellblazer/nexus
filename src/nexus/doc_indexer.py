@@ -37,7 +37,7 @@ def _sha256(path: Path) -> str:
 
 def _has_credentials() -> bool:
     from nexus.config import get_credential
-    return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
+    return bool(get_credential("voyage_api_key"))
 
 
 _CCE_TOKEN_LIMIT = 32_000

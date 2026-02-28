@@ -160,15 +160,9 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     docs_collection = info.get("docs_collection") or _docs_collection_name(repo)
 
     voyage_key = get_credential("voyage_api_key")
-    chroma_key = get_credential("chroma_api_key")
-    if not voyage_key or not chroma_key:
-        missing = []
-        if not voyage_key:
-            missing.append("voyage_api_key")
-        if not chroma_key:
-            missing.append("chroma_api_key")
+    if not voyage_key:
         raise CredentialsMissingError(
-            f"{', '.join(missing)} not set — run: nx config init"
+            "voyage_api_key not set — run: nx config init"
         )
 
     frecency_map = batch_frecency(repo)
@@ -749,15 +743,9 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
     # Credential check (required for T3 operations)
     from nexus.config import get_credential
     voyage_key = get_credential("voyage_api_key")
-    chroma_key = get_credential("chroma_api_key")
-    if not voyage_key or not chroma_key:
-        missing = []
-        if not voyage_key:
-            missing.append("voyage_api_key")
-        if not chroma_key:
-            missing.append("chroma_api_key")
+    if not voyage_key:
         raise CredentialsMissingError(
-            f"{', '.join(missing)} not set — run: nx config init"
+            "voyage_api_key not set — run: nx config init"
         )
 
     import voyageai
