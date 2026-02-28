@@ -114,7 +114,7 @@ def doctor_cmd() -> None:
                 lines.append(_check_line(f"ChromaDB  ({db_name})", False, "not reachable"))
         if not db_ok:
             _fix(lines,
-                 f"Create these databases in your ChromaDB Cloud dashboard:",
+                 "Create these databases in your ChromaDB Cloud dashboard:",
                  *[f"  - {chroma_database}_{t}" for t in _STORE_TYPES],
                  "Then run: nx migrate t3  (to copy data from the old single store)")
 

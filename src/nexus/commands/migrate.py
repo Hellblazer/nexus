@@ -2,11 +2,17 @@
 """nx migrate — migration utilities."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import click
 import structlog
 
 from nexus.config import get_credential
+from nexus.db import make_t3
 from nexus.db.t3 import _STORE_TYPES
+
+if TYPE_CHECKING:
+    import chromadb
 
 _log = structlog.get_logger(__name__)
 
@@ -15,7 +21,7 @@ _log = structlog.get_logger(__name__)
 _PAGE_SIZE = 5_000
 
 
-def _cloud_admin_client(api_key: str) -> object:  # returns chromadb.AdminClient
+def _cloud_admin_client(api_key: str) -> "chromadb.AdminClient":
     """Return a ChromaDB AdminClient pointed at Chroma Cloud.
 
     Mirrors the same Settings wiring used internally by ``chromadb.CloudClient``
@@ -135,7 +141,7 @@ def migrate_t3_collections(
         except Exception as exc:
             _log.warning("migrate_collection_failed", collection=name, error=str(exc))
             if verbose:
-                click.echo(f"  FAILED {name}: {exc}")
+                click.echo(f"  FAILED {name}: see log for details")
             result[name] = -1
 
     return result
@@ -202,9 +208,10 @@ def migrate_t3_cmd(verbose: bool) -> None:
 
     # Destination: the new four-store T3Database (creates 4 suffixed CloudClients).
     try:
-        from nexus.db import make_t3
         dest = make_t3()
     except RuntimeError as exc:
+        # RuntimeError from T3Database.__init__ is explicitly sanitized (no credential
+        # text in the message).  Review this handler if make_t3() internals change.
         raise click.ClickException(str(exc)) from exc
 
     click.echo(f"\nMigrating collections from {database!r} to four-store layout…")

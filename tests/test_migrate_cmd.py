@@ -237,7 +237,12 @@ def test_migrate_continues_after_per_collection_failure() -> None:
 # ── P16: _cloud_admin_client Settings wiring ─────────────────────────────────
 
 def test_cloud_admin_client_calls_admin_client_with_cloud_settings() -> None:
-    """_cloud_admin_client passes cloud-wired Settings to chromadb.AdminClient."""
+    """_cloud_admin_client passes all seven cloud-wired Settings fields to chromadb.AdminClient.
+
+    All seven fields are version-sensitive (verified against chromadb 0.6.x).
+    If any assertion fails after a chromadb upgrade, review the Settings wiring in
+    _cloud_admin_client() against the new chromadb.CloudClient internals.
+    """
     import chromadb as real_chromadb
     from nexus.commands.migrate import _cloud_admin_client
 
@@ -245,10 +250,17 @@ def test_cloud_admin_client_calls_admin_client_with_cloud_settings() -> None:
         _cloud_admin_client("my-api-key")
 
     mock_admin.assert_called_once()
-    settings_arg = mock_admin.call_args[0][0]
-    assert settings_arg.chroma_server_host == "api.trychroma.com"
-    assert settings_arg.chroma_server_ssl_enabled is True
-    assert settings_arg.chroma_client_auth_credentials == "my-api-key"
+    s = mock_admin.call_args[0][0]
+
+    assert s.chroma_api_impl == "chromadb.api.fastapi.FastAPI"
+    assert s.chroma_server_host == "api.trychroma.com"
+    assert s.chroma_server_http_port == 443
+    assert s.chroma_server_ssl_enabled is True
+    assert s.chroma_client_auth_provider == (
+        "chromadb.auth.token_authn.TokenAuthClientProvider"
+    )
+    assert s.chroma_client_auth_credentials == "my-api-key"
+    assert s.chroma_overwrite_singleton_tenant_database_access_from_auth is True
 
 
 # ── CLI smoke test ────────────────────────────────────────────────────────────
@@ -266,7 +278,7 @@ def test_migrate_t3_ensure_databases_called_before_make_t3() -> None:
     """ensure_databases is called before make_t3 — auto-create before connect."""
     call_order: list[str] = []
 
-    def mock_ensure(admin, *, tenant, base):
+    def mock_ensure(*_args, **_kwargs):
         call_order.append("ensure_databases")
         return {}
 
@@ -286,7 +298,9 @@ def test_migrate_t3_ensure_databases_called_before_make_t3() -> None:
         patch.object(real_chromadb, "CloudClient", return_value=source_mock),
         patch("nexus.commands.migrate._cloud_admin_client", return_value=MagicMock()),
         patch("nexus.commands.migrate.ensure_databases", side_effect=mock_ensure),
-        patch("nexus.db.make_t3", side_effect=mock_make_t3),
+        # Patching nexus.commands.migrate.make_t3 because make_t3 is now imported at
+        # module level in migrate.py.  If the import location changes, update this target.
+        patch("nexus.commands.migrate.make_t3", side_effect=mock_make_t3),
     ):
         runner.invoke(main, ["migrate", "t3"])
 

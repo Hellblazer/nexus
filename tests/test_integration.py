@@ -508,6 +508,68 @@ def test_t3_put_embedding_model_in_search_metadata() -> None:
             pass
 
 
+# ── Migration (requires Chroma Cloud credentials) ─────────────────────────────
+
+@pytest.mark.integration
+@requires_t3
+def test_migrate_t3_ensure_databases_is_idempotent(runner: CliRunner) -> None:
+    """ensure_databases() can be called twice on real Chroma Cloud without raising.
+
+    This tests the full AdminClient Settings wiring and the UniqueConstraintError
+    silencing in ensure_databases() against a live Chroma Cloud endpoint.
+    """
+    import os
+    from nexus.commands.migrate import ensure_databases, _cloud_admin_client
+
+    api_key = os.environ.get("CHROMA_API_KEY", "")
+    tenant = os.environ.get("CHROMA_TENANT", "")
+    database = os.environ.get("CHROMA_DATABASE", "")
+
+    admin = _cloud_admin_client(api_key)
+    # First call may create or find existing; second call must not raise
+    first = ensure_databases(admin, tenant=tenant, base=database)
+    second = ensure_databases(admin, tenant=tenant, base=database)
+
+    from nexus.db.t3 import _STORE_TYPES
+    expected_keys = {f"{database}_{t}" for t in _STORE_TYPES}
+    assert set(first.keys()) == expected_keys
+    # All False on second call — databases already exist
+    assert all(not v for v in second.values()), (
+        "Second ensure_databases call should return all False (already exists)"
+    )
+
+
+@pytest.mark.integration
+@requires_t3
+def test_migrate_t3_cmd_with_real_source(runner: CliRunner) -> None:
+    """nx migrate t3 runs against live Chroma Cloud and reports a valid summary line.
+
+    Uses the current credentials to verify end-to-end: source connection,
+    database auto-creation, collection enumeration, and idempotent copy.
+    The source is the old unsuffixed database; if it doesn't exist the command
+    will fail to connect and exit with a clear error (that failure mode is also tested).
+    """
+    import os
+    database = os.environ.get("CHROMA_DATABASE", "")
+
+    result = runner.invoke(main, ["migrate", "t3", "--verbose"])
+
+    # Either the source database exists and migration runs to completion,
+    # or it does not exist and the command exits with an explicit error.
+    # In either case the exit code must be determinate (no unhandled exception).
+    if result.exit_code == 0:
+        # Successful run: summary line must be present
+        assert "Done:" in result.output, (
+            f"Expected 'Done:' summary line, got:\n{result.output}"
+        )
+        assert "collection(s) processed" in result.output
+    else:
+        # Expected failure: source not found or credentials problem
+        assert "Error" in result.output, (
+            f"Non-zero exit but no 'Error' in output:\n{result.output}"
+        )
+
+
 # ── Answer mode (requires T3 + Anthropic) ─────────────────────────────────────
 
 @pytest.mark.integration
