@@ -7,6 +7,7 @@ import click
 from nexus.corpus import t3_collection_name
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
+from nexus.db.t3_stores import t3_knowledge
 from nexus.ttl import parse_ttl
 
 
@@ -91,7 +92,7 @@ def put_cmd(
     ttl_days = days if days is not None else 0
 
     col_name = t3_collection_name(collection)
-    db = _t3()
+    db = t3_knowledge()
     doc_id = db.put(
         collection=col_name,
         content=content,
@@ -113,7 +114,7 @@ def put_cmd(
 def list_cmd(collection: str, limit: int) -> None:
     """List entries in a T3 knowledge collection."""
     col_name = t3_collection_name(collection)
-    entries = _t3().list_store(col_name, limit=limit)
+    entries = t3_knowledge().list_store(col_name, limit=limit)
     if not entries:
         click.echo(f"No entries in {col_name}.")
         return
@@ -136,5 +137,5 @@ def list_cmd(collection: str, limit: int) -> None:
 @store.command("expire")
 def expire_cmd() -> None:
     """Remove T3 knowledge__ entries whose TTL has expired."""
-    count = _t3().expire()
+    count = t3_knowledge().expire()
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")

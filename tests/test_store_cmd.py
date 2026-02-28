@@ -23,54 +23,22 @@ def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CHROMA_DATABASE", "test-db")
 
 
-# ── _t3() factory error paths ─────────────────────────────────────────────────
-
-def test_store_put_missing_chroma_api_key(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-    src = tmp_path / "f.txt"
-    src.write_text("content")
-
-    result = runner.invoke(main, ["store", "put", str(src)])
-
-    assert result.exit_code != 0
-    assert "chroma_api_key" in result.output.lower()
-
+# ── t3_knowledge() credential guard ───────────────────────────────────────────
 
 def test_store_put_missing_voyage_api_key(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    monkeypatch.setenv("CHROMA_API_KEY", "ck")
+    """t3_knowledge() raises RuntimeError when voyage_api_key absent."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     src = tmp_path / "f.txt"
     src.write_text("content")
 
     result = runner.invoke(main, ["store", "put", str(src)])
 
     assert result.exit_code != 0
-    assert "voyage_api_key" in result.output.lower()
-
-
-def test_store_put_missing_tenant(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    monkeypatch.setenv("CHROMA_API_KEY", "ck")
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk")
-    monkeypatch.delenv("CHROMA_TENANT", raising=False)
-    monkeypatch.delenv("CHROMA_DATABASE", raising=False)
-    src = tmp_path / "f.txt"
-    src.write_text("content")
-
-    result = runner.invoke(main, ["store", "put", str(src)])
-
-    assert result.exit_code != 0
-    assert "tenant" in result.output.lower() or "database" in result.output.lower()
+    assert result.exception is not None
+    assert "voyage_api_key" in str(result.exception).lower()
 
 
 # ── nx store put ──────────────────────────────────────────────────────────────
@@ -79,7 +47,7 @@ def test_store_put_stdin_requires_title(
     runner: CliRunner, env_creds, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """C1: stdin input without --title is rejected with a clear error."""
-    with patch("nexus.commands.store._t3"):
+    with patch("nexus.commands.store.t3_knowledge"):
         result = runner.invoke(main, ["store", "put", "-"], input="some content")
 
     assert result.exit_code != 0
@@ -93,7 +61,7 @@ def test_store_put_stdin_with_title_succeeds(
     mock_db = MagicMock()
     mock_db.put.return_value = "doc-id-abc"
 
-    with patch("nexus.commands.store._t3", return_value=mock_db):
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
         result = runner.invoke(
             main, ["store", "put", "-", "--title", "my-title.md"], input="content here"
         )
@@ -115,7 +83,7 @@ def test_store_put_file_uses_filename_as_title(
     mock_db = MagicMock()
     mock_db.put.return_value = "doc-id-xyz"
 
-    with patch("nexus.commands.store._t3", return_value=mock_db):
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["store", "put", str(src)])
 
     assert result.exit_code == 0
@@ -127,7 +95,7 @@ def test_store_put_file_uses_filename_as_title(
 def test_store_put_file_not_found(
     runner: CliRunner, env_creds
 ) -> None:
-    with patch("nexus.commands.store._t3"):
+    with patch("nexus.commands.store.t3_knowledge"):
         result = runner.invoke(main, ["store", "put", "/no/such/file.txt"])
 
     assert result.exit_code != 0
@@ -141,7 +109,7 @@ def test_store_put_invalid_ttl_shows_error(
     src = tmp_path / "f.txt"
     src.write_text("content")
 
-    with patch("nexus.commands.store._t3"):
+    with patch("nexus.commands.store.t3_knowledge"):
         result = runner.invoke(main, ["store", "put", str(src), "--ttl", "5z"])
 
     assert result.exit_code != 0
@@ -155,7 +123,7 @@ def test_store_list_empty_collection(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_store.return_value = []
 
-    with patch("nexus.commands.store._t3", return_value=mock_db):
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["store", "list"])
 
     assert result.exit_code == 0
@@ -185,7 +153,7 @@ def test_store_list_shows_entries(runner: CliRunner, env_creds) -> None:
         },
     ]
 
-    with patch("nexus.commands.store._t3", return_value=mock_db):
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["store", "list"])
 
     assert result.exit_code == 0
@@ -211,7 +179,7 @@ def test_store_list_shows_tags(runner: CliRunner, env_creds) -> None:
         }
     ]
 
-    with patch("nexus.commands.store._t3", return_value=mock_db):
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["store", "list"])
 
     assert result.exit_code == 0
@@ -223,7 +191,7 @@ def test_store_list_custom_collection(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_store.return_value = []
 
-    with patch("nexus.commands.store._t3", return_value=mock_db):
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
         runner.invoke(main, ["store", "list", "--collection", "knowledge__notes"])
 
     call_args = mock_db.list_store.call_args
@@ -235,7 +203,7 @@ def test_store_list_limit_flag(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_store.return_value = []
 
-    with patch("nexus.commands.store._t3", return_value=mock_db):
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
         runner.invoke(main, ["store", "list", "--limit", "10"])
 
     call_args = mock_db.list_store.call_args
@@ -246,7 +214,7 @@ def test_store_expire_reports_count(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.expire.return_value = 3
 
-    with patch("nexus.commands.store._t3", return_value=mock_db):
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["store", "expire"])
 
     assert result.exit_code == 0
@@ -601,3 +569,50 @@ def test_search_no_path_returns_all(runner: CliRunner, env_creds) -> None:
     assert where_filter is None, (
         f"Expected no where filter when path is absent, got: {where_filter}"
     )
+
+
+# ── nexus-pjsc.3: P2/P13 store routing to knowledge store ────────────────────
+
+def test_store_put_routes_to_knowledge_store(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """P2: store put calls t3_knowledge() not legacy _t3()."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    src = tmp_path / "f.txt"
+    src.write_text("content")
+    mock_db = MagicMock()
+    mock_db.put.return_value = "doc-id-123"
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["store", "put", str(src)])
+    assert result.exit_code == 0
+    mock_db.put.assert_called_once()
+
+
+def test_store_list_routes_to_knowledge_store(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2: store list calls t3_knowledge() not legacy _t3()."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    mock_db = MagicMock()
+    mock_db.list_store.return_value = []
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["store", "list"])
+    assert result.exit_code == 0
+    mock_db.list_store.assert_called_once()
+
+
+def test_store_expire_routes_to_knowledge_store(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P13: store expire calls t3_knowledge() and expires only knowledge store entries."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    mock_db = MagicMock()
+    mock_db.expire.return_value = 5
+    with patch("nexus.commands.store.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["store", "expire"])
+    assert result.exit_code == 0
+    mock_db.expire.assert_called_once()
+    assert "5" in result.output
