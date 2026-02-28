@@ -568,6 +568,36 @@ Critic read source files: `db/t3.py`, `config.py`, `corpus.py`, `registry.py`, `
 - O4: `expire()` docstring handled in Phase 1 Step 4 — no change
 - O5: Deployment ordering note expanded to state that CloudClient users must retain `chroma_*` credentials until migration completes
 
+### Gate 5 (2026-02-27) — BLOCKED
+
+**4 critical, 2 significant, 5 observations.**
+
+Critic read source files: `db/t3.py`, `config.py`, `indexer.py` (full 841 lines), `commands/store.py`, `commands/memory.py`, `commands/pm.py`, `pm.py`, `db/__init__.py`, `commands/index.py`, `commands/collection.py`, `commands/search_cmd.py`, `doc_indexer.py`, `corpus.py`, `registry.py`, `search_engine.py`.
+
+#### Critical
+
+**C1. `_run_index_frecency_only()` loop structure incompatible with split-store routing.** The function creates a single `db` and iterates `[code_collection, docs_collection]`, calling `db.get_or_create_collection()` and `db.update_chunks()` for both. Under four-store, code and docs are in separate `PersistentClient` instances — a single `db` cannot address both. The routing table instruction "call `t3_code()` for code, `t3_docs()` for docs" is insufficient without showing the restructured loop. Fix: add explicit pseudocode in Step 10: `db_code = t3_code(); db_docs = t3_docs(); for collection_name, db in [(code_collection, db_code), (docs_collection, db_docs)]: ...`.
+
+**C2. `_run_index()` not mentioned in the implementation plan, yet must be fully rewritten.** `_run_index()` creates a single `db = make_t3()` (line 768) and passes it to: `db.get_or_create_collection(code_collection)`, `db.get_or_create_collection(docs_collection)`, `_discover_and_index_rdrs(..., db, ...)`, `_prune_misclassified(..., db)`, `_prune_deleted_files(..., db)`. After Step 10 removes the `db` params from helper functions, `_run_index()` still calls `make_t3()` and passes `db` — a compile-time `TypeError`. `_run_index()` itself must be rewritten to instantiate three separate `T3Database` objects. Phase 2 Step 12 says only "route `nx index` entry point to `t3_code()`, `t3_docs()`, `t3_rdr()`" — too vague. Fix: add explicit step: "Rewrite `_run_index()` to call `t3_code()`, `t3_docs()`, `t3_rdr()` separately; route each collection and each helper call to the correct instance; remove `make_t3()`."
+
+**C3. `_persistent_t3()` blocks `nx migrate t3` for CloudClient users without `voyage_api_key`.** Migration users who have only cloud credentials (`chroma_api_key`, `chroma_tenant`, `chroma_database`) and no `voyage_api_key` cannot call the destination factories — `_persistent_t3()` raises `RuntimeError("voyage_api_key not configured")` before opening the destination stores. Migration is blocked for the exact users who need it most. Fix: Phase 4 Step 15 must specify how destination stores are opened during migration, either: (a) pass `_ef_override=DefaultEmbeddingFunction()` so no VoyageAI key is needed for migration (documents are moved with pre-existing embeddings, no re-embedding occurs); or (b) add a migration-specific factory that skips the `voyage_api_key` guard. Document in the migration steps that `voyage_api_key` is not needed for migration because embeddings are copied verbatim.
+
+**C4. `commands/memory.py:promote_cmd` Step 8 removes only the guard but leaves `T3Database(...)` constructor at lines 134–139.** The guard at lines 112–120 checks 4 keys (including `voyage_api_key` — current guard is not just `chroma_*` as stated). The direct `T3Database(tenant=..., database=..., api_key=..., voyage_api_key=...)` constructor at lines 134–139 is a separate, independent CloudClient construction. Removing only the guard still leaves CloudClient credentials required at runtime. Fix: Step 8 must explicitly state: "Replace lines 112–139 entirely with `with t3_knowledge() as t3:` — removes both the credential guard and the `T3Database(...)` constructor." The RDR's "Current guard" column must also be corrected: the actual guard checks four keys (`chroma_api_key`, `voyage_api_key`, `chroma_tenant`, `chroma_database`), not three.
+
+#### Significant
+
+**S1. `search_engine.py:_t3_for_search()` — undocumented `make_t3()` call site not in routing table or Phase 3 cleanup.** `search_engine.py` contains a `_t3_for_search()` function that imports and calls `make_t3()` inline. It is currently unused (`search_cmd.py` passes `t3=db` directly), but it survives Phase 3 cleanup as written and would fail if `make_t3()` is removed or if CloudClient credentials are absent. Fix: add to Phase 3 Step 13: "Remove `_t3_for_search()` from `search_engine.py` (dead code — current `search_cmd.py` passes `t3=db` directly)."
+
+**S2. `doc_indexer._index_document()` has a `make_t3()` fallback at line 170 that survives all phases.** The RDR routes `index_pdf_cmd`, `index_md_cmd`, `index_rdr_cmd` to pass `t3=t3_docs()`/`t3=t3_rdr()` explicitly. But `_index_document(t3=None, ...)` at line 170 does `db = t3 if t3 is not None else make_t3()`. If any caller passes `t3=None` (tests, future code), the `make_t3()` CloudClient path runs. Phase 3 "removes `make_t3()`" from `db/__init__.py`, making this fallback an `ImportError`. Fix: Phase 2 Step 11 must also specify removing the `make_t3()` fallback in `_index_document()` — either require `t3` explicitly or raise `RuntimeError("t3 must be provided")`.
+
+#### Observations
+
+- O1: `commands/pm.py` top-level `from nexus.db import make_t3` import is already dead before Phase 3 — it is unused today; Phase 3 Step 14 correctly removes it.
+- O2: `T3Database.__exit__` is a `pass` with comment "ChromaDB CloudClient is HTTP-based; no persistent connection to close" — Phase 1 Step 4 says "Update __exit__ comment" but should specify replacement text, e.g. "ChromaDB manages its own lifecycle; explicit close is not required for PersistentClient or CloudClient."
+- O3: Test P12 claims `--collection notes` → `knowledge__notes` but `promote_cmd` passes `collection` directly to `t3.put(collection=collection, ...)` without calling `t3_collection_name()`. P12 should use `--collection knowledge__notes` or specify that `promote_cmd` must call `t3_collection_name()` before `put()`.
+- O4: Migration Step 4 specifies `col.get(limit=None, ...)` — ChromaDB version-dependent; use `col.get(include=[...])` without `limit` or use `limit=10_000` as a safe large value.
+- O5: `_persistent_t3()` fallback to `legacy_key` is the zero-downtime path for users who set `path:` in the old single-store era. RDR should explicitly document this as the migration path for users who followed RDR-003.
+
 ### Gate 3 (2026-02-27) — BLOCKED
 
 **3 critical, 4 significant, 5 observations.**
