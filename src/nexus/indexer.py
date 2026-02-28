@@ -505,6 +505,7 @@ def _index_pdf_file(
             "ttl_days": 0,
             "frecency_score": float(score),
             **git_meta,
+            "store_type": "pdf",
         }
         metadatas.append(augmented)
 
@@ -564,7 +565,7 @@ def _discover_and_index_rdrs(
         db = t3_rdr()
     except RuntimeError as exc:
         _log.error("rdr_path not configured — skipping RDR indexing", error=str(exc))
-        raise
+        return 0, 0, 0
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
     results = batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection)
     indexed = sum(1 for s in results.values() if s == "indexed")

@@ -1608,7 +1608,8 @@ def test_prune_deleted_files_no_truncation_warning_below_50k() -> None:
 def test_discover_and_index_rdrs_logs_error_when_rdr_path_not_configured(
     tmp_path: Path,
 ) -> None:
-    """S5: when t3_rdr() raises RuntimeError, _discover_and_index_rdrs logs before re-raising."""
+    """S5/S1: when t3_rdr() raises RuntimeError, _discover_and_index_rdrs logs the
+    error and returns (0, 0, 0) — skipping gracefully, not aborting the index run."""
     from nexus.indexer import _discover_and_index_rdrs
 
     repo = tmp_path / "repo"
@@ -1623,11 +1624,11 @@ def test_discover_and_index_rdrs_logs_error_when_rdr_path_not_configured(
                    side_effect=RuntimeError("T3 store not configured: set chromadb.rdr_path")), \
              patch("nexus.registry._repo_identity", return_value=("repo", "abc")), \
              patch("nexus.registry._rdr_collection_name", return_value="rdr__repo-abc"):
-            with pytest.raises(RuntimeError, match="rdr_path"):
-                _discover_and_index_rdrs(repo, {rdr_dir})
+            result = _discover_and_index_rdrs(repo, {rdr_dir})
 
+    assert result == (0, 0, 0), "must return (0,0,0) when rdr_path not configured"
     error_events = [e for e in cap if e.get("log_level") == "error"]
-    assert error_events, "structured error log must be emitted before re-raise"
+    assert error_events, "structured error log must be emitted"
 
 
 # ── S2: STORE_PREFIX_MAP must be importable from nexus.db.t3_stores ──────────
@@ -1670,3 +1671,90 @@ def test_migrate_dest_store_uses_shared_prefix_map() -> None:
     # knowledge__ falls back
     assert _dest_store_for("knowledge__foo") == "knowledge"
     assert _dest_store_for("unknown__bar") == "knowledge"
+
+
+# ── S1: _discover_and_index_rdrs must skip gracefully when rdr_path missing ──
+
+
+def test_discover_and_index_rdrs_skips_gracefully_when_rdr_not_configured(
+    tmp_path: Path,
+) -> None:
+    """S1: when t3_rdr() raises RuntimeError, _discover_and_index_rdrs returns (0,0,0)
+    without propagating the exception — log says 'skipping' and the code must honour it."""
+    from nexus.indexer import _discover_and_index_rdrs
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rdr_dir = repo / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "rdr-001.md").write_text("# Decision\nsome content\n")
+
+    import structlog.testing
+    with structlog.testing.capture_logs() as cap:
+        with patch("nexus.indexer.t3_rdr",
+                   side_effect=RuntimeError("T3 store not configured: set chromadb.rdr_path")), \
+             patch("nexus.registry._repo_identity", return_value=("repo", "abc")), \
+             patch("nexus.registry._rdr_collection_name", return_value="rdr__repo-abc"):
+            result = _discover_and_index_rdrs(repo, {rdr_dir})
+
+    assert result == (0, 0, 0), "must return (0,0,0) — skipping, not aborting"
+    error_events = [e for e in cap if e.get("log_level") == "error"]
+    assert error_events, "structured error log must still be emitted"
+
+
+# ── S4: _index_pdf_file store_type must always be 'pdf', never overridden ────
+
+
+def test_index_pdf_file_store_type_always_pdf_regardless_of_git_meta(
+    tmp_path: Path,
+) -> None:
+    """S4: store_type in augmented metadata is always 'pdf', even when git_meta
+    carries a different store_type value (e.g. from repo metadata injection)."""
+    from nexus.indexer import _index_pdf_file
+
+    fake_pdf = tmp_path / "report.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 fake")
+    repo = tmp_path
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_db = MagicMock()
+
+    chunk_meta = {
+        "store_type": "pdf",
+        "source_path": str(fake_pdf),
+        "content_hash": "abc123",
+        "embedding_model": "voyage-4",
+        "page_number": 1,
+        "indexed_at": "2026-01-01T00:00:00+00:00",
+    }
+    fake_prepared = [("id-1", "page text", chunk_meta)]
+
+    # git_meta intentionally carries a conflicting store_type to expose the bug
+    git_meta = {
+        "store_type": "should_not_win",
+        "git_commit": "deadbeef",
+    }
+
+    with patch("nexus.doc_indexer._pdf_chunks", return_value=fake_prepared), \
+         patch("nexus.doc_indexer._embed_with_fallback",
+               return_value=([[0.1, 0.2]], "voyage-4")):
+        _index_pdf_file(
+            file=fake_pdf,
+            repo=repo,
+            collection_name="docs__testrepo",
+            target_model="voyage-4",
+            col=mock_col,
+            db=mock_db,
+            voyage_key="test-key",
+            git_meta=git_meta,
+            now_iso="2026-01-01T00:00:00+00:00",
+            score=0.5,
+        )
+
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args.kwargs
+    actual_store_type = call_kwargs["metadatas"][0]["store_type"]
+    assert actual_store_type == "pdf", (
+        f"store_type must always be 'pdf' but got {actual_store_type!r}; "
+        "git_meta must not be able to override store_type"
+    )

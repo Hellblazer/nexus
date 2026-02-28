@@ -405,3 +405,55 @@ def test_migrate_t3_empty_source_exits_cleanly(runner: CliRunner) -> None:
     assert result.exit_code == 0, result.output
     assert "empty" in result.output.lower() or "nothing" in result.output.lower()
     mock_open_dest.assert_not_called()
+
+
+# ── S2: _PREFIX_TO_STORE in migrate.py must be a tuple (not dict) ─────────────
+
+
+def test_migrate_prefix_to_store_is_tuple() -> None:
+    """S2: _PREFIX_TO_STORE in migrate.py must be tuple[tuple[str,str],...] for
+    type consistency with collection.py — both consumers of STORE_PREFIX_MAP."""
+    from nexus.commands.migrate import _PREFIX_TO_STORE
+
+    assert isinstance(_PREFIX_TO_STORE, tuple), (
+        f"_PREFIX_TO_STORE must be tuple, got {type(_PREFIX_TO_STORE).__name__}; "
+        "both collection.py and migrate.py should use the same type"
+    )
+    for item in _PREFIX_TO_STORE:
+        assert isinstance(item, tuple) and len(item) == 2, (
+            f"each entry must be a (prefix, store) tuple, got {item!r}"
+        )
+
+
+# ── S3: upsert failure during migration must propagate, not be silently swallowed
+
+
+def test_migrate_t3_upsert_failure_propagates_exception(
+    runner: CliRunner,
+) -> None:
+    """S3: if dest_col.upsert() raises during migration, the exception must
+    propagate (non-zero exit) — partial migration is detectable on retry."""
+    source_col = _make_source_col("knowledge__test", 2)
+    source_col.get.return_value = {
+        "ids": ["a", "b"],
+        "documents": ["doc a", "doc b"],
+        "embeddings": [[0.1], [0.2]],
+        "metadatas": [{}, {}],
+    }
+    source_db = MagicMock()
+    source_db.list_collections.return_value = [{"name": "knowledge__test"}]
+    source_db._client.get_collection.return_value = source_col
+
+    dest_col = MagicMock()
+    dest_col.count.return_value = 0
+    dest_col.upsert.side_effect = RuntimeError("disk full")
+    dest_db = MagicMock()
+    dest_db.get_or_create_collection.return_value = dest_col
+
+    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
+         patch("nexus.commands.migrate._open_dest_db", return_value=dest_db):
+        result = runner.invoke(main, ["migrate", "t3"])
+
+    assert result.exit_code != 0, (
+        "upsert failure must propagate as non-zero exit code, not be swallowed"
+    )

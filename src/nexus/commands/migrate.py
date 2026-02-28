@@ -8,14 +8,14 @@ from nexus.db.t3 import T3Database
 from nexus.db.t3_stores import STORE_PREFIX_MAP
 
 
-# Derived from the shared STORE_PREFIX_MAP for O(1) lookup.
+# Same type as collection.py — tuple[tuple[str, str], ...] for consistency.
 # knowledge__ intentionally absent — _dest_store_for falls back to "knowledge".
-_PREFIX_TO_STORE: dict[str, str] = dict(STORE_PREFIX_MAP)
+_PREFIX_TO_STORE: tuple[tuple[str, str], ...] = STORE_PREFIX_MAP
 
 
 def _dest_store_for(col_name: str) -> str:
     """Return the destination store key for a collection name."""
-    for prefix, store in _PREFIX_TO_STORE.items():
+    for prefix, store in _PREFIX_TO_STORE:
         if col_name.startswith(prefix):
             return store
     return "knowledge"
