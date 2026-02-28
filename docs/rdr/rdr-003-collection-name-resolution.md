@@ -2,19 +2,25 @@
 title: "Collection Name Resolution by Prefix"
 id: RDR-003
 type: Feature
-status: draft
+status: superseded
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-02-27
 accepted_date:
+close_date: 2026-02-27
+close_reason: superseded
+superseded_by: RDR-004
 related_issues: []
 ---
 
 # RDR-003: Collection Name Resolution by Prefix
 
-> Revise during planning; lock at implementation.
-> If wrong, abandon code and iterate RDR.
+> **SUPERSEDED** by [RDR-004](rdr-004-three-store-architecture.md) (2026-02-27).
+> After 5 gate rounds the design was still BLOCKED. Root cause: prefix resolution
+> in a single mixed-purpose store creates interlocking exception-handling and
+> contract-preservation constraints that resist clean solution. RDR-004 adopts a
+> three-store architecture (code / docs / rdr) that eliminates the problem class.
 
 ## Problem Statement
 
