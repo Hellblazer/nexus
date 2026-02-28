@@ -59,7 +59,7 @@ def ensure_databases(
     ``UniqueConstraintError`` (HTTP 409) is silently swallowed — it means the
     database already exists, which is the desired end state.
     """
-    from chromadb.errors import UniqueConstraintError
+    from chromadb.errors import ChromaError, UniqueConstraintError
 
     result: dict[str, bool] = {}
     for t in _STORE_TYPES:
@@ -69,6 +69,13 @@ def ensure_databases(
             result[db_name] = True
         except UniqueConstraintError:
             result[db_name] = False
+        except ChromaError as exc:
+            # Chroma Cloud may return a plain ChromaError (not UniqueConstraintError)
+            # with "already exists" in the message — treat as idempotent.
+            if "already exists" in str(exc).lower():
+                result[db_name] = False
+            else:
+                raise
     return result
 
 

@@ -151,6 +151,33 @@ def test_ensure_databases_ignores_already_exists() -> None:
     ensure_databases(admin, tenant="my-tenant", base="nexus")
 
 
+def test_ensure_databases_ignores_chroma_error_already_exists() -> None:
+    """ensure_databases silently ignores ChromaError with 'already exists' message.
+
+    Chroma Cloud returns a plain ChromaError (not UniqueConstraintError) when a
+    database already exists — both must be treated as idempotent.
+    """
+    from chromadb.errors import ChromaError
+    from nexus.commands.migrate import ensure_databases
+
+    admin = MagicMock()
+    admin.create_database.side_effect = ChromaError("Database [nexus_code] already exists")
+    # Should not raise
+    result = ensure_databases(admin, tenant="my-tenant", base="nexus")
+    assert all(v is False for v in result.values())
+
+
+def test_ensure_databases_reraises_other_chroma_errors() -> None:
+    """ensure_databases re-raises ChromaError that is NOT an already-exists message."""
+    from chromadb.errors import ChromaError
+    from nexus.commands.migrate import ensure_databases
+
+    admin = MagicMock()
+    admin.create_database.side_effect = ChromaError("Permission denied.")
+    with pytest.raises(ChromaError, match="Permission denied"):
+        ensure_databases(admin, tenant="my-tenant", base="nexus")
+
+
 # ── P14: pagination ───────────────────────────────────────────────────────────
 
 def test_migrate_paginates_large_collections() -> None:
