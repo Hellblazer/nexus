@@ -5,16 +5,12 @@ from __future__ import annotations
 import click
 
 from nexus.db.t3 import T3Database
+from nexus.db.t3_stores import STORE_PREFIX_MAP
 
 
-# knowledge__ is intentionally absent: _dest_store_for falls back to "knowledge"
-# for any unrecognised prefix, so an explicit entry would be redundant
-# (mirrors the same decision in nexus.commands.collection._PREFIX_TO_STORE).
-_PREFIX_TO_STORE = {
-    "code__": "code",
-    "docs__": "docs",
-    "rdr__": "rdr",
-}
+# Derived from the shared STORE_PREFIX_MAP for O(1) lookup.
+# knowledge__ intentionally absent — _dest_store_for falls back to "knowledge".
+_PREFIX_TO_STORE: dict[str, str] = dict(STORE_PREFIX_MAP)
 
 
 def _dest_store_for(col_name: str) -> str:

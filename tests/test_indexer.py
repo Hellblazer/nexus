@@ -80,11 +80,13 @@ def test_run_index_raises_credentials_missing_without_credentials(
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-                with patch("nexus.db.make_t3") as mock_make_t3:
+                with patch("nexus.indexer.t3_code") as mock_t3_code, \
+                     patch("nexus.indexer.t3_docs") as mock_t3_docs:
                     with pytest.raises(CredentialsMissingError):
                         _run_index(repo, registry)
 
-    mock_make_t3.assert_not_called()
+    mock_t3_code.assert_not_called()
+    mock_t3_docs.assert_not_called()
 
 
 def test_index_sets_pending_credentials_when_missing(tmp_path: Path, registry) -> None:
@@ -1350,15 +1352,16 @@ def test_prune_deleted_files_uses_bounded_col_get() -> None:
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_code_db = MagicMock()
-    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_code_db._client.get_collection.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db._client.get_collection.return_value = mock_col
 
     _prune_deleted_files(
         "code__repo", "docs__repo", {"/repo/file.py"},
         db_code=mock_code_db, db_docs=mock_docs_db,
     )
 
+    assert mock_col.get.called, "col.get() must be called"
     for call in mock_col.get.call_args_list:
         call_kwargs = call.kwargs if call.kwargs else {}
         assert "limit" in call_kwargs, "col.get() in _prune_deleted_files must pass limit="
@@ -1496,19 +1499,16 @@ def test_prune_deleted_files_skips_nonexistent_collection() -> None:
     mock_docs_db.get_or_create_collection.assert_not_called()
 
 
-def test_prune_deleted_files_accepts_db_handles(tmp_path: Path) -> None:
-    """I3: _prune_deleted_files(... , db_code=, db_docs=) uses provided handles.
-
-    Same rationale as test_prune_misclassified_accepts_db_handles.
-    """
+def test_prune_deleted_files_accepts_db_handles() -> None:
+    """_prune_deleted_files(... , db_code=, db_docs=) uses provided handles, not module-level factories."""
     from nexus.indexer import _prune_deleted_files
 
     db_code = MagicMock()
     db_docs = MagicMock()
     col = MagicMock()
     col.get.return_value = {"ids": [], "metadatas": []}
-    db_code.get_or_create_collection.return_value = col
-    db_docs.get_or_create_collection.return_value = col
+    db_code._client.get_collection.return_value = col
+    db_docs._client.get_collection.return_value = col
 
     with patch("nexus.indexer.t3_code") as mock_t3_code, \
          patch("nexus.indexer.t3_docs") as mock_t3_docs:
@@ -1519,3 +1519,154 @@ def test_prune_deleted_files_accepts_db_handles(tmp_path: Path) -> None:
         )
         mock_t3_code.assert_not_called()
         mock_t3_docs.assert_not_called()
+
+
+# ── I2: _prune_misclassified must pass limit= to per-file col.get() calls ────
+
+
+def test_prune_misclassified_uses_bounded_col_get() -> None:
+    """I2: per-file col.get() in _prune_misclassified must pass limit= to prevent OOM."""
+    from nexus.indexer import _prune_misclassified
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_code_db = MagicMock()
+    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db.get_or_create_collection.return_value = mock_col
+
+    _prune_misclassified(
+        Path("/repo"), "code__repo", "docs__repo",
+        code_files=[Path("/repo/main.py")],
+        prose_files=[Path("/repo/README.md")],
+        pdf_files=[],
+        db_code=mock_code_db, db_docs=mock_docs_db,
+    )
+
+    assert mock_col.get.called, "col.get() must be called"
+    for call in mock_col.get.call_args_list:
+        kw = call.kwargs if call.kwargs else {}
+        assert "limit" in kw, "col.get() in _prune_misclassified must pass limit="
+
+
+# ── S4: _prune_deleted_files 50k warning must use == not >= ──────────────────
+
+
+def test_prune_deleted_files_truncation_warning_fires_at_exactly_50k() -> None:
+    """S4: truncation warning fires when exactly 50000 IDs returned (== 50000)."""
+    from nexus.indexer import _prune_deleted_files
+
+    mock_col = MagicMock()
+    # Return exactly 50000 IDs — this is the truncation signal
+    ids_50k = [f"id-{i}" for i in range(50000)]
+    mock_col.get.return_value = {
+        "ids": ids_50k,
+        "metadatas": [{"source_path": f"/repo/f{i}.py"} for i in range(50000)],
+    }
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError
+
+    mock_code_db = MagicMock()
+    mock_code_db._client.get_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db._client.get_collection.side_effect = _ChromaNotFoundError("not found")
+
+    import structlog.testing
+    with structlog.testing.capture_logs() as cap:
+        _prune_deleted_files("code__repo", "docs__repo", {"/repo/keep.py"},
+                             db_code=mock_code_db, db_docs=mock_docs_db)
+
+    warning_events = [e for e in cap if e.get("log_level") == "warning"]
+    assert warning_events, "warning must fire when exactly 50000 IDs returned"
+
+
+def test_prune_deleted_files_no_truncation_warning_below_50k() -> None:
+    """S4: truncation warning must NOT fire when fewer than 50000 IDs returned."""
+    from nexus.indexer import _prune_deleted_files
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": ["id-1", "id-2"], "metadatas": [
+        {"source_path": "/repo/gone.py"},
+        {"source_path": "/repo/gone.py"},
+    ]}
+    mock_code_db = MagicMock()
+    mock_code_db._client.get_collection.return_value = mock_col
+    mock_docs_db = MagicMock()
+    mock_docs_db._client.get_collection.return_value = mock_col
+
+    import structlog.testing
+    with structlog.testing.capture_logs() as cap:
+        _prune_deleted_files("code__repo", "docs__repo", {"/repo/keep.py"},
+                             db_code=mock_code_db, db_docs=mock_docs_db)
+
+    warning_events = [e for e in cap if e.get("log_level") == "warning"]
+    assert not warning_events, "no truncation warning when < 50000 IDs returned"
+
+
+# ── S5: _discover_and_index_rdrs logs structured error when rdr_path missing ──
+
+
+def test_discover_and_index_rdrs_logs_error_when_rdr_path_not_configured(
+    tmp_path: Path,
+) -> None:
+    """S5: when t3_rdr() raises RuntimeError, _discover_and_index_rdrs logs before re-raising."""
+    from nexus.indexer import _discover_and_index_rdrs
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rdr_dir = repo / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "rdr-001.md").write_text("# Decision\nsome content\n")
+
+    import structlog.testing
+    with structlog.testing.capture_logs() as cap:
+        with patch("nexus.indexer.t3_rdr",
+                   side_effect=RuntimeError("T3 store not configured: set chromadb.rdr_path")), \
+             patch("nexus.registry._repo_identity", return_value=("repo", "abc")), \
+             patch("nexus.registry._rdr_collection_name", return_value="rdr__repo-abc"):
+            with pytest.raises(RuntimeError, match="rdr_path"):
+                _discover_and_index_rdrs(repo, {rdr_dir})
+
+    error_events = [e for e in cap if e.get("log_level") == "error"]
+    assert error_events, "structured error log must be emitted before re-raise"
+
+
+# ── S2: STORE_PREFIX_MAP must be importable from nexus.db.t3_stores ──────────
+
+
+def test_store_prefix_map_exported_from_t3_stores() -> None:
+    """S2: STORE_PREFIX_MAP is a shared constant importable from t3_stores."""
+    from nexus.db.t3_stores import STORE_PREFIX_MAP
+
+    assert isinstance(STORE_PREFIX_MAP, tuple), "STORE_PREFIX_MAP must be a tuple"
+    prefixes = {prefix for prefix, _ in STORE_PREFIX_MAP}
+    assert "code__" in prefixes
+    assert "docs__" in prefixes
+    assert "rdr__" in prefixes
+    # knowledge__ intentionally absent — falls back to "knowledge" store
+    assert "knowledge__" not in prefixes
+
+
+def test_collection_infer_store_uses_shared_prefix_map() -> None:
+    """S2: _infer_store_type in collection.py uses the shared STORE_PREFIX_MAP."""
+    from nexus.commands.collection import _infer_store_type
+    from nexus.db.t3_stores import STORE_PREFIX_MAP
+
+    for prefix, expected_store in STORE_PREFIX_MAP:
+        assert _infer_store_type(f"{prefix}mycol", None) == expected_store
+
+    # knowledge__ falls back
+    assert _infer_store_type("knowledge__foo", None) == "knowledge"
+    assert _infer_store_type("unknown__bar", None) == "knowledge"
+
+
+def test_migrate_dest_store_uses_shared_prefix_map() -> None:
+    """S2: _dest_store_for in migrate.py uses the shared STORE_PREFIX_MAP."""
+    from nexus.commands.migrate import _dest_store_for
+    from nexus.db.t3_stores import STORE_PREFIX_MAP
+
+    for prefix, expected_store in STORE_PREFIX_MAP:
+        assert _dest_store_for(f"{prefix}mycol") == expected_store
+
+    # knowledge__ falls back
+    assert _dest_store_for("knowledge__foo") == "knowledge"
+    assert _dest_store_for("unknown__bar") == "knowledge"

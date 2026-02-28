@@ -46,6 +46,7 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
         result[key] = value
     return result
 
+
 _CONTENT_MAX_CHARS: int = 200
 
 # Lambda wrapping is intentional: it provides late name binding so that

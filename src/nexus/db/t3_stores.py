@@ -21,6 +21,17 @@ from nexus.config import get_credential, load_config
 from nexus.db.t3 import T3Database
 
 
+# Canonical prefix-to-store mapping.  Shared by commands/collection.py and
+# commands/migrate.py so a single place governs all prefix-based routing.
+# knowledge__ is intentionally absent: the fallback "knowledge" handles it,
+# keeping the table free of a redundant entry (mirrors collection._infer_store_type).
+STORE_PREFIX_MAP: tuple[tuple[str, str], ...] = (
+    ("code__", "code"),
+    ("docs__", "docs"),
+    ("rdr__", "rdr"),
+)
+
+
 def _persistent_t3(
     path_key: str,
     legacy_key: str | None = None,

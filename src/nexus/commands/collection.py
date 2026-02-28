@@ -9,6 +9,7 @@ import structlog
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
 from nexus.db.t3 import T3Database
 from nexus.db.t3_stores import (
+    STORE_PREFIX_MAP,
     t3_code, t3_code_local,
     t3_docs, t3_docs_local,
     t3_knowledge, t3_knowledge_local,
@@ -40,13 +41,8 @@ _LOCAL_STORE_FACTORIES: dict[str, Callable[[], T3Database]] = {
 }
 
 # Prefix → store key mapping used by _infer_store_type.
-# knowledge__ is intentionally absent: everything else falls back to "knowledge"
-# in _infer_store_type(), so an explicit entry would be redundant.
-_PREFIX_TO_STORE: tuple[tuple[str, str], ...] = (
-    ("code__", "code"),
-    ("docs__", "docs"),
-    ("rdr__", "rdr"),
-)
+# Imported from t3_stores to keep a single authoritative source.
+_PREFIX_TO_STORE: tuple[tuple[str, str], ...] = STORE_PREFIX_MAP
 
 
 def _infer_store_type(name: str, explicit: str | None) -> str:

@@ -560,7 +560,11 @@ def _discover_and_index_rdrs(
     basename, _ = _repo_identity(repo)
     collection = _rdr_collection_name(repo)
 
-    db = t3_rdr()
+    try:
+        db = t3_rdr()
+    except RuntimeError as exc:
+        _log.error("rdr_path not configured — skipping RDR indexing", error=str(exc))
+        raise
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
     results = batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection)
     indexed = sum(1 for s in results.values() if s == "indexed")
@@ -595,7 +599,7 @@ def _prune_misclassified(
     # Prose + PDF files should NOT have chunks in the code__ collection
     docs_paths = {str(f) for f in prose_files} | {str(f) for f in pdf_files}
     for source_path in docs_paths:
-        existing = code_col.get(where={"source_path": source_path}, include=[])
+        existing = code_col.get(where={"source_path": source_path}, include=[], limit=50000)
         if existing["ids"]:
             code_col.delete(ids=existing["ids"])
             _log.debug("pruned misclassified chunks from code collection",
@@ -604,7 +608,7 @@ def _prune_misclassified(
     # Code files should NOT have chunks in the docs__ collection
     code_paths = {str(f) for f in code_files}
     for source_path in code_paths:
-        existing = docs_col.get(where={"source_path": source_path}, include=[])
+        existing = docs_col.get(where={"source_path": source_path}, include=[], limit=50000)
         if existing["ids"]:
             docs_col.delete(ids=existing["ids"])
             _log.debug("pruned misclassified chunks from docs collection",
@@ -634,7 +638,7 @@ def _prune_deleted_files(
             continue  # not yet indexed — skip, do not create a ghost collection
         # Cap at 50 000 to avoid loading an entire large collection into memory.
         all_chunks = col.get(include=["metadatas"], limit=50000)
-        if len(all_chunks["ids"]) >= 50000:
+        if len(all_chunks["ids"]) == 50000:
             _log.warning("_prune_deleted_files: collection exceeds 50k chunks; "
                          "prune may be incomplete", collection=collection_name)
         if not all_chunks["ids"]:

@@ -211,7 +211,6 @@ def test_info_shows_embedding_model_for_code_collection(
     mock_db.list_collections.return_value = [
         {"name": "code__nexus", "count": 1247},
     ]
-    mock_db.collection_info.return_value = {"count": 1247, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db._client.get_collection.return_value = mock_col
@@ -232,7 +231,6 @@ def test_info_shows_embedding_model_for_knowledge_collection(
     mock_db.list_collections.return_value = [
         {"name": "knowledge__research", "count": 88},
     ]
-    mock_db.collection_info.return_value = {"count": 88, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db._client.get_collection.return_value = mock_col
@@ -252,7 +250,6 @@ def test_info_shows_last_indexed_when_metadata_exists(
     mock_db.list_collections.return_value = [
         {"name": "knowledge__test", "count": 3},
     ]
-    mock_db.collection_info.return_value = {"count": 3, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {
         "ids": ["a", "b", "c"],
@@ -280,7 +277,6 @@ def test_info_shows_unknown_when_no_indexed_at_metadata(
     mock_db.list_collections.return_value = [
         {"name": "knowledge__legacy", "count": 2},
     ]
-    mock_db.collection_info.return_value = {"count": 2, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {
         "ids": ["x", "y"],
@@ -350,7 +346,6 @@ def test_info_default_uses_knowledge_store(runner: CliRunner) -> None:
     """info without --type uses t3_knowledge()."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
-    mock_db.collection_info.return_value = {"count": 5, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db.get_or_create_collection.return_value = mock_col
@@ -364,7 +359,6 @@ def test_info_type_code_routes_to_code_store(runner: CliRunner) -> None:
     """info --type code uses t3_code()."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = [{"name": "code__nexus", "count": 10}]
-    mock_db.collection_info.return_value = {"count": 10, "metadata": {}}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db.get_or_create_collection.return_value = mock_col
@@ -421,7 +415,6 @@ def test_info_does_not_call_get_or_create_collection(
     """C2: info_cmd uses _client.get_collection, not get_or_create_collection."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
-    mock_db.collection_info.return_value = {}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db._client.get_collection.return_value = mock_col
@@ -441,7 +434,6 @@ def test_info_fetches_metadata_with_limit(runner: CliRunner, env_creds) -> None:
     """S3: col.get() in info_cmd must pass limit= to prevent unbounded fetches."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
-    mock_db.collection_info.return_value = {}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db._client.get_collection.return_value = mock_col
@@ -462,7 +454,6 @@ def test_info_infers_code_store_from_prefix(runner: CliRunner, env_creds) -> Non
     """I4: info code__repo without --type infers code store from prefix."""
     mock_code_db = MagicMock()
     mock_code_db.list_collections.return_value = [{"name": "code__repo", "count": 10}]
-    mock_code_db.collection_info.return_value = {}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_code_db._client.get_collection.return_value = mock_col
@@ -481,7 +472,6 @@ def test_info_infers_docs_store_from_prefix(runner: CliRunner, env_creds) -> Non
     """I4: info docs__corpus without --type infers docs store from prefix."""
     mock_docs_db = MagicMock()
     mock_docs_db.list_collections.return_value = [{"name": "docs__corpus", "count": 7}]
-    mock_docs_db.collection_info.return_value = {}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_docs_db._client.get_collection.return_value = mock_col
@@ -500,7 +490,6 @@ def test_info_infers_rdr_store_from_prefix(runner: CliRunner, env_creds) -> None
     """I4: info rdr__nexus without --type infers rdr store from prefix."""
     mock_rdr_db = MagicMock()
     mock_rdr_db.list_collections.return_value = [{"name": "rdr__nexus-abc12345", "count": 3}]
-    mock_rdr_db.collection_info.return_value = {}
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_rdr_db._client.get_collection.return_value = mock_col
