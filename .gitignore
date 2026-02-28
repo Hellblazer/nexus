@@ -18,3 +18,4 @@ htmlcov/
 .env
 /coverage.json
 tests/e2e/.claude-auth/
+.worktrees/
