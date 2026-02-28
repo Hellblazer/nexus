@@ -1452,3 +1452,75 @@ def test_index_markdown_metadata_includes_t3_schema_fields(sample_md, monkeypatc
     meta = captured_metadatas[0]
     missing = t3_schema_fields - meta.keys()
     assert not missing, f"Missing T3 schema fields in standalone index_markdown path: {missing}"
+    # Type correctness: ChromaDB rejects wrong types at upsert time.
+    assert isinstance(meta["frecency_score"], float), (
+        f"frecency_score must be float, got {type(meta['frecency_score'])}"
+    )
+    assert isinstance(meta["ttl_days"], int), (
+        f"ttl_days must be int, got {type(meta['ttl_days'])}"
+    )
+    assert isinstance(meta["expires_at"], str), (
+        f"expires_at must be str, got {type(meta['expires_at'])}"
+    )
+
+
+def test_index_pdf_metadata_includes_t3_schema_fields(sample_pdf, monkeypatch):
+    """S3: standalone index_pdf path must include T3 schema fields (symmetric
+    coverage to the markdown test)."""
+    _set_credentials(monkeypatch)
+
+    t3_schema_fields = {
+        "frecency_score", "ttl_days", "expires_at",
+        "session_id", "source_agent", "category", "title", "tags",
+    }
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    captured_metadatas: list[dict] = []
+
+    def capture_upsert(collection, ids, documents, embeddings, metadatas):
+        captured_metadatas.extend(metadatas)
+
+    mock_chunk = MagicMock()
+    mock_chunk.text = "chunk text"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 18, "page_number": 1}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
+        with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
+            with patch("voyageai.Client", return_value=mock_voyage_client):
+                mock_extractor_class.return_value.extract.return_value = MagicMock(
+                    text="extracted text",
+                    metadata={
+                        "extraction_method": "pymupdf4llm_markdown",
+                        "page_count": 1,
+                        "format": "markdown",
+                        "page_boundaries": [],
+                    },
+                )
+                mock_chunker_class.return_value.chunk.return_value = [mock_chunk]
+                index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
+
+    assert len(captured_metadatas) >= 1, "Expected at least one chunk to be upserted"
+    meta = captured_metadatas[0]
+    missing = t3_schema_fields - meta.keys()
+    assert not missing, f"Missing T3 schema fields in standalone index_pdf path: {missing}"
+    assert isinstance(meta["frecency_score"], float), (
+        f"frecency_score must be float, got {type(meta['frecency_score'])}"
+    )
+    assert isinstance(meta["ttl_days"], int), (
+        f"ttl_days must be int, got {type(meta['ttl_days'])}"
+    )
+    assert isinstance(meta["expires_at"], str), (
+        f"expires_at must be str, got {type(meta['expires_at'])}"
+    )

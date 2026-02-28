@@ -90,8 +90,11 @@ class T3Database:
         """Return an existing collection without creating it (read-only access).
 
         Use this instead of accessing ``_client`` directly so callers stay within
-        the T3Database API layer.
+        the T3Database API layer.  Raises ``ValueError`` for invalid names;
+        raises ``chromadb.errors.NotFoundError`` if the collection does not exist.
         """
+        from nexus.corpus import validate_collection_name
+        validate_collection_name(name)
         return self._client.get_collection(name)
 
     # ── Write ─────────────────────────────────────────────────────────────────

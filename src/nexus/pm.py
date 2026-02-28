@@ -455,7 +455,7 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
         collection = f"knowledge__pm__{query}"
         if not t3.collection_exists(collection):
             return []
-        col = t3._client.get_collection(collection)
+        col = t3.get_collection_raw(collection)
         result = col.get(
             where={"store_type": {"$eq": "pm-archive"}},
             include=["documents", "metadatas"],

@@ -348,7 +348,7 @@ def test_info_default_uses_knowledge_store(runner: CliRunner) -> None:
     mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_db.get_collection_raw.return_value = mock_col
     with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "knowledge__test"])
     assert result.exit_code == 0, result.output
@@ -361,7 +361,7 @@ def test_info_type_code_routes_to_code_store(runner: CliRunner) -> None:
     mock_db.list_collections.return_value = [{"name": "code__nexus", "count": 10}]
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_db.get_collection_raw.return_value = mock_col
     with patch("nexus.commands.collection.t3_code", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "code__nexus", "--type", "code"])
     assert result.exit_code == 0, result.output
@@ -576,3 +576,24 @@ def test_verify_infers_code_store_from_prefix(runner: CliRunner, env_creds) -> N
     assert result.exit_code == 0, result.output
     m_code.assert_called_once()
     m_k.assert_not_called()
+
+
+# ── I2: info_cmd NotFoundError race ──────────────────────────────────────────
+
+
+def test_info_cmd_handles_notfound_race_as_click_exception(
+    runner: CliRunner, env_creds
+) -> None:
+    """I2: if the collection disappears between list_collections and get_collection_raw,
+    info_cmd must emit a clean ClickException rather than an unformatted traceback."""
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError
+
+    mock_db = MagicMock()
+    mock_db.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
+    mock_db.get_collection_raw.side_effect = _ChromaNotFoundError("gone")
+
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "info", "knowledge__test"])
+
+    assert result.exit_code != 0
+    assert "Error" in result.output

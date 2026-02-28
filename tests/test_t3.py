@@ -1036,3 +1036,16 @@ def test_t3database_get_collection_raw_delegates_to_client() -> None:
 
     mock_client.get_collection.assert_called_once_with("knowledge__test")
     assert result is mock_raw_col
+
+
+def test_get_collection_raw_rejects_invalid_name() -> None:
+    """S1: get_collection_raw must validate the collection name and raise ValueError
+    for invalid names before ever touching the underlying client."""
+    mock_client = MagicMock()
+    db = T3Database(_client=mock_client)
+
+    # "bad" is only 3 chars but starts/ends ok. Use a name with colons (invalid charset).
+    with pytest.raises(ValueError):
+        db.get_collection_raw("invalid:name")
+
+    mock_client.get_collection.assert_not_called()

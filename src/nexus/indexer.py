@@ -172,7 +172,7 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
 
     for store, collection_name in store_cols:
         try:
-            col = store._client.get_collection(collection_name)
+            col = store.get_collection_raw(collection_name)
         except _ChromaNotFoundError:
             continue  # not yet indexed — skip, do not create a ghost collection
         for file, score in frecency_map.items():
@@ -634,7 +634,7 @@ def _prune_deleted_files(
     """
     for store, collection_name in ((db_code, code_collection), (db_docs, docs_collection)):
         try:
-            col = store._client.get_collection(collection_name)
+            col = store.get_collection_raw(collection_name)
         except _ChromaNotFoundError:
             continue  # not yet indexed — skip, do not create a ghost collection
         # Cap at 50 000 to avoid loading an entire large collection into memory.

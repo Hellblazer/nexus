@@ -40,7 +40,7 @@ def _make_source_db(collections: list[MagicMock]) -> MagicMock:
     db = MagicMock()
     db.list_collections.return_value = [{"name": c.name} for c in collections]
     col_map = {c.name: c for c in collections}
-    db._client.get_collection.side_effect = lambda name: col_map[name]
+    db.get_collection_raw.side_effect = lambda name: col_map[name]
     return db
 
 
@@ -331,7 +331,7 @@ def test_migrate_t3_upserts_per_page_not_accumulated(runner: CliRunner) -> None:
 
     source_db = MagicMock()
     source_db.list_collections.return_value = [{"name": "code__repo"}]
-    source_db._client.get_collection.return_value = source_col
+    source_db.get_collection_raw.return_value = source_col
 
     dest_col = MagicMock()
     dest_col.count.return_value = 0
@@ -442,7 +442,7 @@ def test_migrate_t3_upsert_failure_propagates_exception(
     }
     source_db = MagicMock()
     source_db.list_collections.return_value = [{"name": "knowledge__test"}]
-    source_db._client.get_collection.return_value = source_col
+    source_db.get_collection_raw.return_value = source_col
 
     dest_col = MagicMock()
     dest_col.count.return_value = 0

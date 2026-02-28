@@ -106,7 +106,12 @@ def info_cmd(name: str, store_type: str | None) -> None:
 
     # Use get_collection_raw (read-only) not get_or_create_collection (has side-effect).
     # Cap the fetch at 5000 docs — sufficient for last-indexed heuristic.
-    col = db.get_collection_raw(name)
+    try:
+        col = db.get_collection_raw(name)
+    except Exception:
+        raise click.ClickException(
+            f"collection disappeared: {name!r} — it may have been deleted concurrently"
+        )
     result = col.get(include=["metadatas"], limit=5000)
     metadatas: list[dict] = result.get("metadatas") or []
     timestamps = [m["indexed_at"] for m in metadatas if m and "indexed_at" in m]

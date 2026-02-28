@@ -113,7 +113,7 @@ def migrate_t3_cmd() -> None:
         dest_db = dest_stores[store_key]
         counts[store_key]["total"] += 1
 
-        source_col = source_db._client.get_collection(col_name)
+        source_col = source_db.get_collection_raw(col_name)
         dest_col = dest_db.get_or_create_collection(col_name)
 
         src_count = source_col.count()

@@ -364,9 +364,9 @@ def test_frecency_only_updates_frecency_score(tmp_path: Path) -> None:
     mock_col.get.return_value = {"ids": ["chunk-1"], "metadatas": [old_meta]}
 
     mock_code_db = MagicMock()
-    mock_code_db._client.get_collection.return_value = mock_col
+    mock_code_db.get_collection_raw.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db._client.get_collection.return_value = mock_col
+    mock_docs_db.get_collection_raw.return_value = mock_col
 
     with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
@@ -405,9 +405,9 @@ def test_frecency_only_skips_unindexed_files(tmp_path: Path) -> None:
     mock_col.get.return_value = {"ids": [], "metadatas": []}
 
     mock_code_db = MagicMock()
-    mock_code_db._client.get_collection.return_value = mock_col
+    mock_code_db.get_collection_raw.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db._client.get_collection.return_value = mock_col
+    mock_docs_db.get_collection_raw.return_value = mock_col
 
     with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.5}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
@@ -439,7 +439,7 @@ def test_frecency_only_does_not_require_voyage_api_key(tmp_path: Path, monkeypat
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db = MagicMock()
-    mock_db._client.get_collection.return_value = mock_col
+    mock_db.get_collection_raw.return_value = mock_col
 
     with patch("nexus.frecency.batch_frecency", return_value={}), \
          patch("nexus.indexer.t3_code_local", return_value=mock_db), \
@@ -913,9 +913,9 @@ def test_run_index_prune_deleted_files(tmp_path: Path) -> None:
     }
 
     mock_code_db = MagicMock()
-    mock_code_db._client.get_collection.return_value = mock_col
+    mock_code_db.get_collection_raw.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db._client.get_collection.return_value = mock_col
+    mock_docs_db.get_collection_raw.return_value = mock_col
 
     _prune_deleted_files("code__repo", "docs__repo", all_current,
                          db_code=mock_code_db, db_docs=mock_docs_db)
@@ -1352,9 +1352,9 @@ def test_prune_deleted_files_uses_bounded_col_get() -> None:
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_code_db = MagicMock()
-    mock_code_db._client.get_collection.return_value = mock_col
+    mock_code_db.get_collection_raw.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db._client.get_collection.return_value = mock_col
+    mock_docs_db.get_collection_raw.return_value = mock_col
 
     _prune_deleted_files(
         "code__repo", "docs__repo", {"/repo/file.py"},
@@ -1465,7 +1465,7 @@ def test_frecency_update_skips_nonexistent_collection(tmp_path: Path) -> None:
 
     mock_store = MagicMock()
     # _client.get_collection raises NotFoundError → collection doesn't exist
-    mock_store._client.get_collection.side_effect = NotFoundError("collection not found")
+    mock_store.get_collection_raw.side_effect = NotFoundError("collection not found")
 
     with patch("nexus.indexer.t3_code_local", return_value=mock_store), \
          patch("nexus.indexer.t3_docs_local", return_value=mock_store), \
@@ -1486,8 +1486,8 @@ def test_prune_deleted_files_skips_nonexistent_collection() -> None:
 
     mock_code_db = MagicMock()
     mock_docs_db = MagicMock()
-    mock_code_db._client.get_collection.side_effect = NotFoundError("not found")
-    mock_docs_db._client.get_collection.side_effect = NotFoundError("not found")
+    mock_code_db.get_collection_raw.side_effect = NotFoundError("not found")
+    mock_docs_db.get_collection_raw.side_effect = NotFoundError("not found")
 
     # Should complete without error, creating no ghost collections
     _prune_deleted_files(
@@ -1507,8 +1507,8 @@ def test_prune_deleted_files_accepts_db_handles() -> None:
     db_docs = MagicMock()
     col = MagicMock()
     col.get.return_value = {"ids": [], "metadatas": []}
-    db_code._client.get_collection.return_value = col
-    db_docs._client.get_collection.return_value = col
+    db_code.get_collection_raw.return_value = col
+    db_docs.get_collection_raw.return_value = col
 
     with patch("nexus.indexer.t3_code") as mock_t3_code, \
          patch("nexus.indexer.t3_docs") as mock_t3_docs:
@@ -1566,9 +1566,9 @@ def test_prune_deleted_files_truncation_warning_fires_at_exactly_50k() -> None:
     from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
     mock_code_db = MagicMock()
-    mock_code_db._client.get_collection.return_value = mock_col
+    mock_code_db.get_collection_raw.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db._client.get_collection.side_effect = _ChromaNotFoundError("not found")
+    mock_docs_db.get_collection_raw.side_effect = _ChromaNotFoundError("not found")
 
     import structlog.testing
     with structlog.testing.capture_logs() as cap:
@@ -1589,9 +1589,9 @@ def test_prune_deleted_files_no_truncation_warning_below_50k() -> None:
         {"source_path": "/repo/gone.py"},
     ]}
     mock_code_db = MagicMock()
-    mock_code_db._client.get_collection.return_value = mock_col
+    mock_code_db.get_collection_raw.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db._client.get_collection.return_value = mock_col
+    mock_docs_db.get_collection_raw.return_value = mock_col
 
     import structlog.testing
     with structlog.testing.capture_logs() as cap:
