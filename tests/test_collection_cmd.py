@@ -225,7 +225,7 @@ def test_info_shows_embedding_model_for_code_collection(
 def test_info_shows_embedding_model_for_knowledge_collection(
     runner: CliRunner, env_creds
 ) -> None:
-    """info shows voyage-4 for knowledge__ collections."""
+    """info shows voyage-context-3 for knowledge__ collections (CCE)."""
     mock_db = MagicMock()
     mock_db.list_collections.return_value = [
         {"name": "knowledge__research", "count": 88},
@@ -239,7 +239,7 @@ def test_info_shows_embedding_model_for_knowledge_collection(
         result = runner.invoke(main, ["collection", "info", "knowledge__research"])
 
     assert result.exit_code == 0, result.output
-    assert "voyage-4" in result.output
+    assert "voyage-context-3" in result.output
 
 
 def test_info_shows_last_indexed_when_metadata_exists(

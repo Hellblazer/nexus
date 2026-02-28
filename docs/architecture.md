@@ -25,7 +25,11 @@ CLI (cli.py + commands/)
     └── Storage tiers
           T1: in-memory ChromaDB (session scratch)
           T2: SQLite + FTS5 (persistent memory, PM state)
-          T3: ChromaDB cloud + Voyage AI (permanent knowledge)
+          T3: ChromaDB Cloud (four databases) + Voyage AI (permanent knowledge)
+                {base}_code      → code__*       voyage-code-3 index / voyage-4 query
+                {base}_docs      → docs__*       voyage-context-3 (CCE) index + query
+                {base}_rdr       → rdr__*        voyage-context-3 (CCE) index + query
+                {base}_knowledge → knowledge__*  voyage-context-3 (CCE) index + query
 ```
 
 Data flows upward (T1 → T2 → T3). No reverse flow except `nx pm restore`.

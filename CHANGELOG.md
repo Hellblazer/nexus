@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0rc6] - 2026-02-28
+
+### Fixed
+- **CCE query model mismatch** (P0, affected rc1–rc5): `docs__`, `knowledge__`, and `rdr__`
+  collections were indexed with `voyage-context-3` (CCE) but queried with `voyage-4`.
+  These two models produce vectors in incompatible geometric spaces (cosine similarity ≈ 0.05
+  — effectively random noise). All three collection types were returning semantically
+  meaningless results since rc1. `code__` collections were unaffected.
+  Fix: `corpus.py` returns `voyage-context-3` for CCE collections; `T3Database.search()`
+  bypasses the ChromaDB `VoyageAIEmbeddingFunction` for CCE collections and calls
+  `contextualized_embed([[query]], input_type="query")` directly. `T3Database.put()`
+  likewise uses `contextualized_embed` with `input_type="document"` so single entries
+  stored via `nx store put` land in the same CCE vector space as indexed chunks.
+  **All CCE-indexed collections (`docs__*`, `knowledge__*`, `rdr__*`) must be re-indexed
+  after upgrading from rc1–rc5.**
+
 ## [1.0.0rc5] - 2026-02-28
 
 ### Added
@@ -229,6 +245,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Phase 1–8 implementations covering all CLI surface
 
 [Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc5...HEAD
+[1.0.0rc5]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc4...v1.0.0rc5
+[1.0.0rc6]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc5...v1.0.0rc6
 [1.0.0rc5]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc4...v1.0.0rc5
 [1.0.0rc4]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc3...v1.0.0rc4
 [1.0.0rc3]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc2...v1.0.0rc3

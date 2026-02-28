@@ -6,9 +6,11 @@ import hashlib
 import os
 import threading
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import chromadb
 import chromadb.errors
+import voyageai
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 import structlog
 
@@ -58,6 +60,9 @@ class T3Database:
         self._ef_override = _ef_override
         self._ef_cache: dict[str, object] = {}
         self._ef_lock = threading.Lock()
+        self._voyage_client: voyageai.Client | None = (
+            voyageai.Client(api_key=voyage_api_key) if voyage_api_key else None
+        )
         if _client is not None:
             # Test injection: single client serves all store types.
             self._clients: dict[str, object] = {t: _client for t in _STORE_TYPES}
@@ -114,17 +119,51 @@ class T3Database:
         return client
 
     def _embedding_fn(self, collection_name: str):
+        """Return a VoyageAI EF (always voyage-4) for collection creation.
+
+        The voyage-4 EF is attached to collections for structural compatibility
+        but is NOT called for CCE collections at write or query time:
+        - Write: ``upsert_chunks_with_embeddings()`` passes pre-computed CCE
+          embeddings; ``put()`` calls ``_cce_embed()`` directly and passes
+          ``embeddings=`` to bypass the EF.
+        - Query: ``search()`` calls ``_cce_embed()`` and passes
+          ``query_embeddings=`` to bypass the EF.
+        Caching is per-collection-name to match the existing test contract.
+        """
         if self._ef_override is not None:
             return self._ef_override
         with self._ef_lock:
             if collection_name not in self._ef_cache:
-                model = embedding_model_for_collection(collection_name)
                 self._ef_cache[collection_name] = (
                     chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
-                        model_name=model, api_key=self._voyage_api_key
+                        model_name="voyage-4", api_key=self._voyage_api_key
                     )
                 )
             return self._ef_cache[collection_name]
+
+    def _cce_embed(
+        self, text: str, input_type: Literal["query", "document"] = "document"
+    ) -> list[float]:
+        """Embed *text* via the Voyage AI Contextualized Chunk Embedding API.
+
+        CCE collections (docs__, knowledge__, rdr__) use voyage-context-3 at
+        both index and query time.  voyage-4 is **not** compatible with CCE
+        vector spaces (cross-model cosine similarity ≈ 0.05, i.e. random noise).
+
+        ``inputs=[[text]]`` — one inner list — embeds the text independently,
+        with no cross-chunk context propagation.  Use ``input_type="document"``
+        (default) for documents being stored and ``input_type="query"`` for
+        search queries.  Using the wrong subtype is the same class of bug as
+        the original CCE/voyage-4 mismatch.
+        """
+        assert self._voyage_client is not None, "_cce_embed called without voyage_api_key"
+        result = self._voyage_client.contextualized_embed(
+            inputs=[[text]],
+            model="voyage-context-3",
+            input_type=input_type,
+        )
+        assert result.results, "voyageai CCE returned empty results"
+        return result.results[0].embeddings[0]
 
     # ── Collection access ─────────────────────────────────────────────────────
 
@@ -174,6 +213,15 @@ class T3Database:
             else:
                 expires_at = ""
 
+        # Determine whether this collection uses CCE.  When a voyage_api_key
+        # is available, CCE collections (docs__, knowledge__, rdr__) are embedded
+        # via _cce_embed() so that put()-stored entries are in the same vector
+        # space as the CCE-indexed chunks and can be found by search().
+        is_cce = (
+            bool(self._voyage_api_key)
+            and index_model_for_collection(collection) == "voyage-context-3"
+        )
+
         metadata: dict = {
             "title": title,
             "tags": tags,
@@ -184,14 +232,15 @@ class T3Database:
             "indexed_at": now_iso,
             "expires_at": expires_at,
             "ttl_days": ttl_days,
-            # voyage-4 is the query-time model for all collection types; nx store put
-            # intentionally uses it (via the collection EF) rather than CCE because
-            # agent-stored knowledge chunks are typically single entries (CCE requires 2+).
-            "embedding_model": embedding_model_for_collection(collection),
+            "embedding_model": "voyage-context-3" if is_cce else "voyage-4",
         }
 
         col = self.get_or_create_collection(collection)
-        col.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
+        if is_cce:
+            vec = self._cce_embed(content)
+            col.upsert(ids=[doc_id], documents=[content], embeddings=[vec], metadatas=[metadata])
+        else:
+            col.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
         return doc_id
 
     def upsert_chunks(
@@ -271,21 +320,39 @@ class T3Database:
         """
         results: list[dict] = []
         for name in collection_names:
+            # CCE collections must be queried with voyage-context-3 via
+            # contextualized_embed(); using query_texts would invoke the voyage-4
+            # EF, producing vectors in an incompatible space (cosine sim ≈ 0.05).
+            # Skip CCE path when voyage_api_key is absent (test / offline mode).
+            is_cce = (
+                bool(self._voyage_api_key)
+                and index_model_for_collection(name) == "voyage-context-3"
+            )
             try:
-                col = self._client_for(name).get_collection(
-                    name, embedding_function=self._embedding_fn(name)
-                )
+                if is_cce:
+                    col = self._client_for(name).get_collection(name)
+                else:
+                    col = self._client_for(name).get_collection(
+                        name, embedding_function=self._embedding_fn(name)
+                    )
             except _ChromaNotFoundError:
                 continue  # collection doesn't exist, skip it
             count = col.count()
             if count == 0:
                 continue
             actual_n = min(n_results, count)
-            query_kwargs: dict = {
-                "query_texts": [query],
-                "n_results": actual_n,
-                "include": ["documents", "metadatas", "distances"],
-            }
+            if is_cce:
+                query_kwargs: dict = {
+                    "query_embeddings": [self._cce_embed(query, input_type="query")],
+                    "n_results": actual_n,
+                    "include": ["documents", "metadatas", "distances"],
+                }
+            else:
+                query_kwargs = {
+                    "query_texts": [query],
+                    "n_results": actual_n,
+                    "include": ["documents", "metadatas", "distances"],
+                }
             if where is not None:
                 query_kwargs["where"] = where
             qr = col.query(**query_kwargs)

@@ -397,20 +397,21 @@ def test_voyage4_query_retrieves_voyage_code3_indexed_content() -> None:
             pass
 
 
-# ── Cross-model: voyage-context-3 (CCE) index + voyage-4 query ───────────────
+# ── CCE symmetric retrieval: voyage-context-3 index + voyage-context-3 query ──
 
 @pytest.mark.integration
 @requires_t3
-def test_voyage4_query_retrieves_cce_indexed_markdown() -> None:
-    """voyage-4 queries retrieve results from CCE-indexed docs__ content.
+def test_cce_query_retrieves_cce_indexed_markdown() -> None:
+    """CCE search correctly retrieves voyage-context-3-indexed docs__ content.
 
-    Validates the second cross-model assumption: voyage-context-3 (CCE) index
-    vectors are in the same space as voyage-4 query vectors.
+    Validates the fix for the CCE query model mismatch (post-mortem: cce-query-model-mismatch).
+    Before the fix, db.search() used voyage-4 (incompatible space, cosine sim ≈ 0.05).
+    After the fix, search uses voyage-context-3 via contextualized_embed() for CCE collections.
 
     Method:
     - Index a multi-chunk markdown file via index_markdown (triggers CCE path)
-    - Query via db.search (collection EF = voyage-4)
-    - Assert the indexed chunk is returned and embedding_model is recorded
+    - Query via db.search (CCE path: voyage-context-3 via contextualized_embed)
+    - Assert the indexed chunk is returned and embedding_model is 'voyage-context-3'
     """
     import tempfile
     from pathlib import Path
@@ -449,15 +450,15 @@ def test_voyage4_query_retrieves_cce_indexed_markdown() -> None:
                 n_results=5,
             )
             assert results, (
-                "voyage-4 query returned no results from CCE-indexed docs__ collection"
+                "CCE search returned no results from CCE-indexed docs__ collection"
             )
             assert any(uid in r.get("content", "") for r in results), (
-                "voyage-4 query did not retrieve the CCE-indexed markdown chunk"
+                "CCE search did not retrieve the CCE-indexed markdown chunk"
             )
-            # embedding_model must be voyage-context-3 (CCE succeeded) or voyage-4 (fallback)
+            # embedding_model must be voyage-context-3 (CCE indexer records it)
             stored_model = results[0].get("embedding_model", "")
-            assert stored_model in ("voyage-context-3", "voyage-4"), (
-                f"embedding_model should be voyage-context-3 or voyage-4 (fallback), "
+            assert stored_model == "voyage-context-3", (
+                f"docs__ chunks must be indexed with voyage-context-3, "
                 f"got: {stored_model!r}"
             )
         finally:
@@ -470,10 +471,12 @@ def test_voyage4_query_retrieves_cce_indexed_markdown() -> None:
 @pytest.mark.integration
 @requires_t3
 def test_t3_put_embedding_model_in_search_metadata() -> None:
-    """T3Database.put() stores embedding_model='voyage-4'; field survives to search results.
+    """T3Database.put() stores embedding_model='voyage-context-3'; field survives to search results.
 
-    Validates that the metadata provenance field added to put() is persisted
-    through ChromaDB and returned by db.search().
+    knowledge__ collections use CCE (voyage-context-3) at both index and query
+    time. Validates that the metadata provenance field is persisted through
+    ChromaDB and returned by db.search(), and that the stored document is
+    retrievable (index and query vectors are in the same CCE space).
     """
     from nexus.db import make_t3
 
@@ -497,8 +500,8 @@ def test_t3_put_embedding_model_in_search_metadata() -> None:
         assert results, "Expected search to find the just-stored document"
         matching = [r for r in results if uid in r.get("content", "")]
         assert matching, "Stored document not found by unique token in search results"
-        assert matching[0].get("embedding_model") == "voyage-4", (
-            f"knowledge__ put() must store embedding_model='voyage-4', "
+        assert matching[0].get("embedding_model") == "voyage-context-3", (
+            f"knowledge__ put() must store embedding_model='voyage-context-3' (CCE), "
             f"got: {matching[0].get('embedding_model')!r}"
         )
     finally:

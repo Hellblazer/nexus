@@ -17,11 +17,15 @@ def test_embedding_model_code_collection() -> None:
 
 
 def test_embedding_model_docs_collection() -> None:
-    assert embedding_model_for_collection("docs__papers") == "voyage-4"
+    assert embedding_model_for_collection("docs__papers") == "voyage-context-3"
 
 
 def test_embedding_model_knowledge_collection() -> None:
-    assert embedding_model_for_collection("knowledge__security") == "voyage-4"
+    assert embedding_model_for_collection("knowledge__security") == "voyage-context-3"
+
+
+def test_embedding_model_rdr_collection() -> None:
+    assert embedding_model_for_collection("rdr__myrepo-abcdef12") == "voyage-context-3"
 
 
 def test_embedding_model_unknown_prefix_defaults_voyage4() -> None:
@@ -136,11 +140,18 @@ def test_index_model_bare_name_defaults_voyage4() -> None:
 
 
 def test_embedding_model_for_collection_regression() -> None:
-    """voyage-4 is the universal query model for all collection types."""
+    """CCE collections use voyage-context-3 at query time; others use voyage-4.
+
+    voyage-4 and voyage-context-3 are incompatible vector spaces.
+    CCE collections (docs__, knowledge__, rdr__) were indexed with
+    voyage-context-3 and must be queried with the same model.
+    """
+    # CCE collections → voyage-context-3
+    assert embedding_model_for_collection("docs__papers") == "voyage-context-3"
+    assert embedding_model_for_collection("knowledge__security") == "voyage-context-3"
+    assert embedding_model_for_collection("rdr__myrepo-abcdef12") == "voyage-context-3"
+    # Standard collections → voyage-4
     assert embedding_model_for_collection("code__myrepo") == "voyage-4"
-    assert embedding_model_for_collection("knowledge__security") == "voyage-4"
-    assert embedding_model_for_collection("docs__papers") == "voyage-4"
-    assert embedding_model_for_collection("rdr__myrepo-abcdef12") == "voyage-4"
     assert embedding_model_for_collection("other__collection") == "voyage-4"
 
 
