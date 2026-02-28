@@ -27,7 +27,7 @@ def _make_source_col(name: str, docs: list[str], embeddings: list) -> MagicMock:
 # ── P9: code routing ──────────────────────────────────────────────────────────
 
 def test_migrate_routes_code_collection_to_code_store() -> None:
-    """code__repo from source ends up in dest via get_or_create_collection."""
+    """code__repo from source ends up in dest via upsert_chunks_with_embeddings."""
     embs = [[0.1, 0.2], [0.3, 0.4]]
     col = _make_source_col("code__repo", ["d1", "d2"], embs)
 
@@ -37,22 +37,21 @@ def test_migrate_routes_code_collection_to_code_store() -> None:
 
     dest = MagicMock()
     dest.collection_info.side_effect = KeyError("not found")
-    dest_col = MagicMock()
-    dest.get_or_create_collection.return_value = dest_col
 
     from nexus.commands.migrate import migrate_t3_collections
 
     result = migrate_t3_collections(source, dest)
 
-    dest.get_or_create_collection.assert_called_once_with("code__repo")
-    dest_col.upsert.assert_called_once()
+    dest.upsert_chunks_with_embeddings.assert_called_once()
+    call_kwargs = dest.upsert_chunks_with_embeddings.call_args.kwargs
+    assert call_kwargs["collection_name"] == "code__repo"
     assert result["code__repo"] == 2
 
 
 # ── P10: docs routing ─────────────────────────────────────────────────────────
 
 def test_migrate_routes_docs_collection_to_docs_store() -> None:
-    """docs__corpus from source ends up in dest via get_or_create_collection."""
+    """docs__corpus from source ends up in dest via upsert_chunks_with_embeddings."""
     embs = [[0.5, 0.6]]
     col = _make_source_col("docs__corpus", ["doc1"], embs)
 
@@ -62,15 +61,14 @@ def test_migrate_routes_docs_collection_to_docs_store() -> None:
 
     dest = MagicMock()
     dest.collection_info.side_effect = KeyError("not found")
-    dest_col = MagicMock()
-    dest.get_or_create_collection.return_value = dest_col
 
     from nexus.commands.migrate import migrate_t3_collections
 
     result = migrate_t3_collections(source, dest)
 
-    dest.get_or_create_collection.assert_called_once_with("docs__corpus")
-    dest_col.upsert.assert_called_once()
+    dest.upsert_chunks_with_embeddings.assert_called_once()
+    call_kwargs = dest.upsert_chunks_with_embeddings.call_args.kwargs
+    assert call_kwargs["collection_name"] == "docs__corpus"
     assert result["docs__corpus"] == 1
 
 
@@ -102,7 +100,7 @@ def test_migrate_is_idempotent_when_counts_match() -> None:
 # ── P12: embeddings verbatim ──────────────────────────────────────────────────
 
 def test_migrate_copies_embeddings_verbatim() -> None:
-    """Embeddings from source are passed to dest upsert unchanged (no re-embedding)."""
+    """Embeddings from source are passed to dest upsert_chunks_with_embeddings unchanged."""
     embeddings = [[0.11, 0.22, 0.33], [0.44, 0.55, 0.66]]
     col = _make_source_col("knowledge__notes", ["doc a", "doc b"], embeddings)
 
@@ -112,14 +110,12 @@ def test_migrate_copies_embeddings_verbatim() -> None:
 
     dest = MagicMock()
     dest.collection_info.side_effect = KeyError("not found")
-    dest_col = MagicMock()
-    dest.get_or_create_collection.return_value = dest_col
 
     from nexus.commands.migrate import migrate_t3_collections
 
     migrate_t3_collections(source, dest)
 
-    upsert_call = dest_col.upsert.call_args
+    upsert_call = dest.upsert_chunks_with_embeddings.call_args
     # Embeddings must be passed verbatim
     assert upsert_call.kwargs.get("embeddings") == embeddings
 
@@ -184,7 +180,8 @@ def test_migrate_paginates_large_collections() -> None:
     """Collections with more than _PAGE_SIZE docs are fetched in multiple pages."""
     from nexus.commands.migrate import migrate_t3_collections, _PAGE_SIZE
 
-    total_docs = _PAGE_SIZE + 500  # one full page + partial page
+    remainder = 150  # partial second page (< _PAGE_SIZE)
+    total_docs = _PAGE_SIZE + remainder  # one full page + partial page
 
     col = MagicMock()
     col.name = "knowledge__big"
@@ -197,10 +194,10 @@ def test_migrate_paginates_large_collections() -> None:
         "metadatas": [{}] * _PAGE_SIZE,
     }
     second_page = {
-        "ids": [f"id-{_PAGE_SIZE + i}" for i in range(500)],
-        "documents": ["doc"] * 500,
-        "embeddings": [[0.1]] * 500,
-        "metadatas": [{}] * 500,
+        "ids": [f"id-{_PAGE_SIZE + i}" for i in range(remainder)],
+        "documents": ["doc"] * remainder,
+        "embeddings": [[0.1]] * remainder,
+        "metadatas": [{}] * remainder,
     }
     col.get.side_effect = [first_page, second_page]
 
@@ -210,8 +207,6 @@ def test_migrate_paginates_large_collections() -> None:
 
     dest = MagicMock()
     dest.collection_info.side_effect = KeyError("not found")
-    dest_col = MagicMock()
-    dest.get_or_create_collection.return_value = dest_col
 
     result = migrate_t3_collections(source, dest)
 
@@ -220,11 +215,11 @@ def test_migrate_paginates_large_collections() -> None:
     first_call, second_call = col.get.call_args_list
     assert first_call.kwargs["limit"] == _PAGE_SIZE
     assert first_call.kwargs["offset"] == 0
-    assert second_call.kwargs["limit"] == 500
+    assert second_call.kwargs["limit"] == remainder
     assert second_call.kwargs["offset"] == _PAGE_SIZE
 
-    # upsert called twice (once per page)
-    assert dest_col.upsert.call_count == 2
+    # upsert_chunks_with_embeddings called twice (once per page)
+    assert dest.upsert_chunks_with_embeddings.call_count == 2
     assert result["knowledge__big"] == total_docs
 
 
@@ -233,10 +228,7 @@ def test_migrate_paginates_large_collections() -> None:
 def test_migrate_continues_after_per_collection_failure() -> None:
     """A failure on one collection is recorded as -1 and migration continues."""
     good_col = _make_source_col("knowledge__good", ["doc"], [[0.1]])
-
-    bad_col = MagicMock()
-    bad_col.name = "knowledge__bad"
-    bad_col.count.return_value = 1
+    bad_col = _make_source_col("knowledge__bad", ["doc"], [[0.1]])
 
     source = MagicMock()
     source.list_collections.return_value = [bad_col, good_col]
@@ -244,14 +236,12 @@ def test_migrate_continues_after_per_collection_failure() -> None:
 
     dest = MagicMock()
     dest.collection_info.side_effect = KeyError("not found")
-    dest_col_good = MagicMock()
 
-    def get_or_create(name):
-        if name == "knowledge__bad":
+    def mock_upsert(**kwargs):
+        if kwargs.get("collection_name") == "knowledge__bad":
             raise RuntimeError("upsert validation error")
-        return dest_col_good
 
-    dest.get_or_create_collection.side_effect = get_or_create
+    dest.upsert_chunks_with_embeddings.side_effect = mock_upsert
 
     from nexus.commands.migrate import migrate_t3_collections
 
