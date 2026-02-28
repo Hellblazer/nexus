@@ -6,7 +6,7 @@ Active and closed RDRs for the Nexus project. Updated by `/rdr-list` and `/rdr-c
 |----|-------|------|--------|---------|
 | [RDR-001](rdr-001-rdr-process-validation.md) | RDR Process Validation | Architecture | Accepted | 2026-02-27 |
 | [RDR-002](rdr-002-t2-status-synchronization.md) | T2 Status Synchronization | Technical Debt | Accepted | 2026-02-27 |
-| [RDR-004](rdr-004-four-store-architecture.md) | Four-Store T3 Architecture | Architecture | Accepted | 2026-02-28 |
+| [RDR-004](rdr-004-four-store-architecture.md) | Four-Store T3 Architecture | Architecture | Closed | 2026-02-28 |
 
 ## RDR Process Documentation
 

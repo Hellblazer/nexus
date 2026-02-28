@@ -1,11 +1,13 @@
 ---
 title: "Four-Store T3 Architecture"
 type: architecture
-status: accepted
+status: closed
 priority: P1
 author: Hal Hildebrand
 date: 2026-02-28
 accepted_date: 2026-02-28
+close_date: 2026-02-28
+close_reason: implemented
 reviewed-by: self
 related_issues: []
 ---
