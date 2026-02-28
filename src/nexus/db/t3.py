@@ -417,7 +417,7 @@ class T3Database:
             if count == 0:
                 continue
             actual_n = min(n_results, count, QUOTAS.MAX_QUERY_RESULTS)
-            if actual_n < n_results:
+            if n_results > QUOTAS.MAX_QUERY_RESULTS:
                 _log.warning(
                     "search_n_results_clamped",
                     requested=n_results,
