@@ -70,8 +70,9 @@ class T3Database:
                         tenant=tenant, database=db_name, api_key=api_key
                     )
                 except Exception as exc:
+                    _log.debug("cloud_client_connect_failed", database=db_name, error=str(exc))
                     raise RuntimeError(
-                        f"Failed to connect to ChromaDB Cloud database {db_name!r}: {exc}\n"
+                        f"Failed to connect to ChromaDB Cloud database {db_name!r}.\n"
                         f"Ensure these four databases exist in your ChromaDB Cloud dashboard:\n"
                         + "\n".join(f"  - {database}_{t2}" for t2 in _STORE_TYPES)
                     ) from exc
@@ -97,7 +98,11 @@ class T3Database:
         - ``knowledge__*`` → knowledge client
         - no ``__`` or unknown prefix → knowledge client (with a warning)
         """
-        prefix = collection_name.split("__")[0] if "__" in collection_name else "knowledge"
+        if "__" in collection_name:
+            prefix = collection_name.split("__")[0]
+        else:
+            _log.warning("collection_no_prefix", collection=collection_name)
+            prefix = "knowledge"
         client = self._clients.get(prefix)
         if client is None:
             _log.warning(
@@ -396,7 +401,11 @@ class T3Database:
         with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
             futures = {pool.submit(_count, n): n for n in names}
             for future in as_completed(futures):
-                result.append(future.result())
+                try:
+                    result.append(future.result())
+                except Exception as exc:
+                    name = futures[future]
+                    _log.warning("list_collections_count_failed", collection=name, error=str(exc))
         return sorted(result, key=lambda r: r["name"])
 
     def collection_exists(self, name: str) -> bool:

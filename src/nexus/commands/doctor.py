@@ -3,9 +3,14 @@
 import shutil
 import sys
 
+import chromadb
 import click
+import structlog
 
 from nexus.config import get_credential
+from nexus.db.t3 import _STORE_TYPES
+
+_log = structlog.get_logger(__name__)
 
 _CHECK = "✓"
 _WARN  = "✗"
@@ -94,8 +99,6 @@ def doctor_cmd() -> None:
 
     # ── ChromaDB four-store databases ────────────────────────────────────────
     if chroma_key and chroma_tenant and chroma_database:
-        from nexus.db.t3 import _STORE_TYPES
-        import chromadb
         db_ok = True
         for t in _STORE_TYPES:
             db_name = f"{chroma_database}_{t}"
@@ -107,8 +110,8 @@ def doctor_cmd() -> None:
             except Exception as exc:
                 db_ok = False
                 failed = True
-                lines.append(_check_line(f"ChromaDB  ({db_name})", False,
-                                          f"not reachable: {exc}"))
+                _log.debug("db_not_reachable", db_name=db_name, error=str(exc))
+                lines.append(_check_line(f"ChromaDB  ({db_name})", False, "not reachable"))
         if not db_ok:
             _fix(lines,
                  f"Create these databases in your ChromaDB Cloud dashboard:",

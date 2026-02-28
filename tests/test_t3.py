@@ -1116,3 +1116,91 @@ def test_t3_constructor_creates_four_distinct_clients(mock_chromadb: tuple) -> N
     assert len(calls) == 4
     databases = {c.kwargs["database"] for c in calls}
     assert databases == {"nexus_code", "nexus_docs", "nexus_rdr", "nexus_knowledge"}
+
+
+# ── Coverage gap 1: __init__ failure mid-loop ─────────────────────────────────
+
+def test_t3_init_raises_runtime_error_on_third_client_failure(mock_chromadb: tuple) -> None:
+    """RuntimeError is raised when CloudClient fails on any of the four database connections."""
+    chromadb_m, _ = mock_chromadb
+    ok_client = MagicMock()
+    chromadb_m.CloudClient.side_effect = [
+        ok_client,         # first store: succeeds
+        ok_client,         # second store: succeeds
+        RuntimeError("connect refused"),  # third store: fails
+    ]
+
+    with pytest.raises(RuntimeError, match="nexus_rdr"):
+        T3Database(tenant="t", database="nexus", api_key="k")
+
+
+def test_t3_init_error_message_does_not_leak_exception_text(mock_chromadb: tuple) -> None:
+    """RuntimeError message lists missing databases but does not expose raw exception text."""
+    chromadb_m, _ = mock_chromadb
+    chromadb_m.CloudClient.side_effect = RuntimeError("HTTP 401: invalid api_key SECRET")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        T3Database(tenant="t", database="nexus", api_key="k")
+
+    error_msg = str(exc_info.value)
+    assert "nexus_code" in error_msg  # lists the expected database names
+    assert "SECRET" not in error_msg  # does NOT expose secret from exception chain
+
+
+# ── S1: _client_for warning on no __ separator ───────────────────────────────
+
+def test_client_for_warns_when_no_separator(mock_chromadb: tuple) -> None:
+    """_client_for() emits a warning log when collection name has no __ separator."""
+    import logging
+    _, mock_client = mock_chromadb
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    with patch("nexus.db.t3._log") as mock_log:
+        client = db._client_for("barenamenocollection")
+
+    mock_log.warning.assert_called_once()
+    call_kwargs = mock_log.warning.call_args
+    # First positional arg is the event name
+    assert "no_prefix" in call_kwargs[0][0] or "no_prefix" in str(call_kwargs)
+    # Falls back to knowledge client
+    assert client is db._clients["knowledge"]
+
+
+def test_client_for_no_warning_with_separator(mock_chromadb: tuple) -> None:
+    """_client_for() does NOT warn when collection name contains __."""
+    _, mock_client = mock_chromadb
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    with patch("nexus.db.t3._log") as mock_log:
+        db._client_for("code__myrepo")
+
+    mock_log.warning.assert_not_called()
+
+
+# ── S2: list_collections handles _count() exception ──────────────────────────
+
+def test_list_collections_skips_failed_count(mock_chromadb: tuple) -> None:
+    """list_collections() skips a collection when its count() raises — other collections included."""
+    _, mock_client = mock_chromadb
+
+    mock_ok = MagicMock()
+    mock_ok.count.return_value = 10
+    mock_fail = MagicMock()
+    mock_fail.count.side_effect = RuntimeError("network error")
+
+    mock_client.list_collections.return_value = ["knowledge__good", "knowledge__broken"]
+
+    def get_collection(name):
+        if name == "knowledge__good":
+            return mock_ok
+        return mock_fail
+
+    mock_client.get_collection.side_effect = get_collection
+
+    db = T3Database(tenant="t", database="d", api_key="k")
+    result = db.list_collections()
+
+    # Only the successful collection is included
+    names = [r["name"] for r in result]
+    assert "knowledge__good" in names
+    assert "knowledge__broken" not in names
