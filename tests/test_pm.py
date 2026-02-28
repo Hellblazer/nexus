@@ -932,3 +932,61 @@ def test_pm_reference_uses_get_collection_not_get_or_create(db) -> None:
     mock_t3.get_or_create_collection.assert_not_called()
     mock_t3._client.get_collection.assert_called_with("knowledge__pm__myproject")
     assert result == []
+
+
+# ── C4: pm_reference must not open two t3_knowledge() instances ───────────────
+
+
+def test_pm_reference_single_t3_instance_semantic(db) -> None:
+    """C4: pm_reference creates exactly one t3_knowledge() for a semantic query."""
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = []
+
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3) as mock_factory:
+        pm_reference(db, "how do I configure nexus?")
+
+    mock_factory.assert_called_once()
+
+
+def test_pm_reference_single_t3_instance_project(db) -> None:
+    """C4: pm_reference creates exactly one t3_knowledge() for a project-name query."""
+    mock_t3 = MagicMock()
+    mock_t3.collection_exists.return_value = False
+
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3) as mock_factory:
+        pm_reference(db, "myproject")
+
+    mock_factory.assert_called_once()
+
+
+# ── I12: pm_archive idempotency must tolerate float pm_doc_count ──────────────
+
+
+def test_pm_archive_idempotent_with_float_pm_doc_count(db) -> None:
+    """I12: pm_archive skips synthesis when pm_doc_count stored as float (ChromaDB Cloud)."""
+    pm_init(db, project="myrepo")
+    entries = db.list_entries(project="myrepo")
+    doc_count = len(entries)
+    rows = [db.get(project="myrepo", title=e["title"]) for e in entries]
+    max_ts = max(r["timestamp"] for r in rows if r)
+
+    # Simulate ChromaDB returning int metadata as float (known Cloud client behaviour)
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["existing-id"],
+        "metadatas": [{
+            "store_type": "pm-archive",
+            "pm_doc_count": float(doc_count),   # ← float, not int
+            "pm_latest_timestamp": max_ts,
+            "chunk_total": 1,
+        }],
+    }
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.pm._synthesize_haiku") as mock_h, \
+         patch("nexus.pm.t3_knowledge", return_value=mock_t3):
+        pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
+
+    # float(4) == int(4) in Python, so idempotency should fire and skip synthesis
+    mock_h.assert_not_called()

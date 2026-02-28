@@ -362,9 +362,9 @@ def test_frecency_only_updates_frecency_score(tmp_path: Path) -> None:
     mock_col.get.return_value = {"ids": ["chunk-1"], "metadatas": [old_meta]}
 
     mock_code_db = MagicMock()
-    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_code_db._client.get_collection.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db._client.get_collection.return_value = mock_col
 
     with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
@@ -403,9 +403,9 @@ def test_frecency_only_skips_unindexed_files(tmp_path: Path) -> None:
     mock_col.get.return_value = {"ids": [], "metadatas": []}
 
     mock_code_db = MagicMock()
-    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_code_db._client.get_collection.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db._client.get_collection.return_value = mock_col
 
     with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.5}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
@@ -437,7 +437,7 @@ def test_frecency_only_does_not_require_voyage_api_key(tmp_path: Path, monkeypat
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db = MagicMock()
-    mock_db.get_or_create_collection.return_value = mock_col
+    mock_db._client.get_collection.return_value = mock_col
 
     with patch("nexus.frecency.batch_frecency", return_value={}), \
          patch("nexus.indexer.t3_code_local", return_value=mock_db), \
@@ -911,9 +911,9 @@ def test_run_index_prune_deleted_files(tmp_path: Path) -> None:
     }
 
     mock_code_db = MagicMock()
-    mock_code_db.get_or_create_collection.return_value = mock_col
+    mock_code_db._client.get_collection.return_value = mock_col
     mock_docs_db = MagicMock()
-    mock_docs_db.get_or_create_collection.return_value = mock_col
+    mock_docs_db._client.get_collection.return_value = mock_col
 
     _prune_deleted_files("code__repo", "docs__repo", all_current,
                          db_code=mock_code_db, db_docs=mock_docs_db)
@@ -1440,6 +1440,60 @@ def test_prune_misclassified_accepts_db_handles(tmp_path: Path) -> None:
         )
         mock_t3_code.assert_not_called()
         mock_t3_docs.assert_not_called()
+
+
+# ── I10: frecency update must skip non-existent collections ──────────────────
+
+
+def test_frecency_update_skips_nonexistent_collection(tmp_path: Path) -> None:
+    """I10: _run_index_frecency_only skips a collection that doesn't exist (no ghost creation)."""
+    from chromadb.errors import NotFoundError
+    from nexus.indexer import _run_index_frecency_only
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    registry = MagicMock()
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
+
+    mock_store = MagicMock()
+    # _client.get_collection raises NotFoundError → collection doesn't exist
+    mock_store._client.get_collection.side_effect = NotFoundError("collection not found")
+
+    with patch("nexus.indexer.t3_code_local", return_value=mock_store), \
+         patch("nexus.indexer.t3_docs_local", return_value=mock_store), \
+         patch("nexus.frecency.batch_frecency", return_value={"file.py": 1.0}):
+        _run_index_frecency_only(repo, registry)
+
+    # Must NOT call get_or_create_collection — that would silently create a ghost collection
+    mock_store.get_or_create_collection.assert_not_called()
+
+
+# ── I11: prune deleted files must skip non-existent collections ───────────────
+
+
+def test_prune_deleted_files_skips_nonexistent_collection() -> None:
+    """I11: _prune_deleted_files skips gracefully when collection doesn't exist."""
+    from chromadb.errors import NotFoundError
+    from nexus.indexer import _prune_deleted_files
+
+    mock_code_db = MagicMock()
+    mock_docs_db = MagicMock()
+    mock_code_db._client.get_collection.side_effect = NotFoundError("not found")
+    mock_docs_db._client.get_collection.side_effect = NotFoundError("not found")
+
+    # Should complete without error, creating no ghost collections
+    _prune_deleted_files(
+        "code__repo", "docs__repo", {"/repo/file.py"},
+        db_code=mock_code_db, db_docs=mock_docs_db,
+    )
+
+    mock_code_db.get_or_create_collection.assert_not_called()
+    mock_docs_db.get_or_create_collection.assert_not_called()
 
 
 def test_prune_deleted_files_accepts_db_handles(tmp_path: Path) -> None:

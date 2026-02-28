@@ -349,7 +349,7 @@ def test_collection_delete_yes_skips_prompt(runner: CliRunner, env_creds) -> Non
     """--yes flag skips interactive confirmation."""
     mock_db = MagicMock()
 
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge_local", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--yes"])
 
     assert result.exit_code == 0, result.output
@@ -361,7 +361,7 @@ def test_collection_delete_without_yes_prompts(runner: CliRunner, env_creds) -> 
     """Without --yes, a confirmation prompt is shown (user declines via 'n')."""
     mock_db = MagicMock()
 
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge_local", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
 
     # User said no → aborted, collection NOT deleted
@@ -372,7 +372,7 @@ def test_collection_delete_confirm_flag_alias(runner: CliRunner, env_creds) -> N
     """--confirm is a supported alias for --yes and skips the confirmation prompt."""
     mock_db = MagicMock()
 
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge_local", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--confirm"])
 
     assert result.exit_code == 0

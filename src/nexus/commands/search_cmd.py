@@ -185,14 +185,21 @@ def search_cmd(
         try:
             db = factory()
             all_cols = [c["name"] for c in db.list_collections()]
-            target: list[str] = []
-            for c in corpus:
-                matched = resolve_corpus(c, all_cols)
-                target.extend(matched)
-            target = list(dict.fromkeys(target))
+            if store_type is not None:
+                # --type already constrains to one store; corpus filter is irrelevant.
+                target: list[str] = all_cols
+            else:
+                target = []
+                for c in corpus:
+                    matched = resolve_corpus(c, all_cols)
+                    target.extend(matched)
+                target = list(dict.fromkeys(target))
             if target:
                 store_entries.append((db, target))
-        except RuntimeError:
+        except RuntimeError as exc:
+            if store_type is not None:
+                # User explicitly named this store — surface the credential error.
+                raise click.ClickException(str(exc)) from exc
             _log.debug("store not configured, skipping", store_type=_stype)
 
     if not store_entries and not mxbai:

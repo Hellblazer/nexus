@@ -327,7 +327,7 @@ def pm_archive(
     if existing["ids"]:
         prior_meta = existing["metadatas"][0]
         if (
-            prior_meta.get("pm_doc_count") == doc_count
+            int(prior_meta.get("pm_doc_count") or 0) == doc_count
             and prior_meta.get("pm_latest_timestamp") == max_ts
             and len(existing["ids"]) >= prior_meta.get("chunk_total", 1)
         ):
@@ -437,9 +437,9 @@ def _list_pm_collections(t3: "T3Database") -> list[str]:
 
 def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
     """Dispatch reference query to T3 semantic search or metadata-only filter."""
+    t3 = t3_knowledge()
     if _is_semantic_query(query):
         # Semantic path: fan out to all knowledge__pm__ collections
-        t3 = t3_knowledge()
         clean_query = query.strip('"')
         pm_collections = _list_pm_collections(t3)
         if not pm_collections:
@@ -452,7 +452,6 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
         )
     else:
         # Project-name path: metadata-only filter on collection for that project
-        t3 = t3_knowledge()
         collection = f"knowledge__pm__{query}"
         if not t3.collection_exists(collection):
             return []

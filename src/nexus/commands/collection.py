@@ -8,7 +8,12 @@ import structlog
 
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
 from nexus.db.t3 import T3Database
-from nexus.db.t3_stores import t3_code, t3_docs, t3_knowledge, t3_rdr
+from nexus.db.t3_stores import (
+    t3_code, t3_code_local,
+    t3_docs, t3_docs_local,
+    t3_knowledge, t3_knowledge_local,
+    t3_rdr, t3_rdr_local,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -23,6 +28,16 @@ _STORE_FACTORIES: dict[str, Callable[[], T3Database]] = {
 }
 
 _TYPE_CHOICE = click.Choice(list(_STORE_FACTORIES))
+
+# Local (no voyage_api_key) variants used by delete_cmd — deletion is a
+# metadata-only operation that never calls the embedding API.
+# Lambda wrapping: same rationale as _STORE_FACTORIES above.
+_LOCAL_STORE_FACTORIES: dict[str, Callable[[], T3Database]] = {
+    "code": lambda: t3_code_local(),
+    "docs": lambda: t3_docs_local(),
+    "rdr": lambda: t3_rdr_local(),
+    "knowledge": lambda: t3_knowledge_local(),
+}
 
 # Prefix → store key mapping used by _infer_store_type.
 # knowledge__ is intentionally absent: everything else falls back to "knowledge"
@@ -117,7 +132,8 @@ def delete_cmd(name: str, yes: bool, store_type: str | None) -> None:
     """Delete a T3 collection (irreversible)."""
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
-    _STORE_FACTORIES[_infer_store_type(name, store_type)]().delete_collection(name)
+    # Use local (no voyage_api_key) variant — deletion never calls the embedding API.
+    _LOCAL_STORE_FACTORIES[_infer_store_type(name, store_type)]().delete_collection(name)
     click.echo(f"Deleted: {name}")
 
 

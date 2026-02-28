@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from chromadb.errors import NotFoundError as _ChromaNotFoundError
 from nexus.corpus import index_model_for_collection
 from nexus.db.t3_stores import t3_code, t3_code_local, t3_docs, t3_docs_local, t3_rdr
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
@@ -170,7 +171,10 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
         store_cols.append((db_docs, docs_collection))
 
     for store, collection_name in store_cols:
-        col = store.get_or_create_collection(collection_name)
+        try:
+            col = store._client.get_collection(collection_name)
+        except _ChromaNotFoundError:
+            continue  # not yet indexed — skip, do not create a ghost collection
         for file, score in frecency_map.items():
             existing = col.get(
                 where={"source_path": str(file)},
@@ -540,6 +544,10 @@ def _discover_and_index_rdrs(
         if not rdr_dir.is_dir():
             continue
         for path in sorted(rdr_dir.glob("*.md")):
+            # Symlinked files are skipped (same as the main code walk).
+            # Symlinked *directories* are intentionally followed by rdr_dir.glob —
+            # this asymmetry is by design: a repo may legitimately symlink an entire
+            # RDR directory from another repo, and we want to index its contents.
             if path.is_file() and not path.is_symlink():
                 md_paths.append(path)
 
@@ -620,7 +628,10 @@ def _prune_deleted_files(
     already-open database handles rather than opening fresh ones.
     """
     for store, collection_name in ((db_code, code_collection), (db_docs, docs_collection)):
-        col = store.get_or_create_collection(collection_name)
+        try:
+            col = store._client.get_collection(collection_name)
+        except _ChromaNotFoundError:
+            continue  # not yet indexed — skip, do not create a ghost collection
         # Cap at 50 000 to avoid loading an entire large collection into memory.
         all_chunks = col.get(include=["metadatas"], limit=50000)
         if len(all_chunks["ids"]) >= 50000:

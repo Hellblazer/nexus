@@ -75,7 +75,7 @@ def test_info_not_found(runner: CliRunner, env_creds) -> None:
 
 def test_delete_with_yes_flag(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge_local", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "old", "--yes"])
     assert result.exit_code == 0
     assert "Deleted" in result.output
@@ -84,7 +84,7 @@ def test_delete_with_yes_flag(runner: CliRunner, env_creds) -> None:
 
 def test_delete_aborts_without_confirmation(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge_local", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "old"], input="n\n")
     assert result.exit_code != 0
     mock_db.delete_collection.assert_not_called()
@@ -93,7 +93,7 @@ def test_delete_aborts_without_confirmation(runner: CliRunner, env_creds) -> Non
 def test_delete_confirm_alias(runner: CliRunner, env_creds) -> None:
     """--confirm is accepted as alias for --yes."""
     mock_db = MagicMock()
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge_local", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "c", "--confirm"])
     assert result.exit_code == 0
     mock_db.delete_collection.assert_called_once()
@@ -375,18 +375,18 @@ def test_info_type_code_routes_to_code_store(runner: CliRunner) -> None:
 
 
 def test_delete_default_uses_knowledge_store(runner: CliRunner) -> None:
-    """delete without --type uses t3_knowledge()."""
+    """delete without --type uses t3_knowledge_local() (no voyage_api_key needed)."""
     mock_db = MagicMock()
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge_local", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "knowledge__old", "--yes"])
     assert result.exit_code == 0, result.output
     mock_db.delete_collection.assert_called_once_with("knowledge__old")
 
 
 def test_delete_type_rdr_routes_to_rdr_store(runner: CliRunner) -> None:
-    """delete --type rdr uses t3_rdr()."""
+    """delete --type rdr uses t3_rdr_local() (no voyage_api_key needed)."""
     mock_db = MagicMock()
-    with patch("nexus.commands.collection.t3_rdr", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_rdr_local", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "rdr__old", "--yes", "--type", "rdr"])
     assert result.exit_code == 0, result.output
     mock_db.delete_collection.assert_called_once_with("rdr__old")
@@ -516,17 +516,62 @@ def test_info_infers_rdr_store_from_prefix(runner: CliRunner, env_creds) -> None
 
 
 def test_delete_infers_code_store_from_prefix(runner: CliRunner, env_creds) -> None:
-    """I4: delete code__repo without --type infers code store from prefix."""
+    """I4: delete code__repo without --type infers code store from prefix (uses local variant)."""
     mock_code_db = MagicMock()
     mock_knowledge_db = MagicMock()
 
-    with patch("nexus.commands.collection.t3_code", return_value=mock_code_db) as m_code, \
-         patch("nexus.commands.collection.t3_knowledge", return_value=mock_knowledge_db) as m_k:
+    with patch("nexus.commands.collection.t3_code_local", return_value=mock_code_db) as m_code, \
+         patch("nexus.commands.collection.t3_knowledge_local", return_value=mock_knowledge_db) as m_k:
         result = runner.invoke(main, ["collection", "delete", "code__repo", "--yes"])
 
     assert result.exit_code == 0, result.output
     m_code.assert_called_once()
     m_k.assert_not_called()
+
+
+# ── I8: delete must not require voyage_api_key ───────────────────────────────
+
+
+def test_delete_cmd_does_not_require_voyage_api_key_code(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I8: 'nx collection delete code__repo' succeeds without voyage_api_key."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    mock_db = MagicMock()
+
+    with patch("nexus.commands.collection.t3_code_local", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "--yes", "code__repo"])
+
+    assert result.exit_code == 0, result.output
+    mock_db.delete_collection.assert_called_once_with("code__repo")
+
+
+def test_delete_cmd_does_not_require_voyage_api_key_rdr(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I8: 'nx collection delete rdr__nexus' succeeds without voyage_api_key."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    mock_db = MagicMock()
+
+    with patch("nexus.commands.collection.t3_rdr_local", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "--yes", "rdr__nexus"])
+
+    assert result.exit_code == 0, result.output
+    mock_db.delete_collection.assert_called_once_with("rdr__nexus")
+
+
+def test_delete_cmd_does_not_require_voyage_api_key_knowledge(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I8: 'nx collection delete knowledge__topic' succeeds without voyage_api_key."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    mock_db = MagicMock()
+
+    with patch("nexus.commands.collection.t3_knowledge_local", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "delete", "--yes", "knowledge__topic"])
+
+    assert result.exit_code == 0, result.output
+    mock_db.delete_collection.assert_called_once_with("knowledge__topic")
 
 
 def test_verify_infers_code_store_from_prefix(runner: CliRunner, env_creds) -> None:

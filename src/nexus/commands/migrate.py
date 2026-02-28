@@ -7,11 +7,13 @@ import click
 from nexus.db.t3 import T3Database
 
 
+# knowledge__ is intentionally absent: _dest_store_for falls back to "knowledge"
+# for any unrecognised prefix, so an explicit entry would be redundant
+# (mirrors the same decision in nexus.commands.collection._PREFIX_TO_STORE).
 _PREFIX_TO_STORE = {
     "code__": "code",
     "docs__": "docs",
     "rdr__": "rdr",
-    "knowledge__": "knowledge",
 }
 
 
@@ -41,7 +43,7 @@ def _open_source_db() -> T3Database:
         )
     import chromadb
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-    client = chromadb.PersistentClient(path=str(_Path(legacy_path).expanduser()))
+    client = chromadb.PersistentClient(path=str(_Path(legacy_path).expanduser().resolve()))
     return T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
 
 
@@ -60,7 +62,7 @@ def _open_dest_db(path_key: str) -> T3Database:
         raise click.ClickException(
             f"chromadb.{path_key} not configured — run: nx config init"
         )
-    path = str(_Path(raw_path).expanduser())
+    path = str(_Path(raw_path).expanduser().resolve())
     client = chromadb.PersistentClient(path=path)
     return T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
 
@@ -128,12 +130,10 @@ def migrate_t3_cmd() -> None:
             click.echo(f"  {col_name}: skipped ({src_count} docs already present)")
             continue
 
-        # Paginate with limit=5000 to avoid OOM on large collections.
+        # Paginate and upsert per page to bound peak memory usage.
+        # Each page is upserted immediately — no full-collection accumulation.
         _PAGE_SIZE = 5000
-        all_ids: list = []
-        all_docs: list = []
-        all_embs: list = []
-        all_metas: list = []
+        total_ids = 0
         offset = 0
         while True:
             page = source_col.get(
@@ -143,22 +143,18 @@ def migrate_t3_cmd() -> None:
             )
             if not page["ids"]:
                 break
-            all_ids.extend(page["ids"])
-            all_docs.extend(page["documents"])
-            all_embs.extend(page["embeddings"])
-            all_metas.extend(page["metadatas"])
+            dest_col.upsert(
+                ids=page["ids"],
+                documents=page["documents"],
+                embeddings=page["embeddings"],
+                metadatas=page["metadatas"],
+            )
+            total_ids += len(page["ids"])
             offset += len(page["ids"])
             if len(page["ids"]) < _PAGE_SIZE:
                 break
-        if all_ids:
-            dest_col.upsert(
-                ids=all_ids,
-                documents=all_docs,
-                embeddings=all_embs,
-                metadatas=all_metas,
-            )
         counts[store_key]["migrated"] += 1
-        click.echo(f"  {col_name} → {store_key}: {len(all_ids)} docs")
+        click.echo(f"  {col_name} → {store_key}: {total_ids} docs")
 
     click.echo("\nMigration complete:")
     for store_key, c in counts.items():

@@ -739,3 +739,44 @@ def test_search_warns_when_corpus_term_unmatched(runner: CliRunner) -> None:
 
     # Warning about the unmatched corpus term should appear somewhere in output
     assert "badcorpus" in result.output
+
+
+# ── I9: explicit --type RuntimeError must surface credential hint ─────────────
+
+
+def test_search_type_explicit_store_credential_error_is_visible(runner: CliRunner) -> None:
+    """I9: --type with a store that raises RuntimeError(voyage_api_key) shows error."""
+    with patch("nexus.commands.search_cmd.t3_rdr",
+               side_effect=RuntimeError("voyage_api_key not configured")):
+        result = runner.invoke(main, ["search", "--type", "rdr", "test query"])
+
+    # The misleading "no matching collections found" must NOT be the only feedback.
+    # The actual credential problem must be surfaced (in output or exit code).
+    silent_fail = (
+        result.exit_code == 0
+        and "no matching collections found" in result.output
+        and "voyage_api_key" not in result.output
+    )
+    assert not silent_fail, (
+        "search --type rdr silently showed 'no matching collections found' "
+        "when the real cause was a missing voyage_api_key"
+    )
+
+
+# ── S9: --type must bypass default corpus filter ──────────────────────────────
+
+
+def test_search_type_rdr_finds_rdr_collections_without_corpus_flag(runner: CliRunner) -> None:
+    """S9: 'nx search --type rdr' finds rdr__ collections even without --corpus rdr."""
+    mock_rdr_db = MagicMock()
+    mock_rdr_db.list_collections.return_value = [{"name": "rdr__nexus-abc", "count": 5}]
+
+    with patch("nexus.commands.search_cmd.t3_rdr", return_value=mock_rdr_db), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
+         patch("nexus.commands.search_cmd.rerank_results", return_value=[]):
+        result = runner.invoke(main, ["search", "--type", "rdr", "how does auth work"])
+
+    assert "no matching collections found" not in result.output, (
+        "--type rdr returned 'no matching collections found' because default corpus "
+        "('knowledge', 'code', 'docs') filtered out the rdr__ collection"
+    )

@@ -279,6 +279,119 @@ def test_migrate_t3_col_get_uses_limit(runner: CliRunner) -> None:
     assert call_kwargs["limit"] == 5000
 
 
+# ── C5: upsert must be per-page, not accumulated ──────────────────────────────
+
+
+def _make_paginated_source_col(name: str, n_pages: int, page_size: int = 5000) -> MagicMock:
+    """Source collection that returns `n_pages` full pages then an empty page."""
+    def _page(offset: int, limit: int, **_kwargs) -> dict:
+        start = offset
+        end = min(start + limit, n_pages * page_size)
+        ids = [f"{name}_id_{i}" for i in range(start, end)]
+        return {
+            "ids": ids,
+            "documents": [f"doc {i}" for i in range(start, end)],
+            "embeddings": [[float(i)] for i in range(start, end)],
+            "metadatas": [{"k": str(i)} for i in range(start, end)],
+        }
+
+    col = MagicMock()
+    col.name = name
+    col.get.side_effect = lambda include, limit, offset: _page(offset, limit)
+    col.count.return_value = n_pages * page_size
+    return col
+
+
+def test_migrate_t3_upserts_per_page_not_accumulated(runner: CliRunner) -> None:
+    """C5: migrate_t3_cmd calls dest_col.upsert() once per page, not once for all pages."""
+    # 2 full pages of 5000 + partial final page
+    source_col = _make_paginated_source_col("code__repo", n_pages=2, page_size=5000)
+    # Adjust: last page has fewer items to signal end
+    page_size = 5000
+    calls: list[dict] = []
+
+    def _page(include, limit, offset):
+        start = offset
+        if start >= 2 * page_size:
+            return {"ids": [], "documents": [], "embeddings": [], "metadatas": []}
+        end = min(start + limit, 2 * page_size + 3)  # partial third "page" won't exist
+        end = min(start + limit, 2 * page_size)
+        ids = [f"id_{i}" for i in range(start, end)]
+        return {
+            "ids": ids,
+            "documents": [f"d{i}" for i in range(start, end)],
+            "embeddings": [[float(i)] for i in range(start, end)],
+            "metadatas": [{"k": str(i)} for i in range(start, end)],
+        }
+
+    source_col = MagicMock()
+    source_col.name = "code__repo"
+    source_col.get.side_effect = lambda include, limit, offset: _page(include, limit, offset)
+    source_col.count.return_value = 2 * page_size
+
+    source_db = MagicMock()
+    source_db.list_collections.return_value = [{"name": "code__repo"}]
+    source_db._client.get_collection.return_value = source_col
+
+    dest_col = MagicMock()
+    dest_col.count.return_value = 0
+    dest_db = MagicMock()
+    dest_db.get_or_create_collection.return_value = dest_col
+
+    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
+         patch("nexus.commands.migrate._open_dest_db", return_value=dest_db):
+        result = runner.invoke(main, ["migrate", "t3"])
+
+    assert result.exit_code == 0, result.output
+    # Each page must be upserted immediately — 2 separate upsert calls
+    assert dest_col.upsert.call_count == 2, (
+        f"Expected 2 per-page upserts, got {dest_col.upsert.call_count}"
+    )
+
+
+# ── I7: _open_source_db and _open_dest_db must resolve paths ──────────────────
+
+
+def test_open_source_db_resolves_dotdot_in_path() -> None:
+    """I7: _open_source_db normalises '..' path components via Path.resolve()."""
+    from nexus.commands.migrate import _open_source_db
+
+    dotdot_path = "/tmp/nexus_migrate_test/a/../legacy_store"
+
+    with patch("nexus.config.load_config",
+               return_value={"chromadb": {"path": dotdot_path}}), \
+         patch("chromadb.PersistentClient") as mock_pc, \
+         patch("chromadb.utils.embedding_functions.DefaultEmbeddingFunction"):
+        try:
+            _open_source_db()
+        except Exception:
+            pass
+
+    assert mock_pc.called, "PersistentClient was never called"
+    actual = mock_pc.call_args.kwargs.get("path", mock_pc.call_args.args[0] if mock_pc.call_args.args else "")
+    assert ".." not in actual, f"Path not resolved — '..' still present: {actual!r}"
+
+
+def test_open_dest_db_resolves_dotdot_in_path() -> None:
+    """I7: _open_dest_db normalises '..' path components via Path.resolve()."""
+    from nexus.commands.migrate import _open_dest_db
+
+    dotdot_path = "/tmp/nexus_migrate_test/a/../dest_store"
+
+    with patch("nexus.config.load_config",
+               return_value={"chromadb": {"code_path": dotdot_path}}), \
+         patch("chromadb.PersistentClient") as mock_pc, \
+         patch("chromadb.utils.embedding_functions.DefaultEmbeddingFunction"):
+        try:
+            _open_dest_db("code_path")
+        except Exception:
+            pass
+
+    assert mock_pc.called, "PersistentClient was never called"
+    actual = mock_pc.call_args.kwargs.get("path", mock_pc.call_args.args[0] if mock_pc.call_args.args else "")
+    assert ".." not in actual, f"Path not resolved — '..' still present: {actual!r}"
+
+
 def test_migrate_t3_empty_source_exits_cleanly(runner: CliRunner) -> None:
     """Empty source store exits 0 with informative message; no dest stores are opened."""
     source_db = MagicMock()

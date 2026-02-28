@@ -112,7 +112,20 @@ def t3_docs_local() -> T3Database:
     return _persistent_t3("docs_path", embeddings_required=False)
 
 
-# Note: t3_rdr_local() and t3_knowledge_local() are intentionally absent.
-# Frecency updates (the only metadata-only bulk operation) apply exclusively to
-# file-based code__ and docs__ collections.  RDR and knowledge collections are
-# written via normal embedding operations that already require voyage_api_key.
+def t3_rdr_local() -> T3Database:
+    """Return a T3Database for the RDR store without requiring ``voyage_api_key``.
+
+    Uses ``DefaultEmbeddingFunction`` — suitable for metadata-only operations
+    such as collection deletion that never call the embedding API.
+    """
+    return _persistent_t3("rdr_path", embeddings_required=False)
+
+
+def t3_knowledge_local() -> T3Database:
+    """Return a T3Database for the knowledge store without requiring ``voyage_api_key``.
+
+    Uses ``DefaultEmbeddingFunction`` — suitable for metadata-only operations
+    such as collection deletion that never call the embedding API.
+    Falls back to the legacy ``chromadb.path`` key.
+    """
+    return _persistent_t3("knowledge_path", legacy_key="path", embeddings_required=False)
