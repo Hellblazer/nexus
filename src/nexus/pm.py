@@ -17,6 +17,7 @@ import structlog
 
 from nexus.config import HAIKU_MODEL, get_credential
 from nexus.db import make_t3
+from nexus.db.t3_stores import t3_knowledge
 
 if TYPE_CHECKING:
     from nexus.db.t2 import T2Database
@@ -316,7 +317,7 @@ def pm_archive(
     doc_count = len(all_docs)
     max_ts = max(d.get("timestamp", "") for d in all_docs)
 
-    t3 = make_t3()
+    t3 = t3_knowledge()
 
     # Idempotency: metadata-only check — no embedding API call (nexus-dqz)
     col = t3.get_or_create_collection(collection)
@@ -439,7 +440,7 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
     """Dispatch reference query to T3 semantic search or metadata-only filter."""
     if _is_semantic_query(query):
         # Semantic path: fan out to all knowledge__pm__ collections
-        t3 = make_t3()
+        t3 = t3_knowledge()
         clean_query = query.strip('"')
         pm_collections = _list_pm_collections(t3)
         if not pm_collections:
@@ -452,7 +453,7 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
         )
     else:
         # Project-name path: metadata-only filter on collection for that project
-        t3 = make_t3()
+        t3 = t3_knowledge()
         collection = f"knowledge__pm__{query}"
         if not t3.collection_exists(collection):
             return []
