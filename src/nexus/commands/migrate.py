@@ -201,10 +201,23 @@ def migrate_t3_cmd(verbose: bool) -> None:
     # Must happen BEFORE make_t3() which connects to those databases.
     click.echo(f"Ensuring four T3 databases exist for base {database!r}…")
     admin = _cloud_admin_client(api_key)
-    created = ensure_databases(admin, tenant=tenant, base=database)
-    for db_name, was_created in created.items():
-        status = "created" if was_created else "already exists"
-        click.echo(f"  {db_name}: {status}")
+    try:
+        created = ensure_databases(admin, tenant=tenant, base=database)
+        for db_name, was_created in created.items():
+            status = "created" if was_created else "already exists"
+            click.echo(f"  {db_name}: {status}")
+    except Exception as exc:
+        # Chroma Cloud free-tier and some plans reject AdminClient.create_database
+        # with Permission denied (HTTP 403).  If the databases already exist in the
+        # dashboard this is harmless — make_t3() will succeed.  If they don't exist
+        # make_t3() will fail with a clear actionable message.
+        _log.debug("ensure_databases_failed", error=str(exc))
+        click.echo(
+            "  Warning: could not auto-create databases (permission denied or plan restriction).\n"
+            "  If you have already created the four databases in your ChromaDB Cloud dashboard,\n"
+            "  migration will continue.  Otherwise create these databases first:\n"
+            + "\n".join(f"    - {database}_{t}" for t in _STORE_TYPES)
+        )
 
     # Destination: the new four-store T3Database (creates 4 suffixed CloudClients).
     try:

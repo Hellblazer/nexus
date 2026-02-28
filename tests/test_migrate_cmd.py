@@ -309,3 +309,39 @@ def test_migrate_t3_ensure_databases_called_before_make_t3() -> None:
     ensure_idx = call_order.index("ensure_databases")
     make_t3_idx = call_order.index("make_t3")
     assert ensure_idx < make_t3_idx, "ensure_databases must be called before make_t3"
+
+
+# ── P17: ensure_databases permission error is non-fatal ───────────────────────
+
+def test_migrate_t3_continues_when_ensure_databases_permission_denied() -> None:
+    """When ensure_databases raises (e.g. Chroma Cloud permission denied),
+    the command prints a warning and proceeds to make_t3()."""
+    import chromadb as real_chromadb
+
+    source_mock = MagicMock()
+    source_mock.list_collections.return_value = []
+
+    make_t3_called: list[bool] = []
+
+    def mock_make_t3():
+        make_t3_called.append(True)
+        return MagicMock()
+
+    runner = CliRunner()
+    with (
+        patch("nexus.commands.migrate.get_credential", return_value="fake-val"),
+        patch.object(real_chromadb, "CloudClient", return_value=source_mock),
+        patch("nexus.commands.migrate._cloud_admin_client", return_value=MagicMock()),
+        patch(
+            "nexus.commands.migrate.ensure_databases",
+            side_effect=Exception("Permission denied."),
+        ),
+        patch("nexus.commands.migrate.make_t3", side_effect=mock_make_t3),
+    ):
+        result = runner.invoke(main, ["migrate", "t3"])
+
+    # Warning printed, NOT a hard failure
+    assert "Warning" in result.output
+    assert "permission denied" in result.output.lower()
+    # Migration proceeds to make_t3
+    assert make_t3_called, "make_t3 was not called after permission denied"
