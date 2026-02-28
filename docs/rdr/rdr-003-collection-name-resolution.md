@@ -16,7 +16,7 @@ related_issues: []
 
 # RDR-003: Collection Name Resolution by Prefix
 
-> **SUPERSEDED** by [RDR-004](rdr-004-three-store-architecture.md) (2026-02-27).
+> **SUPERSEDED** by [RDR-004](rdr-004-four-store-architecture.md) (2026-02-27).
 > After 5 gate rounds the design was still BLOCKED. Root cause: prefix resolution
 > in a single mixed-purpose store creates interlocking exception-handling and
 > contract-preservation constraints that resist clean solution. RDR-004 adopts a
