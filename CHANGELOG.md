@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0rc5] - 2026-02-28
+
 ### Added
 - **Four-store T3 architecture** (RDR-004): T3 is now split into four separate PersistentClient stores
   - `~/.config/nexus/chroma_code` — `code__*` collections (voyage-code-3 embeddings)
@@ -242,7 +244,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc4...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc5...HEAD
+[1.0.0rc5]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc4...v1.0.0rc5
 [1.0.0rc4]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc3...v1.0.0rc4
 [1.0.0rc3]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc2...v1.0.0rc3
 [1.0.0rc2]: https://github.com/Hellblazer/nexus/compare/v1.0.0-rc1...v1.0.0rc2
