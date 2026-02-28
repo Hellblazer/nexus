@@ -368,8 +368,8 @@ def test_frecency_only_updates_frecency_score(tmp_path: Path) -> None:
 
     with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
-         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
-         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
+         patch("nexus.indexer.t3_code_local", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs_local", return_value=mock_docs_db):
         _run_index_frecency_only(repo, registry)
 
     # Called at least once for the code collection
@@ -409,16 +409,16 @@ def test_frecency_only_skips_unindexed_files(tmp_path: Path) -> None:
 
     with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.5}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
-         patch("nexus.indexer.t3_code", return_value=mock_code_db), \
-         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
+         patch("nexus.indexer.t3_code_local", return_value=mock_code_db), \
+         patch("nexus.indexer.t3_docs_local", return_value=mock_docs_db):
         _run_index_frecency_only(repo, registry)
 
     mock_code_db.update_chunks.assert_not_called()
     mock_docs_db.update_chunks.assert_not_called()
 
 
-def test_frecency_only_raises_credentials_missing(tmp_path: Path, monkeypatch) -> None:
-    """_run_index_frecency_only raises CredentialsMissingError when T3 keys are absent."""
+def test_frecency_only_does_not_require_voyage_api_key(tmp_path: Path, monkeypatch) -> None:
+    """_run_index_frecency_only works without voyage_api_key (uses local embedding function)."""
     from nexus.indexer import _run_index_frecency_only
 
     repo = tmp_path / "repo"
@@ -434,7 +434,15 @@ def test_frecency_only_raises_credentials_missing(tmp_path: Path, monkeypatch) -
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 
-    with pytest.raises(CredentialsMissingError):
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}), \
+         patch("nexus.indexer.t3_code_local", return_value=mock_db), \
+         patch("nexus.indexer.t3_docs_local", return_value=mock_db):
+        # Should not raise — frecency uses local stores with DefaultEmbeddingFunction
         _run_index_frecency_only(repo, registry)
 
 
@@ -1193,8 +1201,8 @@ def test_index_code_file_returns_false_when_all_chunks_empty(tmp_path: Path) -> 
 # ── nexus-pjsc.8: Multi-store routing RED tests ───────────────────────────────
 
 
-def test_run_index_frecency_only_uses_t3_code_and_t3_docs(tmp_path: Path) -> None:
-    """_run_index_frecency_only should call t3_code() and t3_docs() not make_t3()."""
+def test_run_index_frecency_only_uses_t3_code_local_and_t3_docs_local(tmp_path: Path) -> None:
+    """_run_index_frecency_only uses t3_code_local() and t3_docs_local() (no voyage_api_key)."""
     from nexus.indexer import _run_index_frecency_only
 
     repo = tmp_path / "repo"
@@ -1215,12 +1223,12 @@ def test_run_index_frecency_only_uses_t3_code_and_t3_docs(tmp_path: Path) -> Non
 
     with patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.frecency.batch_frecency", return_value={}), \
-         patch("nexus.indexer.t3_code", return_value=mock_code_db) as mock_t3_code, \
-         patch("nexus.indexer.t3_docs", return_value=mock_docs_db) as mock_t3_docs:
+         patch("nexus.indexer.t3_code_local", return_value=mock_code_db) as mock_t3_code_local, \
+         patch("nexus.indexer.t3_docs_local", return_value=mock_docs_db) as mock_t3_docs_local:
         _run_index_frecency_only(repo, registry)
 
-    mock_t3_code.assert_called_once()
-    mock_t3_docs.assert_called_once()
+    mock_t3_code_local.assert_called_once()
+    mock_t3_docs_local.assert_called_once()
 
 
 def test_prune_deleted_files_uses_internal_stores(tmp_path: Path) -> None:

@@ -79,27 +79,26 @@ def migrate_t3_cmd() -> None:
 
     Migration is idempotent: if destination count equals source count, the
     collection is skipped.  Embeddings are copied verbatim — no re-embedding.
+    Note: idempotency is count-based — if destination has a different count
+    than source (partial migration), the full collection is re-upserted.
 
     Does NOT delete the source store.  Verify the migration and then remove
     the source manually.
     """
-    source_db = _open_source_db()
-    dest_code = _open_dest_db("code_path")
-    dest_docs = _open_dest_db("docs_path")
-    dest_rdr = _open_dest_db("rdr_path")
-    dest_knowledge = _open_dest_db("knowledge_path")
-
-    dest_map = {
-        "code": dest_code,
-        "docs": dest_docs,
-        "rdr": dest_rdr,
-        "knowledge": dest_knowledge,
+    _dest_path_keys = {
+        "code": "code_path",
+        "docs": "docs_path",
+        "rdr": "rdr_path",
+        "knowledge": "knowledge_path",
     }
+
+    source_db = _open_source_db()
+    dest_stores: dict[str, T3Database] = {}  # opened lazily as needed
 
     # Per-type counters for the migration report
     counts: dict[str, dict[str, int]] = {
         k: {"migrated": 0, "skipped": 0, "total": 0}
-        for k in dest_map
+        for k in _dest_path_keys
     }
 
     collections = source_db.list_collections()
@@ -110,10 +109,12 @@ def migrate_t3_cmd() -> None:
     for col_info in collections:
         col_name = col_info["name"]
         store_key = _dest_store_for(col_name)
-        dest_db = dest_map[store_key]
+        if store_key not in dest_stores:
+            dest_stores[store_key] = _open_dest_db(_dest_path_keys[store_key])
+        dest_db = dest_stores[store_key]
         counts[store_key]["total"] += 1
 
-        source_col = source_db.get_or_create_collection(col_name)
+        source_col = source_db._client.get_collection(col_name)
         dest_col = dest_db.get_or_create_collection(col_name)
 
         src_count = source_col.count()

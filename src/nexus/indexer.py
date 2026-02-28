@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nexus.corpus import index_model_for_collection
-from nexus.db.t3_stores import t3_code, t3_docs, t3_rdr
+from nexus.db.t3_stores import t3_code, t3_code_local, t3_docs, t3_docs_local, t3_rdr
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 
 _log = structlog.get_logger(__name__)
@@ -147,7 +147,6 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
 
     Handles both code__ and docs__ collections.
     """
-    from nexus.config import get_credential
     from nexus.frecency import batch_frecency
     from nexus.registry import _docs_collection_name
 
@@ -159,15 +158,10 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     code_collection = info.get("code_collection", info["collection"])
     docs_collection = info.get("docs_collection") or _docs_collection_name(repo)
 
-    voyage_key = get_credential("voyage_api_key")
-    if not voyage_key:
-        raise CredentialsMissingError(
-            "voyage_api_key not set — run: nx config init"
-        )
-
     frecency_map = batch_frecency(repo)
-    db_code = t3_code()
-    db_docs = t3_docs()
+    # Frecency updates only write metadata, never create embeddings — no voyage key needed.
+    db_code = t3_code_local()
+    db_docs = t3_docs_local()
 
     # Update frecency in code and docs collections (each in their own store)
     store_cols: list[tuple[object, str]] = [(db_code, code_collection)]
@@ -368,7 +362,7 @@ def _index_prose_file(
                 "category": "prose",
                 "session_id": "",
                 "source_agent": "nexus-indexer",
-                "store_type": "prose",
+                "store_type": "markdown",
                 "indexed_at": now_iso,
                 "expires_at": "",
                 "ttl_days": 0,
@@ -660,7 +654,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
 
     info = registry.get(repo)
     if info is None:
-        return
+        return {}
 
     # C2: use deterministic naming function as fallback
     code_collection = info.get("code_collection", info["collection"])

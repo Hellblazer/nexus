@@ -4,11 +4,17 @@ from __future__ import annotations
 from typing import Callable
 
 import click
+import structlog
 
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
 from nexus.db.t3 import T3Database
 from nexus.db.t3_stores import t3_code, t3_docs, t3_knowledge, t3_rdr
 
+_log = structlog.get_logger(__name__)
+
+# Insertion order is intentional: code → docs → rdr → knowledge matches display order.
+# Lambda wrapping is intentional: it provides late name binding so that
+# `patch("nexus.commands.collection.t3_code", ...)` intercepts calls in tests.
 _STORE_FACTORIES: dict[str, Callable[[], T3Database]] = {
     "code": lambda: t3_code(),
     "docs": lambda: t3_docs(),
@@ -34,11 +40,11 @@ def list_cmd(store_type: str | None) -> None:
         cols = db.list_collections()
     else:
         cols = []
-        for factory in _STORE_FACTORIES.values():
+        for _stype, factory in _STORE_FACTORIES.items():
             try:
                 cols.extend(factory().list_collections())
             except RuntimeError:
-                pass  # unconfigured store — skip silently
+                _log.debug("store not configured, skipping", store_type=_stype)
 
     if not cols:
         click.echo("No collections found.")

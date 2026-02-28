@@ -217,8 +217,8 @@ def test_info_shows_embedding_model_for_code_collection(
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
-        result = runner.invoke(main, ["collection", "info", "code__nexus"])
+    with patch("nexus.commands.collection.t3_code", return_value=mock_db):
+        result = runner.invoke(main, ["collection", "info", "code__nexus", "--type", "code"])
 
     assert result.exit_code == 0, result.output
     assert "voyage-code-3" in result.output  # index model

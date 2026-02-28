@@ -277,6 +277,8 @@ def test_index_frecency_only_preserves_chunk_count(
     with patch("nexus.indexer.t3_code", return_value=local_t3), \
          patch("nexus.indexer.t3_docs", return_value=MagicMock()), \
          patch("nexus.indexer.t3_rdr", return_value=MagicMock()), \
+         patch("nexus.indexer.t3_code_local", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs_local", return_value=MagicMock()), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         index_repository(mini_repo, registry)
         col_name = registry.get(mini_repo)["code_collection"]
@@ -812,6 +814,8 @@ def test_cli_index_frecency_only_flag(
     with patch("nexus.indexer.t3_code", return_value=local_t3), \
          patch("nexus.indexer.t3_docs", return_value=local_t3), \
          patch("nexus.indexer.t3_rdr", return_value=local_t3), \
+         patch("nexus.indexer.t3_code_local", return_value=local_t3), \
+         patch("nexus.indexer.t3_docs_local", return_value=local_t3), \
          patch("nexus.config.get_credential", return_value="test-key"):
         runner.invoke(main, ["index", "repo", str(mini_repo)])
         result = runner.invoke(main, ["index", "repo", str(mini_repo), "--frecency-only"])

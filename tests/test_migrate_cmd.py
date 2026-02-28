@@ -40,7 +40,7 @@ def _make_source_db(collections: list[MagicMock]) -> MagicMock:
     db = MagicMock()
     db.list_collections.return_value = [{"name": c.name} for c in collections]
     col_map = {c.name: c for c in collections}
-    db.get_or_create_collection.side_effect = lambda name: col_map[name]
+    db._client.get_collection.side_effect = lambda name: col_map[name]
     return db
 
 
@@ -65,9 +65,11 @@ def test_migrate_t3_routes_code_collections_to_code_store(runner: CliRunner) -> 
     dest_knowledge = _make_dest_db()
 
     with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", side_effect=[
-             dest_code, dest_docs, dest_rdr, dest_knowledge
-         ]):
+         patch("nexus.commands.migrate._open_dest_db",
+               side_effect=lambda key: {
+                   "code_path": dest_code, "docs_path": dest_docs,
+                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
+               }[key]):
         result = runner.invoke(main, ["migrate", "t3"])
 
     assert result.exit_code == 0, result.output
@@ -88,9 +90,11 @@ def test_migrate_t3_routes_docs_collections_to_docs_store(runner: CliRunner) -> 
     dest_knowledge = _make_dest_db()
 
     with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", side_effect=[
-             dest_code, dest_docs, dest_rdr, dest_knowledge
-         ]):
+         patch("nexus.commands.migrate._open_dest_db",
+               side_effect=lambda key: {
+                   "code_path": dest_code, "docs_path": dest_docs,
+                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
+               }[key]):
         result = runner.invoke(main, ["migrate", "t3"])
 
     assert result.exit_code == 0, result.output
@@ -110,9 +114,11 @@ def test_migrate_t3_routes_rdr_collections_to_rdr_store(runner: CliRunner) -> No
     dest_knowledge = _make_dest_db()
 
     with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", side_effect=[
-             dest_code, dest_docs, dest_rdr, dest_knowledge
-         ]):
+         patch("nexus.commands.migrate._open_dest_db",
+               side_effect=lambda key: {
+                   "code_path": dest_code, "docs_path": dest_docs,
+                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
+               }[key]):
         result = runner.invoke(main, ["migrate", "t3"])
 
     assert result.exit_code == 0, result.output
@@ -132,9 +138,11 @@ def test_migrate_t3_routes_knowledge_collections_to_knowledge_store(runner: CliR
     dest_knowledge = _make_dest_db()
 
     with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", side_effect=[
-             dest_code, dest_docs, dest_rdr, dest_knowledge
-         ]):
+         patch("nexus.commands.migrate._open_dest_db",
+               side_effect=lambda key: {
+                   "code_path": dest_code, "docs_path": dest_docs,
+                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
+               }[key]):
         result = runner.invoke(main, ["migrate", "t3"])
 
     assert result.exit_code == 0, result.output
@@ -158,9 +166,11 @@ def test_migrate_t3_skips_collection_when_dest_count_matches(runner: CliRunner) 
     dest_knowledge.get_or_create_collection.return_value = dest_col_existing
 
     with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", side_effect=[
-             dest_code, dest_docs, dest_rdr, dest_knowledge
-         ]):
+         patch("nexus.commands.migrate._open_dest_db",
+               side_effect=lambda key: {
+                   "code_path": dest_code, "docs_path": dest_docs,
+                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
+               }[key]):
         result = runner.invoke(main, ["migrate", "t3"])
 
     assert result.exit_code == 0, result.output
@@ -183,9 +193,11 @@ def test_migrate_t3_upserts_when_dest_count_differs(runner: CliRunner) -> None:
     dest_knowledge.get_or_create_collection.return_value = dest_col
 
     with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", side_effect=[
-             dest_code, dest_docs, dest_rdr, dest_knowledge
-         ]):
+         patch("nexus.commands.migrate._open_dest_db",
+               side_effect=lambda key: {
+                   "code_path": dest_code, "docs_path": dest_docs,
+                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
+               }[key]):
         result = runner.invoke(main, ["migrate", "t3"])
 
     assert result.exit_code == 0, result.output
@@ -206,11 +218,30 @@ def test_migrate_t3_unknown_prefix_goes_to_knowledge_store(runner: CliRunner) ->
     dest_knowledge = _make_dest_db()
 
     with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", side_effect=[
-             dest_code, dest_docs, dest_rdr, dest_knowledge
-         ]):
+         patch("nexus.commands.migrate._open_dest_db",
+               side_effect=lambda key: {
+                   "code_path": dest_code, "docs_path": dest_docs,
+                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
+               }[key]):
         result = runner.invoke(main, ["migrate", "t3"])
 
     assert result.exit_code == 0, result.output
     dest_knowledge.get_or_create_collection.assert_called_with("custom__stuff")
     dest_code.get_or_create_collection.assert_not_called()
+
+
+# ── S3: empty source guard ────────────────────────────────────────────────────
+
+def test_migrate_t3_empty_source_exits_cleanly(runner: CliRunner) -> None:
+    """Empty source store exits 0 with informative message; no dest stores are opened."""
+    source_db = MagicMock()
+    source_db.list_collections.return_value = []
+    mock_open_dest = MagicMock()
+
+    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
+         patch("nexus.commands.migrate._open_dest_db", mock_open_dest):
+        result = runner.invoke(main, ["migrate", "t3"])
+
+    assert result.exit_code == 0, result.output
+    assert "empty" in result.output.lower() or "nothing" in result.output.lower()
+    mock_open_dest.assert_not_called()

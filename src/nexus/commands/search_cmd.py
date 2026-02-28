@@ -6,10 +6,14 @@ from typing import Callable
 
 import click
 
+import structlog
+
 from nexus.config import load_config
 from nexus.corpus import resolve_corpus
 from nexus.db.t3 import T3Database
 from nexus.db.t3_stores import t3_code, t3_docs, t3_knowledge, t3_rdr
+
+_log = structlog.get_logger(__name__)
 from nexus.ripgrep_cache import search_ripgrep
 from nexus.formatters import format_json, format_plain_with_context, format_vimgrep
 from nexus.answer import answer_mode
@@ -39,6 +43,8 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
 
 _CONTENT_MAX_CHARS: int = 200
 
+# Lambda wrapping is intentional: it provides late name binding so that
+# `patch("nexus.commands.search_cmd.t3_code", ...)` intercepts calls in tests.
 _SEARCH_FACTORIES: dict[str, Callable[[], T3Database]] = {
     "code": lambda: t3_code(),
     "docs": lambda: t3_docs(),
@@ -79,7 +85,8 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
 @click.argument("query")
 @click.argument("path", required=False, default=None)
 @click.option("--corpus", multiple=True, default=("knowledge", "code", "docs"),
-              show_default=True, help="Corpus prefix or full collection name (repeatable)")
+              show_default=True, help="Corpus prefix or full collection name (repeatable). "
+              "Note: rdr is excluded from the default set; use --corpus rdr or --type rdr to search it.")
 @click.option("--n", "-m", "--max-results", "n", default=10, show_default=True,
               help="Max results to return")
 @click.option("--hybrid", is_flag=True, default=False,
@@ -178,7 +185,7 @@ def search_cmd(
             if target:
                 store_entries.append((db, target))
         except RuntimeError:
-            pass  # unconfigured store — skip silently
+            _log.debug("store not configured, skipping", store_type=_stype)
 
     if not store_entries and not mxbai:
         click.echo("no matching collections found — use: nx collection list", err=True)
