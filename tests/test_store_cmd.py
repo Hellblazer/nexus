@@ -1,6 +1,7 @@
 """CLI-layer tests for nx store, nx search, and nx collection commands."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,6 +22,17 @@ def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VOYAGE_API_KEY", "test-voyage-key")
     monkeypatch.setenv("CHROMA_TENANT", "test-tenant")
     monkeypatch.setenv("CHROMA_DATABASE", "test-db")
+
+
+@contextmanager
+def _patch_search_knowledge(mock_db: MagicMock):
+    """Patch all 4 search store factories: knowledge → mock_db, others → RuntimeError."""
+    _re = RuntimeError("not configured")
+    with patch("nexus.commands.search_cmd.t3_knowledge", return_value=mock_db), \
+         patch("nexus.commands.search_cmd.t3_code", side_effect=_re), \
+         patch("nexus.commands.search_cmd.t3_docs", side_effect=_re), \
+         patch("nexus.commands.search_cmd.t3_rdr", side_effect=_re):
+        yield
 
 
 # ── t3_knowledge() credential guard ───────────────────────────────────────────
@@ -227,7 +239,7 @@ def test_collection_list_empty(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_collections.return_value = []
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "list"])
 
     assert result.exit_code == 0
@@ -241,7 +253,7 @@ def test_collection_list_shows_names_and_counts(runner: CliRunner, env_creds) ->
         {"name": "knowledge__sec", "count": 7},
     ]
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "list"])
 
     assert result.exit_code == 0
@@ -255,7 +267,7 @@ def test_collection_info_not_found(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_collections.return_value = []
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "info", "no-such-collection"])
 
     assert result.exit_code != 0
@@ -266,7 +278,7 @@ def test_collection_verify_not_found(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_collections.return_value = []
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "verify", "missing"])
 
     assert result.exit_code != 0
@@ -279,7 +291,7 @@ def test_search_no_matching_corpus(runner: CliRunner, env_creds) -> None:
     mock_db = MagicMock()
     mock_db.list_collections.return_value = []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(main, ["search", "my query", "--corpus", "code"])
 
     assert result.exit_code == 0
@@ -291,7 +303,7 @@ def test_search_no_results(runner: CliRunner, env_creds) -> None:
     mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 5}]
     mock_db.search.return_value = []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(main, ["search", "my query", "--corpus", "knowledge"])
 
     assert result.exit_code == 0
@@ -313,7 +325,7 @@ def test_search_displays_results(runner: CliRunner, env_creds) -> None:
         }
     ]
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(main, ["search", "security", "--corpus", "knowledge"])
 
     assert result.exit_code == 0
@@ -326,7 +338,7 @@ def test_collection_delete_yes_skips_prompt(runner: CliRunner, env_creds) -> Non
     """--yes flag skips interactive confirmation."""
     mock_db = MagicMock()
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--yes"])
 
     assert result.exit_code == 0, result.output
@@ -338,7 +350,7 @@ def test_collection_delete_without_yes_prompts(runner: CliRunner, env_creds) -> 
     """Without --yes, a confirmation prompt is shown (user declines via 'n')."""
     mock_db = MagicMock()
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
 
     # User said no → aborted, collection NOT deleted
@@ -349,7 +361,7 @@ def test_collection_delete_confirm_flag_alias(runner: CliRunner, env_creds) -> N
     """--confirm is a supported alias for --yes and skips the confirmation prompt."""
     mock_db = MagicMock()
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
+    with patch("nexus.commands.collection.t3_knowledge", return_value=mock_db):
         result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--confirm"])
 
     assert result.exit_code == 0
@@ -374,7 +386,7 @@ def test_search_content_flag_shows_chunk_text(runner: CliRunner, env_creds) -> N
         }
     ]
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(
             main, ["search", "security", "--corpus", "knowledge", "--content"]
         )
@@ -403,7 +415,7 @@ def test_search_content_flag_absent_no_chunk_text(runner: CliRunner, env_creds) 
         }
     ]
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(
             main, ["search", "security", "--corpus", "knowledge"]
         )
@@ -431,7 +443,7 @@ def test_search_content_flag_truncates_long_text(runner: CliRunner, env_creds) -
         }
     ]
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(
             main, ["search", "query", "--corpus", "knowledge", "--content"]
         )
@@ -461,7 +473,7 @@ def test_search_content_flag_short_text_no_ellipsis(runner: CliRunner, env_creds
         }
     ]
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(
             main, ["search", "query", "--corpus", "knowledge", "--content"]
         )
@@ -485,7 +497,7 @@ def test_search_path_scopes_where_filter(runner: CliRunner, env_creds, tmp_path)
     src_dir = tmp_path / "src"
     src_dir.mkdir()
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(
             main, ["search", "query", str(src_dir), "--corpus", "knowledge"]
         )
@@ -534,7 +546,7 @@ def test_search_path_filters_results_by_file_path(runner: CliRunner, env_creds, 
 
     mock_db.search.side_effect = fake_search
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(
             main, ["search", "query", str(src_dir), "--corpus", "knowledge"]
         )
@@ -558,7 +570,7 @@ def test_search_no_path_returns_all(runner: CliRunner, env_creds) -> None:
         }
     ]
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
+    with _patch_search_knowledge(mock_db):
         result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
 
     assert result.exit_code == 0

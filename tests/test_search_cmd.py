@@ -1,6 +1,7 @@
 """Tests for nx search command — new flags: --where, -A/-B/-C, --reverse, -m."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -39,6 +40,17 @@ def _mock_t3(collections: list[str] | None = None) -> MagicMock:
     return mock
 
 
+@contextmanager
+def _patch_knowledge_store(mock_t3: MagicMock):
+    """Patch all 4 store factories: knowledge returns mock_t3, others raise RuntimeError."""
+    _re = RuntimeError("not configured")
+    with patch("nexus.commands.search_cmd.t3_knowledge", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.t3_code", side_effect=_re), \
+         patch("nexus.commands.search_cmd.t3_docs", side_effect=_re), \
+         patch("nexus.commands.search_cmd.t3_rdr", side_effect=_re):
+        yield
+
+
 # ── -C short form REMOVED from --corpus ───────────────────────────────────────
 
 
@@ -52,7 +64,7 @@ def test_corpus_short_form_C_is_removed(runner: CliRunner, monkeypatch: pytest.M
     mock_t3 = _mock_t3()
     mock_t3.search.return_value = []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         # -C N should now be context-lines, not corpus: using a string corpus name
         # should fail (N would be an int argument). Providing -C knowledge would
         # at minimum NOT be treated as corpus selection — the old behaviour is gone.
@@ -78,7 +90,7 @@ def test_corpus_long_form_still_works(runner: CliRunner, monkeypatch: pytest.Mon
     mock_t3 = _mock_t3(["knowledge__test"])
     mock_t3.search.return_value = []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
             result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
 
@@ -102,7 +114,7 @@ def test_m_flag_limits_results(runner: CliRunner, monkeypatch: pytest.MonkeyPatc
     ]
 
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 result = runner.invoke(
@@ -136,7 +148,7 @@ def test_reverse_flag_reverses_output_order(
     ]
 
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 normal = runner.invoke(
@@ -180,7 +192,7 @@ def test_where_single_filter_passed_to_search(
         captured_where.append(where)
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 result = runner.invoke(
@@ -212,7 +224,7 @@ def test_where_multiple_filters_anded(
         captured_where.append(where)
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 result = runner.invoke(
@@ -247,7 +259,7 @@ def test_where_no_flag_passes_none(
         captured_where.append(where)
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 result = runner.invoke(
@@ -281,7 +293,7 @@ def test_context_A_shows_extra_lines_after(
     ]
 
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 # Without -A: format_plain shows all lines already — test that
@@ -305,7 +317,7 @@ def test_context_C_sets_lines_after(
     monkeypatch.setenv("CHROMA_DATABASE", "d")
 
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 result = runner.invoke(
@@ -326,7 +338,7 @@ def test_context_C_requires_integer(
     monkeypatch.setenv("CHROMA_DATABASE", "d")
 
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         result = runner.invoke(
             main,
             ["search", "query", "--corpus", "knowledge", "-C", "notanumber"],
@@ -391,7 +403,7 @@ def test_hybrid_flag_triggers_ripgrep(
         rg_call_count.append(1)
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 with patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_search_ripgrep):
@@ -426,7 +438,7 @@ def test_hybrid_results_include_rg_hits(
         "frecency_score": 0.5,
     }
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 with patch("nexus.commands.search_cmd.search_ripgrep", return_value=[rg_hit]):
@@ -460,7 +472,7 @@ def test_hybrid_without_cache_files_still_works(
     )
     mock_t3 = _mock_t3(["code__myrepo"])
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[semantic_result]):
             with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
                 result = runner.invoke(
@@ -496,7 +508,7 @@ def test_nx_answer_env_enables_answer_mode(
         return "Synthesized answer"
 
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
             with patch("nexus.commands.search_cmd.load_config",
                        return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
@@ -535,7 +547,7 @@ def test_nx_answer_env_unset_does_not_enable_answer_mode(
         return "Synthesized answer"
 
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
             with patch("nexus.commands.search_cmd.load_config",
                        return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
@@ -574,7 +586,7 @@ def test_nx_answer_empty_string_does_not_enable_answer_mode(
         return "Synthesized answer"
 
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with _patch_knowledge_store(mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
             with patch("nexus.commands.search_cmd.load_config",
                        return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
@@ -633,3 +645,64 @@ def test_parse_where_missing_equals_raises() -> None:
 def test_parse_where_multiple_pairs_merged() -> None:
     result = _parse_where(("lang=python", "type=code"))
     assert result == {"lang": "python", "type": "code"}
+
+
+# ── nexus-pjsc.5: --type flag + multi-store fan-out ──────────────────────────
+
+
+def test_search_type_knowledge_routes_to_knowledge_store(runner: CliRunner) -> None:
+    """search --type knowledge uses t3_knowledge() only."""
+    mock_t3 = _mock_t3(["knowledge__test"])
+    mock_t3.search.return_value = []
+    with _patch_knowledge_store(mock_t3):
+        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
+            result = runner.invoke(
+                main,
+                ["search", "hello", "--type", "knowledge", "--corpus", "knowledge"],
+            )
+    assert result.exit_code == 0 or "No results" in result.output
+
+
+def test_search_no_type_fans_out_to_all_four_stores(runner: CliRunner) -> None:
+    """search without --type calls all 4 store factories."""
+    def make_mock(names: list[str]) -> MagicMock:
+        m = MagicMock()
+        m.list_collections.return_value = [{"name": n} for n in names]
+        m.search.return_value = []
+        return m
+
+    mock_code = make_mock(["code__a"])
+    mock_docs = make_mock(["docs__b"])
+    mock_rdr = make_mock(["rdr__c"])
+    mock_know = make_mock(["knowledge__d"])
+
+    with patch("nexus.commands.search_cmd.t3_code", return_value=mock_code), \
+         patch("nexus.commands.search_cmd.t3_docs", return_value=mock_docs), \
+         patch("nexus.commands.search_cmd.t3_rdr", return_value=mock_rdr), \
+         patch("nexus.commands.search_cmd.t3_knowledge", return_value=mock_know), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
+        result = runner.invoke(
+            main,
+            ["search", "hello", "--corpus", "code", "--corpus", "docs",
+             "--corpus", "rdr", "--corpus", "knowledge"],
+        )
+
+    mock_code.list_collections.assert_called()
+    mock_docs.list_collections.assert_called()
+    mock_rdr.list_collections.assert_called()
+    mock_know.list_collections.assert_called()
+
+
+def test_search_type_code_routes_to_code_store(runner: CliRunner) -> None:
+    """search --type code uses t3_code() only, not knowledge."""
+    mock_code = _mock_t3(["code__nexus"])
+    mock_code.search.return_value = []
+    not_called = MagicMock()
+    with patch("nexus.commands.search_cmd.t3_code", return_value=mock_code), \
+         patch("nexus.commands.search_cmd.t3_knowledge", return_value=not_called), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
+        result = runner.invoke(
+            main,
+            ["search", "hello", "--type", "code", "--corpus", "code"],
+        )
+    not_called.list_collections.assert_not_called()

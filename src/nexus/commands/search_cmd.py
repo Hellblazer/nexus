@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Callable
 
 import click
 
 from nexus.config import load_config
 from nexus.corpus import resolve_corpus
-from nexus.commands.store import _t3
+from nexus.db.t3 import T3Database
+from nexus.db.t3_stores import t3_code, t3_docs, t3_knowledge, t3_rdr
 from nexus.ripgrep_cache import search_ripgrep
 from nexus.formatters import format_json, format_plain_with_context, format_vimgrep
 from nexus.answer import answer_mode
@@ -34,6 +38,13 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
     return result
 
 _CONTENT_MAX_CHARS: int = 200
+
+_SEARCH_FACTORIES: dict[str, Callable[[], T3Database]] = {
+    "code": lambda: t3_code(),
+    "docs": lambda: t3_docs(),
+    "rdr": lambda: t3_rdr(),
+    "knowledge": lambda: t3_knowledge(),
+}
 
 # Directory where ripgrep cache files are stored (overridable in tests via monkeypatch)
 _CONFIG_DIR: Path = Path.home() / ".config" / "nexus"
@@ -100,6 +111,10 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               help="Show N lines of context after each result chunk (alias for -A N)")
 @click.option("--reverse", "-r", is_flag=True, default=False,
               help="Reverse output order (highest-scoring last)")
+@click.option("--type", "store_type",
+              type=click.Choice(["code", "docs", "rdr", "knowledge"]),
+              default=None,
+              help="Limit search to a specific store (default: all 4).")
 def search_cmd(
     query: str,
     path: str | None,
@@ -119,6 +134,7 @@ def search_cmd(
     lines_after: int,
     lines_context: int,
     reverse: bool,
+    store_type: str | None,
 ) -> None:
     """Semantic search across T3 knowledge collections.
 
@@ -143,19 +159,28 @@ def search_cmd(
     except click.BadParameter as exc:
         raise click.ClickException(str(exc)) from exc
 
-    db = _t3()
-    all_collections = [c["name"] for c in db.list_collections()]
+    # Build (db, target_collections) pairs — one per store selected by --type.
+    candidate_factories = (
+        {store_type: _SEARCH_FACTORIES[store_type]}
+        if store_type is not None
+        else _SEARCH_FACTORIES
+    )
+    store_entries: list[tuple[T3Database, list[str]]] = []
+    for _stype, factory in candidate_factories.items():
+        try:
+            db = factory()
+            all_cols = [c["name"] for c in db.list_collections()]
+            target: list[str] = []
+            for c in corpus:
+                matched = resolve_corpus(c, all_cols)
+                target.extend(matched)
+            target = list(dict.fromkeys(target))
+            if target:
+                store_entries.append((db, target))
+        except RuntimeError:
+            pass  # unconfigured store — skip silently
 
-    target_collections: list[str] = []
-    for c in corpus:
-        matched = resolve_corpus(c, all_collections)
-        if not matched:
-            click.echo(f"Warning: no collections match --corpus {c!r}", err=True)
-        target_collections.extend(matched)
-
-    target_collections = list(dict.fromkeys(target_collections))
-
-    if not target_collections and not mxbai:
+    if not store_entries and not mxbai:
         click.echo("no matching collections found — use: nx collection list", err=True)
         return
 
@@ -163,10 +188,12 @@ def search_cmd(
     reranker_model = config["embeddings"]["rerankerModel"]
 
     def _retrieve(q: str) -> list[SearchResult]:
-        raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter)
+        raw: list[SearchResult] = []
+        for _db, _cols in store_entries:
+            raw.extend(search_cross_corpus(q, _cols, n_results=n, t3=_db, where=where_filter))
         if mxbai:
             stores = config.get("mxbai", {}).get("stores", [])
-            num = len(target_collections) or 1
+            num = sum(len(cols) for _, cols in store_entries) or 1
             per_k = max(5, (n // num) * 2)
             mxbai_results = fetch_mxbai_results(q, stores=stores, per_k=per_k)
             raw.extend(mxbai_results)

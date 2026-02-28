@@ -748,9 +748,13 @@ def test_cli_index_then_search_pipeline(
         + hashlib.sha256(str(mini_repo).encode()).hexdigest()[:8]
     )
 
+    _re = RuntimeError("not configured")
     with patch("nexus.db.make_t3", return_value=local_t3), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
-         patch("nexus.commands.search_cmd._t3", return_value=local_t3):
+         patch("nexus.commands.search_cmd.t3_knowledge", return_value=local_t3), \
+         patch("nexus.commands.search_cmd.t3_code", side_effect=_re), \
+         patch("nexus.commands.search_cmd.t3_docs", side_effect=_re), \
+         patch("nexus.commands.search_cmd.t3_rdr", side_effect=_re):
 
         index_result = runner.invoke(main, ["index", "repo", str(mini_repo)])
         assert index_result.exit_code == 0, index_result.output
