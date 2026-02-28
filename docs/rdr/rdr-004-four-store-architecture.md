@@ -194,7 +194,21 @@ chromadb:
   path: ""  # if set, used as fallback for knowledge_path
 ```
 
-All four `*_path` keys are added to `_DEFAULTS["chromadb"]` in `config.py` using the paths shown in the table above as defaults (e.g. `~/.config/nexus/chroma_code`). A user who sets none of these keys gets the defaults automatically on first run — `PersistentClient` creates the directory if absent. The `~` in path values is expanded by `_persistent_t3()` via `Path.expanduser()` before passing to `PersistentClient`. A user who explicitly sets a key to empty string `""` still triggers the `RuntimeError("T3 store not configured: ...")` in `_persistent_t3()`.
+All four `*_path` keys are added to `_DEFAULTS["chromadb"]` in `config.py` with non-empty string defaults (not `""`). The exact `_DEFAULTS["chromadb"]` block after Phase 1 Step 1:
+
+```python
+"chromadb": {
+    "tenant":         "",
+    "database":       "",
+    "code_path":      "~/.config/nexus/chroma_code",
+    "docs_path":      "~/.config/nexus/chroma_docs",
+    "rdr_path":       "~/.config/nexus/chroma_rdr",
+    "knowledge_path": "~/.config/nexus/chroma_knowledge",
+    "path":           "",   # legacy alias; empty = not set
+},
+```
+
+The four `*_path` keys use non-empty defaults so `_persistent_t3()`'s `or`-falsy guard passes on a fresh install. The legacy `path` key defaults to `""` (not-set). A user who explicitly sets any `*_path` key to `""` still triggers the `RuntimeError("T3 store not configured: ...")`. `PersistentClient` creates the directory on first use if absent. The `~` in path values is expanded by `_persistent_t3()` via `Path.expanduser()` before passing to `PersistentClient`.
 
 Existing `tenant`, `database`, `api_key` keys remain for CloudClient access during migration.
 
@@ -208,6 +222,7 @@ The following guards must be updated in Phase 1 alongside the factory functions:
 | `indexer.py:163` (`_run_index_frecency_only`) | checks `chroma_api_key`, raises `CredentialsMissingError` | check `voyage_api_key` only |
 | `indexer.py:752` (`_run_index`) | checks `chroma_api_key`, raises `CredentialsMissingError` | check `voyage_api_key` only |
 | `store._t3()` (lines 13–38) | validates `chroma_api_key`, `chroma_tenant`, `chroma_database` | removed — replaced by factory `voyage_api_key` guard |
+| `commands/memory.py:promote_cmd` (lines 112–120) | checks `chroma_api_key`, `chroma_tenant`, `chroma_database` | check `voyage_api_key` only; remove `chroma_api_key`, `chroma_tenant`, `chroma_database` checks |
 
 `polling.py`'s retry logic catches `CredentialsMissingError` to avoid recording `head_hash` on credential failures. This behaviour is preserved: the updated guards still raise `CredentialsMissingError` (same exception type, new message), so polling skips `head_hash` writes correctly.
 
@@ -221,8 +236,10 @@ All commands that currently call `_t3()` or `make_t3()` are updated to call the 
 | `nx index` (docs) | `make_t3()` | `t3_docs()` |
 | `nx index` (rdr) | `make_t3()` | `t3_rdr()` |
 | `_discover_and_index_rdrs()` | receives `db` from caller | remove `db` param; call `t3_rdr()` internally; `_run_index()` call site drops the `db` arg |
+| `_run_index_frecency_only()` | `make_t3()` (line 175) | call `t3_code()` for code collections, `t3_docs()` for docs collections |
 | `nx index pdf` (`index_pdf_cmd`) | no `t3=` passed to `index_pdf()` | pass `t3=t3_docs()` explicitly |
 | `nx index md` (`index_md_cmd`) | no `t3=` passed to `index_markdown()` | pass `t3=t3_docs()` explicitly |
+| `nx index rdr` (`index_rdr_cmd`) | no `t3=` passed to `batch_index_markdowns()` | pass `t3=t3_rdr()` explicitly |
 | `_prune_deleted_files()` | receives `db` from caller | remove `db` param; call `t3_code()` + `t3_docs()` internally |
 | `_prune_misclassified()` | receives `db` from caller | remove `db` param; call `t3_code()` + `t3_docs()` internally |
 | `nx store put` | `_t3()` | `t3_knowledge()` |
@@ -322,7 +339,7 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
 6. **Per-type count verification**: After migration, assert that the count of `code__*` docs in the code store equals the count of `code__*` docs in the source, and similarly for docs, rdr, and knowledge. Per-type verification catches cross-type routing errors; total-only would not.
 7. Print per-type migration report; do not delete source store (user removes manually after verifying).
 
-**Deployment ordering**: Phase 4 migration must be run by existing users before Phases 2+3 are deployed. Deploying Phases 2+3 first on a machine with existing cloud data leaves the new PersistentClient stores empty. Document this in the release notes.
+**Deployment ordering**: Phase 4 migration must be run by existing users before Phases 2+3 are deployed. Deploying Phases 2+3 first on a machine with existing cloud data leaves the new PersistentClient stores empty. Users migrating from CloudClient (not PersistentClient legacy path) must keep `chroma_api_key`, `chroma_tenant`, and `chroma_database` in their config until `nx migrate t3` completes — those credentials are needed to open the source CloudClient. They may be removed from config afterward. Document both requirements in the release notes.
 
 ## Trade-offs
 
@@ -341,7 +358,7 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
 ## Implementation Plan
 
 ### Phase 1 — Config, Factories, and Credential Guards
-1. Add `code_path`, `docs_path`, `rdr_path`, `knowledge_path` to `_DEFAULTS["chromadb"]` in `src/nexus/config.py` using the default paths from the Four Stores table (`~/.config/nexus/chroma_code`, etc.). Add `path` as deprecated legacy alias for `knowledge_path` with empty-string default.
+1. Add `code_path`, `docs_path`, `rdr_path`, `knowledge_path` to `_DEFAULTS["chromadb"]` in `src/nexus/config.py` using the non-empty default paths from the Four Stores table (e.g. `"~/.config/nexus/chroma_code"` — not `""`). Add `path` as deprecated legacy alias with empty-string default `""`. The complete `_DEFAULTS["chromadb"]` block is shown in the Config Schema Changes section above.
 2. Create `src/nexus/db/t3_stores.py` with `_persistent_t3()` (including `Path.expanduser()`, `voyage_api_key = get_credential("voyage_api_key")` with one-arg call, and `voyage_api_key` guard), `t3_code()`, `t3_docs()`, `t3_rdr()`, `t3_knowledge()`.
 3. Update credential gates:
    - `doc_indexer._has_credentials()`: check only `voyage_api_key`; remove `chroma_api_key` requirement.
@@ -353,18 +370,19 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
 5. `commands/store.py`: `put_cmd`, `list_cmd`, `expire_cmd` → `t3_knowledge()`.
 6. `commands/collection.py`: `list_cmd` enumerates all 4 stores by default (grouped output); `info_cmd`, `delete_cmd`, `verify_cmd` → `t3_knowledge()` default; on "collection not found", error message suggests `--type <code|docs|rdr>`; add `--type` flag routing to all four stores for all subcommands.
 7. `commands/search_cmd.py`: add `--type` flag; implement fan-out algorithm (four `T3Database` instances, extract names via `[c["name"] for c in db.list_collections()]`, `resolve_corpus()` per store with `list[str]`, `db.search(collection_names=targets, ...)`, merge by distance); `--corpus` applies per-store as specified.
-8. `commands/memory.py` (`promote_cmd`): replace direct `T3Database(...)` construction with `t3_knowledge()`.
+8. `commands/memory.py` (`promote_cmd`): replace direct `T3Database(...)` construction with `t3_knowledge()`; remove the credential guard at lines 112–120 that checks `chroma_api_key`, `chroma_tenant`, and `chroma_database` (the factory's `voyage_api_key` guard replaces it).
 9. `pm.py` and `commands/pm.py`: replace all `make_t3()` / `_t3()` calls with `t3_knowledge()`.
 10. `indexer.py`:
+    - `_run_index_frecency_only()`: replace `make_t3()` call (line 175) with `t3_code()` for code collections and `t3_docs()` for docs collections.
     - `_discover_and_index_rdrs()`: remove `db` parameter; call `t3_rdr()` internally. Update `_run_index()` call site to drop the `db` argument.
     - `_prune_deleted_files()`: remove `db` parameter; call `t3_code()` and `t3_docs()` internally. Update all call sites.
     - `_prune_misclassified()`: same — remove `db` parameter, call stores internally.
-11. `commands/index.py`: `index_pdf_cmd` and `index_md_cmd` pass `t3=t3_docs()` explicitly to `index_pdf()`/`index_markdown()`.
+11. `commands/index.py`: `index_pdf_cmd` and `index_md_cmd` pass `t3=t3_docs()` explicitly to `index_pdf()`/`index_markdown()`; `index_rdr_cmd` passes `t3=t3_rdr()` explicitly to `batch_index_markdowns()`.
 12. `index.py` entry point: route `nx index` to `t3_code()` (code collections), `t3_docs()` (docs collections), `t3_rdr()` (rdr collections).
 
 ### Phase 3 — Cleanup (deploy atomically with Phase 2)
 13. Remove or deprecate `make_t3()` / `_t3()` single-store factory; replace all remaining callers (except `nx migrate t3` which retains `make_t3()` for CloudClient source access).
-14. Remove stale `from nexus.db import make_t3` import from `commands/pm.py` (import is dead code after step 9).
+14. Remove two dead imports from `commands/pm.py` after step 9: (a) top-level `from nexus.db import make_t3` (line 10); (b) inline `from nexus.commands.store import _t3` inside `promote_cmd`. If `store._t3()` is removed in step 13 while the inline import survives, an `ImportError` is raised at runtime.
 
 ### Phase 4 — Migration
 15. Implement `nx migrate t3` subcommand:
@@ -378,7 +396,7 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
 
 ## Test Plan
 
-- P1: `t3_code()`, `t3_docs()`, `t3_rdr()`, `t3_knowledge()` each return a `T3Database` whose `_client` is a `chromadb.PersistentClient` at the configured path (verify via `type(db._client).__name__ == "PersistentClient"` and `db._client._settings.persist_directory == expected_path`).
+- P1: `t3_code()`, `t3_docs()`, `t3_rdr()`, `t3_knowledge()` each return a `T3Database` whose `_client` is a local persistent client at the configured path. Verify via `db._client.get_settings().is_persistent is True` and `db._client.get_settings().persist_directory == expected_path`. (`chromadb.PersistentClient(path)` returns a `chromadb.api.client.Client` instance; `is_persistent` is the correct discriminator between persistent and ephemeral clients.)
 - P2: `nx store put "doc"` (no `--type`) → item appears in knowledge store; absent from code, docs, and rdr stores.
 - P3: `nx index repo` → code collection created in code store; docs collection in docs store; absent from knowledge and rdr stores.
 - P4: `nx search "query"` (no `--type`) → results from all 4 stores, merged and sorted by distance; result metadata includes `store` label.
@@ -499,6 +517,56 @@ Critic read source files: `t3.py`, `corpus.py`, `config.py`, `indexer.py`, `doc_
 - O3: `Path.expanduser()` added to `_persistent_t3()` factory code; removed from Open Questions (resolved)
 - O4: `_discover_and_index_rdrs()` added to Command Routing table and Phase 2 step 9
 - O5: Threading note acknowledged; no action required
+
+### Gate 4 (2026-02-27) — BLOCKED
+
+**1 critical, 4 significant, 5 observations.**
+
+Critic read source files: `db/t3.py`, `config.py`, `corpus.py`, `registry.py`, `indexer.py`, `doc_indexer.py`, `commands/index.py`, `commands/pm.py`, `pm.py`, `db/__init__.py`, `commands/store.py`, `commands/collection.py`, `commands/search_cmd.py`, `commands/memory.py`.
+
+#### Critical
+
+**C1. Test P1 asserts wrong type name and nonexistent attribute on `chromadb.PersistentClient`.** `chromadb.PersistentClient(path=...)` returns an instance of `chromadb.api.client.Client`; `type(c).__name__` is `"Client"`, not `"PersistentClient"`. `db._client._settings` does not exist and raises `AttributeError`; the correct accessor is `db._client.get_settings()` which returns a `Settings` object with `is_persistent` and `persist_directory` attributes. Both P1 assertions fail unconditionally on any implementation. Fix: replace with `db._client.get_settings().is_persistent is True` and `db._client.get_settings().persist_directory == expected_path`.
+
+#### Significant
+
+**S1. Empty-string default ambiguity — `_DEFAULTS` spec is contradictory.** Phase 1 Step 1 says add the four `*_path` keys using "the default paths from the Four Stores table." But the config schema YAML example shows `path: ""` (the legacy alias) in the same block, making it unclear which keys get non-empty defaults and which get `""`. `_persistent_t3()` uses `or`-falsy logic: `chromadb_cfg.get(path_key) or ...` — if any of the four `*_path` keys default to `""`, every call to that factory raises `RuntimeError` for all users without explicit path config. Fix: explicitly show the `_DEFAULTS["chromadb"]` block in the spec with non-empty string defaults for the four new `*_path` keys and `""` only for `path` (legacy alias).
+
+**S2. `commands/memory.py:promote_cmd` credential guard missing from credential guard update table.** Lines 112–120 of `commands/memory.py` check `chroma_api_key`, `chroma_tenant`, and `chroma_database` before running `promote_cmd`. After Phase 2/3, users with only `voyage_api_key` will get a `ClickException` when running `nx memory promote`. The credential guard update table covers `doc_indexer`, `indexer.py:163`, `indexer.py:752`, and `store._t3()` — but omits this guard. Fix: add a fifth row to the credential guard update table for `commands/memory.py:promote_cmd` (lines 112–120): check `voyage_api_key` only; remove `chroma_api_key`, `chroma_tenant`, `chroma_database` checks.
+
+**S3. Phase 3 Step 14 removes top-level `make_t3` import from `commands/pm.py` but misses inline `_t3` import.** `commands/pm.py:promote_cmd` contains an inline import `from nexus.commands.store import _t3` in addition to the top-level `from nexus.db import make_t3` at line 10. After Phase 2 Step 9 replaces the `_t3()` call with `t3_knowledge()`, the inline import becomes dead code. If Phase 3 removes `store._t3()`, the surviving dead inline import causes `ImportError`. Fix: revise Step 14 to remove both imports from `commands/pm.py` — the top-level `from nexus.db import make_t3` and the inline `from nexus.commands.store import _t3` inside `promote_cmd`.
+
+**S4. `_run_index_frecency_only()` calls `make_t3()` (line 175) — missing from routing table and Phase 2 Step 10.** The credential guard at `indexer.py:163` is correctly listed in the credential guard table, but `_run_index_frecency_only()` also calls `make_t3()` at line 175 to get the T3 client for frecency updates. This call site is absent from the Command Routing table. After Phase 3 removes `make_t3()`, frecency-only indexing (`nx index repo --frecency-only`) will fail with `ImportError` or silently write to CloudClient. Fix: add `_run_index_frecency_only()` to the routing table (routes to both `t3_code()` for code collections and `t3_docs()` for docs collections) and add it explicitly to Phase 2 Step 10.
+
+#### Observations
+
+- O1: `commands/index.py:index_rdr_cmd` (lines 92–121) calls `batch_index_markdowns()` without `t3=` — same `make_t3()` fallback pattern as `index_pdf_cmd` and `index_md_cmd` (addressed as C3 in Gate 3), but `index_rdr_cmd` is absent from Phase 2 Step 11. Add it: pass `t3=t3_rdr()` to `batch_index_markdowns()` in `index_rdr_cmd`.
+- O2: Fan-out `list_collections()` return type (`list[dict]` with `name`/`count` keys) verified correct against `t3.py` source.
+- O3: `pm.py:pm_reference()` double `make_t3()` entry in routing table correctly reflects the two branches of the `if/else` — this is accurate.
+- O4: `expire()` docstring update is handled in Phase 1 Step 4.
+- O5: Migration via CloudClient source requires `chroma_api_key`, `chroma_tenant`, `chroma_database` to remain in config until migration completes — should be documented explicitly in release notes alongside the deployment ordering note.
+
+#### Critical — Resolved
+
+**C1 — RESOLVED.** Test P1 corrected to use `db._client.get_settings().is_persistent is True` and `db._client.get_settings().persist_directory == expected_path`. Added note that `chromadb.PersistentClient(path)` returns a `chromadb.api.client.Client` instance and `is_persistent` is the correct discriminator.
+
+#### Significant — Resolved
+
+**S1 — RESOLVED.** Config Schema Changes section now shows the complete `_DEFAULTS["chromadb"]` block with non-empty string defaults for all four `*_path` keys and `""` only for the legacy `path` alias. Phase 1 Step 1 cross-references this block explicitly.
+
+**S2 — RESOLVED.** Added fifth row to credential guard update table for `commands/memory.py:promote_cmd` (lines 112–120). Phase 2 Step 8 now explicitly removes the `chroma_api_key`, `chroma_tenant`, `chroma_database` guard in `promote_cmd`.
+
+**S3 — RESOLVED.** Phase 3 Step 14 now specifies both dead imports to remove from `commands/pm.py`: the top-level `from nexus.db import make_t3` and the inline `from nexus.commands.store import _t3` inside `promote_cmd`.
+
+**S4 — RESOLVED.** `_run_index_frecency_only()` added to Command Routing table (routes to `t3_code()` + `t3_docs()`). Phase 2 Step 10 now covers this function explicitly before `_discover_and_index_rdrs()`.
+
+#### Observations — Applied
+
+- O1: `index_rdr_cmd` added to routing table and Phase 2 Step 11; passes `t3=t3_rdr()` to `batch_index_markdowns()`
+- O2: Fan-out `list_collections()` return type verified — no change needed
+- O3: `pm.py:pm_reference()` double-entry in routing table is correct and accurate — no change
+- O4: `expire()` docstring handled in Phase 1 Step 4 — no change
+- O5: Deployment ordering note expanded to state that CloudClient users must retain `chroma_*` credentials until migration completes
 
 ### Gate 3 (2026-02-27) — BLOCKED
 
