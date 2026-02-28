@@ -125,6 +125,33 @@ def test_migrate_copies_embeddings_verbatim() -> None:
     assert upsert_call.kwargs.get("embeddings") == embeddings
 
 
+# ── P13: auto-create databases ───────────────────────────────────────────────
+
+def test_ensure_databases_creates_four_databases() -> None:
+    """ensure_databases calls create_database for each of the four store types."""
+    from nexus.commands.migrate import ensure_databases
+    from nexus.db.t3 import _STORE_TYPES
+
+    admin = MagicMock()
+    ensure_databases(admin, tenant="my-tenant", base="nexus")
+
+    created = [c.args[0] for c in admin.create_database.call_args_list]
+    assert set(created) == {f"nexus_{t}" for t in _STORE_TYPES}
+    for c in admin.create_database.call_args_list:
+        assert c.kwargs.get("tenant") == "my-tenant"
+
+
+def test_ensure_databases_ignores_already_exists() -> None:
+    """ensure_databases silently ignores UniqueConstraintError (database already exists)."""
+    from chromadb.errors import UniqueConstraintError
+    from nexus.commands.migrate import ensure_databases
+
+    admin = MagicMock()
+    admin.create_database.side_effect = UniqueConstraintError()
+    # Should not raise
+    ensure_databases(admin, tenant="my-tenant", base="nexus")
+
+
 # ── CLI smoke test ────────────────────────────────────────────────────────────
 
 def test_migrate_t3_missing_credentials_exits_cleanly() -> None:

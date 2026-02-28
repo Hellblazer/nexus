@@ -5,6 +5,52 @@ from __future__ import annotations
 import click
 
 from nexus.config import get_credential
+from nexus.db.t3 import _STORE_TYPES
+
+
+def _cloud_admin_client(api_key: str):
+    """Return a ChromaDB AdminClient pointed at Chroma Cloud.
+
+    Mirrors the same Settings wiring used internally by ``chromadb.CloudClient``.
+    """
+    import chromadb
+    from chromadb import Settings
+    from chromadb.auth.token_authn import TokenTransportHeader
+
+    settings = Settings()
+    settings.chroma_api_impl = "chromadb.api.fastapi.FastAPI"
+    settings.chroma_server_host = "api.trychroma.com"
+    settings.chroma_server_http_port = 443
+    settings.chroma_server_ssl_enabled = True
+    settings.chroma_client_auth_provider = (
+        "chromadb.auth.token_authn.TokenAuthClientProvider"
+    )
+    settings.chroma_client_auth_credentials = api_key
+    settings.chroma_auth_token_transport_header = TokenTransportHeader.X_CHROMA_TOKEN
+    settings.chroma_overwrite_singleton_tenant_database_access_from_auth = True
+    return chromadb.AdminClient(settings)
+
+
+def ensure_databases(admin, *, tenant: str, base: str) -> dict[str, bool]:
+    """Create the four T3 databases under *tenant* if they do not already exist.
+
+    Returns a mapping of ``{db_name: created}`` where ``created=True`` means the
+    database was freshly created and ``False`` means it already existed.
+
+    ``UniqueConstraintError`` (HTTP 409) is silently swallowed — it means the
+    database already exists, which is the desired end state.
+    """
+    from chromadb.errors import UniqueConstraintError
+
+    result: dict[str, bool] = {}
+    for t in _STORE_TYPES:
+        db_name = f"{base}_{t}"
+        try:
+            admin.create_database(db_name, tenant=tenant)
+            result[db_name] = True
+        except UniqueConstraintError:
+            result[db_name] = False
+    return result
 
 
 def migrate_t3_collections(
@@ -122,7 +168,15 @@ def migrate_t3_cmd(verbose: bool) -> None:
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    click.echo(f"Migrating from {database!r} to four-store layout…")
+    # Auto-create the four destination databases (idempotent).
+    click.echo(f"Ensuring four T3 databases exist for base {database!r}…")
+    admin = _cloud_admin_client(api_key)
+    created = ensure_databases(admin, tenant=tenant, base=database)
+    for db_name, was_created in created.items():
+        status = "created" if was_created else "already exists"
+        click.echo(f"  {db_name}: {status}")
+
+    click.echo(f"\nMigrating collections from {database!r} to four-store layout…")
     result = migrate_t3_collections(source, dest, verbose=verbose)
 
     copied_total = sum(v for v in result.values() if v > 0)
