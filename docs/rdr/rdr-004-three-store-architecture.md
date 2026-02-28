@@ -87,8 +87,10 @@ No `docs__*` or `rdr__*` collections exist in code today. Three stores covers pr
 | Store | Config key | Default path | Collection naming | Primary commands |
 |-------|-----------|--------------|-------------------|-----------------|
 | **code** | `chroma_code_path` | `~/.config/nexus/chroma_code/` | `{lang}__{repo-hash8}` | `nx index`, `nx search --type code` |
-| **docs** | `chroma_docs_path` | `~/.config/nexus/chroma_docs/` | flat user name | `nx store`, `nx search --type docs` |
-| **rdr** | `chroma_rdr_path` | `~/.config/nexus/chroma_rdr/` | `rdr-NNN` | `nx rdr store`, `nx search --type rdr` |
+| **docs** | `chroma_docs_path` | `~/.config/nexus/chroma_docs/` | `{repo-hash8}` / `null` | `nx store`, `nx search --type docs` |
+| **rdr** | `chroma_rdr_path` | `~/.config/nexus/chroma_rdr/` | `{repo-hash8}` / `null` | `nx rdr store`, `nx search --type rdr` |
+
+Collection identity uses the existing `_repo_identity()` function throughout (SHA-256 of the repo filesystem path, first 8 hex digits, prefixed with the repo name — e.g., `nexus-8c2e74c0`). The store path encodes the type; the collection name needs only to encode the repo. The `{lang}__` prefix is retained for the code store because it is meaningful (distinguishes `python__nexus-8c2e74c0` from `javascript__nexus-8c2e74c0` for polyglot repos). For docs and rdr stores there is no lang-equivalent, so no prefix is needed. When no git repo is present, the sentinel `null` is used as the collection name. One collection per repo per store; all RDRs for a repo are documents within that collection, distinguished by `rdr_id` in metadata.
 
 `T3Database` is unchanged — three instances are constructed from three paths. No class hierarchy needed; the store is selected at the call site.
 
@@ -110,11 +112,11 @@ No dynamic dispatch, no prefix parsing. The store is selected at the call site b
 
 ### Collection Naming Per Store
 
-**Code store**: Naming unchanged — `{lang}__{repo-hash8}`. The hash disambiguates multiple repos. `resolve_corpus()` still applies here, but `list_collections()` on the code store returns only code collections — no cross-type noise. The resolution algorithm is straightforward: prefix match against a homogeneous set.
+**Code store**: Naming unchanged — `{lang}__{repo-hash8}`. The lang prefix distinguishes `python__nexus-8c2e74c0` from `javascript__nexus-8c2e74c0` for polyglot repos. `resolve_corpus()` still applies here; `list_collections()` on the code store returns only code collections.
 
-**Docs store**: Bare user-supplied name (e.g., `nexus-docs`, `api-reference`). The store provides type isolation; no `knowledge__` prefix needed. `t3_collection_name()` is removed; callers pass bare names directly.
+**Docs store**: `{repo-identity}` (e.g., `nexus-8c2e74c0`), computed via `_repo_identity()`. One collection per repo containing all documentation for that repo. The store path (`chroma_docs/`) provides the type context. No `knowledge__` prefix; `t3_collection_name()` is removed. For standalone docs not in a repo: collection name `null`.
 
-**RDR store**: `rdr-NNN` per RDR. RDR ID and status live in collection metadata. Single-collection (`rdr`) with metadata-based filtering is an alternative but per-RDR collections are simpler to delete and archive independently.
+**RDR store**: `{repo-identity}` (e.g., `nexus-8c2e74c0`), computed via `_repo_identity()`. One collection per repo containing all RDRs for that repo as documents, with `rdr_id` and `status` in metadata. The store path (`chroma_rdr/`) provides the type context. For RDRs without a repo: collection name `null`. `_repo_identity()` is reused without modification.
 
 ### search Routing
 
@@ -140,9 +142,10 @@ Multi-store fan-out queries each store and merges results. Latency cost is negli
 One-time migration via `nx migrate t3`:
 1. Read existing single store at `chroma_path` (preserved as deprecated config alias for `chroma_docs_path`)
 2. Copy `code__*` collections → code store, names unchanged
-3. Copy `knowledge__*` collections → docs store, strip `knowledge__` prefix
-4. Verify document counts match before and after
-5. Print migration report; do not delete source store (user destroys manually after verification)
+3. Copy `knowledge__*` collections → docs store, renamed to `{repo-identity}` for the current repo or `null` for unscoped collections; strip `knowledge__` prefix
+4. No existing `rdr__*` collections exist — rdr store starts empty; RDR tooling populates it going forward
+5. Verify document counts match before and after
+6. Print migration report; do not delete source store (user destroys manually after verification)
 
 ## Trade-offs
 
@@ -192,8 +195,7 @@ One-time migration via `nx migrate t3`:
 ## Open Questions
 
 - CloudClient mode: does ChromaDB Cloud support multiple databases per account, or do we use separate projects? Verify before Phase 1 config design.
-- RDR store: single `rdr` collection (RDR ID in metadata) vs. per-RDR collections (`rdr-003`, `rdr-004`)? Current proposal: per-RDR for independent archival. Revisit at implementation.
-- Should `--type` on `nx search` accept a comma-separated list (`--type code,docs`)? Default is all-three; defer until a use case materialises.
+- Should `--type` on `nx search` accept a comma-separated list (`--type code,docs`)? Default is all-three fan-out; defer until a use case materialises.
 
 ## Revision History
 
