@@ -36,6 +36,8 @@ The root cause is not the resolution algorithm — it is the single-store design
 
 ## Research Findings
 
+T2 finding keys: `004-research-001` through `004-research-005` (project: `nexus_rdr`).
+
 ### RDR-003 Gate History (Verified — source-code confirmed by deep-analyst)
 
 Five consecutive BLOCKED gate rounds. Each round fixed identified issues and revealed new interlocking ones:
