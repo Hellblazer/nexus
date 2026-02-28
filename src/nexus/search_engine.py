@@ -22,6 +22,11 @@ __all__ = [
 
 # ── Cross-corpus search ───────────────────────────────────────────────────────
 
+def _t3_for_search():
+    """Create a T3Database from credentials."""
+    from nexus.db import make_t3
+    return make_t3()
+
 
 def search_cross_corpus(
     query: str,

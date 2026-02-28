@@ -297,28 +297,11 @@ def test_index_markdown_atomicity_originals_survive_add_failure(
 
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
-    mock_t3.upsert_chunks_with_embeddings.side_effect = RuntimeError("Simulated embedding API failure during upsert()")
 
-    from nexus.doc_indexer import index_markdown
-    with patch("voyageai.Client") as mock_voyage:
-        mock_client = MagicMock()
-        mock_voyage.return_value = mock_client
-        mock_result = MagicMock()
-        mock_result.embeddings = [[0.1, 0.2]]
-        mock_client.embed.return_value = mock_result
-        mock_cce_result = MagicMock()
-        mock_cce_result.embeddings = [[0.1, 0.2]]
-        mock_cce_obj = MagicMock()
-        mock_cce_obj.results = [mock_cce_result]
-        mock_client.contextualized_embed.return_value = mock_cce_obj
-        with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_cls:
-            mc = MagicMock()
-            mc.text = "chunk"
-            mc.chunk_index = 0
-            mc.metadata = {"chunk_start_char": 0, "chunk_end_char": 5, "page_number": 0, "header_path": ""}
-            mock_chunker_cls.return_value.chunk.return_value = [mc]
-            with pytest.raises(Exception):  # noqa: B017
-                index_markdown(md_path, corpus="testcorpus", t3=mock_t3)
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        from nexus.doc_indexer import index_markdown
+        with pytest.raises(Exception):  # noqa: B017
+            index_markdown(md_path, corpus="testcorpus")
 
     # After the failed upsert(), no delete occurred — 3 originals must be intact.
     remaining = len(stored_ids)

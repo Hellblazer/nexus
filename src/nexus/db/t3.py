@@ -52,14 +52,13 @@ class T3Database:
                 tenant=tenant, database=database, api_key=api_key
             )
 
-    # ── Context manager (no-op: ChromaDB manages its own lifecycle) ─────────
+    # ── Context manager (no-op: CloudClient is stateless REST) ───────────────
 
     def __enter__(self) -> "T3Database":
         return self
 
     def __exit__(self, *_) -> None:
-        pass  # ChromaDB manages its own lifecycle; explicit close is not required
-              # for PersistentClient or CloudClient.
+        pass  # ChromaDB CloudClient is HTTP-based; no persistent connection to close.
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -85,17 +84,6 @@ class T3Database:
         return self._client.get_or_create_collection(
             name, embedding_function=self._embedding_fn(name)
         )
-
-    def get_collection_raw(self, name: str) -> chromadb.Collection:
-        """Return an existing collection without creating it (read-only access).
-
-        Use this instead of accessing ``_client`` directly so callers stay within
-        the T3Database API layer.  Raises ``ValueError`` for invalid names;
-        raises ``chromadb.errors.NotFoundError`` if the collection does not exist.
-        """
-        from nexus.corpus import validate_collection_name
-        validate_collection_name(name)
-        return self._client.get_collection(name)
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -264,12 +252,6 @@ class T3Database:
     def expire(self) -> int:
         """Delete all expired entries from ``knowledge__*`` collections.
 
-        This method is intended to be called on a ``T3Database`` instance backed
-        by the knowledge store (via ``t3_knowledge()``). In the four-store layout,
-        only the knowledge store holds TTL-expirable entries; the ``knowledge__``
-        prefix filter is retained for safety but is now redundant since all
-        collections in the knowledge store already start with ``knowledge__``.
-
         Only removes entries where ``ttl_days > 0`` AND ``expires_at != ""``
         AND ``expires_at < now``. Permanent entries (``ttl_days=0``,
         ``expires_at=""``) are always preserved.
@@ -290,8 +272,7 @@ class T3Database:
             if not name.startswith("knowledge__"):
                 continue
             col = self._client.get_collection(name)
-            # Cap at 10 000 to avoid loading an entire collection into memory.
-            result = col.get(where=ttl_where, include=["metadatas"], limit=10000)
+            result = col.get(where=ttl_where, include=["metadatas"])
             expired_ids = [
                 doc_id
                 for doc_id, meta in zip(result["ids"], result["metadatas"])
@@ -345,15 +326,7 @@ class T3Database:
         with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
             futures = {pool.submit(_count, n): n for n in names}
             for future in as_completed(futures):
-                try:
-                    result.append(future.result())
-                except _ChromaNotFoundError:
-                    # Collection disappeared between list_collections() and count() —
-                    # this is a benign race condition; skip it silently.
-                    _log.debug(
-                        "collection disappeared between list and count",
-                        name=futures[future],
-                    )
+                result.append(future.result())
         return sorted(result, key=lambda r: r["name"])
 
     def collection_exists(self, name: str) -> bool:

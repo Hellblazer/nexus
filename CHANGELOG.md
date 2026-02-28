@@ -8,32 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.0.0rc5] - 2026-02-28
 
-### Added
-- **Four-store T3 architecture** (RDR-004): T3 is now split into four separate PersistentClient stores
-  - `~/.config/nexus/chroma_code` — `code__*` collections (voyage-code-3 embeddings)
-  - `~/.config/nexus/chroma_docs` — `docs__*` collections (voyage-context-3 embeddings)
-  - `~/.config/nexus/chroma_rdr` — `rdr__*` collections (voyage-context-3 embeddings)
-  - `~/.config/nexus/chroma_knowledge` — `knowledge__*` collections (voyage-context-3 embeddings)
-  - Eliminates `list_collections()` prefix ambiguity that was fatal for RDR-003
-  - `voyage_api_key` is the only required credential; `chroma_api_key`/tenant/database no longer needed for local use
-- `nx migrate t3` command: idempotent, non-destructive one-time migration from legacy single store to four-store layout
-  - Sources: legacy `chromadb.path` (PersistentClient) or CloudClient (requires `chroma_api_key`, `chroma_tenant`, `chroma_database`)
-  - Destinations opened with `DefaultEmbeddingFunction` — `voyage_api_key` not required for migration
-  - Embeddings copied verbatim; no re-embedding occurs during migration
-  - Idempotent: skips collections where destination count matches source count
-  - Per-type migration report printed; source store not deleted
-
-### Changed
-- `nx index pdf/md` now require explicit `t3=` argument (callers pass `t3_docs()`) — `make_t3()` fallback removed
-- `nx index rdr` passes `t3=t3_rdr()` explicitly (RDR-004 routing)
-- `doc_indexer._index_document()` raises `RuntimeError` when `t3=None` instead of falling back to `make_t3()`
-- `search_engine._t3_for_search()` removed (dead code; callers already pass `t3=` explicitly)
-- `commands/store._t3()` removed (dead code; all commands use `t3_knowledge()` directly)
-
-### Migration Notes for Existing Users
-1. Run `nx migrate t3` **before** upgrading to this version if you have existing data in a ChromaDB cloud store or local single-store (`chromadb.path`)
-2. CloudClient users: keep `chroma_api_key`, `chroma_tenant`, and `chroma_database` in config until `nx migrate t3` completes
-3. After successful migration, those credentials may be removed with `nx config set`
+### Fixed
+- Eliminated spurious per-corpus warning noise during `nx search`: warnings now fire once per unmatched corpus term across all collections, not once per internal resolver call
 
 ## [1.0.0rc4] - 2026-02-27
 

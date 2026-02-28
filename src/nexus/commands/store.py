@@ -5,8 +5,37 @@ from pathlib import Path
 import click
 
 from nexus.corpus import t3_collection_name
-from nexus.db.t3_stores import t3_knowledge
+from nexus.db import make_t3
+from nexus.db.t3 import T3Database
 from nexus.ttl import parse_ttl
+
+
+def _t3() -> T3Database:
+    from nexus.config import get_credential
+
+    tenant = get_credential("chroma_tenant")
+    database = get_credential("chroma_database")
+    api_key = get_credential("chroma_api_key")
+    voyage_api_key = get_credential("voyage_api_key")
+
+    if not api_key:
+        raise click.ClickException(
+            "chroma_api_key not set — run: nx config set chroma_api_key <value>"
+        )
+    if not voyage_api_key:
+        raise click.ClickException(
+            "voyage_api_key not set — run: nx config set voyage_api_key <value>"
+        )
+    if not tenant or not database:
+        missing = []
+        if not tenant:
+            missing.append("chroma_tenant")
+        if not database:
+            missing.append("chroma_database")
+        raise click.ClickException(
+            f"{', '.join(missing)} not set — run: nx config init"
+        )
+    return make_t3()
 
 
 @click.group()
@@ -62,13 +91,7 @@ def put_cmd(
     ttl_days = days if days is not None else 0
 
     col_name = t3_collection_name(collection)
-    if not col_name.startswith("knowledge__"):
-        raise click.ClickException(
-            f"'nx store put' writes to the knowledge store only; "
-            f"got {col_name!r} (prefix {col_name.split('__')[0]!r}). "
-            f"Use 'nx index' for code/docs/rdr collections."
-        )
-    db = t3_knowledge()
+    db = _t3()
     doc_id = db.put(
         collection=col_name,
         content=content,
@@ -90,7 +113,7 @@ def put_cmd(
 def list_cmd(collection: str, limit: int) -> None:
     """List entries in a T3 knowledge collection."""
     col_name = t3_collection_name(collection)
-    entries = t3_knowledge().list_store(col_name, limit=limit)
+    entries = _t3().list_store(col_name, limit=limit)
     if not entries:
         click.echo(f"No entries in {col_name}.")
         return
@@ -113,5 +136,5 @@ def list_cmd(collection: str, limit: int) -> None:
 @store.command("expire")
 def expire_cmd() -> None:
     """Remove T3 knowledge__ entries whose TTL has expired."""
-    count = t3_knowledge().expire()
+    count = _t3().expire()
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")

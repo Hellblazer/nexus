@@ -49,13 +49,8 @@ _DEFAULTS: dict[str, Any] = {
         "stores": [],
     },
     "chromadb": {
-        "tenant":         "",
-        "database":       "",
-        "code_path":      "~/.config/nexus/chroma_code",
-        "docs_path":      "~/.config/nexus/chroma_docs",
-        "rdr_path":       "~/.config/nexus/chroma_rdr",
-        "knowledge_path": "~/.config/nexus/chroma_knowledge",
-        "path":           "",   # legacy alias; empty = not set
+        "tenant": "",
+        "database": "",
     },
     "client": {
         "host": "localhost",

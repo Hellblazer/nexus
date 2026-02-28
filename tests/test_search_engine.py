@@ -123,10 +123,11 @@ def test_cross_corpus_overfetch():
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
     # 2 corpora, n=10 → per_corpus_k = max(5, (10//2)*2) = max(5, 10) = 10
-    search_cross_corpus(
-        query="test", collections=["code__r", "docs__d"],
-        n_results=10, t3=mock_t3
-    )
+    with patch("nexus.search_engine._t3_for_search", return_value=mock_t3):
+        search_cross_corpus(
+            query="test", collections=["code__r", "docs__d"],
+            n_results=10, t3=mock_t3
+        )
     calls = mock_t3.search.call_args_list
     assert len(calls) == 2
     for c in calls:
