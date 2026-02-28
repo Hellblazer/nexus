@@ -212,6 +212,8 @@ The four `*_path` keys use non-empty defaults so `_persistent_t3()`'s `or`-falsy
 
 Existing `tenant`, `database`, `api_key` keys remain for CloudClient access during migration.
 
+The `path` legacy alias provides a zero-downtime migration path for users who set `path:` under `[chromadb]` in the old single-store era. `t3_knowledge()` calls `_persistent_t3("knowledge_path", legacy_key="path")`: if `knowledge_path` is absent or empty, the factory falls back to the `path` value. A user who had `path: ~/.config/nexus/chroma` gets uninterrupted knowledge store access after deployment, with no config change required. They can add `knowledge_path:` to config at their convenience and the old `path` value becomes unused.
+
 ### Credential Guard Updates
 
 The following guards must be updated in Phase 1 alongside the factory functions:
@@ -222,7 +224,7 @@ The following guards must be updated in Phase 1 alongside the factory functions:
 | `indexer.py:163` (`_run_index_frecency_only`) | checks `chroma_api_key`, raises `CredentialsMissingError` | check `voyage_api_key` only |
 | `indexer.py:752` (`_run_index`) | checks `chroma_api_key`, raises `CredentialsMissingError` | check `voyage_api_key` only |
 | `store._t3()` (lines 13–38) | validates `chroma_api_key`, `chroma_tenant`, `chroma_database` | removed — replaced by factory `voyage_api_key` guard |
-| `commands/memory.py:promote_cmd` (lines 112–120) | checks `chroma_api_key`, `chroma_tenant`, `chroma_database` | check `voyage_api_key` only; remove `chroma_api_key`, `chroma_tenant`, `chroma_database` checks |
+| `commands/memory.py:promote_cmd` (lines 112–120) | checks `chroma_api_key`, `voyage_api_key`, `chroma_tenant`, `chroma_database` | remove entire guard and direct `T3Database(...)` constructor (lines 112–139); replace with `with t3_knowledge() as t3:` |
 
 `polling.py`'s retry logic catches `CredentialsMissingError` to avoid recording `head_hash` on credential failures. This behaviour is preserved: the updated guards still raise `CredentialsMissingError` (same exception type, new message), so polling skips `head_hash` writes correctly.
 
@@ -236,7 +238,8 @@ All commands that currently call `_t3()` or `make_t3()` are updated to call the 
 | `nx index` (docs) | `make_t3()` | `t3_docs()` |
 | `nx index` (rdr) | `make_t3()` | `t3_rdr()` |
 | `_discover_and_index_rdrs()` | receives `db` from caller | remove `db` param; call `t3_rdr()` internally; `_run_index()` call site drops the `db` arg |
-| `_run_index_frecency_only()` | `make_t3()` (line 175) | call `t3_code()` for code collections, `t3_docs()` for docs collections |
+| `_run_index_frecency_only()` | single `make_t3()` (line 175) shared across both collections | split loop: `for (col_name, db) in [(code_col, t3_code()), (docs_col, t3_docs())]:` — each collection opened on its own store |
+| `_run_index()` | single `make_t3()` (line 768) shared across code, docs, rdr | rewrite to instantiate `db_code=t3_code()`, `db_docs=t3_docs()`, `db_rdr=t3_rdr()` separately; route `code_col`/`docs_col` to their stores; helper functions no longer accept `db` |
 | `nx index pdf` (`index_pdf_cmd`) | no `t3=` passed to `index_pdf()` | pass `t3=t3_docs()` explicitly |
 | `nx index md` (`index_md_cmd`) | no `t3=` passed to `index_markdown()` | pass `t3=t3_docs()` explicitly |
 | `nx index rdr` (`index_rdr_cmd`) | no `t3=` passed to `batch_index_markdowns()` | pass `t3=t3_rdr()` explicitly |
@@ -327,14 +330,14 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
 `nx migrate t3` — non-destructive, idempotent one-time migration:
 
 1. **Open source store**: If `chromadb.path` is set in config, open via `PersistentClient(path)`. Otherwise, open via `CloudClient(tenant, database, api_key)` using the existing `[chromadb]` credentials (call `make_t3()` — the old factory). This is the only place `make_t3()` is called post-Phase 3; migration must run before `make_t3()` is removed.
-2. **Open destination stores** via `t3_code()`, `t3_docs()`, `t3_rdr()`, `t3_knowledge()`.
+2. **Open destination stores** for migration using `_ef_override=DefaultEmbeddingFunction()` so that `voyage_api_key` is not required. Embeddings are copied verbatim from the source — no re-embedding occurs during migration. Users who have not yet set `voyage_api_key` can run migration; the key is only needed when new documents are indexed. Concretely: open each destination as `T3Database(_client=chromadb.PersistentClient(path=<expanded_path>), _ef_override=DefaultEmbeddingFunction())` using the default paths from `_DEFAULTS["chromadb"]`. The normal `t3_code()` / `t3_docs()` / `t3_rdr()` / `t3_knowledge()` factories must NOT be called here because they require `voyage_api_key`.
 3. **For each collection in the source store**:
    - `code__*` → copy to code store
    - `docs__*` → copy to docs store
    - `rdr__*` → copy to rdr store
    - `knowledge__*` → copy to knowledge store
    - Unrecognised prefix → warn, copy to knowledge store with metadata tag `migrated_unknown_prefix: true`
-4. **Copy mechanism**: Read with `source_col.get(limit=None, include=["documents", "embeddings", "metadatas", "ids"])` — `limit=None` is required to avoid ChromaDB's default row limit truncating large collections. Write with `dest_col.upsert(ids=..., documents=..., embeddings=..., metadatas=...)` — upsert is safe and idempotent.
+4. **Copy mechanism**: Read with `source_col.get(include=["documents", "embeddings", "metadatas", "ids"])` without a `limit` argument — ChromaDB's `get()` returns all documents when `limit` is omitted. Do not pass `limit=None`; in some ChromaDB versions `None` is not a valid value for `limit` and raises `TypeError`. Write with `dest_col.upsert(ids=..., documents=..., embeddings=..., metadatas=...)` — upsert is safe and idempotent.
 5. **Idempotency**: If collection already exists in destination, compare document count. If equal, skip. If different, upsert all source documents into destination (re-upserts existing docs and adds missing ones — no data loss, safe on partial-failure re-run).
 6. **Per-type count verification**: After migration, assert that the count of `code__*` docs in the code store equals the count of `code__*` docs in the source, and similarly for docs, rdr, and knowledge. Per-type verification catches cross-type routing errors; total-only would not.
 7. Print per-type migration report; do not delete source store (user removes manually after verifying).
@@ -364,30 +367,32 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
    - `doc_indexer._has_credentials()`: check only `voyage_api_key`; remove `chroma_api_key` requirement.
    - `indexer.py:163` and `indexer.py:752`: replace `chroma_api_key` guard with `voyage_api_key` guard; keep `CredentialsMissingError` as the exception type.
    - `store._t3()`: credential validation will be replaced when `_t3()` is removed in Phase 3.
-4. Update `T3Database.expire()` docstring and `__exit__` comment to reflect that the client may be `PersistentClient` or `CloudClient`. (Moving from Phase 3 to eliminate the incorrect-docstring window.)
+4. Update `T3Database.expire()` docstring and `__exit__` comment. Replace the `__exit__` comment "ChromaDB CloudClient is HTTP-based; no persistent connection to close" with "ChromaDB manages its own lifecycle; explicit close is not required for PersistentClient or CloudClient." (Moving from Phase 3 to eliminate the incorrect-docstring window.)
 
 ### Phase 2 — Command Routing (deploy atomically with Phase 3)
 5. `commands/store.py`: `put_cmd`, `list_cmd`, `expire_cmd` → `t3_knowledge()`.
 6. `commands/collection.py`: `list_cmd` enumerates all 4 stores by default (grouped output); `info_cmd`, `delete_cmd`, `verify_cmd` → `t3_knowledge()` default; on "collection not found", error message suggests `--type <code|docs|rdr>`; add `--type` flag routing to all four stores for all subcommands.
 7. `commands/search_cmd.py`: add `--type` flag; implement fan-out algorithm (four `T3Database` instances, extract names via `[c["name"] for c in db.list_collections()]`, `resolve_corpus()` per store with `list[str]`, `db.search(collection_names=targets, ...)`, merge by distance); `--corpus` applies per-store as specified.
-8. `commands/memory.py` (`promote_cmd`): replace direct `T3Database(...)` construction with `t3_knowledge()`; remove the credential guard at lines 112–120 that checks `chroma_api_key`, `chroma_tenant`, and `chroma_database` (the factory's `voyage_api_key` guard replaces it).
+8. `commands/memory.py` (`promote_cmd`): replace lines 112–139 entirely — remove both the credential guard (lines 112–120, which checks `chroma_api_key`, `voyage_api_key`, `chroma_tenant`, `chroma_database`) and the direct `T3Database(tenant=..., database=..., api_key=..., voyage_api_key=...)` constructor (lines 134–139). Replace with `with t3_knowledge() as t3:`. The factory's `voyage_api_key` guard replaces the credential check; `PersistentClient` replaces the `CloudClient` construction.
 9. `pm.py` and `commands/pm.py`: replace all `make_t3()` / `_t3()` calls with `t3_knowledge()`.
 10. `indexer.py`:
-    - `_run_index_frecency_only()`: replace `make_t3()` call (line 175) with `t3_code()` for code collections and `t3_docs()` for docs collections.
+    - `_run_index_frecency_only()`: replace the single `make_t3()` call (line 175) with a split-loop pattern — `db_code = t3_code(); db_docs = t3_docs()` — then iterate `for (col_name, db) in [(code_collection, db_code), (docs_collection, db_docs)]:`, calling `db.get_or_create_collection(col_name)` and `db.update_chunks(collection=col_name, ...)` on each pair. Do not use a single `db` for both.
+    - `_run_index()`: rewrite to call `db_code = t3_code()`, `db_docs = t3_docs()`, `db_rdr = t3_rdr()` separately at the top of the function; replace the single `make_t3()` call (line 768). Route `code_collection` to `db_code`, `docs_collection` to `db_docs`. The helper calls (`_discover_and_index_rdrs`, `_prune_deleted_files`, `_prune_misclassified`) no longer take a `db` argument — call them with no `db` param after updating them in sub-bullets below.
     - `_discover_and_index_rdrs()`: remove `db` parameter; call `t3_rdr()` internally. Update `_run_index()` call site to drop the `db` argument.
     - `_prune_deleted_files()`: remove `db` parameter; call `t3_code()` and `t3_docs()` internally. Update all call sites.
     - `_prune_misclassified()`: same — remove `db` parameter, call stores internally.
-11. `commands/index.py`: `index_pdf_cmd` and `index_md_cmd` pass `t3=t3_docs()` explicitly to `index_pdf()`/`index_markdown()`; `index_rdr_cmd` passes `t3=t3_rdr()` explicitly to `batch_index_markdowns()`.
+11. `commands/index.py`: `index_pdf_cmd` and `index_md_cmd` pass `t3=t3_docs()` explicitly to `index_pdf()`/`index_markdown()`; `index_rdr_cmd` passes `t3=t3_rdr()` explicitly to `batch_index_markdowns()`. Also remove the `make_t3()` fallback in `_index_document()` (`doc_indexer.py:170`): replace `db = t3 if t3 is not None else make_t3()` with `if t3 is None: raise RuntimeError("t3 store must be provided to _index_document()")`.
 12. `index.py` entry point: route `nx index` to `t3_code()` (code collections), `t3_docs()` (docs collections), `t3_rdr()` (rdr collections).
 
 ### Phase 3 — Cleanup (deploy atomically with Phase 2)
-13. Remove or deprecate `make_t3()` / `_t3()` single-store factory; replace all remaining callers (except `nx migrate t3` which retains `make_t3()` for CloudClient source access).
+13. Remove or deprecate `make_t3()` / `_t3()` single-store factory; replace all remaining callers (except `nx migrate t3` which retains `make_t3()` for CloudClient source access). Also remove `_t3_for_search()` from `search_engine.py` — it is dead code (unused; `search_cmd.py` passes `t3=db` directly) and contains an inline `make_t3()` call that would otherwise survive cleanup.
 14. Remove two dead imports from `commands/pm.py` after step 9: (a) top-level `from nexus.db import make_t3` (line 10); (b) inline `from nexus.commands.store import _t3` inside `promote_cmd`. If `store._t3()` is removed in step 13 while the inline import survives, an `ImportError` is raised at runtime.
 
 ### Phase 4 — Migration
 15. Implement `nx migrate t3` subcommand:
     - Source: `PersistentClient(legacy_path)` if `chromadb.path` is set; otherwise `make_t3()` (CloudClient).
-    - Copy each collection using `source_col.get(limit=None, include=["documents", "embeddings", "metadatas", "ids"])` — use `limit=None` to avoid default row limits truncating large collections.
+    - Destination stores: open as `T3Database(_client=chromadb.PersistentClient(path=<expanded_default_path>), _ef_override=DefaultEmbeddingFunction())`. Do NOT call `t3_code()` / `t3_docs()` / `t3_rdr()` / `t3_knowledge()` — those factories require `voyage_api_key`, which migration users may not yet have. Embeddings are copied verbatim; no re-embedding occurs. Import `DefaultEmbeddingFunction` from `chromadb.utils.embedding_functions`.
+    - Copy each collection using `source_col.get(include=["documents", "embeddings", "metadatas", "ids"])` — omit `limit`; ChromaDB returns all documents when `limit` is not specified. Do not pass `limit=None` (raises `TypeError` in some versions).
     - Destination write: `dest_col.upsert(ids=..., documents=..., embeddings=..., metadatas=...)` — upsert semantics are idempotent and safe on re-run.
     - Idempotency on re-run: if collection already exists and has same doc count, skip; if count differs, upsert (adds missing, re-upserts existing — no data loss).
     - Per-type count verification after migration: assert `code__*` count in code store equals source count, and similarly for each type.
@@ -407,7 +412,7 @@ The `info_cmd`, `delete_cmd`, and `verify_cmd` subcommands default to the knowle
 - P9: `nx collection info myname` → queries knowledge store; `nx collection info myname --type code` → queries code store.
 - P10: `nx collection delete myname --type code` → deletes from code store only.
 - P11: `nx collection verify myname --type docs` → verifies docs store only.
-- P12: `promote_cmd` with bare `--collection notes` → stored in knowledge store as `knowledge__notes`.
+- P12: `promote_cmd` with `--collection knowledge__notes` → stored in knowledge store with collection name `knowledge__notes`. (`promote_cmd` passes the `--collection` argument directly to `t3.put(collection=collection, ...)`; callers must pass the fully-prefixed name. Test with a `knowledge__`-prefixed value to match the expected store naming convention.)
 - P13: `expire_cmd` → only knowledge store entries with expired TTL are deleted; code/docs/rdr stores untouched.
 - P14: `_has_credentials()` returns True when only `voyage_api_key` is set and `chroma_api_key` is absent.
 - P15: `pm.py:archive()` writes `knowledge__pm__*` collection to knowledge store; subsequent `nx search "query" --type knowledge` returns the archived content.
@@ -597,6 +602,30 @@ Critic read source files: `db/t3.py`, `config.py`, `indexer.py` (full 841 lines)
 - O3: Test P12 claims `--collection notes` → `knowledge__notes` but `promote_cmd` passes `collection` directly to `t3.put(collection=collection, ...)` without calling `t3_collection_name()`. P12 should use `--collection knowledge__notes` or specify that `promote_cmd` must call `t3_collection_name()` before `put()`.
 - O4: Migration Step 4 specifies `col.get(limit=None, ...)` — ChromaDB version-dependent; use `col.get(include=[...])` without `limit` or use `limit=10_000` as a safe large value.
 - O5: `_persistent_t3()` fallback to `legacy_key` is the zero-downtime path for users who set `path:` in the old single-store era. RDR should explicitly document this as the migration path for users who followed RDR-003.
+
+#### Critical — Resolved
+
+**C1 — RESOLVED.** Routing table row for `_run_index_frecency_only()` now shows the split-loop pattern explicitly: `for (col_name, db) in [(code_col, t3_code()), (docs_col, t3_docs())]:`. Phase 2 Step 10 sub-bullet specifies this loop structure explicitly so the implementor does not need to invent it.
+
+**C2 — RESOLVED.** `_run_index()` added to Command Routing table with its own row. Phase 2 Step 10 now has an explicit sub-bullet: "Rewrite `_run_index()` to call `db_code = t3_code()`, `db_docs = t3_docs()`, `db_rdr = t3_rdr()` separately; route each collection and helper call to the correct instance; remove `make_t3()`."
+
+**C3 — RESOLVED.** Migration Step 2 rewritten: destination stores are opened as `T3Database(_client=PersistentClient(path), _ef_override=DefaultEmbeddingFunction())` — no `voyage_api_key` required. Phase 4 Step 15 updated to match.
+
+**C4 — RESOLVED.** Credential guard table row corrected: current guard checks four keys (`chroma_api_key`, `voyage_api_key`, `chroma_tenant`, `chroma_database`). Phase 2 Step 8 now states: "replace lines 112–139 entirely — remove both the credential guard and the direct `T3Database(...)` constructor; replace with `with t3_knowledge() as t3:`."
+
+#### Significant — Resolved
+
+**S1 — RESOLVED.** Phase 3 Step 13 now explicitly includes: "Remove `_t3_for_search()` from `search_engine.py` — dead code with inline `make_t3()` call."
+
+**S2 — RESOLVED.** Phase 2 Step 11 now specifies removing the `make_t3()` fallback in `_index_document()` (line 170): replace `db = t3 if t3 is not None else make_t3()` with `if t3 is None: raise RuntimeError(...)`.
+
+#### Observations — Applied
+
+- O1: `commands/pm.py` top-level `from nexus.db import make_t3` already dead — Phase 3 Step 14 correctly removes it; no further change needed
+- O2: Phase 1 Step 4 now specifies the exact replacement text for `__exit__` comment
+- O3: Test P12 corrected to use `--collection knowledge__notes`; note added that `promote_cmd` passes the argument directly without normalization
+- O4: Migration Step 4 changed from `limit=None` to omitting `limit`; note added about version-dependent behavior
+- O5: Legacy `path` key zero-downtime migration path documented in Config Schema Changes section
 
 ### Gate 3 (2026-02-27) — BLOCKED
 
