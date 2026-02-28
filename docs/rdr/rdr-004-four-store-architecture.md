@@ -486,3 +486,41 @@ Critic read source files: `t3.py`, `corpus.py`, `config.py`, `indexer.py`, `doc_
 - O3: `Path.expanduser()` added to `_persistent_t3()` factory code; removed from Open Questions (resolved)
 - O4: `_discover_and_index_rdrs()` added to Command Routing table and Phase 2 step 9
 - O5: Threading note acknowledged; no action required
+
+### Gate 3 (2026-02-27) — BLOCKED
+
+**3 critical, 4 significant, 5 observations.**
+
+Critic read source files: `db/t3.py`, `config.py`, `db/__init__.py`, `doc_indexer.py`, `indexer.py`, `corpus.py`, `commands/store.py`, `commands/collection.py`, `commands/search_cmd.py`, `commands/memory.py`, `commands/pm.py`, `commands/index.py`, `pm.py`, `registry.py`.
+
+#### Critical
+
+**C1. `get_credential(cfg, "voyage_api_key")` wrong call signature.** Confirmed `get_credential()` signature is `get_credential(name: str) -> str` — one argument, reads config internally. The factory passes `cfg` as first argument, causing `TypeError` on every call to `t3_code()`, `t3_docs()`, `t3_rdr()`, `t3_knowledge()`. All four factories are broken. Fix: `voyage_api_key = get_credential("voyage_api_key")`.
+
+**C2. `_discover_and_index_rdrs()` routing underspecified — ambiguous implementation with two failure modes.** Current signature `(repo, rdr_abs_paths, db, voyage_key, now_iso)` receives `db` from caller. After routing update, if caller passes `t3_code()` as `db`, RDR chunks land in the code store (the exact bug P16 tests). RDR says "call `t3_rdr()` directly" but does not specify: (a) whether `db` parameter is removed and `t3_rdr()` is called inside the function, or (b) whether the `_run_index()` call site passes `t3_rdr()`. Disposition of `voyage_key` and `now_iso` parameters not addressed. Each ambiguous interpretation produces a different bug. Fix: specify that `_discover_and_index_rdrs` calls `t3_rdr()` internally, removes the `db` parameter, and the `_run_index()` call site is updated accordingly.
+
+**C3. `doc_indexer._index_document()` has `make_t3()` fallback at line 170; `nx index pdf` and `nx index md` absent from routing table.** `doc_indexer.py:170`: `db = t3 if t3 is not None else make_t3()`. Commands `nx index pdf` and `nx index md` (`commands/index.py:72,86`) call `index_pdf`/`index_markdown` without passing `t3=`, so they fall through to `make_t3()` — constructing a `CloudClient` requiring `chroma_tenant`, `chroma_database`, `chroma_api_key`. After migration, local-only users hit this path and get a connection failure, despite `voyage_api_key` being set. The credential guard change in Phase 1 removes the early silent return but exposes the fallback failure. Fix: add `nx index pdf` and `nx index md` to the routing table; specify they pass `t3=t3_docs()` explicitly.
+
+#### Significant
+
+**S1. Default path column contradicts "no default paths" text.** Design table lists `~/.config/nexus/chroma_code/` etc. as default paths; Config Schema text says "empty-string defaults — absent value raises RuntimeError". Pick one: if defaults are implemented, remove the RuntimeError path and update P1; if no defaults, remove the default-path column.
+
+**S2. Fan-out pseudocode wrong parameter name and wrong type passed to `resolve_corpus()`.** `T3Database.search()` parameter is `collection_names=`, not `target_collections=` (confirmed at `t3.py:206`). Also `list_collections()` returns `list[dict]` (with `name` and `count` keys); `resolve_corpus()` takes `list[str]`. Passing the raw dict list returns no matches. Fix:
+```python
+collections_info = db.list_collections()
+collection_name_list = [c["name"] for c in collections_info]
+targets = resolve_corpus(corpus, collection_name_list) if corpus else collection_name_list
+results = db.search(query, collection_names=targets, n_results=n)
+```
+
+**S3. `commands/pm.py` has stale `make_t3` import (line 10) not addressed in Phase 3 cleanup.** Import `from nexus.db import make_t3` remains after `_t3()` is replaced. Phase 3 step 12 must explicitly include removing this import.
+
+**S4. Migration `.get()` pagination not addressed; idempotency check is count-based and fragile.** ChromaDB `.get()` has a default limit (100 in some versions); migrating large collections without `limit=None` or pagination silently truncates. Count verification in step 5 would catch this, but the idempotency check (step 4: overwrite if count differs) does not specify whether "overwrite" means upsert or delete-then-insert. Specify: use upsert for idempotency safety; use `limit=None` or paginated `.get()` for migration reads.
+
+#### Observations
+
+- O1: `T3Database.__exit__` docstring fix costs nothing — move from Phase 3 to Phase 1 to eliminate the incorrect-docstring window.
+- O2: Fan-out creates four `PersistentClient` opens per search; acceptable for CLI but should be noted for the persistent server path.
+- O3: `index_pdf_cmd` and `index_md_cmd` absent from routing table (addressed in C3 above as Critical).
+- O4: `nx collection info/delete/verify` defaulting to knowledge store will give confusing "Collection not found" errors for code/docs/rdr collections. Specify that the error message should suggest `--type`.
+- O5: `_prune_deleted_files` and `_prune_misclassified` routing ambiguity (one `db` → two db objects) same pattern as `_discover_and_index_rdrs`. Specify that each function is updated to call `t3_code()` and `t3_docs()` internally.
