@@ -210,4 +210,42 @@ One-time migration via `nx migrate t3`:
 
 ## Revision History
 
-_Gate reviews will be appended here._
+### Gate 1 (2026-02-27) — BLOCKED
+
+**3 critical, 7 significant, 6 observations.**
+
+#### Critical — Must Fix
+
+**C1. Store factory signature wrong — T3Database uses CloudClient, not path-based constructor.**
+The proposed factories call `T3Database(config().chroma_code_path)`. The actual `T3Database.__init__` signature is `__init__(self, tenant, database, api_key, voyage_api_key, ...)` — it wraps `chromadb.CloudClient`, not `PersistentClient`. The entire "four paths" premise depends on path-based construction that does not exist. Resolution requires answering: do the four new stores use local PersistentClient (new capability) or separate CloudClient databases? Either answer has large implementation consequences that must be specified in the design before the factory code is written.
+
+**C2. `expire()` hardcodes `knowledge__` prefix — silently broken post-migration.**
+`T3Database.expire()` skips any collection whose name does not start with `"knowledge__"`. Under the new design, knowledge store collections have bare user-chosen names (`llm-papers`, not `knowledge__llm-papers`). Post-migration, `expire()` matches zero collections and silently expires nothing. TTL enforcement breaks completely with no error. Must be addressed in Phase 3 cleanup — the updated `expire()` for the knowledge store should operate on all collections in that store instance without prefix filtering.
+
+**C3. `index_model_for_collection()` dispatches on collection name prefix — wrong embedding model for docs/rdr stores.**
+`index_model_for_collection()` in `corpus.py` selects the embedding model (`voyage-code-3`, `voyage-context-3`, `voyage-4`) by checking if the collection name starts with `code__`, `docs__`, `knowledge__`, or `rdr__`. Under the new naming, docs and rdr store collections are bare `{repo-identity}` strings (e.g., `nexus-8c2e74c0`) — no prefix. They fall through to the `voyage-4` default instead of `voyage-context-3`. All docs and rdr content is indexed with the wrong model; embedding spaces are corrupted silently. This function must be refactored: since store type is now encoded in which factory is used rather than in the collection name, it needs to accept a store-type parameter or be replaced with per-store constants.
+
+#### Significant — Must Fix
+
+**S1. File named `rdr-004-three-store-architecture.md`; Open Questions says "all-three fan-out".** Rename the file and correct the Open Questions section to say "all-four fan-out."
+
+**S2. `T3Database` claimed "unchanged" — false.** Beyond `expire()` (C2), `collection_metadata()` calls `index_model_for_collection()` using the collection name (C3 applies here too). The docstring at line 21 documents the `code__/docs__/knowledge__/rdr__` namespace conventions — all become inaccurate for the new naming. Replace "unchanged" with a precise list of what stays the same and what must be updated.
+
+**S3. `delete_cmd` and `verify_cmd` in `collection.py` not addressed in the plan.** The plan routes `_t3()` → `t3_knowledge()` for `collection.py` but is silent on `delete_cmd` and `verify_cmd`. Without `--type` routing, `nx collection delete` and `nx collection verify` would always target the knowledge store and fail for code/docs/rdr collections. Add explicit routing for all four `collection` subcommands.
+
+**S4. YAGNI claim wrong — `docs__*` and `rdr__*` collections already exist.** `registry.py` already has `_docs_collection_name()` and `_rdr_collection_name()`, used by `indexer.py`. Any user who has run `nx index repo` has `docs__` and `rdr__` collections in their current single store. Migration steps 2-4 only migrate `code__*` and `knowledge__*`; `docs__*` and `rdr__*` are silently dropped. Correct the YAGNI claim and add migration steps for all four prefix types.
+
+**S5. `--corpus` vs `--type` flag conflict on `search_cmd`.** The existing `search_cmd` uses `--corpus` for collection selection via `resolve_corpus()`. RDR-004 adds `--type` for store routing. These two mechanisms overlap — the RDR does not specify what happens when both are provided, whether `--corpus` is deprecated, or how the all-stores default fan-out interacts with `resolve_corpus()`. Specify the interaction explicitly.
+
+**S6. `promote_cmd` directly constructs `T3Database` — factory refactor must be stated explicitly for testability.** The current `promote_cmd` bypasses `make_t3()` entirely. The plan says "call `t3_knowledge()`" but does not acknowledge the direct construction or specify that `t3_knowledge()` must support `_client`/`_ef_override` injection for unit testing. P9 would otherwise require real CloudClient credentials to run.
+
+**S7. `null` sentinel for no-git-repo case is an unresolved design gap for CloudClient mode.** If CloudClient databases are shared, two users without git repos both write to a collection named `null` in the same database. CloudClient Open Question (already noted) must be answered first; the `null` sentinel design depends on the answer.
+
+#### Observations
+
+- O1: `--type` and `--corpus` are two overlapping control surfaces; consider retiring `--corpus` explicitly
+- O2: `_prune_deleted_files()` and `_prune_misclassified()` in `indexer.py` take `code_collection` and `docs_collection` names via `make_t3()` — must use `t3_code()` / `t3_docs()` after refactor; not addressed
+- O3: Phases 2 and 3 must be deployed atomically — deploying Phase 2 without Phase 3 leaves `t3_collection_name()` injecting `knowledge__` prefixes into a store without prefixed collections
+- O4: P1 test says "connect to the correct configured path" — if CloudClient, this must verify `(tenant, database)` pair, not path
+- O5: Migration verification step 5 should explicitly state the invariant: sum of counts across all four new stores = sum across all old store collections
+- O6: `nx rdr store` referenced in the Four Stores table does not exist; `nx index rdr` exists but is different
