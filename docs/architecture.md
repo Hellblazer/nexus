@@ -25,11 +25,7 @@ CLI (cli.py + commands/)
     └── Storage tiers
           T1: in-memory ChromaDB (session scratch)
           T2: SQLite + FTS5 (persistent memory, PM state)
-          T3: four PersistentClient stores + Voyage AI
-                code__*      → ~/.config/nexus/chroma_code
-                docs__*      → ~/.config/nexus/chroma_docs
-                rdr__*       → ~/.config/nexus/chroma_rdr
-                knowledge__* → ~/.config/nexus/chroma_knowledge
+          T3: ChromaDB cloud + Voyage AI (permanent knowledge)
 ```
 
 Data flows upward (T1 → T2 → T3). No reverse flow except `nx pm restore`.
@@ -39,7 +35,7 @@ Data flows upward (T1 → T2 → T3). No reverse flow except `nx pm restore`.
 | Area | Files | What they do |
 |------|-------|-------------|
 | **Entry** | `cli.py`, `commands/` | Click CLI, one file per command group |
-| **Storage** | `db/t1.py`, `db/t2.py`, `db/t3.py`, `db/t3_stores.py` | Tier implementations; `t3_stores.py` exports `t3_code()`, `t3_docs()`, `t3_rdr()`, `t3_knowledge()` |
+| **Storage** | `db/t1.py`, `db/t2.py`, `db/t3.py` | Tier implementations |
 | **Indexing** | `indexer.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py` | Repo indexing pipeline |
 | **Search** | `search_engine.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py`, `answer.py` | Query, rank, synthesize |
 | **Server** | `server.py`, `server_main.py`, `polling.py` | Daemon, HEAD polling, auto-reindex |

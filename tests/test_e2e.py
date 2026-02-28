@@ -246,12 +246,8 @@ def test_cli_store_put_and_search(
     """nx store put → nx store search round-trip via CLI."""
     uid = _uid()
 
-    _re = RuntimeError("not configured")
-    with patch("nexus.commands.store.t3_knowledge", return_value=local_t3), \
-         patch("nexus.commands.search_cmd.t3_knowledge", return_value=local_t3), \
-         patch("nexus.commands.search_cmd.t3_code", side_effect=_re), \
-         patch("nexus.commands.search_cmd.t3_docs", side_effect=_re), \
-         patch("nexus.commands.search_cmd.t3_rdr", side_effect=_re):
+    with patch("nexus.commands.store._t3", return_value=local_t3), \
+         patch("nexus.commands.search_cmd._t3", return_value=local_t3):
 
         put_result = runner.invoke(main, [
             "store", "put", "-",
@@ -275,11 +271,7 @@ def test_cli_search_command(
     uid = _uid()
     local_t3.put("knowledge__search", content=f"search test content {uid}", title="s.md")
 
-    _re = RuntimeError("not configured")
-    with patch("nexus.commands.search_cmd.t3_knowledge", return_value=local_t3), \
-         patch("nexus.commands.search_cmd.t3_code", side_effect=_re), \
-         patch("nexus.commands.search_cmd.t3_docs", side_effect=_re), \
-         patch("nexus.commands.search_cmd.t3_rdr", side_effect=_re):
+    with patch("nexus.commands.search_cmd._t3", return_value=local_t3):
         result = runner.invoke(main, [
             "search", f"search test {uid}",
             "--corpus", "knowledge__search",
@@ -298,11 +290,7 @@ def test_cli_search_json_output(
     uid = _uid()
     local_t3.put("knowledge__json", content=f"json output test {uid}", title="j.md")
 
-    _re = RuntimeError("not configured")
-    with patch("nexus.commands.search_cmd.t3_knowledge", return_value=local_t3), \
-         patch("nexus.commands.search_cmd.t3_code", side_effect=_re), \
-         patch("nexus.commands.search_cmd.t3_docs", side_effect=_re), \
-         patch("nexus.commands.search_cmd.t3_rdr", side_effect=_re):
+    with patch("nexus.commands.search_cmd._t3", return_value=local_t3):
         result = runner.invoke(main, [
             "search", uid,
             "--corpus", "knowledge__json",
@@ -321,11 +309,7 @@ def test_cli_search_vimgrep_output(
     uid = _uid()
     local_t3.put("knowledge__vimgrep", content=f"vimgrep test {uid}", title="v.md")
 
-    _re = RuntimeError("not configured")
-    with patch("nexus.commands.search_cmd.t3_knowledge", return_value=local_t3), \
-         patch("nexus.commands.search_cmd.t3_code", side_effect=_re), \
-         patch("nexus.commands.search_cmd.t3_docs", side_effect=_re), \
-         patch("nexus.commands.search_cmd.t3_rdr", side_effect=_re):
+    with patch("nexus.commands.search_cmd._t3", return_value=local_t3):
         result = runner.invoke(main, [
             "search", uid,
             "--corpus", "knowledge__vimgrep",
@@ -368,18 +352,18 @@ def test_pm_archive_with_mocked_haiku(
     with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
         runner.invoke(main, ["pm", "init", "--project", "archive-proj"])
 
-    with patch("nexus.pm.t3_knowledge", return_value=local_t3), \
-         patch("nexus.pm.get_credential", return_value="mock-anthropic-key"), \
-         patch("anthropic.Anthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
-        mock_client.messages.create.return_value = MagicMock(
-            content=[MagicMock(text=canned_synthesis)]
-        )
-        with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
-            result = runner.invoke(main, [
-                "pm", "archive", "--project", "archive-proj"
-            ])
+    with patch("nexus.pm.make_t3", return_value=local_t3):
+        with patch("nexus.pm.get_credential", return_value="mock-key"):
+            with patch("anthropic.Anthropic") as mock_cls:
+                mock_client = MagicMock()
+                mock_cls.return_value = mock_client
+                mock_client.messages.create.return_value = MagicMock(
+                    content=[MagicMock(text=canned_synthesis)]
+                )
+                with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
+                    result = runner.invoke(main, [
+                        "pm", "archive", "--project", "archive-proj"
+                    ])
 
     assert result.exit_code == 0, result.output
     # Verify synthesis was written to T3

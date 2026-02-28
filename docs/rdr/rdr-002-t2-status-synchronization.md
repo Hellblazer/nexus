@@ -2,13 +2,11 @@
 title: "T2 Status Synchronization"
 id: RDR-002
 type: Technical Debt
-status: implemented
+status: accepted
 priority: high
 author: Hal Hildebrand
-reviewed-by: self
+reviewed-by:
 created: 2026-02-27
-close_date: 2026-02-27
-close_reason: implemented
 related_issues:
   - RDR-001
 ---

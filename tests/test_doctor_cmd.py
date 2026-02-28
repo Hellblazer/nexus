@@ -21,6 +21,7 @@ def test_doctor_all_healthy() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.serve._read_pid", return_value=12345),
         patch("nexus.commands.serve._process_running", return_value=True),
+        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -63,6 +64,7 @@ def test_doctor_missing_rg() -> None:
         patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
         patch("nexus.commands.serve._read_pid", return_value=None),
         patch("nexus.commands.serve._process_running", return_value=False),
+        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -82,6 +84,7 @@ def test_doctor_server_not_running() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.serve._read_pid", return_value=None),
         patch("nexus.commands.serve._process_running", return_value=False),
+        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -127,6 +130,7 @@ def test_doctor_python_version_shown() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.serve._read_pid", return_value=12345),
         patch("nexus.commands.serve._process_running", return_value=True),
+        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -143,6 +147,7 @@ def test_doctor_python_version_too_old_fails() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.serve._read_pid", return_value=12345),
         patch("nexus.commands.serve._process_running", return_value=True),
+        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
@@ -182,12 +187,75 @@ def test_doctor_missing_rg_shows_platform_hints() -> None:
         patch("nexus.commands.doctor.shutil.which", return_value=None),
         patch("nexus.commands.serve._read_pid", return_value=None),
         patch("nexus.commands.serve._process_running", return_value=False),
+        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
     ):
         result = runner.invoke(main, ["doctor"])
 
     assert "brew install ripgrep" in result.output
     assert "apt install ripgrep" in result.output
     assert "BurntSushi/ripgrep" in result.output
+
+
+# ── Four-store database check ─────────────────────────────────────────────────
+
+def test_doctor_four_store_calls_cloud_client_four_times() -> None:
+    """doctor four-store check calls CloudClient exactly four times (one per store type)."""
+    runner = _runner()
+    with (
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
+        patch("nexus.commands.serve._read_pid", return_value=None),
+        patch("nexus.commands.serve._process_running", return_value=False),
+        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()) as mock_cc,
+    ):
+        result = runner.invoke(main, ["doctor"])
+
+    assert mock_cc.call_count == 4
+    # All four suffixed database names appear in output
+    for suffix in ("_code", "_docs", "_rdr", "_knowledge"):
+        assert suffix in result.output
+
+
+def test_doctor_four_store_one_unreachable_fails_with_fix_hint() -> None:
+    """When one of the four stores is unreachable, exit code 1 and fix hint shown."""
+    runner = _runner()
+
+    def cloud_client_side_effect(**kwargs):
+        if kwargs.get("database", "").endswith("_rdr"):
+            raise RuntimeError("connection refused")
+        return MagicMock()
+
+    with (
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
+        patch("nexus.commands.serve._read_pid", return_value=None),
+        patch("nexus.commands.serve._process_running", return_value=False),
+        patch("nexus.commands.doctor.chromadb.CloudClient",
+              side_effect=cloud_client_side_effect),
+    ):
+        result = runner.invoke(main, ["doctor"])
+
+    assert result.exit_code == 1
+    assert "not reachable" in result.output
+    assert "nx migrate t3" in result.output
+
+
+def test_doctor_four_store_error_does_not_expose_exception_text() -> None:
+    """doctor four-store check prints 'not reachable' without raw exception detail."""
+    runner = _runner()
+
+    with (
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
+        patch("nexus.commands.serve._read_pid", return_value=None),
+        patch("nexus.commands.serve._process_running", return_value=False),
+        patch("nexus.commands.doctor.chromadb.CloudClient",
+              side_effect=RuntimeError("HTTP 401: invalid api_key SUPERSECRET")),
+    ):
+        result = runner.invoke(main, ["doctor"])
+
+    assert "SUPERSECRET" not in result.output
+    assert "not reachable" in result.output
 
 
 # ── _check helper ────────────────────────────────────────────────────────────

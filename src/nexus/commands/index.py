@@ -4,7 +4,6 @@ from pathlib import Path
 
 import click
 
-from nexus.db.t3_stores import t3_docs, t3_rdr
 from nexus.registry import RepoRegistry
 
 
@@ -70,7 +69,7 @@ def index_pdf_cmd(path: Path, corpus: str) -> None:
 
     path = path.resolve()
     click.echo(f"Indexing {path}…")
-    n = index_pdf(path, corpus=corpus, t3=t3_docs())
+    n = index_pdf(path, corpus=corpus)
     click.echo(f"Indexed {n} chunk(s).")
 
 
@@ -83,7 +82,7 @@ def index_md_cmd(path: Path, corpus: str) -> None:
 
     path = path.resolve()
     click.echo(f"Indexing {path}…")
-    n = index_markdown(path, corpus=corpus, t3=t3_docs())
+    n = index_markdown(path, corpus=corpus)
     click.echo(f"Indexed {n} chunk(s).")
 
 
@@ -117,6 +116,6 @@ def index_rdr_cmd(path: Path) -> None:
     basename, _ = _repo_identity(path)
     collection = _rdr_collection_name(path)
     click.echo(f"Indexing {len(rdr_files)} RDR document(s) into {collection}…")
-    results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection, t3=t3_rdr())
+    results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection)
     indexed = sum(1 for s in results.values() if s == "indexed")
     click.echo(f"Indexed {indexed} of {len(rdr_files)} RDR document(s).")

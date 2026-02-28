@@ -17,12 +17,14 @@ Each level is deep-merged, with higher-priority values winning.
 |---|---|---|
 | `chroma_api_key` | `CHROMA_API_KEY` | T3 (cloud storage) |
 | `chroma_tenant` | `CHROMA_TENANT` | T3 |
-| `chroma_database` | `CHROMA_DATABASE` | T3 |
+| `chroma_database` | `CHROMA_DATABASE` | T3 (base name — see below) |
 | `voyage_api_key` | `VOYAGE_API_KEY` | T3 (embeddings) |
 | `anthropic_api_key` | `ANTHROPIC_API_KEY` | Answer mode, PM archive |
 | `mxbai_api_key` | `MXBAI_API_KEY` | Mixedbread search (optional) |
 
 Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.config/nexus/config.yml`.
+
+**`chroma_database` is a base name.** Nexus uses it to derive four database names: `{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`. For example, `chroma_database = nexus` creates connections to `nexus_code`, `nexus_docs`, `nexus_rdr`, and `nexus_knowledge`. All four must exist in your ChromaDB Cloud dashboard. Use `nx doctor` to check their status.
 
 ## Settings
 

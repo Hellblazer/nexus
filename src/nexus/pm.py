@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from nexus.config import HAIKU_MODEL, get_credential
-from nexus.db.t3_stores import t3_knowledge
+from nexus.db import make_t3
 
 if TYPE_CHECKING:
     from nexus.db.t2 import T2Database
@@ -316,7 +316,7 @@ def pm_archive(
     doc_count = len(all_docs)
     max_ts = max(d.get("timestamp", "") for d in all_docs)
 
-    t3 = t3_knowledge()
+    t3 = make_t3()
 
     # Idempotency: metadata-only check — no embedding API call (nexus-dqz)
     col = t3.get_or_create_collection(collection)
@@ -327,7 +327,7 @@ def pm_archive(
     if existing["ids"]:
         prior_meta = existing["metadatas"][0]
         if (
-            int(prior_meta.get("pm_doc_count") or 0) == doc_count
+            prior_meta.get("pm_doc_count") == doc_count
             and prior_meta.get("pm_latest_timestamp") == max_ts
             and len(existing["ids"]) >= prior_meta.get("chunk_total", 1)
         ):
@@ -437,9 +437,9 @@ def _list_pm_collections(t3: "T3Database") -> list[str]:
 
 def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
     """Dispatch reference query to T3 semantic search or metadata-only filter."""
-    t3 = t3_knowledge()
     if _is_semantic_query(query):
         # Semantic path: fan out to all knowledge__pm__ collections
+        t3 = make_t3()
         clean_query = query.strip('"')
         pm_collections = _list_pm_collections(t3)
         if not pm_collections:
@@ -452,10 +452,11 @@ def pm_reference(db: "T2Database", query: str) -> list[dict[str, Any]]:
         )
     else:
         # Project-name path: metadata-only filter on collection for that project
+        t3 = make_t3()
         collection = f"knowledge__pm__{query}"
         if not t3.collection_exists(collection):
             return []
-        col = t3.get_collection_raw(collection)
+        col = t3.get_or_create_collection(collection)
         result = col.get(
             where={"store_type": {"$eq": "pm-archive"}},
             include=["documents", "metadatas"],

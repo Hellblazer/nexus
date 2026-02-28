@@ -78,5 +78,5 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
         prefix = f"{corpus}__"
         matches = [c for c in all_collections if c.startswith(prefix)]
     if not matches:
-        structlog.get_logger().warning("resolve_corpus: no collections matched", corpus=corpus)
+        structlog.get_logger().debug("resolve_corpus: no collections matched", corpus=corpus)
     return matches

@@ -7,15 +7,12 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from chromadb.errors import NotFoundError as _ChromaNotFoundError
 from nexus.corpus import index_model_for_collection
-from nexus.db.t3_stores import t3_code, t3_code_local, t3_docs, t3_docs_local, t3_rdr
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
-    from nexus.db.t3 import T3Database
     from nexus.registry import RepoRegistry
 
 DEFAULT_IGNORE: list[str] = [
@@ -149,7 +146,9 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
 
     Handles both code__ and docs__ collections.
     """
+    from nexus.config import get_credential
     from nexus.frecency import batch_frecency
+    from nexus.db import make_t3
     from nexus.registry import _docs_collection_name
 
     info = registry.get(repo)
@@ -160,21 +159,28 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     code_collection = info.get("code_collection", info["collection"])
     docs_collection = info.get("docs_collection") or _docs_collection_name(repo)
 
+    voyage_key = get_credential("voyage_api_key")
+    chroma_key = get_credential("chroma_api_key")
+    if not voyage_key or not chroma_key:
+        missing = []
+        if not voyage_key:
+            missing.append("voyage_api_key")
+        if not chroma_key:
+            missing.append("chroma_api_key")
+        raise CredentialsMissingError(
+            f"{', '.join(missing)} not set — run: nx config init"
+        )
+
     frecency_map = batch_frecency(repo)
-    # Frecency updates only write metadata, never create embeddings — no voyage key needed.
-    db_code = t3_code_local()
-    db_docs = t3_docs_local()
+    db = make_t3()
 
-    # Update frecency in code and docs collections (each in their own store)
-    store_cols: list[tuple[object, str]] = [(db_code, code_collection)]
+    # Update frecency in both collections
+    collection_names = [code_collection]
     if docs_collection:
-        store_cols.append((db_docs, docs_collection))
+        collection_names.append(docs_collection)
 
-    for store, collection_name in store_cols:
-        try:
-            col = store.get_collection_raw(collection_name)
-        except _ChromaNotFoundError:
-            continue  # not yet indexed — skip, do not create a ghost collection
+    for collection_name in collection_names:
+        col = db.get_or_create_collection(collection_name)
         for file, score in frecency_map.items():
             existing = col.get(
                 where={"source_path": str(file)},
@@ -187,7 +193,7 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
                 {**m, "frecency_score": float(score)}
                 for m in existing["metadatas"]
             ]
-            store.update_chunks(collection=collection_name, ids=existing["ids"], metadatas=updated_metadatas)
+            db.update_chunks(collection=collection_name, ids=existing["ids"], metadatas=updated_metadatas)
 
 
 # ── Per-file indexing helpers ────────────────────────────────────────────────
@@ -367,7 +373,7 @@ def _index_prose_file(
                 "category": "prose",
                 "session_id": "",
                 "source_agent": "nexus-indexer",
-                "store_type": "markdown",
+                "store_type": "prose",
                 "indexed_at": now_iso,
                 "expires_at": "",
                 "ttl_days": 0,
@@ -505,7 +511,6 @@ def _index_pdf_file(
             "ttl_days": 0,
             "frecency_score": float(score),
             **git_meta,
-            "store_type": "pdf",
         }
         metadatas.append(augmented)
 
@@ -527,10 +532,13 @@ def _index_pdf_file(
 def _discover_and_index_rdrs(
     repo: Path,
     rdr_abs_paths: set[Path],
+    db: object,
+    voyage_key: str,
+    now_iso: str,
 ) -> tuple[int, int, int]:
     """Find .md files under RDR paths and index them via batch_index_markdowns.
 
-    Uses t3_rdr() to write into the rdr__ store.
+    M2: passes t3=db to avoid creating a redundant T3 client.
 
     Returns (indexed, skipped, failed) counts.
     """
@@ -544,11 +552,7 @@ def _discover_and_index_rdrs(
     for rdr_dir in rdr_abs_paths:
         if not rdr_dir.is_dir():
             continue
-        for path in sorted(rdr_dir.glob("*.md")):
-            # Symlinked files are skipped (same as the main code walk).
-            # Symlinked *directories* are intentionally followed by rdr_dir.glob —
-            # this asymmetry is by design: a repo may legitimately symlink an entire
-            # RDR directory from another repo, and we want to index its contents.
+        for path in sorted(rdr_dir.rglob("*.md")):
             if path.is_file() and not path.is_symlink():
                 md_paths.append(path)
 
@@ -561,11 +565,6 @@ def _discover_and_index_rdrs(
     basename, _ = _repo_identity(repo)
     collection = _rdr_collection_name(repo)
 
-    try:
-        db = t3_rdr()
-    except RuntimeError as exc:
-        _log.error("rdr_path not configured — skipping RDR indexing", error=str(exc))
-        return 0, 0, 0
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
     results = batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection)
     indexed = sum(1 for s in results.values() if s == "indexed")
@@ -582,25 +581,20 @@ def _prune_misclassified(
     code_files: list[Path],
     prose_files: list[Path],
     pdf_files: list[Path],
-    *,
-    db_code: "T3Database",
-    db_docs: "T3Database",
+    db: object,
 ) -> None:
     """Remove chunks from the wrong collection after reclassification.
 
     If a file was previously classified as code but is now prose (or vice versa),
     its chunks in the old collection must be removed.
-
-    *db_code* and *db_docs* are passed in from the caller (_run_index) to reuse
-    already-open database handles rather than opening fresh ones.
     """
-    code_col = db_code.get_or_create_collection(code_collection)
-    docs_col = db_docs.get_or_create_collection(docs_collection)
+    code_col = db.get_or_create_collection(code_collection)
+    docs_col = db.get_or_create_collection(docs_collection)
 
     # Prose + PDF files should NOT have chunks in the code__ collection
     docs_paths = {str(f) for f in prose_files} | {str(f) for f in pdf_files}
     for source_path in docs_paths:
-        existing = code_col.get(where={"source_path": source_path}, include=[], limit=50000)
+        existing = code_col.get(where={"source_path": source_path}, include=[])
         if existing["ids"]:
             code_col.delete(ids=existing["ids"])
             _log.debug("pruned misclassified chunks from code collection",
@@ -609,7 +603,7 @@ def _prune_misclassified(
     # Code files should NOT have chunks in the docs__ collection
     code_paths = {str(f) for f in code_files}
     for source_path in code_paths:
-        existing = docs_col.get(where={"source_path": source_path}, include=[], limit=50000)
+        existing = docs_col.get(where={"source_path": source_path}, include=[])
         if existing["ids"]:
             docs_col.delete(ids=existing["ids"])
             _log.debug("pruned misclassified chunks from docs collection",
@@ -620,28 +614,17 @@ def _prune_deleted_files(
     code_collection: str,
     docs_collection: str,
     all_current_paths: set[str],
-    *,
-    db_code: "T3Database",
-    db_docs: "T3Database",
+    db: object,
 ) -> None:
     """Remove chunks for files that no longer exist in the repo (C3 fix).
 
     Queries each collection for all distinct source_paths and deletes chunks
     for any path not in *all_current_paths*.
-
-    *db_code* and *db_docs* are passed in from the caller (_run_index) to reuse
-    already-open database handles rather than opening fresh ones.
     """
-    for store, collection_name in ((db_code, code_collection), (db_docs, docs_collection)):
-        try:
-            col = store.get_collection_raw(collection_name)
-        except _ChromaNotFoundError:
-            continue  # not yet indexed — skip, do not create a ghost collection
-        # Cap at 50 000 to avoid loading an entire large collection into memory.
-        all_chunks = col.get(include=["metadatas"], limit=50000)
-        if len(all_chunks["ids"]) == 50000:
-            _log.warning("_prune_deleted_files: collection exceeds 50k chunks; "
-                         "prune may be incomplete", collection=collection_name)
+    for collection_name in (code_collection, docs_collection):
+        col = db.get_or_create_collection(collection_name)
+        # Get all chunks to find unique source_paths
+        all_chunks = col.get(include=["metadatas"])
         if not all_chunks["ids"]:
             continue
 
@@ -680,7 +663,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
 
     info = registry.get(repo)
     if info is None:
-        return {}
+        return
 
     # C2: use deterministic naming function as fallback
     code_collection = info.get("code_collection", info["collection"])
@@ -766,27 +749,33 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
     # Credential check (required for T3 operations)
     from nexus.config import get_credential
     voyage_key = get_credential("voyage_api_key")
-    if not voyage_key:
+    chroma_key = get_credential("chroma_api_key")
+    if not voyage_key or not chroma_key:
+        missing = []
+        if not voyage_key:
+            missing.append("voyage_api_key")
+        if not chroma_key:
+            missing.append("chroma_api_key")
         raise CredentialsMissingError(
-            "voyage_api_key not set — run: nx config init"
+            f"{', '.join(missing)} not set — run: nx config init"
         )
 
     import voyageai
     from datetime import UTC, datetime as _dt
+    from nexus.db import make_t3
 
+    _log.debug("connecting to ChromaDB Cloud")
+    db = make_t3()
+    _log.debug("ChromaDB connected")
     now_iso = _dt.now(UTC).isoformat()
-
-    # Open per-type stores
-    db_code = t3_code()
-    db_docs = t3_docs()
 
     # Initialize collections and models
     code_model = index_model_for_collection(code_collection)
     docs_model = index_model_for_collection(docs_collection)
     voyage_client = voyageai.Client(api_key=voyage_key)
     _log.debug("creating collections", code=code_collection, docs=docs_collection)
-    code_col = db_code.get_or_create_collection(code_collection)
-    docs_col = db_docs.get_or_create_collection(docs_collection)
+    code_col = db.get_or_create_collection(code_collection)
+    docs_col = db.get_or_create_collection(docs_collection)
     _log.debug("collections ready")
 
     # Index code files → code__ (voyage-code-3, AST chunking)
@@ -794,7 +783,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
     for score, file in code_files:
         _log.debug("indexing", file=str(file))
         _index_code_file(
-            file, repo, code_collection, code_model, code_col, db_code,
+            file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
         )
 
@@ -803,7 +792,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
     for score, file in prose_files:
         _log.debug("indexing", file=str(file))
         _index_prose_file(
-            file, repo, docs_collection, docs_model, docs_col, db_docs,
+            file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
         )
 
@@ -812,13 +801,13 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
     for score, file in pdf_files:
         _log.debug("indexing", file=str(file))
         _index_pdf_file(
-            file, repo, docs_collection, docs_model, docs_col, db_docs,
+            file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
         )
 
     # Discover and index RDR markdown files → rdr__
     rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
-        repo, rdr_abs_paths
+        repo, rdr_abs_paths, db, voyage_key, now_iso
     )
 
     # Prune misclassified chunks (reclassification cleanup)
@@ -827,7 +816,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
         [f for _, f in code_files],
         [f for _, f in prose_files],
         [f for _, f in pdf_files],
-        db_code=db_code, db_docs=db_docs,
+        db,
     )
 
     # C3: Prune deleted files — remove chunks for files no longer in the repo
@@ -838,8 +827,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
         all_current_paths.add(str(f))
     for _, f in pdf_files:
         all_current_paths.add(str(f))
-    _prune_deleted_files(code_collection, docs_collection, all_current_paths,
-                         db_code=db_code, db_docs=db_docs)
+    _prune_deleted_files(code_collection, docs_collection, all_current_paths, db)
     return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
 
 

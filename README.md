@@ -1,5 +1,10 @@
 # Nexus
 
+[![CI](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml/badge.svg)](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/conexus)](https://pypi.org/project/conexus/)
+[![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 Nexus is a support framework and tooling foundation for systematic development with evolving semantic knowledge. It gives teams and individual developers a way to index what they build, search what they know, and maintain coherent direction as projects grow in complexity — especially under the speed and pressure of LLM-driven agentic coding.
 
 Three layers, each useful on its own, each building on the last:
@@ -36,7 +41,7 @@ Scratch and memory commands work with zero API keys. Cloud search requires [Chro
 2. Classifies each file by extension — code, prose, or PDF
 3. Chunks code with tree-sitter AST parsing (12 languages) and prose with semantic markdown splitting
 4. Embeds each chunk with a purpose-built Voyage AI model
-5. Routes results to separate collections: `code__<repo>` and `docs__<repo>`
+5. Routes results to separate collections: `code__<repo>`, `docs__<repo>`, and `rdr__<repo>` for RDR documents
 6. Computes git frecency scores so recently-touched files rank higher in hybrid search
 
 Auto-discovers RDR documents in `docs/rdr/` and indexes them into a dedicated collection. Stable across git worktrees. Configurable per-repo via `.nexus.yml`. See [Repo Indexing](docs/repo-indexing.md).
@@ -63,6 +68,7 @@ Every command targets one or more tiers:
 | `nx scratch` | T1 | Ephemeral session scratch pad |
 | `nx serve` | — | Background daemon for auto-reindexing |
 | `nx collection` | T3 | Inspect and manage cloud collections |
+| `nx migrate` | T3 | Migrate collections from single-database to four-store layout |
 | `nx config` | — | Credentials and settings |
 
 ## RDR: Research-Design-Review

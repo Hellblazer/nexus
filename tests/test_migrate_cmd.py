@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nx migrate t3 — T3 store migration command tests (P15 from RDR-004).
-
-All tests follow RED → verify fail → GREEN discipline.
-"""
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+"""nx migrate t3 — unit tests for T3 migration logic."""
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -12,448 +8,367 @@ from click.testing import CliRunner
 from nexus.cli import main
 
 
-@pytest.fixture
-def runner() -> CliRunner:
-    return CliRunner()
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-
-def _make_source_col(name: str, doc_count: int) -> MagicMock:
-    """Build a mock ChromaDB Collection with `name` and pre-populated docs."""
-    ids = [f"{name}_id_{i}" for i in range(doc_count)]
-    docs = [f"doc content {i}" for i in range(doc_count)]
-    metas = [{"key": f"val_{i}"} for i in range(doc_count)]
-    embeddings = [[float(i)] * 4 for i in range(doc_count)]
+def _make_source_col(name: str, docs: list[str], embeddings: list) -> MagicMock:
+    """Build a mock ChromaDB collection for the source store."""
     col = MagicMock()
     col.name = name
+    col.count.return_value = len(docs)
     col.get.return_value = {
-        "ids": ids,
+        "ids": [f"id-{i}" for i in range(len(docs))],
         "documents": docs,
-        "metadatas": metas,
         "embeddings": embeddings,
+        "metadatas": [{} for _ in docs],
     }
-    col.count.return_value = doc_count
     return col
 
 
-def _make_source_db(collections: list[MagicMock]) -> MagicMock:
-    """Build a mock T3Database whose list_collections returns the given cols."""
-    db = MagicMock()
-    db.list_collections.return_value = [{"name": c.name} for c in collections]
-    col_map = {c.name: c for c in collections}
-    db.get_collection_raw.side_effect = lambda name: col_map[name]
-    return db
+# ── P9: code routing ──────────────────────────────────────────────────────────
 
+def test_migrate_routes_code_collection_to_code_store() -> None:
+    """code__repo from source ends up in dest via get_or_create_collection."""
+    embs = [[0.1, 0.2], [0.3, 0.4]]
+    col = _make_source_col("code__repo", ["d1", "d2"], embs)
 
-def _make_dest_db() -> MagicMock:
-    """Build a mock destination T3Database."""
-    db = MagicMock()
+    source = MagicMock()
+    source.list_collections.return_value = [col]
+    source.get_collection.return_value = col
+
+    dest = MagicMock()
+    dest.collection_info.side_effect = KeyError("not found")
     dest_col = MagicMock()
-    dest_col.count.return_value = 0  # starts empty
-    db.get_or_create_collection.return_value = dest_col
-    return db
+    dest.get_or_create_collection.return_value = dest_col
 
+    from nexus.commands.migrate import migrate_t3_collections
 
-# ── P15-a: code__ routing ──────────────────────────────────────────────────────
+    result = migrate_t3_collections(source, dest)
 
-def test_migrate_t3_routes_code_collections_to_code_store(runner: CliRunner) -> None:
-    """code__* collections in source are upserted into the code store."""
-    code_col = _make_source_col("code__myrepo", 2)
-    source_db = _make_source_db([code_col])
-    dest_code = _make_dest_db()
-    dest_docs = _make_dest_db()
-    dest_rdr = _make_dest_db()
-    dest_knowledge = _make_dest_db()
-
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db",
-               side_effect=lambda key: {
-                   "code_path": dest_code, "docs_path": dest_docs,
-                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
-               }[key]):
-        result = runner.invoke(main, ["migrate", "t3"])
-
-    assert result.exit_code == 0, result.output
-    dest_code.get_or_create_collection.assert_called_with("code__myrepo")
-    dest_docs.get_or_create_collection.assert_not_called()
-    dest_rdr.get_or_create_collection.assert_not_called()
-
-
-# ── P15-b: docs__ routing ─────────────────────────────────────────────────────
-
-def test_migrate_t3_routes_docs_collections_to_docs_store(runner: CliRunner) -> None:
-    """docs__* collections in source are upserted into the docs store."""
-    docs_col = _make_source_col("docs__corpus1", 3)
-    source_db = _make_source_db([docs_col])
-    dest_code = _make_dest_db()
-    dest_docs = _make_dest_db()
-    dest_rdr = _make_dest_db()
-    dest_knowledge = _make_dest_db()
-
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db",
-               side_effect=lambda key: {
-                   "code_path": dest_code, "docs_path": dest_docs,
-                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
-               }[key]):
-        result = runner.invoke(main, ["migrate", "t3"])
-
-    assert result.exit_code == 0, result.output
-    dest_docs.get_or_create_collection.assert_called_with("docs__corpus1")
-    dest_code.get_or_create_collection.assert_not_called()
-
-
-# ── P15-c: rdr__ routing ──────────────────────────────────────────────────────
-
-def test_migrate_t3_routes_rdr_collections_to_rdr_store(runner: CliRunner) -> None:
-    """rdr__* collections in source are upserted into the rdr store."""
-    rdr_col = _make_source_col("rdr__nexus-abc12345", 1)
-    source_db = _make_source_db([rdr_col])
-    dest_code = _make_dest_db()
-    dest_docs = _make_dest_db()
-    dest_rdr = _make_dest_db()
-    dest_knowledge = _make_dest_db()
-
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db",
-               side_effect=lambda key: {
-                   "code_path": dest_code, "docs_path": dest_docs,
-                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
-               }[key]):
-        result = runner.invoke(main, ["migrate", "t3"])
-
-    assert result.exit_code == 0, result.output
-    dest_rdr.get_or_create_collection.assert_called_with("rdr__nexus-abc12345")
-    dest_code.get_or_create_collection.assert_not_called()
-
-
-# ── P15-d: knowledge__ routing ───────────────────────────────────────────────
-
-def test_migrate_t3_routes_knowledge_collections_to_knowledge_store(runner: CliRunner) -> None:
-    """knowledge__* collections in source are upserted into the knowledge store."""
-    k_col = _make_source_col("knowledge__topic", 5)
-    source_db = _make_source_db([k_col])
-    dest_code = _make_dest_db()
-    dest_docs = _make_dest_db()
-    dest_rdr = _make_dest_db()
-    dest_knowledge = _make_dest_db()
-
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db",
-               side_effect=lambda key: {
-                   "code_path": dest_code, "docs_path": dest_docs,
-                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
-               }[key]):
-        result = runner.invoke(main, ["migrate", "t3"])
-
-    assert result.exit_code == 0, result.output
-    dest_knowledge.get_or_create_collection.assert_called_with("knowledge__topic")
-    dest_code.get_or_create_collection.assert_not_called()
-
-
-# ── P15-e: idempotency — skip when counts match ───────────────────────────────
-
-def test_migrate_t3_skips_collection_when_dest_count_matches(runner: CliRunner) -> None:
-    """When destination collection already has same doc count, migration skips upsert."""
-    k_col = _make_source_col("knowledge__notes", 4)
-    source_db = _make_source_db([k_col])
-    dest_code = _make_dest_db()
-    dest_docs = _make_dest_db()
-    dest_rdr = _make_dest_db()
-    dest_knowledge = _make_dest_db()
-    # Destination already has same count
-    dest_col_existing = MagicMock()
-    dest_col_existing.count.return_value = 4
-    dest_knowledge.get_or_create_collection.return_value = dest_col_existing
-
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db",
-               side_effect=lambda key: {
-                   "code_path": dest_code, "docs_path": dest_docs,
-                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
-               }[key]):
-        result = runner.invoke(main, ["migrate", "t3"])
-
-    assert result.exit_code == 0, result.output
-    # Upsert should NOT have been called — counts match
-    dest_col_existing.upsert.assert_not_called()
-
-
-# ── P15-f: upsert when count differs ──────────────────────────────────────────
-
-def test_migrate_t3_upserts_when_dest_count_differs(runner: CliRunner) -> None:
-    """When destination has fewer docs than source, migration upserts all source docs."""
-    k_col = _make_source_col("knowledge__notes", 4)
-    source_db = _make_source_db([k_col])
-    dest_code = _make_dest_db()
-    dest_docs = _make_dest_db()
-    dest_rdr = _make_dest_db()
-    dest_knowledge = _make_dest_db()
-    dest_col = MagicMock()
-    dest_col.count.return_value = 2  # partial migration
-    dest_knowledge.get_or_create_collection.return_value = dest_col
-
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db",
-               side_effect=lambda key: {
-                   "code_path": dest_code, "docs_path": dest_docs,
-                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
-               }[key]):
-        result = runner.invoke(main, ["migrate", "t3"])
-
-    assert result.exit_code == 0, result.output
+    dest.get_or_create_collection.assert_called_once_with("code__repo")
     dest_col.upsert.assert_called_once()
-    call_kwargs = dest_col.upsert.call_args.kwargs
-    assert call_kwargs["ids"] == k_col.get.return_value["ids"]
+    assert result["code__repo"] == 2
 
 
-# ── P15-g: unknown prefix → knowledge store ──────────────────────────────────
+# ── P10: docs routing ─────────────────────────────────────────────────────────
 
-def test_migrate_t3_unknown_prefix_goes_to_knowledge_store(runner: CliRunner) -> None:
-    """Collections with unrecognised prefix are routed to knowledge store."""
-    unknown_col = _make_source_col("custom__stuff", 1)
-    source_db = _make_source_db([unknown_col])
-    dest_code = _make_dest_db()
-    dest_docs = _make_dest_db()
-    dest_rdr = _make_dest_db()
-    dest_knowledge = _make_dest_db()
+def test_migrate_routes_docs_collection_to_docs_store() -> None:
+    """docs__corpus from source ends up in dest via get_or_create_collection."""
+    embs = [[0.5, 0.6]]
+    col = _make_source_col("docs__corpus", ["doc1"], embs)
 
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db",
-               side_effect=lambda key: {
-                   "code_path": dest_code, "docs_path": dest_docs,
-                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
-               }[key]):
-        result = runner.invoke(main, ["migrate", "t3"])
+    source = MagicMock()
+    source.list_collections.return_value = [col]
+    source.get_collection.return_value = col
 
-    assert result.exit_code == 0, result.output
-    dest_knowledge.get_or_create_collection.assert_called_with("custom__stuff")
-    dest_code.get_or_create_collection.assert_not_called()
+    dest = MagicMock()
+    dest.collection_info.side_effect = KeyError("not found")
+    dest_col = MagicMock()
+    dest.get_or_create_collection.return_value = dest_col
 
+    from nexus.commands.migrate import migrate_t3_collections
 
-# ── I2: _open_source_db must not fall back to CloudClient ────────────────────
+    result = migrate_t3_collections(source, dest)
+
+    dest.get_or_create_collection.assert_called_once_with("docs__corpus")
+    dest_col.upsert.assert_called_once()
+    assert result["docs__corpus"] == 1
 
 
-def test_open_source_db_raises_when_no_path_configured() -> None:
-    """I2: _open_source_db raises ClickException when chromadb.path is empty.
+# ── P11: idempotency ──────────────────────────────────────────────────────────
 
-    Post-migration, there is no legacy path — falling back silently to
-    CloudClient would be a misleading and risky default.
+def test_migrate_is_idempotent_when_counts_match() -> None:
+    """When dest count equals source count, collection is skipped entirely."""
+    col = _make_source_col("knowledge__sec", ["a", "b", "c"], [[0.1]] * 3)
+
+    source = MagicMock()
+    source.list_collections.return_value = [col]
+    source.get_collection.return_value = col
+
+    dest = MagicMock()
+    dest.collection_info.return_value = {"count": 3}  # same as source
+    dest_col = MagicMock()
+    dest.get_or_create_collection.return_value = dest_col
+
+    from nexus.commands.migrate import migrate_t3_collections
+
+    result = migrate_t3_collections(source, dest)
+
+    # Must not create or upsert to dest collection when counts match
+    dest.get_or_create_collection.assert_not_called()
+    dest_col.upsert.assert_not_called()
+    assert result.get("knowledge__sec", 0) == 0
+
+
+# ── P12: embeddings verbatim ──────────────────────────────────────────────────
+
+def test_migrate_copies_embeddings_verbatim() -> None:
+    """Embeddings from source are passed to dest upsert unchanged (no re-embedding)."""
+    embeddings = [[0.11, 0.22, 0.33], [0.44, 0.55, 0.66]]
+    col = _make_source_col("knowledge__notes", ["doc a", "doc b"], embeddings)
+
+    source = MagicMock()
+    source.list_collections.return_value = [col]
+    source.get_collection.return_value = col
+
+    dest = MagicMock()
+    dest.collection_info.side_effect = KeyError("not found")
+    dest_col = MagicMock()
+    dest.get_or_create_collection.return_value = dest_col
+
+    from nexus.commands.migrate import migrate_t3_collections
+
+    migrate_t3_collections(source, dest)
+
+    upsert_call = dest_col.upsert.call_args
+    # Embeddings must be passed verbatim
+    assert upsert_call.kwargs.get("embeddings") == embeddings
+
+
+# ── P13: auto-create databases ───────────────────────────────────────────────
+
+def test_ensure_databases_creates_four_databases() -> None:
+    """ensure_databases calls create_database for each of the four store types."""
+    from nexus.commands.migrate import ensure_databases
+    from nexus.db.t3 import _STORE_TYPES
+
+    admin = MagicMock()
+    ensure_databases(admin, tenant="my-tenant", base="nexus")
+
+    created = [c.args[0] for c in admin.create_database.call_args_list]
+    assert set(created) == {f"nexus_{t}" for t in _STORE_TYPES}
+    for c in admin.create_database.call_args_list:
+        assert c.kwargs.get("tenant") == "my-tenant"
+
+
+def test_ensure_databases_ignores_already_exists() -> None:
+    """ensure_databases silently ignores UniqueConstraintError (database already exists)."""
+    from chromadb.errors import UniqueConstraintError
+    from nexus.commands.migrate import ensure_databases
+
+    admin = MagicMock()
+    admin.create_database.side_effect = UniqueConstraintError()
+    # Should not raise
+    ensure_databases(admin, tenant="my-tenant", base="nexus")
+
+
+def test_ensure_databases_ignores_chroma_error_already_exists() -> None:
+    """ensure_databases silently ignores ChromaError with 'already exists' message.
+
+    Chroma Cloud returns a plain ChromaError (not UniqueConstraintError) when a
+    database already exists — both must be treated as idempotent.
     """
-    import click
-    from nexus.commands.migrate import _open_source_db
+    from chromadb.errors import ChromaError
+    from nexus.commands.migrate import ensure_databases
 
-    with patch("nexus.config.load_config", return_value={"chromadb": {}}):
-        with pytest.raises(click.ClickException, match="chromadb.path"):
-            _open_source_db()
-
-
-# ── S3: empty source guard ────────────────────────────────────────────────────
-
-# ── I2: source_col.get() must be paginated ────────────────────────────────────
-
-def test_migrate_t3_col_get_uses_limit(runner: CliRunner) -> None:
-    """I2: source_col.get() must use limit= to avoid OOM on large collections.
-
-    Without a limit, get() on a large collection loads all docs into memory
-    at once.  The migration must paginate with limit=5000.
-    """
-    small_col = _make_source_col("knowledge__small", 3)
-    source_db = _make_source_db([small_col])
-    dest_knowledge = _make_dest_db()
-    dest_code = _make_dest_db()
-    dest_docs = _make_dest_db()
-    dest_rdr = _make_dest_db()
-
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db",
-               side_effect=lambda key: {
-                   "code_path": dest_code, "docs_path": dest_docs,
-                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
-               }[key]):
-        result = runner.invoke(main, ["migrate", "t3"])
-
-    assert result.exit_code == 0, result.output
-    # get() must have been called with a limit= to avoid unbounded fetches
-    call_kwargs = small_col.get.call_args.kwargs
-    assert "limit" in call_kwargs, "source_col.get() must pass limit= (pagination guard)"
-    assert call_kwargs["limit"] == 5000
+    admin = MagicMock()
+    admin.create_database.side_effect = ChromaError("Database [nexus_code] already exists")
+    # Should not raise
+    result = ensure_databases(admin, tenant="my-tenant", base="nexus")
+    assert all(v is False for v in result.values())
 
 
-# ── C5: upsert must be per-page, not accumulated ──────────────────────────────
+def test_ensure_databases_reraises_other_chroma_errors() -> None:
+    """ensure_databases re-raises ChromaError that is NOT an already-exists message."""
+    from chromadb.errors import ChromaError
+    from nexus.commands.migrate import ensure_databases
+
+    admin = MagicMock()
+    admin.create_database.side_effect = ChromaError("Permission denied.")
+    with pytest.raises(ChromaError, match="Permission denied"):
+        ensure_databases(admin, tenant="my-tenant", base="nexus")
 
 
-def _make_paginated_source_col(name: str, n_pages: int, page_size: int = 5000) -> MagicMock:
-    """Source collection that returns `n_pages` full pages then an empty page."""
-    def _page(offset: int, limit: int, **_kwargs) -> dict:
-        start = offset
-        end = min(start + limit, n_pages * page_size)
-        ids = [f"{name}_id_{i}" for i in range(start, end)]
-        return {
-            "ids": ids,
-            "documents": [f"doc {i}" for i in range(start, end)],
-            "embeddings": [[float(i)] for i in range(start, end)],
-            "metadatas": [{"k": str(i)} for i in range(start, end)],
-        }
+# ── P14: pagination ───────────────────────────────────────────────────────────
+
+def test_migrate_paginates_large_collections() -> None:
+    """Collections with more than _PAGE_SIZE docs are fetched in multiple pages."""
+    from nexus.commands.migrate import migrate_t3_collections, _PAGE_SIZE
+
+    total_docs = _PAGE_SIZE + 500  # one full page + partial page
 
     col = MagicMock()
-    col.name = name
-    col.get.side_effect = lambda include, limit, offset: _page(offset, limit)
-    col.count.return_value = n_pages * page_size
-    return col
+    col.name = "knowledge__big"
+    col.count.return_value = total_docs
 
-
-def test_migrate_t3_upserts_per_page_not_accumulated(runner: CliRunner) -> None:
-    """C5: migrate_t3_cmd calls dest_col.upsert() once per page, not once for all pages."""
-    # 2 full pages of 5000 + partial final page
-    source_col = _make_paginated_source_col("code__repo", n_pages=2, page_size=5000)
-    # Adjust: last page has fewer items to signal end
-    page_size = 5000
-    calls: list[dict] = []
-
-    def _page(include, limit, offset):
-        start = offset
-        if start >= 2 * page_size:
-            return {"ids": [], "documents": [], "embeddings": [], "metadatas": []}
-        end = min(start + limit, 2 * page_size + 3)  # partial third "page" won't exist
-        end = min(start + limit, 2 * page_size)
-        ids = [f"id_{i}" for i in range(start, end)]
-        return {
-            "ids": ids,
-            "documents": [f"d{i}" for i in range(start, end)],
-            "embeddings": [[float(i)] for i in range(start, end)],
-            "metadatas": [{"k": str(i)} for i in range(start, end)],
-        }
-
-    source_col = MagicMock()
-    source_col.name = "code__repo"
-    source_col.get.side_effect = lambda include, limit, offset: _page(include, limit, offset)
-    source_col.count.return_value = 2 * page_size
-
-    source_db = MagicMock()
-    source_db.list_collections.return_value = [{"name": "code__repo"}]
-    source_db.get_collection_raw.return_value = source_col
-
-    dest_col = MagicMock()
-    dest_col.count.return_value = 0
-    dest_db = MagicMock()
-    dest_db.get_or_create_collection.return_value = dest_col
-
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", return_value=dest_db):
-        result = runner.invoke(main, ["migrate", "t3"])
-
-    assert result.exit_code == 0, result.output
-    # Each page must be upserted immediately — 2 separate upsert calls
-    assert dest_col.upsert.call_count == 2, (
-        f"Expected 2 per-page upserts, got {dest_col.upsert.call_count}"
-    )
-
-
-# ── I7: _open_source_db and _open_dest_db must resolve paths ──────────────────
-
-
-def test_open_source_db_resolves_dotdot_in_path() -> None:
-    """I7: _open_source_db normalises '..' path components via Path.resolve()."""
-    from nexus.commands.migrate import _open_source_db
-
-    dotdot_path = "/tmp/nexus_migrate_test/a/../legacy_store"
-
-    with patch("nexus.config.load_config",
-               return_value={"chromadb": {"path": dotdot_path}}), \
-         patch("chromadb.PersistentClient") as mock_pc, \
-         patch("chromadb.utils.embedding_functions.DefaultEmbeddingFunction"):
-        try:
-            _open_source_db()
-        except Exception:
-            pass
-
-    assert mock_pc.called, "PersistentClient was never called"
-    actual = mock_pc.call_args.kwargs.get("path", mock_pc.call_args.args[0] if mock_pc.call_args.args else "")
-    assert ".." not in actual, f"Path not resolved — '..' still present: {actual!r}"
-
-
-def test_open_dest_db_resolves_dotdot_in_path() -> None:
-    """I7: _open_dest_db normalises '..' path components via Path.resolve()."""
-    from nexus.commands.migrate import _open_dest_db
-
-    dotdot_path = "/tmp/nexus_migrate_test/a/../dest_store"
-
-    with patch("nexus.config.load_config",
-               return_value={"chromadb": {"code_path": dotdot_path}}), \
-         patch("chromadb.PersistentClient") as mock_pc, \
-         patch("chromadb.utils.embedding_functions.DefaultEmbeddingFunction"):
-        try:
-            _open_dest_db("code_path")
-        except Exception:
-            pass
-
-    assert mock_pc.called, "PersistentClient was never called"
-    actual = mock_pc.call_args.kwargs.get("path", mock_pc.call_args.args[0] if mock_pc.call_args.args else "")
-    assert ".." not in actual, f"Path not resolved — '..' still present: {actual!r}"
-
-
-def test_migrate_t3_empty_source_exits_cleanly(runner: CliRunner) -> None:
-    """Empty source store exits 0 with informative message; no dest stores are opened."""
-    source_db = MagicMock()
-    source_db.list_collections.return_value = []
-    mock_open_dest = MagicMock()
-
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", mock_open_dest):
-        result = runner.invoke(main, ["migrate", "t3"])
-
-    assert result.exit_code == 0, result.output
-    assert "empty" in result.output.lower() or "nothing" in result.output.lower()
-    mock_open_dest.assert_not_called()
-
-
-# ── S2: _PREFIX_TO_STORE in migrate.py must be a tuple (not dict) ─────────────
-
-
-def test_migrate_prefix_to_store_is_tuple() -> None:
-    """S2: _PREFIX_TO_STORE in migrate.py must be tuple[tuple[str,str],...] for
-    type consistency with collection.py — both consumers of STORE_PREFIX_MAP."""
-    from nexus.commands.migrate import _PREFIX_TO_STORE
-
-    assert isinstance(_PREFIX_TO_STORE, tuple), (
-        f"_PREFIX_TO_STORE must be tuple, got {type(_PREFIX_TO_STORE).__name__}; "
-        "both collection.py and migrate.py should use the same type"
-    )
-    for item in _PREFIX_TO_STORE:
-        assert isinstance(item, tuple) and len(item) == 2, (
-            f"each entry must be a (prefix, store) tuple, got {item!r}"
-        )
-
-
-# ── S3: upsert failure during migration must propagate, not be silently swallowed
-
-
-def test_migrate_t3_upsert_failure_propagates_exception(
-    runner: CliRunner,
-) -> None:
-    """S3: if dest_col.upsert() raises during migration, the exception must
-    propagate (non-zero exit) — partial migration is detectable on retry."""
-    source_col = _make_source_col("knowledge__test", 2)
-    source_col.get.return_value = {
-        "ids": ["a", "b"],
-        "documents": ["doc a", "doc b"],
-        "embeddings": [[0.1], [0.2]],
-        "metadatas": [{}, {}],
+    first_page = {
+        "ids": [f"id-{i}" for i in range(_PAGE_SIZE)],
+        "documents": ["doc"] * _PAGE_SIZE,
+        "embeddings": [[0.1]] * _PAGE_SIZE,
+        "metadatas": [{}] * _PAGE_SIZE,
     }
-    source_db = MagicMock()
-    source_db.list_collections.return_value = [{"name": "knowledge__test"}]
-    source_db.get_collection_raw.return_value = source_col
+    second_page = {
+        "ids": [f"id-{_PAGE_SIZE + i}" for i in range(500)],
+        "documents": ["doc"] * 500,
+        "embeddings": [[0.1]] * 500,
+        "metadatas": [{}] * 500,
+    }
+    col.get.side_effect = [first_page, second_page]
 
+    source = MagicMock()
+    source.list_collections.return_value = [col]
+    source.get_collection.return_value = col
+
+    dest = MagicMock()
+    dest.collection_info.side_effect = KeyError("not found")
     dest_col = MagicMock()
-    dest_col.count.return_value = 0
-    dest_col.upsert.side_effect = RuntimeError("disk full")
-    dest_db = MagicMock()
-    dest_db.get_or_create_collection.return_value = dest_col
+    dest.get_or_create_collection.return_value = dest_col
 
-    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
-         patch("nexus.commands.migrate._open_dest_db", return_value=dest_db):
+    result = migrate_t3_collections(source, dest)
+
+    # get() called twice: first full page then remainder
+    assert col.get.call_count == 2
+    first_call, second_call = col.get.call_args_list
+    assert first_call.kwargs["limit"] == _PAGE_SIZE
+    assert first_call.kwargs["offset"] == 0
+    assert second_call.kwargs["limit"] == 500
+    assert second_call.kwargs["offset"] == _PAGE_SIZE
+
+    # upsert called twice (once per page)
+    assert dest_col.upsert.call_count == 2
+    assert result["knowledge__big"] == total_docs
+
+
+# ── P15: per-collection exception handling ────────────────────────────────────
+
+def test_migrate_continues_after_per_collection_failure() -> None:
+    """A failure on one collection is recorded as -1 and migration continues."""
+    good_col = _make_source_col("knowledge__good", ["doc"], [[0.1]])
+
+    bad_col = MagicMock()
+    bad_col.name = "knowledge__bad"
+    bad_col.count.return_value = 1
+
+    source = MagicMock()
+    source.list_collections.return_value = [bad_col, good_col]
+    source.get_collection.side_effect = lambda name: bad_col if name == "knowledge__bad" else good_col
+
+    dest = MagicMock()
+    dest.collection_info.side_effect = KeyError("not found")
+    dest_col_good = MagicMock()
+
+    def get_or_create(name):
+        if name == "knowledge__bad":
+            raise RuntimeError("upsert validation error")
+        return dest_col_good
+
+    dest.get_or_create_collection.side_effect = get_or_create
+
+    from nexus.commands.migrate import migrate_t3_collections
+
+    result = migrate_t3_collections(source, dest)
+
+    assert result["knowledge__bad"] == -1
+    assert result["knowledge__good"] == 1
+
+
+# ── P16: _cloud_admin_client Settings wiring ─────────────────────────────────
+
+def test_cloud_admin_client_calls_admin_client_with_cloud_settings() -> None:
+    """_cloud_admin_client passes all seven cloud-wired Settings fields to chromadb.AdminClient.
+
+    All seven fields are version-sensitive (verified against chromadb 0.6.x).
+    If any assertion fails after a chromadb upgrade, review the Settings wiring in
+    _cloud_admin_client() against the new chromadb.CloudClient internals.
+    """
+    import chromadb as real_chromadb
+    from nexus.commands.migrate import _cloud_admin_client
+
+    with patch.object(real_chromadb, "AdminClient", return_value=MagicMock()) as mock_admin:
+        _cloud_admin_client("my-api-key")
+
+    mock_admin.assert_called_once()
+    s = mock_admin.call_args[0][0]
+
+    assert s.chroma_api_impl == "chromadb.api.fastapi.FastAPI"
+    assert s.chroma_server_host == "api.trychroma.com"
+    assert s.chroma_server_http_port == 443
+    assert s.chroma_server_ssl_enabled is True
+    assert s.chroma_client_auth_provider == (
+        "chromadb.auth.token_authn.TokenAuthClientProvider"
+    )
+    assert s.chroma_client_auth_credentials == "my-api-key"
+    assert s.chroma_overwrite_singleton_tenant_database_access_from_auth is True
+
+
+# ── CLI smoke test ────────────────────────────────────────────────────────────
+
+def test_migrate_t3_missing_credentials_exits_cleanly() -> None:
+    """nx migrate t3 exits with error message when credentials are missing."""
+    runner = CliRunner()
+    with patch("nexus.commands.migrate.get_credential", return_value=None):
+        result = runner.invoke(main, ["migrate", "t3"])
+    assert result.exit_code != 0
+    assert "Error" in result.output
+
+
+def test_migrate_t3_ensure_databases_called_before_make_t3() -> None:
+    """ensure_databases is called before make_t3 — auto-create before connect."""
+    call_order: list[str] = []
+
+    def mock_ensure(*_args, **_kwargs):
+        call_order.append("ensure_databases")
+        return {}
+
+    def mock_make_t3():
+        call_order.append("make_t3")
+        return MagicMock()
+
+    runner = CliRunner()
+
+    source_mock = MagicMock()
+    source_mock.list_collections.return_value = []
+
+    import chromadb as real_chromadb
+
+    with (
+        patch("nexus.commands.migrate.get_credential", return_value="fake-val"),
+        patch.object(real_chromadb, "CloudClient", return_value=source_mock),
+        patch("nexus.commands.migrate._cloud_admin_client", return_value=MagicMock()),
+        patch("nexus.commands.migrate.ensure_databases", side_effect=mock_ensure),
+        # Patching nexus.commands.migrate.make_t3 because make_t3 is now imported at
+        # module level in migrate.py.  If the import location changes, update this target.
+        patch("nexus.commands.migrate.make_t3", side_effect=mock_make_t3),
+    ):
+        runner.invoke(main, ["migrate", "t3"])
+
+    assert "ensure_databases" in call_order, "ensure_databases was not called"
+    assert "make_t3" in call_order, "make_t3 was not called"
+    ensure_idx = call_order.index("ensure_databases")
+    make_t3_idx = call_order.index("make_t3")
+    assert ensure_idx < make_t3_idx, "ensure_databases must be called before make_t3"
+
+
+# ── P17: ensure_databases permission error is non-fatal ───────────────────────
+
+def test_migrate_t3_continues_when_ensure_databases_permission_denied() -> None:
+    """When ensure_databases raises (e.g. Chroma Cloud permission denied),
+    the command prints a warning and proceeds to make_t3()."""
+    import chromadb as real_chromadb
+
+    source_mock = MagicMock()
+    source_mock.list_collections.return_value = []
+
+    make_t3_called: list[bool] = []
+
+    def mock_make_t3():
+        make_t3_called.append(True)
+        return MagicMock()
+
+    runner = CliRunner()
+    with (
+        patch("nexus.commands.migrate.get_credential", return_value="fake-val"),
+        patch.object(real_chromadb, "CloudClient", return_value=source_mock),
+        patch("nexus.commands.migrate._cloud_admin_client", return_value=MagicMock()),
+        patch(
+            "nexus.commands.migrate.ensure_databases",
+            side_effect=Exception("Permission denied."),
+        ),
+        patch("nexus.commands.migrate.make_t3", side_effect=mock_make_t3),
+    ):
         result = runner.invoke(main, ["migrate", "t3"])
 
-    assert result.exit_code != 0, (
-        "upsert failure must propagate as non-zero exit code, not be swallowed"
-    )
+    # Warning printed, NOT a hard failure
+    assert "Warning" in result.output
+    assert "permission denied" in result.output.lower()
+    # Migration proceeds to make_t3
+    assert make_t3_called, "make_t3 was not called after permission denied"

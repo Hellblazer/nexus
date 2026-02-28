@@ -180,18 +180,17 @@ def mem_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_promote_cmd_no_credentials_raises(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
-    """promote fails with helpful message when voyage_api_key is absent."""
+    """promote fails with helpful message when T3 credentials are absent."""
     row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
-        with patch("nexus.commands.memory.t3_knowledge",
-                   side_effect=RuntimeError("voyage_api_key not configured")):
+        with patch("nexus.commands.memory.get_credential", return_value=""):
             result = runner.invoke(
                 main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
             )
 
     assert result.exit_code != 0
-    assert "voyage_api_key" in result.output.lower()
+    assert "not set" in result.output.lower() or "config init" in result.output.lower()
 
 
 def test_promote_cmd_entry_not_found_exits(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
@@ -206,18 +205,22 @@ def test_promote_cmd_entry_not_found_exits(runner: CliRunner, mem_home: Path, db
 
 
 def test_promote_cmd_calls_t3_put(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
-    """promote with valid id calls t3_knowledge().put and echoes doc_id."""
+    """promote with valid id + credentials calls t3.put and echoes doc_id."""
     row_id = db.put(project="proj", title="doc.md", content="the content", ttl=7, tags="ai")
 
     mock_t3 = MagicMock()
     mock_t3.put.return_value = "abc123"
+    # Wire up context manager so `with T3Database(...) as t3:` yields mock_t3.
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
-        with patch("nexus.commands.memory.t3_knowledge", return_value=mock_t3):
-            result = runner.invoke(
-                main,
-                ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
-            )
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                result = runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
+                )
 
     assert result.exit_code == 0, result.output
     mock_t3.put.assert_called_once()
@@ -234,14 +237,17 @@ def test_promote_cmd_permanent_entry_ttl_is_zero(runner: CliRunner, mem_home: Pa
     row_id = db.put(project="proj", title="perm.md", content="forever", ttl=None)
 
     mock_t3 = MagicMock()
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
     mock_t3.put.return_value = "def456"
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
-        with patch("nexus.commands.memory.t3_knowledge", return_value=mock_t3):
-            runner.invoke(
-                main,
-                ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
-            )
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
+                )
 
     call_kwargs = mock_t3.put.call_args.kwargs
     assert call_kwargs["ttl_days"] == 0
@@ -252,19 +258,61 @@ def test_promote_cmd_remove_deletes_t2_entry(runner: CliRunner, mem_home: Path, 
     row_id = db.put(project="proj", title="tmp.md", content="temp data", ttl=5)
 
     mock_t3 = MagicMock()
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
     mock_t3.put.return_value = "ghi789"
 
     _t2_cm = MagicMock(__enter__=MagicMock(return_value=db))
     with patch("nexus.commands.memory.T2Database", return_value=_t2_cm):
-        with patch("nexus.commands.memory.t3_knowledge", return_value=mock_t3):
-            result = runner.invoke(
-                main,
-                ["memory", "promote", str(row_id), "--collection", "knowledge__proj", "--remove"],
-            )
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                result = runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj", "--remove"],
+                )
 
     assert result.exit_code == 0, result.output
     assert db.get(project="proj", title="tmp.md") is None
     assert "removed" in result.output.lower()
+
+
+# ── nexus-mox: promote_cmd four-credential guard ──────────────────────────────
+
+def test_promote_cmd_missing_tenant_raises(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """promote fails when chroma_tenant is absent even if api keys are present."""
+    row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
+
+    def cred_side_effect(key: str) -> str:
+        # Return empty string only for chroma_tenant
+        return "" if key == "chroma_tenant" else "fake-value"
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", side_effect=cred_side_effect):
+            result = runner.invoke(
+                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
+            )
+
+    assert result.exit_code != 0
+    assert "chroma_tenant" in result.output
+    assert "not set" in result.output.lower()
+
+
+def test_promote_cmd_missing_database_raises(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """promote fails when chroma_database is absent even if api keys are present."""
+    row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
+
+    def cred_side_effect(key: str) -> str:
+        return "" if key == "chroma_database" else "fake-value"
+
+    with patch("nexus.commands.memory.T2Database", return_value=db):
+        with patch("nexus.commands.memory.get_credential", side_effect=cred_side_effect):
+            result = runner.invoke(
+                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
+            )
+
+    assert result.exit_code != 0
+    assert "chroma_database" in result.output
+    assert "not set" in result.output.lower()
 
 
 # ── nexus-huj: promote_cmd expires_at computed from T2 timestamp ───────────────
@@ -283,14 +331,17 @@ def test_promote_cmd_expires_at_derived_from_t2_timestamp(
     db.conn.commit()
 
     mock_t3 = MagicMock()
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
     mock_t3.put.return_value = "xyz000"
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
-        with patch("nexus.commands.memory.t3_knowledge", return_value=mock_t3):
-            result = runner.invoke(
-                main,
-                ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
-            )
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                result = runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
+                )
 
     assert result.exit_code == 0, result.output
     call_kwargs = mock_t3.put.call_args.kwargs
@@ -313,40 +364,20 @@ def test_promote_cmd_permanent_expires_at_is_empty(
     row_id = db.put(project="proj", title="perm2.md", content="forever", ttl=None)
 
     mock_t3 = MagicMock()
+    mock_t3.__enter__ = MagicMock(return_value=mock_t3)
+    mock_t3.__exit__ = MagicMock(return_value=False)
     mock_t3.put.return_value = "perm-id"
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
-        with patch("nexus.commands.memory.t3_knowledge", return_value=mock_t3):
-            runner.invoke(
-                main,
-                ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
-            )
+        with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
+            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+                runner.invoke(
+                    main,
+                    ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
+                )
 
     call_kwargs = mock_t3.put.call_args.kwargs
     assert call_kwargs.get("expires_at", "MISSING") == "", "permanent entry must have expires_at=''"
-
-
-# ── nexus-pjsc.6: promote_cmd routes to t3_knowledge() ───────────────────────
-
-def test_promote_cmd_routes_to_knowledge_store(
-    runner: CliRunner, mem_home: Path, db: T2Database
-) -> None:
-    """P2: promote_cmd uses t3_knowledge() not T3Database constructor directly."""
-    row_id = db.put(project="proj", title="doc.md", content="the content", ttl=7)
-
-    mock_t3 = MagicMock()
-    mock_t3.put.return_value = "promoted-id"
-
-    with patch("nexus.commands.memory.T2Database", return_value=db):
-        with patch("nexus.commands.memory.t3_knowledge", return_value=mock_t3):
-            result = runner.invoke(
-                main,
-                ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
-            )
-
-    assert result.exit_code == 0, result.output
-    mock_t3.put.assert_called_once()
-    assert "promoted-id" in result.output
 
 
 # ── nexus-28b: t2._read_session_id delegates to session.read_session_id ──────

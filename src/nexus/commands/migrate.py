@@ -1,162 +1,249 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nx migrate — data migration commands."""
+"""nx migrate — migration utilities."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import click
+import structlog
 
-from nexus.db.t3 import T3Database
-from nexus.db.t3_stores import STORE_PREFIX_MAP
+from nexus.config import get_credential
+from nexus.db import make_t3
+from nexus.db.t3 import _STORE_TYPES
 
-
-# Same type as collection.py — tuple[tuple[str, str], ...] for consistency.
-# knowledge__ intentionally absent — _dest_store_for falls back to "knowledge".
-_PREFIX_TO_STORE: tuple[tuple[str, str], ...] = STORE_PREFIX_MAP
-
-
-def _dest_store_for(col_name: str) -> str:
-    """Return the destination store key for a collection name."""
-    for prefix, store in _PREFIX_TO_STORE:
-        if col_name.startswith(prefix):
-            return store
-    return "knowledge"
-
-
-def _open_source_db() -> T3Database:
-    """Open the source T3 store for migration.
-
-    Requires ``chromadb.path`` to be set in config (legacy single-store path).
-    Post-migration there is no legacy path, so this raises ``ClickException``
-    rather than silently falling back to CloudClient.
-    """
-    from pathlib import Path as _Path
-    from nexus.config import load_config
-    cfg = load_config()
-    legacy_path = cfg.get("chromadb", {}).get("path", "")
-    if not legacy_path:
-        raise click.ClickException(
-            "chromadb.path not configured — nothing to migrate "
-            "(set chromadb.path to the legacy single-store directory)"
-        )
+if TYPE_CHECKING:
     import chromadb
-    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-    client = chromadb.PersistentClient(path=str(_Path(legacy_path).expanduser().resolve()))
-    return T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
+
+_log = structlog.get_logger(__name__)
+
+# Maximum documents fetched per page during migration.  Keeps memory usage
+# bounded even for very large collections.
+_PAGE_SIZE = 5_000
 
 
-def _open_dest_db(path_key: str) -> T3Database:
-    """Open a destination store for migration (no voyage_api_key required).
+def _cloud_admin_client(api_key: str) -> "chromadb.AdminClient":
+    """Return a ChromaDB AdminClient pointed at Chroma Cloud.
 
-    Embeddings are copied verbatim — no re-embedding occurs.
+    Mirrors the same Settings wiring used internally by ``chromadb.CloudClient``
+    (verified against chromadb 0.6.x; review if upgrading chromadb major version).
     """
-    from pathlib import Path as _Path
     import chromadb
-    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-    from nexus.config import load_config
-    cfg = load_config()
-    raw_path = cfg.get("chromadb", {}).get(path_key, "")
-    if not raw_path:
-        raise click.ClickException(
-            f"chromadb.{path_key} not configured — run: nx config init"
-        )
-    path = str(_Path(raw_path).expanduser().resolve())
-    client = chromadb.PersistentClient(path=path)
-    return T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
+    from chromadb import Settings
+    from chromadb.auth.token_authn import TokenTransportHeader
+
+    settings = Settings()
+    settings.chroma_api_impl = "chromadb.api.fastapi.FastAPI"
+    settings.chroma_server_host = "api.trychroma.com"
+    settings.chroma_server_http_port = 443
+    settings.chroma_server_ssl_enabled = True
+    settings.chroma_client_auth_provider = (
+        "chromadb.auth.token_authn.TokenAuthClientProvider"
+    )
+    settings.chroma_client_auth_credentials = api_key
+    settings.chroma_auth_token_transport_header = TokenTransportHeader.X_CHROMA_TOKEN
+    settings.chroma_overwrite_singleton_tenant_database_access_from_auth = True
+    return chromadb.AdminClient(settings)
 
 
-@click.group()
+def ensure_databases(
+    admin: "chromadb.AdminClient",
+    *,
+    tenant: str,
+    base: str,
+) -> dict[str, bool]:
+    """Create the four T3 databases under *tenant* if they do not already exist.
+
+    Returns a mapping of ``{db_name: created}`` where ``created=True`` means the
+    database was freshly created and ``False`` means it already existed.
+
+    ``UniqueConstraintError`` (HTTP 409) is silently swallowed — it means the
+    database already exists, which is the desired end state.
+    """
+    from chromadb.errors import ChromaError, UniqueConstraintError
+
+    result: dict[str, bool] = {}
+    for t in _STORE_TYPES:
+        db_name = f"{base}_{t}"
+        try:
+            admin.create_database(db_name, tenant=tenant)
+            result[db_name] = True
+        except UniqueConstraintError:
+            result[db_name] = False
+        except ChromaError as exc:
+            # Chroma Cloud may return a plain ChromaError (not UniqueConstraintError)
+            # with "already exists" in the message — treat as idempotent.
+            if "already exists" in str(exc).lower():
+                result[db_name] = False
+            else:
+                raise
+    return result
+
+
+def migrate_t3_collections(
+    source,
+    dest,
+    *,
+    verbose: bool = False,
+) -> dict[str, int]:
+    """Copy collections from *source* (old single-database CloudClient) to *dest*
+    (new four-store T3Database).
+
+    Returns a mapping of ``{collection_name: documents_copied}``.  Entries with
+    a value of ``0`` were skipped because the destination already contained the
+    same number of documents as the source (idempotency).  Entries with a value
+    of ``-1`` indicate a per-collection failure (logged; migration continues).
+
+    The migration is:
+    - **Non-destructive**: the source store is never modified.
+    - **Idempotent**: if a collection already exists in the destination with the
+      same document count as the source, it is silently skipped.
+    - **Verbatim**: embeddings from the source are copied directly to the
+      destination without re-embedding (no Voyage AI calls needed).
+    - **Paginated**: fetches at most ``_PAGE_SIZE`` documents per request to
+      keep memory usage bounded on large collections.
+    """
+    result: dict[str, int] = {}
+    for col_or_name in source.list_collections():
+        name = col_or_name if isinstance(col_or_name, str) else col_or_name.name
+        src_col = source.get_collection(name)
+        src_count = src_col.count()
+
+        # Idempotency check — skip when dest already has the right count.
+        try:
+            info = dest.collection_info(name)
+            if info["count"] == src_count:
+                result[name] = 0
+                if verbose:
+                    click.echo(f"  skipping {name} ({src_count} docs already in dest)")
+                continue
+        except KeyError:
+            pass  # collection not found in dest; proceed to copy
+
+        try:
+            dest_col = dest.get_or_create_collection(name)
+            page_offset = 0
+            copied = 0
+            while page_offset < src_count:
+                page_limit = min(_PAGE_SIZE, src_count - page_offset)
+                data = src_col.get(
+                    include=["documents", "metadatas", "embeddings"],
+                    limit=page_limit,
+                    offset=page_offset,
+                )
+                if not data["ids"]:
+                    break
+                dest_col.upsert(
+                    ids=data["ids"],
+                    documents=data["documents"],
+                    embeddings=data["embeddings"],
+                    metadatas=data["metadatas"],
+                )
+                copied += len(data["ids"])
+                page_offset += len(data["ids"])
+                if verbose and src_count > _PAGE_SIZE:
+                    click.echo(f"  {name}: {copied}/{src_count} docs…")
+            result[name] = copied
+            if verbose:
+                click.echo(f"  copied {name}: {copied} docs")
+        except Exception as exc:
+            _log.warning("migrate_collection_failed", collection=name, error=str(exc))
+            if verbose:
+                click.echo(f"  FAILED {name}: see log for details")
+            result[name] = -1
+
+    return result
+
+
+@click.group("migrate")
 def migrate() -> None:
-    """Data migration utilities."""
+    """Migration utilities for Nexus data stores."""
 
 
 @migrate.command("t3")
-def migrate_t3_cmd() -> None:
-    """Migrate T3 data from legacy single store to four-store layout.
+@click.option("--verbose", "-v", is_flag=True, help="Print per-collection progress.")
+def migrate_t3_cmd(verbose: bool) -> None:
+    """Migrate T3 collections from the old single-database store to the new
+    four-store layout.
 
-    Opens the source store (legacy chromadb.path), then copies each collection
-    to the appropriate destination store based on prefix: code__* → code store,
-    docs__* → docs store, rdr__* → rdr store, everything else → knowledge store.
+    Reads all collections from the original ``chroma_database`` (e.g. ``nexus``)
+    and copies them to the four typed databases (``nexus_code``, ``nexus_docs``,
+    ``nexus_rdr``, ``nexus_knowledge``).  The operation is idempotent — already-
+    migrated collections are skipped.
 
-    Migration is idempotent: if destination count equals source count, the
-    collection is skipped.  Embeddings are copied verbatim — no re-embedding.
-    Note: idempotency is count-based — if destination has a different count
-    than source (partial migration), the full collection is re-upserted.
+    **Prerequisites:**
 
-    Does NOT delete the source store.  Verify the migration and then remove
-    the source manually.
+    \\b
+    1. Ensure the original single database (nexus) still exists as the source.
+    2. Run this command — it will auto-create the four typed databases and copy
+       your collections.
     """
-    _dest_path_keys = {
-        "code": "code_path",
-        "docs": "docs_path",
-        "rdr": "rdr_path",
-        "knowledge": "knowledge_path",
-    }
+    import chromadb
 
-    source_db = _open_source_db()
-    dest_stores: dict[str, T3Database] = {}  # opened lazily as needed
+    tenant = get_credential("chroma_tenant")
+    database = get_credential("chroma_database")
+    api_key = get_credential("chroma_api_key")
 
-    # Per-type counters for the migration report
-    counts: dict[str, dict[str, int]] = {
-        k: {"migrated": 0, "skipped": 0, "total": 0}
-        for k in _dest_path_keys
-    }
+    if not all([tenant, database, api_key]):
+        missing = [k for k, v in [
+            ("chroma_tenant", tenant),
+            ("chroma_database", database),
+            ("chroma_api_key", api_key),
+        ] if not v]
+        raise click.ClickException(
+            f"{', '.join(missing)} not set — run: nx config init"
+        )
 
-    collections = source_db.list_collections()
-    if not collections:
-        click.echo("Source store is empty — nothing to migrate.")
-        return
+    # Source: the OLD single ChromaDB Cloud database (unsuffixed name).
+    try:
+        source = chromadb.CloudClient(
+            tenant=tenant, database=database, api_key=api_key
+        )
+    except Exception as exc:
+        _log.debug("source_connect_failed", database=database, error=str(exc))
+        raise click.ClickException(
+            f"Cannot connect to source database {database!r}: connection failed"
+        ) from exc
 
-    for col_info in collections:
-        col_name = col_info["name"]
-        store_key = _dest_store_for(col_name)
-        if store_key not in dest_stores:
-            dest_stores[store_key] = _open_dest_db(_dest_path_keys[store_key])
-        dest_db = dest_stores[store_key]
-        counts[store_key]["total"] += 1
+    # Auto-create the four destination databases (idempotent).
+    # Must happen BEFORE make_t3() which connects to those databases.
+    click.echo(f"Ensuring four T3 databases exist for base {database!r}…")
+    admin = _cloud_admin_client(api_key)
+    try:
+        created = ensure_databases(admin, tenant=tenant, base=database)
+        for db_name, was_created in created.items():
+            status = "created" if was_created else "already exists"
+            click.echo(f"  {db_name}: {status}")
+    except Exception as exc:
+        # Chroma Cloud free-tier and some plans reject AdminClient.create_database
+        # with Permission denied (HTTP 403).  If the databases already exist in the
+        # dashboard this is harmless — make_t3() will succeed.  If they don't exist
+        # make_t3() will fail with a clear actionable message.
+        _log.debug("ensure_databases_failed", error=str(exc))
+        click.echo(
+            "  Warning: could not auto-create databases (permission denied or plan restriction).\n"
+            "  If you have already created the four databases in your ChromaDB Cloud dashboard,\n"
+            "  migration will continue.  Otherwise create these databases first:\n"
+            + "\n".join(f"    - {database}_{t}" for t in _STORE_TYPES)
+        )
 
-        source_col = source_db.get_collection_raw(col_name)
-        dest_col = dest_db.get_or_create_collection(col_name)
+    # Destination: the new four-store T3Database (creates 4 suffixed CloudClients).
+    try:
+        dest = make_t3()
+    except RuntimeError as exc:
+        # RuntimeError from T3Database.__init__ is explicitly sanitized (no credential
+        # text in the message).  Review this handler if make_t3() internals change.
+        raise click.ClickException(str(exc)) from exc
 
-        src_count = source_col.count()
-        dst_count = dest_col.count()
+    click.echo(f"\nMigrating collections from {database!r} to four-store layout…")
+    result = migrate_t3_collections(source, dest, verbose=verbose)
 
-        # Idempotency: skip if counts match and collection is non-empty.
-        # Note: count-based — re-upserts if counts differ (partial migration).
-        if src_count == dst_count and src_count > 0:
-            counts[store_key]["skipped"] += 1
-            click.echo(f"  {col_name}: skipped ({src_count} docs already present)")
-            continue
-
-        # Paginate and upsert per page to bound peak memory usage.
-        # Each page is upserted immediately — no full-collection accumulation.
-        _PAGE_SIZE = 5000
-        total_ids = 0
-        offset = 0
-        while True:
-            page = source_col.get(
-                include=["documents", "embeddings", "metadatas", "ids"],
-                limit=_PAGE_SIZE,
-                offset=offset,
-            )
-            if not page["ids"]:
-                break
-            dest_col.upsert(
-                ids=page["ids"],
-                documents=page["documents"],
-                embeddings=page["embeddings"],
-                metadatas=page["metadatas"],
-            )
-            total_ids += len(page["ids"])
-            offset += len(page["ids"])
-            if len(page["ids"]) < _PAGE_SIZE:
-                break
-        counts[store_key]["migrated"] += 1
-        click.echo(f"  {col_name} → {store_key}: {total_ids} docs")
-
-    click.echo("\nMigration complete:")
-    for store_key, c in counts.items():
-        if c["total"]:
-            click.echo(
-                f"  {store_key}: {c['migrated']} migrated, "
-                f"{c['skipped']} skipped ({c['total']} collections)"
-            )
-    click.echo("Source store NOT deleted — verify and remove manually.")
+    copied_total = sum(v for v in result.values() if v > 0)
+    skipped = sum(1 for v in result.values() if v == 0)
+    failed = sum(1 for v in result.values() if v < 0)
+    cols = len(result)
+    click.echo(
+        f"Done: {cols} collection(s) processed, "
+        f"{copied_total} doc(s) copied, "
+        f"{skipped} collection(s) skipped (already up-to-date)"
+        + (f", {failed} collection(s) failed" if failed else "") + "."
+    )

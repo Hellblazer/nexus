@@ -16,6 +16,7 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 from nexus.corpus import index_model_for_collection
+from nexus.db import make_t3
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor
@@ -32,6 +33,11 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: f.read(65536), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def _has_credentials() -> bool:
+    from nexus.config import get_credential
+    return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
 
 
 _CCE_TOKEN_LIMIT = 32_000
@@ -141,7 +147,7 @@ def _index_document(
     file_path: Path,
     corpus: str,
     chunk_fn: ChunkFn,
-    t3: Any,
+    t3: Any = None,
     *,
     collection_name: str | None = None,
 ) -> int:
@@ -155,15 +161,13 @@ def _index_document(
     directly, bypassing the default ``docs__{corpus}`` derivation.  This is
     used for RDR collections (``rdr__<repo>-<hash8>``).
     """
-    from nexus.config import get_credential
-    voyage_key = get_credential("voyage_api_key")
-    if not voyage_key:
+    if not _has_credentials():
         return 0
 
     content_hash = _sha256(file_path)
     if collection_name is None:
         collection_name = f"docs__{corpus}"
-    db = t3
+    db = t3 if t3 is not None else make_t3()
     col = db.get_or_create_collection(collection_name)
 
     target_model = index_model_for_collection(collection_name)
@@ -189,18 +193,10 @@ def _index_document(
     documents = [p[1] for p in prepared]
     metadatas = [p[2] for p in prepared]
 
-    # Augment with T3 schema fields required by frecency and expire consumers.
-    # setdefault preserves values set by the chunk function (e.g. store_type, tags).
-    for m in metadatas:
-        m.setdefault("frecency_score", 0.0)
-        m.setdefault("ttl_days", 0)
-        m.setdefault("expires_at", "")
-        m.setdefault("session_id", "")
-        m.setdefault("source_agent", "")
-        m.setdefault("category", "")
-        m.setdefault("title", "")
-        m.setdefault("tags", "")
-
+    from nexus.config import get_credential
+    voyage_key = get_credential("voyage_api_key")
+    if not voyage_key:
+        raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
     embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
     if actual_model != target_model:
         for m in metadatas:
@@ -304,7 +300,7 @@ def _markdown_chunks(
     return prepared
 
 
-def index_pdf(pdf_path: Path, corpus: str, t3: Any) -> int:
+def index_pdf(pdf_path: Path, corpus: str, t3: Any = None) -> int:
     """Index *pdf_path* into the T3 ``docs__{corpus}`` collection.
 
     Returns the number of chunks indexed, or 0 if skipped (no credentials or
@@ -316,7 +312,7 @@ def index_pdf(pdf_path: Path, corpus: str, t3: Any) -> int:
 def index_markdown(
     md_path: Path,
     corpus: str,
-    t3: Any,
+    t3: Any = None,
     *,
     collection_name: str | None = None,
 ) -> int:
@@ -334,7 +330,7 @@ def index_markdown(
 def batch_index_pdfs(
     paths: list[Path],
     corpus: str,
-    t3: Any,
+    t3: Any = None,
 ) -> dict[str, str]:
     """Index multiple PDFs sequentially, returning per-file status.
 
@@ -355,7 +351,7 @@ def batch_index_pdfs(
 def batch_index_markdowns(
     paths: list[Path],
     corpus: str,
-    t3: Any,
+    t3: Any = None,
     *,
     collection_name: str | None = None,
 ) -> dict[str, str]:
