@@ -100,7 +100,8 @@ def test_store_put_permanent_metadata(mock_chromadb: tuple) -> None:
     assert meta["ttl_days"] == 0       # permanent
     assert meta["expires_at"] == ""    # permanent sentinel
     assert meta["store_type"] == "knowledge"
-    assert meta["embedding_model"] == "voyage-4"  # knowledge__ always uses voyage-4
+    # No voyage_api_key → CCE path skipped → voyage-4 EF used → embedding_model="voyage-4"
+    assert meta["embedding_model"] == "voyage-4"
 
 
 def test_store_put_with_ttl_metadata(mock_chromadb: tuple) -> None:
@@ -261,6 +262,77 @@ def test_search_skips_missing_collection_without_creating(mock_chromadb: tuple) 
 
     assert results == []
     mock_client.get_or_create_collection.assert_not_called()
+
+
+def test_search_cce_collection_uses_query_embeddings(mock_chromadb: tuple) -> None:
+    """search() uses query_embeddings (not query_texts) for CCE collections.
+
+    CCE collections (docs__, knowledge__, rdr__) are indexed with voyage-context-3
+    via the /v1/contextualizedembeddings endpoint.  voyage-4 and voyage-context-3
+    are incompatible vector spaces; querying with voyage-4 produces cosine similarity
+    ≈ 0.05 (random noise).  The fix bypasses the ChromaDB EF entirely and calls
+    voyageai.Client.contextualized_embed() for query embedding.
+    """
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.count.return_value = 3
+    mock_col.query.return_value = {
+        "ids": [["id-cce"]],
+        "documents": [["cce content"]],
+        "metadatas": [[{"title": "rdr-004"}]],
+        "distances": [[0.12]],
+    }
+    mock_client.get_collection.return_value = mock_col
+
+    with patch("nexus.db.t3.voyageai") as mock_vo_mod:
+        mock_vo_inst = MagicMock()
+        mock_vo_mod.Client.return_value = mock_vo_inst
+        # contextualized_embed returns a result whose .results[0].embeddings[0]
+        # is the query vector — MagicMock auto-returns a Mock for chained access.
+        mock_vo_inst.contextualized_embed.return_value = MagicMock()
+
+        db = T3Database(
+            tenant="t", database="d", api_key="k", voyage_api_key="vkey"
+        )
+        results = db.search("four store t3 architecture", ["rdr__nexus-abc123"], n_results=5)
+
+    # voyageai.Client instantiated with the voyage_api_key
+    mock_vo_mod.Client.assert_called_once_with(api_key="vkey")
+    # contextualized_embed called with the query wrapped in a list-of-list
+    mock_vo_inst.contextualized_embed.assert_called_once_with(
+        inputs=[["four store t3 architecture"]],
+        model="voyage-context-3",
+        input_type="query",
+    )
+    # ChromaDB queried with query_embeddings (not query_texts)
+    call_kwargs = mock_col.query.call_args.kwargs
+    assert "query_embeddings" in call_kwargs, "CCE search must use query_embeddings, not query_texts"
+    assert "query_texts" not in call_kwargs
+
+    assert len(results) == 1
+    assert results[0]["id"] == "id-cce"
+
+
+def test_search_cce_skipped_without_voyage_api_key(mock_chromadb: tuple) -> None:
+    """search() falls back to query_texts when voyage_api_key is not set (test/offline mode)."""
+    _, mock_client = mock_chromadb
+    mock_col = MagicMock()
+    mock_col.count.return_value = 2
+    mock_col.query.return_value = {
+        "ids": [["id-1"]],
+        "documents": [["doc"]],
+        "metadatas": [[{}]],
+        "distances": [[0.2]],
+    }
+    mock_client.get_collection.return_value = mock_col
+
+    # No voyage_api_key → CCE path must not be taken
+    db = T3Database(tenant="t", database="d", api_key="k")
+    db.search("query", ["docs__manual"], n_results=5)
+
+    call_kwargs = mock_col.query.call_args.kwargs
+    assert "query_texts" in call_kwargs
+    assert "query_embeddings" not in call_kwargs
 
 
 # ── AC7: collection list ──────────────────────────────────────────────────────
@@ -565,8 +637,8 @@ def test_collection_metadata_returns_correct_fields(mock_chromadb: tuple) -> Non
 
     assert meta["name"] == "docs__corpus"
     assert meta["count"] == 17
-    assert meta["embedding_model"] == "voyage-4"
-    assert meta["index_model"] == "voyage-context-3"
+    assert meta["embedding_model"] == "voyage-context-3"  # CCE query model (docs__ is CCE)
+    assert meta["index_model"] == "voyage-context-3"  # docs__ indexed with CCE
 
 
 def test_collection_metadata_code_collection(mock_chromadb: tuple) -> None:

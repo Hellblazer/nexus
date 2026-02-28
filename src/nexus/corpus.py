@@ -30,11 +30,17 @@ def validate_collection_name(name: str) -> None:
 def embedding_model_for_collection(collection_name: str) -> str:
     """Return the Voyage AI model used at QUERY time for a T3 collection.
 
-    voyage-4 is the universal query model for all collection types.
-    Code collections are indexed with voyage-code-3 but queried with voyage-4 —
-    the semantic spaces are compatible enough for effective retrieval, and a single
-    query model simplifies cross-corpus search.
+    CCE collections (docs__, knowledge__, rdr__) must use voyage-context-3
+    at query time via contextualized_embed() — voyage-4 and voyage-context-3
+    are incompatible vector spaces (cosine similarity ≈ 0.05, i.e. random noise).
+
+    code__ collections are indexed with voyage-code-3 but queried with voyage-4 —
+    the semantic spaces are compatible enough for effective retrieval.
+
+    All other collections use voyage-4.
     """
+    if collection_name.startswith(("docs__", "knowledge__", "rdr__")):
+        return "voyage-context-3"
     return "voyage-4"
 
 
