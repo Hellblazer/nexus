@@ -56,22 +56,6 @@ def test_index_markdown_skips_without_credentials(sample_md, monkeypatch):
 
 # P14: voyage_api_key alone is sufficient — chroma_api_key is no longer required
 
-def test_has_credentials_true_with_only_voyage_key(monkeypatch):
-    """P14: _has_credentials() returns True when only voyage_api_key is set."""
-    from nexus.doc_indexer import _has_credentials
-    monkeypatch.setenv("VOYAGE_API_KEY", "vkey-test")
-    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    assert _has_credentials() is True
-
-
-def test_has_credentials_false_when_voyage_key_missing(monkeypatch):
-    """P14: _has_credentials() returns False when voyage_api_key is absent."""
-    from nexus.doc_indexer import _has_credentials
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.setenv("CHROMA_API_KEY", "ckey-test")  # chroma set but voyage missing
-    assert _has_credentials() is False
-
-
 def test_index_markdown_proceeds_with_only_voyage_key(sample_md, monkeypatch):
     """P14: index_markdown proceeds past credential check with only voyage_api_key set."""
     monkeypatch.setenv("VOYAGE_API_KEY", "vkey-test")

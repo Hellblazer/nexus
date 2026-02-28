@@ -25,6 +25,8 @@ _STORE_FACTORIES: dict[str, Callable[[], T3Database]] = {
 _TYPE_CHOICE = click.Choice(list(_STORE_FACTORIES))
 
 # Prefix → store key mapping used by _infer_store_type.
+# knowledge__ is intentionally absent: everything else falls back to "knowledge"
+# in _infer_store_type(), so an explicit entry would be redundant.
 _PREFIX_TO_STORE: tuple[tuple[str, str], ...] = (
     ("code__", "code"),
     ("docs__", "docs"),
@@ -90,8 +92,6 @@ def info_cmd(name: str, store_type: str | None) -> None:
 
     query_model = embedding_model_for_collection(name)
     idx_model   = index_model_for_collection(name)
-
-    info = db.collection_info(name)
 
     # Use get_collection (read-only) not get_or_create_collection (has side-effect).
     # Cap the fetch at 5000 docs — sufficient for last-indexed heuristic.

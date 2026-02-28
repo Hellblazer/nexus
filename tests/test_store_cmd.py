@@ -639,3 +639,23 @@ def test_store_expire_routes_to_knowledge_store(
     assert result.exit_code == 0
     mock_db.expire.assert_called_once()
     assert "5" in result.output
+
+
+# ── I1: store put rejects non-knowledge__ collections ─────────────────────────
+
+def test_store_put_rejects_non_knowledge_prefix(
+    runner: CliRunner, tmp_path
+) -> None:
+    """I1: store put rejects collections with code__/docs__/rdr__ prefix.
+
+    'nx store put' is exclusively a knowledge store command.  Silently writing
+    to the wrong store when the user passes --collection code__myrepo is a data
+    routing bug.  The command must reject non-knowledge__ prefixed names with a
+    clear error message.
+    """
+    src = tmp_path / "f.txt"
+    src.write_text("content")
+    result = runner.invoke(main, ["store", "put", str(src), "--collection", "code__myrepo"])
+    assert result.exit_code != 0
+    # Error message should mention the wrong prefix or direct the user correctly
+    assert "code__" in result.output or "knowledge" in result.output.lower()

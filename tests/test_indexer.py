@@ -915,9 +915,8 @@ def test_run_index_prune_deleted_files(tmp_path: Path) -> None:
     mock_docs_db = MagicMock()
     mock_docs_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.indexer.t3_code", return_value=mock_code_db), \
-         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
-        _prune_deleted_files("code__repo", "docs__repo", all_current)
+    _prune_deleted_files("code__repo", "docs__repo", all_current,
+                         db_code=mock_code_db, db_docs=mock_docs_db)
 
     # Should delete chunks for file_b.py from both collections
     delete_calls = mock_col.delete.call_args_list
@@ -953,9 +952,8 @@ def test_run_index_prune_misclassified(tmp_path: Path) -> None:
     mock_docs_db = MagicMock()
     mock_docs_db.get_or_create_collection.return_value = mock_docs_col
 
-    with patch("nexus.indexer.t3_code", return_value=mock_code_db), \
-         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
-        _prune_misclassified(repo, "code__repo", "docs__repo", code_files, prose_files, pdf_files)
+    _prune_misclassified(repo, "code__repo", "docs__repo", code_files, prose_files, pdf_files,
+                         db_code=mock_code_db, db_docs=mock_docs_db)
 
     # main.py chunk should be deleted from docs__repo
     mock_docs_col.delete.assert_called_once_with(ids=["stale-chunk-1"])
@@ -1231,8 +1229,8 @@ def test_run_index_frecency_only_uses_t3_code_local_and_t3_docs_local(tmp_path: 
     mock_t3_docs_local.assert_called_once()
 
 
-def test_prune_deleted_files_uses_internal_stores(tmp_path: Path) -> None:
-    """_prune_deleted_files should call t3_code() and t3_docs() internally (no db param)."""
+def test_prune_deleted_files_uses_db_handles(tmp_path: Path) -> None:
+    """_prune_deleted_files accepts db_code/db_docs kwargs; does not call t3_code/t3_docs."""
     from nexus.indexer import _prune_deleted_files
 
     mock_col = MagicMock()
@@ -1242,17 +1240,19 @@ def test_prune_deleted_files_uses_internal_stores(tmp_path: Path) -> None:
     mock_code_db.get_or_create_collection.return_value = mock_col
     mock_docs_db.get_or_create_collection.return_value = mock_col
 
-    # New signature: no db param — should call t3_code() / t3_docs() internally
-    with patch("nexus.indexer.t3_code", return_value=mock_code_db) as mock_t3_code, \
-         patch("nexus.indexer.t3_docs", return_value=mock_docs_db) as mock_t3_docs:
-        _prune_deleted_files("code__repo", "docs__repo", {"/repo/file.py"})
+    with patch("nexus.indexer.t3_code") as mock_t3_code, \
+         patch("nexus.indexer.t3_docs") as mock_t3_docs:
+        _prune_deleted_files(
+            "code__repo", "docs__repo", {"/repo/file.py"},
+            db_code=mock_code_db, db_docs=mock_docs_db,
+        )
 
-    mock_t3_code.assert_called_once()
-    mock_t3_docs.assert_called_once()
+    mock_t3_code.assert_not_called()
+    mock_t3_docs.assert_not_called()
 
 
-def test_prune_misclassified_uses_internal_stores(tmp_path: Path) -> None:
-    """_prune_misclassified should call t3_code() and t3_docs() internally (no db param)."""
+def test_prune_misclassified_uses_db_handles(tmp_path: Path) -> None:
+    """_prune_misclassified accepts db_code/db_docs kwargs; does not call t3_code/t3_docs."""
     from nexus.indexer import _prune_misclassified
 
     repo = tmp_path / "repo"
@@ -1264,13 +1264,15 @@ def test_prune_misclassified_uses_internal_stores(tmp_path: Path) -> None:
     mock_code_db.get_or_create_collection.return_value = mock_col
     mock_docs_db.get_or_create_collection.return_value = mock_col
 
-    # New signature: no db param
-    with patch("nexus.indexer.t3_code", return_value=mock_code_db) as mock_t3_code, \
-         patch("nexus.indexer.t3_docs", return_value=mock_docs_db) as mock_t3_docs:
-        _prune_misclassified(repo, "code__repo", "docs__repo", [], [], [])
+    with patch("nexus.indexer.t3_code") as mock_t3_code, \
+         patch("nexus.indexer.t3_docs") as mock_t3_docs:
+        _prune_misclassified(
+            repo, "code__repo", "docs__repo", [], [], [],
+            db_code=mock_code_db, db_docs=mock_docs_db,
+        )
 
-    mock_t3_code.assert_called_once()
-    mock_t3_docs.assert_called_once()
+    mock_t3_code.assert_not_called()
+    mock_t3_docs.assert_not_called()
 
 
 def test_discover_and_index_rdrs_uses_t3_rdr(tmp_path: Path) -> None:
@@ -1287,8 +1289,8 @@ def test_discover_and_index_rdrs_uses_t3_rdr(tmp_path: Path) -> None:
 
     with patch("nexus.indexer.t3_rdr", return_value=mock_rdr_db) as mock_t3_rdr, \
          patch("nexus.doc_indexer.batch_index_markdowns", return_value={"rdr-001.md": "indexed"}):
-        # New signature: (repo, rdr_abs_paths, voyage_key, now_iso) — no db
-        _discover_and_index_rdrs(repo, {rdr_dir}, "fake-key", "2026-01-01T00:00:00")
+        # New signature: (repo, rdr_abs_paths) — no voyage_key/now_iso/db
+        _discover_and_index_rdrs(repo, {rdr_dir})
 
     mock_t3_rdr.assert_called_once()
 
@@ -1352,9 +1354,10 @@ def test_prune_deleted_files_uses_bounded_col_get() -> None:
     mock_docs_db = MagicMock()
     mock_docs_db.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.indexer.t3_code", return_value=mock_code_db), \
-         patch("nexus.indexer.t3_docs", return_value=mock_docs_db):
-        _prune_deleted_files("code__repo", "docs__repo", {"/repo/file.py"})
+    _prune_deleted_files(
+        "code__repo", "docs__repo", {"/repo/file.py"},
+        db_code=mock_code_db, db_docs=mock_docs_db,
+    )
 
     for call in mock_col.get.call_args_list:
         call_kwargs = call.kwargs if call.kwargs else {}
@@ -1385,9 +1388,80 @@ def test_discover_and_index_rdrs_does_not_recurse_into_subdirectories(
 
     with patch("nexus.indexer.t3_rdr"), \
          patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
-        _discover_and_index_rdrs(repo, {rdr_dir}, "fake-key", "2026-01-01T00:00:00")
+        _discover_and_index_rdrs(repo, {rdr_dir})
 
     assert mock_batch.called, "batch_index_markdowns should be called for top-level RDR"
     indexed_paths = mock_batch.call_args[0][0]
     for p in indexed_paths:
         assert p.parent == rdr_dir, f"Subdir file should not be indexed: {p}"
+
+
+# ── C2/S6: _discover_and_index_rdrs vestigial parameters ─────────────────────
+
+def test_discover_and_index_rdrs_takes_two_positional_args(tmp_path: Path) -> None:
+    """C2/S6: _discover_and_index_rdrs(repo, rdr_abs_paths) — no voyage_key/now_iso.
+
+    The voyage_key and now_iso parameters were accepted but never used.
+    The fixed signature is (repo, rdr_abs_paths) — two positional args only.
+    Calling with 2 args should succeed; calling with 4 should still work via
+    positional (backward compat not required — the only call site is _run_index).
+    """
+    from nexus.indexer import _discover_and_index_rdrs
+
+    # Empty rdr_abs_paths → returns (0, 0, 0) immediately without any IO
+    result = _discover_and_index_rdrs(tmp_path, set())
+    assert result == (0, 0, 0)
+
+
+# ── I3: _prune_misclassified / _prune_deleted_files accept db handles ─────────
+
+def test_prune_misclassified_accepts_db_handles(tmp_path: Path) -> None:
+    """I3: _prune_misclassified(... , db_code=, db_docs=) uses provided handles.
+
+    _run_index already holds open db_code/db_docs.  Opening fresh handles in the
+    prune helpers wastes connections.  The refactored signature accepts db_code
+    and db_docs as keyword-only arguments and must NOT call t3_code()/t3_docs().
+    """
+    from nexus.indexer import _prune_misclassified
+
+    db_code = MagicMock()
+    db_docs = MagicMock()
+    col = MagicMock()
+    col.get.return_value = {"ids": []}
+    db_code.get_or_create_collection.return_value = col
+    db_docs.get_or_create_collection.return_value = col
+
+    with patch("nexus.indexer.t3_code") as mock_t3_code, \
+         patch("nexus.indexer.t3_docs") as mock_t3_docs:
+        _prune_misclassified(
+            tmp_path, "code__repo", "docs__repo",
+            code_files=[], prose_files=[], pdf_files=[],
+            db_code=db_code, db_docs=db_docs,
+        )
+        mock_t3_code.assert_not_called()
+        mock_t3_docs.assert_not_called()
+
+
+def test_prune_deleted_files_accepts_db_handles(tmp_path: Path) -> None:
+    """I3: _prune_deleted_files(... , db_code=, db_docs=) uses provided handles.
+
+    Same rationale as test_prune_misclassified_accepts_db_handles.
+    """
+    from nexus.indexer import _prune_deleted_files
+
+    db_code = MagicMock()
+    db_docs = MagicMock()
+    col = MagicMock()
+    col.get.return_value = {"ids": [], "metadatas": []}
+    db_code.get_or_create_collection.return_value = col
+    db_docs.get_or_create_collection.return_value = col
+
+    with patch("nexus.indexer.t3_code") as mock_t3_code, \
+         patch("nexus.indexer.t3_docs") as mock_t3_docs:
+        _prune_deleted_files(
+            "code__repo", "docs__repo",
+            all_current_paths=set(),
+            db_code=db_code, db_docs=db_docs,
+        )
+        mock_t3_code.assert_not_called()
+        mock_t3_docs.assert_not_called()

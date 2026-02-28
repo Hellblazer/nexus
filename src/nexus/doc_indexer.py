@@ -34,10 +34,6 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _has_credentials() -> bool:
-    from nexus.config import get_credential
-    return bool(get_credential("voyage_api_key"))
-
 
 _CCE_TOKEN_LIMIT = 32_000
 _CCE_TOTAL_TOKEN_LIMIT = 120_000  # Voyage API total token limit across all inputs

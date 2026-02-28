@@ -334,7 +334,15 @@ class T3Database:
         with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
             futures = {pool.submit(_count, n): n for n in names}
             for future in as_completed(futures):
-                result.append(future.result())
+                try:
+                    result.append(future.result())
+                except _ChromaNotFoundError:
+                    # Collection disappeared between list_collections() and count() —
+                    # this is a benign race condition; skip it silently.
+                    _log.debug(
+                        "collection disappeared between list and count",
+                        name=futures[future],
+                    )
         return sorted(result, key=lambda r: r["name"])
 
     def collection_exists(self, name: str) -> bool:

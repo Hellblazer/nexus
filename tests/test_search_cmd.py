@@ -707,3 +707,35 @@ def test_search_type_code_routes_to_code_store(runner: CliRunner) -> None:
             ["search", "hello", "--type", "code", "--corpus", "code"],
         )
     not_called.list_collections.assert_not_called()
+
+
+# ── I4: per-corpus warning when corpus term matches nothing ───────────────────
+
+def test_search_warns_when_corpus_term_unmatched(runner: CliRunner) -> None:
+    """I4: search emits a warning to stderr when a --corpus term matches no collection.
+
+    Before the multi-store refactor, the search command printed a per-corpus
+    warning when resolve_corpus() returned nothing.  That guard was dropped.
+    The fixed command must emit a warning when a specific corpus term is given
+    but resolves to zero collections across all queried stores.
+    """
+    from nexus.types import SearchResult
+
+    mock_t3 = _mock_t3(collections=["knowledge__test"])
+    hit = SearchResult(
+        id="r1", content="found", distance=0.1,
+        collection="knowledge__test", metadata={},
+    )
+
+    with _patch_knowledge_store(mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[hit]), \
+         patch("nexus.commands.search_cmd.rerank_results", return_value=[hit]):
+        result = runner.invoke(main, [
+            "search", "foo",
+            "--corpus", "knowledge",    # matches knowledge__test
+            "--corpus", "badcorpus",    # matches nothing
+            "--no-rerank",
+        ])
+
+    # Warning about the unmatched corpus term should appear somewhere in output
+    assert "badcorpus" in result.output

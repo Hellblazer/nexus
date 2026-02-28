@@ -74,10 +74,9 @@ def migrate() -> None:
 def migrate_t3_cmd() -> None:
     """Migrate T3 data from legacy single store to four-store layout.
 
-    Opens the source store (legacy chromadb.path or CloudClient), then copies
-    each collection to the appropriate destination store based on prefix:
-    code__* → code store, docs__* → docs store, rdr__* → rdr store,
-    everything else → knowledge store.
+    Opens the source store (legacy chromadb.path), then copies each collection
+    to the appropriate destination store based on prefix: code__* → code store,
+    docs__* → docs store, rdr__* → rdr store, everything else → knowledge store.
 
     Migration is idempotent: if destination count equals source count, the
     collection is skipped.  Embeddings are copied verbatim — no re-embedding.
@@ -129,16 +128,37 @@ def migrate_t3_cmd() -> None:
             click.echo(f"  {col_name}: skipped ({src_count} docs already present)")
             continue
 
-        data = source_col.get(include=["documents", "embeddings", "metadatas", "ids"])
-        if data["ids"]:
+        # Paginate with limit=5000 to avoid OOM on large collections.
+        _PAGE_SIZE = 5000
+        all_ids: list = []
+        all_docs: list = []
+        all_embs: list = []
+        all_metas: list = []
+        offset = 0
+        while True:
+            page = source_col.get(
+                include=["documents", "embeddings", "metadatas", "ids"],
+                limit=_PAGE_SIZE,
+                offset=offset,
+            )
+            if not page["ids"]:
+                break
+            all_ids.extend(page["ids"])
+            all_docs.extend(page["documents"])
+            all_embs.extend(page["embeddings"])
+            all_metas.extend(page["metadatas"])
+            offset += len(page["ids"])
+            if len(page["ids"]) < _PAGE_SIZE:
+                break
+        if all_ids:
             dest_col.upsert(
-                ids=data["ids"],
-                documents=data["documents"],
-                embeddings=data["embeddings"],
-                metadatas=data["metadatas"],
+                ids=all_ids,
+                documents=all_docs,
+                embeddings=all_embs,
+                metadatas=all_metas,
             )
         counts[store_key]["migrated"] += 1
-        click.echo(f"  {col_name} → {store_key}: {len(data['ids'])} docs")
+        click.echo(f"  {col_name} → {store_key}: {len(all_ids)} docs")
 
     click.echo("\nMigration complete:")
     for store_key, c in counts.items():

@@ -62,6 +62,12 @@ def put_cmd(
     ttl_days = days if days is not None else 0
 
     col_name = t3_collection_name(collection)
+    if not col_name.startswith("knowledge__"):
+        raise click.ClickException(
+            f"'nx store put' writes to the knowledge store only; "
+            f"got {col_name!r} (prefix {col_name.split('__')[0]!r}). "
+            f"Use 'nx index' for code/docs/rdr collections."
+        )
     db = t3_knowledge()
     doc_id = db.put(
         collection=col_name,

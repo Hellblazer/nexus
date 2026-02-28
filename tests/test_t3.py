@@ -987,3 +987,38 @@ def test_expire_passes_limit_to_col_get(mock_chromadb: tuple) -> None:
     assert mock_col.get.called, "col.get() should be called during expire()"
     call_kwargs = mock_col.get.call_args.kwargs
     assert "limit" in call_kwargs, "expire() col.get() must pass limit= to avoid unbounded fetches"
+
+
+# ── C3: list_collections thread-pool race ─────────────────────────────────────
+
+def test_list_collections_tolerates_not_found_race() -> None:
+    """C3: list_collections() skips a collection that disappears between list and count.
+
+    When a collection is listed but then deleted before the count query runs,
+    future.result() re-raises NotFoundError.  The fixed implementation must
+    catch it so the other collections are still returned.
+    """
+    from chromadb.errors import NotFoundError
+
+    mock_client = MagicMock()
+    col_stable = MagicMock()
+    col_stable.name = "knowledge__stable"
+    col_gone = MagicMock()
+    col_gone.name = "knowledge__gone"
+    mock_client.list_collections.return_value = [col_stable, col_gone]
+
+    stable_col = MagicMock()
+    stable_col.count.return_value = 3
+
+    def _get(name: str):
+        if name == "knowledge__gone":
+            raise NotFoundError("gone")
+        return stable_col
+
+    mock_client.get_collection.side_effect = _get
+
+    db = T3Database(_client=mock_client)
+    result = db.list_collections()
+
+    # Only the stable collection; no exception raised
+    assert result == [{"name": "knowledge__stable", "count": 3}]

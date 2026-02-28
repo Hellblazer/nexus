@@ -908,3 +908,27 @@ def test_pm_reference_uses_t3_knowledge(db) -> None:
         result = pm_reference(db, query='"caching decisions"')
 
     assert result == []
+
+
+# ── I5: pm_search uses _client.get_collection not get_or_create_collection ────
+
+def test_pm_reference_uses_get_collection_not_get_or_create(db) -> None:
+    """I5: pm_reference reads an existing T3 collection without the side effect of creating it.
+
+    After the collection_exists() guard confirms the collection is present,
+    the code should use _client.get_collection() (read-only) rather than
+    get_or_create_collection() which can silently create an empty collection
+    if it lost a race or the existence check is wrong.
+    """
+    mock_t3 = MagicMock()
+    mock_t3.collection_exists.return_value = True
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
+    mock_t3._client.get_collection.return_value = mock_col
+
+    with patch("nexus.pm.t3_knowledge", return_value=mock_t3):
+        result = pm_reference(db, "myproject")
+
+    mock_t3.get_or_create_collection.assert_not_called()
+    mock_t3._client.get_collection.assert_called_with("knowledge__pm__myproject")
+    assert result == []

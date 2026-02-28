@@ -249,6 +249,36 @@ def test_open_source_db_raises_when_no_path_configured() -> None:
 
 # ── S3: empty source guard ────────────────────────────────────────────────────
 
+# ── I2: source_col.get() must be paginated ────────────────────────────────────
+
+def test_migrate_t3_col_get_uses_limit(runner: CliRunner) -> None:
+    """I2: source_col.get() must use limit= to avoid OOM on large collections.
+
+    Without a limit, get() on a large collection loads all docs into memory
+    at once.  The migration must paginate with limit=5000.
+    """
+    small_col = _make_source_col("knowledge__small", 3)
+    source_db = _make_source_db([small_col])
+    dest_knowledge = _make_dest_db()
+    dest_code = _make_dest_db()
+    dest_docs = _make_dest_db()
+    dest_rdr = _make_dest_db()
+
+    with patch("nexus.commands.migrate._open_source_db", return_value=source_db), \
+         patch("nexus.commands.migrate._open_dest_db",
+               side_effect=lambda key: {
+                   "code_path": dest_code, "docs_path": dest_docs,
+                   "rdr_path": dest_rdr, "knowledge_path": dest_knowledge,
+               }[key]):
+        result = runner.invoke(main, ["migrate", "t3"])
+
+    assert result.exit_code == 0, result.output
+    # get() must have been called with a limit= to avoid unbounded fetches
+    call_kwargs = small_col.get.call_args.kwargs
+    assert "limit" in call_kwargs, "source_col.get() must pass limit= (pagination guard)"
+    assert call_kwargs["limit"] == 5000
+
+
 def test_migrate_t3_empty_source_exits_cleanly(runner: CliRunner) -> None:
     """Empty source store exits 0 with informative message; no dest stores are opened."""
     source_db = MagicMock()

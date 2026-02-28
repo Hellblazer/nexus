@@ -52,7 +52,7 @@ def _persistent_t3(
         raise RuntimeError(
             f"T3 store not configured: set chromadb.{path_key} in config"
         )
-    path = str(Path(raw_path).expanduser())
+    path = str(Path(raw_path).expanduser().resolve())
     if embeddings_required:
         voyage_api_key = get_credential("voyage_api_key")
         if not voyage_api_key:

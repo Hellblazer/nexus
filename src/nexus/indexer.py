@@ -14,6 +14,7 @@ from nexus.errors import CredentialsMissingError  # re-exported for backward com
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
+    from nexus.db.t3 import T3Database
     from nexus.registry import RepoRegistry
 
 DEFAULT_IGNORE: list[str] = [
@@ -521,8 +522,6 @@ def _index_pdf_file(
 def _discover_and_index_rdrs(
     repo: Path,
     rdr_abs_paths: set[Path],
-    voyage_key: str,
-    now_iso: str,
 ) -> tuple[int, int, int]:
     """Find .md files under RDR paths and index them via batch_index_markdowns.
 
@@ -570,14 +569,18 @@ def _prune_misclassified(
     code_files: list[Path],
     prose_files: list[Path],
     pdf_files: list[Path],
+    *,
+    db_code: "T3Database",
+    db_docs: "T3Database",
 ) -> None:
     """Remove chunks from the wrong collection after reclassification.
 
     If a file was previously classified as code but is now prose (or vice versa),
     its chunks in the old collection must be removed.
+
+    *db_code* and *db_docs* are passed in from the caller (_run_index) to reuse
+    already-open database handles rather than opening fresh ones.
     """
-    db_code = t3_code()
-    db_docs = t3_docs()
     code_col = db_code.get_or_create_collection(code_collection)
     docs_col = db_docs.get_or_create_collection(docs_collection)
 
@@ -604,18 +607,25 @@ def _prune_deleted_files(
     code_collection: str,
     docs_collection: str,
     all_current_paths: set[str],
+    *,
+    db_code: "T3Database",
+    db_docs: "T3Database",
 ) -> None:
     """Remove chunks for files that no longer exist in the repo (C3 fix).
 
     Queries each collection for all distinct source_paths and deletes chunks
     for any path not in *all_current_paths*.
+
+    *db_code* and *db_docs* are passed in from the caller (_run_index) to reuse
+    already-open database handles rather than opening fresh ones.
     """
-    db_code = t3_code()
-    db_docs = t3_docs()
     for store, collection_name in ((db_code, code_collection), (db_docs, docs_collection)):
         col = store.get_or_create_collection(collection_name)
         # Cap at 50 000 to avoid loading an entire large collection into memory.
         all_chunks = col.get(include=["metadatas"], limit=50000)
+        if len(all_chunks["ids"]) >= 50000:
+            _log.warning("_prune_deleted_files: collection exceeds 50k chunks; "
+                         "prune may be incomplete", collection=collection_name)
         if not all_chunks["ids"]:
             continue
 
@@ -792,7 +802,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
 
     # Discover and index RDR markdown files → rdr__
     rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
-        repo, rdr_abs_paths, voyage_key, now_iso
+        repo, rdr_abs_paths
     )
 
     # Prune misclassified chunks (reclassification cleanup)
@@ -801,6 +811,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
         [f for _, f in code_files],
         [f for _, f in prose_files],
         [f for _, f in pdf_files],
+        db_code=db_code, db_docs=db_docs,
     )
 
     # C3: Prune deleted files — remove chunks for files no longer in the repo
@@ -811,7 +822,8 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
         all_current_paths.add(str(f))
     for _, f in pdf_files:
         all_current_paths.add(str(f))
-    _prune_deleted_files(code_collection, docs_collection, all_current_paths)
+    _prune_deleted_files(code_collection, docs_collection, all_current_paths,
+                         db_code=db_code, db_docs=db_docs)
     return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
 
 
