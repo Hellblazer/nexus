@@ -59,7 +59,7 @@ Merge behavior: nested dict keys are **additive** (both global and per-repo keys
 | `~/.config/nexus/config.yml` | Global config and credentials |
 | `~/.config/nexus/memory.db` | T2 SQLite database |
 | `~/.config/nexus/repos.json` | Registered repos for `nx serve` |
-| `~/.config/nexus/sessions/` | Session ID files |
+| `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |
 | `~/.config/nexus/server.pid` | Server PID file |
 | `~/.config/nexus/serve.log` | Server log output |
 | `.nexus.yml` | Per-repo config overrides |

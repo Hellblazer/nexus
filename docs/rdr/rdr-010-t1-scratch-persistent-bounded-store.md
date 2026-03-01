@@ -122,7 +122,8 @@ The PPID chain was chosen because:
 3. If `chroma run` fails to start (binary not on PATH, port already taken): log a warning and fall back to `EphemeralClient` for local-only T1. Cross-process sharing is unavailable for this session; subsequent `nx scratch` commands work locally but subagents get fresh sessions. No error is raised.
 4. Write a JSON session record to `~/.config/nexus/sessions/{ppid}.session`:
    ```json
-   {"session_id": "{uuid4}", "server": "127.0.0.1:{port}", "server_pid": {pid}}
+   {"session_id": "{uuid4}", "server_host": "127.0.0.1", "server_port": {port},
+    "server_pid": {pid}, "created_at": {unix_timestamp}, "tmpdir": "{path}"}
    ```
    The key is `os.getppid()` from within the `nx hook session-start` process —
    this is the Claude Code process PID, which IS in any child agent's PPID
@@ -130,12 +131,12 @@ The PPID chain was chosen because:
 
 **SessionEnd** (parent session — only the process that started the server stops it):
 
-1. Read `sessions/{ppid}.session` (the file keyed by this session's parent PID), parse JSON, extract `server_pid` and `started_by`. Only proceed with server shutdown if `started_by == os.getpid()` (i.e., this `session_end()` call is in the same process that originally wrote the record).
+1. Check whether `sessions/{ppid}.session` exists (where `ppid = os.getppid()` of the hook script). If this file is present and readable, this process owns the session and is responsible for shutdown.
 2. Send `SIGTERM` to the server process; wait briefly; `SIGKILL` if needed.
 3. Delete the session record file and the backing tmpdir.
-4. Run T2 `expire()`.
+4. Flush flagged T1 entries to T2 and run T2 `expire()`.
 
-**Child SessionEnd**: A child agent that adopted the parent's server must NOT stop it. `session_end()` in child processes detects that `started_by` does not match `os.getpid()` and skips the server-stop step, running only T2 `expire()`.
+**Child SessionEnd**: A child agent that adopted the parent's server must NOT stop it. `session_end()` in child processes detects that no `sessions/{ppid}.session` file belongs to them and skips the server-stop step, running only T1 flush + T2 `expire()`.
 
 ### Client Connection (all processes)
 
@@ -173,7 +174,7 @@ starting a new one.
 ```
 Parent Claude Code (PID 1000)
   └─ bash → nx hook session-start (PID 1100, PPID=1000)
-       writes: sessions/1000.session = {session_id, server: "127.0.0.1:51823", server_pid: 9900}
+       writes: sessions/1000.session = {session_id, server_host, server_port, server_pid, created_at, tmpdir}
 
   └─ [Agent tool] → Child Claude Code (PID 2000, PPID=1000)
        └─ bash → nx hook session-start (PID 2100, PPID=2000)
@@ -192,16 +193,20 @@ to the same server. The server handles concurrent writes.
 ```json
 {
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "server": "127.0.0.1:51823",
+  "server_host": "127.0.0.1",
+  "server_port": 51823,
   "server_pid": 9900,
-  "started_by": 1100,
-  "created_at": 1740825600.0
+  "created_at": 1740825600.0,
+  "tmpdir": "/tmp/nx_t1_abc123"
 }
 ```
 
-`find_ancestor_session()` returns this dict (or `None`). `started_by` is the PID
-of the process that wrote the record (the hook script's `os.getpid()`), used by
-`session_end()` to determine whether this process should stop the server.
+`find_ancestor_session()` returns this dict (or `None`). Ownership is determined
+structurally: if `sessions/{ppid}.session` (keyed by the hook's `os.getppid()`)
+exists and is readable by `session_end()`, that process is the owner and is
+responsible for stopping the server and deleting the file. Child processes find
+the ancestor's file via the PPID chain but their own `{ppid}` key doesn't match,
+so they skip the server-stop step.
 
 The key change from the original `session.py` design: the session file now carries
 a JSON payload rather than a bare UUID string. All existing callers that read a
@@ -210,15 +215,18 @@ bare UUID must be updated to parse JSON.
 ## Scope
 
 ### Files changed
-- `src/nexus/session.py` — change `write_session_file` to write JSON (add
-  `started_by` field); add `find_ancestor_session()` (PPID chain walk, JSON
-  parse, 24h orphan sweep); add `start_t1_server()` / `stop_t1_server()` helpers;
-  add `sweep_stale_sessions()` called from `session_start()` at startup
-- `src/nexus/hooks.py` — `session_start()` calls `sweep_stale_sessions()`, then
-  `find_ancestor_session()`; if found adopts existing server; if not starts new
-  server and writes JSON record. `session_end()` parses JSON session record,
-  checks `started_by == os.getpid()` before calling `stop_t1_server()`;
-  child sessions skip server stop and run only T2 `expire()`
+- `src/nexus/session.py` — add `write_session_record()` writing JSON
+  (`session_id`, `server_host`, `server_port`, `server_pid`, `created_at`,
+  `tmpdir`); add `find_ancestor_session()` (PPID chain walk via `/proc/{pid}/status`
+  then `ps`, JSON parse, 24h orphan sweep); add `start_t1_server()` /
+  `stop_t1_server()` helpers; add `sweep_stale_sessions()` called from
+  `session_start()` at startup
+- `src/nexus/hooks.py` — `session_start()` acquires `fcntl.flock(LOCK_EX)` on
+  `session.lock`, calls `sweep_stale_sessions()`, then `find_ancestor_session()`;
+  if found adopts existing server; if not starts new server and writes JSON record
+  via `write_session_record()`. `session_end()` checks whether
+  `sessions/{ppid}.session` exists (ownership test) before calling
+  `stop_t1_server()`; child sessions skip server stop and run T1 flush + T2 `expire()`
 - `src/nexus/db/t1.py` — replace `EphemeralClient()` with PPID-chain lookup;
   fall back to `EphemeralClient()` with warning if no record found
 - `src/nexus/commands/scratch.py` — update `_t1()` helper to use new session-aware
@@ -319,8 +327,9 @@ would share a session. Already rejected in the codebase for this reason.
    chain walk, JSON parse, returns `dict | None`
 2. Add `sweep_stale_sessions(sessions_dir)` to `session.py` — scans for JSON
    records older than 24h, SIGTERMs each `server_pid`, deletes stale files
-3. Change `write_session_file` to write JSON payload (session_id, server host,
-   server port, server_pid, started_by, created_at)
+3. Add `write_session_record()` to write JSON payload (session_id, server_host,
+   server_port, server_pid, created_at, tmpdir) — no `started_by` field; ownership
+   is determined by PPID-keyed file existence, not a PID embedded in the record
 4. Add `start_t1_server() -> (host, port, server_pid)` helper — allocates port
    via `socket.bind`, closes socket, launches `chroma run`; returns on success or
    raises on failure (caller handles fallback)
@@ -328,9 +337,11 @@ would share a session. Already rejected in the codebase for this reason.
 6. Update `hooks.py::session_start()`: call `sweep_stale_sessions()`, then
    `find_ancestor_session()`; if found adopt; if not call `start_t1_server()`,
    handle startup failure by writing no session record (fallback path)
-7. Update `hooks.py::session_end()`: parse JSON session record; if
-   `started_by == os.getpid()` call `stop_t1_server()` and delete tmpdir;
-   child sessions skip server stop; all sessions run T2 `expire()`
+7. Update `hooks.py::session_end()`: check if `sessions/{ppid}.session` exists
+   (where ppid = os.getppid()); if found this process owns the session — call
+   `stop_t1_server()`, delete session file and tmpdir; child sessions find no
+   matching file and skip server stop; all sessions flush flagged T1 entries then
+   run T2 `expire()`
 8. Update `T1Database.__init__`: call `find_ancestor_session()`; on success build
    `HttpClient`; on `None` fall back to `EphemeralClient` with warning
 9. Update `commands/scratch.py::_t1()`: remove direct `read_session_id()` UUID
