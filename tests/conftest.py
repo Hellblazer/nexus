@@ -31,6 +31,29 @@ def pytest_configure(config):
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect T1 SESSIONS_DIR so tests never discover real live server records.
+
+    Before fixing chroma's --log-level flag, start_t1_server() always failed
+    in tests (chroma exited immediately), so no session file was ever written
+    and test isolation held by accident.  Now that the server starts cleanly,
+    test_session_start_prints_ready_message (and similar) actually write a
+    session file to the real SESSIONS_DIR.  Subsequent T1Database() calls in
+    the same pytest process find it via PPID chain walk, hijack the session_id,
+    and break isolation across unrelated tests.
+
+    Solution: redirect both consumers of SESSIONS_DIR to an empty per-test
+    tmp_path so find_ancestor_session() always returns None.  T1Database falls
+    back to the process-wide EphemeralClient singleton (isolated by session_id),
+    and any session files written by session_start() go to tmp_path, not ~/.
+    """
+    sessions = tmp_path / ".nexus" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("nexus.db.t1.SESSIONS_DIR", sessions)
+    monkeypatch.setattr("nexus.hooks.SESSIONS_DIR", sessions)
+
+
 @pytest.fixture
 def db(tmp_path: Path) -> T2Database:
     """Provide a T2Database backed by a temporary SQLite file."""
