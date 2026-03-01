@@ -34,7 +34,7 @@ _OVERLAP = 0.15
 _CHUNK_MAX_BYTES = 16_000
 
 
-def _make_code_splitter(language: str, content: str) -> list:
+def _make_code_splitter(language: str, content: str, chunk_lines: int = _CHUNK_LINES) -> list:
     """Chunk *content* via CodeSplitter for *language*; returns list of nodes.
 
     All llama-index imports live here so tests can patch this single function.
@@ -53,8 +53,8 @@ def _make_code_splitter(language: str, content: str) -> list:
     splitter = CodeSplitter(
         language=language,
         parser=parser,
-        chunk_lines=_CHUNK_LINES,
-        chunk_lines_overlap=int(_CHUNK_LINES * _OVERLAP),
+        chunk_lines=chunk_lines,
+        chunk_lines_overlap=int(chunk_lines * _OVERLAP),
     )
     doc = Document(text=content)
     return splitter.get_nodes_from_documents([doc])
@@ -159,13 +159,16 @@ def _enforce_byte_cap(
     return result
 
 
-def chunk_file(file: Path, content: str) -> list[dict[str, Any]]:
+def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list[dict[str, Any]]:
     """Chunk *file* content; use AST splitter for known extensions, else lines.
 
     Each returned dict contains:
         file_path, filename, file_extension, ast_chunked,
         chunk_index, chunk_count, line_start, line_end, text
+
+    *chunk_lines* overrides the module default (_CHUNK_LINES = 150) when set.
     """
+    effective_chunk_lines = chunk_lines if chunk_lines is not None else _CHUNK_LINES
     ext = file.suffix.lower()
     language = _AST_EXTENSIONS.get(ext)
 
@@ -177,7 +180,7 @@ def chunk_file(file: Path, content: str) -> list[dict[str, Any]]:
 
     if language:
         try:
-            nodes = _make_code_splitter(language, content)
+            nodes = _make_code_splitter(language, content, chunk_lines=effective_chunk_lines)
             if nodes:
                 count = len(nodes)
                 result = []
@@ -195,7 +198,7 @@ def chunk_file(file: Path, content: str) -> list[dict[str, Any]]:
             _log.debug("AST chunking failed, falling back to line chunks", file=str(file), exc_info=True)
 
     # Line-based fallback
-    raw_chunks = _line_chunk(content)
+    raw_chunks = _line_chunk(content, chunk_lines=effective_chunk_lines)
     if not raw_chunks:
         if not content.strip():
             return []

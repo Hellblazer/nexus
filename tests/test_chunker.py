@@ -51,6 +51,18 @@ def test_line_chunk_content_matches_lines() -> None:
 
 # ── chunk_file: line fallback for unknown extension ───────────────────────────
 
+def test_chunk_file_custom_chunk_lines_produces_more_chunks(tmp_path: Path) -> None:
+    """chunk_file() with a smaller chunk_lines produces more chunks than the default."""
+    f = tmp_path / "code.xyz"  # unknown ext → line fallback
+    content = "\n".join(f"line {i}" for i in range(300))
+    f.write_text(content)
+
+    chunks_50 = chunk_file(f, content, chunk_lines=50)
+    chunks_150 = chunk_file(f, content, chunk_lines=150)
+
+    assert len(chunks_50) > len(chunks_150)
+
+
 def test_chunk_file_unknown_extension_uses_line_fallback(tmp_path: Path) -> None:
     """Unknown extension → line fallback, ast_chunked=False."""
     f = tmp_path / "data.xyz"

@@ -135,9 +135,153 @@ def test_index_repo_default_is_full_index(runner: CliRunner, index_home: Path) -
 
     with patch("nexus.commands.index._registry", return_value=mock_reg):
         with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "repo", str(repo)])
+            with patch("nexus.commands.index._detect_large_files", return_value=[]):
+                result = runner.invoke(main, ["index", "repo", str(repo)])
 
     assert result.exit_code == 0, result.output
     mock_index.assert_called_once()
     _, call_kwargs = mock_index.call_args
     assert call_kwargs.get("frecency_only") is False
+
+
+# ── Phase 3: --chunk-size and large-file warning ──────────────────────────────
+
+def test_chunk_size_option_passed_to_index_repository(runner: CliRunner, index_home: Path) -> None:
+    """--chunk-size N passes chunk_lines=N to index_repository."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    mock_reg = MagicMock()
+    mock_reg.get.return_value = {"collection": "code__myrepo"}
+
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        with patch("nexus.indexer.index_repository") as mock_index:
+            with patch("nexus.commands.index._detect_large_files", return_value=[]):
+                result = runner.invoke(main, ["index", "repo", str(repo), "--chunk-size", "80"])
+
+    assert result.exit_code == 0, result.output
+    _, call_kwargs = mock_index.call_args
+    assert call_kwargs.get("chunk_lines") == 80
+
+
+def test_chunk_size_default_is_none(runner: CliRunner, index_home: Path) -> None:
+    """Without --chunk-size, chunk_lines defaults to None (use module default)."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    mock_reg = MagicMock()
+    mock_reg.get.return_value = {"collection": "code__myrepo"}
+
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        with patch("nexus.indexer.index_repository") as mock_index:
+            with patch("nexus.commands.index._detect_large_files", return_value=[]):
+                result = runner.invoke(main, ["index", "repo", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    _, call_kwargs = mock_index.call_args
+    assert call_kwargs.get("chunk_lines") is None
+
+
+def test_large_file_warning_printed_when_large_files_present(
+    runner: CliRunner, index_home: Path
+) -> None:
+    """Warning is printed to stderr when large code files are detected."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    mock_reg = MagicMock()
+    mock_reg.get.return_value = {"collection": "code__myrepo"}
+    large_path = repo / "huge.py"
+
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        with patch("nexus.indexer.index_repository"):
+            with patch(
+                "nexus.commands.index._detect_large_files",
+                return_value=[(5000, large_path)],
+            ):
+                result = runner.invoke(main, ["index", "repo", str(repo)], )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning" in result.output
+    assert "chunk" in result.output.lower()
+
+
+def test_no_chunk_warning_flag_suppresses_warning(
+    runner: CliRunner, index_home: Path
+) -> None:
+    """--no-chunk-warning suppresses the large-file warning."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    mock_reg = MagicMock()
+    mock_reg.get.return_value = {"collection": "code__myrepo"}
+    large_path = repo / "huge.py"
+
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        with patch("nexus.indexer.index_repository"):
+            with patch(
+                "nexus.commands.index._detect_large_files",
+                return_value=[(5000, large_path)],
+            ):
+                result = runner.invoke(
+                    main,
+                    ["index", "repo", str(repo), "--no-chunk-warning"],
+                )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning" not in result.output
+
+
+def test_no_warning_when_no_large_files(runner: CliRunner, index_home: Path) -> None:
+    """No warning is printed when all code files are within the threshold."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    mock_reg = MagicMock()
+    mock_reg.get.return_value = {"collection": "code__myrepo"}
+
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        with patch("nexus.indexer.index_repository"):
+            with patch("nexus.commands.index._detect_large_files", return_value=[]):
+                result = runner.invoke(main, ["index", "repo", str(repo)], )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning" not in result.output
+
+
+def test_detect_large_files_returns_large_code_files(index_home: Path) -> None:
+    """_detect_large_files identifies code files exceeding threshold * chunk_lines."""
+    from nexus.commands.index import _detect_large_files
+
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    # Create a large code file (line_count > 30 * 10 = 300)
+    large = repo / "big.py"
+    large.write_text("\n".join(f"x = {i}" for i in range(350)))
+
+    # Create a small code file
+    small = repo / "small.py"
+    small.write_text("x = 1\n")
+
+    results = _detect_large_files(repo, chunk_lines=10, threshold=30)
+    large_paths = [p for _, p in results]
+
+    assert large in large_paths
+    assert small not in large_paths
+
+
+def test_detect_large_files_ignores_non_code_files(index_home: Path) -> None:
+    """_detect_large_files skips non-code files (Markdown, JSON, etc.)."""
+    from nexus.commands.index import _detect_large_files
+
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    md_file = repo / "README.md"
+    md_file.write_text("\n".join(f"line {i}" for i in range(500)))
+
+    results = _detect_large_files(repo, chunk_lines=10, threshold=30)
+    paths = [p for _, p in results]
+
+    assert md_file not in paths

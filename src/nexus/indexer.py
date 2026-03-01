@@ -104,6 +104,7 @@ def index_repository(
     registry: "RepoRegistry",
     *,
     frecency_only: bool = False,
+    chunk_lines: int | None = None,
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
@@ -119,6 +120,9 @@ def index_repository(
     *frecency_only* skips re-chunking and re-embedding; only updates the
     ``frecency_score`` metadata field on existing T3 chunks.
 
+    *chunk_lines* overrides the default chunk size (150 lines) for code files.
+    When None, the module default is used.
+
     Returns a stats dict (empty for frecency_only runs) with keys:
     ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
@@ -128,7 +132,7 @@ def index_repository(
             _run_index_frecency_only(repo, registry)
             stats: dict[str, int] = {}
         else:
-            stats = _run_index(repo, registry)
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines)
         registry.update(repo, status="ready")
         return stats
     except CredentialsMissingError:
@@ -210,6 +214,7 @@ def _index_code_file(
     git_meta: dict,
     now_iso: str,
     score: float,
+    chunk_lines: int | None = None,
 ) -> bool:
     """Index a single code file into the code__ collection.
 
@@ -237,7 +242,7 @@ def _index_code_file(
         if stored.get("content_hash") == content_hash and stored.get("embedding_model") == target_model:
             return False
 
-    chunks = chunk_file(file, content)
+    chunks = chunk_file(file, content, chunk_lines=chunk_lines)
     if not chunks:
         _log.debug("skipped file with no chunks", path=str(file))
         return False
@@ -644,7 +649,7 @@ def _prune_deleted_files(
 # ── Main indexing pipeline ───────────────────────────────────────────────────
 
 
-def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
+def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = None) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
     Routes files to the appropriate collection based on content classification:
@@ -785,6 +790,7 @@ def _run_index(repo: Path, registry: "RepoRegistry") -> dict[str, int]:
         _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
+            chunk_lines=chunk_lines,
         )
 
     # Index prose files → docs__ (voyage-context-3 via CCE)
