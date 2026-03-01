@@ -17,14 +17,15 @@ else
   true
 fi
 
-# Show available T2 memory docs for active project
-if command -v nx &> /dev/null && command -v git &> /dev/null; then
+# Show available T2 memory docs for active project (all namespaces via prefix scan)
+if command -v git &> /dev/null; then
   PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
   if [[ -n "$PROJECT" ]]; then
-    T2_LIST=$(nx memory list --project "$PROJECT" 2>/dev/null | head -8)
-    if [[ -n "$T2_LIST" ]]; then
-      echo "## T2 Memory ($PROJECT)"
-      echo "$T2_LIST"
+    SCAN_SCRIPT="$CLAUDE_PLUGIN_ROOT/hooks/scripts/t2_prefix_scan.py"
+    T2_OUT=$(python3 "$SCAN_SCRIPT" "$PROJECT" 2>/dev/null)
+    if [[ -n "$T2_OUT" ]]; then
+      echo "## T2 Memory (Active Project)"
+      echo "$T2_OUT"
       echo ""
     fi
   fi

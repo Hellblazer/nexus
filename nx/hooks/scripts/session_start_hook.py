@@ -89,16 +89,15 @@ def main() -> None:
             project_name = Path(toplevel).name
 
         if project_name:
+            # Use t2_prefix_scan to surface all namespaces (bare, _rdr, _pm, etc.)
+            scan_script = Path(__file__).parent / "t2_prefix_scan.py"
             memory_output = run_command(
-                ['nx', 'memory', 'list', '--project', f'{project_name}'],
+                [sys.executable, str(scan_script), project_name],
                 timeout=NX_TIMEOUT, cwd=cwd
             )
             if memory_output:
-                lines = memory_output.split('\n')[:8]  # cap at 8 lines
                 output_lines.append("## T2 Memory (Active Project)")
-                output_lines.append("```")
-                output_lines.extend(line[:200] for line in lines)
-                output_lines.append("```")
+                output_lines.append(memory_output)
                 output_lines.append("")
 
     # --- bd ready ---

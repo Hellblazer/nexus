@@ -215,6 +215,23 @@ class T2Database:
             rows = self.conn.execute(sql, params).fetchall()
         return [dict(zip(("id", "title", "agent", "timestamp"), row)) for row in rows]
 
+    def get_projects_with_prefix(self, prefix: str) -> list[dict[str, Any]]:
+        """Return all distinct project namespaces whose name starts with *prefix*.
+
+        Each row has ``project`` and ``last_updated`` (MAX timestamp for that namespace).
+        Results are ordered by ``last_updated`` DESC — most-recently-updated first.
+        """
+        sql = """
+            SELECT project, MAX(timestamp) AS last_updated
+            FROM memory
+            WHERE project LIKE ?
+            GROUP BY project
+            ORDER BY MAX(timestamp) DESC
+        """
+        with self._lock:
+            rows = self.conn.execute(sql, (f"{prefix}%",)).fetchall()
+        return [{"project": row[0], "last_updated": row[1]} for row in rows]
+
     def search_glob(self, query: str, project_glob: str) -> list[dict[str, Any]]:
         """FTS5 search scoped to projects matching a GLOB pattern (e.g. '*_pm')."""
         sql = """

@@ -162,6 +162,67 @@ def test_t2_search_glob_no_match(db: T2Database) -> None:
     assert results == []
 
 
+# ── get_projects_with_prefix ──────────────────────────────────────────────────
+
+def test_get_projects_with_prefix_returns_matching_namespaces(db: T2Database) -> None:
+    """get_projects_with_prefix() returns all projects that start with the prefix."""
+    db.put(project="nexus", title="ctx.md", content="main context")
+    db.put(project="nexus_rdr", title="006.md", content="rdr entry")
+    db.put(project="nexus_pm", title="phase.md", content="pm entry")
+    db.put(project="other", title="x.md", content="unrelated")
+
+    results = db.get_projects_with_prefix("nexus")
+    projects = {r["project"] for r in results}
+    assert projects == {"nexus", "nexus_rdr", "nexus_pm"}
+    assert "other" not in projects
+
+
+def test_get_projects_with_prefix_returns_last_updated(db: T2Database) -> None:
+    """Each result row includes a last_updated field (the MAX timestamp for that project)."""
+    db.put(project="repo_rdr", title="entry.md", content="content")
+
+    results = db.get_projects_with_prefix("repo")
+    assert len(results) == 1
+    assert "last_updated" in results[0]
+    assert results[0]["project"] == "repo_rdr"
+
+
+def test_get_projects_with_prefix_ordered_by_most_recent(db: T2Database) -> None:
+    """Results are ordered by MAX(timestamp) DESC — most-recently-updated namespace first."""
+    db.put(project="repo_pm", title="old.md", content="older entry")
+    db.put(project="repo_rdr", title="new.md", content="newer entry")
+    # Backdate repo_pm so ordering is deterministic at 1-second timestamp resolution
+    db.conn.execute(
+        "UPDATE memory SET timestamp='2020-01-01T00:00:00Z' WHERE project='repo_pm'"
+    )
+    db.conn.commit()
+
+    results = db.get_projects_with_prefix("repo")
+    assert results[0]["project"] == "repo_rdr"
+    assert results[1]["project"] == "repo_pm"
+
+
+def test_get_projects_with_prefix_empty_when_no_match(db: T2Database) -> None:
+    """Returns empty list when no projects match the prefix."""
+    db.put(project="nexus_rdr", title="e.md", content="entry")
+
+    results = db.get_projects_with_prefix("arcaneum")
+    assert results == []
+
+
+def test_get_projects_with_prefix_exact_prefix_only(db: T2Database) -> None:
+    """Prefix 'abc' does NOT match a project named 'xabc' or 'abcx_foo'."""
+    db.put(project="abc", title="e.md", content="entry")
+    db.put(project="abc_sub", title="e2.md", content="entry2")
+    db.put(project="xabc", title="e3.md", content="entry3")
+
+    results = db.get_projects_with_prefix("abc")
+    projects = {r["project"] for r in results}
+    assert "xabc" not in projects
+    assert "abc" in projects
+    assert "abc_sub" in projects
+
+
 # ── delete ───────────────────────────────────────────────────────────────────
 
 def test_t2_delete(db: T2Database) -> None:
