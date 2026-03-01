@@ -384,12 +384,7 @@ serialisation. Only `HttpClient` meets the requirements for parallel subagents.
 
 ## Open Questions
 
-- **PPID topology empirical verification**: The PPID chain mechanism is proven at
-  the OS level (Finding 010-02). Whether Claude Code's Agent tool spawns child
-  processes as direct OS descendants has not been empirically confirmed via `ps`
-  from inside a running subagent. If Claude Code uses a worker pool or container
-  isolation that breaks the chain, the fallback to EphemeralClient activates. A
-  future integration test from inside a live Agent-tool spawn would close this.
+None.
 
 ## Closed Questions
 
@@ -398,6 +393,15 @@ serialisation. Only `HttpClient` meets the requirements for parallel subagents.
   `Settings` class has no UDS path field, and a full source search finds zero
   references to Unix sockets in the ChromaDB 1.5.1 package. TCP localhost with
   a randomly allocated port is the only option.
+
+- **PPID topology empirical verification** (closed — Finding 010-06): Confirmed
+  empirically on 2026-03-01 by spawning a subagent via the Agent tool and tracing
+  its PPID chain. Parent Claude Code PID was 10094; the subagent's chain was:
+  `37930 (python) → 37928 (zsh) → 10094 (claude) → 9983 (zsh) → 99114 (tmux)`.
+  PID 10094 appears at depth 2 in the subagent's chain. The session file
+  `sessions/10094.session` written by the parent hook would be found by
+  `find_ancestor_session()` walking from the subagent's process upward. The PPID
+  chain mechanism works as designed on macOS with Claude Code.
 
 - **Programmatic server start via `chromadb.server.fastapi`** (closed — Finding
   010-05): Not viable. In ChromaDB 1.5.1, `EphemeralClient` and

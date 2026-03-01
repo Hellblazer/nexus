@@ -55,10 +55,15 @@ Found during two rounds of code review (PR #38):
 
 All 1819 tests passing (unit + plugin_structure + integration with real ChromaDB).
 
-## Open Question (Still Open)
+## PPID Topology: Empirically Confirmed (2026-03-01)
 
-PPID chain mechanism is proven at the OS level. Whether Claude Code's Agent tool
-spawns children as direct OS descendants has not been empirically confirmed from
-inside a live subagent spawn. Fallback to EphemeralClient activates gracefully if
-the chain is broken. A future integration test inside a running Agent-tool spawn
-would close this.
+Spawned a subagent via the Agent tool and traced its full PPID chain:
+
+```
+37930 (python subprocess) → 37928 (zsh) → 10094 (claude) → 9983 (zsh) → 99114 (tmux)
+```
+
+Parent Claude Code PID was 10094. The subagent's chain passes through 10094 at
+depth 2. A session file written to `sessions/10094.session` by the parent hook
+would be found by `find_ancestor_session()` walking the subagent's chain. The
+PPID mechanism is fully confirmed on macOS with Claude Code.
