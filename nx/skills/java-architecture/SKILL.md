@@ -7,23 +7,22 @@ description: Use when complex Java features need architectural design before imp
 
 Delegates to the **java-architect-planner** agent (model: opus).
 
-## LSP Usage Patterns
+## Code Navigation
 
-**CRITICAL**: Use LSP for rapid architecture discovery (combine with `nx search --hybrid` for context).
+**REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for symbol-level architecture discovery. Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
 
-- **Map system structure**: Use `documentSymbol` for class/interface inventories
-- **Find architectural patterns**: Use `goToImplementation` to trace abstraction usage
-- **Understand module boundaries**: Use `findReferences` to track cross-module calls
-- **Discover dependencies**: Use `hover` to understand type relationships
-- **Interface analysis**: Use `goToImplementation` to see all concrete implementations
-- **Use LSP for precision, nx search for semantic discovery**
+- **Map system structure**: `jet_brains_get_symbols_overview` for class/interface inventories without reading files
+- **Find architectural patterns**: `jet_brains_find_referencing_symbols` to trace abstraction usage across the codebase
+- **Understand module boundaries**: `jet_brains_find_referencing_symbols` to track cross-module calls
+- **Interface analysis**: `jet_brains_type_hierarchy` to see full implementation tree
+- **Serena for precision, nx search for semantic discovery**
 
 ### Architecture Discovery Workflow
 ```
-1. Use nx search --corpus code --hybrid (30-50 results) for semantic discovery
-2. Use LSP.documentSymbol to map key classes
-3. Use LSP.goToImplementation to trace patterns
-4. Use LSP.findReferences to understand usage
+1. nx search --corpus code --hybrid (30-50 results) for semantic discovery
+2. jet_brains_get_symbols_overview to map key classes in discovered files
+3. jet_brains_type_hierarchy to trace abstraction patterns
+4. jet_brains_find_referencing_symbols to understand cross-module usage
 5. Synthesize findings with `mcp__sequential-thinking__sequentialthinking`
 6. Design architecture with clear boundaries
 ```

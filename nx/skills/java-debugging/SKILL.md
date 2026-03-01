@@ -7,24 +7,22 @@ description: Use when Java tests fail, exceptions occur, or behavior is non-dete
 
 Delegates to the **java-debugger** agent (model: opus).
 
-## LSP Usage Patterns
+## Code Navigation
 
-**CRITICAL**: Use LSP for call tracing and type analysis (900x faster than Grep).
+**REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for all symbol-level navigation during debugging. Serena gives accurate call traces; Grep finds text matches that may be comments or strings.
 
-- **Trace call chains**: Use `findReferences` on failing methods to find all callers
-- **Find exception sources**: Use `goToDefinition` on exception types
-- **Understand type hierarchies**: Use `goToImplementation` for polymorphic calls
-- **Method signatures**: Use `hover` to get parameter types and return values
-- **Call hierarchy**: Use `incomingCalls`/`outgoingCalls` to trace execution paths
-- **Always use LSP before manual code reading**
+- **Trace call chains**: `jet_brains_find_referencing_symbols` on failing methods to find all callers
+- **Find exception sources**: `jet_brains_find_symbol` on exception types to locate definitions
+- **Understand type hierarchies**: `jet_brains_type_hierarchy` for polymorphic call resolution
+- **Class/method inventory**: `jet_brains_get_symbols_overview` before reading a file
 
 ### Debugging Workflow
 ```
 1. Identify failing test/exception
-2. Use LSP.goToDefinition on failure point
-3. Use LSP.findReferences to trace usage
-4. Use LSP.hover for type information
-5. Form hypothesis based on LSP evidence
+2. jet_brains_find_symbol on failure point — locate definition
+3. jet_brains_find_referencing_symbols to trace all callers
+4. jet_brains_type_hierarchy for polymorphic dispatch questions
+5. Form hypothesis based on Serena evidence
 6. Validate with `mcp__sequential-thinking__sequentialthinking`
 ```
 

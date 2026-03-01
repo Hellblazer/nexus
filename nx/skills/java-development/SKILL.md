@@ -7,25 +7,24 @@ description: Use when a plan has been approved and Java implementation work is r
 
 Delegates to the **java-developer** agent (sonnet). See [registry.yaml](../../registry.yaml).
 
-## LSP Usage Patterns
+## Code Navigation
 
-**CRITICAL**: Use LSP for code navigation instead of text search (900x faster).
+**REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for all symbol-level navigation — finding definitions, callers, type hierarchies, and surgical edits. Serena replaces text-pattern Grep for any symbol task.
 
-- **Before modifying interfaces**: Use `goToImplementation` to find all implementers
-- **Before refactoring methods**: Use `findReferences` to find all callers
-- **Understanding dependencies**: Use `hover` for quick type info and JavaDoc
-- **Finding method definitions**: Use `goToDefinition` instead of Grep
-- **Class structure**: Use `documentSymbol` for method/field inventory
-- **Prefer LSP over Grep** for all symbol navigation tasks
+- **Before modifying interfaces**: `jet_brains_find_referencing_symbols` to find all implementers and callers
+- **Before refactoring methods**: `jet_brains_find_referencing_symbols` to find all callers
+- **Class structure**: `jet_brains_get_symbols_overview` for method/field inventory without reading the file
+- **Finding method definitions**: `jet_brains_find_symbol` instead of Grep
+- **Replacing a method body**: `replace_symbol_body` — no line arithmetic, immune to drift
 
 ### Example Workflow
 ```
 1. Read plan requirement
-2. Use LSP.documentSymbol to understand existing class structure
-3. Use LSP.goToDefinition to examine dependencies
+2. jet_brains_get_symbols_overview to understand existing class structure
+3. jet_brains_find_symbol to locate dependencies
 4. Write failing test (TDD)
-5. Use LSP.findReferences to check impact of changes
-6. Implement solution
+5. jet_brains_find_referencing_symbols to check impact of changes
+6. Implement with replace_symbol_body or insert_before/after_symbol
 ```
 
 ## When This Skill Activates

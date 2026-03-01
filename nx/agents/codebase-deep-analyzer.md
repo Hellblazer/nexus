@@ -105,7 +105,7 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
    # Locate integration points
    nx search "external service integrations and APIs" --corpus code --hybrid --n 20
    ```
-   Combine semantic findings with Glob (file structure) and LSP (symbol navigation) for complete understanding.
+   Combine semantic findings with Glob (file structure) and Serena (symbol navigation — see nx:serena-code-nav) for complete understanding.
 
 6. **Context Conservation Strategy**:
    - Use subtasks to handle detailed analysis of specific modules/components
