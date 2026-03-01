@@ -117,7 +117,7 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
 
 5. **Commit the release**
    ```bash
-   git add pyproject.toml CHANGELOG.md .claude-plugin/marketplace.json
+   git add pyproject.toml CHANGELOG.md nx/CHANGELOG.md .claude-plugin/marketplace.json
    git commit -m "Release vX.Y.Z"
    ```
 

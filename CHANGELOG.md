@@ -6,12 +6,74 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0rc9] - 2026-03-01
+
+### Added
+- **Storage tier awareness for agents**: SubagentStart hook injects live T1 scratch entries
+  into every spawned agent's context — agents see what siblings and parent agents already
+  discovered this session without duplicating work.
+- **Storage Tier Protocol** in `using-nx-skills` SKILL.md: T3→T2→T1 read-widest-first
+  table and T1→persist→knowledge-tidy write path, giving all agents a clear data discipline.
+
+### Fixed
+- **T2 FTS5 search crash on hyphenated queries**: `nx memory search "foo-bar"` raised
+  `sqlite3.OperationalError: no such column: bar` — FTS5 was interpreting hyphens as column
+  filter separators. Added `_sanitize_fts5()` helper that quotes special-character tokens
+  before `MATCH`. Trailing `*` prefix wildcard preserved. Applies to `search()`,
+  `search_glob()`, and `search_by_tag()`.
+
+## [1.0.0rc8] - 2026-03-01
+
+### Added
+- **T1 ChromaDB HTTP server** (RDR-010): replaced `EphemeralClient` with a per-session
+  `chroma run` subprocess. All agents spawned from the same Claude Code window share one
+  T1 scratch namespace via PPID chain propagation — cross-process `nx scratch` reads and
+  writes work correctly across separate shell invocations.
+- **`serena-code-nav` skill**: navigate code by symbol — find definitions, all callers,
+  type hierarchies, and safe renames without reading whole files.
+- **`nx hook session-start` / `session-end`** (RDR-008): nx workflow integration hooks
+  for session lifecycle management; T1 server is started on session-start and stopped on
+  session-end.
+- **`using-nx-skills` skill polish**: full 29-skill directory table with 5 categories,
+  Announce step in process flow, 12 red flags (up from 7), `brainstorming-gate` replaces
+  `verification-before-completion` in Skill Priority. Registry trigger conditions sharpened
+  for knowledge-tidier, orchestrator, and substantive-critic. SessionStart hook matcher
+  tightened to `startup|resume|clear|compact`.
+
+### Removed
+- **`--agentic` and `--answer` flags** removed from `nx search` (RDR-009): both modes
+  required Anthropic API key and added latency for marginal benefit. Answer synthesis and
+  agentic refinement are now agent responsibilities via the plugin skill suite.
+
+### Fixed
+- **T1 server startup**: removed `--log-level ERROR` from `chroma run` invocation — flag
+  was dropped in chroma 1.x and silently caused every T1 start to exit code 2, falling
+  back to isolated per-process EphemeralClient.
+- **Session file keyed to grandparent PID**: `hooks.py` now calls `_ppid_of(os.getppid())`
+  to reach the stable Claude Code PID rather than the transient shell subprocess that dies
+  immediately after writing the session file.
+- **T1 SESSIONS_DIR test isolation**: added `autouse` pytest fixture redirecting
+  `SESSIONS_DIR` to `tmp_path`, preventing tests from discovering a live server's session
+  records.
+
+## [1.0.0rc7] - 2026-02-28
+
 ### Added
 - **File-size scoring penalty for code search** (RDR-006): chunks from large files are
   down-ranked proportionally — `score *= min(1.0, 30 / chunk_count)`. Applied unconditionally
   to all `code__` results regardless of `--hybrid`. Files ≤ 30 chunks are unaffected.
 - `nx search --max-file-chunks N`: pre-filters code results to files with at most N chunks
   via a ChromaDB `chunk_count $lte` where filter. Combines with `--where` using `$and`.
+- **T2 multi-namespace prefix scan** (RDR-007): SubagentStart hook surfaces all
+  `{repo}*` T2 namespaces (not just the bare project namespace) with a cap algorithm:
+  5 entries with snippet + 3 title-only + remainder as count per namespace; 15-entry
+  cross-namespace hard cap.
+- `nx index repo --chunk-size N`: configurable lines-per-chunk for code files
+  (default 150, minimum 1).
+- `nx index repo --no-chunk-warning`: suppress the large-file pre-scan warning.
+- **Large-file pre-scan warning**: detects code files exceeding 30× chunk size before
+  indexing and suggests `--chunk-size 80`; adaptive recommendation when chunk size is
+  already set.
 
 ## [1.0.0rc6] - 2026-02-28
 
@@ -251,8 +313,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc5...HEAD
-[1.0.0rc5]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc4...v1.0.0rc5
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc9...HEAD
+[1.0.0rc9]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc8...v1.0.0rc9
+[1.0.0rc8]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc7...v1.0.0rc8
+[1.0.0rc7]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc6...v1.0.0rc7
 [1.0.0rc6]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc5...v1.0.0rc6
 [1.0.0rc5]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc4...v1.0.0rc5
 [1.0.0rc4]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc3...v1.0.0rc4

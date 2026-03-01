@@ -11,7 +11,7 @@ Three layers, each useful on its own, each building on the last:
 
 1. **Semantic search and repository indexing** (`nx`) — Index any repo: code is chunked with tree-sitter AST parsing, prose with semantic markdown splitting, PDFs with layout-aware extraction. Search across all of it with a single command. Three storage tiers let you start local with zero API keys and add cloud search when you're ready.
 
-2. **A Claude Code plugin** (`nx/`) — 15 agents, 27 skills, session hooks, slash commands, and a bundled MCP server. Agents search indexed code before proposing changes and coordinate through standard pipelines (plan, implement, review, test). Works with the CLI; does not require RDR.
+2. **A Claude Code plugin** (`nx/`) — 15 agents, 28 skills, session hooks, slash commands, and a bundled MCP server. Agents search indexed code before proposing changes and coordinate through standard pipelines (plan, implement, review, test). Works with the CLI; does not require RDR.
 
 3. **A structured decision framework** ([RDR](docs/rdr/README.md)) — Research-Design-Review documents: the traction control for agentic development. Each decision is a short document with classified evidence (Verified, Documented, or Assumed). Write one, build it, learn something, write another. Nexus keeps the growing corpus searchable and navigable. Fully optional.
 
@@ -30,7 +30,7 @@ nx search "authentication flow"  # semantic search
 nx search "auth" --hybrid        # semantic + git frecency
 ```
 
-Scratch and memory commands work with zero API keys. Cloud search requires [ChromaDB](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) accounts. See [Getting Started](docs/getting-started.md).
+Scratch and memory commands work with zero API keys. Cloud search requires [ChromaDB](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) accounts — both offer free tiers that cover all typical Nexus usage. See [Getting Started](docs/getting-started.md).
 
 ## Repository Indexing
 
@@ -98,7 +98,7 @@ The `nx/` directory is a Claude Code plugin. Install via the marketplace:
 The plugin provides:
 
 - **15 agents** — code review, debugging, architecture planning, research synthesis, strategic planning, and more
-- **27 skills** — RDR workflow, TDD discipline, brainstorming gates, nexus CLI reference
+- **28 skills** — RDR workflow, TDD discipline, brainstorming gates, nexus CLI reference
 - **Session hooks** — auto-initialize scratch, load PM context, health-check dependencies, prime beads
 - **Slash commands** — `/research`, `/create-plan`, `/review-code`, `/rdr-create`, `/rdr-accept`, etc.
 - **Standard pipelines** — feature, bug, and research workflows with built-in review gates

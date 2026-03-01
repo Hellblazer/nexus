@@ -10,14 +10,19 @@ then lets you search across all of them with a single command.
 - **uv** (package manager) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - **git**
 - **ripgrep** (`rg`) — required for `--hybrid` search. Install via `brew install ripgrep` or your system package manager.
+- **chroma** CLI — required for T1 multi-agent session sharing. Install via `pip install chromadb` or `uv tool install chromadb`.
 
 For T3 (permanent cloud storage), you also need accounts at:
 
-| Service | Purpose | Signup |
-|---------|---------|--------|
-| ChromaDB Cloud | Vector storage | [trychroma.com](https://trychroma.com) |
-| Voyage AI | Embeddings (free tier: 200M tokens/month) | [voyageai.com](https://voyageai.com) |
-| Anthropic | Answer mode, PM archival | [console.anthropic.com](https://console.anthropic.com) |
+| Service | Purpose | Free tier | Signup |
+|---------|---------|-----------|--------|
+| ChromaDB Cloud | Vector storage | Generous storage + requests for individual use | [trychroma.com](https://trychroma.com) |
+| Voyage AI | Embeddings | 200M tokens/month — indexing a large codebase uses 1–5M | [voyageai.com](https://voyageai.com) |
+| Anthropic | PM archival (optional) | — | [console.anthropic.com](https://console.anthropic.com) |
+
+> **Cost**: Both ChromaDB Cloud and Voyage AI free tiers cover all typical Nexus usage at no cost.
+> Voyage AI requires a credit card on file to unlock higher rate limits — but **usage remains
+> free**. You will not be charged for normal indexing and search workloads.
 
 Scratch and memory commands work with zero API keys (see [Local-only quick start](#local-only-quick-start)).
 
@@ -170,7 +175,7 @@ For local development, load the plugin directly from the repo checkout:
 claude --plugin-dir ./nx
 ```
 
-The plugin provides 15 agents, 27 skills, session hooks, slash commands, a bundled MCP server (sequential-thinking), and standard pipelines. See [nx/README.md](../nx/README.md) for details.
+The plugin provides 15 agents, 28 skills, session hooks, slash commands, a bundled MCP server (sequential-thinking), and standard pipelines. See [nx/README.md](../nx/README.md) for details.
 
 ## Next steps
 
