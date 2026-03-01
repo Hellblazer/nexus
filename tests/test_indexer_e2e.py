@@ -142,14 +142,16 @@ def mock_voyage_client():
 
 @pytest.fixture(scope="module")
 def rich_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A real git repo with code, prose, and RDR files.
+    """A real git repo with code, prose, RDR, and PDF files.
 
     Module-scoped: git init + commit runs once per test session.
     Contains:
       - Code files (from _CORPUS_FILES): .py source files
       - Prose files (from _PROSE_FILES): .md and .yaml files
       - RDR files (from _RDR_FILES): ADR markdown under docs/rdr/
+      - PDF file (docs/test.pdf): single-page with title/author metadata (AC-E5)
     """
+    import pymupdf as _fitz
     repo = tmp_path_factory.mktemp("nexus-rich")
 
     # Code files — copied from the real Nexus source
@@ -170,6 +172,21 @@ def rich_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
         dest = repo / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
+
+    # PDF file — single-page with metadata for AC-E5 routing test
+    pdf_doc = _fitz.open()
+    pdf_page = pdf_doc.new_page()
+    pdf_page.insert_text(
+        (72, 100),
+        "Hello World. This is a test document for PDF ingest.",
+        fontsize=12,
+    )
+    pdf_doc.set_metadata({"title": "Test Document", "author": "Test Author"})
+    pdf_bytes = pdf_doc.tobytes()
+    pdf_doc.close()
+    pdf_dest = repo / "docs" / "test.pdf"
+    pdf_dest.parent.mkdir(parents=True, exist_ok=True)
+    pdf_dest.write_bytes(pdf_bytes)
 
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@nexus"], cwd=repo, check=True, capture_output=True)
@@ -783,3 +800,32 @@ def test_cli_index_frecency_only_flag(
 
     assert result.exit_code == 0, result.output
     assert "Done" in result.output
+
+
+# ── AC-E5 — index_repository() PDF routing ───────────────────────────────────
+
+def test_index_repository_pdf_routing(
+    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database
+) -> None:
+    """AC-E5: index_repository() routes PDF files into docs__ with correct metadata."""
+    from nexus.indexer import index_repository
+    from nexus.registry import _docs_collection_name
+
+    with patch("nexus.db.make_t3", return_value=local_t3), \
+         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+        index_repository(rich_repo, rich_registry)
+
+    docs_col_name = _docs_collection_name(rich_repo)
+    results = local_t3.search(
+        "Hello World test document PDF ingest",
+        [docs_col_name],
+        n_results=5,
+    )
+    pdf_results = [r for r in results if r.get("store_type") == "pdf"]
+    assert pdf_results, (
+        f"Expected at least one PDF chunk in {docs_col_name!r}; "
+        f"got store_types: {[r.get('store_type') for r in results]}"
+    )
+    assert pdf_results[0]["source_title"] == "Test Document", (
+        f"Expected source_title='Test Document', got {pdf_results[0]['source_title']!r}"
+    )

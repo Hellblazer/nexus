@@ -12,6 +12,7 @@ not currently implemented. The two-tier strategy covers the known failure modes.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 import re
 
 
@@ -20,7 +21,7 @@ class ExtractionResult:
     """Result of PDF text extraction."""
 
     text: str
-    metadata: dict = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class PDFExtractor:
@@ -73,6 +74,7 @@ class PDFExtractor:
 
         with pymupdf.open(pdf_path) as doc:
             page_count = len(doc)
+            doc_meta = doc.metadata or {}
             for page_num in range(page_count):
                 # Pass the open doc object (not the path) to avoid re-opening
                 # the file for every page — O(1) opens instead of O(N_pages).
@@ -105,6 +107,14 @@ class PDFExtractor:
                 "page_count": page_count,
                 "format": "markdown",
                 "page_boundaries": page_boundaries,
+                "pdf_title": doc_meta.get("title", ""),
+                "pdf_author": doc_meta.get("author", ""),
+                "pdf_subject": doc_meta.get("subject", ""),
+                "pdf_keywords": doc_meta.get("keywords", ""),
+                "pdf_creator": doc_meta.get("creator", ""),
+                "pdf_producer": doc_meta.get("producer", ""),
+                "pdf_creation_date": doc_meta.get("creationDate", ""),
+                "pdf_mod_date": doc_meta.get("modDate", ""),
             },
         )
 
@@ -118,6 +128,7 @@ class PDFExtractor:
 
         with pymupdf.open(pdf_path) as doc:
             page_count = len(doc)
+            doc_meta = doc.metadata or {}
             for page_num, page in enumerate(doc):
                 raw: str = page.get_text(sort=True)
                 # Normalize per-page so page_boundaries match character positions
@@ -148,5 +159,13 @@ class PDFExtractor:
                 "page_count": page_count,
                 "format": "normalized",
                 "page_boundaries": page_boundaries,
+                "pdf_title": doc_meta.get("title", ""),
+                "pdf_author": doc_meta.get("author", ""),
+                "pdf_subject": doc_meta.get("subject", ""),
+                "pdf_keywords": doc_meta.get("keywords", ""),
+                "pdf_creator": doc_meta.get("creator", ""),
+                "pdf_producer": doc_meta.get("producer", ""),
+                "pdf_creation_date": doc_meta.get("creationDate", ""),
+                "pdf_mod_date": doc_meta.get("modDate", ""),
             },
         )

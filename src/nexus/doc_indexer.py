@@ -226,14 +226,19 @@ def _pdf_chunks(
     if not chunks:
         return []
 
+    # Heuristic: fewer than 20 chars per page suggests a scanned/image-only PDF.
+    # Per-page normalisation avoids false positives on short-but-real documents.
+    _page_count = result.metadata.get("page_count", 1) or 1
+    is_image_pdf = (len(result.text) / _page_count) < 20
+
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
             "source_path": str(pdf_path),
-            "source_title": "",
-            "source_author": "",
-            "source_date": "",
+            "source_title": result.metadata.get("pdf_title", ""),
+            "source_author": result.metadata.get("pdf_author", ""),
+            "source_date": result.metadata.get("pdf_creation_date", ""),
             "corpus": corpus,
             "store_type": "pdf",
             "page_count": result.metadata.get("page_count", 0),
@@ -248,6 +253,9 @@ def _pdf_chunks(
             "embedding_model": target_model,
             "indexed_at": now_iso,
             "content_hash": content_hash,
+            "pdf_subject": result.metadata.get("pdf_subject", ""),
+            "pdf_keywords": result.metadata.get("pdf_keywords", ""),
+            "is_image_pdf": is_image_pdf,
         }
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
