@@ -11,6 +11,36 @@ import structlog
 
 _log = structlog.get_logger()
 
+# ── FTS5 helpers ──────────────────────────────────────────────────────────────
+
+# FTS5 special characters that cause OperationalError when unquoted:
+#   -  (column filter: "col-name" → look in column "col" for "name")
+#   :  (explicit column filter: "col:term")
+#   (  )  ^  "  (grouping / phrase / boost — crash if unbalanced)
+# Note: trailing * is a valid FTS5 prefix wildcard (e.g. auth*) — NOT included here.
+_FTS5_SPECIAL = set('-:()"^~')
+
+
+def _sanitize_fts5(query: str) -> str:
+    """Escape a user-supplied query for FTS5 MATCH.
+
+    Splits on whitespace and wraps any token that contains FTS5 special
+    characters in double quotes, with internal double-quotes escaped as '""'.
+    Plain tokens (letters and digits only) are passed through unchanged so
+    that FTS5 AND-of-terms semantics and boolean operators (AND, OR, NOT)
+    still work for well-formed queries.
+    """
+    tokens = query.split()
+    parts: list[str] = []
+    for token in tokens:
+        if any(ch in _FTS5_SPECIAL for ch in token):
+            escaped = token.replace('"', '""')
+            parts.append(f'"{escaped}"')
+        else:
+            parts.append(token)
+    return " ".join(parts)
+
+
 # ── Schema SQL ────────────────────────────────────────────────────────────────
 
 _SCHEMA_SQL = """\
@@ -164,6 +194,7 @@ class T2Database:
 
     def search(self, query: str, project: str | None = None) -> list[dict[str, Any]]:
         """FTS5 keyword search. Returns rows ordered by relevance."""
+        safe = _sanitize_fts5(query)
         with self._lock:
             try:
                 if project:
@@ -176,7 +207,7 @@ class T2Database:
                           AND m.project = ?
                         ORDER BY rank
                     """
-                    rows = self.conn.execute(sql, (query, project)).fetchall()
+                    rows = self.conn.execute(sql, (safe, project)).fetchall()
                 else:
                     sql = """
                         SELECT m.id, m.project, m.title, m.session, m.agent,
@@ -186,7 +217,7 @@ class T2Database:
                         WHERE memory_fts MATCH ?
                         ORDER BY rank
                     """
-                    rows = self.conn.execute(sql, (query,)).fetchall()
+                    rows = self.conn.execute(sql, (safe,)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
@@ -249,9 +280,10 @@ class T2Database:
               AND m.project GLOB ?
             ORDER BY rank
         """
+        safe = _sanitize_fts5(query)
         with self._lock:
             try:
-                rows = self.conn.execute(sql, (query, project_glob)).fetchall()
+                rows = self.conn.execute(sql, (safe, project_glob)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
@@ -272,9 +304,10 @@ class T2Database:
             ORDER BY rank
         """
         like_pattern = f"%,{tag},%"
+        safe = _sanitize_fts5(query)
         with self._lock:
             try:
-                rows = self.conn.execute(sql, (query, like_pattern)).fetchall()
+                rows = self.conn.execute(sql, (safe, like_pattern)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
