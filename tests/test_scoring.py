@@ -147,11 +147,12 @@ def test_size_penalty_applied_regardless_of_hybrid_flag() -> None:
     assert score_map[0.5] == pytest.approx(0.25, abs=1e-6)
 
 
-def test_size_penalty_not_applied_to_docs_results() -> None:
+@pytest.mark.parametrize("coll", ["docs__corpus", "knowledge__notes"])
+def test_size_penalty_not_applied_to_non_code_results(coll: str) -> None:
     """File-size penalty NOT applied to docs__ or knowledge__ results."""
-    r_a = _sized_result("docs__corpus", 0.0, 5)   # v_norm=1.0 → score=1.0
-    r_b = _sized_result("docs__corpus", 0.5, 60)  # v_norm=0.5, no penalty → score=0.5
-    r_c = _sized_result("docs__corpus", 1.0, 5)   # v_norm=0.0 → score=0.0
+    r_a = _sized_result(coll, 0.0, 5)   # v_norm=1.0 → score=1.0
+    r_b = _sized_result(coll, 0.5, 60)  # v_norm=0.5, no penalty → score=0.5
+    r_c = _sized_result(coll, 1.0, 5)   # v_norm=0.0 → score=0.0
     results = apply_hybrid_scoring([r_a, r_b, r_c], hybrid=False)
     score_map = {r.distance: r.hybrid_score for r in results}
     assert score_map[0.5] == pytest.approx(0.5, abs=1e-6)

@@ -95,7 +95,8 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
 @click.option("--where", "where_pairs", multiple=True, metavar="KEY=VALUE",
               help="Filter by metadata field (repeatable; multiple flags are ANDed)")
 @click.option("--max-file-chunks", "max_file_chunks", default=None, type=int, metavar="N",
-              help="Exclude chunks from files larger than N chunks (filters on chunk_count)")
+              help="Exclude chunks from files larger than N chunks (code corpora only; "
+                   "knowledge/docs corpora lack chunk_count and will return no results)")
 @click.option("-A", "lines_after", default=0, type=int, metavar="N",
               help="Show N lines of context after each result chunk")
 @click.option("-C", "lines_context", default=0, type=int, metavar="N",

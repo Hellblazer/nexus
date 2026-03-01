@@ -53,11 +53,16 @@ def apply_hybrid_scoring(
 ) -> list[SearchResult]:
     """Compute hybrid scores for *results*.
 
-    For code__ corpora: score = 0.7 * vector_norm + 0.3 * frecency_norm.
+    For code__ corpora (hybrid=True): score = 0.7 * vector_norm + 0.3 * frecency_norm.
+    For code__ corpora (hybrid=False): score = 1.0 * vector_norm.
     For docs__/knowledge__: score = 1.0 * vector_norm (frecency_score absent).
 
+    File-size penalty: applied to all code__ results unconditionally after the
+    initial score is computed: ``score *= _file_size_factor(chunk_count)``.
+    When ``chunk_count`` is absent from metadata, defaults to 1 (no penalty).
+
     If *hybrid* is True but no code__ collections appear in results, a warning
-    is printed and all results use 1.0 * vector_norm.
+    is logged and all results use 1.0 * vector_norm.
 
     Note: Mutates ``hybrid_score`` on each SearchResult in place before
     returning the sorted list.
