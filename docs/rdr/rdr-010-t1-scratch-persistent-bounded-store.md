@@ -2,13 +2,15 @@
 title: "T1 Scratch: Cross-Process Session Sharing via ChromaDB Server + PPID Chain"
 id: RDR-010
 type: architecture
-status: accepted
+status: closed
+close_reason: implemented
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 accepted_date: 2026-03-02
+closed_date: 2026-03-01
 created: 2026-03-01
-updated: 2026-03-02
+updated: 2026-03-01
 related_issues:
   - RDR-008
 ---
