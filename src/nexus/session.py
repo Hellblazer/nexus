@@ -231,7 +231,6 @@ def start_t1_server() -> tuple[str, int, int, str]:
             "--host", _T1_SERVER_HOST,
             "--port", str(port),
             "--path", tmpdir,
-            "--log-level", "ERROR",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
