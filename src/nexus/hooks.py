@@ -16,6 +16,7 @@ import structlog
 from nexus.db.t2 import T2Database
 from nexus.session import (
     SESSIONS_DIR,
+    _ppid_of,
     find_ancestor_session,
     generate_session_id,
     start_t1_server,
@@ -88,7 +89,12 @@ def session_start(claude_session_id: str | None = None) -> str:
             session_id = ancestor["session_id"]
         else:
             # Root session: start the ChromaDB server with the pre-generated ID.
-            ppid = os.getppid()
+            # Key the session file to the grandparent (Claude Code's PID) rather
+            # than the immediate parent (a transient shell subprocess that dies
+            # as soon as the hook exits).  This ensures subsequent Bash calls from
+            # the same Claude Code process share the same T1 session.
+            _direct_ppid = os.getppid()
+            ppid = _ppid_of(_direct_ppid) or _direct_ppid
             try:
                 host, port, server_pid, tmpdir = start_t1_server()
                 write_session_record(SESSIONS_DIR, ppid, session_id, host, port, server_pid, tmpdir)

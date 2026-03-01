@@ -55,6 +55,63 @@ Found during two rounds of code review (PR #38):
 
 All 1819 tests passing (unit + plugin_structure + integration with real ChromaDB).
 
+## Live Validation Bugs Found Post-Close (2026-03-01, PR #40)
+
+Two bugs surfaced during the first live session validation after rc8 shipped:
+
+### Bug 1 — `chroma run --log-level` removed in chroma 1.x
+
+`start_t1_server()` passed `--log-level ERROR` to `chroma run`. This flag was
+dropped in chroma 1.x; `chroma 1.3.1` exits with code 2 immediately on
+encountering the unknown flag. The session hook caught the early exit and fell
+back to EphemeralClient, silently degrading T1 to per-process isolation.
+
+**Fix:** Remove the `--log-level` argument. stdout/stderr were already discarded
+via `DEVNULL`, so silencing was already handled.
+
+**Lesson:** Version-pin or smoke-test CLI flags when taking a dependency on an
+external binary's argument interface.
+
+### Bug 2 — Session file keyed to transient shell subprocess
+
+`session_start()` called `ppid = os.getppid()` to determine the session file
+key. In the Claude Code hook invocation model, `os.getppid()` returns the
+**transient zsh subprocess** that Claude Code spawns for each `Bash(...)` call
+— not Claude Code itself. That shell exits the moment the hook completes, so
+the session file path (e.g. `sessions/41462.session`) is never reachable from
+subsequent Bash invocations whose PPID chains run through a different (newer)
+transient shell.
+
+**Root cause:** The PPID chain topology assumed the hook runs as a direct child
+of Claude Code. In practice:
+
+```
+Claude Code (40496, stable) → zsh/A (41462, transient) → nx hook session-start
+```
+
+Hook writes `sessions/41462.session`. Next `nx scratch put` runs in:
+
+```
+Claude Code (40496) → zsh/B (41599, transient) → nx scratch put
+```
+
+Walk: 41599 → 40496 → ... never visits 41462 (already dead). Cache miss.
+
+**Fix:** Key to the grandparent instead of the direct parent:
+```python
+_direct_ppid = os.getppid()
+ppid = _ppid_of(_direct_ppid) or _direct_ppid
+```
+`_ppid_of(zsh/A)` = Claude Code (40496) — stable for the session lifetime.
+All subsequent Bash invocations walk through 40496 and find the file.
+
+**Verified:** `nx scratch put` → `nx scratch list` now returns the stored entry
+across separate Bash calls within the same Claude session.
+
+**Lesson:** The "PPID = direct parent" assumption breaks when hooks are run
+through a shell intermediary. An integration test that spans two separate
+subprocess invocations would have caught this before release.
+
 ## PPID Topology: Empirically Confirmed (2026-03-01)
 
 Spawned a subagent via the Agent tool and traced its full PPID chain:
