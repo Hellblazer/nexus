@@ -49,5 +49,15 @@ if [[ -f "$RELAY_TEMPLATE" ]]; then
   awk '/^## Optional Fields/{exit} {print}' "$RELAY_TEMPLATE"
 fi
 
-# T1 scratch: session-scoped, each subagent has its own T1 scope
-# Use nx memory for cross-agent relay within the same project session
+# T1 scratch: SHARED across all agents in this session via PPID chain (RDR-010).
+# All agents spawned from the same root Claude Code process see the same entries.
+# Inject current entries so this agent knows what siblings/parent already found.
+if command -v nx &> /dev/null; then
+  T1_ENTRIES=$(nx scratch list 2>/dev/null)
+  if [[ -n "$T1_ENTRIES" && "$T1_ENTRIES" != "No scratch entries." ]]; then
+    echo ""
+    echo "## Session Scratch (T1 — shared across all agents this session)"
+    echo "$T1_ENTRIES"
+    echo ""
+  fi
+fi
