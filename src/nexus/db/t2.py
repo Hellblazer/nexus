@@ -220,16 +220,22 @@ class T2Database:
 
         Each row has ``project`` and ``last_updated`` (MAX timestamp for that namespace).
         Results are ordered by ``last_updated`` DESC — most-recently-updated first.
+
+        LIKE metacharacters (``%``, ``_``, ``\\``) in *prefix* are escaped so they are
+        matched literally — a repo named ``my_project`` will not match ``myXproject``.
         """
+        if not prefix:
+            return []
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         sql = """
             SELECT project, MAX(timestamp) AS last_updated
             FROM memory
-            WHERE project LIKE ?
+            WHERE project LIKE ? ESCAPE '\\'
             GROUP BY project
             ORDER BY MAX(timestamp) DESC
         """
         with self._lock:
-            rows = self.conn.execute(sql, (f"{prefix}%",)).fetchall()
+            rows = self.conn.execute(sql, (f"{escaped}%",)).fetchall()
         return [{"project": row[0], "last_updated": row[1]} for row in rows]
 
     def search_glob(self, query: str, project_glob: str) -> list[dict[str, Any]]:

@@ -8,16 +8,19 @@ Queries T2 for every namespace whose name starts with *project_name*
 (e.g. "nexus", "nexus_rdr", "nexus_pm") and prints a compact summary
 formatted for session injection.
 
-Cap algorithm (cross-namespace total ≤ 15):
-  entries 1–5   : title + 1-line snippet (≤120 chars)
-  entries 6–8   : title only
-  beyond 8      : omitted; trailing count appended
+Cap algorithm:
+  Per namespace (entries ranked by recency within that namespace):
+    entries 1–5   : title + 1-line snippet (≤120 chars)
+    entries 6–8   : title only
+    beyond 8      : omitted; trailing count appended
+  Cross-namespace hard cap: 15 rendered entries total (snippet or title).
+  Namespaces are processed in recency order (most-recently-updated first).
 """
 import sys
 
-_HARD_CAP = 15
-_SNIPPET_LIMIT = 5
-_TITLE_LIMIT = 8
+_HARD_CAP = 15       # max rendered entries across all namespaces combined
+_SNIPPET_LIMIT = 5   # per-namespace: entries up to this rank get a snippet
+_TITLE_LIMIT = 8     # per-namespace: entries up to this rank get title-only
 
 
 def _snippet(content: str, max_chars: int = 120) -> str:
@@ -40,7 +43,7 @@ def main() -> None:
     try:
         from nexus.commands._helpers import default_db_path
         from nexus.db.t2 import T2Database
-    except Exception as exc:
+    except ImportError as exc:
         print(f"T2 not available: {exc}", file=sys.stderr)
         return
 
@@ -51,9 +54,12 @@ def main() -> None:
                 return
 
             lines: list[str] = []
-            total = 0
+            total = 0  # rendered entries across all namespaces
 
             for ns_row in namespaces:
+                if total >= _HARD_CAP:
+                    break
+
                 ns = ns_row["project"]
                 entries = db.get_all(project=ns)
                 if not entries:
@@ -64,21 +70,23 @@ def main() -> None:
 
                 ns_lines: list[str] = []
                 ns_remaining = 0
+                ns_rank = 0  # per-namespace position (1-based)
+
                 for entry in entries:
                     if total >= _HARD_CAP:
                         ns_remaining += 1
                         continue
-                    rank = total + 1  # 1-based across all namespaces
+                    ns_rank += 1
                     title = entry.get("title", "(untitled)")
-                    if rank <= _SNIPPET_LIMIT:
+                    if ns_rank <= _SNIPPET_LIMIT:
                         snip = _snippet(entry.get("content", ""))
                         ns_lines.append(f"  {title}" + (f" — {snip}" if snip else ""))
-                    elif rank <= _TITLE_LIMIT:
+                        total += 1
+                    elif ns_rank <= _TITLE_LIMIT:
                         ns_lines.append(f"  {title}")
+                        total += 1
                     else:
                         ns_remaining += 1
-                        continue
-                    total += 1
 
                 if ns_lines:
                     lines.append(f"### {label}")

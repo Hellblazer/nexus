@@ -223,6 +223,28 @@ def test_get_projects_with_prefix_exact_prefix_only(db: T2Database) -> None:
     assert "abc_sub" in projects
 
 
+def test_get_projects_with_prefix_underscore_not_wildcard(db: T2Database) -> None:
+    """An underscore in the prefix is treated as a literal '_', not a LIKE wildcard."""
+    db.put(project="my_repo", title="a.md", content="entry")
+    db.put(project="myXrepo", title="b.md", content="other")  # X in position of _
+
+    results = db.get_projects_with_prefix("my_repo")
+    projects = {r["project"] for r in results}
+    assert "myXrepo" not in projects
+    assert "my_repo" in projects
+
+
+def test_get_projects_with_prefix_percent_not_wildcard(db: T2Database) -> None:
+    """A percent sign in the prefix is treated as a literal '%', not a LIKE wildcard."""
+    db.put(project="50%_done", title="a.md", content="entry")
+    db.put(project="50x_done", title="b.md", content="other")
+
+    results = db.get_projects_with_prefix("50%")
+    projects = {r["project"] for r in results}
+    assert "50x_done" not in projects
+    assert "50%_done" in projects
+
+
 # ── delete ───────────────────────────────────────────────────────────────────
 
 def test_t2_delete(db: T2Database) -> None:
