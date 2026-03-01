@@ -77,18 +77,28 @@ PM context is auto-injected by SessionStart and SubagentStart hooks.
 - Map dependencies and identify potential breaking changes
 - Store codebase state snapshots in Nexus for comparison: `echo "..." | nx store put - --collection knowledge --title "codebase-state-{date}" --tags "audit,snapshot"`
 
-### 5.5. Code Reference Validation with Nexus
-**Verify plan references against codebase**:
+### 5.5. Code Reference Validation
+**Verify plan references against codebase using Grep as primary path:**
 ```bash
-# Validate mentioned classes exist
-nx search "does EntityManager interface exist in codebase" --corpus code --hybrid --n 5
+# Validate mentioned classes exist — Grep is faster and reliable regardless of index state
+grep -r "EntityManager" --include="*.java" src/
 
 # Check architectural assumptions
-nx search "current database connection pooling implementation" --corpus code --hybrid --n 10
+grep -r "ConnectionPool\|DataSource" --include="*.java" src/
 
 # Verify integration points
-nx search "how is authentication currently handled" --corpus code --hybrid --n 15
+grep -r "authenticate\|AuthFilter" --include="*.java" src/
 ```
+
+For conceptual cross-file pattern questions where Grep is insufficient, and only after RDR-006
+re-indexing with small chunks:
+```bash
+nx search "EntityManager usage patterns" --corpus code --hybrid --max-file-chunks 20 --n 5
+```
+
+The `--max-file-chunks 20` flag prevents large-file chunk dominance. Use Grep as the primary
+path; semantic search as a supplement for conceptual queries only.
+
 Plans referencing non-existent code are flagged during audit.
 
 ### 6. Technology Validation
