@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **File-size scoring penalty for code search** (RDR-006): chunks from large files are
+  down-ranked proportionally — `score *= min(1.0, 30 / chunk_count)`. Applied unconditionally
+  to all `code__` results regardless of `--hybrid`. Files ≤ 30 chunks are unaffected.
+- `nx search --max-file-chunks N`: pre-filters code results to files with at most N chunks
+  via a ChromaDB `chunk_count $lte` where filter. Combines with `--where` using `$and`.
+
 ## [1.0.0rc6] - 2026-02-28
 
 ### Fixed

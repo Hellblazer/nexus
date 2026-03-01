@@ -23,6 +23,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--no-rerank` | Disable cross-corpus reranking (use round-robin instead) |
 | `--mxbai` | Fan out to Mixedbread-indexed collections (read-only) |
 | `--where KEY=VALUE` | Metadata filter (repeatable; multiple flags are ANDed) |
+| `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |
 | `-m` / `--n` / `--max-results NUM` | Max results (default 10) |
 | `-A N` | Show N lines of context after each result chunk |
 | `-C N` | Show N lines of context after each result chunk (alias for `-A`) |
