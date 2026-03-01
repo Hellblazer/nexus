@@ -11,6 +11,7 @@ from voyageai.object.contextualized_embeddings import (
 from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.doc_indexer import index_markdown, index_pdf
+from tests.conftest import set_credentials
 
 
 @pytest.fixture
@@ -25,13 +26,6 @@ def sample_md(tmp_path: Path) -> Path:
     p = tmp_path / "doc.md"
     p.write_text("---\ntitle: Test Doc\nauthor: Alice\n---\n\n# Hello\n\nWorld.\n")
     return p
-
-
-def _set_credentials(monkeypatch):
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
-    monkeypatch.setenv("CHROMA_API_KEY", "ck_test")
-    monkeypatch.setenv("CHROMA_TENANT", "tenant")
-    monkeypatch.setenv("CHROMA_DATABASE", "db")
 
 
 # ── credential guard ──────────────────────────────────────────────────────────
@@ -60,7 +54,7 @@ def test_index_markdown_skips_without_credentials(sample_md, monkeypatch):
 
 def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch):
     """If content_hash AND embedding_model already match T3, extraction is skipped."""
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
 
     mock_col = MagicMock()
@@ -88,7 +82,7 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch):
     With a single chunk, CCE is skipped (requires >= 2 chunks) and the
     standard embed() path is used, which calls upsert_chunks_with_embeddings.
     """
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
 
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
@@ -137,7 +131,7 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch):
 
 def test_docs_metadata_schema_complete(sample_md, monkeypatch):
     """All required fields from the spec are present in upserted chunk metadata."""
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
 
     required_fields = {
         "source_path", "source_title", "source_author", "source_date",
@@ -188,6 +182,54 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch):
     assert not missing, f"Missing metadata fields: {missing}"
 
 
+# ── PDF metadata schema ───────────────────────────────────────────────────────
+
+def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
+    """PDF chunk metadata contains all 21 required fields (18 base + 3 PDF-only).
+
+    Uses a real PDF fixture so the production metadata mapping is exercised.
+    The markdown schema test (test_docs_metadata_schema_complete) remains unchanged;
+    pdf_subject, pdf_keywords, and is_image_pdf are PDF-only fields.
+    """
+    from nexus.doc_indexer import index_pdf
+
+    set_credentials(monkeypatch)
+
+    required_fields = {
+        # 18 base fields (shared with markdown schema)
+        "source_path", "source_title", "source_author", "source_date",
+        "corpus", "store_type", "page_count", "page_number", "section_title",
+        "format", "extraction_method", "chunk_index", "chunk_count",
+        "chunk_start_char", "chunk_end_char", "embedding_model",
+        "indexed_at", "content_hash",
+        # 3 PDF-only fields added in Phase 0
+        "pdf_subject", "pdf_keywords", "is_image_pdf",
+    }
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    captured_metadatas: list[dict] = []
+
+    def capture_upsert(collection, ids, documents, embeddings, metadatas):
+        captured_metadatas.extend(metadatas)
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert
+
+    def fake_embed(chunks, model, api_key, input_type="document"):
+        return [[0.1] * 5] * len(chunks), "test-local"
+
+    with patch("nexus.doc_indexer._embed_with_fallback", side_effect=fake_embed):
+        index_pdf(simple_pdf, corpus="test", t3=mock_t3)
+
+    assert captured_metadatas, "Expected at least one PDF chunk to be upserted"
+    meta = captured_metadatas[0]
+    missing = required_fields - meta.keys()
+    assert not missing, f"Missing PDF metadata fields: {missing}"
+
+
 # ── nexus-3zj: _sha256 uses streaming hash, not read_bytes ───────────────────
 
 def test_sha256_does_not_call_read_bytes(tmp_path: Path):
@@ -220,7 +262,7 @@ def test_sha256_does_not_call_read_bytes(tmp_path: Path):
 
 def test_index_pdf_sets_store_type_pdf(sample_pdf, monkeypatch):
     """index_pdf stores store_type='pdf', not 'docs'."""
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
 
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
@@ -265,7 +307,7 @@ def test_index_pdf_sets_store_type_pdf(sample_pdf, monkeypatch):
 
 def test_index_markdown_sets_store_type_markdown(sample_md, monkeypatch):
     """index_markdown stores store_type='markdown', not 'docs'."""
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
 
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
@@ -305,7 +347,7 @@ def test_index_markdown_sets_store_type_markdown(sample_md, monkeypatch):
 
 def test_index_markdown_offsets_account_for_frontmatter(tmp_path: Path, monkeypatch):
     """chunk_start_char/chunk_end_char are adjusted by the frontmatter length."""
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
 
     # File with 30-char frontmatter prefix
     fm = "---\ntitle: Test\n---\n"  # 20 chars
@@ -359,7 +401,7 @@ def test_index_markdown_offsets_account_for_frontmatter(tmp_path: Path, monkeypa
 
 def test_index_markdown_no_frontmatter_offsets_unchanged(tmp_path: Path, monkeypatch):
     """When no frontmatter, chunk offsets are not shifted."""
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
 
     body = "# Hello\n\nWorld."
     md_path = tmp_path / "no_fm.md"
@@ -780,7 +822,7 @@ def _make_pdf_mocks():
 
 def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
     """For docs__ collection, index_pdf calls t3.upsert_chunks_with_embeddings."""
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
 
     mock_chunk, mock_extract_result = _make_pdf_mocks()
 
@@ -814,7 +856,7 @@ def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
 
 def test_index_pdf_rerenders_when_model_changes(sample_pdf, monkeypatch):
     """Re-indexes when embedding_model in store differs from target model."""
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
     import hashlib as _hashlib
     content_hash = _hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
 
@@ -856,7 +898,7 @@ def test_index_pdf_rerenders_when_model_changes(sample_pdf, monkeypatch):
 
 def test_index_pdf_skips_when_hash_and_model_match(sample_pdf, monkeypatch):
     """Skips re-indexing when both content_hash and embedding_model match target."""
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
     import hashlib as _hashlib
     content_hash = _hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
 
@@ -1205,7 +1247,7 @@ def test_batch_index_markdowns_marks_failed_on_error(tmp_path, monkeypatch):
 def test_stale_chunk_pruning_deletes_old_ids(sample_md, monkeypatch):
     """When re-index produces fewer chunks, stale chunk IDs are deleted."""
     import hashlib as _hashlib
-    _set_credentials(monkeypatch)
+    set_credentials(monkeypatch)
 
     content_hash = _hashlib.sha256(sample_md.read_bytes()).hexdigest()
     prefix = content_hash[:16]
