@@ -112,6 +112,34 @@ across separate Bash calls within the same Claude session.
 through a shell intermediary. An integration test that spans two separate
 subprocess invocations would have caught this before release.
 
+### Bug 3 — Test isolation held by accident; broken by Bug 1's fix (PR #41)
+
+Fixing Bug 1 (removing `--log-level`) caused 5 previously-passing tests to fail.
+
+**Root cause:** The test suite had an implicit dependency on `start_t1_server()` always
+failing. When `chroma run --log-level ERROR` was present, chroma exited immediately with
+code 2, `session_start()` caught the exception, and no session file was ever written to
+`SESSIONS_DIR`. All `T1Database()` calls fell back to `EphemeralClient`. Test isolation
+held — **by accident**.
+
+Once Bug 1 was fixed, `test_session_start_prints_ready_message` (which calls
+`session_start()` without patching `start_t1_server`) started actually launching a
+ChromaDB server and writing a real session file at `SESSIONS_DIR/{grandparent_pid}.session`.
+Every subsequent `T1Database()` call in the same pytest process walked the PPID chain,
+found that file, and used its UUID `session_id` — ignoring whatever `session_id` the test
+had passed explicitly. Five tests failed with cross-test session contamination.
+
+**Fix:** `autouse` fixture in `conftest.py` redirects both `nexus.db.t1.SESSIONS_DIR` and
+`nexus.hooks.SESSIONS_DIR` to a per-test empty `tmp_path`. `find_ancestor_session()` always
+returns `None`; `T1Database` falls back to the process-wide EphemeralClient singleton,
+isolated per test by unique `session_id`.
+
+**Lesson:** When a test implicitly relies on a downstream side-effect (server failing to
+start), fixing that side-effect breaks the test in a non-obvious way. The test for
+`session_start()` should have patched `start_t1_server` from the start. A broader lesson:
+any test that exercises a function which may write shared state (SESSIONS_DIR) needs
+explicit isolation, not reliance on a known failure in a dependency.
+
 ## PPID Topology: Empirically Confirmed (2026-03-01)
 
 Spawned a subagent via the Agent tool and traced its full PPID chain:
