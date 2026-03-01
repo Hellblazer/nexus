@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.db.t2 import T2Database
+from nexus.db.t2 import T2Database, _sanitize_fts5
 
 
 def test_t2database_context_manager_closes_on_exit(tmp_path: Path) -> None:
@@ -460,3 +460,60 @@ def test_t2_get_all_returns_full_content(db: T2Database) -> None:
     titles = {e["title"] for e in entries}
     assert titles == {"a.md", "b.md"}
     assert all("content" in e["content"] for e in entries)
+
+
+# ── _sanitize_fts5 ──────────────────────────────────────────────────────────
+
+def test_sanitize_fts5_plain_query_unchanged() -> None:
+    """Plain alphanumeric tokens pass through unquoted."""
+    assert _sanitize_fts5("hello world") == "hello world"
+
+
+def test_sanitize_fts5_hyphen_token_quoted() -> None:
+    """Tokens containing a hyphen are wrapped in double quotes."""
+    assert _sanitize_fts5("verification-probe") == '"verification-probe"'
+
+
+def test_sanitize_fts5_colon_token_quoted() -> None:
+    """Tokens containing a colon are wrapped in double quotes."""
+    assert _sanitize_fts5("phase:1") == '"phase:1"'
+
+
+def test_sanitize_fts5_mixed_tokens() -> None:
+    """Plain and special tokens are handled independently."""
+    assert _sanitize_fts5("foo bar-baz") == 'foo "bar-baz"'
+
+
+def test_sanitize_fts5_embedded_double_quote_escaped() -> None:
+    """Embedded double quotes within a token are escaped as ''."""
+    result = _sanitize_fts5('say"hello')
+    assert result == '"say""hello"'
+
+
+def test_sanitize_fts5_hyphenated_query_no_crash(db: T2Database) -> None:
+    """search() with a hyphenated query does not raise OperationalError."""
+    db.put(project="proj", title="notes.md", content="verification probe test")
+    results = db.search("verification-probe")
+    # May or may not match depending on FTS tokenisation, but must not crash.
+    assert isinstance(results, list)
+
+
+def test_sanitize_fts5_hyphenated_query_with_project_no_crash(db: T2Database) -> None:
+    """search() with project filter and hyphenated query does not raise."""
+    db.put(project="proj", title="notes.md", content="smoke test entry")
+    results = db.search("smoke-test", project="proj")
+    assert isinstance(results, list)
+
+
+def test_sanitize_fts5_search_glob_hyphen_no_crash(db: T2Database) -> None:
+    """search_glob() with a hyphenated query does not raise OperationalError."""
+    db.put(project="nexus_pm", title="notes.md", content="verification probe")
+    results = db.search_glob("verification-probe", "*_pm")
+    assert isinstance(results, list)
+
+
+def test_sanitize_fts5_search_by_tag_hyphen_no_crash(db: T2Database) -> None:
+    """search_by_tag() with a hyphenated query does not raise OperationalError."""
+    db.put(project="proj", title="notes.md", content="verification probe", tags="pm")
+    results = db.search_by_tag("verification-probe", "pm")
+    assert isinstance(results, list)
