@@ -2,12 +2,14 @@
 title: "nx Workflow Integration: Protocol Standardization and Knowledge Accumulation"
 id: RDR-008
 type: architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-02-28
 accepted_date: 2026-03-01
+closed_date: 2026-03-01
+close_reason: implemented
 related_issues:
   - RDR-007
   - RDR-009
