@@ -28,7 +28,6 @@ nx doctor                        # verify setup
 nx index repo .                  # index current repo
 nx search "authentication flow"  # semantic search
 nx search "auth" --hybrid        # semantic + git frecency
-nx search "how does auth work" --answer  # synthesized answer with citations
 ```
 
 Scratch and memory commands work with zero API keys. Cloud search requires [ChromaDB](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) accounts. See [Getting Started](docs/getting-started.md).
@@ -60,7 +59,7 @@ Every command targets one or more tiers:
 
 | Command | Tier | Description |
 |---------|------|-------------|
-| `nx search` | T3 | Semantic, hybrid, answer, and agentic search |
+| `nx search` | T3 | Semantic and hybrid search |
 | `nx index` | T3 | Index code repos, PDFs, and markdown |
 | `nx store` | T3 | Store knowledge in the cloud |
 | `nx memory` | T2 | Per-project persistent notes |
@@ -126,7 +125,6 @@ Each agent runs on a model matched to its task: opus for complex reasoning, sonn
 
 - Python 3.12+, [`uv`](https://docs.astral.sh/uv/) (for install), `git` (for repo indexing)
 - [ChromaDB cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) for T3
-- [Anthropic](https://www.anthropic.com/) API key for answer mode
 - `ripgrep` for hybrid search
 
 ## License

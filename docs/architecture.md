@@ -20,7 +20,7 @@ CLI (cli.py + commands/)
     │     pdf:   PyMuPDF4LLM → voyage-context-3 → docs__<corpus>
     │
     ├── Search: query → retrieve → rerank → format
-    │     semantic, hybrid (+ frecency), answer (+ Haiku), agentic
+    │     semantic, hybrid (+ frecency + ripgrep)
     │
     └── Storage tiers
           T1: in-memory ChromaDB (session scratch)
@@ -41,7 +41,7 @@ Data flows upward (T1 → T2 → T3). No reverse flow except `nx pm restore`.
 | **Entry** | `cli.py`, `commands/` | Click CLI, one file per command group |
 | **Storage** | `db/t1.py`, `db/t2.py`, `db/t3.py` | Tier implementations |
 | **Indexing** | `indexer.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py` | Repo indexing pipeline |
-| **Search** | `search_engine.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py`, `answer.py` | Query, rank, synthesize |
+| **Search** | `search_engine.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py` | Query, rank, rerank |
 | **Server** | `server.py`, `server_main.py`, `polling.py` | Daemon, HEAD polling, auto-reindex |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `pm.py`, `types.py`, `errors.py` | Configuration, naming, formatting, PM |
 

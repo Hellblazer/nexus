@@ -121,12 +121,6 @@ Blend semantic search with git frecency for hybrid ranking:
 nx search "database connection pool" --hybrid
 ```
 
-Get an LLM-synthesized answer with citations (requires Anthropic key):
-
-```bash
-nx search "what embedding models are used" --answer
-```
-
 Other useful flags:
 
 ```bash

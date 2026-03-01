@@ -17,8 +17,6 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `QUERY` (positional) | Search query text |
 | `PATH` (positional, optional) | Scope search to files under that directory |
 | `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
-| `-a` / `--answer` | Synthesize cited answer via Haiku after retrieval |
-| `--agentic` | Multi-step Haiku query refinement before returning results |
 | `--hybrid` | Merge semantic + ripgrep results for code (0.7*vector + 0.3*frecency) |
 | `--no-rerank` | Disable cross-corpus reranking (use round-robin instead) |
 | `--mxbai` | Fan out to Mixedbread-indexed collections (read-only) |

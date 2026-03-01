@@ -1,4 +1,4 @@
-"""Tests verifying the module split: scoring.py, answer.py, formatters.py, search_engine.py.
+"""Tests verifying the module split: scoring.py, formatters.py, search_engine.py.
 
 These tests import directly from the canonical modules to confirm correct placement.
 """
