@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-03-01
+
+First stable release. Promoted from rc10 after live validation. No functional changes
+from rc10 — this entry marks the API, CLI, and plugin contract as stable.
+
+### Changed
+- `Development Status` classifier promoted from `4 - Beta` to `5 - Production/Stable`.
+
 ## [1.0.0rc10] - 2026-03-01
 
 ### Changed
@@ -321,7 +329,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc10...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc10...v1.0.0
+[1.0.0rc10]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc9...v1.0.0rc10
 [1.0.0rc10]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc9...v1.0.0rc10
 [1.0.0rc9]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc8...v1.0.0rc9
 [1.0.0rc8]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc7...v1.0.0rc8
