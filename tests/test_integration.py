@@ -149,11 +149,10 @@ def test_t2_memory_list_project(runner: CliRunner, tmp_path, monkeypatch) -> Non
 def test_t1_scratch_put_list_clear(runner: CliRunner, tmp_path, monkeypatch) -> None:
     """T1 scratch put → list → clear roundtrip."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    # T1 scratch requires an active session file keyed by os.getsid(0)
-    sid = os.getsid(0)
-    session_dir = tmp_path / ".config" / "nexus" / "sessions"
-    session_dir.mkdir(parents=True)
-    (session_dir / f"{sid}.session").write_text("integration-test-session")
+    # T1 scratch uses EphemeralClient fallback in tests (no chroma server).
+    # Write current_session so all CLI calls share the same session_id.
+    from nexus.session import write_claude_session_id
+    write_claude_session_id("integration-test-session")
 
     unique = f"scratch-{uuid.uuid4().hex[:8]}"
 
@@ -175,10 +174,9 @@ def test_t1_scratch_put_list_clear(runner: CliRunner, tmp_path, monkeypatch) -> 
 def test_t1_scratch_search(runner: CliRunner, tmp_path, monkeypatch) -> None:
     """T1 scratch search finds stored content."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    sid = os.getsid(0)
-    session_dir = tmp_path / ".config" / "nexus" / "sessions"
-    session_dir.mkdir(parents=True)
-    (session_dir / f"{sid}.session").write_text("integration-test-session")
+    # Write current_session so all CLI calls share the same session_id.
+    from nexus.session import write_claude_session_id
+    write_claude_session_id("integration-test-session")
 
     unique = f"scratchsearch-{uuid.uuid4().hex[:6]}"
     runner.invoke(main, ["scratch", "put", f"Unique content {unique}"])

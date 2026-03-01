@@ -4,17 +4,21 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 | Tier | Storage | Network | Durability | Use |
 |------|---------|---------|------------|-----|
-| T1 -- scratch | In-memory ChromaDB | None | Session only | Working notes, hypotheses |
+| T1 -- scratch | ChromaDB HTTP server (per-session) | Localhost only | Session only | Working notes, hypotheses |
 | T2 -- memory | SQLite + FTS5 (WAL) | None | Survives restarts | Per-project notes, PM state |
 | T3 -- knowledge | ChromaDB cloud + Voyage AI | Required | Permanent | Semantic search, indexed code/docs |
 
 ## T1 -- Session Scratch
 
-Backed by `chromadb.EphemeralClient` with `DefaultEmbeddingFunction` (MiniLM-L6-v2, local ONNX). No API keys required.
+Backed by a per-session `chromadb.HttpClient` connecting to a ChromaDB server process started by the `SessionStart` hook. Uses `DefaultEmbeddingFunction` (MiniLM-L6-v2, local ONNX). No API keys required.
 
-Everything is wiped at session end. Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes. Each concurrent Claude Code window gets its own isolated session.
+When a parent Claude Code session starts, the `SessionStart` hook allocates a free localhost port, launches a ChromaDB server (`chroma run`), and writes the server address and session ID to `~/.config/nexus/sessions/{ppid}.session`. Child agents spawned via the Agent tool walk the OS PPID chain to find the nearest ancestor session file and connect to the same server — they share scratch space and see each other's entries. Concurrent independent Claude Code windows stay isolated because they have disjoint OS process trees.
 
-**Use for**: working hypotheses, temporary notes, in-flight analysis.
+Falls back to a local `EphemeralClient` (with a warning) when no server record is found — T1 functions locally for that process but subagents get isolated sessions. This activates when `chroma` is not on PATH, in restricted container environments, or when `ps` is unavailable.
+
+Everything is wiped at session end: the `SessionEnd` hook stops the ChromaDB server and deletes the backing tmpdir. Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
+
+**Use for**: working hypotheses, temporary notes, in-flight analysis shared across spawned agents.
 
 ## T2 -- Memory Bank
 

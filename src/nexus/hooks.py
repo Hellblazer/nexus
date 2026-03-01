@@ -3,17 +3,26 @@
 """SessionStart and SessionEnd hook logic for Claude Code integration."""
 from __future__ import annotations
 
+import fcntl
+import json
+import os
+import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
-
-import sqlite3
 
 import structlog
 
 from nexus.db.t2 import T2Database
 from nexus.session import (
-    generate_session_id, session_file_path, write_session_file,
+    SESSIONS_DIR,
+    find_ancestor_session,
+    generate_session_id,
+    start_t1_server,
+    stop_t1_server,
+    sweep_stale_sessions,
     write_claude_session_id,
+    write_session_record,
 )
 
 
@@ -29,9 +38,9 @@ def _open_t2() -> T2Database:
     return T2Database(_default_db_path())
 
 
-def _open_t1(session_id: str):
+def _open_t1():
     from nexus.db.t1 import T1Database
-    return T1Database(session_id=session_id)
+    return T1Database()
 
 
 def _infer_repo() -> str:
@@ -51,28 +60,54 @@ def _infer_repo() -> str:
 def session_start(claude_session_id: str | None = None) -> str:
     """Execute the SessionStart hook.
 
-    1. Write stable session ID so all Bash subprocesses share one namespace.
-       Uses the Claude session ID if provided (from hook stdin JSON), otherwise
-       generates a UUID4. Written to both the flat current_session file and the
-       legacy getsid-keyed file.
-    2. Detect PM project via T2 query.
-    3. If PM: inject computed PM resume (<=2000 chars) via pm_resume().
-       Else: print recent memory summary (<=10 entries x 500 chars).
+    1. Sweep stale orphaned server processes from previous sessions.
+    2. Walk the PPID chain: if an ancestor session exists, adopt it (child agent).
+       Otherwise start a new ChromaDB server and write a session record.
+    3. Detect PM project via T2 query.
+    4. If PM: inject computed PM resume.
+       Else: print recent memory summary.
 
     Returns the output string to be printed.
     """
+    # Sweep orphaned server processes from previous crashed sessions.
+    sweep_stale_sessions(SESSIONS_DIR)
+
+    # Initialize session_id before the lock block so it is always bound even if
+    # flock or find_ancestor_session raises an unexpected exception.
     session_id = claude_session_id or generate_session_id()
-    # Write flat file — stable across all Bash subprocesses (thought, scratch)
+
+    # Acquire an exclusive lock before the find+write sequence to prevent two
+    # sibling agents (same parent PID, both see ancestor=None simultaneously)
+    # from each starting their own ChromaDB server and orphaning the first.
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_fd = os.open(str(SESSIONS_DIR / "session.lock"), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        ancestor = find_ancestor_session(SESSIONS_DIR)
+        if ancestor:
+            session_id = ancestor["session_id"]
+        else:
+            # Root session: start the ChromaDB server with the pre-generated ID.
+            ppid = os.getppid()
+            try:
+                host, port, server_pid, tmpdir = start_t1_server()
+                write_session_record(SESSIONS_DIR, ppid, session_id, host, port, server_pid, tmpdir)
+            except Exception as exc:
+                _log.warning(
+                    "session_start: T1 server unavailable; T1 will be local-only",
+                    error=str(exc),
+                )
+    finally:
+        os.close(lock_fd)  # closing the fd releases the flock automatically
+
+    # Keep writing the flat file for any external tooling that reads it.
     write_claude_session_id(session_id)
-    # Write legacy getsid-keyed file — used by SessionEnd for T1 flush
-    write_session_file(session_id)
 
     lines: list[str] = [f"Nexus ready. T1 scratch initialized (session: {session_id})."]
 
     repo = _infer_repo()
     try:
         with _open_t2() as db:
-            # PM detection: check for BLOCKERS.md with 'pm' tag
             from nexus.pm import pm_resume
             blockers_row = db.get(project=repo, title="BLOCKERS.md")
             is_pm = blockers_row is not None and "pm" in (blockers_row.get("tags") or "")
@@ -81,7 +116,6 @@ def session_start(claude_session_id: str | None = None) -> str:
                 if content:
                     lines.append(content)
             else:
-                # Non-PM: recent memory summary
                 entries = db.list_entries(project=repo)[:10]
                 if entries:
                     lines.append(f"Recent memory ({repo}, last {len(entries)} entries):")
@@ -100,28 +134,46 @@ def session_start(claude_session_id: str | None = None) -> str:
 def session_end() -> str:
     """Execute the SessionEnd hook.
 
-    1. Flush flagged T1 entries to T2.
-    2. Clear T1 session entries.
-    3. Run T2 expire.
-    4. Remove the session file.
+    1. Check whether this process owns the session (its parent wrote the record).
+    2. Flush flagged T1 entries to T2 (using whatever session is reachable via
+       PPID chain — works for both parent and child agents).
+    3. Run T2 expire().
+    4. If owner: stop the ChromaDB server and delete the session record + tmpdir.
+       Child agents skip the server-stop step.
 
     Returns a summary string.
     """
-    session_file = session_file_path()
+    ppid = os.getppid()
+    own_file = SESSIONS_DIR / f"{ppid}.session"
 
-    # Read session ID so we can open T1
-    try:
-        session_id = session_file.read_text().strip() or None
-    except FileNotFoundError:
-        session_id = None
+    # Determine if this process owns the session (wrote the record at start).
+    # own_file.read_text() is safe here: the file is written once at session_start
+    # by this process and is only deleted later in this function — no external
+    # writer can modify it between the exists() check and read_text().
+    own_record: dict | None = None
+    if own_file.exists():
+        try:
+            r = json.loads(own_file.read_text())
+            if isinstance(r, dict) and "session_id" in r:
+                own_record = r
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # For T1 flush, use own record if available; otherwise walk the chain
+    # (child-agent scenario where the parent's file is further up).
+    flush_record = own_record or find_ancestor_session(SESSIONS_DIR)
+    if flush_record is None:
+        _log.warning(
+            "session_end: no T1 session record found; flagged scratch entries may not have been flushed"
+        )
 
     flushed = 0
     expired = 0
 
     try:
         with _open_t2() as db:
-            if session_id:
-                t1 = _open_t1(session_id)
+            if flush_record:
+                t1 = _open_t1()
                 for entry in t1.flagged_entries():
                     db.put(
                         project=entry["flush_project"],
@@ -131,23 +183,24 @@ def session_end() -> str:
                         ttl=None,
                     )
                     flushed += 1
-                # Only clear T1 after all entries are successfully flushed to T2.
-                # A finally: t1.clear() would wipe entries if db.put() raises, so
-                # we intentionally clear only on full success.
-                # If db.put() fails mid-loop, the already-flushed entries will be
-                # re-flushed on the next session end — T2.put uses ON CONFLICT DO UPDATE
-                # so duplicate flushes are idempotent (same project/title overwrites).
+                # Clear only after all entries are flushed (T2.put is idempotent).
                 t1.clear()
 
             expired = db.expire()
     except (sqlite3.Error, OSError) as exc:
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
-    # Remove session file
-    try:
-        session_file.unlink()
-    except OSError:
-        pass
+    # Stop server and clean up only if this process owns the session.
+    if own_record:
+        server_pid = own_record.get("server_pid", 0)
+        if server_pid:
+            stop_t1_server(server_pid)
+        try:
+            own_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        tmpdir = own_record.get("tmpdir", "")
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
-    parts = [f"Session ended. Flushed {flushed} scratch entries. Expired {expired} memory entries."]
-    return "\n".join(parts)
+    return f"Session ended. Flushed {flushed} scratch entries. Expired {expired} memory entries."

@@ -285,31 +285,33 @@ def test_session_end_orphan_recovery(two_sessions) -> None:
     assert db_a.list_entries() == []
 
 
-# ── Behavior 9: _t1() auto-create session ────────────────────────────────────
+# ── Behavior 9: _t1() session stability from current_session ─────────────────
 
 def test_t1_auto_create_session_when_no_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """_t1() generates a new session ID and writes it when no session file exists.
+    """_t1() uses the current_session flat file for stable session ID.
 
-    A second call within the same process (same getsid anchor) reads the same
-    file and returns a T1Database with the same session_id.
+    When no T1 server record is found (EphemeralClient fallback), the session ID
+    is read from the current_session file written by session_start.  Two calls
+    within the same process return the same session_id.
     """
+    import warnings
     from nexus.commands.scratch import _t1
+    from nexus.session import write_claude_session_id
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("NX_SESSION_PID", raising=False)
 
-    with patch("nexus.session.os.getsid", return_value=12300):
+    # Simulate session_start having run: write a known session ID to current_session.
+    write_claude_session_id("known-stable-session-id")
+
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
         first = _t1()
         second = _t1()
 
+    assert first._session_id == "known-stable-session-id"
     assert first._session_id == second._session_id
-
-    # The session file must now exist on disk
-    session_file = tmp_path / ".config" / "nexus" / "sessions" / "12300.session"
-    assert session_file.exists()
-    assert session_file.read_text().strip() == first._session_id
 
 
 # ── T1 edge cases: flag/unflag sequences ─────────────────────────────────────
