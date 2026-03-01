@@ -94,6 +94,8 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               help="Show matched text inline under each result (truncated at 200 chars).")
 @click.option("--where", "where_pairs", multiple=True, metavar="KEY=VALUE",
               help="Filter by metadata field (repeatable; multiple flags are ANDed)")
+@click.option("--max-file-chunks", "max_file_chunks", default=None, type=int, metavar="N",
+              help="Exclude chunks from files larger than N chunks (filters on chunk_count)")
 @click.option("-A", "lines_after", default=0, type=int, metavar="N",
               help="Show N lines of context after each result chunk")
 @click.option("-C", "lines_context", default=0, type=int, metavar="N",
@@ -116,6 +118,7 @@ def search_cmd(
     no_color: bool,
     show_content: bool,
     where_pairs: tuple[str, ...],
+    max_file_chunks: int | None,
     lines_after: int,
     lines_context: int,
     reverse: bool,
@@ -142,6 +145,13 @@ def search_cmd(
         where_filter = _parse_where(where_pairs)
     except click.BadParameter as exc:
         raise click.ClickException(str(exc)) from exc
+
+    if max_file_chunks is not None:
+        size_filter: dict = {"chunk_count": {"$lte": max_file_chunks}}
+        if where_filter is None:
+            where_filter = size_filter
+        else:
+            where_filter = {"$and": [size_filter, where_filter]}
 
     db = _t3()
     all_collections = [c["name"] for c in db.list_collections()]

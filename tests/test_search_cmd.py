@@ -636,6 +636,80 @@ def test_parse_where_multiple_pairs_merged() -> None:
 
 
 
+# ── --max-file-chunks ─────────────────────────────────────────────────────────
+
+
+def test_max_file_chunks_builds_chunk_count_filter(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--max-file-chunks N passes chunk_count $lte filter to search_cross_corpus."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+
+    mock_t3 = _mock_t3(["code__myrepo"])
+    captured_where: list[dict | None] = []
+
+    def fake_search(query, collections, n_results, t3, where=None):
+        captured_where.append(where)
+        return []
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+        with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
+            with patch("nexus.commands.search_cmd.load_config",
+                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+                result = runner.invoke(
+                    main,
+                    ["search", "query", "--corpus", "code", "--max-file-chunks", "17"],
+                )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured_where) == 1
+    assert captured_where[0] == {"chunk_count": {"$lte": 17}}, (
+        f"Expected chunk_count $lte filter, got {captured_where[0]}"
+    )
+
+
+def test_max_file_chunks_and_where_merged_with_and(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--max-file-chunks + --where are merged using ChromaDB $and operator."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+
+    mock_t3 = _mock_t3(["code__myrepo"])
+    captured_where: list[dict | None] = []
+
+    def fake_search(query, collections, n_results, t3, where=None):
+        captured_where.append(where)
+        return []
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+        with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
+            with patch("nexus.commands.search_cmd.load_config",
+                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+                result = runner.invoke(
+                    main,
+                    [
+                        "search", "query", "--corpus", "code",
+                        "--max-file-chunks", "17",
+                        "--where", "lang=python",
+                    ],
+                )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured_where) == 1
+    w = captured_where[0]
+    assert w is not None
+    assert "$and" in w, f"Expected $and merge, got {w}"
+    conditions = w["$and"]
+    assert {"chunk_count": {"$lte": 17}} in conditions, f"Missing chunk_count filter in {w}"
+    assert {"lang": "python"} in conditions, f"Missing lang filter in {w}"
+
+
 # ── corpus warning ────────────────────────────────────────────────────────────
 
 

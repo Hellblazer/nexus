@@ -12,6 +12,16 @@ _log = structlog.get_logger()
 
 _EPSILON = 1e-9
 _RERANK_MODEL = "rerank-2.5"
+_FILE_SIZE_THRESHOLD = 30
+
+
+def _file_size_factor(chunk_count: int) -> float:
+    """Return a [0, 1] penalty factor for files larger than the threshold.
+
+    Files at or below *_FILE_SIZE_THRESHOLD* chunks return 1.0 (no penalty).
+    Larger files return threshold / chunk_count, linearly reducing the score.
+    """
+    return min(1.0, _FILE_SIZE_THRESHOLD / max(1, chunk_count))
 
 
 def min_max_normalize(value: float, window: list[float]) -> float:
@@ -76,6 +86,9 @@ def apply_hybrid_scoring(
             r.hybrid_score = hybrid_score(v_norm, f_norm)
         else:
             r.hybrid_score = v_norm
+        if r.collection.startswith("code__"):
+            chunk_count = int(r.metadata.get("chunk_count", 1))
+            r.hybrid_score *= _file_size_factor(chunk_count)
 
     return sorted(results, key=lambda r: r.hybrid_score, reverse=True)
 

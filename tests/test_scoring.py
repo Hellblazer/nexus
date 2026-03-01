@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nexus.scoring import (
+    _file_size_factor,
     apply_hybrid_scoring,
     min_max_normalize,
     rerank_results,
@@ -99,3 +100,58 @@ def test_round_robin_interleave_mixed_lengths() -> None:
     c = _result(coll="code__a", dist=0.3)
     result = round_robin_interleave([[a, c], [b]])
     assert [r.distance for r in result] == [0.1, 0.2, 0.3]
+
+
+# ── _file_size_factor ────────────────────────────────────────────────────────
+
+def test_file_size_factor_at_threshold() -> None:
+    """chunk_count == threshold → factor == 1.0 (no penalty)."""
+    assert _file_size_factor(30) == pytest.approx(1.0)
+
+
+def test_file_size_factor_above_threshold() -> None:
+    """chunk_count > threshold → factor < 1.0."""
+    assert _file_size_factor(37) == pytest.approx(30 / 37, abs=0.001)
+
+
+def test_file_size_factor_below_threshold() -> None:
+    """chunk_count < threshold → capped at 1.0."""
+    assert _file_size_factor(10) == pytest.approx(1.0)
+
+
+def test_file_size_factor_zero_chunks() -> None:
+    """chunk_count == 0 → treated as 1 via max(1, 0), factor == 1.0."""
+    assert _file_size_factor(0) == pytest.approx(1.0)
+
+
+# ── file-size penalty in apply_hybrid_scoring ────────────────────────────────
+
+def _sized_result(coll: str, dist: float, chunks: int) -> SearchResult:
+    return SearchResult(
+        id=f"{coll}-d{dist}",
+        content="content",
+        distance=dist,
+        collection=coll,
+        metadata={"frecency_score": 0.5, "chunk_count": chunks},
+    )
+
+
+def test_size_penalty_applied_regardless_of_hybrid_flag() -> None:
+    """File-size penalty applies to code__ results even when hybrid=False."""
+    # Three results so middle one (dist=0.5) gets v_norm=0.5
+    r_a = _sized_result("code__repo", 0.0, 5)   # v_norm=1.0, factor=1.0 → score=1.0
+    r_b = _sized_result("code__repo", 0.5, 60)  # v_norm=0.5, factor=30/60=0.5 → score=0.25
+    r_c = _sized_result("code__repo", 1.0, 5)   # v_norm=0.0, factor=1.0 → score=0.0
+    results = apply_hybrid_scoring([r_a, r_b, r_c], hybrid=False)
+    score_map = {r.distance: r.hybrid_score for r in results}
+    assert score_map[0.5] == pytest.approx(0.25, abs=1e-6)
+
+
+def test_size_penalty_not_applied_to_docs_results() -> None:
+    """File-size penalty NOT applied to docs__ or knowledge__ results."""
+    r_a = _sized_result("docs__corpus", 0.0, 5)   # v_norm=1.0 → score=1.0
+    r_b = _sized_result("docs__corpus", 0.5, 60)  # v_norm=0.5, no penalty → score=0.5
+    r_c = _sized_result("docs__corpus", 1.0, 5)   # v_norm=0.0 → score=0.0
+    results = apply_hybrid_scoring([r_a, r_b, r_c], hybrid=False)
+    score_map = {r.distance: r.hybrid_score for r in results}
+    assert score_map[0.5] == pytest.approx(0.5, abs=1e-6)
