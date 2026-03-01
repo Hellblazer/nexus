@@ -1,7 +1,9 @@
 ---
 title: "File-Size Scoring Penalty for Code Search"
 type: feature
-status: accepted
+status: closed
+close_reason: implemented
+closed_date: 2026-02-28
 priority: P2
 author: Hal Hildebrand
 date: 2026-02-28
