@@ -2,6 +2,9 @@
 """Tests for T1Database — session scratch with per-session server sharing."""
 from __future__ import annotations
 
+import json
+import os
+import time
 import warnings
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -80,6 +83,136 @@ class TestT1DatabaseConstructor:
         with patch("nexus.db.t1.find_ancestor_session"):
             t1 = T1Database(client=client)
         assert t1._session_id  # non-empty UUID
+
+    def test_http_constructor_reads_real_session_file(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """T1Database resolves HttpClient by reading a real session record file.
+
+        This exercises the full path through find_ancestor_session reading a
+        JSON file, rather than mocking find_ancestor_session itself.
+        """
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        ppid = os.getppid()
+        record = {
+            "session_id": "http-path-test-session",
+            "server_host": "127.0.0.1",
+            "server_port": 54321,
+            "server_pid": 99999,
+            "created_at": time.time(),
+            "tmpdir": "",
+        }
+        (sessions_dir / f"{ppid}.session").write_text(json.dumps(record))
+
+        mock_http = MagicMock()
+        mock_col = MagicMock()
+        mock_http.get_or_create_collection.return_value = mock_col
+
+        monkeypatch.setattr("nexus.db.t1.SESSIONS_DIR", sessions_dir)
+        with patch("chromadb.HttpClient", return_value=mock_http) as mock_http_cls:
+            t1 = T1Database()
+
+        mock_http_cls.assert_called_once_with(host="127.0.0.1", port=54321)
+        assert t1._session_id == "http-path-test-session"
+        assert t1._client is mock_http
+
+
+# ---------------------------------------------------------------------------
+# _exec / _reconnect resilience
+# ---------------------------------------------------------------------------
+
+class TestT1DatabaseReconnect:
+
+    def test_exec_reconnects_on_connection_error(self) -> None:
+        """_exec() calls _reconnect() and retries the op once after a connection error."""
+        t1 = _ephemeral_t1()
+        call_count = 0
+
+        def flaky_op():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionError("server gone")
+            return "success"
+
+        with patch.object(t1, "_reconnect") as mock_reconnect:
+            result = t1._exec(flaky_op)
+
+        assert result == "success"
+        assert call_count == 2
+        mock_reconnect.assert_called_once()
+
+    def test_exec_dead_flag_prevents_reconnect(self) -> None:
+        """When _dead is True, the wrapper does not reconnect and re-raises the error."""
+        t1 = _ephemeral_t1()
+        t1._dead = True
+
+        def always_fails():
+            raise ConnectionError("still gone")
+
+        with patch.object(t1, "_reconnect") as mock_reconnect:
+            with pytest.raises(ConnectionError):
+                t1._exec(always_fails)
+
+        mock_reconnect.assert_not_called()
+
+    def test_exec_reraises_non_connection_errors(self) -> None:
+        """The wrapper re-raises errors that are not connectivity-related."""
+        t1 = _ephemeral_t1()
+
+        def bad_value():
+            raise ValueError("completely unrelated error")
+
+        with patch.object(t1, "_reconnect") as mock_reconnect:
+            with pytest.raises(ValueError):
+                t1._exec(bad_value)
+
+        mock_reconnect.assert_not_called()
+
+    def test_reconnect_falls_back_to_ephemeral_when_no_record(self) -> None:
+        """_reconnect() switches to EphemeralClient when no session record is found."""
+        record = {
+            "session_id": "orig-session",
+            "server_host": "127.0.0.1",
+            "server_port": 54321,
+        }
+        mock_http = MagicMock()
+        mock_col = MagicMock()
+        mock_http.get_or_create_collection.return_value = mock_col
+
+        with (
+            patch("nexus.db.t1.find_ancestor_session", return_value=record),
+            patch("chromadb.HttpClient", return_value=mock_http),
+        ):
+            t1 = T1Database()
+
+        assert t1._client is mock_http
+
+        # Simulate server death: reconnect finds no record → falls back to Ephemeral.
+        with patch("nexus.db.t1.find_ancestor_session", return_value=None):
+            t1._reconnect()
+
+        assert t1._dead is True
+        assert t1._client is not mock_http  # switched away from the dead HttpClient
+
+    def test_reconnect_sets_dead_flag(self) -> None:
+        """_reconnect() always sets _dead=True to prevent cascading reconnect loops."""
+        t1 = _ephemeral_t1()
+        assert t1._dead is False
+        with patch("nexus.db.t1.find_ancestor_session", return_value=None):
+            t1._reconnect()
+        assert t1._dead is True
+
+    def test_reconnect_noop_when_already_dead(self) -> None:
+        """_reconnect() is a no-op when _dead is already True."""
+        t1 = _ephemeral_t1()
+        t1._dead = True
+        original_client = t1._client
+        with patch("nexus.db.t1.find_ancestor_session") as mock_find:
+            t1._reconnect()
+        mock_find.assert_not_called()
+        assert t1._client is original_client
 
 
 # ---------------------------------------------------------------------------

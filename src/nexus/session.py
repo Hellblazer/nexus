@@ -8,6 +8,10 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+import structlog
+
+_log = structlog.get_logger()
+
 # Flat file written by SessionStart hook with the Claude session ID.
 # Shared by all Bash subprocesses within one Claude Code conversation.
 # os.getsid(0) is NOT used: Claude Code spawns each Bash(...) call in its own
@@ -94,7 +98,23 @@ _SERVER_READY_TIMEOUT: float = 10.0
 
 
 def _ppid_of(pid: int) -> int | None:
-    """Return the parent PID of *pid* via ps, or None if the process is gone."""
+    """Return the parent PID of *pid*, or None if the process is gone.
+
+    Tries ``/proc/{pid}/status`` first (Linux; works in minimal containers
+    without ``ps``), then falls back to ``ps`` (macOS + Linux with procps).
+    """
+    # Linux: /proc is more reliable than ps in containers (Alpine, distroless).
+    status_path = Path(f"/proc/{pid}/status")
+    if status_path.exists():
+        try:
+            for line in status_path.read_text().splitlines():
+                if line.startswith("PPid:"):
+                    val = int(line.split()[1])
+                    return val if val > 1 else None
+        except (OSError, ValueError):
+            pass
+
+    # Fallback: ps (macOS + Linux with procps)
     try:
         out = subprocess.check_output(
             ["ps", "-o", "ppid=", "-p", str(pid)],
@@ -132,16 +152,17 @@ def find_ancestor_session(
         if candidate.exists():
             try:
                 record = json.loads(candidate.read_text())
-                if not isinstance(record, dict):
-                    pass  # not a JSON object — skip
-                elif record.get("created_at", 0) < cutoff:
-                    # Stale orphan: kill server and remove file
-                    _try_kill(record.get("server_pid"))
-                    _try_remove_path(candidate)
-                elif "server_host" in record and "server_port" in record and "session_id" in record:
-                    return record
+                if isinstance(record, dict):
+                    if record.get("created_at", 0) < cutoff:
+                        # Stale orphan: stop server (SIGTERM → SIGKILL) and remove file.
+                        server_pid = record.get("server_pid")
+                        if server_pid:
+                            stop_t1_server(server_pid)
+                        _try_remove_path(candidate)
+                    elif "server_host" in record and "server_port" in record and "session_id" in record:
+                        return record
             except (json.JSONDecodeError, OSError):
-                pass  # corrupt or unreadable — skip silently
+                _log.debug("find_ancestor_session: skipping corrupt/unreadable session file", path=str(candidate))
         pid = _ppid_of(pid)
 
     return None
@@ -149,12 +170,12 @@ def find_ancestor_session(
 
 def sweep_stale_sessions(
     sessions_dir: Path | None = None,
-    max_age_hours: float = 24.0,
+    max_age_hours: float = _SESSION_MAX_AGE_SECONDS / 3600.0,
 ) -> None:
     """Scan *sessions_dir* for JSON records older than *max_age_hours*.
 
-    For each stale record: sends SIGTERM to server_pid, removes the backing
-    tmpdir, and deletes the session file. Non-JSON files are ignored silently.
+    For each stale record: sends SIGTERM → SIGKILL to server_pid, removes the
+    backing tmpdir, and deletes the session file. Non-JSON files are ignored.
     """
     if sessions_dir is None:
         sessions_dir = SESSIONS_DIR
@@ -167,7 +188,9 @@ def sweep_stale_sessions(
             if not isinstance(record, dict):
                 continue
             if record.get("created_at", time.time()) < cutoff:
-                _try_kill(record.get("server_pid"))
+                server_pid = record.get("server_pid")
+                if server_pid:
+                    stop_t1_server(server_pid)
                 tmpdir = record.get("tmpdir", "")
                 if tmpdir:
                     import shutil
@@ -191,8 +214,10 @@ def start_t1_server() -> tuple[str, int, int, str]:
     if not _shutil.which("chroma"):
         raise RuntimeError("chroma not found on PATH; T1 server cannot start")
 
-    # Allocate a free port, then release the socket before handing the port
-    # to chroma run (TOCTOU window exists but is negligible on localhost).
+    # Allocate a free port, then release the socket before handing the port to
+    # chroma run.  There is an inherent TOCTOU race between releasing the port
+    # and chroma binding it.  Known limitation; no retry logic is implemented
+    # since the window is negligible on loopback.
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((_T1_SERVER_HOST, 0))
@@ -251,6 +276,13 @@ def stop_t1_server(server_pid: int) -> None:
     try:
         os.kill(server_pid, signal.SIGKILL)
     except OSError:
+        return
+    # Reap the zombie so it does not linger in the process table.
+    try:
+        os.waitpid(server_pid, os.WNOHANG)
+    except ChildProcessError:
+        pass  # not our child (different parent process — acceptable)
+    except OSError:
         pass
 
 
@@ -283,16 +315,6 @@ def write_session_record(
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
-
-def _try_kill(server_pid: int | None) -> None:
-    """Send SIGTERM to *server_pid*, ignoring errors."""
-    if not server_pid:
-        return
-    try:
-        os.kill(server_pid, signal.SIGTERM)
-    except OSError:
-        pass
-
 
 def _try_remove_path(path: Path) -> None:
     """Remove *path*, ignoring errors."""

@@ -3,6 +3,7 @@
 """SessionStart and SessionEnd hook logic for Claude Code integration."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -71,22 +72,33 @@ def session_start(claude_session_id: str | None = None) -> str:
     # Sweep orphaned server processes from previous crashed sessions.
     sweep_stale_sessions(SESSIONS_DIR)
 
-    # Check for an existing ancestor session (child-agent scenario).
-    ancestor = find_ancestor_session(SESSIONS_DIR)
-    if ancestor:
-        session_id = ancestor["session_id"]
-    else:
-        # Root session: generate ID and start the ChromaDB server.
-        session_id = claude_session_id or generate_session_id()
-        ppid = os.getppid()
-        try:
-            host, port, server_pid, tmpdir = start_t1_server()
-            write_session_record(SESSIONS_DIR, ppid, session_id, host, port, server_pid, tmpdir)
-        except Exception as exc:
-            _log.warning(
-                "session_start: T1 server unavailable; T1 will be local-only",
-                error=str(exc),
-            )
+    # Initialize session_id before the lock block so it is always bound even if
+    # flock or find_ancestor_session raises an unexpected exception.
+    session_id = claude_session_id or generate_session_id()
+
+    # Acquire an exclusive lock before the find+write sequence to prevent two
+    # sibling agents (same parent PID, both see ancestor=None simultaneously)
+    # from each starting their own ChromaDB server and orphaning the first.
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_fd = os.open(str(SESSIONS_DIR / "session.lock"), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        ancestor = find_ancestor_session(SESSIONS_DIR)
+        if ancestor:
+            session_id = ancestor["session_id"]
+        else:
+            # Root session: start the ChromaDB server with the pre-generated ID.
+            ppid = os.getppid()
+            try:
+                host, port, server_pid, tmpdir = start_t1_server()
+                write_session_record(SESSIONS_DIR, ppid, session_id, host, port, server_pid, tmpdir)
+            except Exception as exc:
+                _log.warning(
+                    "session_start: T1 server unavailable; T1 will be local-only",
+                    error=str(exc),
+                )
+    finally:
+        os.close(lock_fd)  # closing the fd releases the flock automatically
 
     # Keep writing the flat file for any external tooling that reads it.
     write_claude_session_id(session_id)
@@ -135,6 +147,9 @@ def session_end() -> str:
     own_file = SESSIONS_DIR / f"{ppid}.session"
 
     # Determine if this process owns the session (wrote the record at start).
+    # own_file.read_text() is safe here: the file is written once at session_start
+    # by this process and is only deleted later in this function — no external
+    # writer can modify it between the exists() check and read_text().
     own_record: dict | None = None
     if own_file.exists():
         try:
@@ -147,6 +162,10 @@ def session_end() -> str:
     # For T1 flush, use own record if available; otherwise walk the chain
     # (child-agent scenario where the parent's file is further up).
     flush_record = own_record or find_ancestor_session(SESSIONS_DIR)
+    if flush_record is None:
+        _log.warning(
+            "session_end: no T1 session record found; flagged scratch entries may not have been flushed"
+        )
 
     flushed = 0
     expired = 0
