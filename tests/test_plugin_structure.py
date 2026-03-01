@@ -306,6 +306,7 @@ class TestSkillStructure:
         "writing-nx-skills",
         "rdr-list", "rdr-show", "rdr-create",
         "sequential-thinking",
+        "serena-code-nav",  # direct tool instructions, no agent dispatch
     }
 
     REQUIRED_SKILL_SECTIONS = [
@@ -322,6 +323,7 @@ class TestSkillStructure:
             "writing-nx-skills",
             "rdr-list", "rdr-show", "rdr-create",
             "sequential-thinking",
+            "serena-code-nav",
         }
     ])
     def test_skill_has_relay_template(self, skill_path: Path) -> None:
@@ -345,6 +347,7 @@ class TestSkillStructure:
             "writing-nx-skills",
             "rdr-list", "rdr-show", "rdr-create",
             "sequential-thinking",
+            "serena-code-nav",
         }
     ])
     def test_agent_skill_has_produce_section(self, skill_path: Path) -> None:
@@ -363,6 +366,7 @@ class TestSkillStructure:
             "writing-nx-skills",
             "rdr-list", "rdr-show", "rdr-create",
             "sequential-thinking",
+            "serena-code-nav",
         }
     ])
     def test_skill_mentions_t1_scratch(self, skill_path: Path) -> None:
