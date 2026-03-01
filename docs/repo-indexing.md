@@ -71,6 +71,33 @@ Six additional extensions (`.kt`, `.swift`, `.scala`, `.r`, `.m`, `.php`) are cl
 When AST parsing fails or no parser exists for the extension, the chunker falls back to
 line-based splitting: 150-line chunks with 15% overlap.
 
+The chunk size is configurable via `--chunk-size N` on `nx index repo`:
+
+```bash
+nx index repo .                   # default: 150-line chunks
+nx index repo . --chunk-size 80   # smaller chunks for better precision on large files
+```
+
+Smaller chunk sizes improve semantic search precision for large files (the most specific
+chunk is less likely to be dominated by unrelated code in the same chunk) at the cost of
+storing more chunks and slightly higher embedding cost.
+
+### Large-File Warning
+
+Before indexing, `nx index repo` scans for code files that exceed 30× the chunk size in
+lines (e.g., 4 500 lines at the default chunk size of 150). When such files are detected
+a warning is printed suggesting a smaller `--chunk-size`:
+
+```
+Warning: 2 files exceed the large-file threshold (4,500 lines; largest: src/big.py, 6,200 lines).
+Large files produce many chunks that dominate semantic scoring.
+Consider: nx index repo . --chunk-size 80
+Run with --no-chunk-warning to suppress this message.
+```
+
+Use `--no-chunk-warning` to suppress this message when you have already tuned the chunk
+size or intentionally accept the default behaviour.
+
 Each chunk carries metadata: `file_path`, `filename`, `file_extension`,
 `programming_language`, `line_start`, `line_end`, `chunk_index`, `chunk_count`,
 `ast_chunked` (bool), `content_hash`, `frecency_score`.

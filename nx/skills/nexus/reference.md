@@ -81,9 +81,13 @@ nx scratch clear
 ```bash
 nx index repo <path>                       # register and index a repo (classifies into code + docs collections)
 nx index repo <path> --frecency-only       # refresh git frecency scores only (fast)
+nx index repo <path> --chunk-size 80       # smaller chunks for better search precision on large files
+nx index repo <path> --no-chunk-warning    # suppress large-file pre-scan warning
 nx index pdf <path> --corpus my-papers
 nx index md  <path> --corpus notes
 ```
+
+**Large-file warning**: before indexing, `nx index repo` scans for code files exceeding 30× the chunk size in lines. When large files are found a warning is printed suggesting a smaller `--chunk-size`. Suppress with `--no-chunk-warning` once you have tuned the value.
 
 ## Project management (PM)
 
@@ -159,4 +163,4 @@ Use **`nx search --corpus code__`** for:
 - Finding "what handles PDF processing" across an unfamiliar codebase
 - Cross-file concept queries: "retry logic with exponential backoff"
 
-**Current limitation**: `code__` collections indexed with default chunk sizes have known precision issues — large files dominate results regardless of query specificity (see RDR-006). Until re-indexed with smaller chunks, prefer Grep for code navigation. Use `nx search --corpus rdr__` and `--corpus docs__` freely — those collections have good precision.
+**Precision tip**: `code__` collections indexed with large chunk sizes can have precision issues — large files dominate results regardless of query specificity (RDR-006). Re-index with `nx index repo <path> --chunk-size 80` to improve precision. Until re-indexed, prefer Grep for code navigation. Use `nx search --corpus rdr__` and `--corpus docs__` freely — those collections have good precision.

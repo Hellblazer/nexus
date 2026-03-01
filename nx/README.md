@@ -64,7 +64,8 @@ nx/
 │       ├── rdr_hook.py               # Report RDR document count and status
 │       ├── session_start_hook.py     # Load PM context, prime beads
 │       ├── setup.sh                  # One-time setup checks
-│       └── subagent-start.sh         # Context prep for spawned subagents
+│       ├── subagent-start.sh         # Context prep for spawned subagents
+│       └── t2_prefix_scan.py         # T2 multi-namespace prefix scan for session context
 ├── .mcp.json                # Bundled MCP servers (sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
 ├── CHANGELOG.md             # Version history (Keep a Changelog format)
@@ -233,7 +234,7 @@ When skills delegate to agents, they use a standardized relay format defined in 
 ### Storage Naming Conventions
 
 - **nx store titles**: hyphens — `decision-cache-strategy`, `research-auth-patterns`
-- **nx memory projects**: `{repo}_active`, `{repo}_rdr`
+- **nx memory projects**: `{repo}` (general notes), `{repo}_rdr` (RDR metadata), `{repo}_pm` (project management), `{repo}_knowledge` (findings)
 - **Bead IDs**: managed by `bd` CLI
 
 ### Permission Auto-Approval
