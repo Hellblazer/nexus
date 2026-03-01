@@ -573,17 +573,3 @@ def test_migrate_t3_cmd_with_real_source(runner: CliRunner) -> None:
         )
 
 
-# ── Answer mode (requires T3 + Anthropic) ─────────────────────────────────────
-
-@pytest.mark.integration
-@requires_t3
-@requires_anthropic
-def test_answer_mode_returns_synthesis(runner: CliRunner) -> None:
-    """nx search -a returns a synthesized answer with citations."""
-    result = runner.invoke(main, [
-        "search", "what is nexus",
-        "--corpus", _T3_TEST_COLLECTION,
-        "--answer", "--n", "3",
-    ])
-    assert result.exit_code == 0, result.output
-    assert len(result.output.strip()) > 0

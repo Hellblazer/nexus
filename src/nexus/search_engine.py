@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Search engine: cross-corpus orchestration, Mixedbread fan-out, agentic search."""
+"""Search engine: cross-corpus orchestration and Mixedbread fan-out."""
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Callable
+from typing import Any
 
 import structlog
 
-from nexus.answer import _haiku_refine
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
@@ -16,7 +15,6 @@ _log = structlog.get_logger()
 __all__ = [
     "search_cross_corpus",
     "fetch_mxbai_results",
-    "agentic_search",
 ]
 
 
@@ -103,40 +101,3 @@ def fetch_mxbai_results(
                 metadata={"mxbai_store": store_id, "mxbai_score": float(chunk.score)},
             ))
     return results
-
-
-# ── Agentic mode ──────────────────────────────────────────────────────────────
-
-def agentic_search(
-    initial_query: str,
-    retrieve_fn: Callable[[str], list[SearchResult]],
-    max_iterations: int = 3,
-) -> list[SearchResult]:
-    """Multi-step query refinement loop powered by Haiku.
-
-    1. Initial query → retrieve top results.
-    2. Haiku responds {"done": true} or {"query": "<refined>"}.
-    3. Repeat up to *max_iterations* total retrievals.
-    4. Deduplicate by ID across all iterations.
-    """
-    seen_ids: set[str] = set()
-    combined: list[SearchResult] = []
-    query = initial_query
-
-    for _iteration in range(max_iterations):
-        new_results = retrieve_fn(query)
-        for r in new_results:
-            if r.id not in seen_ids:
-                seen_ids.add(r.id)
-                combined.append(r)
-
-        decision = _haiku_refine(query, combined)
-        if decision.get("done"):
-            break
-        refined = decision.get("query", "").strip()
-        if refined:
-            query = refined
-        else:
-            break
-
-    return combined

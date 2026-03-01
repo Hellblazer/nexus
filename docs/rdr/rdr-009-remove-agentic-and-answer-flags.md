@@ -2,7 +2,8 @@
 title: "Remove --agentic and --answer Flags from nx search"
 id: RDR-009
 type: cleanup
-status: open
+status: accepted
+accepted_date: 2026-03-01
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self

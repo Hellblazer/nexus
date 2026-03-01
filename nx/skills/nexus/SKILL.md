@@ -20,7 +20,6 @@ description: Use when running nx commands for search, memory, knowledge storage,
 nx search "query"                    # semantic search across T3
 nx search "query" --corpus code      # code only
 nx search "query" --hybrid           # semantic + ripgrep + frecency
-nx search "query" --answer           # retrieval + synthesis
 
 # Memory (T2)
 nx memory put "content" --project {repo} --title file.md
