@@ -40,7 +40,13 @@ nx memory expire                           # remove TTL-expired entries
 nx memory promote <id> --collection knowledge  # push to T3
 ```
 
-**Project naming**: use bare `{repo}` for all project memory (e.g., `nexus`). No `_active` or `_pm` suffixes.
+**Project naming**: Use purpose-specific suffixes for different memory domains:
+
+- bare `{repo}` — general project memory and notes
+- `{repo}_rdr` — RDR documents and gate results (populated by `/rdr-create`)
+- `{repo}_pm` — project management context (populated by `nx pm`)
+
+The session hook discovers all populated namespaces by prefix scan; content stored under any `{repo}_*` namespace surfaces at session start.
 
 ## Knowledge store (T3 — permanent, cloud)
 
@@ -128,3 +134,29 @@ nx serve logs
 - `decision-{component}-{name}` — architectural decisions
 - `pattern-{name}` — reusable patterns
 - `debug-{component}-{issue}` — debugging insights
+
+## T2 Search Constraints
+
+`nx memory search` uses FTS5 full-text search — it matches literal tokens, not semantic meaning. Rules:
+
+- Use exact terms from the stored document, not conceptual paraphrases
+- `"retain slash commands"` works if those words appear verbatim in content
+- `"memory management plugin"` may return nothing if stored as "retain system" — even if the content is the same concept
+- Multi-word queries are AND-matched: all tokens must appear somewhere in the document. A broad single term (e.g., `"indexing"`) matches many entries; a three-term query returns only documents containing all three tokens
+- When results are empty: drop one term at a time to identify which token has no match. Consider `nx memory list --project {repo}` to browse titles directly, then `nx memory get` by title
+- **Title searches always return empty**: the FTS5 index covers `content` and `tags` only — not `title`. Searching for an entry by its title (e.g., `nx memory search "RDR-007"`) will find nothing even if that entry exists. Use `nx memory get --project {repo} --title {title}` for title-based lookup.
+
+## Code Search: When to Use nx vs Grep
+
+Use **Grep** (the Grep tool) for:
+- Finding a class or function by name: `class EmbeddingClient`
+- Locating all usages of a symbol: `EmbeddingClient`
+- Exact text matches: error messages, config keys, import paths
+- Any query where you know the literal text that will appear in the file
+
+Use **`nx search --corpus code__`** for:
+- Conceptual queries when you don't know the file name or function name
+- Finding "what handles PDF processing" across an unfamiliar codebase
+- Cross-file concept queries: "retry logic with exponential backoff"
+
+**Current limitation**: `code__` collections indexed with default chunk sizes have known precision issues — large files dominate results regardless of query specificity (see RDR-006). Until re-indexed with smaller chunks, prefer Grep for code navigation. Use `nx search --corpus rdr__` and `--corpus docs__` freely — those collections have good precision.
