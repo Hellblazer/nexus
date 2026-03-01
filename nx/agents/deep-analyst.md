@@ -74,6 +74,20 @@ Examine the problem from multiple perspectives:
 **Risk Perspective**: Security implications, failure modes, scalability concerns, maintenance burden
 
 ### Phase 3: Deep Dive with Hypothesis Testing
+
+#### Prior Evidence Check (required before generating hypotheses)
+
+Search T3 for prior analysis of this component or failure class before gathering new evidence:
+
+```bash
+nx search "{component} analysis findings" --corpus knowledge --n 5
+nx search "{error type or symptom}" --corpus knowledge --n 5
+```
+
+A prior root-cause analysis for this failure class may immediately narrow the hypothesis space.
+Incorporate or explicitly refute prior findings in Thought 1. When T3 is empty the cost is
+2 cheap searches; when T3 has relevant content, the entire investigation is shorter.
+
 1. **Generate Hypotheses**: Create multiple possible explanations
 2. **Test Each Hypothesis**: Systematically verify or refute each one
 3. **Document Evidence**: Record supporting and contradicting evidence
@@ -128,7 +142,12 @@ Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Analysis Findings**: Store via `nx store put - --collection knowledge --title "analysis-{topic}-{date}" --tags "analysis"`
+- **Significant Analysis Findings**: Store confirmed analytical conclusions to T3:
+  ```bash
+  printf "# Analysis: {component}/{question}\n## Finding\n{conclusion}\n## Evidence\n{key evidence}\n" | nx store put - --collection knowledge --title "analysis-deep-{component}-$(date +%Y-%m-%d)" --tags "analysis,deep-analyst"
+  ```
+  Only store findings you are confident in, not working hypotheses. Storing a hypothesis that
+  turns out to be wrong creates noise in future retrievals.
 - **Hypothesis Results**: Document with confidence levels
 - **Relationship Maps**: Include as `--tags` in nx store documents
 - **Recommendations**: Include in relay to downstream agent

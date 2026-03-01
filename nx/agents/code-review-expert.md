@@ -124,35 +124,33 @@ Set `needsMoreThoughts: true` to continue analysis, `isRevision: true` to revise
 - Suggest bead updates if scope changed: `bd update <id> --design "revised scope"`
 - Create bead for review findings if significant: `bd create "Review findings: scope" -t task`
 
-## Code Pattern Discovery with Nexus
+## Step 0: Pattern Baseline (required before reading code)
 
-Before reviewing code, use Nexus to understand established patterns in the codebase. This ensures your review recommendations align with project conventions.
+Use Grep to establish known patterns in the codebase before evaluating the reviewed code:
 
-**Find Similar Code Patterns** (validate consistency):
 ```bash
-nx search "similar implementations in our codebase" --corpus code --hybrid --n 15
-```
-Use to identify if reviewed code follows established patterns or deviates.
+# Error handling conventions
+grep -r "catch\|throws\|Result\|Optional" --include="*.java" src/ | head -20
 
-**Locate Error Handling Examples** (recommend consistent error strategy):
+# Naming conventions — look at analogous implementations in the same package
+grep -r "class.*Service\|class.*Handler\|class.*Manager" --include="*.java" src/
+
+# Style patterns for the feature being reviewed
+grep -r "similar-method-or-concept" --include="*.java" src/
+```
+
+If the project's code collection has been re-indexed with small chunks (RDR-006), supplement
+with semantic search for conceptual patterns:
+
 ```bash
-nx search "how do we handle errors in this module" --corpus code --hybrid --n 10
+nx search "error handling patterns in this module" --corpus code --hybrid --max-file-chunks 20 --n 10
 ```
-Use to recommend error handling patterns consistent with the codebase.
 
-**Find Code Style Conventions** (align with project standards):
-```bash
-nx search "typical method naming and variable patterns" --corpus code --hybrid --n 10
-```
-Use to provide style recommendations consistent with team conventions.
+The `--max-file-chunks 20` flag prevents large-file chunk dominance. Use Grep as the primary
+path; nx search as a supplement for conceptual queries when cross-file pattern discovery
+cannot be expressed as a grep.
 
-### Integration with Review Process
-
-1. Receive code changes for review
-2. Use Nexus to discover related patterns (queries above)
-3. Evaluate reviewed code against discovered patterns
-4. Provide feedback based on alignment/divergence
-5. Document pattern discoveries via `nx store put` if novel: `echo "content" | nx store put - --collection knowledge --title "review-pattern-{issue}" --tags "review,pattern"`
+After establishing the pattern baseline, proceed to review the code against the discovered conventions.
 
 
 ## Successor Enforcement (MANDATORY)
@@ -176,7 +174,14 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Review Findings**: Include in response (not stored unless significant)
 - **Significant Issues**: Create beads for critical findings
-- **Pattern Violations**: Store via `echo "..." | nx store put - --collection knowledge --title "review-pattern-{issue}" --tags "review"` if recurring
+- **Pattern Violations Found**: When a review identifies a violation of established patterns
+  (naming, error handling, structural conventions), store it to T3:
+  ```bash
+  printf "# Review: Pattern Violation\n## Pattern\n{pattern name}\n## Violation\n{what was found}\n## File\n{path}\n## Recommendation\n{fix}\n" | nx store put - --collection knowledge --title "review-pattern-{pattern-name}-$(date +%Y-%m-%d)" --tags "review,pattern,violation"
+  ```
+  Store when: a pattern is violated across multiple locations in the reviewed code; a violation
+  suggests the pattern itself may need documentation; the violation is non-obvious (not a typo).
+  Do not store: single-instance style nits, formatting errors, trivial cases.
 - **Approval/Rejection**: Document in bead status
 - **Review Working Notes**: Use T1 scratch to track findings during review, then consolidate:
   ```bash

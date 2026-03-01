@@ -45,12 +45,21 @@ digraph brainstorming {
 
 ## Checklist
 
-1. **Explore project context** — check files, docs, recent commits, nx search for prior art
-2. **Ask clarifying questions** — one at a time, understand purpose/constraints/success criteria
-3. **Propose 2-3 approaches** — with trade-offs and your recommendation
-4. **Present design** — scaled to complexity, get user approval after each section
-5. **Write design doc** — save to `docs/plans/YYYY-MM-DD-<topic>-design.md`
-6. **Transition** — invoke strategic-planning skill to create implementation plan
+1. **Prior art search** — search T3 for prior decisions on this topic **before** exploring files
+   or asking questions:
+   ```bash
+   nx search "{feature or topic}" --corpus knowledge --n 5
+   ```
+   If a prior decision exists, surface it immediately — either re-use it (if still valid) or
+   acknowledge it explicitly before proposing alternatives. Don't re-litigate settled decisions
+   without knowing they were settled. If no prior decision exists, proceed to file and commit
+   exploration.
+2. **Explore project context** — check files, docs, recent commits
+3. **Ask clarifying questions** — one at a time, understand purpose/constraints/success criteria
+4. **Propose 2-3 approaches** — with trade-offs and your recommendation
+5. **Present design** — scaled to complexity, get user approval after each section
+6. **Write design doc** — save to `docs/plans/YYYY-MM-DD-<topic>-design.md`
+7. **Transition** — invoke strategic-planning skill to create implementation plan
 
 ## Key Principles
 

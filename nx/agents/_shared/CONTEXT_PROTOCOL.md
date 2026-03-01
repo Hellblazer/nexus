@@ -76,6 +76,25 @@ The SessionEnd hook (`nx hook session-end`) runs automatically at session close 
 | T2 | nx memory | Per-project, persistent | `nx memory put` | Session state, project context, agent relay, active work | 30d default; `permanent` available |
 | T3 | nx store / nx search | Permanent, cross-session | `nx store put` | Research findings, architectural decisions, validated patterns | `permanent` or explicit TTL |
 
+## Choosing Search Options
+
+Use the right search form for the task:
+
+| Goal | Command |
+|---|---|
+| Find related prior knowledge | `nx search "topic" --corpus knowledge --n 5` |
+| Research with uncertain vocabulary | Run 2 searches: primary term, then alternate framing |
+| Conceptual code search (unfamiliar codebase) | `nx search "concept" --corpus code --hybrid --n 15` |
+| Documentation search | `nx search "topic" --corpus docs --n 10` |
+| Exact code navigation | Use Grep tool instead — faster and more precise |
+| Cross-corpus research | Repeat `--corpus` flag (e.g., `--corpus knowledge --corpus docs`) |
+| Large-file noise reduction | Add `--max-file-chunks 20` to any `--corpus code` search |
+
+**When NOT to use nx search:**
+- When the relay already contains the information needed
+- For simple, bounded tasks where prior knowledge is unlikely to change the approach
+- When Grep or file reads are faster and more precise (class/function lookups)
+
 ## PRODUCE
 
 Agents produce artifacts based on their specialization:
@@ -201,13 +220,16 @@ nx store uses `--tags` for categorization (comma-separated strings).
 
 ## nx Memory Organization
 
-Projects use bare `{repo}` naming (e.g., `--project nexus`):
+Three project namespaces are in use:
+- `{repo}` — agent working notes and relay state (e.g., `--project nexus`)
+- `{repo}_rdr` — RDR records and gate results (e.g., `--project nexus_rdr`)
+- `{repo}_pm` — PM infrastructure created by `nx pm init` (e.g., `--project nexus_pm`)
+
+Common titles under `{repo}`:
 - `--title hypotheses.md` - Current working hypotheses
 - `--title findings.md` - Validated discoveries
 - `--title blockers.md` - Active blockers and impediments
 - `--title relay.md` - Pending relay context
-
-All memory -- agent working notes and PM documents -- lives under the bare project name. There is no separate `_active` or `_pm` suffix. `nx pm` commands operate on the same project namespace.
 
 ### Memory Commands
 ```bash

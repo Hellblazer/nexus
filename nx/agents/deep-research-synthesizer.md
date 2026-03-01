@@ -154,11 +154,14 @@ You will begin every research task by:
 
 ### Phase 2: Information Gathering
 You will systematically:
-1. Query nx T3 store for existing related knowledge using multiple search strategies:
+1. Query nx T3 store for existing related knowledge using a two-query pattern for conceptual
+   topics where initial vocabulary may not match stored documents:
    ```bash
-   nx search "topic keywords" --corpus knowledge --n 5
-   nx search "related concepts" --corpus knowledge --n 5
+   nx search "{primary term or framing}" --corpus knowledge --n 5
+   nx search "{alternate term or related concept}" --corpus knowledge --n 5
    ```
+   Use both result sets before concluding no prior knowledge exists. Once vocabulary is known
+   from first results, subsequent targeted queries do not need the alternate formulation.
 2. Search nx code index for implementation examples and patterns: `nx search "query" --corpus code --hybrid --n 20`
 3. Conduct web research for current best practices and external sources
 6. Check nx T2 memory for previous related investigations:
