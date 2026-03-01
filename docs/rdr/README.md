@@ -11,7 +11,7 @@ Active and closed RDRs for the Nexus project. Updated by `/rdr-list` and `/rdr-c
 | [RDR-006](rdr-006-chunk-size-configuration.md) | File-Size Scoring Penalty for Code Search | Feature | Closed | 2026-02-28 |
 | [RDR-007](rdr-007-claude-adoption-session-context-and-search-guidance.md) | Claude Adoption: Session Context Gaps and Search Tool Guidance | Feature | Closed | 2026-02-28 |
 | [RDR-008](rdr-008-nx-workflow-integration.md) | nx Workflow Integration: Protocol Standardization and Knowledge Accumulation | Architecture | Closed | 2026-03-01 |
-| [RDR-009](rdr-009-remove-agentic-and-answer-flags.md) | Remove --agentic and --answer Flags from nx search | Technical Debt | Accepted | 2026-03-01 |
+| [RDR-009](rdr-009-remove-agentic-and-answer-flags.md) | Remove --agentic and --answer Flags from nx search | Technical Debt | Closed | 2026-03-01 |
 | [RDR-010](rdr-010-t1-scratch-persistent-bounded-store.md) | T1 Scratch: Persistent Bounded Store with Frecency Eviction | Architecture | Draft | 2026-03-01 |
 
 ## RDR Process Documentation
