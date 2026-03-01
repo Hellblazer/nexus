@@ -27,6 +27,7 @@ digraph skill_flow {
     "Invoke brainstorming-gate" [shape=box];
     "Might any skill apply?" [shape=diamond];
     "Invoke Skill tool" [shape=box];
+    "Announce: 'Using [skill] to [purpose]'" [shape=box];
     "Follow skill exactly" [shape=box];
     "Respond" [shape=doublecircle];
 
@@ -38,10 +39,67 @@ digraph skill_flow {
     "Invoke brainstorming-gate" -> "Might any skill apply?";
     "Might any skill apply?" -> "Invoke Skill tool" [label="yes, even 1%"];
     "Might any skill apply?" -> "Respond" [label="definitely not"];
-    "Invoke Skill tool" -> "Follow skill exactly";
+    "Invoke Skill tool" -> "Announce: 'Using [skill] to [purpose]'";
+    "Announce: 'Using [skill] to [purpose]'" -> "Follow skill exactly";
     "Follow skill exactly" -> "Respond";
 }
 ```
+
+## Skill Directory
+
+Use this table to match tasks to skills. When in doubt, check the skill.
+
+### Discipline (apply before any implementation)
+
+| Skill | Command | Invoke when... |
+|-------|---------|----------------|
+| brainstorming-gate | `/brainstorming-gate` | About to implement any feature, build any component, or change any behavior |
+
+### Process (guide workflow and quality)
+
+| Skill | Command | Invoke when... |
+|-------|---------|----------------|
+| code-review | `/review-code` | Code changes ready for quality, security, or best practices review |
+| strategic-planning | `/create-plan` | Multi-step work needs decomposition into tasks before any code |
+| plan-validation | `/plan-audit` | A plan exists and needs validation before implementation begins |
+| test-validation | `/test-validate` | Implementation complete; test coverage needs verification |
+| substantive-critique | `/substantive-critique` | Architectural decisions, multi-phase plans, or major docs need deep constructive critique |
+
+### Implementation (execute domain-specific work)
+
+| Skill | Command | Invoke when... |
+|-------|---------|----------------|
+| codebase-analysis | `/analyze-code` | Exploring unfamiliar codebase or understanding module structure before changes |
+| deep-analysis | `/deep-analysis` | Surface-level analysis is insufficient; hypothesis-driven investigation needed |
+| research-synthesis | `/research` | Researching unfamiliar topics or comparing technology approaches |
+| java-architecture | `/java-architecture` | Complex Java features need architectural design before implementation |
+| java-development | `/java-implement` | Plan approved; Java implementation work ready to begin |
+| java-debugging | `/java-debug` | Java tests fail or behavior is non-deterministic, especially after 2+ failed attempts |
+
+### RDR Lifecycle (research-design-review documents)
+
+| Skill | Command | Invoke when... |
+|-------|---------|----------------|
+| rdr-create | `/rdr-create` | Starting a new technical decision document |
+| rdr-research | `/rdr-research` | Adding or tracking structured research findings for an active RDR |
+| rdr-list | `/rdr-list` | Listing all RDRs with status, type, and priority |
+| rdr-show | `/rdr-show` | Viewing full details and research findings for a specific RDR |
+| rdr-gate | `/rdr-gate` | RDR appears complete; needs structural + assumption + AI critique check |
+| rdr-accept | `/rdr-accept` | Gate returned PASSED; ready to officially accept the RDR |
+| rdr-close | `/rdr-close` | RDR implemented; close with optional post-mortem and bead decomposition |
+
+### Standalone Reference
+
+| Skill | Command | Invoke when... |
+|-------|---------|----------------|
+| knowledge-tidying | `/knowledge-tidy` | 3+ validated findings or decisions need persisting to T3 for cross-session reuse |
+| orchestration | `/orchestrate` | After reading this directory, still unsure which agent fits the task |
+| pdf-processing | `/pdf-process` | PDF documents need indexing into nx store for semantic search |
+| project-setup | `/project-setup` | Starting a 3+ week project that needs PM infrastructure |
+| nexus | `/nexus` | Running nx commands or unsure which nx subcommand to use |
+| serena-code-nav | `/serena-code-nav` | Navigating code by symbol — finding definitions, callers, type hierarchies, or safe renames |
+| cli-controller | `/cli-controller` | Controlling interactive CLI apps, REPLs, pdb, gdb, or spawning Claude Code instances |
+| writing-nx-skills | `/writing-nx-skills` | Creating new nx plugin skills or editing existing ones |
 
 ## Red Flags
 
@@ -52,22 +110,27 @@ These thoughts mean STOP — you are rationalizing:
 | "This is just a simple question" | Questions are tasks. Check for skills. |
 | "I need more context first" | Skill check comes BEFORE gathering context. |
 | "Let me explore the codebase first" | Skills tell you HOW to explore. Check first. |
+| "I can check git/files quickly" | Files lack conversation context. Check for skills. |
+| "Let me gather information first" | Skills tell you HOW to gather information. |
 | "This doesn't need a formal skill" | If a skill exists, use it. |
 | "I remember this skill" | Skills evolve. Read current version. |
+| "This doesn't count as a task" | Action = task. Check for skills. |
 | "The skill is overkill" | Simple things become complex. Use it. |
 | "I'll just do this one thing first" | Check BEFORE doing anything. |
+| "This feels productive" | Undisciplined action wastes time. Skills prevent this. |
+| "I know what that means" | Knowing the concept ≠ using the skill. Invoke it. |
 
 ## Skill Priority
 
 When multiple skills could apply:
 
-1. **Discipline skills first** (brainstorming-gate, verification-before-completion) — these determine HOW to approach
+1. **Discipline skills first** (brainstorming-gate) — these determine HOW to approach
 2. **Process skills second** (strategic-planning, code-review) — these guide workflow
 3. **Implementation skills third** (java-development, java-debugging) — these execute work
 
 ## Skill Types
 
-**Rigid** (verification-before-completion, brainstorming-gate): Follow exactly. Do not adapt away discipline.
+**Rigid** (brainstorming-gate): Follow exactly. Do not adapt away discipline.
 
 **Flexible** (patterns, reference): Adapt principles to context.
 

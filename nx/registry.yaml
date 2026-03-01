@@ -167,9 +167,9 @@ agents:
     description: "Persists and organizes knowledge in nx store (T3)"
     triggers:
       - "research-synthesis completes"
-      - "major investigation concludes"
-      - "valuable insights discovered"
-      - "consolidating cross-session information"
+      - "3 or more validated findings need persisting across sessions"
+      - "valuable insights discovered that should survive session end"
+      - "consolidating cross-session information into T3"
     strengths:
       - "Knowledge organization"
       - "nx store management"
@@ -186,9 +186,9 @@ agents:
     slash_command: /orchestrate
     description: "Routes requests to appropriate specialized agents"
     triggers:
-      - "task is ambiguous about which agent to use"
-      - "coordinating work across multiple agents"
-      - "workflow routing needed"
+      - "unsure which agent to use after reading the skill directory"
+      - "coordinating work across multiple agents in a pipeline"
+      - "task spans multiple agent types and needs explicit routing"
     strengths:
       - "Agent selection"
       - "Pipeline coordination"
@@ -282,10 +282,10 @@ agents:
     slash_command: /substantive-critique
     description: "Deep constructive critique of code, documentation, plans, and designs"
     triggers:
-      - "reviewing architectural decisions"
-      - "validating implementations against specs"
+      - "reviewing an architectural decision or multi-phase plan"
+      - "validating an implementation against a spec (not routine fix review)"
       - "verifying claims against evidence"
-      - "comprehensive system audit"
+      - "comprehensive system audit or drift detection"
     strengths:
       - "Structural analysis"
       - "Logic validation"
