@@ -4,6 +4,30 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-03-01
+
+### Added
+- **Storage Tier Protocol** in `using-nx-skills` SKILL.md: T3→T2→T1 read-widest-first
+  table and T1→persist→knowledge-tidy write path — gives every agent an explicit data
+  discipline so they don't re-research what siblings already found.
+
+## [0.6.0] - 2026-03-01
+
+### Added
+- **`serena-code-nav` skill**: navigate code by symbol — definitions, callers, type
+  hierarchies, safe renames — without reading whole files.
+- **SubagentStart T1 injection**: `subagent-start.sh` now injects live T1 scratch entries
+  into every spawned agent's context; agents see session-wide discoveries immediately.
+- **`using-nx-skills` polish**: 29-skill directory table with 5 categories, Announce step
+  in process flow, 12 red flags (restored from 7), `brainstorming-gate` replaces
+  `verification-before-completion` in Skill Priority.
+- Registry trigger conditions sharpened: knowledge-tidier, orchestrator, substantive-critic.
+
+### Fixed
+- SessionStart hook matcher tightened to `startup|resume|clear|compact` (was match-all `""`).
+- Wrong comment in `subagent-start.sh` claiming T1 is per-agent-scoped corrected; actual
+  behavior (PPID-chain shared) documented inline.
+
 ## [0.5.0] - 2026-02-28
 
 ### Added (RDR-007: Claude Adoption — Session Context and Search Guidance)

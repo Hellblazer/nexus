@@ -11,7 +11,7 @@ fi
 
 # Check nx CLI is available
 if ! command -v nx &>/dev/null; then
-    failures+=("nx CLI not found — run 'uv tool install nexus' or add nx to PATH")
+    failures+=("nx CLI not found — run 'uv tool install conexus' or add nx to PATH")
 else
     # Run nx doctor to verify nx subsystems are healthy; suppress output on success
     if ! nx doctor &>/dev/null 2>&1; then

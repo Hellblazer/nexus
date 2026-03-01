@@ -14,7 +14,7 @@ if command -v nx &> /dev/null; then
     echo '⚠ nx doctor reported issues — run "nx doctor" for details'
   fi
 else
-  echo '⚠ nx not found — install with: uv tool install nexus'
+  echo '⚠ nx not found — install with: uv tool install conexus'
 fi
 
 echo ''

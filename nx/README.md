@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-15 agents, 27 skills, session hooks, slash commands, and a bundled MCP server for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
+15 agents, 28 skills, session hooks, slash commands, and a bundled MCP server for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
 
 ## Installation
 
@@ -35,7 +35,7 @@ Run `/nx-preflight` after installing to verify all dependencies are present.
 ## What You Get
 
 - **15 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **27 skills** — 5 standalone + 15 agent-delegating + 7 RDR workflow
+- **28 skills** — 6 standalone + 15 agent-delegating + 7 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — auto-load PM context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe read-only commands skip the confirmation prompt
@@ -73,6 +73,7 @@ nx/
     ├── brainstorming-gate/  # Standalone: design gate before implementation
     ├── cli-controller/      # Standalone: tmux-based interactive CLI control
     ├── nexus/               # Standalone: nx CLI reference (all tiers)
+    ├── serena-code-nav/     # Standalone: navigate code by symbol (definitions, callers, renames)
     ├── using-nx-skills/     # Standalone: skill invocation discipline
     ├── writing-nx-skills/   # Standalone: plugin authorship guide
     ├── code-review/         # → code-review-expert agent
@@ -112,7 +113,7 @@ The nx plugin delegates workflow discipline to the [superpowers](https://github.
 | Git worktrees | `superpowers:using-git-worktrees` |
 | Writing plans | `superpowers:writing-plans` |
 
-## Standalone Skills (5)
+## Standalone Skills (6)
 
 Skills that provide guidance directly without delegating to an agent.
 
@@ -121,6 +122,7 @@ Skills that provide guidance directly without delegating to an agent.
 | brainstorming-gate | Design gate — requires exploration and user approval before implementation |
 | cli-controller | Expert guidance for controlling interactive CLI applications via tmux |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
+| serena-code-nav | Navigate code by symbol — definitions, callers, type hierarchies, safe renames |
 | using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring nx plugin skills |
 
