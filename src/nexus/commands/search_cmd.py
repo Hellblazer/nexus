@@ -8,9 +8,8 @@ from nexus.corpus import resolve_corpus
 from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
 from nexus.formatters import format_json, format_plain_with_context, format_vimgrep
-from nexus.answer import answer_mode
 from nexus.scoring import apply_hybrid_scoring, rerank_results, round_robin_interleave
-from nexus.search_engine import agentic_search, fetch_mxbai_results, search_cross_corpus
+from nexus.search_engine import fetch_mxbai_results, search_cross_corpus
 from nexus.types import SearchResult
 
 
@@ -77,11 +76,6 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               help="Disable cross-corpus reranking (use round-robin instead)")
 @click.option("--mxbai", is_flag=True, default=False,
               help="Fan out to Mixedbread-indexed collections (read-only)")
-@click.option("--agentic", is_flag=True, default=False,
-              help="Multi-step Haiku query refinement before returning results")
-@click.option("-a", "--answer", "answer", is_flag=True, default=False,
-              envvar="NX_ANSWER",
-              help="Synthesize cited answer via Haiku after retrieval")
 @click.option("--vimgrep", is_flag=True, default=False,
               help="Output in path:line:col:content format")
 @click.option("--json", "json_out", is_flag=True, default=False,
@@ -111,8 +105,6 @@ def search_cmd(
     hybrid: bool,
     no_rerank: bool,
     mxbai: bool,
-    agentic: bool,
-    answer: bool,
     vimgrep: bool,
     json_out: bool,
     files_only: bool,
@@ -187,15 +179,7 @@ def search_cmd(
                 raw.extend(_rg_hit_to_result(h) for h in rg_hits)
         return raw
 
-    # Retrieval (agentic or direct)
-    if agentic:
-        results = agentic_search(
-            initial_query=query,
-            retrieve_fn=_retrieve,
-            max_iterations=3,
-        )
-    else:
-        results = _retrieve(query)
+    results = _retrieve(query)
 
     if not results:
         click.echo("No results.")
@@ -231,11 +215,6 @@ def search_cmd(
     # --reverse: invert final order
     if reverse:
         results = list(reversed(results))
-
-    # Answer mode
-    if answer:
-        click.echo(answer_mode(query=query, results=results))
-        return
 
     # Output format
     if json_out:

@@ -1,10 +1,9 @@
-"""AC1–AC8: Search engine — hybrid scoring, reranking, answer mode, output formatters."""
+"""AC1–AC8: Search engine — hybrid scoring, reranking, output formatters."""
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import nexus.search_engine as se_mod
-from nexus.answer import answer_mode
 from nexus.formatters import format_json, format_vimgrep
 from nexus.scoring import (
     apply_hybrid_scoring,
@@ -162,97 +161,6 @@ def test_mxbai_with_key_calls_sdk(monkeypatch):
     assert results[0].collection == "mxbai__art"
 
 
-# ── AC5: Agentic mode ─────────────────────────────────────────────────────────
-
-def test_agentic_refinement_stops_when_done():
-    """Agentic loop stops when Haiku returns {"done": true}."""
-    initial = [SearchResult(id="1", content="r1", distance=0.1, collection="c", metadata={})]
-    mock_retrieve = MagicMock(return_value=initial)
-
-    with patch("nexus.search_engine._haiku_refine", return_value={"done": True}):
-        final = se_mod.agentic_search(
-            initial_query="test", retrieve_fn=mock_retrieve, max_iterations=3
-        )
-
-    # Only one retrieval (initial), no refinement iterations
-    mock_retrieve.assert_called_once()
-    assert len(final) == len(initial)
-
-
-def test_agentic_refinement_loop_max_3():
-    """Agentic loop runs at most 3 total iterations."""
-    call_count = 0
-
-    def mock_retrieve(query):
-        nonlocal call_count
-        call_count += 1
-        return [SearchResult(id=str(call_count), content="r",
-                             distance=0.1, collection="c", metadata={})]
-
-    with patch("nexus.search_engine._haiku_refine", return_value={"query": "refined"}):
-        se_mod.agentic_search(
-            initial_query="test", retrieve_fn=mock_retrieve, max_iterations=3
-        )
-    assert call_count <= 3
-
-
-def test_agentic_deduplicates_results():
-    """Agentic loop deduplicates results across iterations by ID."""
-    shared = SearchResult(id="dup", content="dup content", distance=0.1,
-                          collection="c", metadata={})
-    calls = [0]
-
-    def mock_retrieve(query):
-        calls[0] += 1
-        return [shared]
-
-    responses = [{"query": "refined"}, {"done": True}]
-    response_iter = iter(responses)
-
-    with patch("nexus.search_engine._haiku_refine", side_effect=lambda *a, **kw: next(response_iter)):
-        final = se_mod.agentic_search(
-            initial_query="test", retrieve_fn=mock_retrieve, max_iterations=3
-        )
-    # Despite 2 retrieve calls, only 1 unique result
-    assert len(final) == 1
-
-
-# ── AC6: Answer mode ──────────────────────────────────────────────────────────
-
-def test_answer_mode_produces_cite_tags():
-    """answer_mode synthesis includes <cite i="N"> format."""
-    results = [
-        SearchResult(id="1", content="Token validation logic here.",
-                     distance=0.1, collection="code__r",
-                     metadata={"source_path": "./auth.py", "line_start": 42}),
-        SearchResult(id="2", content="Session management code.",
-                     distance=0.2, collection="code__r",
-                     metadata={"source_path": "./session.py", "line_start": 12}),
-    ]
-    mock_response = MagicMock()
-    mock_response.content = [MagicMock(text='Auth uses <cite i="0"> and session <cite i="1">.')]
-
-    with patch("nexus.answer._haiku_answer", return_value='Auth uses <cite i="0"> and session <cite i="1">.'):
-        output = answer_mode(query="how does auth work?", results=results)
-
-    assert '<cite i="0">' in output
-    assert "0:" in output or "./auth.py" in output
-
-
-def test_answer_mode_includes_citation_footer():
-    """answer_mode appends numbered citation list after synthesis."""
-    results = [
-        SearchResult(id="1", content="foo", distance=0.1,
-                     collection="code__r",
-                     metadata={"source_path": "./foo.py", "line_start": 1}),
-    ]
-    with patch("nexus.answer._haiku_answer", return_value='Result <cite i="0">.'):
-        output = answer_mode(query="foo", results=results)
-
-    lines = output.splitlines()
-    assert any("0:" in ln and "./foo.py" in ln for ln in lines)
-
-
 # ── AC7: Output formatters ────────────────────────────────────────────────────
 
 def test_format_vimgrep():
@@ -325,72 +233,6 @@ def test_mxbai_chunk_id_is_deterministic(monkeypatch):
     )
 
 
-# ── Behavior: Agentic search handles invalid JSON from Haiku ─────────────────
-
-def test_agentic_search_graceful_on_json_decode_error():
-    """agentic_search stops gracefully when _haiku_refine returns invalid JSON."""
-    initial = [SearchResult(id="1", content="result", distance=0.1,
-                            collection="c", metadata={})]
-    mock_retrieve = MagicMock(return_value=initial)
-
-    with patch("nexus.search_engine._haiku_refine", return_value={"done": True}):
-        result = se_mod.agentic_search(
-            initial_query="test", retrieve_fn=mock_retrieve, max_iterations=3
-        )
-    assert result == initial
-
-
-def test_haiku_refine_returns_done_on_json_error():
-    """_haiku_refine returns {'done': True} when Haiku response is not valid JSON."""
-    import nexus.answer as _answer_mod
-    mock_msg = MagicMock()
-    mock_msg.content = [MagicMock(text="Sure! Here is some text, not JSON.")]
-    mock_client = MagicMock()
-    mock_client.messages.create.return_value = mock_msg
-
-    _answer_mod._anthropic_instance = None
-    with patch("nexus.config.get_credential", return_value="key"):
-        with patch("anthropic.Anthropic", return_value=mock_client):
-            result = se_mod._haiku_refine("query", [])
-    _answer_mod._anthropic_instance = None
-    assert result == {"done": True}
-
-
-def test_haiku_refine_returns_done_on_empty_content():
-    """_haiku_refine returns {'done': True} when Haiku returns empty content."""
-    import nexus.answer as _answer_mod
-    mock_msg = MagicMock()
-    mock_msg.content = []
-    mock_client = MagicMock()
-    mock_client.messages.create.return_value = mock_msg
-
-    _answer_mod._anthropic_instance = None
-    with patch("nexus.config.get_credential", return_value="key"):
-        with patch("anthropic.Anthropic", return_value=mock_client):
-            result = se_mod._haiku_refine("query", [])
-    _answer_mod._anthropic_instance = None
-    assert result == {"done": True}
-
-
-# ── Behavior: Agentic search skips empty refined queries ─────────────────────
-
-def test_agentic_search_stops_on_empty_refined_query():
-    """agentic_search stops loop when Haiku returns empty/whitespace query."""
-    call_count = 0
-
-    def mock_retrieve(query):
-        nonlocal call_count
-        call_count += 1
-        return [SearchResult(id=str(call_count), content="r",
-                             distance=0.1, collection="c", metadata={})]
-
-    with patch("nexus.search_engine._haiku_refine", return_value={"query": "   "}):
-        se_mod.agentic_search(
-            initial_query="test", retrieve_fn=mock_retrieve, max_iterations=3
-        )
-    assert call_count == 1  # stopped after initial retrieve
-
-
 # ── AC8: min_max_normalize over combined window ───────────────────────────────
 
 def test_min_max_normalize_over_combined_not_per_corpus():
@@ -406,27 +248,6 @@ def test_min_max_normalize_over_combined_not_per_corpus():
     # If per-corpus: code [0.1] → both 0.0; docs [0.9] → both 0.0
     # Combined window correctly distinguishes them
     assert norm_code < norm_doc
-
-
-# ── nexus-7vr: _haiku_answer guards empty content ────────────────────────────
-
-def test_haiku_answer_returns_empty_string_on_empty_content():
-    """_haiku_answer returns '' when msg.content is empty (no IndexError)."""
-    import nexus.answer as _answer_mod
-    mock_msg = MagicMock()
-    mock_msg.content = []  # Empty list — previously caused IndexError
-    mock_client = MagicMock()
-    mock_client.messages.create.return_value = mock_msg
-
-    results = [SearchResult(id="1", content="ctx", distance=0.1, collection="c", metadata={})]
-    _answer_mod._anthropic_instance = None
-    with patch("nexus.config.get_credential", return_value="key"):
-        with patch("anthropic.Anthropic", return_value=mock_client):
-            from nexus.answer import _haiku_answer
-            result = _haiku_answer("what?", results)
-    _answer_mod._anthropic_instance = None
-
-    assert result == ""
 
 
 # ── nexus-6kj: fetch_mxbai_results isolates per-store errors ─────────────────

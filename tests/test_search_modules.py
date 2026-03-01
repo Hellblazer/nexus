@@ -20,11 +20,6 @@ def test_scoring_imports():
     )
 
 
-def test_answer_imports():
-    """answer_mode importable from nexus.answer."""
-    from nexus.answer import answer_mode  # noqa: F401
-
-
 def test_formatters_imports():
     """All formatter functions importable from nexus.formatters."""
     from nexus.formatters import (  # noqa: F401
@@ -40,7 +35,6 @@ def test_search_engine_orchestration_imports():
     from nexus.search_engine import (  # noqa: F401
         search_cross_corpus,
         fetch_mxbai_results,
-        agentic_search,
     )
 
 
@@ -118,7 +112,7 @@ def test_formatters_format_json_valid():
 
 
 def test_no_circular_imports():
-    """scoring, answer, and formatters must not import from search_engine."""
+    """scoring and formatters must not import from search_engine."""
     import importlib
     import sys
 
@@ -133,12 +127,10 @@ def test_no_circular_imports():
 
         # These should all import cleanly without pulling in search_engine internals
         scoring = importlib.import_module("nexus.scoring")
-        answer = importlib.import_module("nexus.answer")
         formatters = importlib.import_module("nexus.formatters")
 
         # Verify search_engine is not in their __dict__ as an imported sub-module
         assert not hasattr(scoring, "search_engine"), "scoring must not import search_engine"
-        assert not hasattr(answer, "search_engine"), "answer must not import search_engine"
         assert not hasattr(formatters, "search_engine"), "formatters must not import search_engine"
     finally:
         # Restore original sys.modules to avoid contaminating subsequent tests
@@ -168,39 +160,6 @@ def test_format_json_metadata_does_not_shadow_canonical_fields():
     assert item["content"] == "canonical-content", f"content was overwritten: {item['content']}"
     assert item["distance"] == pytest.approx(0.3), f"distance was overwritten: {item['distance']}"
     assert item["collection"] == "code__repo", f"collection was overwritten: {item['collection']}"
-
-
-def test_match_pct_clipped_for_large_distance():
-    """match_pct must be >= 0 even when distance > 1.0 (L2 distances can exceed 1)."""
-    from nexus.answer import answer_mode
-    from unittest.mock import patch, MagicMock
-
-    results = [
-        SearchResult(
-            id="r1",
-            content="some content",
-            distance=1.5,  # L2 distance exceeding 1 — would give negative pct without clip
-            collection="docs__test",
-            metadata={"source_path": "foo.py", "line_start": 1, "line_end": 5},
-        )
-    ]
-
-    # Mock _haiku_answer so we don't need API credentials
-    with patch("nexus.answer._haiku_answer", return_value="Synthesized answer."):
-        output = answer_mode("test query", results)
-
-    # The footer must contain a non-negative match percentage
-    # Find the line with the citation footer
-    lines = output.splitlines()
-    footer_lines = [l for l in lines if "% match" in l]
-    assert footer_lines, f"No footer lines found in output:\n{output}"
-    for line in footer_lines:
-        # Extract the percentage value from "(...% match)"
-        import re
-        m = re.search(r"\((-?[\d.]+)% match\)", line)
-        assert m, f"Could not parse match_pct from line: {line}"
-        pct = float(m.group(1))
-        assert pct >= 0.0, f"match_pct is negative ({pct}) for distance=1.5"
 
 
 def test_rerank_results_degrades_on_api_error():
