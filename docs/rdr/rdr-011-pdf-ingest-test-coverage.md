@@ -2,13 +2,15 @@
 title: "PDF Ingest Test Coverage: Unit, Subsystem, and E2E with Local ChromaDB"
 id: RDR-011
 type: testing
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-03-01
 updated: 2026-03-01
 accepted_date: 2026-03-01
+closed_date: 2026-03-01
+close_reason: implemented
 gate_result: PASSED
 gate_date: 2026-03-01
 related_issues: []
