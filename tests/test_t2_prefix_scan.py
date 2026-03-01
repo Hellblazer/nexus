@@ -60,22 +60,15 @@ def test_cap_constants_are_consistent() -> None:
 # ── cap algorithm integration via scan_namespaces helper ─────────────────────
 # We test the cap logic by calling the scan logic directly with a live T2Database.
 
-from pathlib import Path as _Path
-
-import pytest
-
 from nexus.db.t2 import T2Database
 
 
-def _make_db(tmp_path: _Path) -> T2Database:
+def _make_db(tmp_path: Path) -> T2Database:
     return T2Database(tmp_path / "t2_scan_test.db")
 
 
 def _run_scan(db: T2Database, project_name: str) -> str:
     """Run the scan logic and capture its stdout equivalent as a string."""
-    import io
-    from contextlib import redirect_stdout
-
     # Patch sys.argv and the import, then call main logic inline
     namespaces = db.get_projects_with_prefix(project_name)
     if not namespaces:
@@ -125,7 +118,7 @@ def _run_scan(db: T2Database, project_name: str) -> str:
     return "\n".join(lines)
 
 
-def test_entries_1_to_5_include_snippet(tmp_path: _Path) -> None:
+def test_entries_1_to_5_include_snippet(tmp_path: Path) -> None:
     """First 5 entries per namespace include ' — snippet' text."""
     with _make_db(tmp_path) as db:
         for i in range(1, 6):
@@ -134,7 +127,7 @@ def test_entries_1_to_5_include_snippet(tmp_path: _Path) -> None:
     assert " — Content of entry" in output
 
 
-def test_entries_6_to_8_title_only(tmp_path: _Path) -> None:
+def test_entries_6_to_8_title_only(tmp_path: Path) -> None:
     """Entries 6–8 per namespace appear without a snippet."""
     with _make_db(tmp_path) as db:
         for i in range(1, 9):
@@ -146,7 +139,7 @@ def test_entries_6_to_8_title_only(tmp_path: _Path) -> None:
         assert " — " not in line
 
 
-def test_entries_beyond_8_appear_as_count(tmp_path: _Path) -> None:
+def test_entries_beyond_8_appear_as_count(tmp_path: Path) -> None:
     """Entries beyond 8 per namespace are summarised as '… (N more)'."""
     with _make_db(tmp_path) as db:
         for i in range(1, 12):
@@ -155,7 +148,7 @@ def test_entries_beyond_8_appear_as_count(tmp_path: _Path) -> None:
     assert "… (3 more)" in output
 
 
-def test_hard_cap_across_namespaces(tmp_path: _Path) -> None:
+def test_hard_cap_across_namespaces(tmp_path: Path) -> None:
     """Total rendered entries across namespaces must not exceed _HARD_CAP."""
     with _make_db(tmp_path) as db:
         # Three namespaces each with 10 entries — would be 30 without cap
@@ -172,7 +165,7 @@ def test_hard_cap_across_namespaces(tmp_path: _Path) -> None:
     assert len(rendered) <= _HARD_CAP
 
 
-def test_namespace_header_appears_per_namespace(tmp_path: _Path) -> None:
+def test_namespace_header_appears_per_namespace(tmp_path: Path) -> None:
     """Each non-empty namespace gets its own '### T2 Memory ...' header."""
     with _make_db(tmp_path) as db:
         db.put(project="repo", title="main.md", content="main content")

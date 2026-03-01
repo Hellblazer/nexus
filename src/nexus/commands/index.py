@@ -17,7 +17,7 @@ def _detect_large_files(
     Uses a quick rglob scan limited to known code extensions.
     Returns a list of (line_count, path) sorted descending by line count.
     """
-    from nexus.chunker import _AST_EXTENSIONS
+    from nexus.chunker import AST_EXTENSIONS
 
     line_threshold = threshold * chunk_lines
     large: list[tuple[int, Path]] = []
@@ -27,10 +27,10 @@ def _detect_large_files(
             continue
         if any(part.startswith(".") for part in path.relative_to(repo).parts):
             continue
-        if path.suffix.lower() not in _AST_EXTENSIONS:
+        if path.suffix.lower() not in AST_EXTENSIONS:
             continue
         try:
-            line_count = path.read_text(encoding="utf-8", errors="ignore").count("\n") + 1
+            line_count = len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
         except OSError:
             continue
         if line_count > line_threshold:
@@ -62,7 +62,7 @@ def index() -> None:
 )
 @click.option(
     "--chunk-size",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="Lines per chunk for code files (default: 150). Smaller values improve search "
     "precision for large files at the cost of more chunks.",
@@ -101,12 +101,16 @@ def index_repo_cmd(
             count = len(large)
             largest_count, largest_path = large[0]
             largest_rel = largest_path.relative_to(path)
+            suggest = (
+                f"\nConsider: nx index repo . --chunk-size 80"
+                if chunk_size is None
+                else f"\nConsider reducing further with --chunk-size {max(10, effective_chunk_lines // 2)}"
+            )
             msg = (
                 f"Warning: {count} file{'s' if count != 1 else ''} exceed the large-file "
                 f"threshold ({line_threshold:,} lines; largest: {largest_rel}, "
-                f"{largest_count:,} lines). Default chunk size may reduce search precision "
-                f"— large files produce many chunks that dominate semantic scoring.\n"
-                f"Consider: nx index repo . --chunk-size 80\n"
+                f"{largest_count:,} lines). Large files produce many chunks that dominate "
+                f"semantic scoring.{suggest}\n"
                 f"Run with --no-chunk-warning to suppress this message."
             )
             click.echo(msg, err=True)

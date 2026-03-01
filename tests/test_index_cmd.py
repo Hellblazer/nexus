@@ -285,3 +285,52 @@ def test_detect_large_files_ignores_non_code_files(index_home: Path) -> None:
     paths = [p for _, p in results]
 
     assert md_file not in paths
+
+
+def test_chunk_size_zero_is_rejected(runner: CliRunner, index_home: Path) -> None:
+    """--chunk-size 0 is rejected by Click (IntRange min=1)."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    result = runner.invoke(main, ["index", "repo", str(repo), "--chunk-size", "0"])
+
+    assert result.exit_code != 0
+
+
+def test_chunk_size_negative_is_rejected(runner: CliRunner, index_home: Path) -> None:
+    """--chunk-size -1 is rejected by Click (IntRange min=1)."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    result = runner.invoke(main, ["index", "repo", str(repo), "--chunk-size", "-1"])
+
+    assert result.exit_code != 0
+
+
+def test_warning_suggestion_omitted_when_chunk_size_already_set(
+    runner: CliRunner, index_home: Path
+) -> None:
+    """When --chunk-size is specified and files still exceed threshold, warning
+    adapts its suggestion rather than blindly recommending --chunk-size 80."""
+    repo = index_home / "myrepo"
+    repo.mkdir()
+
+    mock_reg = MagicMock()
+    mock_reg.get.return_value = {"collection": "code__myrepo"}
+    large_path = repo / "huge.py"
+
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        with patch("nexus.indexer.index_repository"):
+            with patch(
+                "nexus.commands.index._detect_large_files",
+                return_value=[(5000, large_path)],
+            ):
+                result = runner.invoke(
+                    main,
+                    ["index", "repo", str(repo), "--chunk-size", "100"],
+                )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning" in result.output
+    # Should NOT recommend --chunk-size 80 when user already passed --chunk-size 100
+    assert "--chunk-size 80" not in result.output

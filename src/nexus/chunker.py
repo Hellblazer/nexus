@@ -8,7 +8,7 @@ import structlog
 _log = structlog.get_logger()
 
 # Extensions supported by llama-index CodeSplitter / tree-sitter
-_AST_EXTENSIONS: dict[str, str] = {
+AST_EXTENSIONS: dict[str, str] = {
     ".py": "python",
     ".js": "javascript",
     ".ts": "typescript",
@@ -170,7 +170,7 @@ def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list
     """
     effective_chunk_lines = chunk_lines if chunk_lines is not None else _CHUNK_LINES
     ext = file.suffix.lower()
-    language = _AST_EXTENSIONS.get(ext)
+    language = AST_EXTENSIONS.get(ext)
 
     base_meta = {
         "file_path": str(file),

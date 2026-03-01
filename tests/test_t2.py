@@ -245,6 +245,13 @@ def test_get_projects_with_prefix_percent_not_wildcard(db: T2Database) -> None:
     assert "50%_done" in projects
 
 
+def test_get_projects_with_prefix_empty_prefix_returns_empty(db: T2Database) -> None:
+    """Empty prefix returns empty list (not every project)."""
+    db.put(project="alpha", title="a.md", content="entry")
+    results = db.get_projects_with_prefix("")
+    assert results == []
+
+
 # ── delete ───────────────────────────────────────────────────────────────────
 
 def test_t2_delete(db: T2Database) -> None:
