@@ -1,11 +1,13 @@
 ---
 title: "ChromaDB Cloud Quota Enforcement"
 type: architecture
-status: accepted
+status: closed
+close_reason: implemented
 priority: P1
 author: Hal Hildebrand
 date: 2026-02-28
 accepted_date: 2026-02-28
+closed_date: 2026-02-28
 reviewed-by: self
 related_issues: []
 ---
