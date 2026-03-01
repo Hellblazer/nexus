@@ -2,11 +2,12 @@
 title: "Claude Adoption: Session Context Gaps and Search Tool Guidance"
 id: RDR-007
 type: feature
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
-reviewed-by:
+reviewed-by: self
 created: 2026-02-28
+accepted_date: 2026-02-28
 related_issues:
   - RDR-006
 ---
@@ -78,9 +79,10 @@ The following was tested in a single session against the arcaneum project:
 3. Ran `nx memory list --project arcaneum_rdr` (`_rdr` suffix, actual
    namespace) → 19 entries listed
 4. Ran 7 targeted queries against `code__arcaneum-2ad2825c` (the code T3
-   collection); verified expected canonical file in top-3 results for each
+   collection); recorded the top file returned for each query and compared
+   against the expected canonical file (Finding 3 — all 7 failed)
 5. Ran equivalent queries against `rdr__arcaneum-2ad2825c` (RDR T3
-   collection); verified expected canonical file in top-3 results for each
+   collection); verified expected canonical RDR in top-3 results for each
 6. Ran `nx memory search` with conceptual phrases vs. keyword-literal phrases
    against loaded T2 content
 
@@ -156,14 +158,15 @@ navigation, Grep is currently more reliable than T3 semantic search.
 ### Finding 4: T2 FTS5 Constraint Undocumented
 
 `nx memory search` uses FTS5 full-text search. Multi-word queries are tokenized
-and OR-matched against stored content. This means:
+and AND-matched against stored content — all tokens must appear in a document
+for it to match. This means:
 
 - Query `"retain slash commands memory"` → finds RDR-015 (contains all four
   literal tokens) ✓
 - Query `"semantic search"` → returns 19 results (both tokens appear in almost
   every RDR) — low precision
-- Query `"embedding startup failure"` → finds nothing (no stored document
-  contains these exact tokens even if the content covers the concept)
+- Query `"embedding startup failure"` → finds nothing (no document contains
+  all three tokens simultaneously; the query needs all tokens to co-occur)
 
 This is expected FTS5 behavior, but it is not documented in the `nexus` skill
 or the `memory search` help text. Claude issues conceptual paraphrases as
@@ -211,12 +214,17 @@ discover and surface all T2 namespaces matching the prefix `{repo}` using
 a SQL `LIKE` prefix scan against the T2 SQLite database.
 
 **Resolution of design choice**: The `nx memory list --project` CLI does not
-support wildcards. However, the underlying T2 store is SQLite and the session
-hook (`session_start_hook.py`) already imports `nexus.db.t2.T2Database`
-directly (as demonstrated in `rdr_hook.py`). The hook must use the Python
-T2 API with a prefix query, not suffix enumeration. Verified: `SELECT DISTINCT
-project FROM memory WHERE project LIKE '{repo}%'` correctly returns
-`arcaneum_rdr` when querying `arcaneum%`.
+support wildcards. The underlying T2 store is SQLite, and the T2Database Python
+API supports direct SQL queries. The session hook (`session_start_hook.py`)
+**currently uses only subprocess CLI calls** to `nx memory list` — it does
+not import `nexus.db.t2.T2Database`. The existing example of direct T2Database
+usage is `rdr_hook.py`, which imports and uses T2Database for RDR
+reconciliation. Fix 1 requires converting `session_start_hook.py` from CLI
+subprocess calls to T2Database direct API calls — this is a real implementation
+step, not a trivial adjustment. The hook must use the Python T2 API with a
+prefix query, not suffix enumeration. Verified: `SELECT DISTINCT project FROM
+memory WHERE project LIKE '{repo}%'` correctly returns `arcaneum_rdr` when
+querying `arcaneum%`.
 
 Suffix enumeration (`['', '_rdr', '_pm']`) is **rejected** — it creates a
 silent maintenance trap where any new namespace convention (e.g., `_agent`,
@@ -238,15 +246,45 @@ for ns in namespaces:
         ...
 ```
 
-If `get_projects_with_prefix()` does not yet exist in the T2Database API,
-it must be added as part of Phase 1 implementation. The SQL is:
-`SELECT DISTINCT project FROM memory WHERE project LIKE ? ORDER BY project`
-with parameter `f'{project_name}%'`.
+`get_projects_with_prefix()` must be added to T2Database as part of Phase 1
+implementation. The SQL must order namespaces by most-recent write (to support
+Fix 2's recency preference in the cross-namespace cap):
 
-**Scope**: `session_start_hook.py` and `subagent-start.sh`. The shell script
-(`subagent-start.sh`) currently uses the `nx memory list` CLI directly; it
-must be converted to call a thin wrapper script (or `python3 -c`) that
-performs the prefix scan, matching the Python hook's behavior.
+```sql
+SELECT project, MAX(timestamp) AS last_updated
+FROM memory
+WHERE project LIKE ?
+GROUP BY project
+ORDER BY MAX(timestamp) DESC
+```
+
+Parameter: `f'{project_name}%'`. Note: `search_glob()` uses SQLite GLOB
+syntax. Resolved: `get_projects_with_prefix()` uses LIKE for the prefix
+scan, as shown in the SQL above. Either works functionally; LIKE was chosen
+as standard SQL for prefix queries.
+
+**Error handling**: The T2Database context manager must be wrapped in
+`try/except Exception` with silent fallback — a hook that propagates uncaught
+T2Database exceptions will corrupt session startup. Pattern: `rdr_hook.py`
+wraps T2Database in try/except; `session_start_hook.py` catches all exceptions
+silently in `run_command()`. Implement Fix 1 to the same standard: on any
+T2Database failure, return empty namespace list and log to stderr only if debug
+mode is enabled.
+
+**Scope**: `session_start_hook.py` and `subagent-start.sh`. Wrapper specification:
+
+- **New file**: `hooks/scripts/t2_prefix_scan.py` — canonical implementation
+  of the prefix scan, snippet extraction, and cap algorithm. Accepts a repo
+  name as `argv[1]` and writes the formatted T2 context block to stdout.
+  `session_start_hook.py` **imports and calls** a function from this module
+  rather than duplicating the logic — `t2_prefix_scan.py` is the single source
+  of truth for the cap algorithm; `session_start_hook.py` calls it and
+  assembles it alongside PM context and beads output.
+- **`subagent-start.sh` change**: Replace the `nx memory list --project
+  "$PROJECT"` call with `python3 "$CLAUDE_PLUGIN_ROOT/hooks/scripts/t2_prefix_scan.py" "$PROJECT"`
+- **Unchanged in `subagent-start.sh`**: PM context injection (`nx pm resume`
+  / `nx pm status`), beads display (`bd ready`) — these are separate concerns
+  that do not touch T2 memory and require no modification
 
 ### Fix 2: Content Snippet in T2 Session Surfacing
 
@@ -263,22 +301,63 @@ non-empty, non-heading line of content as a snippet (truncated to 120 chars):
 This allows Claude to triage relevance from session context without a round
 trip per entry.
 
-**Implementation**: After `nx memory list`, run `nx memory get` for entries
-up to a configurable cap (default: 5 most recent). Extract first substantive
-line. Display as `[id] title — {snippet}`.
+**Implementation**: Fix 1's `db.get_all(project=ns)` already returns full
+entry content — no separate `nx memory get` subprocess calls are needed. For
+each namespace, sort entries by recency, iterate through the list, and extract
+the first non-empty, non-heading line from the `content` field, truncated to
+120 chars. Display as `[id] title — {snippet}`.
+
+**Cap algorithm** (per namespace, applied in recency order):
+
+- Entries 1–5: title + 1-line snippet
+- Entries 6–8: title only
+- Beyond 8: count only — `... (N more entries — use nx memory list to browse)`
+- **Cross-namespace hard cap**: 15 total entries across all namespaces in a
+  single session context injection. If multiple namespaces are populated,
+  allocate proportionally and favour the most recently written namespace.
+
+**Cap interaction order**: Apply the per-namespace rules (snippet/title/count)
+first to each namespace independently, then truncate the combined entry list to
+15, preserving entries from the most recently written namespace first. The
+snippet/title thresholds are fixed (entries 1–5 get snippets regardless of
+how many namespaces are present) — only the total number of fully-rendered
+entries is capped at 15.
+
+This prevents context bloat for projects with large T2 stores while still
+surfacing actionable content for the most relevant entries.
 
 **Alternative**: Extend `nx memory list` to support a `--snippet` flag that
 returns id, title, and first-N-chars of content in one call. Cleaner API but
-requires CLI change rather than hook logic.
+requires CLI change. The direct `get_all()` approach has no per-entry latency
+(single SQL query); the `--snippet` flag alternative is deferred until there
+is a reason to add a CLI call to a workflow that the API path already handles.
 
-**Cap**: Surface at most 8 entries with snippets; beyond that, show count
-only. Prevents context bloat for large T2 stores.
+### Fix 3: FTS5 Caveat, Tool Selection Guide, and Naming Convention Correction
 
-### Fix 3: FTS5 Caveat and Tool Selection Guide in Nexus Skill
+Fix 3 makes three changes to `nx/skills/nexus/reference.md`:
 
-Add two sections to `nx/skills/nexus/reference.md`:
+**Change A — Correct the namespace naming convention.** The current
+`reference.md` states: "**Project naming**: use bare `{repo}` for all project
+memory (e.g., `nexus`). No `_active` or `_pm` suffixes." This directly
+contradicts the actual namespace conventions in use (`{repo}_rdr`,
+`{repo}_pm`). Replace with:
 
-**Section: T2 search constraints**
+```markdown
+**Project naming**: Use purpose-specific suffixes for different memory domains:
+
+- bare `{repo}` — general project memory and notes
+- `{repo}_rdr` — RDR documents and gate results (populated by `/rdr-create`)
+- `{repo}_pm` — project management context (populated by `nx pm`)
+
+The session hook discovers all populated namespaces by prefix scan; content
+stored under any `{repo}_*` namespace will surface at session start.
+```
+
+**Change B — Add "T2 Search Constraints" section** (new section, add two):
+
+Add to `nx/skills/nexus/reference.md`:
+
+**Change B — "T2 Search Constraints" section**
 
 ```markdown
 ## T2 Search Constraints
@@ -290,14 +369,19 @@ not semantic meaning. Rules:
 - `"retain slash commands"` works if those words appear verbatim in content
 - `"memory management plugin"` may return nothing if stored as "retain
   system" — even if the content is the same concept
-- Multi-word queries are OR-matched: broad terms (e.g., "indexing") will
-  match most entries
-- When results are empty: try different vocabulary, not just different
-  queries. Consider `nx memory list --project {repo}` to browse titles
+- Multi-word queries are AND-matched: all tokens must appear somewhere in the
+  document. A broad single term (e.g., "indexing") matches many entries; a
+  three-term query returns only documents containing all three tokens
+- When results are empty: drop one term at a time to identify which token
+  has no match. Consider `nx memory list --project {repo}` to browse titles
   directly, then `nx memory get` by title.
+- **Title searches always return empty**: the FTS5 index covers `content`
+  and `tags` only — not `title`. Searching for an entry by its title (e.g.,
+  `nx memory search "RDR-007"`) will find nothing even if that entry exists.
+  Use `nx memory get --project {repo} --title {title}` for title-based lookup.
 ```
 
-**Section: Tool selection for code navigation**
+**Change C — "Code Search: When to Use nx vs Grep" section**
 
 ```markdown
 ## Code Search: When to Use nx vs Grep
@@ -326,10 +410,10 @@ When indexing a code collection without `--chunk-size`, emit a warning if the
 repo contains files large enough to produce chunk-count dominance.
 
 ```text
-Warning: 12 files exceed the large-file threshold (largest:
+Warning: 12 files exceed the large-file threshold (200 lines; largest:
 src/arcaneum/cli/doctor.py, 847 lines). Default chunk size may reduce search
 precision — large files produce many chunks that dominate semantic scoring.
-Consider: nx index repo . --chunk-size 150
+Consider: nx index repo . --chunk-size 80
 Run with --no-chunk-warning to suppress this message.
 ```
 
@@ -337,22 +421,27 @@ This surfaces the RDR-006 issue at the moment it can be prevented, rather
 than after precision has already degraded. It does not block indexing.
 
 **Implementation prerequisite**: Fix 4 is **blocked on RDR-006 acceptance**.
-The threshold value (lines and/or bytes per file) must be derived from
-RDR-006's chunk size analysis — specifically, the token-to-byte ratio and
-default chunk token count that RDR-006 defines. The 200-line placeholder in
-the warning example above must not be used as-is; it will be replaced with
-the value from RDR-006 before Phase 3 begins.
+The chunker (`src/nexus/chunker.py`) operates in **lines**, not tokens
+(`_CHUNK_LINES = 150`). The large-file warning threshold must therefore be
+expressed in lines — not bytes or tokens. The correct derivation is: target
+chunk line count defined by RDR-006 → files where total line count
+significantly exceeds that target → warning threshold in lines. The 200-line
+placeholder in the warning example above must not be used as-is; it will be
+replaced with a value derived from RDR-006's target chunk size before Phase 3
+begins. Note: RDR-006 research finding R5 identifies 60–80 lines as the likely
+target (not 150, which is the current default); Fix 4's threshold must
+reflect whatever value RDR-006 finalizes.
 
 **Phase 3 is therefore sequenced after RDR-006 is accepted**, not after
 RDR-006 is merely drafted. Phase 1 and Phase 2 of this RDR have no dependency
 on RDR-006 and may proceed independently.
 
-**Rationale for prerequisite**: The 200-line / 8KB figure is not derived from
-the empirical data in this RDR (the evidence table contains chunk counts, not
-file sizes or line counts), and deriving it requires knowing the default chunk
-token size — which is the subject of RDR-006. Implementing Fix 4 with an
-arbitrary threshold trains users to suppress the warning, which defeats the
-guard's purpose entirely.
+**Rationale for prerequisite**: The 200-line placeholder figure is not derived
+from the empirical data in this RDR (the evidence table contains chunk counts,
+not file line counts), and calibrating it correctly requires knowing the target
+chunk line count — which is the subject of RDR-006. Implementing Fix 4 with
+an arbitrary threshold trains users to suppress the warning, defeating the
+guard's purpose entirely. An incorrect threshold is worse than no threshold.
 
 ## Alternatives Considered
 
@@ -408,11 +497,12 @@ ensuring all populated namespaces are surfaced.
 - **Risk**: Surfacing multiple T2 namespaces adds context bloat
   **Mitigation**: Apply the same 8-line cap per namespace; suppress
   namespaces that are empty
-- **Risk**: Content snippets require additional `nx memory get` calls in
-  the hook, adding latency
-  **Mitigation**: Cap at 5 snippet-enriched entries; fall back to titles
-  for the remainder. Or implement `nx memory list --snippet` to batch
-  the retrieval
+- **Risk**: `get_all()` for large namespaces loads more content than the cap
+  algorithm will display
+  **Mitigation**: `get_all()` is a single indexed query (`project = ?` is
+  indexed); for typical T2 stores the cost is negligible. If profiling shows
+  measurable latency for stores with hundreds of entries, add `LIMIT N` to
+  the SQL query
 - **Risk**: "Use Grep over nx search" guidance becomes stale once
   RDR-006 is implemented
   **Mitigation**: The skill text already scopes the guidance to "until
@@ -433,11 +523,14 @@ ensuring all populated namespaces are surfaced.
 
 ### Phase 1: Hook Fixes (High Impact, Low Risk)
 
-1. Update `session_start_hook.py` to query `{repo}`, `{repo}_rdr`,
-   `{repo}_pm` at session start; surface non-empty namespaces separately
-2. Add 1-line content snippet per T2 entry for up to 5 most recent entries
-   in each namespace
-3. Mirror changes in `subagent-start.sh`
+1. Convert `session_start_hook.py` from CLI subprocess calls to direct
+   T2Database API usage; add `get_projects_with_prefix()` to T2Database if
+   not present; use `project LIKE '{repo}%'` prefix scan to discover all
+   populated namespaces; surface non-empty namespaces separately
+2. Add 1-line content snippet per T2 entry: snippets for entries 1–5,
+   title-only for 6–8, count-only beyond 8, cross-namespace hard cap of 15
+3. Implement `hooks/scripts/t2_prefix_scan.py` wrapper; update
+   `subagent-start.sh` to call it instead of `nx memory list`
 
 ### Phase 2: Skill Documentation Updates
 
@@ -448,11 +541,15 @@ ensuring all populated namespaces are surfaced.
 
 ### Phase 3: CLI Guard (prerequisite: RDR-006 accepted)
 
-7. Obtain threshold value from RDR-006 implementation (token count per
-   default chunk → bytes per chunk → large-file line/byte threshold)
-8. Add large-file warning to `nx index repo` when code files exceed
+7. Obtain target chunk line count from accepted RDR-006 (chunker uses
+   lines — `_CHUNK_LINES`; threshold = file line count that significantly
+   exceeds the target chunk line count)
+8. Add `--chunk-size N` option to `nx index repo` that overrides
+   `_CHUNK_LINES` for the indexed repository — confirm whether RDR-006
+   already adds this flag; if so, skip this step
+9. Add large-file warning to `nx index repo` when code files exceed
    threshold and `--chunk-size` is not specified
-9. Add `--no-chunk-warning` flag to suppress
+10. Add `--no-chunk-warning` flag to suppress
 
 ## Test Plan
 
@@ -505,18 +602,17 @@ The following scenarios should all pass after implementation:
 
 ## Open Questions
 
-- Should content snippets be added to `nx memory list` as a `--snippet`
-  flag, or should the hook extract them via separate `get` calls? CLI
-  change is cleaner but larger scope. Resolved choice deferred to
-  implementation: start with hook-side `get` calls (no CLI change needed),
-  migrate to `--snippet` flag if latency is measurable.
-- Should "Use Grep over nx search" guidance be temporary (scoped to "until
-  RDR-006 is resolved") or permanent (Grep is always the right first tool
-  for exact code navigation)? The latter seems correct even with fixed
-  chunk sizes — semantic search and exact search serve different use cases.
-  Proposed answer: make the guidance permanent with two tiers — Grep for
-  known-symbol lookups always; nx search for conceptual queries always.
-  The RDR-006 caveat becomes a footnote, not the primary framing.
+- ~~Content snippets via `--snippet` flag or hook-side calls?~~ —
+  **Resolved**: hook-side `get_all()` call (single SQL query returns full
+  content for all entries; no per-entry calls and no CLI change needed).
+  Migrate to `--snippet` flag only if a use case requires batch snippet
+  retrieval from a CLI context.
+- ~~Should "Use Grep over nx search" guidance be temporary or permanent?~~
+  — **Resolved**: implemented as temporary in Fix 3 Change C ("until
+  re-indexed with smaller chunks"). The permanent two-tier framing (Grep
+  for known-symbol lookups always; nx search for conceptual queries always)
+  is the long-term target; re-evaluate after RDR-006 ships and collections
+  are re-indexed. The RDR-006 caveat is the primary framing for now.
 
 **Resolved**:
 
@@ -554,3 +650,156 @@ all four findings were addressed by RDR-007. Fixed: Summary now explicitly
 states Finding 3 is mitigated (skill caveat + index warning) but not resolved.
 Resolution requires RDR-006 to ship and collections to be re-indexed.
 Motivation section corrected to match.
+
+### Gate Review 2 (2026-02-28) — BLOCKED
+
+### Critical Issues — Resolved (Gate 2)
+
+**NC1. Fix 1 falsely claimed `session_start_hook.py` already imports T2Database
+— RESOLVED.** Fix 1 stated "the session hook already imports
+`nexus.db.t2.T2Database` directly (as demonstrated in `rdr_hook.py`)." This
+is factually wrong: `session_start_hook.py` uses only subprocess CLI calls
+throughout; only `rdr_hook.py` imports T2Database. Fixed: Fix 1 now explicitly
+states the hook **currently uses subprocess CLI only** and that converting it
+to T2Database direct API calls is a real implementation step. Phase 1, step 1
+updated to match (removes suffix enumeration language; specifies T2Database
+conversion and `get_projects_with_prefix()` addition).
+
+### Significant — Resolved
+
+**NS1. Snippet cap numbers inconsistent across the document — RESOLVED.** Fix
+2 cited three different numbers (5 most recent, 8 entries with snippets, 5
+snippet-enriched with fallback) with no canonical algorithm. Fixed: Fix 2 now
+defines a single explicit algorithm — entries 1–5 get snippets, entries 6–8
+get titles only, beyond 8 shows count only, with a cross-namespace hard cap of
+15 total. Risk mitigation and Phase 1 step 2 updated to match.
+
+**NS2. Fix 3 omitted the contradictory naming guidance in `reference.md` —
+RESOLVED.** `reference.md` line reads "No `_active` or `_pm` suffixes"
+directly contradicting the `_rdr` and `_pm` namespace conventions. Fix 3 now
+includes Change A: replacing that line with the correct three-tier namespace
+documentation (`{repo}`, `{repo}_rdr`, `{repo}_pm`) before adding the two new
+sections (FTS5 caveat and code search guide).
+
+**NS3. `subagent-start.sh` conversion underspecified — RESOLVED.** Fix 1
+Scope section now names the new wrapper (`hooks/scripts/t2_prefix_scan.py`),
+specifies its interface (argv[1] = repo name; stdout = structured namespace/
+entry data), documents the exact shell substitution, and explicitly identifies
+which portions of the shell script are unchanged (PM context injection, beads
+display).
+
+### Gate Review 3 (2026-02-28) — BLOCKED
+
+### Critical Issues — Resolved (Gate 3)
+
+**NC3-1. Fix 4 threshold derivation chain used tokens, not lines — RESOLVED.**
+Fix 4 described the threshold derivation as "token count per default chunk →
+bytes per chunk → large-file threshold." The actual chunker (`chunker.py`)
+operates in lines (`_CHUNK_LINES = 150`), not tokens. Fixed: derivation chain
+now reads "target chunk line count from RDR-006 → files where line count
+significantly exceeds target → warning threshold in lines." Phase 3 step 1 and
+the Rationale paragraph updated to match. RDR-006 R5 finding (60–80 lines
+as likely target) noted explicitly. Warning example updated: `--chunk-size 150`
+(the current default — no improvement) replaced with `--chunk-size 80`.
+
+**NC3-2. "200-line placeholder" referenced nonexistent text — RESOLVED.** Fix 4
+referred to "the 200-line placeholder in the warning example above" but no
+200-line value appeared in the warning block. Fixed: restored explicit `200
+lines` to the warning example's threshold display so the cross-reference is
+valid. The rationale text updated to remove "200-line / 8KB" and replace with
+"the 200-line placeholder figure" — making clear it is a placeholder, not a
+derived value.
+
+**NC3-3. Testing Methodology step 4 contradicted Finding 3 — RESOLVED.** Step 4
+said "verified expected canonical file in top-3 results for each" — the
+opposite of Finding 3's conclusion (0/7 canonical files in top-3). Fixed: step
+4 now reads "recorded the top file returned for each query and compared against
+the expected canonical file (Finding 3 — all 7 failed)." Step 5 retains
+"verified" framing since RDR queries did return expected results.
+
+### Gate Review 4 (2026-02-28) — BLOCKED
+
+### Significant Issues — Resolved (Gate 4)
+
+**NS4-1. Fix 1 SQL ordered namespaces alphabetically; Fix 2 requires recency
+order — RESOLVED.** The original SQL `SELECT DISTINCT project ... ORDER BY
+project` returns alphabetical order. Fix 2's cap algorithm favours the most
+recently written namespace, which requires timestamp ordering. Fixed: SQL
+replaced with `SELECT project, MAX(updated_at) ... GROUP BY project ORDER BY
+MAX(updated_at) DESC`.
+
+**NS4-2. Fix 1 lacked try/except error handling requirement — RESOLVED.** The
+pseudocode showed raw T2Database calls with no exception handling. Both
+`rdr_hook.py` (T2Database) and `session_start_hook.py` (`run_command`) use
+silent fallback on failure. Fixed: Fix 1 now explicitly requires wrapping the
+T2Database context manager in `try/except Exception` with empty-namespace
+fallback and debug-mode stderr logging.
+
+**NS4-3. Fix 2 described CLI subprocess path that Fix 1 eliminated — RESOLVED.**
+Fix 2 said "After `nx memory list`, run `nx memory get` for the 5 most recent
+entries." Fix 1's `db.get_all(project=ns)` already returns full content — no
+subprocess calls needed. Fixed: Fix 2's implementation now reads "Fix 1's
+`db.get_all()` already returns full entry content — extract snippet from
+`content` field directly."
+
+**NS4-4. Change B omitted that FTS5 does not index titles — RESOLVED.** `nx
+memory search "RDR-007"` silently returns nothing even if that entry exists,
+because FTS5 only indexes `content` and `tags`. Fixed: added explicit bullet to
+Change B: "Title searches always return empty — use `nx memory get --title`
+for title-based lookup."
+
+### Gate Review 5 (2026-02-28) — BLOCKED
+
+### Critical Issues — Resolved (Gate 5)
+
+### Gate Review 6 (2026-02-28) — BLOCKED
+
+### Critical Issues — Resolved (Gate 6)
+
+**NC6-1. FTS5 uses AND semantics, not OR — RDR stated the opposite throughout —
+RESOLVED.** Finding 4 body said "Multi-word queries are tokenized and OR-matched"
+and Change B said "Multi-word queries are OR-matched." SQLite FTS5 default query
+syntax uses implicit AND — all tokens must appear somewhere in the document for
+a match. The empirical evidence in Finding 4 is only consistent with AND:
+`"embedding startup failure"` returns nothing because no document contains all
+three tokens simultaneously (under OR it would match any document containing
+"embedding" alone, which would be most of the RDR store). Fixed: "OR-matched"
+corrected to "AND-matched" in Finding 4 and Change B; debugging guidance updated
+to "drop one term at a time" rather than "try different vocabulary."
+
+### Significant Issues — Resolved (Gate 6)
+
+**NS6-1. Risks section described latency from per-entry `nx memory get` calls —
+eliminated by NS4-3 — RESOLVED.** The stale risk described subprocess-based
+per-entry calls; NS4-3 switched to a single `db.get_all()` query. Fixed: risk
+updated to describe the actual remaining risk (get_all loading more content than
+the cap displays) with correct mitigation (LIMIT clause if needed).
+
+**NS6-2. Fix 1's LIKE vs. GLOB note read as an open design question — RESOLVED.**
+The note said "consider whether... Either works; the choice should be consistent."
+The Open Questions Resolved section already settled this (LIKE), but Fix 1 in
+isolation appeared undecided. Fixed: note updated to state the resolution directly
+("Resolved: LIKE was chosen as standard SQL for prefix queries").
+
+**NS6-3. Phase 3 implementation plan missing step to add `--chunk-size` CLI
+option — RESOLVED.** Phase 3 step 8 conditioned the warning on `--chunk-size`
+not being specified, and the warning example suggests `nx index repo . --chunk-size
+80`, but `nx index repo` currently has no `--chunk-size` flag. Fixed: added Phase
+3 step 8 to add `--chunk-size N` option (or confirm RDR-006 adds it); renumbered
+subsequent steps.
+
+**NS6-4. Open Questions "proposed answer" contradicted Fix 3 Change C — RESOLVED.**
+The Open Questions section had a live "proposed answer" (make Grep guidance
+permanent with two tiers) that contradicted Change C's temporary framing. Fixed:
+both Open Questions marked resolved with explicit conclusions.
+
+**NC5-1. Fix 1 SQL used `updated_at` column which does not exist in T2 schema —
+RESOLVED.** The Gate 4 fix for NS4-1 introduced `MAX(updated_at) AS last_updated`
+and `ORDER BY MAX(updated_at) DESC`. The T2 schema (`src/nexus/db/t2.py`) has no
+`updated_at` column — the timestamp column is named `timestamp`. This would raise
+`sqlite3.OperationalError: no such column: updated_at` at runtime, which the
+`try/except Exception` block (introduced in NS4-2) would silently swallow,
+returning an empty namespace list and reproducing Finding 1 exactly despite the
+fix appearing correct on paper. Fixed: both occurrences of `updated_at` in the
+Fix 1 SQL replaced with `timestamp`; confirmed against `idx_memory_timestamp` in
+`t2.py`.
