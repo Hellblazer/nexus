@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0rc10] - 2026-03-01
+
+### Changed
+- Version bump to rc10 for release candidate validation prior to 1.0.0 final.
+- Polish pass: CHANGELOG entries for rc7/rc8/rc9, hook script package name fix
+  (conexus not nexus), skill count corrected to 28, serena-code-nav added to
+  plugin README, free tier callout for ChromaDB and Voyage AI.
+
 ## [1.0.0rc9] - 2026-03-01
 
 ### Added
@@ -313,7 +321,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc9...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc10...HEAD
+[1.0.0rc10]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc9...v1.0.0rc10
 [1.0.0rc9]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc8...v1.0.0rc9
 [1.0.0rc8]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc7...v1.0.0rc8
 [1.0.0rc7]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc6...v1.0.0rc7
