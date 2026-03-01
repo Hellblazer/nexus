@@ -9,7 +9,7 @@ Active and closed RDRs for the Nexus project. Updated by `/rdr-list` and `/rdr-c
 | [RDR-004](rdr-004-four-store-architecture.md) | Four-Store T3 Architecture | Architecture | Closed | 2026-02-28 |
 | [RDR-005](rdr-005-chromadb-cloud-quota-enforcement.md) | ChromaDB Cloud Quota Enforcement | Architecture | Closed | 2026-02-28 |
 | [RDR-006](rdr-006-chunk-size-configuration.md) | File-Size Scoring Penalty for Code Search | Feature | Closed | 2026-02-28 |
-| [RDR-007](rdr-007-claude-adoption-session-context-and-search-guidance.md) | Claude Adoption: Session Context Gaps and Search Tool Guidance | Feature | Accepted | 2026-02-28 |
+| [RDR-007](rdr-007-claude-adoption-session-context-and-search-guidance.md) | Claude Adoption: Session Context Gaps and Search Tool Guidance | Feature | Closed | 2026-02-28 |
 
 ## RDR Process Documentation
 
