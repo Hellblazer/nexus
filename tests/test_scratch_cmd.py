@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import click
 import pytest
@@ -18,9 +19,20 @@ def runner() -> CliRunner:
 
 @pytest.fixture
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect HOME so T1 uses a tmp directory, not ~/.config/nexus/scratch."""
+    """Redirect HOME so T1 uses a tmp directory, not ~/.config/nexus/scratch.
+
+    Also patches CLAUDE_SESSION_FILE to a per-test path (it's precomputed at
+    import time so HOME env var alone is insufficient) and seeds a unique
+    session ID so EphemeralClient fallback doesn't leak state between tests.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("NX_SESSION_PID", raising=False)
+    # Redirect the precomputed CLAUDE_SESSION_FILE to a per-test path.
+    claude_session_file = tmp_path / ".config" / "nexus" / "current_session"
+    claude_session_file.parent.mkdir(parents=True, exist_ok=True)
+    # Write a unique session ID so each test gets isolated scratch state.
+    claude_session_file.write_text(str(uuid4()))
+    monkeypatch.setattr("nexus.session.CLAUDE_SESSION_FILE", claude_session_file)
     return tmp_path
 
 

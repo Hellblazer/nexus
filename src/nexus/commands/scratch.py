@@ -1,21 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import sys
-from pathlib import Path
 
 import click
 
 from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
-from nexus.session import read_session_id, write_session_file, generate_session_id
 
 
 def _t1() -> T1Database:
-    session_id = read_session_id()
-    if session_id is None:
-        session_id = generate_session_id()
-        write_session_file(session_id)
-    return T1Database(session_id=session_id)
+    """Return a T1Database connected to the current session's server.
+
+    T1Database resolves the session automatically via the PPID chain, falling
+    back to a local EphemeralClient if no server record is found.
+    """
+    return T1Database()
 
 
 @click.group()

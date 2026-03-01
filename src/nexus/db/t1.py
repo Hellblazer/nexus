@@ -2,32 +2,55 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 from __future__ import annotations
 
+import warnings
 from uuid import uuid4
 
 from nexus.db.t2 import T2Database
+from nexus.session import SESSIONS_DIR, find_ancestor_session
 
 _COLLECTION = "scratch"
 
 
 class T1Database:
-    """T1 ChromaDB session scratch.
+    """T1 ChromaDB session scratch — shared across all agents in a session tree.
 
-    Uses a per-process ``chromadb.EphemeralClient`` + ``DefaultEmbeddingFunction``
-    (all-MiniLM-L6-v2, local ONNX — no API calls).
+    On construction, walks the PPID chain to find the session's ChromaDB HTTP
+    server address.  All agents that share a common ancestor Claude Code process
+    connect to the same server and see each other's entries (scoped by
+    ``session_id`` metadata filter).
 
-    EphemeralClient holds data in-memory only; nothing is written to disk.
-    Per-session isolation is provided by ``session_id`` metadata filtering in
-    ``search``, ``list_entries``, ``clear``, and ``flagged_entries``.
+    Falls back to a local ``EphemeralClient`` (with a warning) when no server
+    record is found — this preserves T1 functionality in restricted environments
+    where the server could not start or ``ps`` is unavailable.
 
-    Note: crash-recovery of orphaned entries from previous sessions is out of scope
-    per spec — T1 is the scratch tier and must be zero-persistence.
+    Pass ``client=`` explicitly to inject a custom client in tests.
     """
 
-    def __init__(self, session_id: str, client=None) -> None:
+    def __init__(self, session_id: str | None = None, client=None) -> None:
         import chromadb
 
-        self._session_id = session_id
-        self._client = client if client is not None else chromadb.EphemeralClient()
+        if client is not None:
+            # Test-injection path: use provided client as-is.
+            self._client = client
+            self._session_id = session_id or str(uuid4())
+        else:
+            record = find_ancestor_session(SESSIONS_DIR)
+            if record is not None:
+                self._client = chromadb.HttpClient(
+                    host=record["server_host"],
+                    port=record["server_port"],
+                )
+                self._session_id = record["session_id"]
+            else:
+                warnings.warn(
+                    "No T1 server found; falling back to local EphemeralClient. "
+                    "Cross-agent scratch sharing is unavailable for this session.",
+                    stacklevel=2,
+                )
+                from nexus.session import read_claude_session_id
+                self._client = chromadb.EphemeralClient()
+                self._session_id = session_id or read_claude_session_id() or str(uuid4())
+
         self._col = self._client.get_or_create_collection(_COLLECTION)
 
     # ── Internal helpers ──────────────────────────────────────────────────────

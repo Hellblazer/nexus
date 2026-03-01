@@ -1,5 +1,7 @@
 """AC2–AC6: session hooks, PM detection, doctor checks."""
 import json
+import os
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,19 +26,25 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 # ── AC2: SessionStart — UUID4 session ID ──────────────────────────────────────
 
 def test_session_start_writes_session_file(runner: CliRunner, fake_home: Path) -> None:
-    """nx hook session-start writes UUID4 session ID to the getsid-scoped session file."""
-    with patch("nexus.session.os.getsid", return_value=12345):
-        result = runner.invoke(main, ["hook", "session-start"])
-    assert result.exit_code == 0, result.output
-
-    session_file = fake_home / ".config" / "nexus" / "sessions" / "12345.session"
-    assert session_file.exists()
-    session_id = session_file.read_text().strip()
+    """nx hook session-start calls write_claude_session_id with a UUID4 session ID."""
     import re
+    captured: dict[str, str] = {}
+
+    original_write = __import__("nexus.session", fromlist=["write_claude_session_id"]).write_claude_session_id
+
+    def _capture(session_id: str) -> None:
+        captured["session_id"] = session_id
+        original_write(session_id)
+
+    with patch("nexus.hooks.write_claude_session_id", side_effect=_capture):
+        result = runner.invoke(main, ["hook", "session-start"])
+
+    assert result.exit_code == 0, result.output
+    assert "session_id" in captured, "write_claude_session_id was not called"
     assert re.match(
         r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-        session_id,
-    ), f"Not a UUID4: {session_id!r}"
+        captured["session_id"],
+    ), f"Not a UUID4: {captured['session_id']!r}"
 
 
 def test_session_start_prints_ready_message(runner: CliRunner, fake_home: Path) -> None:
@@ -51,25 +59,26 @@ def test_session_start_prints_ready_message(runner: CliRunner, fake_home: Path) 
 def test_hook_and_cli_use_same_getsid_anchor(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """session_start() and read_session_id() both resolve to the same session file."""
-    from nexus.hooks import session_start
-    from nexus.session import read_session_id
-
-    monkeypatch.delenv("NX_SESSION_PID", raising=False)
-
-    with patch("nexus.session.os.getsid", return_value=98765):
-        _inner = MagicMock(get=lambda **kw: None, list_entries=lambda **kw: [])
-        _t2_cm = MagicMock(__enter__=MagicMock(return_value=_inner))
-        with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-            session_start()
-        recovered = read_session_id()
-
-    assert recovered is not None
+    """session_start() passes a UUID4 to write_claude_session_id."""
     import re
+    from nexus.hooks import session_start
+
+    written: dict[str, str] = {}
+
+    def _capture(session_id: str) -> None:
+        written["session_id"] = session_id
+
+    _inner = MagicMock(get=lambda **kw: None, list_entries=lambda **kw: [])
+    _t2_cm = MagicMock(__enter__=MagicMock(return_value=_inner))
+    with patch("nexus.hooks.T2Database", return_value=_t2_cm):
+        with patch("nexus.hooks.write_claude_session_id", side_effect=_capture):
+            session_start()
+
+    assert "session_id" in written
     assert re.match(
         r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-        recovered,
-    ), f"Recovered session ID is not a UUID4: {recovered!r}"
+        written["session_id"],
+    ), f"Recovered session ID is not a UUID4: {written['session_id']!r}"
 
 
 # ── AC3: SessionStart PM detection ────────────────────────────────────────────
@@ -116,30 +125,40 @@ def test_session_start_non_pm_outputs_memory_summary(
 # ── AC5: SessionEnd flush + expire ────────────────────────────────────────────
 
 def test_session_end_flushes_flagged_t1_entries(
-    runner: CliRunner, fake_home: Path
+    runner: CliRunner, fake_home: Path, tmp_path: Path
 ) -> None:
     """SessionEnd flushes T1 flagged entries to T2."""
-    with patch("nexus.session.os.getsid", return_value=1):
-        session_file = fake_home / ".config" / "nexus" / "sessions" / "1.session"
-        session_file.parent.mkdir(parents=True, exist_ok=True)
-        session_file.write_text("test-session-id")
+    sessions = tmp_path / "sessions"
+    ppid = os.getppid()
+    session_file = sessions / f"{ppid}.session"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text(json.dumps({
+        "session_id": "test-session-id",
+        "server_host": "127.0.0.1",
+        "server_port": 51823,
+        "server_pid": 0,
+        "created_at": time.time(),
+        "tmpdir": "",
+    }))
 
-        mock_t1 = MagicMock()
-        mock_t1.flagged_entries.return_value = [
-            {
-                "id": "entry-1",
-                "content": "important finding",
-                "tags": "research",
-                "flush_project": "myproject",
-                "flush_title": "finding.md",
-            }
-        ]
-        mock_t2 = MagicMock()
+    mock_t1 = MagicMock()
+    mock_t1.flagged_entries.return_value = [
+        {
+            "id": "entry-1",
+            "content": "important finding",
+            "tags": "research",
+            "flush_project": "myproject",
+            "flush_title": "finding.md",
+        }
+    ]
+    mock_t2 = MagicMock()
 
-        _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_t2))
+    _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_t2))
+    with patch("nexus.hooks.SESSIONS_DIR", sessions):
         with patch("nexus.hooks._open_t1", return_value=mock_t1):
             with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-                result = runner.invoke(main, ["hook", "session-end"])
+                with patch("nexus.hooks.stop_t1_server"):
+                    result = runner.invoke(main, ["hook", "session-end"])
 
     assert result.exit_code == 0, result.output
     mock_t2.put.assert_called_once_with(
@@ -152,21 +171,31 @@ def test_session_end_flushes_flagged_t1_entries(
 
 
 def test_session_end_clears_t1_and_removes_session_file(
-    runner: CliRunner, fake_home: Path
+    runner: CliRunner, fake_home: Path, tmp_path: Path
 ) -> None:
     """SessionEnd clears T1 and removes the session file."""
+    sessions = tmp_path / "sessions"
+    ppid = os.getppid()
+    session_file = sessions / f"{ppid}.session"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text(json.dumps({
+        "session_id": "test-session-id",
+        "server_host": "127.0.0.1",
+        "server_port": 51823,
+        "server_pid": 0,
+        "created_at": time.time(),
+        "tmpdir": "",
+    }))
+
     mock_t1 = MagicMock()
     mock_t1.flagged_entries.return_value = []
 
-    with patch("nexus.session.os.getsid", return_value=42):
-        session_file = fake_home / ".config" / "nexus" / "sessions" / "42.session"
-        session_file.parent.mkdir(parents=True, exist_ok=True)
-        session_file.write_text("test-session-id")
-
-        _t2_cm = MagicMock(__enter__=MagicMock(return_value=MagicMock()))
+    _t2_cm = MagicMock(__enter__=MagicMock(return_value=MagicMock()))
+    with patch("nexus.hooks.SESSIONS_DIR", sessions):
         with patch("nexus.hooks._open_t1", return_value=mock_t1):
             with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-                result = runner.invoke(main, ["hook", "session-end"])
+                with patch("nexus.hooks.stop_t1_server"):
+                    result = runner.invoke(main, ["hook", "session-end"])
 
     assert result.exit_code == 0, result.output
     mock_t1.clear.assert_called_once()
