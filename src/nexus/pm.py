@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from nexus.config import HAIKU_MODEL, get_credential
 from nexus.db import make_t3
 
 if TYPE_CHECKING:
@@ -41,15 +40,17 @@ _STANDARD_DOCS: dict[str, str] = {
 
 _log = structlog.get_logger()
 
-# ~1200 tokens x 3.3 chars/token ~ 3960 chars. Keeps each chunk
-# within Claude Haiku's comfortable synthesis window.
+_ARCHIVE_MODEL = "claude-haiku-4-5-20251001"
+
+# ~1200 tokens x 3.3 chars/token ~ 3960 chars. Keeps each archive chunk
+# within a comfortable context window for downstream embedding / retrieval.
 _SYNTHESIS_CHAR_LIMIT = 3960
 
-def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> str:
-    """Call Haiku to synthesize PM docs into a structured archive chunk."""
-    import anthropic
 
-    # Build doc selection: standard docs first, then others by most-recently-written
+def _build_archive_context(
+    docs: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str, str]:
+    """Select and trim docs for archival; return (selected, started_at, archived_at)."""
     standard_titles = set(_STANDARD_DOCS.keys())
     standard = [d for d in docs if d["title"] in standard_titles]
     others = sorted(
@@ -61,7 +62,6 @@ def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> 
 
     total_chars = sum(len(d.get("content", "")) for d in selected)
     if total_chars > 100_000:
-        # Trim others to fit
         budget = 100_000 - sum(len(d.get("content", "")) for d in standard)
         trimmed: list[dict] = list(standard)
         for doc in others:
@@ -71,12 +71,44 @@ def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> 
                 budget -= len(c)
         selected = trimmed
 
-    # Compute started_at from oldest doc
     timestamps = [d.get("timestamp", "") for d in docs if d.get("timestamp")]
     started_at = min(timestamps) if timestamps else "unknown"
     archived_at = datetime.now(UTC).isoformat()
+    return selected, started_at, archived_at
 
-    # Build context string
+
+def _format_archive(docs: list[dict[str, Any]], project: str, status: str) -> str:
+    """Format PM docs as a structured archive (no AI — plain concatenation fallback)."""
+    selected, started_at, archived_at = _build_archive_context(docs)
+    parts: list[str] = [
+        f"# Project Archive: {project}",
+        f"Status: {status}",
+        f"Date Range: {started_at} → {archived_at}",
+        "",
+    ]
+    for doc in selected:
+        parts.append(f"## {doc['title']}")
+        parts.append(doc.get("content", ""))
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+def _synthesize_archive(docs: list[dict[str, Any]], project: str, status: str) -> str:
+    """Synthesize PM docs via ``claude --print`` subprocess.
+
+    Builds a structured synthesis prompt and pipes it to the ``claude`` CLI.
+    Falls back to ``_format_archive`` (plain concatenation) if ``claude`` is
+    not on PATH or the subprocess fails — so ``nx pm archive`` works outside
+    of a Claude Code session without any API key.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("claude"):
+        _log.debug("claude CLI not found; using plain archive format")
+        return _format_archive(docs, project, status)
+
+    selected, started_at, archived_at = _build_archive_context(docs)
     context_parts: list[str] = []
     for doc in selected:
         context_parts.append(f"## {doc['title']}\n{doc.get('content', '')}")
@@ -97,22 +129,25 @@ def _synthesize_haiku(docs: list[dict[str, Any]], project: str, status: str) -> 
         f"Use brief bullets (one line per item). Target 400-800 tokens, hard cap 1200 tokens."
     )
 
-    api_key = get_credential("anthropic_api_key")
-    if not api_key:
-        raise RuntimeError(
-            "anthropic_api_key is required for PM archive synthesis. "
-            "Set ANTHROPIC_API_KEY or run `nx config set anthropic_api_key <key>`."
+    _log.info("Synthesizing archive via claude CLI", project=project)
+    try:
+        result = subprocess.run(
+            ["claude", "--print", "--model", _ARCHIVE_MODEL],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
-    _log.info("Synthesizing archive via Haiku", project=project)
-    client = anthropic.Anthropic(api_key=api_key, timeout=60.0)
-    message = client.messages.create(
-        model=HAIKU_MODEL,
-        max_tokens=1200,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    if not message.content:
-        raise RuntimeError("Haiku returned empty response during archive synthesis")
-    return message.content[0].text
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        _log.warning(
+            "claude CLI returned empty or non-zero; using plain archive format",
+            returncode=result.returncode,
+            stderr=result.stderr[:200] if result.stderr else "",
+        )
+    except Exception as exc:
+        _log.warning("claude CLI synthesis failed; using plain archive format", error=str(exc))
+    return _format_archive(docs, project, status)
 
 
 def _split_synthesis(text: str) -> list[str]:
@@ -336,7 +371,7 @@ def pm_archive(
             return
 
     # Phase 1: Synthesize → T3
-    synthesis_text = _synthesize_haiku(all_docs, project, status)
+    synthesis_text = _synthesize_archive(all_docs, project, status)
 
     # Compute metadata
     archived_at = datetime.now(UTC).isoformat()

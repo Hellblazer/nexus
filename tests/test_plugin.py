@@ -224,7 +224,6 @@ def test_doctor_shows_all_checks(runner: CliRunner, fake_home: Path) -> None:
     output_lower = result.output.lower()
     assert "chroma" in output_lower or "chromadb" in output_lower
     assert "voyage" in output_lower
-    assert "anthropic" in output_lower
     assert "ripgrep" in output_lower or "rg" in output_lower
     assert "git" in output_lower
 

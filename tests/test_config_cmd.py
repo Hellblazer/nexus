@@ -133,7 +133,7 @@ def test_config_list_shows_credential_names(runner: CliRunner, fake_home: Path) 
     assert result.exit_code == 0, result.output
     assert "chroma_api_key" in result.output
     assert "voyage_api_key" in result.output
-    assert "anthropic_api_key" in result.output
+    assert "mxbai_api_key" in result.output
 
 
 def test_config_list_shows_non_secret_settings(runner: CliRunner, fake_home: Path) -> None:
@@ -149,7 +149,7 @@ def test_config_list_shows_non_secret_settings(runner: CliRunner, fake_home: Pat
 def test_config_init_writes_provided_values(runner: CliRunner, fake_home: Path) -> None:
     """nx config init with all inputs writes all credentials to config.yml."""
     # Simulate interactive input: provide values for each prompt, then empty to skip mxbai
-    inputs = "chroma-key\nmy-tenant\nmy-db\nvoyage-key\nanthropickey\n\n"
+    inputs = "chroma-key\nmy-tenant\nmy-db\nvoyage-key\n\n"
     result = runner.invoke(main, ["config", "init"], input=inputs)
     assert result.exit_code == 0, result.output
 
@@ -159,7 +159,7 @@ def test_config_init_writes_provided_values(runner: CliRunner, fake_home: Path) 
     creds = data.get("credentials", {})
     assert creds.get("chroma_api_key") == "chroma-key"
     assert creds.get("voyage_api_key") == "voyage-key"
-    assert creds.get("anthropic_api_key") == "anthropickey"
+    assert "anthropic_api_key" not in creds
 
 
 def test_config_init_shows_signup_urls(runner: CliRunner, fake_home: Path) -> None:

@@ -115,7 +115,7 @@ def test_set_credential_cleans_up_temp_on_write_failure(
     with patch("nexus.config.os.fdopen", side_effect=failing_fdopen):
         with patch("nexus.config.os.unlink", side_effect=tracking_unlink):
             with pytest.raises(IOError, match="simulated write failure"):
-                set_credential("anthropic_api_key", "test-key")
+                set_credential("voyage_api_key", "test-key")
 
     # Verify unlink was called on a temp file
     assert len(unlinked_paths) >= 1, "os.unlink should have been called on the temp file"

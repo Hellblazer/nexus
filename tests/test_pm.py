@@ -167,8 +167,8 @@ def test_pm_phase_next_increments_correctly(db) -> None:
 
 # ── AC5: pm_archive — two-phase, idempotency ──────────────────────────────────
 
-def test_pm_archive_calls_haiku_then_t3(db) -> None:
-    """pm_archive synthesizes via Haiku then upserts to T3 collection."""
+def test_pm_archive_synthesizes_then_upserts_t3(db) -> None:
+    """pm_archive synthesizes via claude CLI then upserts to T3 collection."""
     pm_init(db, project="myrepo")
 
     mock_col = MagicMock()
@@ -177,11 +177,11 @@ def test_pm_archive_calls_haiku_then_t3(db) -> None:
     mock_t3.search.return_value = []  # no prior archive
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_haiku", return_value="# Archive summary") as mock_h:
+    with patch("nexus.pm._synthesize_archive", return_value="# Archive summary") as mock_s:
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
-    mock_h.assert_called_once()
+    mock_s.assert_called_once()
     mock_t3.upsert_chunks.assert_called_once()
 
 
@@ -195,7 +195,7 @@ def test_pm_archive_decays_t2_after_t3(db) -> None:
     mock_t3.search.return_value = []
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_haiku", return_value="# summary"):
+    with patch("nexus.pm._synthesize_archive", return_value="# summary"):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
@@ -230,11 +230,11 @@ def test_pm_archive_idempotent_skips_synthesis(db) -> None:
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_haiku") as mock_h:
+    with patch("nexus.pm._synthesize_archive") as mock_s:
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
-    mock_h.assert_not_called()
+    mock_s.assert_not_called()
 
 
 def test_pm_archive_aborts_on_haiku_failure(db) -> None:
@@ -247,7 +247,7 @@ def test_pm_archive_aborts_on_haiku_failure(db) -> None:
     mock_t3.search.return_value = []
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_haiku", side_effect=RuntimeError("API error")):
+    with patch("nexus.pm._synthesize_archive", side_effect=RuntimeError("API error")):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             with pytest.raises(RuntimeError, match="API error"):
                 pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
@@ -425,7 +425,7 @@ def test_pm_archive_upsert_includes_required_metadata(db) -> None:
     mock_t3.search.return_value = []
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_haiku", return_value="# summary"):
+    with patch("nexus.pm._synthesize_archive", return_value="# summary"):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
@@ -482,7 +482,7 @@ def test_pm_archive_writes_chunk_total_in_metadata(db) -> None:
     mock_t3.upsert_chunks.side_effect = capture_upsert_chunks
 
     synthesis = "# Archive\n\n## Key Decisions\n- Used SQLite"
-    with patch("nexus.pm._synthesize_haiku", return_value=synthesis):
+    with patch("nexus.pm._synthesize_archive", return_value=synthesis):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
@@ -627,30 +627,11 @@ def test_split_synthesis_short_text_single_chunk() -> None:
     assert chunks == [short_text]
 
 
-# ── Edge cases: _synthesize_haiku ─────────────────────────────────────────────
+# ── Edge cases: _synthesize_archive ──────────────────────────────────────────
 
-def test_synthesize_haiku_empty_response_raises() -> None:
-    """_synthesize_haiku raises RuntimeError when Anthropic returns empty message.content."""
-    from nexus.pm import _synthesize_haiku
-
-    mock_message = MagicMock()
-    mock_message.content = []  # empty content list
-
-    with patch("anthropic.Anthropic") as mock_anthropic_cls:
-        mock_client = mock_anthropic_cls.return_value
-        mock_client.messages.create.return_value = mock_message
-        with patch("nexus.pm.get_credential", return_value="fake-api-key"):
-            with pytest.raises(RuntimeError, match="empty response"):
-                _synthesize_haiku(
-                    docs=[{"title": "METHODOLOGY.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
-                    project="test",
-                    status="completed",
-                )
-
-
-def test_synthesize_haiku_trims_long_content() -> None:
-    """_synthesize_haiku trims input when total doc chars exceed 100K before calling Anthropic."""
-    from nexus.pm import _STANDARD_DOCS, _synthesize_haiku
+def test_synthesize_archive_trims_long_content() -> None:
+    """_synthesize_archive trims input when total doc chars exceed 100K."""
+    from nexus.pm import _STANDARD_DOCS, _synthesize_archive
 
     # Build docs: 5 standard (small) + 50 "other" docs (each 3000 chars) = ~150K total
     standard_docs = [
@@ -665,31 +646,36 @@ def test_synthesize_haiku_trims_long_content() -> None:
     total_chars = sum(len(d["content"]) for d in all_docs)
     assert total_chars > 100_000, f"Test setup: need >100K chars, got {total_chars}"
 
-    mock_message = MagicMock()
-    mock_message.content = [MagicMock(text="# Archive synthesis")]
+    captured: dict = {}
 
-    captured_prompt = {}
+    def fake_run(cmd, *, input, **kwargs):
+        captured["input"] = input
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "# Archive synthesis"
+        return result
 
-    def capture_create(**kwargs):
-        captured_prompt["messages"] = kwargs["messages"]
-        return mock_message
+    import shutil
+    with patch("shutil.which", return_value="/usr/bin/claude"):
+        with patch("subprocess.run", side_effect=fake_run):
+            result = _synthesize_archive(all_docs, project="test", status="completed")
 
-    with patch("anthropic.Anthropic") as mock_anthropic_cls:
-        mock_client = mock_anthropic_cls.return_value
-        mock_client.messages.create.side_effect = capture_create
-        with patch("nexus.pm.get_credential", return_value="fake-api-key"):
-            result = _synthesize_haiku(all_docs, project="test", status="completed")
-
-    # Verify Anthropic was called
-    assert "messages" in captured_prompt
-    # The prompt content sent to Anthropic should be shorter than the raw total
-    prompt_text = captured_prompt["messages"][0]["content"]
-    # The prompt should contain fewer chars than the raw 150K input
-    # (standard ~65 chars + budget ~100K max for others + prompt boilerplate)
-    assert len(prompt_text) < total_chars, (
-        f"Expected trimmed prompt ({len(prompt_text)} chars) < raw total ({total_chars} chars)"
-    )
+    # Verify the prompt was trimmed before being sent to claude
+    assert "input" in captured
+    assert len(captured["input"]) < total_chars
     assert result == "# Archive synthesis"
+
+
+def test_synthesize_archive_falls_back_when_claude_missing() -> None:
+    """_synthesize_archive falls back to plain format when claude CLI is not found."""
+    from nexus.pm import _synthesize_archive
+
+    docs = [{"title": "METHODOLOGY.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}]
+    with patch("shutil.which", return_value=None):
+        result = _synthesize_archive(docs, project="test", status="completed")
+
+    assert "# Project Archive: test" in result
+    assert "METHODOLOGY.md" in result
 
 
 # ── Edge cases: pm_block / pm_unblock ─────────────────────────────────────────
@@ -771,19 +757,22 @@ def test_pm_status_empty_blockers_list(db) -> None:
     assert status["blockers"] == []
 
 
-# ── Gap 1: _synthesize_haiku raises RuntimeError when API key is empty ──────
+# ── Gap 1: _synthesize_archive falls back on claude CLI failure ──────────────
 
-def test_synthesize_haiku_raises_when_api_key_empty() -> None:
-    """_synthesize_haiku raises RuntimeError when get_credential returns empty string."""
-    from nexus.pm import _synthesize_haiku
+def test_synthesize_archive_falls_back_on_subprocess_error() -> None:
+    """_synthesize_archive returns plain format when claude CLI subprocess fails."""
+    from nexus.pm import _synthesize_archive
 
-    with patch("nexus.pm.get_credential", return_value=""):
-        with pytest.raises(RuntimeError, match="anthropic_api_key is required"):
-            _synthesize_haiku(
+    with patch("shutil.which", return_value="/usr/bin/claude"):
+        with patch("subprocess.run", side_effect=OSError("exec failed")):
+            result = _synthesize_archive(
                 docs=[{"title": "METHODOLOGY.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
                 project="test",
                 status="completed",
             )
+
+    assert "# Project Archive: test" in result
+    assert "METHODOLOGY.md" in result
 
 
 # ── Gap 2: _split_synthesis no-headers fallback ────────────────────────────
@@ -828,7 +817,7 @@ def test_pm_archive_handles_non_integer_phase_tag(db) -> None:
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_haiku", return_value="# Archive summary"):
+    with patch("nexus.pm._synthesize_archive", return_value="# Archive summary"):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             # Should not raise — gracefully ignores the bad phase tag
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
@@ -866,7 +855,7 @@ def test_pm_archive_stores_multiple_chunks_for_long_synthesis(db) -> None:
     mock_t3.get_or_create_collection.return_value = mock_col
     mock_t3.upsert_chunks.side_effect = capture_upsert
 
-    with patch("nexus.pm._synthesize_haiku", return_value=long_synthesis):
+    with patch("nexus.pm._synthesize_archive", return_value=long_synthesis):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 

@@ -34,7 +34,6 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "anthropic>=0.39",
     "chromadb>=0.6",
     "click>=8.1",
     "flask>=3.0",
