@@ -161,15 +161,13 @@ def doctor_cmd() -> None:
                               uv_path or "not found — pip install conexus works too"))
 
     # ── Nexus server ──────────────────────────────────────────────────────────
-    # Server is optional for most commands; report status but do not fail.
+    # Server is optional for most commands; always ✓, report status in detail.
     from nexus.commands.serve import _read_pid, _process_running
     pid = _read_pid()
     server_running = pid is not None and _process_running(pid)
-    lines.append(_check_line("Nexus server",                server_running,
+    lines.append(_check_line("Nexus server (optional)",     True,
                               f"running (PID {pid})" if server_running else
-                              "not running (optional — needed for search-over-HTTP)"))
-    if not server_running:
-        _fix(lines, "nx serve start")
+                              "not running — start with: nx serve start"))
 
     click.echo("\n".join(lines))
 
