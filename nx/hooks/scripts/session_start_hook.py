@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 # Configuration via environment variables
-DEBUG = os.environ.get('PM_HOOK_DEBUG', '0') == '1'
+DEBUG = os.environ.get('NX_HOOK_DEBUG', '0') == '1'
 NX_TIMEOUT = int(os.environ.get('NX_TIMEOUT', '10'))
 BD_TIMEOUT = int(os.environ.get('BD_TIMEOUT', '5'))
 
