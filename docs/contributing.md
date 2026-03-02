@@ -104,9 +104,12 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
    ```
 
 2. **Update version in `pyproject.toml`**
-   Change the `version` field (e.g. `"1.0.0rc4"` → `"1.0.0"`), then regenerate the lock file:
+   Change the `version` field (e.g. `"1.0.0rc4"` → `"1.0.0"`), then regenerate the lock file
+   and reinstall the local tool so `nx --version` reflects the new version immediately:
    ```bash
    uv sync
+   uv tool install --reinstall .
+   nx --version   # must show X.Y.Z before proceeding
    ```
 
 3. **Update `CHANGELOG.md`**
