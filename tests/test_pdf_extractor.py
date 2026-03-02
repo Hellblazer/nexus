@@ -182,80 +182,85 @@ def test_format_table_empty():
     assert _format_table([]) == ""
 
 
-# ── _markdown_misses_tables ───────────────────────────────────────────────────
+# ── _count_ruled_tables ───────────────────────────────────────────────────────
 
-def _mock_pymupdf_with_tables(n_tables: int):
-    """Return a mock pymupdf module with n_tables ruled tables on page 0."""
-    mock_finder = MagicMock()
-    mock_finder.tables = [MagicMock()] * n_tables
+def _mock_pdfplumber_with_tables(n_tables: int):
+    """Return a mock pdfplumber module with n_tables ruled tables on page 0."""
     mock_page = MagicMock()
-    mock_page.find_tables.return_value = mock_finder
+    mock_page.find_tables.return_value = [MagicMock()] * n_tables
 
-    mock_doc = MagicMock()
-    mock_doc.__enter__ = MagicMock(return_value=mock_doc)
-    mock_doc.__exit__ = MagicMock(return_value=False)
-    mock_doc.__iter__ = MagicMock(side_effect=lambda: iter([mock_page]))
+    mock_pdf = MagicMock()
+    mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+    mock_pdf.__exit__ = MagicMock(return_value=False)
+    mock_pdf.pages = [mock_page]
 
-    mock_pymupdf = MagicMock()
-    mock_pymupdf.open.return_value = mock_doc
-    return mock_pymupdf
-
-
-def test_markdown_misses_tables_detects_gap(extractor, dummy_pdf):
-    """PDF has ruled tables; markdown has no pipes → returns True (rescue needed)."""
-    mock_pymupdf = _mock_pymupdf_with_tables(n_tables=2)
-    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-        result = extractor._markdown_misses_tables(dummy_pdf, "prose only, no pipes here")
-    assert result is True
+    mock_pdfplumber = MagicMock()
+    mock_pdfplumber.open.return_value = mock_pdf
+    return mock_pdfplumber
 
 
-def test_markdown_misses_tables_no_tables(extractor, dummy_pdf):
-    """PDF has no ruled tables → returns False."""
-    mock_pymupdf = _mock_pymupdf_with_tables(n_tables=0)
-    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-        result = extractor._markdown_misses_tables(dummy_pdf, "prose only")
-    assert result is False
+def test_count_ruled_tables_counts_pages(extractor, dummy_pdf):
+    """_count_ruled_tables returns the total across the first 5 pages."""
+    mock_pdfplumber = _mock_pdfplumber_with_tables(n_tables=3)
+    with patch.dict("sys.modules", {"pdfplumber": mock_pdfplumber}):
+        assert extractor._count_ruled_tables(dummy_pdf) == 3
 
 
-def test_markdown_misses_tables_pipes_present(extractor, dummy_pdf):
-    """PDF has ruled tables; markdown already has sufficient pipes → returns False."""
-    mock_pymupdf = _mock_pymupdf_with_tables(n_tables=1)
-    # 1 table × 3 = threshold of 3 pipes; supply 5 to ensure False
-    markdown_with_pipes = "| col1 | col2 | col3 | col4 | col5 |"
-    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-        result = extractor._markdown_misses_tables(dummy_pdf, markdown_with_pipes)
-    assert result is False
+def test_count_ruled_tables_zero_when_none(extractor, dummy_pdf):
+    """Returns 0 when no ruled tables are found."""
+    mock_pdfplumber = _mock_pdfplumber_with_tables(n_tables=0)
+    with patch.dict("sys.modules", {"pdfplumber": mock_pdfplumber}):
+        assert extractor._count_ruled_tables(dummy_pdf) == 0
 
 
-def test_markdown_misses_tables_at_threshold_boundary(extractor, dummy_pdf):
-    """Exactly at threshold (3 pipes, 1 table) → False (not missing)."""
-    mock_pymupdf = _mock_pymupdf_with_tables(n_tables=1)
-    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-        result = extractor._markdown_misses_tables(dummy_pdf, "| a | b | c |")
-    assert result is False
-
-
-def test_markdown_misses_tables_one_below_threshold(extractor, dummy_pdf):
-    """One below threshold (2 pipes, 1 table → threshold 3) → True (rescue needed)."""
-    mock_pymupdf = _mock_pymupdf_with_tables(n_tables=1)
-    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-        # "| a |" has exactly 2 pipes; threshold is 1*3=3, so 2<3 → True
-        result = extractor._markdown_misses_tables(dummy_pdf, "| a |")
-    assert result is True
-
-
-def test_markdown_misses_tables_no_pdfplumber(extractor, dummy_pdf):
-    """pdfplumber not installed → returns False (graceful degradation)."""
+def test_count_ruled_tables_no_pdfplumber(extractor, dummy_pdf):
+    """pdfplumber not installed → returns 0 (table rescue disabled)."""
     import sys
-    # Temporarily remove pdfplumber from sys.modules to simulate ImportError
     saved = sys.modules.pop("pdfplumber", None)
     try:
         with patch.dict("sys.modules", {"pdfplumber": None}):
-            result = extractor._markdown_misses_tables(dummy_pdf, "prose")
-        assert result is False
+            result = extractor._count_ruled_tables(dummy_pdf)
+        assert result == 0
     finally:
         if saved is not None:
             sys.modules["pdfplumber"] = saved
+
+
+def test_count_ruled_tables_returns_zero_on_error(extractor, dummy_pdf):
+    """Any exception during counting returns 0 (graceful degradation)."""
+    mock_pdfplumber = MagicMock()
+    mock_pdfplumber.open.side_effect = Exception("bad PDF")
+    with patch.dict("sys.modules", {"pdfplumber": mock_pdfplumber}):
+        assert extractor._count_ruled_tables(dummy_pdf) == 0
+
+
+# ── _markdown_misses_tables ───────────────────────────────────────────────────
+
+def test_markdown_misses_tables_detects_gap(extractor):
+    """Ruled tables present; markdown has no pipes → returns True (rescue needed)."""
+    assert extractor._markdown_misses_tables(2, "prose only, no pipes here") is True
+
+
+def test_markdown_misses_tables_no_tables(extractor):
+    """Zero ruled tables → always returns False."""
+    assert extractor._markdown_misses_tables(0, "prose only") is False
+
+
+def test_markdown_misses_tables_pipes_present(extractor):
+    """Ruled tables present; markdown has sufficient pipes → returns False."""
+    # 1 table × 3 = threshold of 3 pipes; supply 5 to ensure False
+    assert extractor._markdown_misses_tables(1, "| col1 | col2 | col3 | col4 | col5 |") is False
+
+
+def test_markdown_misses_tables_at_threshold_boundary(extractor):
+    """Exactly at threshold (3 pipes, 1 table) → False (not missing)."""
+    assert extractor._markdown_misses_tables(1, "| a | b | c |") is False
+
+
+def test_markdown_misses_tables_one_below_threshold(extractor):
+    """One below threshold (2 pipes, 1 table → threshold 3) → True (rescue needed)."""
+    # "| a |" has exactly 2 pipes; threshold is 1*3=3, so 2<3 → True
+    assert extractor._markdown_misses_tables(1, "| a |") is True
 
 
 # ── _extract_with_pdfplumber ──────────────────────────────────────────────────

@@ -19,3 +19,6 @@ htmlcov/
 /coverage.json
 tests/e2e/.claude-auth/
 .worktrees/
+tests/fixtures/*.pdf
+.beads/ephemeral.sqlite3
+.serena/
