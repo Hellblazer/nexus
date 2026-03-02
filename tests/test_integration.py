@@ -49,10 +49,6 @@ requires_t3 = pytest.mark.skipif(
     ),
 )
 
-requires_anthropic = pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="Anthropic integration requires ANTHROPIC_API_KEY",
-)
 
 # Collection used by T3 tests — short TTL so it self-cleans via nx store expire
 _T3_TEST_COLLECTION = "knowledge__nexus-integration-test"
@@ -200,7 +196,6 @@ def test_doctor_runs_and_reports(runner: CliRunner) -> None:
     output = result.output.lower()
     assert "chroma" in output
     assert "voyage" in output
-    assert "anthropic" in output
     assert "ripgrep" in output or "rg" in output
     assert "git" in output
 

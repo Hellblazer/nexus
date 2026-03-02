@@ -18,7 +18,7 @@ def runner() -> CliRunner:
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     # Remove any real API keys from env so config-file fallback is tested
-    for key in ("CHROMA_API_KEY", "VOYAGE_API_KEY", "ANTHROPIC_API_KEY", "MXBAI_API_KEY",
+    for key in ("CHROMA_API_KEY", "VOYAGE_API_KEY", "MXBAI_API_KEY",
                 "CHROMA_TENANT", "CHROMA_DATABASE"):
         monkeypatch.delenv(key, raising=False)
     return tmp_path
@@ -159,7 +159,6 @@ def test_config_init_writes_provided_values(runner: CliRunner, fake_home: Path) 
     creds = data.get("credentials", {})
     assert creds.get("chroma_api_key") == "chroma-key"
     assert creds.get("voyage_api_key") == "voyage-key"
-    assert "anthropic_api_key" not in creds
 
 
 def test_config_init_shows_signup_urls(runner: CliRunner, fake_home: Path) -> None:
