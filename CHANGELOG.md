@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-03-02
+
+### Removed
+- **`nx pm` command layer** — `nx pm new/status/close/list/archive/restore` commands
+  removed. T2 memory (`nx memory`) serves this purpose directly with less overhead.
+- **Mixedbread integration** — `--mxbai` search flag and `fetch_mxbai_results()` removed.
+  Voyage AI via ChromaDB Cloud covers all semantic search needs.
+
+### Added
+- **`bd` and `uv` checks in `nx doctor`** — both reported as optional (informational only,
+  no exit 1); `bd` includes install URL when absent.
+
+### Fixed
+- **`chroma` CLI no longer required on PATH** — `start_t1_server()` now locates the
+  `chroma` entry-point relative to `sys.executable`, so it is always found when
+  `conexus` is installed via `uv tool install` or `uv sync`. No separate install step.
+
 ## [1.0.0] - 2026-03-01
 
 First stable release. Promoted from rc10 after live validation. No functional changes
