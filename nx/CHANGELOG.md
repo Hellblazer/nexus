@@ -4,6 +4,18 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-03-02
+
+### Fixed
+- **`rdr-close` pre-check** — status check now correctly accepts `"accepted"` (or
+  `"final"`) matching actual command behaviour; warning message shows `{current_status}`
+  instead of the hardcoded `"Draft"`.
+
+### Changed
+- **Agent and skill counts** corrected throughout plugin docs after PM removal
+  (14 agents, 27 skills).
+- **`nexus` skill description** — "project management" replaced with "indexing".
+
 ## [1.1.0] - 2026-03-02
 
 ### Removed
