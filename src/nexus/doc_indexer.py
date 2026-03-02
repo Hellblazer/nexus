@@ -26,6 +26,10 @@ from nexus.pdf_extractor import PDFExtractor
 # a list of (chunk_id, document_text, metadata_dict) tuples, or an empty list.
 ChunkFn = Callable[[Path, str, str, str, str], list[tuple[str, str, dict]]]
 
+# Type alias for a local embedding function (replaces _embed_with_fallback).
+# Receives (texts, model) and returns (embeddings, actual_model).
+EmbedFn = Callable[[list[str], str], tuple[list[list[float]], str]]
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -150,6 +154,7 @@ def _index_document(
     t3: Any = None,
     *,
     collection_name: str | None = None,
+    embed_fn: EmbedFn | None = None,
 ) -> int:
     """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
 
@@ -160,8 +165,12 @@ def _index_document(
     When *collection_name* is provided it is used as the T3 collection name
     directly, bypassing the default ``docs__{corpus}`` derivation.  This is
     used for RDR collections (``rdr__<repo>-<hash8>``).
+
+    When *embed_fn* is provided it replaces ``_embed_with_fallback`` and the
+    Voyage AI credential check is skipped.  This supports local dry-run mode
+    (ONNX / DefaultEmbeddingFunction) without requiring any API keys.
     """
-    if not _has_credentials():
+    if embed_fn is None and not _has_credentials():
         return 0
 
     content_hash = _sha256(file_path)
@@ -193,11 +202,14 @@ def _index_document(
     documents = [p[1] for p in prepared]
     metadatas = [p[2] for p in prepared]
 
-    from nexus.config import get_credential
-    voyage_key = get_credential("voyage_api_key")
-    if not voyage_key:
-        raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-    embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
+    if embed_fn is not None:
+        embeddings, actual_model = embed_fn(documents, target_model)
+    else:
+        from nexus.config import get_credential
+        voyage_key = get_credential("voyage_api_key")
+        if not voyage_key:
+            raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
@@ -308,13 +320,17 @@ def _markdown_chunks(
     return prepared
 
 
-def index_pdf(pdf_path: Path, corpus: str, t3: Any = None) -> int:
+def index_pdf(pdf_path: Path, corpus: str, t3: Any = None, *, embed_fn: EmbedFn | None = None) -> int:
     """Index *pdf_path* into the T3 ``docs__{corpus}`` collection.
 
     Returns the number of chunks indexed, or 0 if skipped (no credentials or
     content unchanged since last index with the same embedding model).
+
+    Pass *embed_fn* to override the default Voyage AI embedding (e.g. a local
+    ONNX function for dry-run mode).  When *embed_fn* is provided the Voyage
+    credential check is bypassed.
     """
-    return _index_document(pdf_path, corpus, _pdf_chunks, t3=t3)
+    return _index_document(pdf_path, corpus, _pdf_chunks, t3=t3, embed_fn=embed_fn)
 
 
 def index_markdown(
