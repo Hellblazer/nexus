@@ -227,6 +227,23 @@ def test_markdown_misses_tables_pipes_present(extractor, dummy_pdf):
     assert result is False
 
 
+def test_markdown_misses_tables_at_threshold_boundary(extractor, dummy_pdf):
+    """Exactly at threshold (3 pipes, 1 table) → False (not missing)."""
+    mock_pymupdf = _mock_pymupdf_with_tables(n_tables=1)
+    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
+        result = extractor._markdown_misses_tables(dummy_pdf, "| a | b | c |")
+    assert result is False
+
+
+def test_markdown_misses_tables_one_below_threshold(extractor, dummy_pdf):
+    """One below threshold (2 pipes, 1 table → threshold 3) → True (rescue needed)."""
+    mock_pymupdf = _mock_pymupdf_with_tables(n_tables=1)
+    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
+        # "| a |" has exactly 2 pipes; threshold is 1*3=3, so 2<3 → True
+        result = extractor._markdown_misses_tables(dummy_pdf, "| a |")
+    assert result is True
+
+
 def test_markdown_misses_tables_no_pdfplumber(extractor, dummy_pdf):
     """pdfplumber not installed → returns False (graceful degradation)."""
     import sys

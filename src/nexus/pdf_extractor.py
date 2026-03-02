@@ -34,10 +34,10 @@ def _normalize_whitespace_edge_cases(text: str) -> str:
 def _format_table(rows: list[list[str | None]]) -> str:
     """Format a pdfplumber table as a Markdown table string.
 
-    Returns an empty string for empty or single-row tables.
+    Returns an empty string for empty tables.
     None cells are rendered as empty strings.
     """
-    if not rows or len(rows) < 1:
+    if not rows:
         return ""
     # Convert None → ""
     cleaned = [[(cell or "") for cell in row] for row in rows]
@@ -93,7 +93,7 @@ class PDFExtractor:
                 if rescue.text.strip():
                     return rescue
             except Exception:
-                pass
+                _log.debug("pdfplumber rescue failed; using pymupdf4llm output", exc_info=True)
         return result
 
     # ── internal extraction methods ───────────────────────────────────────────
