@@ -52,6 +52,188 @@ _EXT_TO_LANGUAGE: dict[str, str] = {
 }
 
 
+# Tree-sitter node types → semantic code_type, per language.
+# Ported from arcaneum/src/arcaneum/indexing/fulltext/ast_extractor.py:51-136.
+# Used by _extract_context to identify class/method boundaries in code chunks.
+DEFINITION_TYPES: dict[str, dict[str, str]] = {
+    "python": {
+        "function_definition": "function",
+        "class_definition": "class",
+        "decorated_definition": "decorated",
+    },
+    "javascript": {
+        "function_declaration": "function",
+        "class_declaration": "class",
+        "method_definition": "method",
+        "arrow_function": "function",
+        "generator_function_declaration": "function",
+    },
+    "typescript": {
+        "function_declaration": "function",
+        "class_declaration": "class",
+        "method_definition": "method",
+        "interface_declaration": "interface",
+        "type_alias_declaration": "type",
+        "arrow_function": "function",
+    },
+    "java": {
+        "method_declaration": "method",
+        "class_declaration": "class",
+        "interface_declaration": "interface",
+        "enum_declaration": "class",
+        "constructor_declaration": "method",
+    },
+    "go": {
+        "function_declaration": "function",
+        "method_declaration": "method",
+        "type_declaration": "class",
+    },
+    "rust": {
+        "function_item": "function",
+        "impl_item": "class",
+        "struct_item": "class",
+        "trait_item": "interface",
+        "enum_item": "class",
+    },
+    "c": {
+        "function_definition": "function",
+        "struct_specifier": "class",
+    },
+    "cpp": {
+        "function_definition": "function",
+        "class_specifier": "class",
+        "struct_specifier": "class",
+    },
+    "c_sharp": {
+        "method_declaration": "method",
+        "class_declaration": "class",
+        "interface_declaration": "interface",
+        "struct_declaration": "class",
+    },
+    "ruby": {
+        "method": "method",
+        "class": "class",
+        "module": "module",
+    },
+    "php": {
+        "function_definition": "function",
+        "method_declaration": "method",
+        "class_declaration": "class",
+        "interface_declaration": "interface",
+        "trait_declaration": "class",
+    },
+    "swift": {
+        "function_declaration": "function",
+        "class_declaration": "class",
+        "struct_declaration": "class",
+        "protocol_declaration": "interface",
+    },
+    "kotlin": {
+        "function_declaration": "function",
+        "class_declaration": "class",
+        "object_declaration": "class",
+        "interface_declaration": "interface",
+    },
+    "scala": {
+        "function_definition": "function",
+        "class_definition": "class",
+        "object_definition": "class",
+        "trait_definition": "interface",
+    },
+}
+
+_CLASS_SEMANTICS: frozenset[str] = frozenset({"class", "interface", "module"})
+_METHOD_SEMANTICS: frozenset[str] = frozenset({"function", "method", "decorated"})
+
+
+def _extract_name_from_node(node) -> str:  # type: ignore[no-untyped-def]
+    """Extract the identifier name from a tree-sitter definition node.
+
+    Adapted from arcaneum ast_extractor.py:366-386.  Uses the field-name API
+    first (most grammars expose 'name' or 'identifier' as named fields), then
+    falls back to scanning child nodes by type.
+
+    Returns empty string (not 'anonymous') so callers can skip empty names.
+    """
+    for field in ("name", "identifier"):
+        child = node.child_by_field_name(field)
+        if child:
+            try:
+                return child.text.decode("utf-8")
+            except (UnicodeDecodeError, AttributeError):
+                pass
+    for child in node.children:
+        if child.type in ("identifier", "name"):
+            try:
+                return child.text.decode("utf-8")
+            except (UnicodeDecodeError, AttributeError):
+                pass
+    return ""
+
+
+def _extract_context(
+    source: bytes,
+    language: str,
+    chunk_start_0idx: int,
+    chunk_end_0idx: int,
+) -> tuple[str, str]:
+    """Return (class_name, method_name) for the chunk at the given 0-indexed line range.
+
+    Walks the AST with depth-first pre-order traversal, pruning subtrees that
+    lie entirely outside the chunk range.  Class and method are the innermost
+    definitions whose ranges fully enclose the chunk — pre-order traversal
+    ensures outer definitions are visited before inner ones, so overwriting
+    gives the innermost result.
+
+    Returns ('', '') when the language is unsupported, tree-sitter is
+    unavailable, or no enclosing definition is found.
+    """
+    lang_types = DEFINITION_TYPES.get(language)
+    if not lang_types:
+        return ("", "")
+
+    try:
+        from tree_sitter_language_pack import get_parser  # lazy import
+        parser = get_parser(language)
+    except Exception:
+        return ("", "")
+
+    try:
+        tree = parser.parse(source)
+    except Exception:
+        return ("", "")
+
+    class_name = ""
+    method_name = ""
+
+    def _walk(node) -> None:  # type: ignore[no-untyped-def]
+        nonlocal class_name, method_name
+        node_start = node.start_point[0]
+        node_end = node.end_point[0]
+
+        # Prune: subtree lies entirely outside chunk range
+        if node_end < chunk_start_0idx or node_start > chunk_end_0idx:
+            return
+
+        code_type = lang_types.get(node.type)
+        if code_type:
+            # Only record when this definition fully encloses the chunk so that
+            # a chunk spanning two sibling methods returns method_name=''.
+            if node_start <= chunk_start_0idx and node_end >= chunk_end_0idx:
+                name = _extract_name_from_node(node)
+                if name:
+                    if code_type in _CLASS_SEMANTICS:
+                        class_name = name  # innermost enclosing class wins
+                    elif code_type in _METHOD_SEMANTICS:
+                        method_name = name  # innermost enclosing method wins
+
+        for child in node.children:
+            _walk(child)
+
+    _walk(tree.root_node)
+    return (class_name, method_name)
+
+
 def _git_metadata(repo: Path) -> dict:
     """Collect git metadata for *repo*. Returns empty strings for missing values."""
     def run(args: list[str]) -> str:
@@ -358,6 +540,7 @@ def _index_prose_file(
     ids: list[str] = []
     documents: list[str] = []
     metadatas: list[dict] = []
+    embed_texts: list[str] = []
 
     if ext in (".md", ".markdown"):
         # Markdown: use SemanticMarkdownChunker (M1: uses char offsets, not line numbers)
@@ -369,6 +552,7 @@ def _index_prose_file(
             _log.debug("skipped file with no chunks", path=str(file))
             return False
 
+        embed_texts: list[str] = []
         for chunk in chunks:
             title = f"{file.relative_to(repo)}:chunk-{chunk.chunk_index}"
             doc_id = _hl.sha256(f"{collection_name}:{title}".encode()).hexdigest()[:32]
@@ -400,6 +584,14 @@ def _index_prose_file(
             ids.append(doc_id)
             documents.append(chunk.text)
             metadatas.append(metadata)
+            # Embed-only prefix: helps Voyage AI locate the right context without
+            # polluting stored text.  Use header_path from chunk metadata (the raw
+            # field, not the stored section_title which is the same string).
+            header_path = chunk.metadata.get("header_path", "")
+            if header_path:
+                embed_texts.append(f"## Section: {header_path}\n\n{chunk.text}")
+            else:
+                embed_texts.append(chunk.text)
     else:
         # Non-markdown prose: use line-based chunking
         raw_chunks = _line_chunk(content)
@@ -440,8 +632,12 @@ def _index_prose_file(
     if not documents:
         return False
 
+    # embed_texts is populated for markdown; for non-markdown prose (no section
+    # structure) we fall back to raw documents for embedding.
+    texts_to_embed = embed_texts if embed_texts else documents
+
     # Embed via _embed_with_fallback (CCE for voyage-context-3)
-    embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
+    embeddings, actual_model = _embed_with_fallback(texts_to_embed, target_model, voyage_key)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
@@ -502,6 +698,21 @@ def _index_pdf_file(
     documents = [p[1] for p in prepared]
     metadatas_raw = [p[2] for p in prepared]
 
+    # Build embed_texts with context prefix BEFORE augmentation overwrites 'title'.
+    # source_title comes from _pdf_chunks (doc_indexer.py:251, field 'pdf_title').
+    # We must read it from metadatas_raw here; after augmentation 'title' is a
+    # file-path string like "path/to/file.pdf:page-3".
+    embed_texts_pdf: list[str] = []
+    for doc, m in zip(documents, metadatas_raw):
+        source_title = m.get("source_title", "")
+        page_number = m.get("page_number", 0)
+        prefix_parts: list[str] = []
+        if source_title:
+            prefix_parts.append(f"Document: {source_title}")
+        prefix_parts.append(f"Page: {page_number}")
+        prefix = "## " + "  ".join(prefix_parts)
+        embed_texts_pdf.append(f"{prefix}\n\n{doc}")
+
     # Augment metadata with repo-indexer fields
     metadatas: list[dict] = []
     for m in metadatas_raw:
@@ -519,7 +730,7 @@ def _index_pdf_file(
         }
         metadatas.append(augmented)
 
-    embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
+    embeddings, actual_model = _embed_with_fallback(embed_texts_pdf, target_model, voyage_key)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
