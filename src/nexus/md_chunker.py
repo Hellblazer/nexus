@@ -84,9 +84,11 @@ class SemanticMarkdownChunker:
         self,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
+        preserve_code_blocks: bool = True,
     ) -> None:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.preserve_code_blocks = preserve_code_blocks
         self.max_chars = int(chunk_size * _CHARS_PER_TOKEN)
         self.overlap_chars = int(chunk_overlap * _CHARS_PER_TOKEN)
         self.md = MarkdownIt() if MARKDOWN_IT_AVAILABLE else None
@@ -285,8 +287,12 @@ class SemanticMarkdownChunker:
                     )
                     chunk_index += 1
                     section_start_char = current_end_char
-                # Truncate oversized parts to prevent unbounded chunk sizes
-                if len(part_text) > self.max_chars:
+                is_code = part.get("is_code_block", False)
+                if self.preserve_code_blocks and is_code:
+                    # Emit code blocks atomically — never truncate, even if oversized.
+                    pass
+                elif len(part_text) > self.max_chars:
+                    # Truncate oversized non-code parts to prevent unbounded chunk sizes.
                     part_text = part_text[: self.max_chars]
                 header_tokens = len(header_text) / _CHARS_PER_TOKEN if header_text else 0.0
                 current_parts = [header_text, part_text] if header_text else [part_text]
@@ -321,6 +327,7 @@ class SemanticMarkdownChunker:
             "header_path": " > ".join(header_path) if header_path else "",
             "chunk_start_char": chunk_start_char,
             "chunk_end_char": chunk_end_char,
+            "has_code_blocks": bool(re.search(r"^```", text, re.MULTILINE)),
         }
         return MarkdownChunk(
             text=text,
