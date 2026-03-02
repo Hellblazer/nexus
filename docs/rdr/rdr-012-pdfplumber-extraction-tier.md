@@ -11,6 +11,7 @@ updated: 2026-03-01
 accepted_date: "2026-03-01"
 closed_date: "2026-03-01"
 close_reason: "implemented"
+post_mortem: "post-mortem/012-pdfplumber-extraction-tier.md"
 gate_result: "BLOCKED 2026-03-01 — revised"
 gate_date: ""
 related_issues: []
