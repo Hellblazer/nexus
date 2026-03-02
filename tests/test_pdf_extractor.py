@@ -280,6 +280,10 @@ def _make_mock_pdfplumber(pages_data: list[dict]):
         mock_page.find_tables.return_value = []  # no bboxes → prose path
         mock_page.extract_text.return_value = pd.get("prose", "")
         mock_page.extract_tables.return_value = pd.get("tables", [])
+        # Wire filter(...).extract_text(...) for the upright-filter prose path.
+        filtered = MagicMock()
+        filtered.extract_text.return_value = pd.get("prose", "")
+        mock_page.filter.return_value = filtered
         mock_pages.append(mock_page)
 
     mock_pdf = MagicMock()

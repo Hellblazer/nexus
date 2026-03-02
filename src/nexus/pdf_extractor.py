@@ -186,6 +186,10 @@ class PDFExtractor:
                 # markdown. If no tables, fall back to full extract_text().
                 if table_bboxes:
                     def _not_in_table(obj: dict, bboxes: list = table_bboxes) -> bool:
+                        # Drop rotated text (upright=0): ArXiv watermarks, marginal
+                        # stamps, and similar sideways decorations that produce garbage.
+                        if not obj.get("upright", 1):
+                            return False
                         x0, y0 = obj.get("x0", 0), obj.get("top", 0)
                         x1, y1 = obj.get("x1", 0), obj.get("bottom", 0)
                         return not any(
@@ -194,7 +198,11 @@ class PDFExtractor:
                         )
                     prose = page.filter(_not_in_table).extract_text(layout=True) or ""
                 else:
-                    prose = page.extract_text(layout=True) or ""
+                    # Drop rotated text even when there are no tables.
+                    prose = (
+                        page.filter(lambda obj: bool(obj.get("upright", 1)))
+                        .extract_text(layout=True) or ""
+                    )
 
                 # Format tables as Markdown, appended after prose.
                 table_blocks: list[str] = []
