@@ -71,6 +71,10 @@ class PDFExtractor:
 
     def extract(self, pdf_path: Path) -> ExtractionResult:
         """Extract text from *pdf_path*. Returns ExtractionResult."""
+        # Count ruled tables BEFORE layout activation. pymupdf.layout.activate()
+        # (called inside _extract_markdown) suppresses find_tables() on some PDFs,
+        # making post-activation counts unreliable. Pre-activation count is safe.
+        pre_table_count = self._count_ruled_tables(pdf_path)
         if self._has_type3_fonts(pdf_path):
             return self._extract_normalized(pdf_path)
         try:
@@ -87,7 +91,7 @@ class PDFExtractor:
         # Quality-rescue: fall back to pdfplumber if ruled tables are present
         # but missing from the markdown output (e.g. GNN mis-classified cells
         # as body text). pdfplumber is opened only when actually needed.
-        if self._markdown_misses_tables(pdf_path, result.text):
+        if self._markdown_misses_tables(pre_table_count, result.text):
             try:
                 rescue = self._extract_with_pdfplumber(pdf_path)
                 if rescue.text.strip():
@@ -98,39 +102,49 @@ class PDFExtractor:
 
     # ── internal extraction methods ───────────────────────────────────────────
 
-    def _markdown_misses_tables(self, pdf_path: Path, markdown_text: str) -> bool:
-        """Return True if the PDF has ruled tables that are absent from the markdown.
+    def _count_ruled_tables(self, pdf_path: Path, max_pages: int = 5) -> int:
+        """Count ruled tables in the first *max_pages* pages using pdfplumber.find_tables().
 
-        Uses PyMuPDF's native find_tables() (same algorithm as pdfplumber) to count
-        ruled tables on the first five pages, then checks whether the markdown output
-        contains a proportional number of pipe characters. Returns False (no fallback)
-        when pdfplumber is not installed.
+        Uses pdfplumber (pdfminer-based) rather than pymupdf so that the count is
+        immune to pymupdf.layout.activate() global state: layout activation suppresses
+        pymupdf's find_tables() on some PDFs, making pymupdf-based counts unreliable
+        once any call to _extract_markdown() has occurred in the process.
+
+        Returns 0 if pdfplumber is not installed (table rescue is disabled anyway),
+        or on any error.
 
         Note: borderless tables (spacing-only alignment, common in IEEE/ACM papers)
         produce no edges from find_tables() and will not be detected. This is a known
         scope limitation — see RDR-012 Risks.
         """
         try:
-            import pdfplumber  # noqa: F401 — availability check only
+            import pdfplumber
         except ImportError:
             _log.debug("pdfplumber not installed; table rescue disabled")
-            return False
-        import pymupdf
+            return 0
         try:
-            ruled_tables = 0
-            with pymupdf.open(pdf_path) as doc:
-                for page in list(doc)[:5]:
-                    # TableFinder is always truthy; len() is the correct test.
-                    ruled_tables += len(page.find_tables().tables)
-            if ruled_tables == 0:
-                return False
-            pipe_count = markdown_text.count("|")
-            # A well-formatted Markdown table produces roughly 2*(N+1) pipes per row
-            # plus a separator row. With 3 pipes per table as floor, we allow small
-            # single-column pseudo-tables while still catching absent multi-column tables.
-            return pipe_count < ruled_tables * 3
+            count = 0
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages[:max_pages]:
+                    count += len(page.find_tables())
+            return count
         except Exception:
+            return 0
+
+    def _markdown_misses_tables(self, ruled_table_count: int, markdown_text: str) -> bool:
+        """Return True if *markdown_text* lacks pipe chars proportional to *ruled_table_count*.
+
+        Pure predicate — no file I/O. Call _count_ruled_tables() first (before layout
+        activation) to obtain the count.
+
+        A well-formatted Markdown table produces roughly 2*(N+1) pipes per row plus a
+        separator row. With 3 pipes per table as floor, small single-column pseudo-tables
+        are tolerated while absent multi-column tables are caught.
+        """
+        if ruled_table_count == 0:
             return False
+        pipe_count = markdown_text.count("|")
+        return pipe_count < ruled_table_count * 3
 
     def _extract_with_pdfplumber(self, pdf_path: Path) -> ExtractionResult:
         """Extract text and tables via pdfplumber with Markdown table formatting.
