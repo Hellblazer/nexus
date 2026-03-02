@@ -92,8 +92,7 @@ Automated connections:
 - `/rdr-close` creates beads (epic + task beads) for implementation tracking.
   The `epic_bead` field in each RDR's T2 record links the decision to its
   work items.
-- `nx pm reference "topic"` searches archived project syntheses, which include
-  RDR decisions — prior art surfaces during planning.
+- `nx search "topic"` against the knowledge corpus surfaces RDR decisions as prior art during planning.
 - `rdr_hook.py` reports RDR document count and indexing status at session start.
 
 RDR T2 metadata includes timestamps, so you can find which decisions were

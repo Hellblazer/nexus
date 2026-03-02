@@ -1,6 +1,6 @@
 # Storage Tiers
 
-Nexus organizes data across three tiers with increasing durability. Data flows upward only (T1 → T2 → T3), with no reverse flow except `nx pm restore`.
+Nexus organizes data across three tiers with increasing durability. Data flows upward (T1 → T2 → T3).
 
 | Tier | Storage | Network | Durability | Use |
 |------|---------|---------|------------|-----|
@@ -32,7 +32,7 @@ T2 is the persistent local layer that bridges sessions. Notes, project state, an
 - **Agent relay** — context passed between agent invocations
 - **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
 
-Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, or permanent. Default is `30d` for developer notes; PM entries are created permanent and only begin decaying after `nx pm archive`.
+Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, or permanent. Default is `30d` for developer notes; PM entries are created permanent.
 
 ## T3 -- Permanent Knowledge
 
@@ -45,7 +45,7 @@ Each content type routes to a dedicated ChromaDB Cloud database derived from the
 | `{base}_code` | `code__*` | Indexed source code |
 | `{base}_docs` | `docs__*` | Indexed prose, PDFs, markdown |
 | `{base}_rdr` | `rdr__*` | Indexed RDR documents |
-| `{base}_knowledge` | `knowledge__*` | Agent outputs, notes, PM syntheses |
+| `{base}_knowledge` | `knowledge__*` | Agent outputs, notes, stored knowledge |
 
 All four databases must exist in your ChromaDB Cloud dashboard before using T3. Run `nx doctor` to verify connectivity. If upgrading from a single-database setup, run `nx migrate t3` to copy existing collections.
 
@@ -61,7 +61,7 @@ Collections are namespaced by corpus type using `__` (double underscore) as sepa
 
 **TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.
 
-**Use for**: semantic search across sessions, institutional knowledge, archived PM syntheses.
+**Use for**: semantic search across sessions, institutional knowledge.
 
 ## Data Flow
 
@@ -70,7 +70,7 @@ T1 (scratch)
   | scratch promote / flag-flush
   v
 T2 (memory)
-  | memory promote / pm archive
+  | memory promote
   v
 T3 (knowledge)
 ```
@@ -78,7 +78,7 @@ T3 (knowledge)
 ### Promotion methods
 
 - **T1 -> T2**: `nx scratch promote ID --project NAME --title NAME`, or auto-flush of flagged items at session end.
-- **T2 -> T3**: `nx memory promote TITLE --collection NAME`, or `nx pm archive` (Haiku synthesis).
+- **T2 -> T3**: `nx memory promote TITLE --collection NAME`.
 
 ### TTL translation on promote
 

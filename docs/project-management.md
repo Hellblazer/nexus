@@ -84,29 +84,6 @@ Phases don't gate work — beads and their dependencies determine what's ready.
 The phase number reported by `nx pm status` is a progress indicator, not a
 coordination mechanism.
 
-## Archiving
-
-When a project is done or paused, archive synthesizes the accumulated state
-and moves it to permanent storage:
-
-```bash
-nx pm archive
-nx pm close        # shorthand for archive with status "completed"
-```
-
-This does two things. First, Haiku reads all PM entries and produces a
-structured summary — key decisions, architecture choices, challenges,
-lessons learned — which goes to T3 as a permanent, searchable document.
-Second, the T2 entries start a 90-day decay. During that window you can
-restore them with `nx pm restore`; after it, they expire and the T3
-synthesis is what remains.
-
-To search across archived projects:
-
-```bash
-nx pm reference "caching strategy"     # semantic search across all archives
-nx pm reference projectname            # direct lookup for one project
-```
 
 ## Session Integration
 
@@ -157,8 +134,7 @@ When you use both, the connections are automated:
 - `/rdr-close` creates beads (epic + task beads) for implementation tracking.
   The `epic_bead` field in each RDR's T2 metadata provides a machine-readable
   link from decision to work items.
-- `nx pm reference "topic"` searches archived project syntheses, which include
-  RDR decisions — prior art surfaces during planning.
+- RDR decisions surface as prior art during planning via `nx search "topic"` against the knowledge corpus.
 - RDR T2 metadata includes timestamps, so you can find which decisions were
   active during any phase without manual cross-referencing.
 

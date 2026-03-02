@@ -39,9 +39,6 @@ _DEFAULTS: dict[str, Any] = {
     "embeddings": {
         "rerankerModel": "rerank-2.5",
     },
-    "pm": {
-        "archiveTtl": 90,
-    },
     "mxbai": {
         "stores": [],
     },
@@ -65,7 +62,6 @@ _ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
     "NX_SERVER_PORT": ("server", "port", int),
     "NX_SERVER_HEAD_POLL_INTERVAL": ("server", "headPollInterval", int),
     "NX_EMBEDDINGS_RERANKER_MODEL": ("embeddings", "rerankerModel", str),
-    "NX_PM_ARCHIVE_TTL": ("pm", "archiveTtl", int),
     "NX_CLIENT_HOST": ("client", "host", str),
 }
 

@@ -32,7 +32,7 @@ CLI (cli.py + commands/)
                 {base}_knowledge → knowledge__*  voyage-context-3 (CCE) index + query
 ```
 
-Data flows upward (T1 → T2 → T3). No reverse flow except `nx pm restore`.
+Data flows upward (T1 → T2 → T3).
 
 ## Module Map
 
