@@ -7,24 +7,45 @@ import structlog
 
 _log = structlog.get_logger()
 
-# Extensions supported by llama-index CodeSplitter / tree-sitter
+# Extensions supported by llama-index CodeSplitter / tree-sitter-language-pack.
+# Values are tree-sitter-language-pack language names (may differ from the logical
+# language names in indexer._EXT_TO_LANGUAGE, e.g. .tsx → "tsx" here vs "typescript"
+# for comment/context purposes; .cs → "c_sharp" in both dicts).
 AST_EXTENSIONS: dict[str, str] = {
+    # Core web/scripting
     ".py": "python",
     ".js": "javascript",
+    ".jsx": "javascript",
     ".ts": "typescript",
     ".tsx": "tsx",
-    ".jsx": "javascript",
+    # Systems languages
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
     ".rs": "rust",
     ".go": "go",
+    # JVM family
     ".java": "java",
-    ".c": "c",
-    ".cpp": "cpp",
-    ".h": "c",
-    ".hpp": "cpp",
-    ".rb": "ruby",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".scala": "scala",
+    ".sc": "scala",
+    # .NET
     ".cs": "c_sharp",
+    # Shell / scripting
     ".sh": "bash",
     ".bash": "bash",
+    # Mobile / cross-platform
+    ".swift": "swift",
+    ".m": "objc",
+    # Interpreted
+    ".rb": "ruby",
+    ".php": "php",
+    ".r": "r",
+    ".lua": "lua",
 }
 
 _CHUNK_LINES = 150

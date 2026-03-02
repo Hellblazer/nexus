@@ -40,7 +40,7 @@ _EXT_TO_LANGUAGE: dict[str, str] = {
     ".h": "c",
     ".hpp": "cpp",
     ".rb": "ruby",
-    ".cs": "csharp",
+    ".cs": "c_sharp",
     ".sh": "bash",
     ".bash": "bash",
     ".kt": "kotlin",
@@ -49,6 +49,10 @@ _EXT_TO_LANGUAGE: dict[str, str] = {
     ".r": "r",
     ".m": "objc",
     ".php": "php",
+    ".lua": "lua",
+    ".cxx": "cpp",
+    ".kts": "kotlin",
+    ".sc": "scala",
 }
 
 # Comment character for each language used to build the embed-only context prefix.
@@ -61,7 +65,7 @@ _COMMENT_CHARS: dict[str, str] = {
     "rust": "//",
     "cpp": "//",
     "c": "//",
-    "csharp": "//",
+    "c_sharp": "//",
     "ruby": "#",
     "php": "//",
     "swift": "//",
@@ -70,6 +74,7 @@ _COMMENT_CHARS: dict[str, str] = {
     "bash": "#",
     "r": "#",
     "objc": "//",
+    "lua": "--",
 }
 
 # Tree-sitter node types → semantic code_type, per language.
