@@ -87,7 +87,6 @@ nx/
     ├── orchestration/       # → orchestrator agent
     ├── pdf-processing/      # → pdf-chromadb-processor agent
     ├── plan-validation/     # → plan-auditor agent
-    ├── project-setup/       # → project-management-setup agent
     ├── research-synthesis/  # → deep-research-synthesizer agent
     ├── strategic-planning/  # → strategic-planner agent
     ├── test-validation/     # → test-validator agent
@@ -189,13 +188,11 @@ Defined in `registry.yaml`:
 - `/orchestrate` → orchestrator
 - `/knowledge-tidy` → knowledge-tidier
 - `/pdf-process` → pdf-chromadb-processor
-- `/project-setup` → project-management-setup
 - `/deep-analysis` → deep-analyst
 - `/substantive-critique` → substantive-critic
 
 **RDR commands**: `/rdr-create`, `/rdr-list`, `/rdr-show`, `/rdr-research`, `/rdr-gate`, `/rdr-accept`, `/rdr-close`
 
-**PM commands**: `/pm-new`, `/pm-status`, `/pm-list`
 
 ## MCP Servers
 

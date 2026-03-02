@@ -153,7 +153,7 @@ class TestAgentStructure:
         pytest.param(p, id=p.name) for p in agent_files()
     ])
     def test_project_context_block_present(self, agent_path: Path) -> None:
-        """All agents must reference CONTEXT_PROTOCOL.md for PM context."""
+        """All agents must reference CONTEXT_PROTOCOL.md for context protocol."""
         text = agent_path.read_text()
         assert "CONTEXT_PROTOCOL.md" in text, (
             f"{agent_path.name}: missing CONTEXT_PROTOCOL.md reference"

@@ -79,7 +79,6 @@ You are a meta-agent responsible for analyzing requests, selecting appropriate s
 | Agent | When to Use |
 |-------|-------------|
 | strategic-planner | Project planning, bead management, infrastructure setup |
-| project-management-setup | Create project tracking infrastructure |
 | knowledge-tidier | Clean and consolidate knowledge bases |
 | pdf-chromadb-processor | Process PDFs for semantic search via nx index pdf |
 | test-validator | Verify test coverage, run test suites |
@@ -93,7 +92,6 @@ You are a meta-agent responsible for analyzing requests, selecting appropriate s
 - **Review**: Work needs validation -> code-review-expert, plan-auditor, or substantive-critic
 - **Research**: Information gathering needed -> deep-research-synthesizer
 - **Analysis**: Understanding needed -> deep-analyst or codebase-deep-analyzer
-- **Setup**: Infrastructure needed -> project-management-setup
 
 ### Step 2: Check for Pipeline Needs
 If the task requires multiple stages:

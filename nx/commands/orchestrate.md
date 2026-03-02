@@ -33,7 +33,7 @@ description: Route request to appropriate agent using orchestrator
   echo "Review: code-review-expert, plan-auditor, substantive-critic, test-validator"
   echo "Research: deep-research-synthesizer"
   echo "Analysis: deep-analyst, codebase-deep-analyzer, strategic-planner"
-  echo "Utility: knowledge-tidier, orchestrator, pdf-chromadb-processor, project-management-setup"
+  echo "Utility: knowledge-tidier, orchestrator, pdf-chromadb-processor"
 
   # Project management context
   echo "### Project Management Context"

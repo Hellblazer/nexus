@@ -71,7 +71,6 @@ Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought
    - nx T3 store: `nx search "relevant topic" --corpus knowledge --n 5`
    - nx T2 memory: `nx memory get --project {project} --title plan.md`
 3. Identify constraints, dependencies, and success criteria
-4. **PM Infrastructure Check**: Determine if this is a multi-phase project (>3 weeks, multiple phases, requires session continuity). If YES, spawn project-management-setup agent IN PARALLEL with Phase 2 plan creation.
 5. **Discover Relevant Project History and Patterns with nx search**:
    ```bash
    # Project structure and organization
@@ -109,47 +108,7 @@ Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought
 
 Iterate based on audit feedback until the plan passes review.
 
-### Phase 4: Infrastructure Verification
-If project-management-setup was spawned in Phase 1:
-- Confirm beads are synced with PM infrastructure
 
-If NOT spawned in Phase 1 (simple project):
-- For projects requiring session continuity, spawn project-management-setup NOW
-
-## Parallel Workflow (Multi-Phase Projects)
-
-For projects with >3 phases or >3 weeks expected duration, use this parallel workflow:
-
-```
-Phase 1 Start
-    ├─> [PARALLEL] project-management-setup agent
-    │       └─> Sets up project context and continuation state
-    │
-    └─> [PARALLEL] strategic-planner continues...
-            └─> Phase 2: Plan Creation
-            └─> Phase 3: plan-auditor review
-            └─> Phase 4: Verify PM infrastructure ready
-            └─> Present combined results to user
-```
-
-**Key Benefits:**
-- PM infrastructure ready by the time plan is finalized
-- Reduced wait time for user
-- plan-auditor and PM setup don't depend on each other
-
-**Implementation:**
-```
-# In Phase 1, after determining multi-phase project:
-Task(
-  subagent_type="project-management-setup",
-  prompt="Create PM infrastructure for [project]. Phases: [N]. Expected duration: [X weeks].",
-  run_in_background=true
-)
-
-# Continue with Phase 2-3 while PM setup runs in background
-# In Phase 4, retrieve PM setup results:
-TaskOutput(task_id="<pm-setup-task-id>")
-```
 
 ## Bead Content Requirements
 
@@ -220,7 +179,6 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Project Plans**: Store in nx T2 memory as `--project {project} --title plan-{name}.md`
 - **Bead Hierarchy**: Epic -> Phase -> Task structure
 - **Dependency Maps**: Use `bd dep add` for all relationships
-- **Infrastructure Specs**: Relay to project-management-setup
 - **Planning Notes**: Use T1 scratch for intermediate analysis during planning; flag for T2 at session end:
   ```bash
   nx scratch put "Planning note: {consideration}" --tags "planning,analysis"
@@ -263,13 +221,11 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 
 - **vs java-architect-planner**: You are language-agnostic and focus on project management, phases, and beads structure. Java-architect-planner focuses on Java-specific architecture and design patterns. You typically call java-architect-planner for Java-specific technical design.
 - **vs plan-auditor**: You create plans. Auditor validates them. Always spawn auditor before finalizing.
-- **vs project-management-setup**: You define what infrastructure is needed. Setup agent creates it.
 
 ## Critical Reminders
 
 ### For You (Strategic Planner)
 - **Always audit plans** via plan-auditor before presenting to user
-- **Always coordinate** with project-management-setup for infrastructure
 - **Keep continuation state current** via `nx memory put ... --title continuation-state.md`
 - **Search knowledge bases** before planning: `nx search` for T3, `nx memory search` for T2
 - **Use beads** (bd) for ALL task tracking - never markdown TODO lists
@@ -305,7 +261,6 @@ When presenting plans:
 
 Before finalizing any plan:
 - [ ] Plan audited by plan-auditor agent
-- [ ] Infrastructure coordinated with project-management-setup agent
 - [ ] All beads contain complete execution context
 - [ ] Dependencies properly linked via bd dep add
 - [ ] TDD approach embedded in every development task

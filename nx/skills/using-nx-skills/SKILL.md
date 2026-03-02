@@ -95,7 +95,6 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 | knowledge-tidying | `/knowledge-tidy` | 3+ validated findings or decisions need persisting to T3 for cross-session reuse |
 | orchestration | `/orchestrate` | After reading this directory, still unsure which agent fits the task |
 | pdf-processing | `/pdf-process` | PDF documents need indexing into nx store for semantic search |
-| project-setup | `/project-setup` | Starting a 3+ week project that needs PM infrastructure |
 | nexus | `/nexus` | Running nx commands or unsure which nx subcommand to use |
 | serena-code-nav | `/serena-code-nav` | Navigating code by symbol — finding definitions, callers, type hierarchies, or safe renames |
 | cli-controller | `/cli-controller` | Controlling interactive CLI apps, REPLs, pdb, gdb, or spawning Claude Code instances |
