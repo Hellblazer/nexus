@@ -104,7 +104,7 @@ def test_m_flag_limits_results(runner: CliRunner, monkeypatch: pytest.MonkeyPatc
     mock_t3 = _mock_t3()
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 result = runner.invoke(
                     main,
                     ["search", "query", "--no-rerank", "-m", "3", "--corpus", "knowledge"],
@@ -138,7 +138,7 @@ def test_reverse_flag_reverses_output_order(
     mock_t3 = _mock_t3()
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 normal = runner.invoke(
                     main,
                     ["search", "query", "--no-rerank", "--corpus", "knowledge", "--no-color"],
@@ -182,7 +182,7 @@ def test_where_single_filter_passed_to_search(
 
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 result = runner.invoke(
                     main,
                     ["search", "query", "--corpus", "knowledge", "--where", "lang=python"],
@@ -214,7 +214,7 @@ def test_where_multiple_filters_anded(
 
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 result = runner.invoke(
                     main,
                     [
@@ -249,7 +249,7 @@ def test_where_no_flag_passes_none(
 
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 result = runner.invoke(
                     main,
                     ["search", "query", "--corpus", "knowledge"],
@@ -283,7 +283,7 @@ def test_context_A_shows_extra_lines_after(
     mock_t3 = _mock_t3()
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 # Without -A: format_plain shows all lines already — test that
                 # -A N is accepted and does not crash
                 result = runner.invoke(
@@ -307,7 +307,7 @@ def test_context_C_sets_lines_after(
     mock_t3 = _mock_t3()
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 result = runner.invoke(
                     main,
                     ["search", "query", "--corpus", "knowledge", "-C", "5"],
@@ -393,7 +393,7 @@ def test_hybrid_flag_triggers_ripgrep(
 
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 with patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_search_ripgrep):
                     result = runner.invoke(
                         main,
@@ -428,7 +428,7 @@ def test_hybrid_results_include_rg_hits(
 
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 with patch("nexus.commands.search_cmd.search_ripgrep", return_value=[rg_hit]):
                     result = runner.invoke(
                         main,
@@ -462,7 +462,7 @@ def test_hybrid_without_cache_files_still_works(
 
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[semantic_result]):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 result = runner.invoke(
                     main,
                     ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"],
@@ -538,7 +538,7 @@ def test_max_file_chunks_builds_chunk_count_filter(
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
             with patch("nexus.commands.search_cmd.load_config",
-                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 result = runner.invoke(
                     main,
                     ["search", "query", "--corpus", "code", "--max-file-chunks", "17"],
@@ -570,7 +570,7 @@ def test_max_file_chunks_and_where_merged_with_and(
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
         with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
             with patch("nexus.commands.search_cmd.load_config",
-                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "mxbai": {}}):
+                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
                 result = runner.invoke(
                     main,
                     [

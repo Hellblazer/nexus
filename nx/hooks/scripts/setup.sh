@@ -29,6 +29,8 @@ if command -v bd &> /dev/null; then
   echo "  Ready: $READY"
   echo "  In Progress: $IN_PROGRESS"
   echo "  Blocked: $BLOCKED"
+else
+  echo '⚠ bd not found — install from: https://github.com/BeadsProject/beads'
 fi
 
 

@@ -254,6 +254,54 @@ def test_doctor_four_store_error_does_not_expose_exception_text() -> None:
     assert "not reachable" in result.output
 
 
+# ── bd (beads) ───────────────────────────────────────────────────────────────
+
+def test_doctor_missing_bd_does_not_fail() -> None:
+    """Missing bd is reported as informational — does not cause exit code 1."""
+    runner = _runner()
+
+    def which_side_effect(name):
+        if name == "bd":
+            return None
+        return f"/usr/bin/{name}"
+
+    with (
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+        patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
+        patch("nexus.commands.serve._read_pid", return_value=12345),
+        patch("nexus.commands.serve._process_running", return_value=True),
+        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
+    ):
+        result = runner.invoke(main, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "bd (beads" in result.output
+    assert "not found" in result.output
+    assert "BeadsProject/beads" in result.output
+
+
+def test_doctor_missing_uv_does_not_fail() -> None:
+    """Missing uv is reported as informational but does not cause exit code 1."""
+    runner = _runner()
+
+    def which_side_effect(name):
+        if name == "uv":
+            return None
+        return f"/usr/bin/{name}"
+
+    with (
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+        patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
+        patch("nexus.commands.serve._read_pid", return_value=12345),
+        patch("nexus.commands.serve._process_running", return_value=True),
+        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
+    ):
+        result = runner.invoke(main, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "uv" in result.output
+
+
 # ── _check helper ────────────────────────────────────────────────────────────
 
 def test_check_helper_format() -> None:

@@ -68,6 +68,20 @@ disable-model-invocation: false
     echo "Install: /plugin marketplace add anthropics/claude-plugins-official"
   fi
   echo ""
+
+  # ── 5. uv (package manager) ──────────────────────────────────────────────────
+  echo "### 5. uv (package manager)"
+  echo ""
+  if command -v uv &>/dev/null; then
+    UV_VERSION=$(uv --version 2>&1)
+    echo "Status: PASS"
+    echo "Version: $UV_VERSION"
+  else
+    echo "Status: WARN"
+    echo "uv not found — nx can be installed with pip instead, but uv is recommended"
+    echo "Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+  fi
+  echo ""
 }
 
 ## Summary
@@ -80,8 +94,9 @@ Based on the preflight output above, produce a summary table:
 | nx doctor | — | — |
 | bd (beads) | — | — |
 | superpowers | — | — |
+| uv | — | — |
 
-Fill in each row from the check results above. Use "PASS" or "FAIL" for Status. Leave Action needed blank for passing checks; for failures, provide the install command or link.
+Fill in each row from the check results above. Use "PASS", "FAIL", or "WARN" for Status. Leave Action needed blank for passing checks; for failures/warnings, provide the install command or link.
 
 If all checks pass: print "nx plugin is ready"
 If any check fails: print "Fix the above before using nx agents"

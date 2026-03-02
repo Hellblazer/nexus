@@ -32,10 +32,7 @@ def test_formatters_imports():
 
 def test_search_engine_orchestration_imports():
     """Orchestration functions importable from nexus.search_engine."""
-    from nexus.search_engine import (  # noqa: F401
-        search_cross_corpus,
-        fetch_mxbai_results,
-    )
+    from nexus.search_engine import search_cross_corpus  # noqa: F401
 
 
 def test_search_result_from_types():

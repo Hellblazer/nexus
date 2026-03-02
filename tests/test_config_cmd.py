@@ -133,7 +133,6 @@ def test_config_list_shows_credential_names(runner: CliRunner, fake_home: Path) 
     assert result.exit_code == 0, result.output
     assert "chroma_api_key" in result.output
     assert "voyage_api_key" in result.output
-    assert "mxbai_api_key" in result.output
 
 
 def test_config_list_shows_non_secret_settings(runner: CliRunner, fake_home: Path) -> None:
@@ -148,8 +147,7 @@ def test_config_list_shows_non_secret_settings(runner: CliRunner, fake_home: Pat
 
 def test_config_init_writes_provided_values(runner: CliRunner, fake_home: Path) -> None:
     """nx config init with all inputs writes all credentials to config.yml."""
-    # Simulate interactive input: provide values for each prompt, then empty to skip mxbai
-    inputs = "chroma-key\nmy-tenant\nmy-db\nvoyage-key\n\n"
+    inputs = "chroma-key\nmy-tenant\nmy-db\nvoyage-key\n"
     result = runner.invoke(main, ["config", "init"], input=inputs)
     assert result.exit_code == 0, result.output
 
@@ -163,7 +161,7 @@ def test_config_init_writes_provided_values(runner: CliRunner, fake_home: Path) 
 
 def test_config_init_shows_signup_urls(runner: CliRunner, fake_home: Path) -> None:
     """nx config init output includes URLs to obtain the required keys."""
-    result = runner.invoke(main, ["config", "init"], input="\n\n\n\n\n\n")
+    result = runner.invoke(main, ["config", "init"], input="\n\n\n\n")
     output = result.output
     assert "trychroma.com" in output or "chromadb" in output.lower()
     assert "voyageai.com" in output or "voyage" in output.lower()
@@ -174,7 +172,7 @@ def test_config_init_skips_keys_already_in_env(
 ) -> None:
     """nx config init does not prompt for keys already set in environment."""
     monkeypatch.setenv("CHROMA_API_KEY", "env-chroma")
-    result = runner.invoke(main, ["config", "init"], input="\n\n\n\n\n\n")
+    result = runner.invoke(main, ["config", "init"], input="\n\n\n")
     # Should mention the key is already set via env, not prompt to re-enter
     assert "env-chroma" in result.output or "already set" in result.output.lower() or "environment" in result.output.lower()
 

@@ -6,7 +6,7 @@ failures=()
 
 # Check bd (beads) CLI is available
 if ! command -v bd &>/dev/null; then
-    failures+=("bd CLI not found")
+    failures+=("bd CLI not found — install: https://github.com/BeadsProject/beads")
 fi
 
 # Check nx CLI is available
@@ -18,6 +18,7 @@ else
         failures+=("nx doctor reported issues — run 'nx doctor' for details")
     fi
 fi
+
 
 # Only output if there are failures
 if [ ${#failures[@]} -gt 0 ]; then

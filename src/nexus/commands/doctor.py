@@ -150,6 +150,16 @@ def doctor_cmd() -> None:
              "apt install git                           (Ubuntu/Debian)",
              "https://git-scm.com/downloads")
 
+    # ── bd (beads, optional) ──────────────────────────────────────────────────
+    bd_path = shutil.which("bd")
+    lines.append(_check_line("bd (beads, optional)",        True,
+                              bd_path or "not found — task tracking unavailable, install: https://github.com/BeadsProject/beads"))
+
+    # ── uv (optional) ─────────────────────────────────────────────────────────
+    uv_path = shutil.which("uv")
+    lines.append(_check_line("uv (optional)",               True,
+                              uv_path or "not found — pip install conexus works too"))
+
     # ── Nexus server ──────────────────────────────────────────────────────────
     # Server is optional for most commands; report status but do not fail.
     from nexus.commands.serve import _read_pid, _process_running
@@ -160,11 +170,6 @@ def doctor_cmd() -> None:
                               "not running (optional — needed for search-over-HTTP)"))
     if not server_running:
         _fix(lines, "nx serve start")
-
-    # ── Mixedbread (optional) ─────────────────────────────────────────────────
-    mxbai_key = get_credential("mxbai_api_key")
-    lines.append(_check_line("Mixedbread (MXBAI_API_KEY, optional)", True,
-                              "set" if mxbai_key else "not set — only needed for --mxbai flag"))
 
     click.echo("\n".join(lines))
 

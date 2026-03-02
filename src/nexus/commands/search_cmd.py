@@ -9,7 +9,7 @@ from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
 from nexus.formatters import format_json, format_plain_with_context, format_vimgrep
 from nexus.scoring import apply_hybrid_scoring, rerank_results, round_robin_interleave
-from nexus.search_engine import fetch_mxbai_results, search_cross_corpus
+from nexus.search_engine import search_cross_corpus
 from nexus.types import SearchResult
 
 
@@ -74,8 +74,6 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               help="Merge semantic + ripgrep results for code (0.7*vector + 0.3*frecency)")
 @click.option("--no-rerank", "no_rerank", is_flag=True, default=False,
               help="Disable cross-corpus reranking (use round-robin instead)")
-@click.option("--mxbai", is_flag=True, default=False,
-              help="Fan out to Mixedbread-indexed collections (read-only)")
 @click.option("--vimgrep", is_flag=True, default=False,
               help="Output in path:line:col:content format")
 @click.option("--json", "json_out", is_flag=True, default=False,
@@ -104,7 +102,6 @@ def search_cmd(
     n: int,
     hybrid: bool,
     no_rerank: bool,
-    mxbai: bool,
     vimgrep: bool,
     json_out: bool,
     files_only: bool,
@@ -158,7 +155,7 @@ def search_cmd(
 
     target_collections = list(dict.fromkeys(target_collections))
 
-    if not target_collections and not mxbai:
+    if not target_collections:
         click.echo("no matching collections found — use: nx collection list", err=True)
         return
 
@@ -167,12 +164,6 @@ def search_cmd(
 
     def _retrieve(q: str) -> list[SearchResult]:
         raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter)
-        if mxbai:
-            stores = config.get("mxbai", {}).get("stores", [])
-            num = len(target_collections) or 1
-            per_k = max(5, (n // num) * 2)
-            mxbai_results = fetch_mxbai_results(q, stores=stores, per_k=per_k)
-            raw.extend(mxbai_results)
         if hybrid:
             for cache_path in _find_rg_cache_paths():
                 rg_hits = search_ripgrep(q, cache_path, n_results=n * 2)

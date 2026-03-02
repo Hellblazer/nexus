@@ -3,7 +3,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import nexus.search_engine as se_mod
 from nexus.formatters import format_json, format_vimgrep
 from nexus.scoring import (
     apply_hybrid_scoring,
@@ -122,43 +121,15 @@ def test_cross_corpus_overfetch():
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
     # 2 corpora, n=10 → per_corpus_k = max(5, (10//2)*2) = max(5, 10) = 10
-    with patch("nexus.search_engine._t3_for_search", return_value=mock_t3):
-        search_cross_corpus(
-            query="test", collections=["code__r", "docs__d"],
-            n_results=10, t3=mock_t3
-        )
+    search_cross_corpus(
+        query="test", collections=["code__r", "docs__d"],
+        n_results=10, t3=mock_t3
+    )
     calls = mock_t3.search.call_args_list
     assert len(calls) == 2
     for c in calls:
         assert c.kwargs.get("n_results") == 10 or c.args[2] == 10
 
-
-# ── AC4: Mixedbread graceful degradation ──────────────────────────────────────
-
-def test_mxbai_missing_key_warns_and_returns_empty(capsys, monkeypatch):
-    """When MXBAI_API_KEY is unset, logs a warning and returns empty results."""
-    monkeypatch.delenv("MXBAI_API_KEY", raising=False)
-    results = se_mod.fetch_mxbai_results(query="test", stores=["art"], per_k=5)
-    captured = capsys.readouterr()
-    assert "MXBAI_API_KEY" in (captured.out + captured.err)
-    assert results == []
-
-
-def test_mxbai_with_key_calls_sdk(monkeypatch):
-    """When MXBAI_API_KEY is set, calls Mixedbread SDK and converts results."""
-    monkeypatch.setenv("MXBAI_API_KEY", "test-key")
-    mock_client = MagicMock()
-    chunk = MagicMock()
-    chunk.content.text = "relevant content"
-    chunk.score = 0.95
-    mock_client.stores.search.return_value = MagicMock(chunks=[chunk])
-
-    with patch("nexus.search_engine._mxbai_client", return_value=mock_client):
-        results = se_mod.fetch_mxbai_results(query="test", stores=["art"], per_k=5)
-
-    assert len(results) == 1
-    assert results[0].content == "relevant content"
-    assert results[0].collection == "mxbai__art"
 
 
 # ── AC7: Output formatters ────────────────────────────────────────────────────
@@ -212,26 +183,6 @@ def test_format_json_includes_metadata():
     assert parsed[0].get("source_path") == "./a.py"
 
 
-# ── Behavior: Mixedbread hash determinism ────────────────────────────────────
-
-def test_mxbai_chunk_id_is_deterministic(monkeypatch):
-    """Same Mixedbread chunk content always produces the same SearchResult ID."""
-    monkeypatch.setenv("MXBAI_API_KEY", "test-key")
-    mock_client = MagicMock()
-
-    chunk = MagicMock()
-    chunk.content.text = "identical content"
-    chunk.score = 0.9
-    mock_client.stores.search.return_value = MagicMock(chunks=[chunk])
-
-    with patch("nexus.search_engine._mxbai_client", return_value=mock_client):
-        results_a = se_mod.fetch_mxbai_results(query="q", stores=["art"], per_k=5)
-        results_b = se_mod.fetch_mxbai_results(query="q", stores=["art"], per_k=5)
-
-    assert results_a[0].id == results_b[0].id, (
-        "Mixedbread chunk IDs must be deterministic (no python hash() randomness)"
-    )
-
 
 # ── AC8: min_max_normalize over combined window ───────────────────────────────
 
@@ -250,30 +201,3 @@ def test_min_max_normalize_over_combined_not_per_corpus():
     assert norm_code < norm_doc
 
 
-# ── nexus-6kj: fetch_mxbai_results isolates per-store errors ─────────────────
-
-def test_mxbai_store_error_skipped_other_stores_still_searched(monkeypatch):
-    """When one store raises, remaining stores are still searched."""
-    monkeypatch.setenv("MXBAI_API_KEY", "test-key")
-    mock_client = MagicMock()
-
-    good_chunk = MagicMock()
-    good_chunk.content.text = "good result"
-    good_chunk.score = 0.9
-
-    def fake_search(store_id, query, top_k):
-        if store_id == "bad-store":
-            raise RuntimeError("store unavailable")
-        return MagicMock(chunks=[good_chunk])
-
-    mock_client.stores.search.side_effect = fake_search
-
-    with patch("nexus.search_engine._mxbai_client", return_value=mock_client):
-        results = se_mod.fetch_mxbai_results(
-            query="test", stores=["bad-store", "good-store"], per_k=5
-        )
-
-    # Bad store skipped, good store returned 1 result
-    assert len(results) == 1
-    assert results[0].content == "good result"
-    assert results[0].collection == "mxbai__good-store"

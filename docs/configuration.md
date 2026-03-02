@@ -19,7 +19,6 @@ Each level is deep-merged, with higher-priority values winning.
 | `chroma_tenant` | `CHROMA_TENANT` | T3 |
 | `chroma_database` | `CHROMA_DATABASE` | T3 (base name — see below) |
 | `voyage_api_key` | `VOYAGE_API_KEY` | T3 (embeddings) |
-| `mxbai_api_key` | `MXBAI_API_KEY` | Mixedbread search (optional) |
 
 Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.config/nexus/config.yml`.
 

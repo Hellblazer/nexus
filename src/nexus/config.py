@@ -25,7 +25,6 @@ CREDENTIALS: dict[str, str] = {
     "chroma_tenant":     "CHROMA_TENANT",
     "chroma_database":   "CHROMA_DATABASE",
     "voyage_api_key":    "VOYAGE_API_KEY",
-    "mxbai_api_key":     "MXBAI_API_KEY",
 }
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
@@ -38,9 +37,6 @@ _DEFAULTS: dict[str, Any] = {
     },
     "embeddings": {
         "rerankerModel": "rerank-2.5",
-    },
-    "mxbai": {
-        "stores": [],
     },
     "chromadb": {
         "tenant": "",

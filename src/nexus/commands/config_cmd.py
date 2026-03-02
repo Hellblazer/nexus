@@ -20,7 +20,6 @@ _SIGNUP = {
     "chroma_tenant":     "https://trychroma.com  (Cloud → Settings → Tenant ID)",
     "chroma_database":   "https://trychroma.com  (Cloud → Settings → Database)",
     "voyage_api_key":    "https://voyageai.com   (Dashboard → API Keys)",
-    "mxbai_api_key":     "https://mixedbread.ai  (Dashboard → API Keys)  [optional]",
 }
 
 
@@ -141,7 +140,6 @@ def config_init() -> None:
         ("chroma_tenant",     "ChromaDB tenant ID"),
         ("chroma_database",   "ChromaDB database name"),
         ("voyage_api_key",    "Voyage AI API key"),
-        ("mxbai_api_key",     "Mixedbread API key (optional — press Enter to skip)"),
     ]
 
     for key, label in _required:

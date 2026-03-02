@@ -16,7 +16,6 @@ nx search "query" --corpus docs            # docs collections only
 nx search "query" --corpus knowledge       # knowledge collections only
 nx search "query" --corpus code --corpus docs  # multi-corpus with reranker merge
 nx search "query" --hybrid                 # semantic + ripgrep + git frecency (code only)
-nx search "query" --mxbai                  # fan out to Mixedbread-indexed collections
 nx search "query" --vimgrep               # path:line:col:content output
 nx search "query" --json                   # JSON array output
 nx search "query" --files                  # unique file paths only
