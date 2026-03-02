@@ -115,28 +115,27 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
    - `nx/CHANGELOG.md`: add release entry
    - `.claude-plugin/marketplace.json`: bump `"version"` field
 
-5. **Commit the release**
+5. **Commit the release on a branch**
    ```bash
+   git checkout -b release/vX.Y.Z
    git add pyproject.toml CHANGELOG.md nx/CHANGELOG.md .claude-plugin/marketplace.json
    git commit -m "Release vX.Y.Z"
+   git push -u origin release/vX.Y.Z
+   gh pr create --title "Release vX.Y.Z" --body "Version bump and changelog for vX.Y.Z."
    ```
 
-6. **Create a tag**
+6. **After the PR merges, tag on main**
    ```bash
+   git checkout main && git pull
    git tag vX.Y.Z
+   git push origin vX.Y.Z
    ```
    Release notes are extracted automatically from the matching `## [X.Y.Z]` section in `CHANGELOG.md`.
 
-7. **Push branch and tag**
-   ```bash
-   git push origin main
-   git push origin vX.Y.Z
-   ```
-
-8. **CI publishes automatically**
+7. **CI publishes automatically**
    The `release.yml` workflow triggers on `v*` tags, runs tests, builds the wheel, publishes to PyPI via OIDC trusted publisher, and creates a GitHub release.
 
-9. **Yank pre-release versions** (if applicable)
+8. **Yank pre-release versions** (if applicable)
    Go to https://pypi.org/manage/project/conexus/releases/ and yank any versions that should not be resolved by `pip install conexus`.
 
 ### One-time Release Infrastructure Setup

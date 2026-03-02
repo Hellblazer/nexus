@@ -2,11 +2,11 @@
 
 ## T2: The Local Store
 
-T2 is a local SQLite database that replaced the AllPepper Memory Bank MCP
-server. The model is simple: every entry has a **project**, a **title**, and
-**content** — like a flat filesystem where project is the directory and title
-is the filename. Entries can have tags, a TTL, and full-text search via FTS5.
-No API keys, no network. It survives restarts.
+T2 is a local SQLite database with a simple model: every entry has a
+**project**, a **title**, and **content** — like a flat filesystem where
+project is the directory and title is the filename. Entries can have tags,
+a TTL, and full-text search via FTS5. No API keys, no network. It survives
+restarts.
 
 ```bash
 nx memory put "auth uses JWT with 24h expiry" --project myrepo --title auth-notes

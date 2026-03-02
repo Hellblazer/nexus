@@ -12,7 +12,7 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 Backed by a per-session `chromadb.HttpClient` connecting to a ChromaDB server process started by the `SessionStart` hook. Uses `DefaultEmbeddingFunction` (MiniLM-L6-v2, local ONNX). No API keys required.
 
-When a parent Claude Code session starts, the `SessionStart` hook allocates a free localhost port, launches a ChromaDB server (`chroma run`), and writes the server address and session ID to `~/.config/nexus/sessions/{ppid}.session`. Child agents spawned via the Agent tool walk the OS PPID chain to find the nearest ancestor session file and connect to the same server — they share scratch space and see each other's entries. Concurrent independent Claude Code windows stay isolated because they have disjoint OS process trees.
+When a parent Claude Code session starts, the `SessionStart` hook allocates a free localhost port, launches a ChromaDB server, and writes the server address and session ID to `~/.config/nexus/sessions/{ppid}.session`. Child agents spawned via the Agent tool walk the OS PPID chain to find the nearest ancestor session file and connect to the same server — they share scratch space and see each other's entries. Concurrent independent Claude Code windows stay isolated because they have disjoint OS process trees.
 
 Falls back to a local `EphemeralClient` (with a warning) when no server record is found — T1 functions locally for that process but subagents get isolated sessions. This activates in restricted container environments where the server process cannot start, or when `ps` is unavailable.
 
@@ -22,7 +22,7 @@ Everything is wiped at session end: the `SessionEnd` hook stops the ChromaDB ser
 
 ## T2 -- Memory Bank
 
-A local SQLite database that replaced the AllPepper Memory Bank MCP server. Every entry has a project, a title, and content — like a flat filesystem where project is the directory and title is the filename. Entries can have tags and an optional TTL. FTS5 provides keyword search with no API call. Stored at `~/.config/nexus/memory.db`.
+A local SQLite database. Every entry has a project, a title, and content — like a flat filesystem where project is the directory and title is the filename. Entries can have tags and an optional TTL. FTS5 provides keyword search with no API call. Stored at `~/.config/nexus/memory.db`.
 
 T2 is the persistent local layer that bridges sessions. Notes, project state, and agent relay context survive restarts here. Different usage patterns share the same simple model:
 

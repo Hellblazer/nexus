@@ -90,9 +90,6 @@ decision to its work items.
 
 Automated connections:
 
-- `/rdr-close` creates beads (epic + task beads) for implementation tracking.
-  The `epic_bead` field in each RDR's T2 record links the decision to its
-  work items.
 - `nx search "topic"` against the knowledge corpus surfaces RDR decisions as prior art during planning.
 - `rdr_hook.py` reports RDR document count and indexing status at session start.
 
@@ -119,5 +116,5 @@ write another RDR:
    implementation agents concrete work items tracked via `bd`. The
    `SubagentStart` hook injects T2 memory context and the active bead, so
    spawned agents know what task they're continuing.
-5. **Post-implementation**: the post-mortem template captures what was learned,
+6. **Post-implementation**: the post-mortem template captures what was learned,
    which often feeds into the next RDR.
