@@ -2,15 +2,15 @@
 title: "pdfplumber Extraction Tier for Complex-Table PDFs"
 id: RDR-012
 type: architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-03-01
 updated: 2026-03-01
 accepted_date: "2026-03-01"
-closed_date: ""
-close_reason: ""
+closed_date: "2026-03-01"
+close_reason: "implemented"
 gate_result: "BLOCKED 2026-03-01 — revised"
 gate_date: ""
 related_issues: []
