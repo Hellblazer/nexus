@@ -136,6 +136,14 @@ def index_repo_cmd(
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--corpus", default="default", show_default=True, help="Corpus name for docs__ collection.")
 @click.option(
+    "--collection",
+    default=None,
+    help=(
+        "Fully-qualified T3 collection name (e.g. knowledge__delos). "
+        "Overrides --corpus when set."
+    ),
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -144,8 +152,8 @@ def index_repo_cmd(
         "Prints a chunk preview so you can verify extraction before indexing for real."
     ),
 )
-def index_pdf_cmd(path: Path, corpus: str, dry_run: bool) -> None:
-    """Extract and index a PDF document into T3 docs__CORPUS."""
+def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool) -> None:
+    """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     from nexus.doc_indexer import index_pdf
 
     path = path.resolve()
@@ -164,14 +172,15 @@ def index_pdf_cmd(path: Path, corpus: str, dry_run: bool) -> None:
             return [v.tolist() for v in ef(texts)], model
 
         click.echo(f"Indexing {path}…")
-        n = index_pdf(path, corpus=corpus, t3=local_t3, embed_fn=_local_embed)
+        n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed)
 
         if n == 0:
             click.echo("No chunks produced (file may already be indexed or extraction failed).")
             return
 
         # Retrieve indexed chunks from the ephemeral collection for preview
-        col = local_t3.get_or_create_collection(f"docs__{corpus}")
+        col_name = collection if collection else f"docs__{corpus}"
+        col = local_t3.get_or_create_collection(col_name)
         result = col.get(include=["documents", "metadatas"])
         docs: list[str] = result.get("documents") or []
         metas: list[dict] = result.get("metadatas") or []
@@ -199,7 +208,7 @@ def index_pdf_cmd(path: Path, corpus: str, dry_run: bool) -> None:
         return
 
     click.echo(f"Indexing {path}…")
-    n = index_pdf(path, corpus=corpus)
+    n = index_pdf(path, corpus=corpus, collection_name=collection)
     click.echo(f"Indexed {n} chunk(s).")
 
 

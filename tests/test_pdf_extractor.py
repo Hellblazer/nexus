@@ -405,3 +405,23 @@ def test_extract_falls_back_to_markdown_if_pdfplumber_raises(extractor, dummy_pd
                     result = extractor.extract(dummy_pdf)
 
     assert result.metadata["extraction_method"] == "pymupdf4llm_markdown"
+
+
+def test_extract_with_pdfplumber_strips_cid_artifacts(extractor, dummy_pdf):
+    """(cid:X) sequences produced by CID fonts without Unicode mappings are removed."""
+    pages_data = [
+        {
+            "page_number": 1,
+            "prose": "Hello(cid:3) world(cid:11) text.",
+            "tables": [],
+        }
+    ]
+    mock_pdfplumber = _make_mock_pdfplumber(pages_data)
+    with patch.dict("sys.modules", {"pdfplumber": mock_pdfplumber}):
+        result = extractor._extract_with_pdfplumber(dummy_pdf)
+
+    assert "(cid:3)" not in result.text
+    assert "(cid:11)" not in result.text
+    # Surrounding words must still be present
+    assert "Hello" in result.text
+    assert "world" in result.text

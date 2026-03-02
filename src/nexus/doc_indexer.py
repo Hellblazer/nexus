@@ -320,8 +320,18 @@ def _markdown_chunks(
     return prepared
 
 
-def index_pdf(pdf_path: Path, corpus: str, t3: Any = None, *, embed_fn: EmbedFn | None = None) -> int:
-    """Index *pdf_path* into the T3 ``docs__{corpus}`` collection.
+def index_pdf(
+    pdf_path: Path,
+    corpus: str,
+    t3: Any = None,
+    *,
+    collection_name: str | None = None,
+    embed_fn: EmbedFn | None = None,
+) -> int:
+    """Index *pdf_path* into a T3 collection.
+
+    By default the collection is ``docs__{corpus}``.  Pass *collection_name*
+    to override (e.g. ``knowledge__delos`` for external reference corpora).
 
     Returns the number of chunks indexed, or 0 if skipped (no credentials or
     content unchanged since last index with the same embedding model).
@@ -330,7 +340,7 @@ def index_pdf(pdf_path: Path, corpus: str, t3: Any = None, *, embed_fn: EmbedFn 
     ONNX function for dry-run mode).  When *embed_fn* is provided the Voyage
     credential check is bypassed.
     """
-    return _index_document(pdf_path, corpus, _pdf_chunks, t3=t3, embed_fn=embed_fn)
+    return _index_document(pdf_path, corpus, _pdf_chunks, t3=t3, collection_name=collection_name, embed_fn=embed_fn)
 
 
 def index_markdown(

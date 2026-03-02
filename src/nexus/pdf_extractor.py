@@ -207,6 +207,11 @@ class PDFExtractor:
                 parts = [prose] if prose.strip() else []
                 parts.extend(table_blocks)
                 page_text = "\n\n".join(parts).strip()
+                # Strip CID font artifacts emitted by pdfminer for characters
+                # with no Unicode mapping. The original character is
+                # unrecoverable; removing the placeholder entirely (not
+                # replacing with a space) avoids spurious word breaks.
+                page_text = re.sub(r"\(cid:\d+\)", "", page_text)
 
                 if page_text:
                     page_boundaries.append(
