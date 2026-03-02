@@ -15,6 +15,7 @@ Active and closed RDRs for the Nexus project. Updated by `/rdr-list` and `/rdr-c
 | [RDR-010](rdr-010-t1-scratch-persistent-bounded-store.md) | T1 Scratch: Cross-Process Session Sharing via ChromaDB Server + PPID Chain | Architecture | Closed | 2026-03-01 |
 | [RDR-011](rdr-011-pdf-ingest-test-coverage.md) | PDF Ingest Test Coverage: Unit, Subsystem, and E2E with Local ChromaDB | Testing | Closed | 2026-03-01 |
 | [RDR-012](rdr-012-pdfplumber-extraction-tier.md) | pdfplumber Extraction Tier for Complex-Table PDFs | Architecture | Closed | 2026-03-01 |
+| [RDR-013](rdr-013-remove-nx-pm-layer.md) | Remove nx pm Layer — Use T2 Memory Directly | Architecture | Closed | 2026-03-01 |
 
 ## RDR Process Documentation
 

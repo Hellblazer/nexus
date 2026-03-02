@@ -151,29 +151,6 @@ nx scratch put "hypothesis: cache invalidation is stale"
 
 ---
 
-## nx pm
-
-Project management (T2 + T3). See [Project Management](project-management.md) for the lifecycle and integration details.
-
-```
-nx pm resume
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `init` | Initialize PM for current git repo |
-| `resume` | Print computed PM continuation (phase, blockers, recent activity) |
-| `status` | Show current phase, last-updated agent, and open blockers |
-| `phase next` | Snapshot current context and advance to the next phase |
-| `block BLOCKER` | Record a blocker |
-| `unblock LINE` | Remove a blocker by 1-based line number |
-| `search QUERY` | FTS5 search across PM docs |
-| `expire` | Remove TTL-expired PM entries from T2 |
-
-**`init`, `resume`, `status`, `block`, `unblock`, `phase next`, `search`, `expire` flags:** `--project NAME` (defaults to current git repo name)
-
----
-
 ## nx collection
 
 Manage T3 cloud collections.

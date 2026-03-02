@@ -1,4 +1,4 @@
-"""AC2–AC6: session hooks, PM detection, doctor checks."""
+"""AC2–AC6: session hooks, memory summary, doctor checks."""
 import json
 import os
 import time
@@ -81,35 +81,13 @@ def test_hook_and_cli_use_same_getsid_anchor(
     ), f"Recovered session ID is not a UUID4: {written['session_id']!r}"
 
 
-# ── AC3: SessionStart PM detection ────────────────────────────────────────────
+# ── AC3: SessionStart memory summary ─────────────────────────────────────────
 
-def test_session_start_pm_detection_injects_computed_resume(
+def test_session_start_outputs_memory_summary(
     runner: CliRunner, fake_home: Path
 ) -> None:
-    """SessionStart injects computed PM resume for PM projects (detected via BLOCKERS.md with pm tag)."""
+    """SessionStart outputs recent memory summary."""
     mock_db = MagicMock()
-    mock_db.get.return_value = {
-        "content": "# Blockers\n",
-        "title": "BLOCKERS.md",
-        "tags": "pm,blockers",
-    }
-    _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_db))
-    with patch("nexus.hooks._infer_repo", return_value="myrepo"):
-        with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-            with patch("nexus.pm.pm_resume", return_value="## PM Resume: myrepo\nPhase: 3"):
-                result = runner.invoke(main, ["hook", "session-start"])
-
-    assert "Phase: 3" in result.output or "myrepo" in result.output
-
-
-# ── AC4: SessionStart non-PM memory summary ───────────────────────────────────
-
-def test_session_start_non_pm_outputs_memory_summary(
-    runner: CliRunner, fake_home: Path
-) -> None:
-    """SessionStart outputs recent memory summary for non-PM projects."""
-    mock_db = MagicMock()
-    mock_db.get.return_value = None  # No PM project
     mock_db.list_entries.return_value = [
         {"id": 1, "title": "note.md", "agent": "coder", "timestamp": "2026-01-01T10:00:00Z"},
     ]

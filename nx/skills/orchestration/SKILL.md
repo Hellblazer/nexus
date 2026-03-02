@@ -104,7 +104,6 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 | Research topic | deep-research-synthesizer | -> knowledge-tidier |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 
-Note: subagent-start hook auto-injects nx pm context when `.pm/` directory exists.
 
 ## Success Criteria
 

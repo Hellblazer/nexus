@@ -41,7 +41,6 @@ nx memory promote <id> --collection knowledge  # push to T3
 
 - bare `{repo}` — general project memory and notes
 - `{repo}_rdr` — RDR documents and gate results (populated by `/rdr-create`)
-- `{repo}_pm` — project management context (populated by `nx pm`)
 
 The session hook discovers all populated namespaces by prefix scan; content stored under any `{repo}_*` namespace surfaces at session start.
 
@@ -89,14 +88,6 @@ nx index md  <path> --corpus notes
 ## Project management (PM)
 
 ```bash
-nx pm init                                 # initialise for current git repo
-nx pm resume                               # inject continuation context (auto-called by hooks)
-nx pm status                               # phase, agent, blockers
-nx pm block "waiting on API approval"
-nx pm unblock 1
-nx pm phase next
-nx pm search "what did we decide about caching"
-nx pm expire
 ```
 
 ## Health and server

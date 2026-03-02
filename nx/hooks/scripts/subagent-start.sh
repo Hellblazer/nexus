@@ -3,20 +3,6 @@
 # SubagentStart Hook
 # Injects context when agents spawn
 
-# Inject PM context via nx pm resume + status if available
-if command -v nx &> /dev/null; then
-  RESUME=$(nx pm resume 2>/dev/null)
-  STATUS=$(nx pm status 2>/dev/null)
-  if [[ -n "$RESUME" || -n "$STATUS" ]]; then
-    echo "## PM Context"
-    [[ -n "$RESUME" ]] && echo "$RESUME" && echo ""
-    [[ -n "$STATUS" ]] && echo "$STATUS" && echo ""
-  fi
-else
-  # nx not available — skip PM context injection gracefully
-  true
-fi
-
 # Show available T2 memory docs for active project (all namespaces via prefix scan)
 if command -v git &> /dev/null; then
   PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)

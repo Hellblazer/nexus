@@ -8,7 +8,7 @@
 
 - [CLI Reference](cli-reference.md) — Every command, every flag
 - [Storage Tiers](storage-tiers.md) — T1/T2/T3 architecture and data flow
-- [Project Management](project-management.md) — Progress tracking, blockers, archive, session integration
+- [Project Management](project-management.md) — T2 memory, beads integration, session context
 - [Repo Indexing](repo-indexing.md) — Smart file classification, chunking, frecency
 - [Configuration](configuration.md) — Config hierarchy, .nexus.yml, settings
 

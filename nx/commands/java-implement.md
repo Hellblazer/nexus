@@ -16,20 +16,8 @@ description: Implement feature using java-developer agent
     echo ""
   fi
 
-  # Check for approved plan via nx pm
-  if command -v nx &> /dev/null && nx pm status &> /dev/null 2>&1; then
-    echo "### Plan Status"
-    echo '```'
-    nx pm status 2>&1 | head -20 || echo "No PM context available"
-    echo '```'
-    echo ""
-    echo "**Note:** Ensure plan has been validated by plan-auditor before implementing."
-    echo ""
-  else
-    echo "### Plan Status"
-    echo "No active project found. Run /create-plan first to create an implementation plan."
-    echo ""
-  fi
+  echo "**Note:** Ensure plan has been validated by plan-auditor before implementing."
+  echo ""
 
   # Bead context
   echo "### Active Work"

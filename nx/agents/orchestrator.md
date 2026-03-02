@@ -138,7 +138,6 @@ If the task requires multiple stages:
 - Ensure routed agents receive relevant bead IDs
 - Verify agents update bead status appropriately
 - Create orchestration beads for complex pipelines: bd create "Orchestrate: task" -t task
-- Check nx pm status for current project context and blockers before routing
 
 
 ## Context Protocol
@@ -197,7 +196,6 @@ When routing to an agent, use the standardized relay format from [RELAY_TEMPLATE
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
 - nx scratch: [scratch IDs or "none"]
-- nx pm context: [Phase N, active blockers or "none"]
 - Files: [key files or "none"]
 
 ### Deliverable

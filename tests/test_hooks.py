@@ -93,29 +93,6 @@ def test_session_start_db_unavailable(mock_repo, mock_sid) -> None:
     assert "memory unavailable" in output
 
 
-@patch("nexus.hooks.generate_session_id", return_value="test-uuid")
-@patch("nexus.hooks._infer_repo", return_value="myrepo")
-def test_session_start_pm_project(mock_repo, mock_sid, tmp_path: Path) -> None:
-    """PM project triggers pm_resume instead of memory listing."""
-    from nexus.db.t2 import T2Database
-
-    db_path = tmp_path / "memory.db"
-    with T2Database(db_path) as db:
-        db.put(project="myrepo", title="BLOCKERS.md", content="no blockers", tags="pm")
-
-    with (
-        patch("nexus.hooks._default_db_path", return_value=db_path),
-        patch("nexus.hooks.sweep_stale_sessions"),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
-        patch("nexus.hooks.write_claude_session_id"),
-        patch("nexus.hooks.start_t1_server", return_value=("127.0.0.1", 51823, 9900, "/tmp/x")),
-        patch("nexus.hooks.write_session_record"),
-    ):
-        output = session_start()
-
-    assert "test-uuid" in output
-
-
 def test_session_start_adopts_ancestor_session(tmp_path: Path) -> None:
     """Child agent adopts ancestor session ID — no new server started."""
     ancestor = {
