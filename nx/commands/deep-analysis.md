@@ -32,14 +32,10 @@ description: Thorough analysis of complex problems using deep-analyst agent
   echo "The deep-analyst uses mcp__sequential-thinking__sequentialthinking: hypothesis → evidence → evaluation → conclusion."
   echo "For cross-cutting issues, this agent explores multiple components before converging on root cause."
 
-  # Project management context
-  echo "### Project Management Context"
+  # Project context
+  echo "### Project Context"
   echo ""
   if command -v nx &> /dev/null; then
-    echo "**PM Status:**"
-    echo '```'
-    echo '```'
-    echo ""
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
     if [ -n "$PROJECT" ]; then
       echo "**T2 Memory ($PROJECT):**"

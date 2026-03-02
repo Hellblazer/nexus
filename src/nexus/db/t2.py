@@ -292,7 +292,7 @@ class T2Database:
         """FTS5 search scoped to entries whose tags contain *tag*.
 
         Uses boundary matching via ``(',' || tags || ',') LIKE '%,{tag},%'``
-        to avoid false positives (e.g. 'pm' matching 'pm-archived').
+        to avoid false positives (e.g. 'rdr' matching 'rdr-archived').
         """
         sql = """
             SELECT m.id, m.project, m.title, m.session, m.agent,

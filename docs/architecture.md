@@ -24,7 +24,7 @@ CLI (cli.py + commands/)
     │
     └── Storage tiers
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
-          T2: SQLite + FTS5 (persistent memory, PM state)
+          T2: SQLite + FTS5 (persistent memory, project context)
           T3: ChromaDB Cloud (four databases) + Voyage AI (permanent knowledge)
                 {base}_code      → code__*       voyage-code-3 index / voyage-4 query
                 {base}_docs      → docs__*       voyage-context-3 (CCE) index + query

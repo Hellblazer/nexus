@@ -60,7 +60,7 @@ if [[ "$TOOL" == "Bash" ]]; then
   fi
 
   # Nexus read-only commands
-  if [[ "$COMMAND" =~ ^nx\ (search|store\ list|store\ get|memory\ list|memory\ get|memory\ search|scratch\ list|pm\ status|pm\ list|doctor|health|index) ]]; then
+  if [[ "$COMMAND" =~ ^nx\ (search|store\ list|store\ get|memory\ list|memory\ get|memory\ search|scratch\ list|doctor|health|index) ]]; then
     echo "allow"
     exit 0
   fi

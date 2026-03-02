@@ -35,7 +35,7 @@ def _patch_session_start(tmp_path: Path, *, ancestor=None, server_raises=False):
 @patch("nexus.hooks.generate_session_id", return_value="test-uuid")
 @patch("nexus.hooks._infer_repo", return_value="myrepo")
 def test_session_start_no_pm_no_entries(mock_repo, mock_sid, tmp_path: Path) -> None:
-    """Non-PM repo with no memory entries outputs fallback message."""
+    """Repo with no memory entries outputs fallback message."""
     with (
         patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
         patch("nexus.hooks.sweep_stale_sessions"),
@@ -53,7 +53,7 @@ def test_session_start_no_pm_no_entries(mock_repo, mock_sid, tmp_path: Path) -> 
 @patch("nexus.hooks.generate_session_id", return_value="test-uuid")
 @patch("nexus.hooks._infer_repo", return_value="myrepo")
 def test_session_start_with_memory_entries(mock_repo, mock_sid, tmp_path: Path) -> None:
-    """Non-PM repo with memory entries lists them."""
+    """Repo with memory entries lists them."""
     from nexus.db.t2 import T2Database
 
     db_path = tmp_path / "memory.db"

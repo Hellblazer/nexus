@@ -44,14 +44,10 @@ description: Analyze codebase using codebase-deep-analyzer agent
   find . -type d -name "src" 2>/dev/null | grep -v node_modules | grep -v target | head -10 || echo "No src directories found"
   echo '```'
 
-  # Project management context
-  echo "### Project Management Context"
+  # Project context
+  echo "### Project Context"
   echo ""
   if command -v nx &> /dev/null; then
-    echo "**PM Status:**"
-    echo '```'
-    echo '```'
-    echo ""
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
     if [ -n "$PROJECT" ]; then
       echo "**T2 Memory ($PROJECT):**"

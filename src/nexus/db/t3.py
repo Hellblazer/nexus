@@ -38,7 +38,7 @@ class T3Database:
     - ``{base}_knowledge`` for ``knowledge__*`` collections and fallback
 
     All routing is internal to this class.  Every public caller
-    (``search_cmd``, ``indexer``, ``pm``, etc.) remains unchanged.
+    (``search_cmd``, ``indexer``, etc.) remains unchanged.
 
     The ``_client`` and ``_ef_override`` keyword arguments are injection
     points for testing — pass an ``EphemeralClient`` and

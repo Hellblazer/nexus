@@ -5,7 +5,7 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 | Tier | Storage | Network | Durability | Use |
 |------|---------|---------|------------|-----|
 | T1 -- scratch | ChromaDB HTTP server (per-session) | Localhost only | Session only | Working notes, hypotheses |
-| T2 -- memory | SQLite + FTS5 (WAL) | None | Survives restarts | Per-project notes, PM state |
+| T2 -- memory | SQLite + FTS5 (WAL) | None | Survives restarts | Per-project notes, session context |
 | T3 -- knowledge | ChromaDB cloud + Voyage AI | Required | Permanent | Semantic search, indexed code/docs |
 
 ## T1 -- Session Scratch

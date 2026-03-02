@@ -85,11 +85,6 @@ nx index md  <path> --corpus notes
 
 **Large-file warning**: before indexing, `nx index repo` scans for code files exceeding 30× the chunk size in lines. When large files are found a warning is printed suggesting a smaller `--chunk-size`. Suppress with `--no-chunk-warning` once you have tuned the value.
 
-## Project management (PM)
-
-```bash
-```
-
 ## Health and server
 
 ```bash

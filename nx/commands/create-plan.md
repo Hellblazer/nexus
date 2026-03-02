@@ -41,7 +41,7 @@ description: Create implementation plan using strategic-planner agent
   echo '```'
 
   if command -v nx &> /dev/null; then
-    echo "### PM Context"
+    echo "### Project Context"
     echo ""
 
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)

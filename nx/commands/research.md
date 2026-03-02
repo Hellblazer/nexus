@@ -24,14 +24,10 @@ description: Research topic using deep-research-synthesizer agent
   echo "The agent will first search nx store for existing research on this topic."
   echo "Prior findings will be incorporated into the synthesis."
 
-  # Project management context
-  echo "### Project Management Context"
+  # Project context
+  echo "### Project Context"
   echo ""
   if command -v nx &> /dev/null; then
-    echo "**PM Status:**"
-    echo '```'
-    echo '```'
-    echo ""
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
     if [ -n "$PROJECT" ]; then
       echo "**T2 Memory ($PROJECT):**"

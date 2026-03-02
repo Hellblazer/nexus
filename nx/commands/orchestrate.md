@@ -35,14 +35,10 @@ description: Route request to appropriate agent using orchestrator
   echo "Analysis: deep-analyst, codebase-deep-analyzer, strategic-planner"
   echo "Utility: knowledge-tidier, orchestrator, pdf-chromadb-processor"
 
-  # Project management context
-  echo "### Project Management Context"
+  # Project context
+  echo "### Project Context"
   echo ""
   if command -v nx &> /dev/null; then
-    echo "**PM Status:**"
-    echo '```'
-    echo '```'
-    echo ""
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
     if [ -n "$PROJECT" ]; then
       echo "**T2 Memory ($PROJECT):**"

@@ -290,22 +290,22 @@ def test_t2_delete_removes_from_fts_index(db: T2Database) -> None:
 
 def test_t2_search_by_tag(db: T2Database) -> None:
     """search_by_tag() returns only entries whose tags contain the specified tag."""
-    db.put(project="nexus", title="phase1.md", content="authentication design", tags="pm,phase:1")
+    db.put(project="nexus", title="phase1.md", content="authentication design", tags="rdr,phase:1")
     db.put(project="nexus", title="notes.md", content="authentication notes", tags="notes")
-    db.put(project="arcaneum", title="arch.md", content="authentication architecture", tags="pm,arch")
+    db.put(project="arcaneum", title="arch.md", content="authentication architecture", tags="rdr,arch")
 
-    results = db.search_by_tag("authentication", "pm")
+    results = db.search_by_tag("authentication", "rdr")
     assert len(results) == 2
     projects = {r["project"] for r in results}
     assert projects == {"nexus", "arcaneum"}
 
 
 def test_t2_search_by_tag_boundary_matching(db: T2Database) -> None:
-    """search_by_tag() uses boundary matching — 'pm' does not match 'pm-archived'."""
-    db.put(project="myrepo", title="active.md", content="active doc", tags="pm,context")
-    db.put(project="myrepo", title="archived.md", content="archived doc", tags="pm-archived,context")
+    """search_by_tag() uses boundary matching — 'rdr' does not match 'rdr-archived'."""
+    db.put(project="myrepo", title="active.md", content="active doc", tags="rdr,context")
+    db.put(project="myrepo", title="archived.md", content="archived doc", tags="rdr-archived,context")
 
-    results = db.search_by_tag("doc", "pm")
+    results = db.search_by_tag("doc", "rdr")
     assert len(results) == 1
     assert results[0]["title"] == "active.md"
 
@@ -314,7 +314,7 @@ def test_t2_search_by_tag_no_match(db: T2Database) -> None:
     """search_by_tag() returns empty list when no entries match the tag."""
     db.put(project="proj", title="notes.md", content="some content", tags="notes")
 
-    results = db.search_by_tag("content", "pm")
+    results = db.search_by_tag("content", "rdr")
     assert results == []
 
 
@@ -403,12 +403,12 @@ def test_t2_search_by_tag_single_letter(db: T2Database) -> None:
 
 
 def test_t2_search_by_tag_no_false_positive(db: T2Database) -> None:
-    """Tag 'pm' does not match 'pm-archived' or 'rpm'."""
-    db.put(project="proj", title="active.md", content="active doc", tags="pm")
-    db.put(project="proj", title="archived.md", content="archived doc", tags="pm-archived")
-    db.put(project="proj", title="rpm.md", content="rpm doc", tags="rpm")
+    """Tag 'rdr' does not match 'rdr-archived' or 'xrdr'."""
+    db.put(project="proj", title="active.md", content="active doc", tags="rdr")
+    db.put(project="proj", title="archived.md", content="archived doc", tags="rdr-archived")
+    db.put(project="proj", title="xrdr.md", content="xrdr doc", tags="xrdr")
 
-    results = db.search_by_tag("doc", "pm")
+    results = db.search_by_tag("doc", "rdr")
     assert len(results) == 1
     assert results[0]["title"] == "active.md"
 
