@@ -270,7 +270,7 @@ class T2Database:
         return [{"project": row[0], "last_updated": row[1]} for row in rows]
 
     def search_glob(self, query: str, project_glob: str) -> list[dict[str, Any]]:
-        """FTS5 search scoped to projects matching a GLOB pattern (e.g. '*_pm')."""
+        """FTS5 search scoped to projects matching a GLOB pattern (e.g. '*_rdr')."""
         sql = """
             SELECT m.id, m.project, m.title, m.session, m.agent,
                    m.content, m.tags, m.timestamp, m.ttl

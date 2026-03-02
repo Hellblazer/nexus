@@ -5,7 +5,7 @@
 Usage: t2_prefix_scan.py <project_name>
 
 Queries T2 for every namespace whose name starts with *project_name*
-(e.g. "nexus", "nexus_rdr", "nexus_pm") and prints a compact summary
+(e.g. "nexus", "nexus_rdr", "nexus_knowledge") and prints a compact summary
 formatted for session injection.
 
 Cap algorithm:

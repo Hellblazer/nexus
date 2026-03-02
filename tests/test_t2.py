@@ -143,22 +143,22 @@ def test_t2_list_entries_agent_filter_only(db: T2Database) -> None:
 
 def test_t2_search_glob(db: T2Database) -> None:
     """search_glob() returns results matching both FTS query and project GLOB pattern."""
-    db.put(project="nexus_pm", title="phase1.md", content="authentication design")
+    db.put(project="nexus_rdr", title="phase1.md", content="authentication design")
     db.put(project="nexus_active", title="notes.md", content="authentication notes")
-    db.put(project="arcaneum_pm", title="arch.md", content="authentication architecture")
+    db.put(project="arcaneum_rdr", title="arch.md", content="authentication architecture")
 
-    # Search for 'authentication' scoped to *_pm projects
-    results = db.search_glob("authentication", "*_pm")
+    # Search for 'authentication' scoped to *_rdr projects
+    results = db.search_glob("authentication", "*_rdr")
     assert len(results) == 2
     projects = {r["project"] for r in results}
-    assert projects == {"nexus_pm", "arcaneum_pm"}
+    assert projects == {"nexus_rdr", "arcaneum_rdr"}
 
 
 def test_t2_search_glob_no_match(db: T2Database) -> None:
     """search_glob() returns empty list when no projects match the GLOB pattern."""
     db.put(project="nexus_active", title="notes.md", content="some content")
 
-    results = db.search_glob("content", "*_pm")
+    results = db.search_glob("content", "*_rdr")
     assert results == []
 
 
@@ -168,12 +168,12 @@ def test_get_projects_with_prefix_returns_matching_namespaces(db: T2Database) ->
     """get_projects_with_prefix() returns all projects that start with the prefix."""
     db.put(project="nexus", title="ctx.md", content="main context")
     db.put(project="nexus_rdr", title="006.md", content="rdr entry")
-    db.put(project="nexus_pm", title="phase.md", content="pm entry")
+    db.put(project="nexus_knowledge", title="notes.md", content="knowledge entry")
     db.put(project="other", title="x.md", content="unrelated")
 
     results = db.get_projects_with_prefix("nexus")
     projects = {r["project"] for r in results}
-    assert projects == {"nexus", "nexus_rdr", "nexus_pm"}
+    assert projects == {"nexus", "nexus_rdr", "nexus_knowledge"}
     assert "other" not in projects
 
 
@@ -495,8 +495,8 @@ def test_sanitize_fts5_hyphenated_query_with_project_no_crash(db: T2Database) ->
 
 def test_sanitize_fts5_search_glob_hyphen_no_crash(db: T2Database) -> None:
     """search_glob() with a hyphenated query does not raise OperationalError."""
-    db.put(project="nexus_pm", title="notes.md", content="verification probe")
-    results = db.search_glob("verification-probe", "*_pm")
+    db.put(project="nexus_rdr", title="notes.md", content="verification probe")
+    results = db.search_glob("verification-probe", "*_rdr")
     assert isinstance(results, list)
 
 

@@ -129,10 +129,10 @@ def test_search_raises_on_malformed_fts5_query(db: T2Database) -> None:
 def test_search_glob_raises_on_malformed_fts5_query(db: T2Database) -> None:
     """search_glob with bare FTS5 operator raises ValueError."""
     import pytest
-    db.put(project="proj_pm", title="doc.md", content="some content")
+    db.put(project="proj_rdr", title="doc.md", content="some content")
 
     with pytest.raises(ValueError, match="Invalid search query"):
-        db.search_glob("NOT", "*_pm")
+        db.search_glob("NOT", "*_rdr")
 
 
 
