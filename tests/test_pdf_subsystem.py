@@ -5,6 +5,7 @@ Real PDF extraction + chunking; mocked embed + T3.  These tests prove that the
 pipeline stitches together correctly without requiring API keys or network access.
 
 AC-S1 through AC-S6 from RDR-011.
+AC-S7 through AC-S8 from RDR-012 (pdfplumber tier).
 """
 import subprocess
 from datetime import UTC, datetime
@@ -16,7 +17,58 @@ import pytest
 from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import _pdf_chunks, _sha256, index_pdf
 from nexus.indexer import _git_metadata, _index_pdf_file
+from nexus.pdf_extractor import ExtractionResult, PDFExtractor
 from tests.conftest import set_credentials
+
+
+def _make_ruled_table_pdf(path: Path) -> None:
+    """Create a PDF with a visible ruled table (borders drawn as lines).
+
+    PyMuPDF's find_tables() detects tables via ruling lines; this creates
+    a 2×2 table with explicit line borders so find_tables() returns non-empty.
+    """
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+
+    # Draw a 2-column, 3-row table (header + 2 data rows) with ruling lines.
+    # Coordinates: (x0, y0, x1, y1); origin is top-left in pymupdf.
+    col_xs = [72, 230, 400]   # x positions of 3 vertical borders
+    row_ys = [100, 130, 160, 190]  # y positions of 4 horizontal borders
+    shape = page.new_shape()
+    for y in row_ys:
+        shape.draw_line((col_xs[0], y), (col_xs[-1], y))
+    for x in col_xs:
+        shape.draw_line((x, row_ys[0]), (x, row_ys[-1]))
+    shape.finish(color=(0, 0, 0), width=1)
+    shape.commit()
+
+    # Insert text into cells (positioned inside cell interiors)
+    cell_positions = [
+        (col_xs[0] + 5, row_ys[0] + 22, "Column A"),
+        (col_xs[1] + 5, row_ys[0] + 22, "Column B"),
+        (col_xs[0] + 5, row_ys[1] + 22, "Value 1"),
+        (col_xs[1] + 5, row_ys[1] + 22, "Value 2"),
+        (col_xs[0] + 5, row_ys[2] + 22, "Data X"),
+        (col_xs[1] + 5, row_ys[2] + 22, "Data Y"),
+    ]
+    for x, y, text in cell_positions:
+        page.insert_text((x, y), text, fontsize=10)
+
+    # Add some prose text below the table
+    page.insert_text((72, 250), "This document contains a ruled table above.", fontsize=11)
+
+    doc.save(str(path))
+    doc.close()
+
+
+@pytest.fixture(scope="session")
+def ruled_table_pdf(pdf_fixtures_dir: Path) -> Path:
+    """PDF with a ruled (bordered) table detectable by find_tables()."""
+    path = pdf_fixtures_dir / "ruled_table.pdf"
+    _make_ruled_table_pdf(path)
+    return path
 
 
 def _fake_embed(chunks, model, api_key, input_type="document"):
@@ -222,3 +274,50 @@ class TestIndexPdfFileGitMetadata:
         for meta in metadatas:
             assert meta["git_commit_hash"] == ""
             assert meta["git_branch"] == ""
+
+
+# ── AC-S7 / AC-S8 — pdfplumber rescue tier (RDR-012) ─────────────────────────
+
+class TestPdfplumberRescueTier:
+    """AC-S7 / AC-S8: pdfplumber tier fires for table PDFs; simple PDFs unchanged."""
+
+    def test_pdfplumber_tier_fires_for_table_pdf(self, ruled_table_pdf: Path) -> None:
+        """AC-S7: Ruled-table PDF with deficient markdown → pdfplumber extraction_method."""
+        extractor = PDFExtractor()
+
+        # Simulate pymupdf4llm producing prose-only output (no pipe chars) for a
+        # table PDF — this is the GNN mis-classification failure mode the rescue
+        # path addresses.
+        prose_only = ExtractionResult(
+            text="This document contains a ruled table above. Some prose text here.",
+            metadata={
+                "extraction_method": "pymupdf4llm_markdown",
+                "page_count": 1,
+                "format": "markdown",
+                "page_boundaries": [{"page_number": 1, "start_char": 0, "page_text_length": 60}],
+                "pdf_title": "", "pdf_author": "", "pdf_subject": "",
+                "pdf_keywords": "", "pdf_creator": "", "pdf_producer": "",
+                "pdf_creation_date": "", "pdf_mod_date": "",
+            },
+        )
+
+        with patch.object(extractor, "_has_type3_fonts", return_value=False):
+            with patch.object(extractor, "_extract_markdown", return_value=prose_only):
+                result = extractor.extract(ruled_table_pdf)
+
+        # _markdown_misses_tables runs for real against ruled_table_pdf;
+        # pdfplumber runs for real to produce the rescue output.
+        assert result.metadata["extraction_method"] == "pdfplumber", (
+            f"Expected pdfplumber rescue; got {result.metadata['extraction_method']!r}. "
+            f"Text preview: {result.text[:200]!r}"
+        )
+        assert "|" in result.text, "pdfplumber output should contain Markdown table pipes"
+
+    def test_simple_pdf_stays_on_markdown_tier(self, simple_pdf: Path) -> None:
+        """AC-S8: Simple PDF (no ruled tables) → extraction_method stays pymupdf4llm_markdown."""
+        extractor = PDFExtractor()
+        result = extractor.extract(simple_pdf)
+        assert result.metadata["extraction_method"] == "pymupdf4llm_markdown", (
+            f"Simple PDF should not trigger pdfplumber rescue; "
+            f"got {result.metadata['extraction_method']!r}"
+        )
