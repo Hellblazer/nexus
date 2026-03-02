@@ -51,7 +51,7 @@ Data flows upward (T1 → T2 → T3).
 2. **No ORM** — Direct `sqlite3` for T2. Schema is simple; WAL + FTS5 are stdlib.
 3. **Constructor injection** — Dependencies via constructor, no global singletons.
 4. **Ported, not imported** — SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
-5. **PPID-chain session propagation** — The `SessionStart` hook starts a per-session ChromaDB HTTP server and writes its address to `~/.config/nexus/sessions/{ppid}.session`, keyed by the Claude Code process PID. Child agents walk the OS PPID chain to find the nearest ancestor session file and connect to the same server, sharing T1 scratch across the entire agent tree. Concurrent independent windows stay isolated via disjoint process trees. Falls back to `EphemeralClient` when `chroma` is not on PATH or the PPID chain yields no record.
+5. **PPID-chain session propagation** — The `SessionStart` hook starts a per-session ChromaDB HTTP server (using the `chroma` entry-point co-installed with the package) and writes its address to `~/.config/nexus/sessions/{ppid}.session`, keyed by the Claude Code process PID. Child agents walk the OS PPID chain to find the nearest ancestor session file and connect to the same server, sharing T1 scratch across the entire agent tree. Concurrent independent windows stay isolated via disjoint process trees. Falls back to `EphemeralClient` when the server cannot start or the PPID chain yields no record.
 
 ## Heritage
 

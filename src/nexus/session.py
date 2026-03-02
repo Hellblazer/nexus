@@ -200,19 +200,39 @@ def sweep_stale_sessions(
             pass
 
 
+def _find_chroma() -> str | None:
+    """Return the path to the chroma CLI co-installed with this interpreter.
+
+    Since chromadb is a hard dependency of nexus, the chroma entry-point
+    script is always present in the same bin directory as the nx tool and
+    Python interpreter.  Checking there first avoids requiring the user to
+    manually add it to PATH.  Falls back to a PATH search for unusual installs
+    (system Python, path-only setup, etc.).
+    """
+    import sys as _sys
+    candidate = Path(_sys.executable).parent / "chroma"
+    if candidate.is_file():
+        return str(candidate)
+    import shutil as _shutil
+    return _shutil.which("chroma")
+
+
 def start_t1_server() -> tuple[str, int, int, str]:
     """Allocate a free localhost port and launch a ChromaDB HTTP server.
 
     Returns *(host, port, server_pid, tmpdir)*.
 
-    Raises ``RuntimeError`` if *chroma* is not on PATH or the server does not
-    become ready within the timeout.  The caller is responsible for the fallback.
+    Raises ``RuntimeError`` if the chroma entry-point cannot be located or
+    the server does not become ready within the timeout.  The caller is
+    responsible for the fallback.
     """
-    import shutil as _shutil
     import tempfile
 
-    if not _shutil.which("chroma"):
-        raise RuntimeError("chroma not found on PATH; T1 server cannot start")
+    chroma = _find_chroma()
+    if not chroma:
+        raise RuntimeError(
+            "chroma entry-point not found; reinstall nexus to restore it"
+        )
 
     # Allocate a free port, then release the socket before handing the port to
     # chroma run.  There is an inherent TOCTOU race between releasing the port
@@ -227,7 +247,7 @@ def start_t1_server() -> tuple[str, int, int, str]:
     tmpdir = tempfile.mkdtemp(prefix="nx_t1_")
     proc = subprocess.Popen(
         [
-            "chroma", "run",
+            chroma, "run",
             "--host", _T1_SERVER_HOST,
             "--port", str(port),
             "--path", tmpdir,

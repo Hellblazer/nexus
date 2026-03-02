@@ -14,7 +14,7 @@ Backed by a per-session `chromadb.HttpClient` connecting to a ChromaDB server pr
 
 When a parent Claude Code session starts, the `SessionStart` hook allocates a free localhost port, launches a ChromaDB server (`chroma run`), and writes the server address and session ID to `~/.config/nexus/sessions/{ppid}.session`. Child agents spawned via the Agent tool walk the OS PPID chain to find the nearest ancestor session file and connect to the same server — they share scratch space and see each other's entries. Concurrent independent Claude Code windows stay isolated because they have disjoint OS process trees.
 
-Falls back to a local `EphemeralClient` (with a warning) when no server record is found — T1 functions locally for that process but subagents get isolated sessions. This activates when `chroma` is not on PATH, in restricted container environments, or when `ps` is unavailable.
+Falls back to a local `EphemeralClient` (with a warning) when no server record is found — T1 functions locally for that process but subagents get isolated sessions. This activates in restricted container environments where the server process cannot start, or when `ps` is unavailable.
 
 Everything is wiped at session end: the `SessionEnd` hook stops the ChromaDB server and deletes the backing tmpdir. Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
 

@@ -10,7 +10,6 @@ then lets you search across all of them with a single command.
 - **uv** (package manager) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - **git**
 - **ripgrep** (`rg`) — required for `--hybrid` search. Install via `brew install ripgrep` or your system package manager.
-- **chroma** CLI — required for T1 multi-agent session sharing. Install via `pip install chromadb` or `uv tool install chromadb`.
 
 For T3 (permanent cloud storage), you also need accounts at:
 

@@ -4,6 +4,31 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-03-02
+
+### Removed
+- **`nx pm` command layer** — six slash commands (`/pm-archive`, `/pm-close`, `/pm-list`,
+  `/pm-new`, `/pm-restore`, `/pm-status`), the `project-management-setup` agent, and
+  the `project-setup` command and skill. T2 memory (`nx memory`) replaces all PM
+  functionality directly; the layer added overhead without benefit.
+- **`--mxbai` reference** removed from `nexus/reference.md` (Mixedbread integration
+  removed from CLI).
+- **Superpowers check** removed from `mcp_health_hook.sh` — superpowers is an optional
+  plugin and should not produce session-start warnings.
+
+### Changed
+- `mcp_health_hook.sh`: `bd` not-found message now includes the install URL.
+- `setup.sh`: prints a warning (rather than silently skipping) when `bd` is absent.
+- `nx-preflight.md`: added `uv` prerequisite check as section 5.
+
+## [1.0.0] - 2026-03-01
+
+### Changed
+- Plugin version aligned with Nexus CLI 1.0.0 release.
+- Package name corrected in hook scripts.
+- Skill count updated in README.
+- Free-tier callout added to prerequisite table.
+
 ## [0.7.0] - 2026-03-01
 
 ### Added
