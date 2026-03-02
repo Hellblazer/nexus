@@ -135,11 +135,69 @@ def index_repo_cmd(
 @index.command("pdf")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--corpus", default="default", show_default=True, help="Corpus name for docs__ collection.")
-def index_pdf_cmd(path: Path, corpus: str) -> None:
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help=(
+        "Extract and embed locally using ONNX (no API keys, no cloud writes). "
+        "Prints a chunk preview so you can verify extraction before indexing for real."
+    ),
+)
+def index_pdf_cmd(path: Path, corpus: str, dry_run: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS."""
     from nexus.doc_indexer import index_pdf
 
     path = path.resolve()
+
+    if dry_run:
+        import chromadb
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+        from nexus.db import make_t3
+
+        click.echo("Dry-run mode — local ONNX embeddings, no cloud writes.")
+        ef = DefaultEmbeddingFunction()
+        local_t3 = make_t3(_client=chromadb.EphemeralClient(), _ef_override=ef)
+
+        def _local_embed(texts: list[str], model: str) -> tuple[list[list[float]], str]:
+            return [v.tolist() for v in ef(texts)], model
+
+        click.echo(f"Indexing {path}…")
+        n = index_pdf(path, corpus=corpus, t3=local_t3, embed_fn=_local_embed)
+
+        if n == 0:
+            click.echo("No chunks produced (file may already be indexed or extraction failed).")
+            return
+
+        # Retrieve indexed chunks from the ephemeral collection for preview
+        col = local_t3.get_or_create_collection(f"docs__{corpus}")
+        result = col.get(include=["documents", "metadatas"])
+        docs: list[str] = result.get("documents") or []
+        metas: list[dict] = result.get("metadatas") or []
+
+        # Summary line
+        pages = sorted({int(m.get("page_number", 0)) for m in metas if m})
+        page_range = f"{pages[0]}–{pages[-1]}" if len(pages) > 1 else str(pages[0]) if pages else "?"
+        title = metas[0].get("source_title", "") if metas else ""
+        author = metas[0].get("source_author", "") if metas else ""
+        summary_parts = [f"Chunks: {n}", f"Pages: {page_range}"]
+        if title:
+            summary_parts.append(f'Title: "{title}"')
+        if author:
+            summary_parts.append(f'Author: "{author}"')
+        click.echo(f"\n  {'  '.join(summary_parts)}\n")
+
+        # Per-chunk preview
+        for i, (doc, meta) in enumerate(zip(docs, metas), start=1):
+            page = meta.get("page_number", "?") if meta else "?"
+            preview = doc[:80].replace("\n", " ") if doc else ""
+            ellipsis = "…" if doc and len(doc) > 80 else ""
+            click.echo(f"  [{i}] p.{page}  {preview}{ellipsis}")
+
+        click.echo("\n(no cloud write)")
+        return
+
     click.echo(f"Indexing {path}…")
     n = index_pdf(path, corpus=corpus)
     click.echo(f"Indexed {n} chunk(s).")
