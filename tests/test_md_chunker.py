@@ -209,3 +209,39 @@ def test_chunk_semantic_exception_falls_back_to_naive():
     assert "plain text" in chunks[0].text
 
     chunker.md.parse = original_parse
+
+
+# ── nexus-q25l: structural-token dedup blocklist ──────────────────────────────
+
+def test_no_duplicate_content_in_chunk():
+    """paragraph_open and list_item_open must not duplicate inline content."""
+    text = "### Section\n\nA paragraph with content.\n\n- bullet one\n- bullet two\n"
+    chunks = SemanticMarkdownChunker().chunk(text, {})
+    assert len(chunks) == 1
+    assert chunks[0].text.count("A paragraph with content.") == 1
+    assert chunks[0].text.count("bullet one") == 1
+
+
+def test_structural_token_not_duplicated():
+    """Plain paragraphs must not appear twice due to paragraph_open .map fallback."""
+    text = "Paragraph text.\n\nSecond paragraph.\n"
+    chunks = SemanticMarkdownChunker().chunk(text, {})
+    full_text = "\n".join(c.text for c in chunks)
+    assert full_text.count("Paragraph text.") == 1
+    assert full_text.count("Second paragraph.") == 1
+
+
+def test_spurious_split_resolved():
+    """Single paragraph ~345 tokens fits in 512-token chunk after dedup fix.
+
+    sentence × 17 ≈ 1139 chars ÷ 3.3 ≈ 345 tokens (clean).
+    With paragraph_open duplication: ≈ 690 tokens → spurious split.
+    After fix: only inline token contributes → 345 tokens → one chunk.
+    """
+    sentence = "The quick brown fox jumps over the lazy dog and continues running. "
+    paragraph = sentence * 17
+    text = f"### Section\n\n{paragraph}"
+    chunks = SemanticMarkdownChunker().chunk(text, {})
+    assert len(chunks) == 1, (
+        f"Expected 1 chunk after dedup fix, got {len(chunks)}"
+    )

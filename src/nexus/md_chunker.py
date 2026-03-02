@@ -22,6 +22,24 @@ except ImportError:
 
 _CHARS_PER_TOKEN = 3.3
 
+# Block-level open/close tokens that carry .map but no .content.
+# Their .map fallback in _token_content() would duplicate the text already
+# produced by the inline child tokens.  Filter them at the caller site in
+# _build_sections so _token_content stays single-responsibility.
+_STRUCTURAL_TOKEN_TYPES: frozenset[str] = frozenset({
+    "paragraph_open", "paragraph_close",
+    "bullet_list_open", "bullet_list_close",
+    "ordered_list_open", "ordered_list_close",
+    "list_item_open", "list_item_close",
+    "blockquote_open", "blockquote_close",
+    "table_open", "table_close",
+    "thead_open", "thead_close",
+    "tbody_open", "tbody_close",
+    "tr_open", "tr_close",
+    "td_open", "td_close",
+    "th_open", "th_close",
+})
+
 
 @dataclass
 class MarkdownChunk:
@@ -156,7 +174,7 @@ class SemanticMarkdownChunker:
                 i += 1  # step past heading_close
                 continue
             content = self._token_content(token, source_text)
-            if content:
+            if content and token.type not in _STRUCTURAL_TOKEN_TYPES:
                 current_section["content_parts"].append(
                     {
                         "type": token.type,
