@@ -63,7 +63,6 @@ Every command targets one or more tiers:
 | `nx index` | T3 | Index code repos, PDFs, and markdown |
 | `nx store` | T3 | Store knowledge in the cloud |
 | `nx memory` | T2 | Per-project persistent notes |
-| `nx pm` | T2+T3 | Project management lifecycle |
 | `nx scratch` | T1 | Ephemeral session scratch pad |
 | `nx serve` | — | Background daemon for auto-reindexing |
 | `nx collection` | T3 | Inspect and manage cloud collections |
@@ -99,7 +98,7 @@ The plugin provides:
 
 - **15 agents** — code review, debugging, architecture planning, research synthesis, strategic planning, and more
 - **28 skills** — RDR workflow, TDD discipline, brainstorming gates, nexus CLI reference
-- **Session hooks** — auto-initialize scratch, load PM context, health-check dependencies, prime beads
+- **Session hooks** — auto-initialize scratch, surface T2 memory context, health-check dependencies, prime beads
 - **Slash commands** — `/research`, `/create-plan`, `/review-code`, `/rdr-create`, `/rdr-accept`, etc.
 - **Standard pipelines** — feature, bug, and research workflows with built-in review gates
 - **Bundled MCP server** — sequential-thinking via `.mcp.json`, no separate install
@@ -113,7 +112,7 @@ Each agent runs on a model matched to its task: opus for complex reasoning, sonn
 | [Getting Started](docs/getting-started.md) | Install, configure, first index and search |
 | [CLI Reference](docs/cli-reference.md) | Every command, every flag |
 | [Storage Tiers](docs/storage-tiers.md) | T1/T2/T3 architecture and data flow |
-| [Project Management](docs/project-management.md) | Progress tracking, blockers, archive, session integration |
+| [Project Management](docs/project-management.md) | T2 memory, beads integration, session context |
 | [Repo Indexing](docs/repo-indexing.md) | Smart file classification, chunking, frecency |
 | [Configuration](docs/configuration.md) | Config hierarchy, .nexus.yml, settings |
 | [Architecture](docs/architecture.md) | Module map, design decisions |
