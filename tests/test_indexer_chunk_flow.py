@@ -6,6 +6,7 @@ Tests _extract_context from nexus.indexer (introduced in Fix A / nexus-2tob):
 - Java class + method: returns ('BankAccount', 'deposit')
 - Unsupported language: returns ('', '')
 - Chunk spanning two sibling methods: returns ('Foo', '')
+- Decorated Python function: returns method name from wrapped function_definition
 """
 import pytest
 
@@ -85,3 +86,25 @@ def test_extract_context_multi_method_span() -> None:
     result = _extract_context(source, "python", 1, 5)
     assert result[0] == "Foo", f"Expected class='Foo', got {result!r}"
     assert result[1] == "", f"Expected method='', got {result!r} (chunk spans two methods)"
+
+
+# ── Decorated Python functions ─────────────────────────────────────────────────
+
+def test_extract_context_decorated_python_function() -> None:
+    """Decorated Python function: chunk inside body returns correct method name.
+
+    Regression for C3: decorated_definition nodes have no direct identifier
+    child — the name is on the wrapped function_definition.  _extract_name_from_node
+    must recurse into the inner node to return the correct name.
+    """
+    source = b"""class MyService:
+    @staticmethod
+    def process(data):
+        return data.strip()
+"""
+    # decorated_definition spans lines 1-3, function_definition spans lines 2-3
+    # chunk is lines 3 (return statement)
+    result = _extract_context(source, "python", 3, 3)
+    assert result == ("MyService", "process"), (
+        f"Decorated method name not extracted: got {result!r}"
+    )

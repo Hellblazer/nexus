@@ -1,10 +1,10 @@
 """Fix E / nexus-0qnh: SemanticMarkdownChunker structural integrity tests.
 
-These tests drive nexus-n72s (Fix C2 — preserve_code_blocks).
-- test_code_block_not_split: FAILS until Fix C2 (large code block truncated)
-- test_list_intact: PASSES after nexus-q25l Fix 2 (list items not duplicated)
-- test_table_pipes_preserved: FAILS until Fix C2 (tr_open blocked by Fix 2
-  removes pipe characters; Fix C2 must handle tables separately)
+All three tests pass after nexus-n72s (Fix C2 — preserve_code_blocks) and
+nexus-q25l (Fix 2 — structural token dedup):
+- test_code_block_not_split: Fix C2 preserves code blocks intact (no truncation)
+- test_list_intact: Fix 2 prevents list_item_open from duplicating inline content
+- test_table_pipes_preserved: table inline tokens carry pipe chars; tables preserved
 """
 from nexus.md_chunker import SemanticMarkdownChunker
 
@@ -63,11 +63,10 @@ def test_list_intact() -> None:
 def test_table_pipes_preserved() -> None:
     """Pipe table must include pipe characters in chunked output.
 
-    Currently FAILS: tr_open/td_open are in _STRUCTURAL_TOKEN_TYPES (Fix 2),
-    which removes the source-level pipe characters that those tokens provided.
-    Fix C2 must handle table tokens to restore pipe formatting.
-
-    Drives nexus-n72s (Fix C2).
+    Table inline tokens (td_open content, inline) carry the pipe-delimited text
+    directly.  tr_open/td_open/th_open are in _STRUCTURAL_TOKEN_TYPES so the
+    container open/close tokens are silently dropped, but the inline child tokens
+    that hold actual cell text (including pipes) are preserved.
     """
     text = (
         "## Results\n\n"
