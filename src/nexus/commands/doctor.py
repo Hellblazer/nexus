@@ -128,16 +128,6 @@ def doctor_cmd() -> None:
              "nx config set voyage_api_key <your-key>",
              "Get key: https://www.voyageai.com")
 
-    # ── ANTHROPIC_API_KEY ─────────────────────────────────────────────────────
-    anthropic_key = get_credential("anthropic_api_key")
-    lines.append(_check_line("Anthropic (ANTHROPIC_API_KEY)", bool(anthropic_key),
-                              "set" if anthropic_key else "not set"))
-    if not anthropic_key:
-        failed = True
-        _fix(lines,
-             "nx config set anthropic_api_key <your-key>",
-             "Get key: https://console.anthropic.com")
-
     # ── ripgrep ───────────────────────────────────────────────────────────────
     rg_path = shutil.which("rg")
     lines.append(_check_line("ripgrep   (rg)",              bool(rg_path),

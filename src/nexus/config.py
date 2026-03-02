@@ -18,8 +18,6 @@ _config_lock = threading.Lock()
 
 # ── Model constants ───────────────────────────────────────────────────────────
 
-HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
-
 # ── Credential registry ───────────────────────────────────────────────────────
 # Maps config-file key → environment variable name
 CREDENTIALS: dict[str, str] = {
@@ -27,7 +25,6 @@ CREDENTIALS: dict[str, str] = {
     "chroma_tenant":     "CHROMA_TENANT",
     "chroma_database":   "CHROMA_DATABASE",
     "voyage_api_key":    "VOYAGE_API_KEY",
-    "anthropic_api_key": "ANTHROPIC_API_KEY",
     "mxbai_api_key":     "MXBAI_API_KEY",
 }
 

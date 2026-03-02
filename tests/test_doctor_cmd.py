@@ -112,9 +112,7 @@ def test_doctor_partial_credentials() -> None:
     assert result.exit_code == 1
     # Missing ones should be listed with fix hints
     assert "CHROMA_TENANT" in result.output
-    assert "ANTHROPIC_API_KEY" in result.output
     assert "nx config set chroma_tenant" in result.output
-    assert "nx config set anthropic_api_key" in result.output
     # Present keys should show as set, not have fix hints
     assert "nx config set chroma_api_key" not in result.output
     assert "nx config set voyage_api_key" not in result.output
@@ -172,10 +170,8 @@ def test_doctor_missing_credential_shows_inline_fix() -> None:
 
     assert "nx config set chroma_api_key" in result.output
     assert "nx config set voyage_api_key" in result.output
-    assert "nx config set anthropic_api_key" in result.output
     assert "trychroma.com" in result.output
     assert "voyageai.com" in result.output
-    assert "console.anthropic.com" in result.output
 
 
 def test_doctor_missing_rg_shows_platform_hints() -> None:

@@ -18,7 +18,6 @@ For T3 (permanent cloud storage), you also need accounts at:
 |---------|---------|-----------|--------|
 | ChromaDB Cloud | Vector storage | Generous storage + requests for individual use | [trychroma.com](https://trychroma.com) |
 | Voyage AI | Embeddings | 200M tokens/month — indexing a large codebase uses 1–5M | [voyageai.com](https://voyageai.com) |
-| Anthropic | PM archival (optional) | — | [console.anthropic.com](https://console.anthropic.com) |
 
 > **Cost**: Both ChromaDB Cloud and Voyage AI free tiers cover all typical Nexus usage at no cost.
 > Voyage AI requires a credit card on file to unlock higher rate limits — but **usage remains
@@ -63,7 +62,6 @@ nx config set chroma_api_key sk-...
 nx config set chroma_tenant YOUR_TENANT_UUID
 nx config set chroma_database default_database
 nx config set voyage_api_key pa-...
-nx config set anthropic_api_key sk-ant-...
 ```
 
 Credentials are stored in `~/.config/nexus/config.yml`. Environment variables always take precedence:
@@ -74,7 +72,6 @@ Credentials are stored in `~/.config/nexus/config.yml`. Environment variables al
 | `chroma_tenant` | `CHROMA_TENANT` |
 | `chroma_database` | `CHROMA_DATABASE` |
 | `voyage_api_key` | `VOYAGE_API_KEY` |
-| `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 
 **ChromaDB tenant** is the UUID shown on your Cloud settings page, not the URL slug.
 **ChromaDB database** is the base name for your four T3 databases. If you set `chroma_database = nexus`, Nexus will use `nexus_code`, `nexus_docs`, `nexus_rdr`, and `nexus_knowledge`. You must create all four in your ChromaDB Cloud dashboard before running `nx index` or `nx store`.

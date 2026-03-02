@@ -312,10 +312,10 @@ def test_pm_init_status_block_unblock(
         assert unblock.exit_code == 0, unblock.output
 
 
-def test_pm_archive_with_mocked_haiku(
+def test_pm_archive_with_mocked_synthesis(
     runner: CliRunner, fake_home: Path, db, local_t3: T3Database
 ) -> None:
-    """nx pm archive synthesizes docs via Haiku (mocked) and writes to T3."""
+    """nx pm archive synthesizes docs via claude CLI (mocked) and writes to T3."""
     canned_synthesis = "# Archive\n\n## Summary\nProject completed.\n\n## Key Decisions\n- Used ChromaDB"
 
     _t2_cm = MagicMock(__enter__=MagicMock(return_value=db))
@@ -323,17 +323,11 @@ def test_pm_archive_with_mocked_haiku(
         runner.invoke(main, ["pm", "init", "--project", "archive-proj"])
 
     with patch("nexus.pm.make_t3", return_value=local_t3):
-        with patch("nexus.pm.get_credential", return_value="mock-key"):
-            with patch("anthropic.Anthropic") as mock_cls:
-                mock_client = MagicMock()
-                mock_cls.return_value = mock_client
-                mock_client.messages.create.return_value = MagicMock(
-                    content=[MagicMock(text=canned_synthesis)]
-                )
-                with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
-                    result = runner.invoke(main, [
-                        "pm", "archive", "--project", "archive-proj"
-                    ])
+        with patch("nexus.pm._synthesize_archive", return_value=canned_synthesis):
+            with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
+                result = runner.invoke(main, [
+                    "pm", "archive", "--project", "archive-proj"
+                ])
 
     assert result.exit_code == 0, result.output
     # Verify synthesis was written to T3
