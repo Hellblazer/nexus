@@ -323,7 +323,7 @@ def test_pm_archive_with_mocked_synthesis(
         runner.invoke(main, ["pm", "init", "--project", "archive-proj"])
 
     with patch("nexus.pm.make_t3", return_value=local_t3):
-        with patch("nexus.pm._synthesize_archive", return_value=canned_synthesis):
+        with patch("nexus.pm._synthesize_archive", return_value=(canned_synthesis, "2026-01-01T00:00:00+00:00")):
             with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
                 result = runner.invoke(main, [
                     "pm", "archive", "--project", "archive-proj"

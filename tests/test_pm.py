@@ -177,7 +177,7 @@ def test_pm_archive_synthesizes_then_upserts_t3(db) -> None:
     mock_t3.search.return_value = []  # no prior archive
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_archive", return_value="# Archive summary") as mock_s:
+    with patch("nexus.pm._synthesize_archive", return_value=("# Archive summary", "2026-01-01T00:00:00+00:00")) as mock_s:
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
@@ -195,7 +195,7 @@ def test_pm_archive_decays_t2_after_t3(db) -> None:
     mock_t3.search.return_value = []
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_archive", return_value="# summary"):
+    with patch("nexus.pm._synthesize_archive", return_value=("# summary", "2026-01-01T00:00:00+00:00")):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
@@ -237,8 +237,8 @@ def test_pm_archive_idempotent_skips_synthesis(db) -> None:
     mock_s.assert_not_called()
 
 
-def test_pm_archive_aborts_on_haiku_failure(db) -> None:
-    """pm_archive aborts without touching T2 if Haiku synthesis fails."""
+def test_pm_archive_aborts_on_synthesis_failure(db) -> None:
+    """pm_archive aborts without touching T2 if archive synthesis fails."""
     pm_init(db, project="myrepo")
 
     mock_col = MagicMock()
@@ -425,7 +425,7 @@ def test_pm_archive_upsert_includes_required_metadata(db) -> None:
     mock_t3.search.return_value = []
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_archive", return_value="# summary"):
+    with patch("nexus.pm._synthesize_archive", return_value=("# summary", "2026-01-01T00:00:00+00:00")):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
@@ -482,7 +482,7 @@ def test_pm_archive_writes_chunk_total_in_metadata(db) -> None:
     mock_t3.upsert_chunks.side_effect = capture_upsert_chunks
 
     synthesis = "# Archive\n\n## Key Decisions\n- Used SQLite"
-    with patch("nexus.pm._synthesize_archive", return_value=synthesis):
+    with patch("nexus.pm._synthesize_archive", return_value=(synthesis, "2026-01-01T00:00:00+00:00")):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 
@@ -658,7 +658,7 @@ def test_synthesize_archive_trims_long_content() -> None:
     import shutil
     with patch("shutil.which", return_value="/usr/bin/claude"):
         with patch("subprocess.run", side_effect=fake_run):
-            result = _synthesize_archive(all_docs, project="test", status="completed")
+            result, _ = _synthesize_archive(all_docs, project="test", status="completed")
 
     # Verify the prompt was trimmed before being sent to claude
     assert "input" in captured
@@ -672,7 +672,7 @@ def test_synthesize_archive_falls_back_when_claude_missing() -> None:
 
     docs = [{"title": "METHODOLOGY.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}]
     with patch("shutil.which", return_value=None):
-        result = _synthesize_archive(docs, project="test", status="completed")
+        result, _ = _synthesize_archive(docs, project="test", status="completed")
 
     assert "# Project Archive: test" in result
     assert "METHODOLOGY.md" in result
@@ -765,11 +765,25 @@ def test_synthesize_archive_falls_back_on_subprocess_error() -> None:
 
     with patch("shutil.which", return_value="/usr/bin/claude"):
         with patch("subprocess.run", side_effect=OSError("exec failed")):
-            result = _synthesize_archive(
+            result, _ = _synthesize_archive(
                 docs=[{"title": "METHODOLOGY.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
                 project="test",
                 status="completed",
             )
+
+    assert "# Project Archive: test" in result
+    assert "METHODOLOGY.md" in result
+
+
+def test_synthesize_archive_falls_back_on_timeout() -> None:
+    """_synthesize_archive returns plain format when claude CLI times out."""
+    import subprocess
+    from nexus.pm import _synthesize_archive
+
+    docs = [{"title": "METHODOLOGY.md", "content": "hello", "timestamp": "2026-01-01T00:00:00"}]
+    with patch("shutil.which", return_value="/usr/bin/claude"):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=120)):
+            result, _ = _synthesize_archive(docs, project="test", status="completed")
 
     assert "# Project Archive: test" in result
     assert "METHODOLOGY.md" in result
@@ -817,7 +831,7 @@ def test_pm_archive_handles_non_integer_phase_tag(db) -> None:
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.pm._synthesize_archive", return_value="# Archive summary"):
+    with patch("nexus.pm._synthesize_archive", return_value=("# Archive summary", "2026-01-01T00:00:00+00:00")):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             # Should not raise — gracefully ignores the bad phase tag
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
@@ -855,7 +869,7 @@ def test_pm_archive_stores_multiple_chunks_for_long_synthesis(db) -> None:
     mock_t3.get_or_create_collection.return_value = mock_col
     mock_t3.upsert_chunks.side_effect = capture_upsert
 
-    with patch("nexus.pm._synthesize_archive", return_value=long_synthesis):
+    with patch("nexus.pm._synthesize_archive", return_value=(long_synthesis, "2026-01-01T00:00:00+00:00")):
         with patch("nexus.pm.make_t3", return_value=mock_t3):
             pm_archive(db, project="myrepo", status="completed", archive_ttl=90)
 

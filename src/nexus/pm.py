@@ -77,9 +77,17 @@ def _build_archive_context(
     return selected, started_at, archived_at
 
 
-def _format_archive(docs: list[dict[str, Any]], project: str, status: str) -> str:
+def _format_archive(
+    docs: list[dict[str, Any]],
+    project: str,
+    status: str,
+    *,
+    archived_at: str | None = None,
+) -> str:
     """Format PM docs as a structured archive (no AI — plain concatenation fallback)."""
-    selected, started_at, archived_at = _build_archive_context(docs)
+    selected, started_at, _computed_at = _build_archive_context(docs)
+    if archived_at is None:
+        archived_at = _computed_at
     parts: list[str] = [
         f"# Project Archive: {project}",
         f"Status: {status}",
@@ -93,22 +101,30 @@ def _format_archive(docs: list[dict[str, Any]], project: str, status: str) -> st
     return "\n".join(parts).strip()
 
 
-def _synthesize_archive(docs: list[dict[str, Any]], project: str, status: str) -> str:
+def _synthesize_archive(
+    docs: list[dict[str, Any]], project: str, status: str
+) -> tuple[str, str]:
     """Synthesize PM docs via ``claude --print`` subprocess.
 
-    Builds a structured synthesis prompt and pipes it to the ``claude`` CLI.
+    Returns ``(synthesis_text, archived_at_iso)`` so the caller can record the
+    same timestamp in T3 metadata as was embedded in the synthesis prompt —
+    avoiding skew from a second ``datetime.now()`` call after the subprocess.
+
     Falls back to ``_format_archive`` (plain concatenation) if ``claude`` is
-    not on PATH or the subprocess fails — so ``nx pm archive`` works outside
+    not on PATH, times out, or fails — so ``nx pm archive`` works outside
     of a Claude Code session without any API key.
     """
     import shutil
     import subprocess
 
+    # Compute context once — archived_at is returned alongside the text so
+    # pm_archive uses the same timestamp in T3 metadata.
+    selected, started_at, archived_at = _build_archive_context(docs)
+
     if not shutil.which("claude"):
         _log.debug("claude CLI not found; using plain archive format")
-        return _format_archive(docs, project, status)
+        return _format_archive(docs, project, status, archived_at=archived_at), archived_at
 
-    selected, started_at, archived_at = _build_archive_context(docs)
     context_parts: list[str] = []
     for doc in selected:
         context_parts.append(f"## {doc['title']}\n{doc.get('content', '')}")
@@ -139,15 +155,21 @@ def _synthesize_archive(docs: list[dict[str, Any]], project: str, status: str) -
             timeout=120,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+            return result.stdout.strip(), archived_at
         _log.warning(
             "claude CLI returned empty or non-zero; using plain archive format",
             returncode=result.returncode,
+            # Truncate to avoid oversized log lines
             stderr=result.stderr[:200] if result.stderr else "",
+        )
+    except subprocess.TimeoutExpired:
+        _log.warning(
+            "claude CLI timed out after 120s; using plain archive format",
+            project=project,
         )
     except Exception as exc:
         _log.warning("claude CLI synthesis failed; using plain archive format", error=str(exc))
-    return _format_archive(docs, project, status)
+    return _format_archive(docs, project, status, archived_at=archived_at), archived_at
 
 
 def _split_synthesis(text: str) -> list[str]:
@@ -371,10 +393,9 @@ def pm_archive(
             return
 
     # Phase 1: Synthesize → T3
-    synthesis_text = _synthesize_archive(all_docs, project, status)
-
-    # Compute metadata
-    archived_at = datetime.now(UTC).isoformat()
+    # archived_at comes from _synthesize_archive so T3 metadata matches the
+    # timestamp embedded in the synthesis prompt (no second datetime.now() call).
+    synthesis_text, archived_at = _synthesize_archive(all_docs, project, status)
     phase_tags = set()
     for doc in all_docs:
         for tag in (doc.get("tags") or "").split(","):
