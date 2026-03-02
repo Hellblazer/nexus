@@ -165,6 +165,13 @@ DEFINITION_TYPES: dict[str, dict[str, str]] = {
         "object_definition": "class",
         "trait_definition": "interface",
     },
+    "r": {
+        "function_definition": "function",
+    },
+    "lua": {
+        "function_declaration": "function",
+        "local_function": "function",
+    },
 }
 
 _CLASS_SEMANTICS: frozenset[str] = frozenset({"class", "interface", "module"})
@@ -178,8 +185,19 @@ def _extract_name_from_node(node) -> str:  # type: ignore[no-untyped-def]
     first (most grammars expose 'name' or 'identifier' as named fields), then
     falls back to scanning child nodes by type.
 
+    For ``decorated_definition`` (Python), the identifier lives inside the
+    wrapped ``function_definition`` / ``class_definition`` child — recurse
+    into that child once to retrieve the name.
+
     Returns empty string (not 'anonymous') so callers can skip empty names.
     """
+    # Python decorated_definition: the name is carried by the wrapped inner
+    # definition node, not by the decorated_definition node itself.
+    if node.type == "decorated_definition":
+        for child in node.children:
+            if child.type in ("function_definition", "class_definition", "async_function_definition"):
+                return _extract_name_from_node(child)
+        return ""
     for field in ("name", "identifier"):
         child = node.child_by_field_name(field)
         if child:
@@ -596,7 +614,6 @@ def _index_prose_file(
             _log.debug("skipped file with no chunks", path=str(file))
             return False
 
-        embed_texts: list[str] = []
         for chunk in chunks:
             title = f"{file.relative_to(repo)}:chunk-{chunk.chunk_index}"
             doc_id = _hl.sha256(f"{collection_name}:{title}".encode()).hexdigest()[:32]
@@ -676,9 +693,22 @@ def _index_prose_file(
     if not documents:
         return False
 
-    # embed_texts is populated for markdown; for non-markdown prose (no section
-    # structure) we fall back to raw documents for embedding.
-    texts_to_embed = embed_texts if embed_texts else documents
+    # For non-markdown prose, embed_texts is empty; normalise to documents so
+    # the filter below can work uniformly across both paths.
+    if not embed_texts:
+        embed_texts = list(documents)
+
+    # Filter empty documents before embedding (Voyage AI rejects empty strings).
+    valid = [
+        (i, d, m, et)
+        for i, d, m, et in zip(ids, documents, metadatas, embed_texts)
+        if d and d.strip()
+    ]
+    if not valid:
+        return False
+    ids, documents, metadatas, embed_texts = map(list, zip(*valid))
+
+    texts_to_embed = embed_texts
 
     # Embed via _embed_with_fallback (CCE for voyage-context-3)
     embeddings, actual_model = _embed_with_fallback(texts_to_embed, target_model, voyage_key)
