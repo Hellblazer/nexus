@@ -312,42 +312,6 @@ class T2Database:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
-    def decay_project(self, project: str, ttl: int) -> None:
-        """Set TTL and flip pm -> pm-archived tags for all docs in *project*."""
-        with self._lock, self.conn:
-            self.conn.execute(
-                """
-                UPDATE memory
-                   SET ttl  = ?,
-                       tags = trim(replace(',' || tags || ',', ',pm,', ',pm-archived,'), ',')
-                 WHERE project = ?
-                """,
-                (ttl, project),
-            )
-
-    def restore_project(self, project: str) -> list[str]:
-        """Reverse decay: set ttl=NULL and restore pm tags.
-
-        Returns the titles of all surviving entries in the project.
-        Note: entries hard-deleted during the decay window cannot be detected,
-        so only surviving titles are returned.
-        """
-        with self._lock, self.conn:
-            rows = self.conn.execute(
-                "SELECT title FROM memory WHERE project = ?", (project,)
-            ).fetchall()
-            surviving = [r[0] for r in rows]
-
-            self.conn.execute(
-                """
-                UPDATE memory
-                   SET ttl  = NULL,
-                       tags = trim(replace(',' || tags || ',', ',pm-archived,', ',pm,'), ',')
-                 WHERE project = ?
-                """,
-                (project,),
-            )
-        return surviving
 
     def get_all(self, project: str) -> list[dict[str, Any]]:
         """Return all entries for *project* with full column data."""

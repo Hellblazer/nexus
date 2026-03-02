@@ -219,14 +219,14 @@ def test_where_multiple_filters_anded(
                     main,
                     [
                         "search", "query", "--corpus", "knowledge",
-                        "--where", "store_type=pm-archive",
+                        "--where", "store_type=knowledge",
                         "--where", "status=completed",
                     ],
                 )
 
     assert result.exit_code == 0, result.output
     assert len(captured_where) == 1
-    assert captured_where[0] == {"store_type": "pm-archive", "status": "completed"}, (
+    assert captured_where[0] == {"store_type": "knowledge", "status": "completed"}, (
         f"Multiple --where flags should be ANDed, got {captured_where[0]}"
     )
 

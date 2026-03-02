@@ -129,19 +129,12 @@ nx pm block "<text>" [--project PROJECT]     # record blocker
 nx pm unblock <line> [--project PROJECT]     # resolve blocker
 nx pm phase next [--project PROJECT]         # advance to next phase
 nx pm search "<query>" [--project PROJECT]   # FTS5 search across PM docs
-nx pm archive [--project PROJECT]            # T2→T3 synthesis + 90-day decay
-nx pm close [--project PROJECT]             # archive + mark completed (alias: archive --status completed)
-nx pm restore <project>                      # restore archived project (within 90-day T2 window)
-nx pm reference [<query>]                    # search archived PM syntheses in T3
 ```
 
 **When to call:**
 - **Session start**: PM context auto-injected by SessionStart and SubagentStart hooks
 - **Blocking issue discovered**: `nx pm block "<description>"`
 - **Project focus shifts**: `nx pm phase next` to snapshot current context and start a new one
-- **Project done or paused**: `nx pm archive` for completed projects
-- **Finding past work**: `nx pm reference "<topic>"` to search T3 archived syntheses
-- **Resuming an old project**: `nx pm restore <project>` (within 90 days of archiving)
 
 ## RELAY (Standard Format)
 

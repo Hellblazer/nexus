@@ -22,7 +22,6 @@ nx search "query" --json                   # JSON array output
 nx search "query" --files                  # unique file paths only
 nx search "query" --content               # show matched text inline
 nx search "query" -C 3                    # 3 context lines around each result
-nx search "query" --where store_type=pm-archive  # metadata filter
 ```
 
 ## Memory (T2 — persistent across sessions)
@@ -97,11 +96,6 @@ nx pm block "waiting on API approval"
 nx pm unblock 1
 nx pm phase next
 nx pm search "what did we decide about caching"
-nx pm promote phases/phase-2/context.md --collection knowledge --tags "decision"
-nx pm archive                              # synthesise → T3, start 90-day T2 decay
-nx pm close                                # archive + mark completed (alias for archive --status completed)
-nx pm restore <project>
-nx pm reference "how did we handle rate limiting"
 nx pm expire
 ```
 

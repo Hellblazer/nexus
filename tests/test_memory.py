@@ -116,23 +116,6 @@ def test_memory_list_by_project(db: T2Database) -> None:
 
 # ── FTS5 safety: malformed query raises ValueError ────────────────────────────
 
-def test_decay_project_single_pm_tag(db: T2Database) -> None:
-    """decay_project correctly replaces 'pm' when it is the only tag (no trailing comma)."""
-    db.put(project="proj", title="note.md", content="x", tags="pm")
-    db.decay_project("proj", ttl=30)
-    row = db.get(project="proj", title="note.md")
-    assert row is not None
-    assert row["tags"] == "pm-archived"
-
-
-def test_restore_project_single_pm_archived_tag(db: T2Database) -> None:
-    """restore_project reverses decay correctly for the single-tag 'pm-archived' case."""
-    db.put(project="proj", title="note.md", content="x", tags="pm-archived")
-    db.restore_project("proj")
-    row = db.get(project="proj", title="note.md")
-    assert row is not None
-    assert row["tags"] == "pm"
-
 
 def test_search_raises_on_malformed_fts5_query(db: T2Database) -> None:
     """FTS5 queries with bare operators (AND, OR alone) raise ValueError, not OperationalError."""
@@ -151,18 +134,6 @@ def test_search_glob_raises_on_malformed_fts5_query(db: T2Database) -> None:
     with pytest.raises(ValueError, match="Invalid search query"):
         db.search_glob("NOT", "*_pm")
 
-
-# ── nexus-ft2: restore_project returns list[str], not tuple ──────────────────
-
-def test_restore_project_returns_list_of_titles(db: T2Database) -> None:
-    """restore_project returns a plain list[str], not a tuple."""
-    db.put(project="myproj", title="a.md", content="aaa", tags="pm-archived")
-    db.put(project="myproj", title="b.md", content="bbb", tags="pm-archived")
-
-    result = db.restore_project("myproj")
-
-    assert isinstance(result, list), f"Expected list, got {type(result)}"
-    assert set(result) == {"a.md", "b.md"}
 
 
 # ── nexus-206: nx memory promote ──────────────────────────────────────────────

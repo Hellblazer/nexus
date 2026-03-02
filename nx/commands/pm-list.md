@@ -1,5 +1,5 @@
 ---
-description: List current and archived PM projects (project)
+description: List current PM project and status (project)
 disable-model-invocation: true
 ---
 
@@ -27,24 +27,9 @@ disable-model-invocation: true
   fi
 
   echo ""
-  echo "## Archived Projects (T3 permanent; restorable within 90-day T2 window)"
-  echo ""
-
-  # nx pm reference requires a query argument — no-arg mode prompts interactively
-  # (not safe in a non-TTY slash command context). Display instructions instead.
-  echo "Search archived projects with:"
-  echo "  \`nx pm reference \"<project-name>\"\`       — retrieve by project name"
-  echo "  \`nx pm reference \"<topic or question>\"\`  — semantic search across all archives"
-  echo ""
-  echo "Restore a project (within 90-day T2 decay window):"
-  echo "  \`/pm-restore <project-name>\`"
-
-  echo ""
   echo "---"
   echo ""
   echo "**Commands**:"
   echo "- \`/pm-status\` - Detailed status of active project"
-  echo "- \`/pm-archive\` - Archive active project to T3"
-  echo "- \`/pm-restore <name>\` - Restore a project within its 90-day window"
   echo "- \`/pm-new <name>\` - Initialize a new project"
 }

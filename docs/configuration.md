@@ -32,7 +32,6 @@ Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.co
 | `server.port` | `NX_SERVER_PORT` | `7890` | HTTP port for `nx serve` |
 | `server.headPollInterval` | `NX_SERVER_HEAD_POLL_INTERVAL` | `10` | Seconds between HEAD checks per repo |
 | `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | Voyage reranker for multi-corpus merge |
-| `pm.archiveTtl` | `NX_PM_ARCHIVE_TTL` | `90` | Days before archived PM docs decay from T2 |
 | `client.host` | `NX_CLIENT_HOST` | `localhost` | Override ChromaDB host URL |
 
 Embedding models are selected automatically based on collection type (see [Storage Tiers](storage-tiers.md)): `voyage-code-3` for code, `voyage-context-3` for docs/knowledge at index time, `voyage-4` for all queries.

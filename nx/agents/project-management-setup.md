@@ -172,7 +172,6 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **T2 PM Documents**: Created via `nx memory put --project <name> --title <doc>.md`
 - **nx pm init**: Initialized project management for the git repo
 - **Groomed Beads**: Epic/phase beads with context links, success criteria, file paths, patterns
-- **T3 Promotion (optional)**: For architectural decisions worth long-term preservation, use `nx pm promote <title> [--collection C] [--tags T]` — promotes a specific PM document (by title) from T2 to T3 for long-term semantic search
 
 Store using these naming conventions:
 - **nx memory title**: `<doc-type>.md` (e.g., `phase-1.md`, `continuation.md`, `architecture.md`)

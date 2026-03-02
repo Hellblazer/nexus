@@ -436,18 +436,6 @@ def test_t2_put_upsert_updates_fts(db: T2Database) -> None:
     assert len(db.search("unique_keyword_beta")) == 1
 
 
-# ── Decay/restore edge cases ───────────────────────────────────────────────
-
-def test_t2_decay_nonexistent_project_is_noop(db: T2Database) -> None:
-    """Decaying a project that doesn't exist doesn't crash."""
-    db.decay_project("nonexistent_project", ttl=90)
-
-
-def test_t2_restore_nonexistent_project_returns_empty(db: T2Database) -> None:
-    """Restoring a never-decayed project returns empty list."""
-    titles = db.restore_project("nonexistent_project")
-    assert titles == []
-
 
 # ── get_all ─────────────────────────────────────────────────────────────────
 

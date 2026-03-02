@@ -196,7 +196,7 @@ Defined in `registry.yaml`:
 
 **RDR commands**: `/rdr-create`, `/rdr-list`, `/rdr-show`, `/rdr-research`, `/rdr-gate`, `/rdr-accept`, `/rdr-close`
 
-**PM commands**: `/pm-new`, `/pm-status`, `/pm-list`, `/pm-archive`, `/pm-restore`, `/pm-close`
+**PM commands**: `/pm-new`, `/pm-status`, `/pm-list`
 
 ## MCP Servers
 

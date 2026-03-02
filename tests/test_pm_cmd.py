@@ -34,14 +34,6 @@ def _patch_db():
     return patch("nexus.commands.pm.T2Database", return_value=mock_db), mock_db
 
 
-def _patch_config(archive_ttl: int = 90):
-    """Return a patch for load_config returning a config dict with pm.archiveTtl."""
-    return patch(
-        "nexus.commands.pm.load_config",
-        return_value={"pm": {"archiveTtl": archive_ttl}},
-    )
-
-
 # ── init ─────────────────────────────────────────────────────────────────────
 
 

@@ -36,17 +36,7 @@ disable-model-invocation: true
     echo ""
     echo "**Options**:"
     echo ""
-    echo "1. **Archive** (preserve current state):"
-    echo "   \`\`\`"
-    echo "   /pm-archive"
-    echo "   /pm-new $PROJECT_NAME"
-    echo "   \`\`\`"
-    echo ""
-    echo "2. **Close** (mark complete, synthesize to T3, then start fresh):"
-    echo "   \`\`\`"
-    echo "   /pm-close"
-    echo "   /pm-new $PROJECT_NAME"
-    echo "   \`\`\`"
+    echo "Use \`/pm-new $PROJECT_NAME\` once you have closed the current project."
     exit 0
   fi
 

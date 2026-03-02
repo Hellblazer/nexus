@@ -29,7 +29,5 @@ disable-model-invocation: true
   echo "---"
   echo ""
   echo "**Commands**:"
-  echo "- \`/pm-archive\` - Archive this project to T3 storage"
-  echo "- \`/pm-close\` - Mark complete and archive"
   echo "- \`bd ready\` - See available work"
 }
