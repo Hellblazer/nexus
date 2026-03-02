@@ -502,6 +502,6 @@ def test_sanitize_fts5_search_glob_hyphen_no_crash(db: T2Database) -> None:
 
 def test_sanitize_fts5_search_by_tag_hyphen_no_crash(db: T2Database) -> None:
     """search_by_tag() with a hyphenated query does not raise OperationalError."""
-    db.put(project="proj", title="notes.md", content="verification probe", tags="pm")
-    results = db.search_by_tag("verification-probe", "pm")
+    db.put(project="proj", title="notes.md", content="verification probe", tags="rdr")
+    results = db.search_by_tag("verification-probe", "rdr")
     assert isinstance(results, list)

@@ -34,8 +34,6 @@ nx store list --collection knowledge
 nx scratch put "working note"
 nx scratch flag <id>                 # auto-promote to T2 at session end
 
-# Project Management
-
 # Indexing
 nx index repo <path>                 # index repo (classifies into code + docs collections)
 ```

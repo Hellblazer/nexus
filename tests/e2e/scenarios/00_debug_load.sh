@@ -107,7 +107,7 @@ echo "    --- session_start_hook.py output ---"
 echo "$session_hook_out" | head -20 | sed 's/^/    | /'
 echo "    ---"
 
-if echo "$session_hook_out" | grep -qiE "Nexus ready|session|T2 Memory|Ready Beads|Project Management"; then
+if echo "$session_hook_out" | grep -qiE "Nexus ready|session|T2 Memory|Ready Beads"; then
     pass "SessionStart hook produced context output"
 else
     fail "SessionStart hook produced no recognisable output"
