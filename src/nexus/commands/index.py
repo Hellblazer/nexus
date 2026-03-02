@@ -7,38 +7,6 @@ import click
 from nexus.registry import RepoRegistry
 
 
-def _detect_large_files(
-    repo: Path,
-    chunk_lines: int,
-    threshold: int,
-) -> list[tuple[int, Path]]:
-    """Return code files whose line count exceeds *threshold* * *chunk_lines*.
-
-    Uses a quick rglob scan limited to known code extensions.
-    Returns a list of (line_count, path) sorted descending by line count.
-    """
-    from nexus.chunker import AST_EXTENSIONS
-
-    line_threshold = threshold * chunk_lines
-    large: list[tuple[int, Path]] = []
-
-    for path in repo.rglob("*"):
-        if not path.is_file() or path.is_symlink():
-            continue
-        if any(part.startswith(".") for part in path.relative_to(repo).parts):
-            continue
-        if path.suffix.lower() not in AST_EXTENSIONS:
-            continue
-        try:
-            line_count = len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
-        except OSError:
-            continue
-        if line_count > line_threshold:
-            large.append((line_count, path))
-
-    return sorted(large, key=lambda x: x[0], reverse=True)
-
-
 def _registry_path() -> Path:
     return Path.home() / ".config" / "nexus" / "repos.json"
 
@@ -60,31 +28,14 @@ def index() -> None:
     default=False,
     help="Update frecency scores only; skip re-embedding (faster, for re-ranking refresh).",
 )
-@click.option(
-    "--chunk-size",
-    type=click.IntRange(min=1),
-    default=None,
-    help="Lines per chunk for code files (default: 150). Smaller values improve search "
-    "precision for large files at the cost of more chunks.",
-)
-@click.option(
-    "--no-chunk-warning",
-    is_flag=True,
-    default=False,
-    help="Suppress the large-file warning emitted before indexing.",
-)
-def index_repo_cmd(
-    path: Path, frecency_only: bool, chunk_size: int | None, no_chunk_warning: bool
-) -> None:
+def index_repo_cmd(path: Path, frecency_only: bool) -> None:
     """Register and immediately index a code repository at PATH.
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
     prose and PDFs get voyage-context-3 embeddings (docs__), RDR documents are
     auto-discovered and indexed into rdr__.
     """
-    from nexus.chunker import _CHUNK_LINES
     from nexus.indexer import index_repository
-    from nexus.scoring import _FILE_SIZE_THRESHOLD
 
     reg = _registry()
     path = path.resolve()
@@ -92,31 +43,8 @@ def index_repo_cmd(
         reg.add(path)
         click.echo(f"Registered {path}.")
 
-    # Warn if any code files exceed the large-file threshold
-    if not frecency_only and not no_chunk_warning:
-        effective_chunk_lines = chunk_size if chunk_size is not None else _CHUNK_LINES
-        large = _detect_large_files(path, effective_chunk_lines, _FILE_SIZE_THRESHOLD)
-        if large:
-            line_threshold = _FILE_SIZE_THRESHOLD * effective_chunk_lines
-            count = len(large)
-            largest_count, largest_path = large[0]
-            largest_rel = largest_path.relative_to(path)
-            suggest = (
-                f"\nConsider: nx index repo . --chunk-size 80"
-                if chunk_size is None
-                else f"\nConsider reducing further with --chunk-size {max(10, effective_chunk_lines // 2)}"
-            )
-            msg = (
-                f"Warning: {count} file{'s' if count != 1 else ''} exceed the large-file "
-                f"threshold ({line_threshold:,} lines; largest: {largest_rel}, "
-                f"{largest_count:,} lines). Large files produce many chunks that dominate "
-                f"semantic scoring.{suggest}\n"
-                f"Run with --no-chunk-warning to suppress this message."
-            )
-            click.echo(msg, err=True)
-
     click.echo(f"{'Updating frecency scores' if frecency_only else 'Indexing'} {path}…")
-    stats = index_repository(path, reg, frecency_only=frecency_only, chunk_lines=chunk_size)
+    stats = index_repository(path, reg, frecency_only=frecency_only)
     if not frecency_only and stats:
         rdr_indexed = stats.get("rdr_indexed", 0)
         rdr_current = stats.get("rdr_current", 0)
