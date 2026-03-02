@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-03-02
+
+### Fixed
+- **`nx doctor` server check** — optional Nexus server now shows `✓` with status in
+  detail string instead of `✗` with a Fix: hint, preventing false failures in
+  preflight scripts that check exit code.
+
+### Changed
+- **Release process docs** — added explicit `uv sync` step and `uv.lock` to the
+  `git add` list so lock file is never missed in a release commit.
+
+### Docs
+- RDR skill docs: `rdr-close` pre-check aligned with actual command behaviour
+  (`"accepted"` not `"final"`); agent and skill counts corrected after PM removal.
+
 ## [1.1.0] - 2026-03-02
 
 ### Removed
