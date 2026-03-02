@@ -39,12 +39,17 @@ class PDFExtractor:
         if self._has_type3_fonts(pdf_path):
             return self._extract_normalized(pdf_path)
         try:
-            return self._extract_markdown(pdf_path)
+            result = self._extract_markdown(pdf_path)
         except RuntimeError as exc:
             msg = str(exc).lower()
             if "font" in msg or "code=4" in msg:
                 return self._extract_normalized(pdf_path)
             raise
+        # Layout mode can produce empty output for minimal or atypical PDFs.
+        # Fall back to normalized extraction so callers always get some content.
+        if not result.text.strip():
+            return self._extract_normalized(pdf_path)
+        return result
 
     # ── internal extraction methods ───────────────────────────────────────────
 
@@ -66,6 +71,14 @@ class PDFExtractor:
     def _extract_markdown(self, pdf_path: Path) -> ExtractionResult:
         """Extract per-page markdown via pymupdf4llm."""
         import pymupdf        # lazy
+        # Activate layout analysis engine before importing pymupdf4llm so that
+        # pymupdf4llm selects layout mode (pymupdf._get_layout is checked at
+        # import time).  No-ops if layout was already activated or unavailable.
+        try:
+            from pymupdf import layout as _layout
+            _layout.activate()
+        except Exception:
+            pass
         import pymupdf4llm    # lazy
 
         page_texts: list[str] = []
