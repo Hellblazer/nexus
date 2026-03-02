@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
 SessionStart hook: Load project context via nx CLI.
-Runs nx pm resume and nx pm status to inject PM context into Claude's session.
+Surfaces T2 memory, beads, and scratch into Claude's session context.
 Output goes to stdout and is injected into Claude's session context.
 """
 
@@ -61,35 +61,15 @@ def main() -> None:
 
     output_lines: list[str] = []
 
-    # --- nx pm context ---
-    if not which('nx'):
-        debug("nx not found on PATH, skipping nx pm context")
-    else:
-        resume_output = run_command(['nx', 'pm', 'resume'], timeout=NX_TIMEOUT, cwd=cwd)
-        status_output = run_command(['nx', 'pm', 'status'], timeout=NX_TIMEOUT, cwd=cwd)
-
-        if resume_output or status_output:
-            output_lines.append("# Project Management Context")
-            output_lines.append("")
-
-        if resume_output:
-            output_lines.append("## Resume")
-            output_lines.append(resume_output)
-            output_lines.append("")
-
-        if status_output:
-            output_lines.append("## Status")
-            output_lines.append(status_output)
-            output_lines.append("")
-
-        # Show available T2 memory docs for active project
+    # --- T2 memory context ---
+    if which('nx'):
         project_name = None
         toplevel = run_command(['git', 'rev-parse', '--show-toplevel'], timeout=5, cwd=cwd)
         if toplevel:
             project_name = Path(toplevel).name
 
         if project_name:
-            # Use t2_prefix_scan to surface all namespaces (bare, _rdr, _pm, etc.)
+            # Use t2_prefix_scan to surface all namespaces (bare, _rdr, etc.)
             scan_script = Path(__file__).parent / "t2_prefix_scan.py"
             memory_output = run_command(
                 [sys.executable, str(scan_script), project_name],
@@ -99,6 +79,8 @@ def main() -> None:
                 output_lines.append("## T2 Memory (Active Project)")
                 output_lines.append(memory_output)
                 output_lines.append("")
+    else:
+        debug("nx not found on PATH, skipping T2 memory context")
 
     # --- bd ready ---
     if which('bd'):

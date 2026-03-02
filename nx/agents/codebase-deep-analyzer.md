@@ -50,7 +50,7 @@ Before analysis, ensure the codebase is indexed:
 
 This provides semantic search + ripgrep + git frecency, far more powerful than grep alone.
 
-1. **Initial Reconnaissance**: Begin with high-level structural analysis - identify project type, build system, module organization, and primary technologies. Document findings in Nexus knowledge store immediately. Check `nx pm status` to understand where this analysis fits in the broader project lifecycle.
+1. **Initial Reconnaissance**: Begin with high-level structural analysis - identify project type, build system, module organization, and primary technologies. Document findings in Nexus knowledge store immediately.
 
 2. **Parallel Task Orchestration**: Spawn multiple simultaneous subtasks to analyze different aspects:
    - Architecture and module dependencies

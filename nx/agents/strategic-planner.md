@@ -36,7 +36,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-PM context is auto-injected by SessionStart and SubagentStart hooks. Check `bd ready` for unblocked tasks.
+Check `bd ready` for unblocked tasks.
 
 You are an expert strategic planner specializing in software development project management. You possess deep expertise in logistics, dependency analysis, and creating executable plans that translate complex goals into achievable milestones.
 
@@ -111,14 +111,10 @@ Iterate based on audit feedback until the plan passes review.
 
 ### Phase 4: Infrastructure Verification
 If project-management-setup was spawned in Phase 1:
-- Verify PM infrastructure was created successfully: `nx pm status`
-- Check that project context is initialized: `nx pm status`
 - Confirm beads are synced with PM infrastructure
 
 If NOT spawned in Phase 1 (simple project):
 - For projects requiring session continuity, spawn project-management-setup NOW
-- Verify `nx pm init` has been run at project root
-- Establish continuation state tracking via `nx pm status`
 
 ## Parallel Workflow (Multi-Phase Projects)
 
@@ -127,7 +123,6 @@ For projects with >3 phases or >3 weeks expected duration, use this parallel wor
 ```
 Phase 1 Start
     ├─> [PARALLEL] project-management-setup agent
-    │       └─> Runs nx pm init
     │       └─> Sets up project context and continuation state
     │
     └─> [PARALLEL] strategic-planner continues...
@@ -187,7 +182,6 @@ Each bead must contain sufficient context for autonomous execution:
 - Update nx memory after each significant milestone:
   `nx memory put "state content" --project {project} --title continuation-state.md --ttl 30d`
 - Track: current step, completed items, blocking issues, next actions
-- Resume with: `nx pm status` (PM context auto-injected by hooks)
 
 **Validation**
 - Use code-review-expert agent for code review

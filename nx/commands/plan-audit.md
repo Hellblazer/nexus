@@ -10,27 +10,8 @@ description: Audit a plan using plan-auditor agent
   echo "**Working directory:** $(pwd)"
   echo ""
 
-  # Check for active project via nx pm
-  if command -v nx &> /dev/null && nx pm status &> /dev/null 2>&1; then
-    echo "**Project management:** Active"
-    echo ""
-
-    echo "### Current Status"
-    echo '```'
-    nx pm status 2>&1
-    echo '```'
-    echo ""
-
-    echo "### Continuation Context"
-    echo '```'
-    nx pm status 2>&1 | head -40 || echo "No PM context available"
-    echo '```'
-    echo ""
-  else
-    echo "**Project management:** Not initialized"
-    echo ""
-    echo "Provide the plan to audit in the arguments or reference existing documentation."
-  fi
+  echo "Provide the plan to audit in the arguments or reference existing documentation."
+  echo ""
 
   # Bead context
   echo ""
@@ -64,7 +45,7 @@ Invoke the **plan-validation** skill with the following relay. Fill in dynamic f
 ### Plan to Validate
 $ARGUMENTS
 
-[fill from strategic-planner output or nx pm status]
+[fill from strategic-planner output or provided plan]
 
 ### Deliverable
 Validation report with go/no-go decision: assumption verification results, dependency confirmation, build/test command validation, risk assessment, and clear recommendation.

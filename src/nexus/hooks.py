@@ -114,21 +114,13 @@ def session_start(claude_session_id: str | None = None) -> str:
     repo = _infer_repo()
     try:
         with _open_t2() as db:
-            from nexus.pm import pm_resume
-            blockers_row = db.get(project=repo, title="BLOCKERS.md")
-            is_pm = blockers_row is not None and "pm" in (blockers_row.get("tags") or "")
-            if is_pm:
-                content = pm_resume(db, project=repo)
-                if content:
-                    lines.append(content)
+            entries = db.list_entries(project=repo)[:10]
+            if entries:
+                lines.append(f"Recent memory ({repo}, last {len(entries)} entries):")
+                for e in entries:
+                    lines.append(f"  - {e['title']} ({e.get('agent') or '-'}, {e.get('timestamp', '')[:10]})")
             else:
-                entries = db.list_entries(project=repo)[:10]
-                if entries:
-                    lines.append(f"Recent memory ({repo}, last {len(entries)} entries):")
-                    for e in entries:
-                        lines.append(f"  - {e['title']} ({e.get('agent') or '-'}, {e.get('timestamp', '')[:10]})")
-                else:
-                    lines.append(f"No memory entries for '{repo}'.")
+                lines.append(f"No memory entries for '{repo}'.")
     except (sqlite3.Error, OSError):
         lines.append("(memory unavailable)")
 

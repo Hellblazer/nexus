@@ -62,7 +62,6 @@ The agent uses `mcp__sequential-thinking__sequentialthinking`:
 - [ ] Success criteria defined per task
 - [ ] Risks identified and mitigated
 - [ ] Plan validated by plan-auditor
-- [ ] nx pm initialized (for multi-session projects)
 
 ## Agent-Specific PRODUCE
 

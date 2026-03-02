@@ -14,97 +14,25 @@ nx memory get --project myrepo --title auth-notes
 nx memory search "JWT" --project myrepo
 ```
 
-That's the whole model. Everything else in this document is a usage pattern
-built on it.
-
-## PM: Conventions on T2
-
-Multi-week projects accumulate state that needs to survive between sessions:
-what phase you're in, what's blocking progress, what each agent last worked
-on. Without somewhere to hold this, every new conversation starts cold.
-
-`nx pm` is a set of convenience commands that manage T2 entries with specific
-titles and tags. There's no separate PM database or schema — it's the same
-store, the same entries, just with conventions that the commands know about.
-
-`nx pm init` writes four entries into the repo's T2 namespace, tagged `pm`:
-
-| Title | What it holds |
-|-------|---------------|
-| `METHODOLOGY.md` | Engineering discipline and workflow for this project |
-| `BLOCKERS.md` | Active blockers as a bullet list |
-| `CONTEXT_PROTOCOL.md` | Context management rules and relay format |
-| `phases/phase-1/context.md` | Current phase goals and state |
-
-These are ordinary T2 entries. You can read them with `nx memory get`, edit
-them with `nx memory put`, and find them with `nx memory list`. The `nx pm`
-commands just know which titles to look for.
-
-## Working With PM
-
-**Status** shows where things stand — phase number, last-active agent, and
-open blockers. Phase is computed from the highest `phase:N` tag across all
-PM entries, so there's no separate counter to get out of sync:
-
-```bash
-nx pm status
-```
-
-**Resume** assembles a continuation summary from PM entries — phase, blockers,
-recent activity, current phase context — capped at 2000 characters. The
-SessionStart hook calls this automatically, so every Claude Code session opens
-with project state already injected:
-
-```bash
-nx pm resume
-```
-
-**Blockers** are bullets in BLOCKERS.md. Add and remove them by content or
-line number:
-
-```bash
-nx pm block "waiting on API access"
-nx pm unblock 1
-```
-
-**Phases** are progress markers that organize project context over time.
-Each phase gets its own context document describing current goals and state.
-When you advance to a new phase, the old context is preserved and a new one
-is created — giving you a record of how the project's focus evolved.
-
-```bash
-nx pm phase next
-```
-
-This creates `phases/phase-{N+1}/context.md` without touching earlier phases,
-which stay available for reference. Session hooks inject the current phase
-context so agents have a picture of what the project is focused on.
-
-Phases don't gate work — beads and their dependencies determine what's ready.
-The phase number reported by `nx pm status` is a progress indicator, not a
-coordination mechanism.
-
+That's the whole model. Store whatever context you need — design notes,
+active decisions, working state — and retrieve it by project and title.
 
 ## Session Integration
 
-The plugin's SessionStart hooks automatically inject PM context so agents
-know where a project stands without being told. Two hooks contribute:
+The plugin's SessionStart hooks automatically surface T2 memory context so
+agents know where a project stands without being told. Two hooks contribute:
 
-1. `nx hook session-start` detects whether the current repo has PM entries
-   and, if so, runs `pm_resume()` to inject phase, blockers, and recent
-   activity.
+1. `nx hook session-start` lists recent T2 entries for the current repo.
 
-2. The plugin's `session_start_hook.py` calls `nx pm resume` and
-   `nx pm status`, adds the T2 memory listing and ready beads.
-
-Together, these give every session a picture of current project state.
+2. The plugin's `session_start_hook.py` scans all T2 namespaces for the
+   project (bare, `_rdr`, etc.) and injects a summary, along with ready beads.
 
 ## Task Tracking With Beads
 
 [Beads](https://github.com/BeadsProject/beads) (`bd`) is an external
-task-tracking tool that the plugin integrates with. Where PM tracks
-project-level state — phases and blockers — beads tracks individual work
-items: tasks, bugs, features, their dependencies, and who's working on what.
+task-tracking tool that the plugin integrates with. Beads tracks individual
+work items: tasks, bugs, features, their dependencies, and who's working on
+what.
 
 The plugin wires beads into the session lifecycle:
 
@@ -116,18 +44,14 @@ The plugin wires beads into the session lifecycle:
   for the overall effort, plus task beads for each implementation step
 - **Branch naming** ties git branches to beads: `feature/<bead-id>-<description>`
 
-Beads is optional. Nexus and PM work without it. But when present, it gives
-agents a shared view of what work is available, what's blocked, and what's
-in progress — the task-level complement to PM's project-level view.
-
 See the [beads documentation](https://github.com/BeadsProject/beads) for
 `bd` command reference.
 
 ## Relationship to RDR
 
-PM tracks execution — phases, blockers, working state. RDR tracks decisions —
-research, design, review. They're complementary but independent: you can use
-either without the other.
+RDR tracks decisions — research, design, review. T2 memory tracks working
+state. They're complementary but independent: you can use either without
+the other.
 
 When you use both, the connections are automated:
 
@@ -137,9 +61,3 @@ When you use both, the connections are automated:
 - RDR decisions surface as prior art during planning via `nx search "topic"` against the knowledge corpus.
 - RDR T2 metadata includes timestamps, so you can find which decisions were
   active during any phase without manual cross-referencing.
-
-Note: the RDR template uses "Phase 1", "Phase 2" as section headings in its
-Implementation Plan, and `/rdr-close` decomposes those into beads. These are
-per-decision implementation steps — not PM phases. An RDR's "Phase 1: Code
-Implementation" might span PM phases 2 through 4. The names overlap but the
-concepts are different granularities.

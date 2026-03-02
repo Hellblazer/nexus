@@ -14,7 +14,7 @@ These agents **MUST proactively search** for context before starting:
 
 **Search Sources in Order**:
 1. **Bead**: `bd show <id>` for task context, design field, dependencies
-2. **Project Infrastructure**: PM context is auto-injected by SessionStart and SubagentStart hooks
+2. **Project Infrastructure**: T2 memory and beads context is auto-injected by SessionStart and SubagentStart hooks
 3. **nx T3 store**: `nx search "[topic]" --corpus knowledge --n 5`
 4. **nx T2 memory**: `nx memory get --project {project} --title ACTIVE_INDEX.md`
 5. **T1 scratch** (current session): `nx scratch search "[topic]"` for any in-flight notes
@@ -116,25 +116,7 @@ Agents produce artifacts based on their specialization:
 
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: `--project {project} --title {topic}.md` (e.g., `--project ART --title auth-implementation.md`)
-- **Bead Description**: Include `Context: nx` line if project uses PM infrastructure
 
-## nx pm Lifecycle
-
-When a project has PM infrastructure (`.pm/` directory), use these commands:
-
-```bash
-nx pm init [--project PROJECT]       # creates METHODOLOGY.md, BLOCKERS.md, phases/phase-1/context.md
-nx pm status [--project PROJECT]     # Phase N, Agent, Blockers
-nx pm block "<text>" [--project PROJECT]     # record blocker
-nx pm unblock <line> [--project PROJECT]     # resolve blocker
-nx pm phase next [--project PROJECT]         # advance to next phase
-nx pm search "<query>" [--project PROJECT]   # FTS5 search across PM docs
-```
-
-**When to call:**
-- **Session start**: PM context auto-injected by SessionStart and SubagentStart hooks
-- **Blocking issue discovered**: `nx pm block "<description>"`
-- **Project focus shifts**: `nx pm phase next` to snapshot current context and start a new one
 
 ## RELAY (Standard Format)
 
@@ -150,7 +132,6 @@ All relays to downstream agents use this structure:
 - nx store: [document titles or "none"]
 - nx memory: [project/title path or "none"]
 - nx scratch: [scratch IDs or "none"]
-- nx pm context: [Phase N, active blockers or "none"]
 - Files: [key files touched]
 
 ### Deliverable
@@ -216,7 +197,6 @@ nx store uses `--tags` for categorization (comma-separated strings).
 Three project namespaces are in use:
 - `{repo}` — agent working notes and relay state (e.g., `--project nexus`)
 - `{repo}_rdr` — RDR records and gate results (e.g., `--project nexus_rdr`)
-- `{repo}_pm` — PM infrastructure created by `nx pm init` (e.g., `--project nexus_pm`)
 
 Common titles under `{repo}`:
 - `--title hypotheses.md` - Current working hypotheses

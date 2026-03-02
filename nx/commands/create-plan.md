@@ -42,7 +42,6 @@ description: Create implementation plan using strategic-planner agent
 
   if command -v nx &> /dev/null; then
     echo "### PM Context"
-    nx pm status 2>/dev/null || echo "No PM initialized"
     echo ""
 
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)

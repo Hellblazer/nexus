@@ -59,7 +59,6 @@ description: Design Java architecture and create phased execution plans using ja
   if command -v nx &> /dev/null; then
     echo "**PM Status:**"
     echo '```'
-    nx pm status 2>/dev/null || echo "No PM initialized"
     echo '```'
     echo ""
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)

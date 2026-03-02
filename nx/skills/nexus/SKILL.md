@@ -35,8 +35,6 @@ nx scratch put "working note"
 nx scratch flag <id>                 # auto-promote to T2 at session end
 
 # Project Management
-nx pm status                         # current phase, blockers
-nx pm resume                         # inject continuation context
 
 # Indexing
 nx index repo <path>                 # index repo (classifies into code + docs collections)

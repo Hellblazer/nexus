@@ -235,24 +235,6 @@ agents:
     predecessors: [strategic-planner]
     successors: [java-architect-planner, java-developer]
 
-  project-management-setup:
-    model: haiku
-    version: "3.0"
-    color: sage
-    skill: project-setup
-    slash_command: /project-setup
-    description: "Creates project management infrastructure for multi-week projects"
-    triggers:
-      - "starting projects over 3 weeks"
-      - "requiring phase tracking"
-      - "systematic tracking needed"
-    strengths:
-      - "PM infrastructure"
-      - "Phase definition"
-      - "Tracking systems"
-    typical_runtime: "30-60 seconds"
-    predecessors: []
-    successors: [strategic-planner]
 
   strategic-planner:
     model: opus
@@ -417,7 +399,7 @@ standalone_skills:
     tools: [Bash, Read, Write]
 
   nexus:
-    description: "Nexus CLI reference for nx search, nx store, nx memory, nx pm"
+    description: "Nexus CLI reference for nx search, nx store, nx memory"
     triggers:
       - "using nx commands"
       - "searching knowledge base"
@@ -535,7 +517,6 @@ model_summary:
     - knowledge-tidier
     - orchestrator
     - pdf-chromadb-processor
-    - project-management-setup
 
 # =============================================================================
 # UTILITY COMMANDS
@@ -549,35 +530,11 @@ utility_commands:
     description: "Verify nx plugin dependencies: nx CLI, nx doctor, bd (beads), superpowers plugin"
     disable_model_invocation: false
 
-  pm-new:
-    slash_command: /pm-new
-    description: "Initialize project management for current repo via nx pm"
-    disable_model_invocation: true
 
-  pm-status:
-    slash_command: /pm-status
-    description: "Show current project status via nx pm"
-    disable_model_invocation: true
 
-  pm-list:
-    slash_command: /pm-list
-    description: "List all projects managed by nx pm"
-    disable_model_invocation: true
 
-  pm-archive:
-    slash_command: /pm-archive
-    description: "Archive current project to T3 storage"
-    disable_model_invocation: true
 
-  pm-close:
-    slash_command: /pm-close
-    description: "Mark project complete and archive"
-    disable_model_invocation: true
 
-  pm-restore:
-    slash_command: /pm-restore
-    description: "Restore archived project from T3"
-    disable_model_invocation: true
 
 # =============================================================================
 # LIFECYCLE

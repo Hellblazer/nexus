@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -288,25 +288,3 @@ def test_cli_search_vimgrep_output(
     assert result.exit_code == 0, result.output
     assert ":0:" in result.output
 
-
-# ── PM lifecycle end-to-end ───────────────────────────────────────────────────
-
-def test_pm_init_status_block_unblock(
-    runner: CliRunner, fake_home: Path, db
-) -> None:
-    """nx pm init → status → block → unblock lifecycle."""
-    _t2_cm = MagicMock(__enter__=MagicMock(return_value=db))
-    with patch("nexus.commands.pm.T2Database", return_value=_t2_cm):
-        init = runner.invoke(main, ["pm", "init", "--project", "e2e-proj"])
-        assert init.exit_code == 0, init.output
-
-        status = runner.invoke(main, ["pm", "status", "--project", "e2e-proj"])
-        assert status.exit_code == 0, status.output
-        assert "phase" in status.output.lower() or "1" in status.output
-
-        block = runner.invoke(main, ["pm", "block", "waiting on API approval",
-                                     "--project", "e2e-proj"])
-        assert block.exit_code == 0, block.output
-
-        unblock = runner.invoke(main, ["pm", "unblock", "1", "--project", "e2e-proj"])
-        assert unblock.exit_code == 0, unblock.output

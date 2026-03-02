@@ -34,10 +34,10 @@ Run `/nx-preflight` after installing to verify all dependencies are present.
 
 ## What You Get
 
-- **15 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
+- **14 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
 - **28 skills** — 6 standalone + 15 agent-delegating + 7 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
-- **Session hooks** — auto-load PM context, prime beads, health-check dependencies
+- **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe read-only commands skip the confirmation prompt
 - **Bundled MCP server** — sequential-thinking via `.mcp.json` (no separate install)
 
@@ -62,7 +62,7 @@ nx/
 │       ├── mcp_health_hook.sh        # MCP/nx health checks at session start
 │       ├── permission-request-stdin.sh # Auto-approve safe read-only commands
 │       ├── rdr_hook.py               # Report RDR document count and status
-│       ├── session_start_hook.py     # Load PM context, prime beads
+│       ├── session_start_hook.py     # Surface T2 memory, prime beads
 │       ├── setup.sh                  # One-time setup checks
 │       ├── subagent-start.sh         # Context prep for spawned subagents
 │       └── t2_prefix_scan.py         # T2 multi-namespace prefix scan for session context
@@ -144,7 +144,6 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | orchestrator | orchestration | `/orchestrate` | haiku | Route requests to appropriate agents |
 | pdf-chromadb-processor | pdf-processing | `/pdf-process` | haiku | Index PDFs into nx store for semantic search |
 | plan-auditor | plan-validation | `/plan-audit` | sonnet | Validate plans before execution |
-| project-management-setup | project-setup | `/project-setup` | haiku | Create PM infrastructure for multi-week projects |
 | strategic-planner | strategic-planning | `/create-plan` | opus | Implementation planning, task decomposition |
 | test-validator | test-validation | `/test-validate` | sonnet | Test coverage and quality validation |
 
@@ -165,7 +164,7 @@ Defined in `registry.yaml`:
 | `Setup` | `setup.sh` | One-time dependency checks (bd, nx) |
 | `SessionStart` | `nx hook session-start` | Initialize nx session |
 | `SessionStart` | `mcp_health_hook.sh` | Verify nx and bd are healthy |
-| `SessionStart` | `session_start_hook.py` | Load PM context, prime bead state |
+| `SessionStart` | `session_start_hook.py` | Surface T2 memory, prime bead state |
 | `SessionStart` | `rdr_hook.py` | Report RDR document count and status |
 | `SessionStart` | `bd prime` | Load beads context into session |
 | `SessionStart` | `using-nx-skills/SKILL.md` | Inject skill invocation discipline |
@@ -245,7 +244,7 @@ The permission hook auto-approves safe read-only operations:
 
 - **beads**: `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
 - **git**: `git log`, `git diff`, `git status`, `git show`, `git branch -a`
-- **nexus**: `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx pm status`, `nx doctor`
+- **nexus**: `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx doctor`
 - **maven**: `mvn help:*`, `mvn dependency:tree`, `mvn dependency:analyze`
 
 Dangerous commands (force-push, `bd delete`, deploys) are always denied.
