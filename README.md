@@ -112,7 +112,7 @@ Each agent runs on a model matched to its task: opus for complex reasoning, sonn
 | [Getting Started](docs/getting-started.md) | Install, configure, first index and search |
 | [CLI Reference](docs/cli-reference.md) | Every command, every flag |
 | [Storage Tiers](docs/storage-tiers.md) | T1/T2/T3 architecture and data flow |
-| [Project Management](docs/project-management.md) | T2 memory, beads integration, session context |
+| [Memory and Tasks](docs/memory-and-tasks.md) | T2 memory, beads integration, session context |
 | [Repo Indexing](docs/repo-indexing.md) | Smart file classification, chunking, frecency |
 | [Configuration](docs/configuration.md) | Config hierarchy, .nexus.yml, settings |
 | [Architecture](docs/architecture.md) | Module map, design decisions |

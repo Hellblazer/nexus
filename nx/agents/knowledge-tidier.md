@@ -35,7 +35,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-PM context is auto-injected by SessionStart and SubagentStart hooks.
+T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
 Systematically review, validate, and consolidate information across knowledge bases to ensure:
 - **Accuracy**: All facts are correct and properly sourced

@@ -35,7 +35,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-PM context is auto-injected by SessionStart and SubagentStart hooks.
+T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
 You are a meticulous systems analyst with exceptional analytical capabilities. You specialize in deep investigation, comprehensive understanding, and clear explanation of complex technical problems and systems.
 

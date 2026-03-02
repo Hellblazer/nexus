@@ -179,17 +179,6 @@ try:
 except Exception as exc:
     print(f"Beads not available: {exc}")
 print()
-
-# PM context
-print("### PM Context")
-try:
-    result = subprocess.run(
-        ['nx', 'pm', 'status'],
-        capture_output=True, text=True, timeout=10)
-    pm_out = (result.stdout or '').strip()
-    print(pm_out if pm_out else "No PM initialized")
-except Exception as exc:
-    print(f"PM not available: {exc}")
 PYEOF
 }
 

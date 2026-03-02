@@ -3,7 +3,7 @@
 No API keys required. Tests exercise real code paths with local backends:
   - T3Database: EphemeralClient + ONNX MiniLM-L6-v2 (DefaultEmbeddingFunction)
   - Anthropic: canned mock responses
-  - All search_engine logic, CLI commands, and PM lifecycle run unmodified.
+  - All search_engine logic and CLI commands run unmodified.
 """
 from __future__ import annotations
 

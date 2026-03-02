@@ -64,9 +64,7 @@ def session_start(claude_session_id: str | None = None) -> str:
     1. Sweep stale orphaned server processes from previous sessions.
     2. Walk the PPID chain: if an ancestor session exists, adopt it (child agent).
        Otherwise start a new ChromaDB server and write a session record.
-    3. Detect PM project via T2 query.
-    4. If PM: inject computed PM resume.
-       Else: print recent memory summary.
+    3. Print recent T2 memory summary.
 
     Returns the output string to be printed.
     """

@@ -80,12 +80,13 @@ is already indexed and findable by agents working on related problems.
 
 ---
 
-## Project Management Integration
+## Beads Integration
 
-PM tracks execution (phases, blockers, working state); RDR tracks decisions
-(research, design, review). They share T2 as a substrate but live in separate
-namespaces — `{repo}` for PM entries (tagged `pm`) and `{repo}_rdr` for RDR
-metadata.
+RDR tracks decisions (research, design, review). Beads tracks implementation
+work items. They connect at close time: `/rdr-close` decomposes the
+Implementation Plan into beads, giving implementation agents concrete tasks
+tracked via `bd`. The `epic_bead` field in each RDR's T2 record links the
+decision to its work items.
 
 Automated connections:
 
@@ -96,13 +97,7 @@ Automated connections:
 - `rdr_hook.py` reports RDR document count and indexing status at session start.
 
 RDR T2 metadata includes timestamps, so you can find which decisions were
-active during any phase without manual cross-referencing.
-
-**Terminology note**: The RDR template uses "Phase 1", "Phase 2" as section
-headings in its Implementation Plan. These are per-decision implementation
-steps, not PM phases. An RDR's "Phase 1: Code Implementation" might span
-multiple PM phases. `/rdr-close` decomposes these into beads; PM phases
-provide project-wide progress context alongside those beads.
+active at any point without manual cross-referencing.
 
 ---
 
@@ -122,7 +117,7 @@ write another RDR:
    authoritative source; the file is the human-readable persistence layer.
 5. **After close**: `/rdr-close` creates beads (epic + tasks), giving
    implementation agents concrete work items tracked via `bd`. The
-   `SubagentStart` hook injects PM context and the active bead, so spawned
-   agents know what task they're continuing.
+   `SubagentStart` hook injects T2 memory context and the active bead, so
+   spawned agents know what task they're continuing.
 5. **Post-implementation**: the post-mortem template captures what was learned,
    which often feeds into the next RDR.

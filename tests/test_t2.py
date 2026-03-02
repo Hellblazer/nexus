@@ -189,17 +189,17 @@ def test_get_projects_with_prefix_returns_last_updated(db: T2Database) -> None:
 
 def test_get_projects_with_prefix_ordered_by_most_recent(db: T2Database) -> None:
     """Results are ordered by MAX(timestamp) DESC — most-recently-updated namespace first."""
-    db.put(project="repo_pm", title="old.md", content="older entry")
+    db.put(project="repo_knowledge", title="old.md", content="older entry")
     db.put(project="repo_rdr", title="new.md", content="newer entry")
-    # Backdate repo_pm so ordering is deterministic at 1-second timestamp resolution
+    # Backdate repo_knowledge so ordering is deterministic at 1-second timestamp resolution
     db.conn.execute(
-        "UPDATE memory SET timestamp='2020-01-01T00:00:00Z' WHERE project='repo_pm'"
+        "UPDATE memory SET timestamp='2020-01-01T00:00:00Z' WHERE project='repo_knowledge'"
     )
     db.conn.commit()
 
     results = db.get_projects_with_prefix("repo")
     assert results[0]["project"] == "repo_rdr"
-    assert results[1]["project"] == "repo_pm"
+    assert results[1]["project"] == "repo_knowledge"
 
 
 def test_get_projects_with_prefix_empty_when_no_match(db: T2Database) -> None:

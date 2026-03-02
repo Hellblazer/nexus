@@ -35,7 +35,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-PM context is auto-injected by SessionStart and SubagentStart hooks.
+T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
 ### 1. Initial Assessment
 - Extract and catalog all key components, dependencies, and assumptions from the plan

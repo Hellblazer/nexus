@@ -27,12 +27,12 @@ A local SQLite database that replaced the AllPepper Memory Bank MCP server. Ever
 T2 is the persistent local layer that bridges sessions. Notes, project state, and agent relay context survive restarts here. Different usage patterns share the same simple model:
 
 - **Developer notes** — hypotheses, findings, decisions-in-progress via `nx memory put`
-- **Project memory** — design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. See [Project Management](project-management.md).
+- **Project memory** — design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. See [Memory and Tasks](memory-and-tasks.md).
 - **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr-nexus-integration.md).
 - **Agent relay** — context passed between agent invocations
 - **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
 
-Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, or permanent. Default is `30d` for developer notes; PM entries are created permanent.
+Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, or permanent. Default is `30d` for developer notes.
 
 ## T3 -- Permanent Knowledge
 

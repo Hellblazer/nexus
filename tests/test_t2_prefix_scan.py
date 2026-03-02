@@ -152,7 +152,7 @@ def test_hard_cap_across_namespaces(tmp_path: Path) -> None:
     """Total rendered entries across namespaces must not exceed _HARD_CAP."""
     with _make_db(tmp_path) as db:
         # Three namespaces each with 10 entries — would be 30 without cap
-        for ns in ["repo", "repo_rdr", "repo_pm"]:
+        for ns in ["repo", "repo_rdr", "repo_knowledge"]:
             for i in range(1, 11):
                 db.put(project=ns, title=f"{ns}-entry-{i}.md", content=f"Content {i}")
         output = _run_scan(db, "repo")

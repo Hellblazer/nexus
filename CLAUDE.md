@@ -43,14 +43,13 @@ See `docs/` for full documentation; `docs/architecture.md` for the module map.
 - **No `synchronized`** — use `threading.Lock` or `asyncio.Lock` as appropriate
 - **Logging**: `structlog` preferred; never `print()` in library code
 
-## Project Management
+## Task Tracking
 
-PM infrastructure lives in T2 under the bare `{repo}` namespace (tagged with `pm`). Use `nx pm` commands for all PM operations.
+Use beads (`bd`) for task tracking and T2 memory (`nx memory`) for project context.
 
-- Session resumption: `nx pm resume`
-- Current phase/status: `nx pm status`
+- Find ready work: `bd ready`
 - Bead tracking: `bd list` / `bd show <id>`
-- Standard docs (4): METHODOLOGY.md, BLOCKERS.md, CONTEXT_PROTOCOL.md, phases/phase-1/context.md
+- Store project context: `nx memory put ... --project {repo}`
 
 ## Git
 
