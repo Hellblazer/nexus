@@ -25,8 +25,8 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 ## Pre-Check
 
 1. Read T2 record: `nx memory get --project {repo}_rdr --title NNN`
-2. If status is not "Final" and reason is "Implemented":
-   - Warn: "RDR NNN has not passed the finalization gate (status: Draft). Close anyway?"
+2. If status is not "accepted" (or "final") and reason is "Implemented":
+   - Warn: "RDR NNN status is '{current_status}' — expected 'accepted'. Close anyway?"
    - Require `--force` or explicit user confirmation to proceed
 3. If T2 record not found, check filesystem for the markdown file
 
