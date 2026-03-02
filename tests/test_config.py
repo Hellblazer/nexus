@@ -17,7 +17,6 @@ def test_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert config["embeddings"]["rerankerModel"] == "rerank-2.5"
     assert "codeModel" not in config["embeddings"]
     assert "docsModel" not in config["embeddings"]
-    assert config["pm"]["archiveTtl"] == 90
 
 
 def test_config_merge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,15 +48,6 @@ def test_config_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     config = load_config(repo_root=tmp_path)
     assert config["server"]["port"] == 8888
 
-
-def test_config_pm_archive_ttl_env_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """NX_PM_ARCHIVE_TTL overrides pm.archiveTtl."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("NX_PM_ARCHIVE_TTL", "60")
-    config = load_config(repo_root=tmp_path)
-    assert config["pm"]["archiveTtl"] == 60
 
 
 def test_config_missing_files_returns_defaults(

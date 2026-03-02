@@ -168,18 +168,9 @@ nx pm resume
 | `block BLOCKER` | Record a blocker |
 | `unblock LINE` | Remove a blocker by 1-based line number |
 | `search QUERY` | FTS5 search across PM docs |
-| `promote TITLE` | Promote PM doc to T3 |
-| `archive` | Synthesize to T3, start 90-day T2 decay |
-| `close` | Archive + mark project completed |
-| `restore PROJECT` | Restore within 90-day decay window |
-| `reference [QUERY]` | Search archived syntheses in T3 |
 | `expire` | Remove TTL-expired PM entries from T2 |
 
-**`init`, `resume`, `status`, `block`, `unblock`, `close` flags:** `--project NAME` (defaults to current git repo name)
-
-**`archive` flags:** `--project NAME`, `--status [completed|paused|cancelled]` (default: `completed`)
-
-**`promote` flags:** `--project NAME`, `--collection NAME` (default: `knowledge__pm__{project}`), `--ttl DAYS` (default: `0` = permanent)
+**`init`, `resume`, `status`, `block`, `unblock`, `phase next`, `search`, `expire` flags:** `--project NAME` (defaults to current git repo name)
 
 ---
 
