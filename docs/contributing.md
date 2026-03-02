@@ -104,7 +104,10 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
    ```
 
 2. **Update version in `pyproject.toml`**
-   Change the `version` field (e.g. `"1.0.0rc4"` → `"1.0.0"`).
+   Change the `version` field (e.g. `"1.0.0rc4"` → `"1.0.0"`), then regenerate the lock file:
+   ```bash
+   uv sync
+   ```
 
 3. **Update `CHANGELOG.md`**
    - Rename `[Unreleased]` section to `[X.Y.Z] - YYYY-MM-DD`
@@ -118,7 +121,7 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
 5. **Commit the release on a branch**
    ```bash
    git checkout -b release/vX.Y.Z
-   git add pyproject.toml CHANGELOG.md nx/CHANGELOG.md .claude-plugin/marketplace.json
+   git add pyproject.toml uv.lock CHANGELOG.md nx/CHANGELOG.md .claude-plugin/marketplace.json
    git commit -m "Release vX.Y.Z"
    git push -u origin release/vX.Y.Z
    gh pr create --title "Release vX.Y.Z" --body "Version bump and changelog for vX.Y.Z."
