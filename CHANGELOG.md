@@ -6,6 +6,49 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-03-03
+
+### Added
+- **`--force` flag** on all four `nx index` subcommands (`repo`, `pdf`, `md`, `rdr`) —
+  bypasses staleness check and re-chunks/re-embeds in-place. Mutually exclusive with
+  `--frecency-only` (repo) and `--dry-run` (pdf).
+- **`--monitor` flag** on all four `nx index` subcommands — prints per-file progress
+  lines with file name, chunk count, and elapsed time. For `pdf` and `md`, prints
+  page range, title, author, and section count after indexing.
+- **Auto-enable monitor in non-TTY contexts** — per-file output is now emitted
+  automatically when stdout is not a TTY (piped, backgrounded, CI), without needing
+  `--monitor`. The flag remains available to force output in interactive sessions.
+- **tqdm progress bar** on `repo` and `rdr` subcommands — shows a file-count bar in
+  interactive TTY sessions; auto-suppressed when piped or backgrounded.
+- **`on_start` / `on_file` progress callbacks** on the indexer layer — `index_repository`
+  and `batch_index_markdowns` accept optional callbacks for real-time progress reporting.
+- **`return_metadata`** parameter on `index_pdf` and `index_markdown` — returns a dict
+  with chunk count, page range, title, author, and section count instead of a plain int.
+- **Proactive 12 KB chunk byte cap** (`SAFE_CHUNK_BYTES = 12_288`) — single constant in
+  `chroma_quotas.py` enforced across all three chunkers:
+  - `chunker.py` escape hatch fixed: single oversized lines are now truncated at the
+    UTF-8 boundary instead of emitted as-is.
+  - `md_chunker.py` byte cap post-pass added after semantic/naive splitting.
+  - `pdf_chunker.py` byte cap post-pass added after char splitting.
+  - `t3.py _write_batch` last-resort drop-and-warn for any document exceeding
+    `MAX_DOCUMENT_BYTES` (16 384) before upsert.
+
+### Fixed
+- **AST chunk line ranges** (RDR-016) — line numbers now derived from
+  `node.start_char_idx` / `node.end_char_idx` instead of a hardcoded formula that
+  produced systematically wrong ranges.
+- **`_run_index` missing registry entry** — returns `{}` instead of raising when the
+  path is not registered, preventing unhandled exceptions on first-run edge cases.
+
+### Changed
+- **Indexer helpers** return `int` chunk count instead of `bool` — callers get
+  actionable count rather than a success/failure flag.
+
+### Docs
+- `cli-reference.md` updated with full `nx index` flag coverage: `--force`, `--monitor`
+  (with auto-enable note), `--collection`, `--dry-run`, and `--frecency-only` mutual
+  exclusion.
+
 ## [1.2.0] - 2026-03-03
 
 ### Added
