@@ -37,7 +37,7 @@ def index() -> None:
     help="Force re-indexing all files, bypassing staleness check (re-chunks and re-embeds in-place).",
 )
 @click.option("--monitor", is_flag=True, default=False,
-              help="Print per-file progress lines (verbose monitoring without debug spam).")
+              help="Print per-file progress lines. Auto-enabled when stdout is not a TTY.")
 def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool) -> None:
     """Register and immediately index a code repository at PATH.
 
@@ -74,7 +74,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool) 
         if bar is not None:
             bar.update(1)
             bar.set_postfix(now=fpath.name)
-        if monitor:
+        if monitor or not sys.stdout.isatty():
             lbl = f"{chunks} chunks" if chunks else "skipped"
             line = f"  [{n}/{total}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
             if bar is not None and sys.stdout.isatty():
@@ -128,7 +128,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool) 
     help="Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place).",
 )
 @click.option("--monitor", is_flag=True, default=False,
-              help="Print per-file progress lines (verbose monitoring without debug spam).")
+              help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
 def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     from nexus.doc_indexer import index_pdf
@@ -189,7 +189,7 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
 
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
-    if monitor:
+    if monitor or not sys.stdout.isatty():
         meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
                          return_metadata=True)
         n = meta["chunks"]  # type: ignore[index]
@@ -219,7 +219,7 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
     help="Force re-indexing, bypassing staleness check.",
 )
 @click.option("--monitor", is_flag=True, default=False,
-              help="Print per-file progress lines (verbose monitoring without debug spam).")
+              help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
 def index_md_cmd(path: Path, corpus: str, force: bool, monitor: bool) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS."""
     from nexus.doc_indexer import index_markdown
@@ -227,7 +227,7 @@ def index_md_cmd(path: Path, corpus: str, force: bool, monitor: bool) -> None:
     path = path.resolve()
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
-    if monitor:
+    if monitor or not sys.stdout.isatty():
         meta = index_markdown(path, corpus=corpus, force=force, return_metadata=True)
         n = meta["chunks"]  # type: ignore[index]
         sections = meta.get("sections", 0)  # type: ignore[union-attr]
@@ -250,7 +250,7 @@ _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
     help="Force re-indexing all RDR documents, bypassing staleness check.",
 )
 @click.option("--monitor", is_flag=True, default=False,
-              help="Print per-file progress lines (verbose monitoring without debug spam).")
+              help="Print per-file progress lines. Auto-enabled when stdout is not a TTY.")
 def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     """Discover and index RDR documents in docs/rdr/ into T3 rdr__REPO-HASH8."""
     from nexus.doc_indexer import batch_index_markdowns
@@ -286,7 +286,7 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
         n += 1
         bar.update(1)
         bar.set_postfix(now=fpath.name)
-        if monitor:
+        if monitor or not sys.stdout.isatty():
             lbl = f"{chunks} chunks" if chunks else "skipped"
             line = f"  [{n}/{len(rdr_files)}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
             if sys.stdout.isatty():
