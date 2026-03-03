@@ -98,51 +98,86 @@ Agent files, skill files, config files: no header needed — the LICENSE file co
 
 ## Release Process
 
-1. **Verify tests pass**
+Every step below is **required**. Missing any one of them has caused problems in the past — hence the explicit checklist.
+
+### Step-by-step checklist
+
+1. **Verify the full test suite passes**
    ```bash
    uv run pytest tests/
    ```
+   Do not proceed if any test fails.
 
-2. **Update version in `pyproject.toml`**
-   Change the `version` field (e.g. `"1.0.0rc4"` → `"1.0.0"`), then regenerate the lock file
-   and reinstall the local tool so `nx --version` reflects the new version immediately:
+2. **Update `docs/cli-reference.md`** (if any CLI flags were added, changed, or removed)
+   Ensure every flag for every affected subcommand is documented with its description and any mutual-exclusion notes.
+
+3. **Bump the version in `pyproject.toml`**
+   Change the `version` field (e.g. `"1.2.0"` → `"1.3.0"`).
+   Semver: `MAJOR` for breaking changes, `MINOR` for new features, `PATCH` for bug fixes.
+
+4. **Regenerate `uv.lock` and reinstall the local tool**
    ```bash
    uv sync
    uv tool install --reinstall .
-   nx --version   # must show X.Y.Z before proceeding
+   nx --version   # must print X.Y.Z before proceeding
    ```
+   `uv.lock` **must** be committed — the release pipeline pins exact versions from it.
 
-3. **Update `CHANGELOG.md`**
-   - Rename `[Unreleased]` section to `[X.Y.Z] - YYYY-MM-DD`
-   - Add a new empty `[Unreleased]` section at the top
-   - Update the comparison links at the bottom
+5. **Update `CHANGELOG.md`**
+   - Move everything under `## [Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD` section
+   - Leave a fresh empty `## [Unreleased]` at the top
+   - Group entries under `### Added`, `### Fixed`, `### Changed`, `### Removed`, `### Docs`
 
-4. **Update plugin versions** (if plugin changed)
-   - `nx/CHANGELOG.md`: add release entry
-   - `.claude-plugin/marketplace.json`: bump `"version"` field
+6. **Update `nx/CHANGELOG.md`** (plugin changelog — always, even if no plugin changes)
+   Add a release entry. If there are no plugin-level changes, write:
+   > Plugin version aligned with Nexus CLI X.Y.Z. No plugin-level functional changes.
 
-5. **Commit the release on a branch**
+7. **Update `.claude-plugin/marketplace.json`**
+   Bump the `"version"` field in the `nx` plugin entry to match the new version.
+   This is what the Claude Code marketplace reads — forgetting it leaves the marketplace on the old version.
+
+8. **Commit all release artifacts directly to `main`**
    ```bash
-   git checkout -b release/vX.Y.Z
    git add pyproject.toml uv.lock CHANGELOG.md nx/CHANGELOG.md .claude-plugin/marketplace.json
-   git commit -m "Release vX.Y.Z"
-   git push -u origin release/vX.Y.Z
-   gh pr create --title "Release vX.Y.Z" --body "Version bump and changelog for vX.Y.Z."
+   # include docs/cli-reference.md if updated
+   git commit -m "chore: bump version to X.Y.Z"
+   git push
    ```
+   Release version-bump commits go directly to `main` (not via PR) because the tag must point to `main`.
 
-6. **After the PR merges, tag on main**
+9. **Tag and push — this triggers the full release pipeline**
    ```bash
-   git checkout main && git pull
    git tag vX.Y.Z
    git push origin vX.Y.Z
    ```
-   Release notes are extracted automatically from the matching `## [X.Y.Z]` section in `CHANGELOG.md`.
+   The `release.yml` workflow:
+   - Runs tests on Python 3.12 and 3.13
+   - Verifies the tag matches `pyproject.toml` version
+   - Extracts release notes from the matching `## [X.Y.Z]` section in `CHANGELOG.md`
+   - Builds wheel + sdist
+   - Publishes to PyPI via OIDC trusted publisher
+   - Creates a GitHub release with the extracted notes and build artifacts
 
-7. **CI publishes automatically**
-   The `release.yml` workflow triggers on `v*` tags, runs tests, builds the wheel, publishes to PyPI via OIDC trusted publisher, and creates a GitHub release.
+10. **Verify the release**
+    ```bash
+    gh run watch   # watch CI until green
+    gh release view vX.Y.Z
+    pip index versions conexus   # confirm new version appears on PyPI
+    ```
 
-8. **Yank pre-release versions** (if applicable)
-   Go to https://pypi.org/manage/project/conexus/releases/ and yank any versions that should not be resolved by `pip install conexus`.
+11. **Yank pre-release versions** (if applicable)
+    Go to https://pypi.org/manage/project/conexus/releases/ and yank any `rcN`, `alpha`, or `beta` versions that should not be resolved by `pip install conexus`.
+
+### Quick reference — files that change every release
+
+| File | What to update |
+|------|----------------|
+| `pyproject.toml` | `version` field |
+| `uv.lock` | auto-updated by `uv sync` |
+| `CHANGELOG.md` | move Unreleased → `[X.Y.Z]`, add empty Unreleased |
+| `nx/CHANGELOG.md` | add `[X.Y.Z]` entry |
+| `.claude-plugin/marketplace.json` | bump `"version"` in the `nx` plugin entry |
+| `docs/cli-reference.md` | update if any CLI flags changed |
 
 ### One-time Release Infrastructure Setup
 
