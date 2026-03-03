@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx index — code repository indexing commands."""
+import sys
 from pathlib import Path
 
 import click
+from tqdm import tqdm
 
 from nexus.registry import RepoRegistry
 
@@ -34,7 +36,9 @@ def index() -> None:
     default=False,
     help="Force re-indexing all files, bypassing staleness check (re-chunks and re-embeds in-place).",
 )
-def index_repo_cmd(path: Path, frecency_only: bool, force: bool) -> None:
+@click.option("--monitor", is_flag=True, default=False,
+              help="Print per-file progress lines (verbose monitoring without debug spam).")
+def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool) -> None:
     """Register and immediately index a code repository at PATH.
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
@@ -54,7 +58,34 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool) -> None:
 
     label = "Force-indexing" if force else ("Updating frecency scores" if frecency_only else "Indexing")
     click.echo(f"{label} {path}…")
-    stats = index_repository(path, reg, frecency_only=frecency_only, force=force)
+
+    bar: tqdm | None = None
+    n = 0
+    total = 0
+
+    def on_start(count: int) -> None:
+        nonlocal bar, total
+        total = count
+        bar = tqdm(total=count, disable=None, desc=path.name, unit="file")
+
+    def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
+        nonlocal n
+        n += 1
+        if bar is not None:
+            bar.update(1)
+            bar.set_postfix(now=fpath.name)
+        if monitor:
+            lbl = f"{chunks} chunks" if chunks else "skipped"
+            line = f"  [{n}/{total}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
+            if bar is not None and sys.stdout.isatty():
+                tqdm.write(line)
+            else:
+                click.echo(line)
+
+    stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
+                             on_start=on_start, on_file=on_file)
+    if bar:
+        bar.close()
     if not frecency_only and stats:
         rdr_indexed = stats.get("rdr_indexed", 0)
         rdr_current = stats.get("rdr_current", 0)
@@ -96,7 +127,9 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool) -> None:
     default=False,
     help="Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place).",
 )
-def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool) -> None:
+@click.option("--monitor", is_flag=True, default=False,
+              help="Print per-file progress lines (verbose monitoring without debug spam).")
+def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     from nexus.doc_indexer import index_pdf
 
@@ -156,7 +189,22 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
 
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
-    n = index_pdf(path, corpus=corpus, collection_name=collection, force=force)
+    if monitor:
+        meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
+                         return_metadata=True)
+        n = meta["chunks"]  # type: ignore[index]
+        pages = meta.get("pages", [])  # type: ignore[union-attr]
+        page_range = f"{pages[0]}–{pages[-1]}" if len(pages) > 1 else str(pages[0]) if pages else "?"
+        title = meta.get("title", "")  # type: ignore[union-attr]
+        author = meta.get("author", "")  # type: ignore[union-attr]
+        parts = [f"Chunks: {n}", f"Pages: {page_range}"]
+        if title:
+            parts.append(f'Title: "{title}"')
+        if author:
+            parts.append(f'Author: "{author}"')
+        click.echo(f"\n  {'  '.join(parts)}")
+    else:
+        n = index_pdf(path, corpus=corpus, collection_name=collection, force=force)
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {n} chunk(s).")
 
@@ -170,14 +218,22 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
     default=False,
     help="Force re-indexing, bypassing staleness check.",
 )
-def index_md_cmd(path: Path, corpus: str, force: bool) -> None:
+@click.option("--monitor", is_flag=True, default=False,
+              help="Print per-file progress lines (verbose monitoring without debug spam).")
+def index_md_cmd(path: Path, corpus: str, force: bool, monitor: bool) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS."""
     from nexus.doc_indexer import index_markdown
 
     path = path.resolve()
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
-    n = index_markdown(path, corpus=corpus, force=force)
+    if monitor:
+        meta = index_markdown(path, corpus=corpus, force=force, return_metadata=True)
+        n = meta["chunks"]  # type: ignore[index]
+        sections = meta.get("sections", 0)  # type: ignore[union-attr]
+        click.echo(f"\n  Chunks: {n}  Sections: {sections}")
+    else:
+        n = index_markdown(path, corpus=corpus, force=force)
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {n} chunk(s).")
 
@@ -193,7 +249,9 @@ _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
     default=False,
     help="Force re-indexing all RDR documents, bypassing staleness check.",
 )
-def index_rdr_cmd(path: Path, force: bool) -> None:
+@click.option("--monitor", is_flag=True, default=False,
+              help="Print per-file progress lines (verbose monitoring without debug spam).")
+def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     """Discover and index RDR documents in docs/rdr/ into T3 rdr__REPO-HASH8."""
     from nexus.doc_indexer import batch_index_markdowns
     from nexus.registry import _repo_identity, _rdr_collection_name
@@ -219,7 +277,26 @@ def index_rdr_cmd(path: Path, force: bool) -> None:
     collection = _rdr_collection_name(path)
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {len(rdr_files)} RDR document(s) into {collection}…")
-    results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection, force=force)
+
+    bar = tqdm(total=len(rdr_files), disable=None, desc="RDR", unit="doc")
+    n = 0
+
+    def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
+        nonlocal n
+        n += 1
+        bar.update(1)
+        bar.set_postfix(now=fpath.name)
+        if monitor:
+            lbl = f"{chunks} chunks" if chunks else "skipped"
+            line = f"  [{n}/{len(rdr_files)}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
+            if sys.stdout.isatty():
+                tqdm.write(line)
+            else:
+                click.echo(line)
+
+    results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
+                                    force=force, on_file=on_file)
+    bar.close()
     indexed = sum(1 for s in results.values() if s == "indexed")
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {indexed} of {len(rdr_files)} RDR document(s).")

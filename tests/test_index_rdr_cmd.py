@@ -115,3 +115,16 @@ def test_index_rdr_force_flag(runner: CliRunner, repo_with_rdrs: Path) -> None:
     mock_batch.assert_called_once()
     _, kwargs = mock_batch.call_args
     assert kwargs.get("force") is True
+
+
+def test_index_rdr_monitor_flag_and_on_file(
+    runner: CliRunner, repo_with_rdrs: Path
+) -> None:
+    """--monitor flag accepted; on_file callback passed to batch_index_markdowns."""
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs), "--monitor"])
+
+    assert result.exit_code == 0, result.output
+    mock_batch.assert_called_once()
+    _, kwargs = mock_batch.call_args
+    assert callable(kwargs.get("on_file")), "on_file must be passed when --monitor is set"
