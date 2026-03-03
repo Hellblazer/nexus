@@ -323,3 +323,24 @@ def test_corpus_validate_collection_name_rejects_128_byte_cloud_limit() -> None:
     name_129_bytes = "a" * 129  # well over old limit too, but tests the code path
     with pytest.raises(ValueError):
         validate_collection_name(name_129_bytes)
+
+
+# ── SAFE_CHUNK_BYTES ──────────────────────────────────────────────────────────
+
+def test_quotas_has_safe_chunk_bytes() -> None:
+    """SAFE_CHUNK_BYTES is 12_288 (12KB, 4KB below MAX_DOCUMENT_BYTES)."""
+    from nexus.db.chroma_quotas import QUOTAS
+    assert QUOTAS.SAFE_CHUNK_BYTES == 12_288
+
+
+def test_safe_chunk_bytes_module_alias() -> None:
+    """Module-level SAFE_CHUNK_BYTES alias matches the dataclass field."""
+    from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES, QUOTAS
+    assert SAFE_CHUNK_BYTES == QUOTAS.SAFE_CHUNK_BYTES
+    assert SAFE_CHUNK_BYTES == 12_288
+
+
+def test_safe_chunk_bytes_less_than_max_document_bytes() -> None:
+    """SAFE_CHUNK_BYTES must be strictly less than MAX_DOCUMENT_BYTES."""
+    from nexus.db.chroma_quotas import QUOTAS
+    assert QUOTAS.SAFE_CHUNK_BYTES < QUOTAS.MAX_DOCUMENT_BYTES

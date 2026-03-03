@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import structlog
 
+from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+
 _log = structlog.get_logger()
 
 _DEFAULT_CHUNK_CHARS = 1500   # ~450 tokens at 3.3 chars/token
@@ -72,6 +74,10 @@ class PDFChunker:
                 break
             start = next_start
 
+        # Byte cap post-pass: truncate any chunk that exceeds the storage limit.
+        for c in chunks:
+            if len(c.text.encode()) > SAFE_CHUNK_BYTES:
+                c.text = c.text.encode()[:SAFE_CHUNK_BYTES].decode("utf-8", errors="ignore")
         return chunks
 
     def _page_for(self, char_pos: int, page_boundaries: list[dict]) -> int:

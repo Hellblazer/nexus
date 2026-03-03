@@ -9,6 +9,8 @@ from typing import Any
 import structlog
 import yaml
 
+from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+
 _log = structlog.get_logger()
 
 try:
@@ -99,10 +101,17 @@ class SemanticMarkdownChunker:
             return []
         if MARKDOWN_IT_AVAILABLE and self.md:
             try:
-                return self._semantic_chunking(text, metadata)
+                chunks = self._semantic_chunking(text, metadata)
             except Exception as exc:
                 _log.warning("Semantic chunking failed (%s); falling back to naive.", exc)
-        return self._naive_chunking(text, metadata)
+                chunks = self._naive_chunking(text, metadata)
+        else:
+            chunks = self._naive_chunking(text, metadata)
+        # Byte cap post-pass: truncate any chunk that exceeds the storage limit.
+        for c in chunks:
+            if len(c.text.encode()) > SAFE_CHUNK_BYTES:
+                c.text = c.text.encode()[:SAFE_CHUNK_BYTES].decode("utf-8", errors="ignore")
+        return chunks
 
     # ── semantic path ─────────────────────────────────────────────────────────
 

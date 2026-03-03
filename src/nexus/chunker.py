@@ -5,6 +5,8 @@ from typing import Any
 
 import structlog
 
+from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+
 _log = structlog.get_logger()
 
 # Extensions supported by llama-index CodeSplitter / tree-sitter-language-pack.
@@ -50,9 +52,8 @@ AST_EXTENSIONS: dict[str, str] = {
 
 _CHUNK_LINES = 150
 _OVERLAP = 0.15
-# ChromaDB Cloud enforces a 16 384-byte per-document hard limit.
-# Keep a small buffer so metadata serialisation overhead doesn't tip us over.
-_CHUNK_MAX_BYTES = 16_000
+# Alias for backward-compat with existing tests that import _CHUNK_MAX_BYTES.
+_CHUNK_MAX_BYTES = SAFE_CHUNK_BYTES
 
 
 def _make_code_splitter(language: str, content: str, chunk_lines: int = _CHUNK_LINES) -> list:
@@ -120,9 +121,12 @@ def _line_chunk(
                     lo = mid
                 else:
                     hi = mid - 1
-            # Always emit at least 1 line even if it alone exceeds max_bytes.
+            # Emit at least 1 line; if that single line still exceeds max_bytes,
+            # truncate at a UTF-8 boundary rather than emitting an oversized chunk.
             end = start + max(1, lo)
             chunk_text = "\n".join(lines[start:end])
+            if len(chunk_text.encode()) > max_bytes:
+                chunk_text = chunk_text.encode()[:max_bytes].decode("utf-8", errors="ignore")
 
         chunks.append((start + 1, end, chunk_text))  # 1-indexed
         if end == n:
@@ -164,6 +168,8 @@ def _enforce_byte_cap(
                     hi = mid - 1
             take = max(1, lo)
             sub_text = "\n".join(lines[pos : pos + take])
+            if len(sub_text.encode()) > max_bytes:
+                sub_text = sub_text.encode()[:max_bytes].decode("utf-8", errors="ignore")
             result.append({
                 **chunk,
                 "text": sub_text,

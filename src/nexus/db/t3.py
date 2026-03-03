@@ -210,6 +210,32 @@ class T3Database:
 
         Acquires the per-collection write semaphore for the duration of all chunks.
         """
+        # Defense-in-depth: drop any document that exceeds the hard ChromaDB limit.
+        # The chunker-level SAFE_CHUNK_BYTES cap should prevent this from ever firing.
+        max_bytes = QUOTAS.MAX_DOCUMENT_BYTES
+        valid = [
+            i for i, doc in enumerate(documents)
+            if len(doc.encode()) <= max_bytes
+        ]
+        if len(valid) < len(documents):
+            for i, doc in enumerate(documents):
+                if len(doc.encode()) > max_bytes:
+                    source = metadatas[i].get("source_path", "<unknown>") if i < len(metadatas) else "<unknown>"
+                    _log.warning(
+                        "write_batch_oversized_document_dropped",
+                        source_path=source,
+                        doc_bytes=len(doc.encode()),
+                        max_bytes=max_bytes,
+                        collection=collection_name,
+                    )
+            if not valid:
+                return
+            ids = [ids[i] for i in valid]
+            documents = [documents[i] for i in valid]
+            metadatas = [metadatas[i] for i in valid]
+            if embeddings is not None:
+                embeddings = [embeddings[i] for i in valid]
+
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection_name):
             for start in range(0, len(ids), size):

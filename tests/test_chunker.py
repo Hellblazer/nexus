@@ -225,12 +225,12 @@ def test_line_chunk_respects_max_bytes() -> None:
         )
 
 
-def test_line_chunk_single_oversized_line_emitted_as_is() -> None:
-    """A single line larger than max_bytes is emitted unchanged (can't shrink further)."""
-    big_line = "z" * 20_000  # 20 KB — exceeds 16 000 limit
+def test_line_chunk_single_oversized_line_is_truncated_at_cap() -> None:
+    """A single line larger than max_bytes is truncated at the byte cap (not emitted as-is)."""
+    big_line = "z" * 20_000  # 20 KB — exceeds SAFE_CHUNK_BYTES
     chunks = _line_chunk(big_line, chunk_lines=150, max_bytes=_CHUNK_MAX_BYTES)
     assert len(chunks) == 1
-    assert chunks[0][2] == big_line
+    assert len(chunks[0][2].encode()) <= _CHUNK_MAX_BYTES
 
 
 def test_line_chunk_byte_cap_no_gaps() -> None:
@@ -379,3 +379,30 @@ def test_chunk_file_ast_none_start_char_idx(tmp_path: Path) -> None:
     assert len(chunks) == 1
     assert chunks[0]["line_start"] == 1
     assert chunks[0]["line_end"] >= chunks[0]["line_start"]
+
+
+# ── Phase 2a: single-line truncation (escape hatch fix) ───────────────────────
+
+def test_line_chunk_single_oversized_line_is_truncated() -> None:
+    """A single line exceeding max_bytes must be truncated, not emitted as-is."""
+    max_bytes = 50
+    big_line = "x" * 200  # 200 bytes > 50
+    chunks = _line_chunk(big_line, chunk_lines=150, max_bytes=max_bytes)
+    assert len(chunks) == 1
+    _, _, text = chunks[0]
+    assert len(text.encode()) <= max_bytes, (
+        f"Single oversized line must be truncated: got {len(text.encode())} bytes (limit {max_bytes})"
+    )
+
+
+def test_enforce_byte_cap_single_oversized_node_is_truncated() -> None:
+    """A single-line AST node exceeding max_bytes must be truncated, not emitted as-is."""
+    max_bytes = 50
+    big_text = "a" * 200  # 200 bytes > 50, single line (no newlines)
+    chunks = [{"text": big_text, "line_start": 1, "line_end": 1, "chunk_index": 0, "chunk_count": 1}]
+    result = _enforce_byte_cap(chunks, max_bytes=max_bytes)
+    assert len(result) >= 1
+    for c in result:
+        assert len(c["text"].encode()) <= max_bytes, (
+            f"Single-line oversized node must be truncated: got {len(c['text'].encode())} bytes (limit {max_bytes})"
+        )
