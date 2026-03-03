@@ -514,3 +514,38 @@ constants imported from the new `chroma_quotas.py` module.
 - `nx collection list` (which uses `list_collections()`) executes correctly without acquiring or deadlocking on collection semaphores.
 - All existing T3 tests pass without modification (enforcement is transparent for in-spec inputs).
 - Zero magic numbers related to ChromaDB limits anywhere outside `src/nexus/db/chroma_quotas.py`.
+
+---
+
+## Addendum: Proactive 12KB Chunk Cap (nexus-bf6w, 2026-03-03)
+
+**Status:** Implemented — PR #61.
+
+**Gap discovered post-close:** RDR-005's original implementation (R1) noted that
+`_enforce_byte_cap()` in `chunker.py` enforced `_CHUNK_MAX_BYTES = 16_000`, but did not
+catch that both `_enforce_byte_cap` and `_line_chunk` contained an escape hatch that
+emitted single oversized lines as-is rather than truncating them. In addition,
+`md_chunker.py` and `pdf_chunker.py` had no byte validation at all (token/char estimates
+only). A 17 576-byte chunk caused a ChromaDB write failure on the ART reindex, which is
+what surfaced the gap.
+
+**Fix (`SAFE_CHUNK_BYTES = 12_288`):**
+
+1. `chroma_quotas.py` — added `SAFE_CHUNK_BYTES: int = 12_288` to `ChromaQuotas`
+   dataclass and a module-level alias. This is 4KB below `MAX_DOCUMENT_BYTES`, giving
+   headroom for metadata serialization and ~3700 Voyage AI tokens per chunk.
+2. `chunker.py` — removed hardcoded `_CHUNK_MAX_BYTES = 16_000` (now imported from
+   `chroma_quotas` as `_CHUNK_MAX_BYTES = SAFE_CHUNK_BYTES`). Fixed escape hatches in
+   `_line_chunk` and `_enforce_byte_cap` to truncate at a UTF-8 boundary instead of
+   emitting oversized content as-is.
+3. `md_chunker.py` — byte cap post-pass in `chunk()` after all splitting paths.
+4. `pdf_chunker.py` — same byte cap post-pass in `chunk()`.
+5. `db/t3.py` — last-resort drop-and-warn pre-filter in `_write_batch` using the hard
+   16KB limit (`QUOTAS.MAX_DOCUMENT_BYTES`). Defense-in-depth only; chunker caps should
+   prevent this from firing in practice.
+
+Truncation pattern used throughout: `text.encode()[:max_bytes].decode('utf-8', errors='ignore')`
+
+**Note on R1:** The `_CHUNK_MAX_BYTES = 16_000` module constant referenced in R1 is now
+`_CHUNK_MAX_BYTES = SAFE_CHUNK_BYTES` (imported from `chroma_quotas`). The "Zero magic
+numbers" success criterion above is now fully satisfied.
