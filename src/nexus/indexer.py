@@ -2,6 +2,8 @@
 """Code repository indexing pipeline."""
 import fnmatch
 import subprocess
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -331,6 +333,8 @@ def index_repository(
     frecency_only: bool = False,
     chunk_lines: int | None = None,
     force: bool = False,
+    on_start: Callable[[int], None] | None = None,
+    on_file: Callable[[Path, int, float], None] | None = None,
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
@@ -358,7 +362,7 @@ def index_repository(
             _run_index_frecency_only(repo, registry)
             stats: dict[str, int] = {}
         else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force)
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, on_start=on_start, on_file=on_file)
         registry.update(repo, status="ready")
         return stats
     except CredentialsMissingError:
@@ -940,7 +944,15 @@ def _prune_deleted_files(
 # ── Main indexing pipeline ───────────────────────────────────────────────────
 
 
-def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = None, *, force: bool = False) -> dict[str, int]:
+def _run_index(
+    repo: Path,
+    registry: "RepoRegistry",
+    chunk_lines: int | None = None,
+    *,
+    force: bool = False,
+    on_start: Callable[[int], None] | None = None,
+    on_file: Callable[[Path, int, float], None] | None = None,
+) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
     Routes files to the appropriate collection based on content classification:
@@ -1038,6 +1050,10 @@ def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = N
     pdf_files.sort(key=lambda x: x[0], reverse=True)
     all_text_scored.sort(key=lambda x: x[0], reverse=True)
 
+    # Fire on_start with total non-RDR file count
+    if on_start:
+        on_start(len(code_files) + len(prose_files) + len(pdf_files))
+
     # Update ripgrep cache (code + prose text files, not PDFs)
     from nexus.registry import _repo_identity
     _repo_basename, _repo_hash = _repo_identity(repo)
@@ -1080,32 +1096,41 @@ def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = N
     _log.debug("indexing code files", count=len(code_files))
     for score, file in code_files:
         _log.debug("indexing", file=str(file))
-        _index_code_file(
+        t0 = time.monotonic()
+        chunks = _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
             chunk_lines=chunk_lines,
             force=force,
         )
+        if on_file:
+            on_file(file, chunks, time.monotonic() - t0)
 
     # Index prose files → docs__ (voyage-context-3 via CCE)
     _log.debug("indexing prose files", count=len(prose_files))
     for score, file in prose_files:
         _log.debug("indexing", file=str(file))
-        _index_prose_file(
+        t0 = time.monotonic()
+        chunks = _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
         )
+        if on_file:
+            on_file(file, chunks, time.monotonic() - t0)
 
     # Index PDF files → docs__ (PDF extraction + voyage-context-3)
     _log.debug("indexing PDF files", count=len(pdf_files))
     for score, file in pdf_files:
         _log.debug("indexing", file=str(file))
-        _index_pdf_file(
+        t0 = time.monotonic()
+        chunks = _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
         )
+        if on_file:
+            on_file(file, chunks, time.monotonic() - t0)
 
     # Discover and index RDR markdown files → rdr__
     rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(

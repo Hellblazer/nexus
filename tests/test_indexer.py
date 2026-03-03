@@ -1528,3 +1528,214 @@ def test_index_pdf_file_returns_positive_when_indexed(tmp_path: Path) -> None:
 
     assert isinstance(result, int) and not isinstance(result, bool)
     assert result == 2, f"Expected 2 chunks indexed, got {result!r}"
+
+# ── on_start / on_file callback tests (RDR-017 Phase 1c) ─────────────────────
+
+_BASE_REGISTRY = {
+    "collection": "code__repo",
+    "code_collection": "code__repo",
+    "docs_collection": "docs__repo",
+}
+
+
+def _make_run_index_patches(registry_info=None):
+    """Return a dict of standard patches needed for _run_index tests."""
+    return {
+        "nexus.frecency.batch_frecency": {},
+        "nexus.ripgrep_cache.build_cache": None,
+        "nexus.indexer._git_metadata": {},
+        "nexus.config.load_config": _DEFAULT_CONFIG,
+        "nexus.config.get_credential": "fake-key",
+    }
+
+
+def test_on_start_called_once_with_total_file_count(tmp_path: Path) -> None:
+    """on_start fires exactly once with len(code) + len(prose) + len(pdf) files."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "code.py").write_text("x = 1\n")
+    (repo / "prose.md").write_text("# Doc\n\nSome prose.\n")
+
+    registry = MagicMock()
+    registry.get.return_value = _BASE_REGISTRY.copy()
+
+    on_start_calls: list[int] = []
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.indexer._index_code_file", return_value=1):
+                                with patch("nexus.indexer._index_prose_file", return_value=1):
+                                    with patch("nexus.indexer._discover_and_index_rdrs", return_value=(0, 0, 0)):
+                                        with patch("nexus.indexer._prune_misclassified"):
+                                            with patch("nexus.indexer._prune_deleted_files"):
+                                                _run_index(
+                                                    repo, registry,
+                                                    on_start=lambda n: on_start_calls.append(n),
+                                                )
+
+    assert len(on_start_calls) == 1, f"on_start should fire exactly once, got {len(on_start_calls)}"
+    assert on_start_calls[0] == 2, f"Expected total=2 (1 code + 1 prose), got {on_start_calls[0]}"
+
+
+def test_on_file_called_per_non_rdr_file(tmp_path: Path) -> None:
+    """on_file fires once per code/prose/pdf file; RDR files do NOT trigger on_file."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "code.py").write_text("x = 1\n")
+    (repo / "prose.md").write_text("# Doc\n\nSome prose.\n")
+
+    registry = MagicMock()
+    registry.get.return_value = _BASE_REGISTRY.copy()
+
+    on_file_calls: list[tuple] = []
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.indexer._index_code_file", return_value=2):
+                                with patch("nexus.indexer._index_prose_file", return_value=3):
+                                    with patch("nexus.indexer._discover_and_index_rdrs", return_value=(0, 0, 0)):
+                                        with patch("nexus.indexer._prune_misclassified"):
+                                            with patch("nexus.indexer._prune_deleted_files"):
+                                                _run_index(
+                                                    repo, registry,
+                                                    on_file=lambda p, c, e: on_file_calls.append((p, c, e)),
+                                                )
+
+    assert len(on_file_calls) == 2, f"Expected 2 on_file calls (code + prose), got {len(on_file_calls)}"
+    paths_called = {c[0].name for c in on_file_calls}
+    assert paths_called == {"code.py", "prose.md"}
+    # chunks should be ints
+    for _, chunks, elapsed in on_file_calls:
+        assert isinstance(chunks, int), f"chunks must be int, got {type(chunks)}"
+        assert isinstance(elapsed, float) and elapsed >= 0.0, f"elapsed must be non-negative float, got {elapsed}"
+
+
+def test_on_file_chunks_zero_for_skipped_files(tmp_path: Path) -> None:
+    """on_file receives chunks=0 when a file is skipped (helper returned 0)."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "code.py").write_text("x = 1\n")
+
+    registry = MagicMock()
+    registry.get.return_value = _BASE_REGISTRY.copy()
+
+    on_file_calls: list[tuple] = []
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.indexer._index_code_file", return_value=0):  # skipped
+                                with patch("nexus.indexer._discover_and_index_rdrs", return_value=(0, 0, 0)):
+                                    with patch("nexus.indexer._prune_misclassified"):
+                                        with patch("nexus.indexer._prune_deleted_files"):
+                                            _run_index(
+                                                repo, registry,
+                                                on_file=lambda p, c, e: on_file_calls.append((p, c, e)),
+                                            )
+
+    assert len(on_file_calls) == 1
+    _, chunks, _ = on_file_calls[0]
+    assert chunks == 0, f"Skipped file should emit chunks=0, got {chunks}"
+
+
+def test_on_start_none_and_on_file_none_safe_defaults(tmp_path: Path) -> None:
+    """None defaults for on_start and on_file must not raise — backward compatible."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "code.py").write_text("x = 1\n")
+
+    registry = MagicMock()
+    registry.get.return_value = _BASE_REGISTRY.copy()
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    # Must not raise — no on_start or on_file passed (default None)
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.indexer._index_code_file", return_value=1):
+                                with patch("nexus.indexer._discover_and_index_rdrs", return_value=(0, 0, 0)):
+                                    with patch("nexus.indexer._prune_misclassified"):
+                                        with patch("nexus.indexer._prune_deleted_files"):
+                                            _run_index(repo, registry)  # no on_start, no on_file
+
+
+def test_rdr_files_do_not_trigger_on_file(tmp_path: Path) -> None:
+    """on_file is NOT called for RDR files — only code/prose/pdf files trigger it."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rdr_dir = repo / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (repo / "code.py").write_text("x = 1\n")
+    (rdr_dir / "rdr-001-test.md").write_text("---\ntitle: test\nstatus: draft\ntype: feature\n---\n# Test\n")
+
+    rdr_config = dict(_DEFAULT_CONFIG)
+    rdr_config["indexing"] = dict(_DEFAULT_CONFIG["indexing"])
+    rdr_config["indexing"]["rdr_paths"] = ["docs/rdr"]
+
+    registry = MagicMock()
+    registry.get.return_value = _BASE_REGISTRY.copy()
+
+    on_file_calls: list[tuple] = []
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=rdr_config):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("nexus.indexer._index_code_file", return_value=1):
+                                with patch("nexus.indexer._discover_and_index_rdrs", return_value=(1, 0, 0)):
+                                    with patch("nexus.indexer._prune_misclassified"):
+                                        with patch("nexus.indexer._prune_deleted_files"):
+                                            _run_index(
+                                                repo, registry,
+                                                on_file=lambda p, c, e: on_file_calls.append((p, c, e)),
+                                            )
+
+    # Only code.py should appear; rdr file was excluded from main loop
+    assert len(on_file_calls) == 1, f"Expected 1 (only code.py), got {len(on_file_calls)}: {on_file_calls}"
+    assert on_file_calls[0][0].name == "code.py"

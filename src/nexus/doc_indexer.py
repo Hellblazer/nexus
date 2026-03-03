@@ -429,6 +429,7 @@ def batch_index_pdfs(
     t3: Any = None,
     *,
     force: bool = False,
+    on_file: Callable[[Path, int, float], None] | None = None,
 ) -> dict[str, str]:
     """Index multiple PDFs sequentially, returning per-file status.
 
@@ -436,15 +437,25 @@ def batch_index_pdfs(
     Failures are logged and do not abort the remaining paths.
 
     Pass *force=True* to bypass the staleness check on every file.
+
+    *on_file*, if provided, is called after each file as
+    ``on_file(path, chunks, elapsed_s)`` where *chunks* is the number of
+    chunks upserted (0 for skipped/failed) and *elapsed_s* is wall time.
     """
+    import time as _time
     results: dict[str, str] = {}
     for path in paths:
+        t0 = _time.monotonic()
         try:
-            count = index_pdf(path, corpus, t3=t3, force=force)
+            raw = index_pdf(path, corpus, t3=t3, force=force)
+            count: int = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
             _log.warning("batch_index_pdfs: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
+            count = 0
+        if on_file:
+            on_file(path, int(count), _time.monotonic() - t0)
     return results
 
 
@@ -455,6 +466,7 @@ def batch_index_markdowns(
     *,
     collection_name: str | None = None,
     force: bool = False,
+    on_file: Callable[[Path, int, float], None] | None = None,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
 
@@ -465,13 +477,23 @@ def batch_index_markdowns(
     Failures are logged and do not abort the remaining paths.
 
     Pass *force=True* to bypass the staleness check on every file.
+
+    *on_file*, if provided, is called after each file as
+    ``on_file(path, chunks, elapsed_s)`` where *chunks* is the number of
+    chunks upserted (0 for skipped/failed) and *elapsed_s* is wall time.
     """
+    import time as _time
     results: dict[str, str] = {}
     for path in paths:
+        t0 = _time.monotonic()
         try:
-            count = index_markdown(path, corpus, t3=t3, collection_name=collection_name, force=force)
+            raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name, force=force)
+            count: int = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
             _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
+            count = 0
+        if on_file:
+            on_file(path, int(count), _time.monotonic() - t0)
     return results

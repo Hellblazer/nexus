@@ -1564,3 +1564,76 @@ def test_batch_index_pdfs_passes_force(tmp_path):
     for c in mock_pdf.call_args_list:
         _, kwargs = c
         assert kwargs.get("force") is True
+
+# ── on_file callback tests for batch functions (RDR-017 Phase 1d) ─────────────
+
+def test_batch_index_markdowns_calls_on_file_per_file(tmp_path):
+    """batch_index_markdowns calls on_file(path, chunks, elapsed_s) after each file."""
+    from nexus.doc_indexer import batch_index_markdowns
+
+    md1 = tmp_path / "a.md"
+    md1.write_text("# A\nContent\n")
+    md2 = tmp_path / "b.md"
+    md2.write_text("# B\nContent\n")
+
+    on_file_calls: list[tuple] = []
+
+    with patch("nexus.doc_indexer.index_markdown", return_value=2) as mock_md:
+        batch_index_markdowns(
+            [md1, md2], corpus="test",
+            on_file=lambda p, c, e: on_file_calls.append((p, c, e)),
+        )
+
+    assert len(on_file_calls) == 2, f"Expected 2 on_file calls, got {len(on_file_calls)}"
+    called_names = {c[0].name for c in on_file_calls}
+    assert called_names == {"a.md", "b.md"}
+    for _, chunks, elapsed in on_file_calls:
+        assert isinstance(chunks, int), f"chunks must be int, got {type(chunks)}"
+        assert isinstance(elapsed, float) and elapsed >= 0.0, f"elapsed must be non-negative float"
+
+
+def test_batch_index_pdfs_calls_on_file_per_file(tmp_path):
+    """batch_index_pdfs calls on_file(path, chunks, elapsed_s) after each PDF."""
+    from nexus.doc_indexer import batch_index_pdfs
+
+    pdf1 = tmp_path / "a.pdf"
+    pdf1.write_bytes(b"%PDF-1.4 fake")
+    pdf2 = tmp_path / "b.pdf"
+    pdf2.write_bytes(b"%PDF-1.4 fake2")
+
+    on_file_calls: list[tuple] = []
+
+    with patch("nexus.doc_indexer.index_pdf", return_value=3):
+        batch_index_pdfs(
+            [pdf1, pdf2], corpus="test",
+            on_file=lambda p, c, e: on_file_calls.append((p, c, e)),
+        )
+
+    assert len(on_file_calls) == 2, f"Expected 2 on_file calls, got {len(on_file_calls)}"
+    called_names = {c[0].name for c in on_file_calls}
+    assert called_names == {"a.pdf", "b.pdf"}
+    for _, chunks, elapsed in on_file_calls:
+        assert isinstance(chunks, int), f"chunks must be int"
+        assert isinstance(elapsed, float) and elapsed >= 0.0
+
+
+def test_batch_index_markdowns_on_file_none_safe_default(tmp_path):
+    """batch_index_markdowns(on_file=None) must not raise — backward compatible."""
+    from nexus.doc_indexer import batch_index_markdowns
+
+    md1 = tmp_path / "a.md"
+    md1.write_text("# A\nContent\n")
+
+    with patch("nexus.doc_indexer.index_markdown", return_value=1):
+        batch_index_markdowns([md1], corpus="test")  # no on_file — must not raise
+
+
+def test_batch_index_pdfs_on_file_none_safe_default(tmp_path):
+    """batch_index_pdfs(on_file=None) must not raise — backward compatible."""
+    from nexus.doc_indexer import batch_index_pdfs
+
+    pdf1 = tmp_path / "a.pdf"
+    pdf1.write_bytes(b"%PDF-1.4 fake")
+
+    with patch("nexus.doc_indexer.index_pdf", return_value=1):
+        batch_index_pdfs([pdf1], corpus="test")  # no on_file — must not raise
