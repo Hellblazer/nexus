@@ -1074,6 +1074,145 @@ def test_index_code_file_skips_empty_text_chunks(tmp_path: Path) -> None:
     assert "x = 1" in texts[0], "Chunk content must appear in embed text (may be prefixed)"
 
 
+# ── Phase 3: force plumbing through orchestration layer ──────────────────────
+
+
+def test_index_repository_passes_force_to_run_index(tmp_path: Path, registry) -> None:
+    """index_repository(force=True) passes force=True to _run_index."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with patch("nexus.indexer._run_index") as mock_run:
+        mock_run.return_value = {}
+        index_repository(repo, registry, force=True)
+
+    mock_run.assert_called_once()
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("force") is True
+
+
+def test_index_repository_default_force_false(tmp_path: Path, registry) -> None:
+    """index_repository() without force arg passes force=False to _run_index."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with patch("nexus.indexer._run_index") as mock_run:
+        mock_run.return_value = {}
+        index_repository(repo, registry)
+
+    mock_run.assert_called_once()
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("force", False) is False
+
+
+def test_run_index_passes_force_to_code_file_helper(tmp_path: Path) -> None:
+    """_run_index(force=True) passes force=True to _index_code_file."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("print('hello')\n")
+
+    registry = _registry_with_dual_collections()
+    mock_db, _, _ = _make_collection_tracking_db()
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("voyageai.Client"):
+                                with patch("nexus.indexer._index_code_file") as mock_code:
+                                    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}):
+                                        _run_index(repo, registry, force=True)
+
+    mock_code.assert_called()
+    _, kwargs = mock_code.call_args
+    assert kwargs.get("force") is True
+
+
+def test_run_index_passes_force_to_prose_file_helper(tmp_path: Path) -> None:
+    """_run_index(force=True) passes force=True to _index_prose_file."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Project\n\nA long description.\n")
+
+    registry = _registry_with_dual_collections()
+    mock_db, _, _ = _make_collection_tracking_db()
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("voyageai.Client"):
+                                with patch("nexus.indexer._index_prose_file") as mock_prose:
+                                    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}):
+                                        _run_index(repo, registry, force=True)
+
+    mock_prose.assert_called()
+    _, kwargs = mock_prose.call_args
+    assert kwargs.get("force") is True
+
+
+def test_run_index_passes_force_to_pdf_file_helper(tmp_path: Path) -> None:
+    """_run_index(force=True) passes force=True to _index_pdf_file."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "spec.pdf").write_bytes(b"%PDF-1.4 fake")
+
+    registry = _registry_with_dual_collections()
+    mock_db, _, _ = _make_collection_tracking_db()
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("voyageai.Client"):
+                                with patch("nexus.indexer._index_pdf_file") as mock_pdf:
+                                    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}):
+                                        _run_index(repo, registry, force=True)
+
+    mock_pdf.assert_called()
+    _, kwargs = mock_pdf.call_args
+    assert kwargs.get("force") is True
+
+
+def test_run_index_passes_force_to_discover_rdrs(tmp_path: Path) -> None:
+    """_run_index(force=True) passes force=True to _discover_and_index_rdrs."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# README\n")
+
+    registry = _registry_with_dual_collections()
+    mock_db, _, _ = _make_collection_tracking_db()
+
+    with patch("nexus.frecency.batch_frecency", return_value={}):
+        with patch("nexus.ripgrep_cache.build_cache"):
+            with patch("nexus.indexer._git_metadata", return_value={}):
+                with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
+                    with patch("nexus.config.get_credential", return_value="fake-key"):
+                        with patch("nexus.db.make_t3", return_value=mock_db):
+                            with patch("voyageai.Client"):
+                                with patch("nexus.indexer._discover_and_index_rdrs") as mock_rdrs:
+                                    mock_rdrs.return_value = (0, 0, 0)
+                                    _run_index(repo, registry, force=True)
+
+    mock_rdrs.assert_called_once()
+    _, kwargs = mock_rdrs.call_args
+    assert kwargs.get("force") is True
+
+
 def test_index_code_file_returns_false_when_all_chunks_empty(tmp_path: Path) -> None:
     """If every chunk has empty text, _index_code_file returns False without calling embed."""
     from nexus.indexer import _index_code_file

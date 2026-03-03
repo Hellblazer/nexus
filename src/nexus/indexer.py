@@ -330,6 +330,7 @@ def index_repository(
     *,
     frecency_only: bool = False,
     chunk_lines: int | None = None,
+    force: bool = False,
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
@@ -357,7 +358,7 @@ def index_repository(
             _run_index_frecency_only(repo, registry)
             stats: dict[str, int] = {}
         else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines)
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force)
         registry.update(repo, status="ready")
         return stats
     except CredentialsMissingError:
@@ -828,6 +829,8 @@ def _discover_and_index_rdrs(
     db: object,
     voyage_key: str,
     now_iso: str,
+    *,
+    force: bool = False,
 ) -> tuple[int, int, int]:
     """Find .md files under RDR paths and index them via batch_index_markdowns.
 
@@ -859,7 +862,7 @@ def _discover_and_index_rdrs(
     collection = _rdr_collection_name(repo)
 
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
-    results = batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection)
+    results = batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection, force=force)
     indexed = sum(1 for s in results.values() if s == "indexed")
     skipped = sum(1 for s in results.values() if s == "skipped")
     failed = sum(1 for s in results.values() if s == "failed")
@@ -937,7 +940,7 @@ def _prune_deleted_files(
 # ── Main indexing pipeline ───────────────────────────────────────────────────
 
 
-def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = None) -> dict[str, int]:
+def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = None, *, force: bool = False) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
     Routes files to the appropriate collection based on content classification:
@@ -1081,6 +1084,7 @@ def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = N
             file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
             chunk_lines=chunk_lines,
+            force=force,
         )
 
     # Index prose files → docs__ (voyage-context-3 via CCE)
@@ -1090,6 +1094,7 @@ def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = N
         _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
+            force=force,
         )
 
     # Index PDF files → docs__ (PDF extraction + voyage-context-3)
@@ -1099,11 +1104,12 @@ def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = N
         _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
+            force=force,
         )
 
     # Discover and index RDR markdown files → rdr__
     rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
-        repo, rdr_abs_paths, db, voyage_key, now_iso
+        repo, rdr_abs_paths, db, voyage_key, now_iso, force=force
     )
 
     # Prune misclassified chunks (reclassification cleanup)

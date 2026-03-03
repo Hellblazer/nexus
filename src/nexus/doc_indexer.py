@@ -377,16 +377,20 @@ def batch_index_pdfs(
     paths: list[Path],
     corpus: str,
     t3: Any = None,
+    *,
+    force: bool = False,
 ) -> dict[str, str]:
     """Index multiple PDFs sequentially, returning per-file status.
 
     Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"failed"``.
     Failures are logged and do not abort the remaining paths.
+
+    Pass *force=True* to bypass the staleness check on every file.
     """
     results: dict[str, str] = {}
     for path in paths:
         try:
-            count = index_pdf(path, corpus, t3=t3)
+            count = index_pdf(path, corpus, t3=t3, force=force)
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
             _log.warning("batch_index_pdfs: failed", path=str(path), error=str(e))
@@ -400,6 +404,7 @@ def batch_index_markdowns(
     t3: Any = None,
     *,
     collection_name: str | None = None,
+    force: bool = False,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
 
@@ -408,11 +413,13 @@ def batch_index_markdowns(
 
     Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"failed"``.
     Failures are logged and do not abort the remaining paths.
+
+    Pass *force=True* to bypass the staleness check on every file.
     """
     results: dict[str, str] = {}
     for path in paths:
         try:
-            count = index_markdown(path, corpus, t3=t3, collection_name=collection_name)
+            count = index_markdown(path, corpus, t3=t3, collection_name=collection_name, force=force)
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
             _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))

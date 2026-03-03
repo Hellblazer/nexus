@@ -971,7 +971,7 @@ def test_batch_index_pdfs_marks_failed_on_error(tmp_path, monkeypatch):
 
     mock_t3 = MagicMock()
 
-    def _side_effect(path, corpus, t3=None):
+    def _side_effect(path, corpus, t3=None, *, force=False):
         if "bad" in str(path):
             raise RuntimeError("extraction failed")
         return 2
@@ -1230,7 +1230,7 @@ def test_batch_index_markdowns_marks_failed_on_error(tmp_path, monkeypatch):
 
     mock_t3 = MagicMock()
 
-    def _side_effect(path, corpus, t3=None, *, collection_name=None):
+    def _side_effect(path, corpus, t3=None, *, collection_name=None, force=False):
         if "bad" in str(path):
             raise RuntimeError("markdown parsing failed")
         return 2
@@ -1525,3 +1525,42 @@ def test_force_default_false_still_skips(sample_pdf, monkeypatch):
 
     assert result == 0, "Default force=False must preserve the staleness skip"
     mock_extractor_class.assert_not_called()
+
+
+# ── Phase 3: batch helpers pass force through ─────────────────────────────────
+
+
+def test_batch_index_markdowns_passes_force(tmp_path):
+    """batch_index_markdowns(force=True) passes force=True to each index_markdown call."""
+    from nexus.doc_indexer import batch_index_markdowns
+
+    md1 = tmp_path / "a.md"
+    md1.write_text("# A\n\nContent.")
+    md2 = tmp_path / "b.md"
+    md2.write_text("# B\n\nContent.")
+
+    with patch("nexus.doc_indexer.index_markdown", return_value=2) as mock_md:
+        batch_index_markdowns([md1, md2], corpus="test", force=True)
+
+    assert mock_md.call_count == 2
+    for c in mock_md.call_args_list:
+        _, kwargs = c
+        assert kwargs.get("force") is True
+
+
+def test_batch_index_pdfs_passes_force(tmp_path):
+    """batch_index_pdfs(force=True) passes force=True to each index_pdf call."""
+    from nexus.doc_indexer import batch_index_pdfs
+
+    pdf1 = tmp_path / "a.pdf"
+    pdf1.write_bytes(b"%PDF-1.4 fake")
+    pdf2 = tmp_path / "b.pdf"
+    pdf2.write_bytes(b"%PDF-1.4 fake2")
+
+    with patch("nexus.doc_indexer.index_pdf", return_value=3) as mock_pdf:
+        batch_index_pdfs([pdf1, pdf2], corpus="test", force=True)
+
+    assert mock_pdf.call_count == 2
+    for c in mock_pdf.call_args_list:
+        _, kwargs = c
+        assert kwargs.get("force") is True
