@@ -135,7 +135,7 @@ The nexus stanza is bounded by sentinel comments for reliable install/uninstall:
 
 ```bash
 # >>> nexus managed begin >>>
-nx index repo "$(git rev-parse --show-toplevel)" \
+nx index repo "$(git rev-parse --show-toplevel)" --on-locked=skip \
   >> "$HOME/.config/nexus/index.log" 2>&1 &
 disown
 # <<< nexus managed end <<<
