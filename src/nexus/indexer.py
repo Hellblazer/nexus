@@ -1023,6 +1023,8 @@ def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = N
             case ContentClass.PDF:
                 pdf_files.append((score, path))
                 # PDF files not included in ripgrep text cache
+            case ContentClass.SKIP:
+                pass  # known-noise file; silently ignore
 
     # Sort all lists descending by frecency
     code_files.sort(key=lambda x: x[0], reverse=True)
