@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for file classification logic."""
 from pathlib import Path
 
@@ -14,19 +15,19 @@ def test_markdown_file_classified_as_prose():
     assert classify_file(Path("README.md")) == ContentClass.PROSE
 
 
-def test_yaml_file_classified_as_prose():
+def test_yaml_file_classified_as_skip():
     from nexus.classifier import classify_file, ContentClass
-    assert classify_file(Path("config.yaml")) == ContentClass.PROSE
+    assert classify_file(Path("config.yaml")) == ContentClass.SKIP
 
 
-def test_toml_file_classified_as_prose():
+def test_toml_file_classified_as_skip():
     from nexus.classifier import classify_file, ContentClass
-    assert classify_file(Path("pyproject.toml")) == ContentClass.PROSE
+    assert classify_file(Path("pyproject.toml")) == ContentClass.SKIP
 
 
-def test_json_file_classified_as_prose():
+def test_json_file_classified_as_skip():
     from nexus.classifier import classify_file, ContentClass
-    assert classify_file(Path("package.json")) == ContentClass.PROSE
+    assert classify_file(Path("package.json")) == ContentClass.SKIP
 
 
 def test_pdf_file_classified_as_pdf():
@@ -39,28 +40,95 @@ def test_unknown_extension_classified_as_prose():
     assert classify_file(Path("notes.txt")) == ContentClass.PROSE
 
 
-def test_no_extension_classified_as_prose():
+def test_no_extension_classified_as_skip(tmp_path: Path):
+    """Extensionless file with no shebang → SKIP."""
+    f = tmp_path / "Makefile"
+    f.write_bytes(b"all:\n\techo done\n")
     from nexus.classifier import classify_file, ContentClass
-    assert classify_file(Path("Makefile")) == ContentClass.PROSE
+    assert classify_file(f) == ContentClass.SKIP
+
+
+def test_extensionless_with_shebang_classified_as_code(tmp_path: Path):
+    """Extensionless file with shebang → CODE."""
+    f = tmp_path / "myscript"
+    f.write_bytes(b"#!/usr/bin/env python\nprint('hi')\n")
+    from nexus.classifier import classify_file, ContentClass
+    assert classify_file(f) == ContentClass.CODE
+
+
+def test_extensionless_shebang_bash(tmp_path: Path):
+    """Extensionless bash script → CODE."""
+    f = tmp_path / "run"
+    f.write_bytes(b"#!/bin/bash\necho hi\n")
+    from nexus.classifier import classify_file, ContentClass
+    assert classify_file(f) == ContentClass.CODE
 
 
 def test_code_extensions_set_matches_design():
-    """The canonical set must match the design doc exactly."""
+    """The canonical set must match the design doc exactly (including shader/proto additions)."""
     from nexus.classifier import _CODE_EXTENSIONS
     expected = {
         ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs",
         ".cpp", ".cc", ".c", ".h", ".hpp", ".rb", ".cs", ".sh", ".bash",
         ".kt", ".swift", ".scala", ".r", ".m", ".php",
+        # shader + protobuf extensions
+        ".proto", ".cl", ".comp", ".frag", ".vert", ".metal", ".glsl", ".wgsl", ".hlsl",
     }
     assert _CODE_EXTENSIONS == expected
 
 
+# ── SKIP extension coverage ────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("filename", [
+    "settings.xml",
+    "data.json",
+    "config.yml",
+    "config.yaml",
+    "pyproject.toml",
+    "settings.properties",
+    "app.ini",
+    "app.cfg",
+    "app.conf",
+    "build.gradle",
+    "index.html",
+    "page.htm",
+    "styles.css",
+    "logo.svg",
+    "run.cmd",
+    "build.bat",
+    "deploy.ps1",
+    "uv.lock",
+])
+def test_skip_extensions(filename: str):
+    from nexus.classifier import classify_file, ContentClass
+    assert classify_file(Path(filename)) == ContentClass.SKIP, f"{filename} should be SKIP"
+
+
+# ── New code extensions ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("filename", [
+    "api.proto",
+    "kernel.cl",
+    "shader.comp",
+    "color.frag",
+    "position.vert",
+    "render.metal",
+    "lighting.glsl",
+    "compute.wgsl",
+    "pixel.hlsl",
+])
+def test_new_code_extensions(filename: str):
+    from nexus.classifier import classify_file, ContentClass
+    assert classify_file(Path(filename)) == ContentClass.CODE, f"{filename} should be CODE"
+
+
+# ── Config overrides ───────────────────────────────────────────────────────────
+
 def test_config_code_extensions_override():
     """code_extensions in config adds to the default set."""
     from nexus.classifier import classify_file, ContentClass
-    cfg = {"code_extensions": [".sql", ".proto"]}
+    cfg = {"code_extensions": [".sql"]}
     assert classify_file(Path("schema.sql"), indexing_config=cfg) == ContentClass.CODE
-    assert classify_file(Path("api.proto"), indexing_config=cfg) == ContentClass.CODE
 
 
 def test_config_prose_extensions_override():
@@ -69,6 +137,13 @@ def test_config_prose_extensions_override():
     cfg = {"prose_extensions": [".sh"], "code_extensions": [".sql"]}
     assert classify_file(Path("deploy.sh"), indexing_config=cfg) == ContentClass.PROSE
     assert classify_file(Path("query.sql"), indexing_config=cfg) == ContentClass.CODE
+
+
+def test_prose_override_wins_over_skip():
+    """prose_extensions config can force a normally-SKIP extension to PROSE."""
+    from nexus.classifier import classify_file, ContentClass
+    cfg = {"prose_extensions": [".json"]}
+    assert classify_file(Path("data.json"), indexing_config=cfg) == ContentClass.PROSE
 
 
 def test_case_insensitive_extension():

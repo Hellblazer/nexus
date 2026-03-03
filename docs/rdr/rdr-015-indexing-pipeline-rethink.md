@@ -1,7 +1,9 @@
 ---
 title: "Indexing Pipeline Rethink: Align Nexus with Arcaneum's Battle-Tested Implementation"
 type: enhancement
-status: accepted
+status: closed
+closed_date: 2026-03-02
+close_reason: implemented
 priority: P1
 author: Hal Hildebrand
 date: 2026-03-02
