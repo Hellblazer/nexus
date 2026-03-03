@@ -1,7 +1,9 @@
 ---
 title: "Knowledge Base Retrieval Quality: Code Context and Docs Deduplication"
 type: bug
-status: accepted
+status: closed
+closed_date: 2026-03-02
+close_reason: implemented
 priority: P2
 author: Hal Hildebrand
 date: 2026-03-02

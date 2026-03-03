@@ -1070,7 +1070,8 @@ def test_index_code_file_skips_empty_text_chunks(tmp_path: Path) -> None:
     call_args = mock_voyage.embed.call_args
     texts = call_args[1].get("texts") or call_args[0][0]
     assert "" not in texts
-    assert "x = 1" in texts
+    assert len(texts) == 1, "Only 1 non-empty chunk should be embedded"
+    assert "x = 1" in texts[0], "Chunk content must appear in embed text (may be prefixed)"
 
 
 def test_index_code_file_returns_false_when_all_chunks_empty(tmp_path: Path) -> None:
