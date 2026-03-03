@@ -4,18 +4,26 @@
 
 `nx index repo` walks a git repository and classifies each file by extension, routing code
 and prose to separate ChromaDB collections with purpose-built Voyage AI embedding models.
-Code files receive AST-aware chunking via tree-sitter; prose files receive semantic markdown
-chunking. Git frecency scores are computed in a single subprocess and attached to every chunk.
+Code files receive AST-aware chunking via tree-sitter with an embed-only context prefix;
+prose files receive semantic markdown chunking. Git frecency scores are computed in a single
+subprocess and attached to every chunk.
 
 ## File Classification
 
-Every file is classified into one of three categories based on its extension:
+Every file is classified into one of four categories:
 
-- **CODE** (23 extensions): `.py`, `.js`, `.jsx`, `.ts`, `.tsx`, `.java`, `.go`, `.rs`,
-  `.cpp`, `.cc`, `.c`, `.h`, `.hpp`, `.rb`, `.cs`, `.sh`, `.bash`, `.kt`, `.swift`,
-  `.scala`, `.r`, `.m`, `.php`
-- **PDF**: `.pdf` files are extracted and chunked separately, then stored alongside prose.
-- **PROSE**: everything else that is not binary or PDF.
+- **CODE** (32 extensions): `.py`, `.js`, `.jsx`, `.ts`, `.tsx`, `.java`, `.go`, `.rs`,
+  `.cpp`, `.cc`, `.c`, `.cxx`, `.h`, `.hpp`, `.rb`, `.cs`, `.sh`, `.bash`, `.kt`, `.kts`,
+  `.swift`, `.scala`, `.sc`, `.r`, `.m`, `.php`, `.lua`,
+  `.proto`, `.cl`, `.comp`, `.frag`, `.vert`, `.metal`, `.glsl`, `.wgsl`, `.hlsl`
+- **PDF**: `.pdf` files are extracted and chunked separately, then stored in `docs__`.
+- **PROSE**: `.md`, `.markdown`, and any extension not in CODE, PDF, or SKIP.
+- **SKIP** (18 extensions — not indexed): `.xml`, `.json`, `.yml`, `.yaml`, `.toml`,
+  `.properties`, `.ini`, `.cfg`, `.conf`, `.gradle`, `.html`, `.htm`, `.css`, `.svg`,
+  `.cmd`, `.bat`, `.ps1`, `.lock`
+
+**Extensionless files** (e.g., `Makefile`, `LICENSE`): if the first two bytes are `#!`
+(shebang), the file is classified as CODE; otherwise SKIP.
 
 Classification uses `git ls-files --cached -z` so only tracked files are indexed, fully
 respecting `.gitignore`, `.git/info/exclude`, and the global gitignore. Hidden directories
@@ -23,6 +31,7 @@ respecting `.gitignore`, `.git/info/exclude`, and the global gitignore. Hidden d
 `.venv`, `__pycache__`, `dist`, `build`, `.git`) are also skipped.
 
 Classification is overridable via `.nexus.yml` (see [Per-Repo Configuration](#nexusyml-per-repo-configuration)).
+`prose_extensions` config takes priority over all built-in classifications including SKIP.
 
 ## Dual-Collection Architecture
 
@@ -36,7 +45,7 @@ Each indexed repository produces two T3 (ChromaDB Cloud) collections:
 `<name>` is the repository basename; `<hash8>` is the first 8 hex characters of the
 SHA-256 digest of the main repository path. Long basenames are truncated to stay within
 ChromaDB's 63-character collection name limit. Collection names are **stable across git
-worktrees** -- `git rev-parse --git-common-dir` resolves to the shared `.git` directory,
+worktrees** — `git rev-parse --git-common-dir` resolves to the shared `.git` directory,
 so a worktree and its parent produce identical collection names.
 
 Additionally, markdown files under RDR paths (default: `docs/rdr/`) are indexed into a
@@ -49,7 +58,7 @@ separate `rdr__<name>-<hash8>` collection via the batch markdown indexer.
 Code files are chunked via tree-sitter AST parsing using `llama-index` `CodeSplitter` and
 `tree-sitter-language-pack`.
 
-**AST-supported languages** (17 extension mappings to 12 parsers):
+**AST-supported languages** (28 extension mappings, 19 parsers after Fix B):
 
 | Extensions | Parser |
 |---|---|
@@ -61,59 +70,63 @@ Code files are chunked via tree-sitter AST parsing using `llama-index` `CodeSpli
 | `.go` | go |
 | `.rs` | rust |
 | `.c`, `.h` | c |
-| `.cpp`, `.hpp` | cpp |
+| `.cpp`, `.cc`, `.cxx`, `.hpp` | cpp |
 | `.rb` | ruby |
 | `.cs` | c\_sharp |
 | `.sh`, `.bash` | bash |
-
-Six additional extensions (`.kt`, `.swift`, `.scala`, `.r`, `.m`, `.php`) are classified as CODE for metadata tagging but do **not** have AST chunking — they use the line-based fallback.
+| `.kt`, `.kts` | kotlin |
+| `.scala`, `.sc` | scala |
+| `.swift` | swift |
+| `.m` | objc |
+| `.php` | php |
+| `.r` | r |
+| `.lua` | lua |
 
 When AST parsing fails or no parser exists for the extension, the chunker falls back to
 line-based splitting: 150-line chunks with 15% overlap.
 
-The chunk size is configurable via `--chunk-size N` on `nx index repo`:
+### Context Prefix Injection (Embed-Only)
 
-```bash
-nx index repo .                   # default: 150-line chunks
-nx index repo . --chunk-size 80   # smaller chunks for better precision on large files
-```
-
-Smaller chunk sizes improve semantic search precision for large files (the most specific
-chunk is less likely to be dominated by unrelated code in the same chunk) at the cost of
-storing more chunks and slightly higher embedding cost.
-
-### Large-File Warning
-
-Before indexing, `nx index repo` scans for code files that exceed 30× the chunk size in
-lines (e.g., 4 500 lines at the default chunk size of 150). When such files are detected
-a warning is printed suggesting a smaller `--chunk-size`:
+Each code chunk's **embedded text** is prefixed with a one-line context header identifying
+the file, class, method, and line range. The raw chunk text is stored in ChromaDB unchanged
+— the prefix affects only the Voyage AI embedding call, not stored documents or search previews.
 
 ```
-Warning: 2 files exceed the large-file threshold (4,500 lines; largest: src/big.py, 6,200 lines).
-Large files produce many chunks that dominate semantic scoring.
-Consider: nx index repo . --chunk-size 80
-Run with --no-chunk-warning to suppress this message.
+// File: art-modules/art-core/src/FuzzyART.java  Class: FuzzyART  Method: computeMatch  Lines: 200–350
+<original chunk text>
 ```
 
-Use `--no-chunk-warning` to suppress this message when you have already tuned the chunk
-size or intentionally accept the default behaviour.
+Class and method names are extracted by tree-sitter using `DEFINITION_TYPES` covering 14
+languages (Python, Java, Go, TypeScript, Rust, C, C++, C#, Ruby, PHP, Swift, Kotlin, Scala).
+For a chunk spanning multiple methods, the method field is empty. For unsupported languages
+or when parsing fails, the prefix falls back to `File + Lines` only.
 
-Each chunk carries metadata: `file_path`, `filename`, `file_extension`,
+The comment character (`//` vs `#`) is selected per language. This prefix anchors each
+chunk's semantic meaning for retrieval, improving recall for algorithm-level queries in
+domain-specific codebases where many files share vocabulary.
+
+Each chunk carries metadata: `filename`, `source_path`, `file_extension`,
 `programming_language`, `line_start`, `line_end`, `chunk_index`, `chunk_count`,
-`ast_chunked` (bool), `content_hash`, `frecency_score`.
+`ast_chunked` (bool), `class_name`, `method_name`, `content_hash`, `frecency_score`,
+`embedding_model`, `git_commit_hash`, `git_project_name`, `git_branch`, `git_remote_url`.
 
 ## Prose Chunking
 
 Markdown files (`.md`, `.markdown`) are chunked using `SemanticMarkdownChunker`, built on
 the `markdown-it-py` AST parser.
 
-- Headers create section boundaries; the header hierarchy is tracked as `header_path`.
+- Headers create section boundaries; the header hierarchy is tracked as `section_title`.
 - Sections that fit within the token budget (512 tokens, ~1690 chars) are emitted as single
   chunks.
 - Oversized sections are split at content-part boundaries with the section header repeated.
 - YAML frontmatter is extracted via `parse_frontmatter()` and preserved; character offsets
   in chunk metadata account for the frontmatter length.
 - Chunks carry `chunk_start_char` and `chunk_end_char` instead of line numbers.
+- Fenced code blocks are preserved intact (`preserve_code_blocks=True` by default) — a
+  code block is never split mid-content even if it exceeds the section size limit.
+- Structural markdown-it-py tokens (`paragraph_open`, `list_item_open`, `tr_open`, etc.)
+  are filtered via `_STRUCTURAL_TOKEN_TYPES` blocklist so content appears exactly once
+  per chunk (no duplication from open/close token pairs).
 
 Non-markdown prose files use the same line-based fallback as unsupported code languages:
 150-line chunks with 15% overlap.
@@ -142,7 +155,7 @@ Normalization uses min-max over the combined result window. Hybrid scoring appli
 `code__` collections; `docs__` and `knowledge__` collections use pure vector similarity.
 
 The `--frecency-only` flag on `nx index repo` refreshes frecency metadata on all existing
-chunks without re-embedding -- useful for a fast score update after a burst of commits.
+chunks without re-embedding — useful for a fast score update after a burst of commits.
 
 ## `.nexus.yml` Per-Repo Configuration
 
@@ -150,15 +163,14 @@ Place a `.nexus.yml` at the repository root to customize indexing behavior:
 
 ```yaml
 indexing:
-  code_extensions: [".proto", ".thrift"]     # added to the default code set
-  prose_extensions: [".txt.j2", ".md.tmpl"]  # forced to prose (wins over code)
-  rdr_paths: ["docs/rdr", "decisions"]       # directories indexed into rdr__ collection
-  include_untracked: true                    # also index untracked (but not .gitignored) files
+  code_extensions: [".thrift"]              # added to the default code set
+  prose_extensions: [".txt.j2", ".md.tmpl"] # forced to prose (wins over code and SKIP)
+  rdr_paths: ["docs/rdr", "decisions"]      # directories indexed into rdr__ collection
+  include_untracked: true                   # also index untracked (but not .gitignored) files
 ```
 
-`prose_extensions` takes precedence: if an extension appears in both lists, it is classified
-as prose. `code_extensions` is additive -- it extends the built-in set, it does not replace
-it.
+`prose_extensions` takes precedence over everything — if an extension appears in both lists,
+or is normally SKIP, it is classified as PROSE. `code_extensions` is additive.
 
 Configuration merges over global config at `~/.config/nexus/config.yml` (repo wins).
 
@@ -166,12 +178,13 @@ Configuration merges over global config at `~/.config/nexus/config.yml` (repo wi
 
 Every chunk stores a `content_hash` (SHA-256 of the file contents) and `embedding_model`
 in its ChromaDB metadata. On re-index, if both match the stored values, the file is skipped
-entirely -- no re-chunking, no re-embedding, no API calls.
+entirely — no re-chunking, no re-embedding, no API calls.
 
 When a file is deleted from the repository, the pruning pass removes its orphaned chunks
 from both collections. When a file's classification changes (e.g., `.nexus.yml` update
-moves it from code to prose), the misclassification pruner deletes chunks from the old
-collection.
+moves it from code to prose, or a previously-PROSE extension is now SKIP), the
+misclassification pruner deletes chunks from the old collection. Previously-indexed
+SKIP files are cleaned automatically on the next `nx index repo` run.
 
 HEAD polling via `nx serve` monitors registered repositories and triggers automatic
 re-indexing when `git rev-parse HEAD` changes.

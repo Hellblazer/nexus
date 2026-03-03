@@ -53,8 +53,6 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh) |
-| `--chunk-size N` | Lines per code chunk (default: 150). Smaller values improve search precision for large files at the cost of more chunks. Rejected if N < 1. |
-| `--no-chunk-warning` | Suppress the large-file warning that is printed before indexing when large code files are detected. |
 
 **`pdf` and `md` flags:**
 
