@@ -19,6 +19,38 @@ The bug was discovered during a post-ingest search quality evaluation on
 
 ---
 
+## Discovery: We Were Never Doing the Right Thing with Code Parsing
+
+**The bug shipped silently with RDR-015.** Every `code__` collection built with nexus from
+the beginning had this defect. The context prefix feature — RDR-015's primary improvement
+for code search recall — provided **zero discriminative signal** from day one.
+
+All chunks from a given file looked identical to Voyage AI:
+```
+# File: src/nexus/chunker.py  Class:   Method:   Lines: 1-242
+# File: src/nexus/indexer.py  Class:   Method:   Lines: 1-1124
+```
+
+The search quality degradation was observable:
+- Query `"semantic markdown chunking preserve code blocks"` → returned `cli/fulltext.py`
+  fragments (the `if not hits:` conditional), not the markdown chunker
+- Query `"voyage embedding client retry rate limit"` → returned `test_utils.py`
+- Docs search worked correctly (line-based fallback path was unaffected)
+
+The reason this went unnoticed: no before/after comparison was done when RDR-015 shipped.
+The feature was implemented and the metrics looked plausible. It was only when we
+deliberately evaluated arcaneum search quality after a reindex — looking for *specific*
+known functions by semantic query — that the pattern became obvious. Every wrong result
+came from the same file; the model was effectively ranking by file-level similarity, not
+chunk-level.
+
+**All collections ever built with nexus ≤ 1.2.0 are affected.** This includes:
+`code__arcaneum-2ad2825c`, `code__ART-8c2e74c0`, `code__Luciferase-f2d57dbc`, and
+any other `code__*` collection created before the 1.2.1 fix. The docs__ and rdr__
+collections are unaffected (different code path).
+
+---
+
 ## Root Cause
 
 `llama_index.core.node_parser.CodeSplitter.get_nodes_from_documents()` always returns
