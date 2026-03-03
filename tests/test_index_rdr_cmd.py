@@ -104,3 +104,14 @@ def test_index_rdr_excludes_postmortem_dir(
     paths_arg = mock_batch.call_args[0][0]
     for p in paths_arg:
         assert "post-mortem" not in str(p), f"Unexpected subdirectory file: {p}"
+
+
+def test_index_rdr_force_flag(runner: CliRunner, repo_with_rdrs: Path) -> None:
+    """nx index rdr <path> --force passes force=True to batch_index_markdowns."""
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs), "--force"])
+
+    assert result.exit_code == 0, result.output
+    mock_batch.assert_called_once()
+    _, kwargs = mock_batch.call_args
+    assert kwargs.get("force") is True

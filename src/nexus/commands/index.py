@@ -28,7 +28,13 @@ def index() -> None:
     default=False,
     help="Update frecency scores only; skip re-embedding (faster, for re-ranking refresh).",
 )
-def index_repo_cmd(path: Path, frecency_only: bool) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Force re-indexing all files, bypassing staleness check (re-chunks and re-embeds in-place).",
+)
+def index_repo_cmd(path: Path, frecency_only: bool, force: bool) -> None:
     """Register and immediately index a code repository at PATH.
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
@@ -37,14 +43,18 @@ def index_repo_cmd(path: Path, frecency_only: bool) -> None:
     """
     from nexus.indexer import index_repository
 
+    if force and frecency_only:
+        raise click.UsageError("--force and --frecency-only are mutually exclusive.")
+
     reg = _registry()
     path = path.resolve()
     if reg.get(path) is None:
         reg.add(path)
         click.echo(f"Registered {path}.")
 
-    click.echo(f"{'Updating frecency scores' if frecency_only else 'Indexing'} {path}…")
-    stats = index_repository(path, reg, frecency_only=frecency_only)
+    label = "Force-indexing" if force else ("Updating frecency scores" if frecency_only else "Indexing")
+    click.echo(f"{label} {path}…")
+    stats = index_repository(path, reg, frecency_only=frecency_only, force=force)
     if not frecency_only and stats:
         rdr_indexed = stats.get("rdr_indexed", 0)
         rdr_current = stats.get("rdr_current", 0)
@@ -80,9 +90,18 @@ def index_repo_cmd(path: Path, frecency_only: bool) -> None:
         "Prints a chunk preview so you can verify extraction before indexing for real."
     ),
 )
-def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place).",
+)
+def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     from nexus.doc_indexer import index_pdf
+
+    if force and dry_run:
+        raise click.UsageError("--force and --dry-run are mutually exclusive.")
 
     path = path.resolve()
 
@@ -135,22 +154,32 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
         click.echo("\n(no cloud write)")
         return
 
-    click.echo(f"Indexing {path}…")
-    n = index_pdf(path, corpus=corpus, collection_name=collection)
-    click.echo(f"Indexed {n} chunk(s).")
+    label = "Force re-indexing" if force else "Indexing"
+    click.echo(f"{label} {path}…")
+    n = index_pdf(path, corpus=corpus, collection_name=collection, force=force)
+    result_label = "Force re-indexed" if force else "Indexed"
+    click.echo(f"{result_label} {n} chunk(s).")
 
 
 @index.command("md")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--corpus", default="default", show_default=True, help="Corpus name for docs__ collection.")
-def index_md_cmd(path: Path, corpus: str) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Force re-indexing, bypassing staleness check.",
+)
+def index_md_cmd(path: Path, corpus: str, force: bool) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS."""
     from nexus.doc_indexer import index_markdown
 
     path = path.resolve()
-    click.echo(f"Indexing {path}…")
-    n = index_markdown(path, corpus=corpus)
-    click.echo(f"Indexed {n} chunk(s).")
+    label = "Force re-indexing" if force else "Indexing"
+    click.echo(f"{label} {path}…")
+    n = index_markdown(path, corpus=corpus, force=force)
+    result_label = "Force re-indexed" if force else "Indexed"
+    click.echo(f"{result_label} {n} chunk(s).")
 
 
 _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
@@ -158,7 +187,13 @@ _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
 
 @index.command("rdr")
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path), default=".")
-def index_rdr_cmd(path: Path) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Force re-indexing all RDR documents, bypassing staleness check.",
+)
+def index_rdr_cmd(path: Path, force: bool) -> None:
     """Discover and index RDR documents in docs/rdr/ into T3 rdr__REPO-HASH8."""
     from nexus.doc_indexer import batch_index_markdowns
     from nexus.registry import _repo_identity, _rdr_collection_name
@@ -182,7 +217,9 @@ def index_rdr_cmd(path: Path) -> None:
 
     basename, _ = _repo_identity(path)
     collection = _rdr_collection_name(path)
-    click.echo(f"Indexing {len(rdr_files)} RDR document(s) into {collection}…")
-    results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection)
+    label = "Force re-indexing" if force else "Indexing"
+    click.echo(f"{label} {len(rdr_files)} RDR document(s) into {collection}…")
+    results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection, force=force)
     indexed = sum(1 for s in results.values() if s == "indexed")
-    click.echo(f"Indexed {indexed} of {len(rdr_files)} RDR document(s).")
+    result_label = "Force re-indexed" if force else "Indexed"
+    click.echo(f"{result_label} {indexed} of {len(rdr_files)} RDR document(s).")
