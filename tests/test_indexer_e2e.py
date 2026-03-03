@@ -362,8 +362,8 @@ def test_smart_index_prose_files_in_docs_collection(
     assert any("architecture.md" in p for p in docs_sources), (
         f"architecture.md should be in docs__ collection; got: {docs_sources}"
     )
-    assert any("config.yaml" in p for p in docs_sources), (
-        f"config.yaml should be in docs__ collection; got: {docs_sources}"
+    assert not any("config.yaml" in p for p in docs_sources), (
+        f"config.yaml is SKIP and must not appear in docs__ collection; got: {docs_sources}"
     )
 
     code_result = code_col.get(include=["metadatas"])
