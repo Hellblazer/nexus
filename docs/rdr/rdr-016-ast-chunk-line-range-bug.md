@@ -150,6 +150,44 @@ No changes required anywhere else. `_enforce_byte_cap()` will automatically rece
    - Any other `code__*` collections built with nexus ≤ 1.2.0.
 4. Validate search quality improvement with before/after queries.
 
+## Research Findings
+
+### RF-1: CodeSplitter always returns metadata={} (Confirmed — empirical)
+
+`llama_index.core.node_parser.CodeSplitter.get_nodes_from_documents()` was probed on a real 192-line Python file. It returned 4 nodes. Every node had `node.metadata = {}`. No `line_start`, `line_end`, or any other field was present. This behavior is consistent across all languages and chunk sizes tested.
+
+**Evidence**: Empirical probe in session 2026-03-03. The `setdefault` fallback was introduced precisely because CodeSplitter was expected to sometimes return metadata — but empirically it never does.
+
+### RF-2: node.start_char_idx is accurately populated (Confirmed — empirical)
+
+The same probe confirmed that `node.start_char_idx` and `node.end_char_idx` are populated correctly on all 4 nodes. Converting character offset to 1-indexed line number via `content[:start_char_idx].count('\n') + 1` yields the correct line position.
+
+**Evidence**: Manual cross-check against known function boundaries in the test file.
+
+### RF-3: _extract_context() is correct when given proper line ranges (Confirmed — unit tests)
+
+All 5 tests in `tests/test_indexer_chunk_flow.py` pass when `_extract_context()` is called with accurate `(chunk_start_0idx, chunk_end_0idx)` values. The function's enclosing-definition logic is sound; only the inputs are wrong.
+
+**Evidence**: `pytest tests/test_indexer_chunk_flow.py` — 5 passed.
+
+### RF-4: Line-based fallback path is unaffected (Confirmed — code review)
+
+`_line_chunk()` in `chunker.py` builds its own `(line_start, line_end, text)` tuples independently and never calls `CodeSplitter`. It is not affected by this bug.
+
+**Evidence**: Reading `chunker.py:84-133`.
+
+### RF-5: All 18 AST languages affected (Confirmed — code review)
+
+`AST_EXTENSIONS` maps 28 file extensions to 18 languages, all routed through `_make_code_splitter()`. Every one of these language paths returns nodes with `metadata={}` for the same reason. There is no language-specific override.
+
+**Evidence**: Reading `chunker.py:_make_code_splitter()` and `AST_EXTENSIONS` dict.
+
+### RF-6: Three collections confirmed affected, more expected (Confirmed — observed)
+
+Search quality evaluation on `code__arcaneum-2ad2825c` (Python) showed all chunks with `Lines: 1-780` and empty `Class:` / `Method:` fields. Same pattern observed in `code__ART-8c2e74c0` (Java). `code__Luciferase-f2d57dbc` (Python, 25,070 docs) was not directly inspected but is built with the same indexer version.
+
+**Evidence**: Live `nx search` queries, 2026-03-03.
+
 ## Investigation Trail
 
 Discovered 2026-03-03 while evaluating arcaneum ingest quality after force-reindex.
