@@ -155,6 +155,7 @@ def _index_document(
     *,
     collection_name: str | None = None,
     embed_fn: EmbedFn | None = None,
+    force: bool = False,
 ) -> int:
     """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
 
@@ -187,7 +188,7 @@ def _index_document(
         include=["metadatas"],
         limit=1,
     )
-    if existing["metadatas"]:
+    if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
         if stored_hash == content_hash and stored_model == target_model:
@@ -327,6 +328,7 @@ def index_pdf(
     *,
     collection_name: str | None = None,
     embed_fn: EmbedFn | None = None,
+    force: bool = False,
 ) -> int:
     """Index *pdf_path* into a T3 collection.
 
@@ -339,8 +341,10 @@ def index_pdf(
     Pass *embed_fn* to override the default Voyage AI embedding (e.g. a local
     ONNX function for dry-run mode).  When *embed_fn* is provided the Voyage
     credential check is bypassed.
+
+    Pass *force=True* to bypass the staleness check and always re-index.
     """
-    return _index_document(pdf_path, corpus, _pdf_chunks, t3=t3, collection_name=collection_name, embed_fn=embed_fn)
+    return _index_document(pdf_path, corpus, _pdf_chunks, t3=t3, collection_name=collection_name, embed_fn=embed_fn, force=force)
 
 
 def index_markdown(
@@ -349,6 +353,8 @@ def index_markdown(
     t3: Any = None,
     *,
     collection_name: str | None = None,
+    embed_fn: EmbedFn | None = None,
+    force: bool = False,
 ) -> int:
     """Index *md_path* into a T3 collection.
 
@@ -357,8 +363,14 @@ def index_markdown(
 
     YAML frontmatter fields (title, author, date) are stored as metadata.
     Returns the number of chunks indexed, or 0 if skipped.
+
+    Pass *embed_fn* to override the default Voyage AI embedding (e.g. a local
+    ONNX function for dry-run mode).  When *embed_fn* is provided the Voyage
+    credential check is bypassed.
+
+    Pass *force=True* to bypass the staleness check and always re-index.
     """
-    return _index_document(md_path, corpus, _markdown_chunks, t3=t3, collection_name=collection_name)
+    return _index_document(md_path, corpus, _markdown_chunks, t3=t3, collection_name=collection_name, embed_fn=embed_fn, force=force)
 
 
 def batch_index_pdfs(
