@@ -84,9 +84,17 @@ disown
 - `nx doctor` reports the log path and its last-modified time.
 
 **Concurrency guard** — `index_repository` acquires a per-repo file lock
-(`~/.config/nexus/locks/<repo-hash>.lock`) before indexing. If a lock is already held
-(e.g. rapid-fire hooks during `git rebase -i`), subsequent hook invocations exit
-immediately rather than launching concurrent index runs.
+(`~/.config/nexus/locks/<repo-hash>.lock`) before indexing. Lock behaviour differs by
+caller via an `on_locked` parameter:
+
+| Caller | `on_locked` | Behaviour |
+|--------|-------------|-----------|
+| Hook script | `skip` | Exits immediately — subsequent hook fires during `git rebase -i` are silently dropped |
+| `nx index repo` (interactive) | `wait` | Blocks until the lock is released, then runs |
+
+The hook wrapper passes `on_locked="skip"` explicitly. Interactive callers use the
+default `on_locked="wait"`. Frecency-only runs (`--frecency-only`) bypass the lock
+entirely since they do not write chunks and cannot conflict.
 
 **Hooks installed:**
 
@@ -127,11 +135,14 @@ The nexus stanza is bounded by sentinel comments for reliable install/uninstall:
 
 ```bash
 # >>> nexus managed begin >>>
-nx index repo "$(git rev-parse --show-toplevel)" &
+nx index repo "$(git rev-parse --show-toplevel)" \
+  >> "$HOME/.config/nexus/index.log" 2>&1 &
+disown
 # <<< nexus managed end <<<
 ```
 
-`uninstall` removes everything between (and including) the sentinel lines.
+`uninstall` removes everything between (and including) the sentinel lines. This stanza
+is identical whether the hook file is created fresh or appended to an existing hook.
 
 ### `nx hooks install` behaviour
 
@@ -200,6 +211,9 @@ after a successful run (moving the update responsibility from the caller to the 
 This keeps the registry accurate and enables future `nx doctor` diagnostics (e.g.
 "last indexed at commit abc1234").
 
+Frecency-only runs (`--frecency-only`) do **not** update `head_hash` — they do not
+re-index content, so advancing the hash would incorrectly suppress future full re-indexes.
+
 ### Credential failure behaviour
 
 The polling server retried indexing on `CredentialsMissingError` by not advancing
@@ -252,7 +266,7 @@ and more semantically correct (fires on git events, not arbitrary filesystem wri
 - [ ] Hook script redirects stdout+stderr to `~/.config/nexus/index.log` and calls `disown`
 - [ ] `index_repository` acquires a per-repo file lock; concurrent hook invocations skip rather than pile up
 - [ ] `index_repository` updates `head_hash` in the registry after a successful run
-- [ ] `nx index repo` prints the reminder iff none of the three hooks are detected in the effective hooks directory
+- [ ] `nx index repo` prints the reminder iff none of the three hook files in the effective hooks directory contain the nexus sentinel (`# >>> nexus managed begin >>>`)
 - [ ] `nx doctor` shows per-repo hook status (worktree-aware, `core.hooksPath`-aware); non-fatal with Fix: hint
 - [ ] `nx doctor` shows index log path and last-modified time; no longer imports from `commands/serve.py`
 - [ ] Worktree install: hooks installed into main repo's hooks dir, not the gitlink stub
