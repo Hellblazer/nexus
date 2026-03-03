@@ -1064,7 +1064,7 @@ def test_index_code_file_skips_empty_text_chunks(tmp_path: Path) -> None:
             git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
         )
 
-    assert result is True
+    assert result == 1
     # embed must have been called with only the non-empty chunk
     assert mock_voyage.embed.called
     call_args = mock_voyage.embed.call_args
@@ -1241,6 +1241,290 @@ def test_index_code_file_returns_false_when_all_chunks_empty(tmp_path: Path) -> 
             git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
         )
 
-    assert result is False
+    assert result == 0
     mock_voyage.embed.assert_not_called()
     mock_db.upsert_chunks_with_embeddings.assert_not_called()
+
+
+# ── nexus-wvys: bool→int return type for _index_*_file helpers ───────────────
+
+
+def test_index_code_file_returns_int_not_bool(tmp_path: Path) -> None:
+    """_index_code_file must return int, not bool, when a file is indexed."""
+    from nexus.indexer import _index_code_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "main.py"
+    file_.write_text("x = 1\n")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    chunks = [
+        {"line_start": 1, "line_end": 1, "text": "x = 1",
+         "chunk_index": 0, "chunk_count": 1, "ast_chunked": False,
+         "filename": "main.py", "file_extension": ".py"},
+    ]
+    mock_voyage = _make_voyage_mock(1)
+
+    with patch("nexus.chunker.chunk_file", return_value=chunks):
+        result = _index_code_file(
+            file_, repo, "code__repo", "voyage-code-3",
+            mock_col, mock_db, mock_voyage,
+            git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+        )
+
+    assert isinstance(result, int) and not isinstance(result, bool), (
+        f"Expected int (not bool), got {type(result).__name__}: {result!r}"
+    )
+
+
+def test_index_code_file_returns_zero_when_skipped(tmp_path: Path) -> None:
+    """_index_code_file returns 0 (int) when staleness check passes (file unchanged)."""
+    import hashlib
+    from nexus.indexer import _index_code_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    content = "x = 1\n"
+    file_ = repo / "main.py"
+    file_.write_text(content)
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+    mock_col = MagicMock()
+    # Staleness check: same hash, same model → skip
+    mock_col.get.return_value = {
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-code-3"}],
+        "ids": [],
+    }
+    mock_db = MagicMock()
+    mock_voyage = _make_voyage_mock(0)
+
+    result = _index_code_file(
+        file_, repo, "code__repo", "voyage-code-3",
+        mock_col, mock_db, mock_voyage,
+        git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+    )
+
+    assert result == 0, f"Expected 0 when skipped, got {result!r}"
+    assert isinstance(result, int) and not isinstance(result, bool)
+
+
+def test_index_code_file_returns_positive_when_indexed(tmp_path: Path) -> None:
+    """_index_code_file returns positive int equal to post-filter chunk count."""
+    from nexus.indexer import _index_code_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "main.py"
+    file_.write_text("x = 1\ny = 2\n")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    chunks = [
+        {"line_start": 1, "line_end": 1, "text": "x = 1",
+         "chunk_index": 0, "chunk_count": 2, "ast_chunked": False,
+         "filename": "main.py", "file_extension": ".py"},
+        {"line_start": 2, "line_end": 2, "text": "y = 2",
+         "chunk_index": 1, "chunk_count": 2, "ast_chunked": False,
+         "filename": "main.py", "file_extension": ".py"},
+    ]
+    mock_voyage = _make_voyage_mock(2)
+
+    with patch("nexus.chunker.chunk_file", return_value=chunks):
+        result = _index_code_file(
+            file_, repo, "code__repo", "voyage-code-3",
+            mock_col, mock_db, mock_voyage,
+            git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+        )
+
+    assert isinstance(result, int) and not isinstance(result, bool)
+    assert result == 2, f"Expected 2 chunks indexed, got {result!r}"
+
+
+def test_index_prose_file_returns_int_not_bool(tmp_path: Path) -> None:
+    """_index_prose_file must return int, not bool, when a file is indexed."""
+    from nexus.indexer import _index_prose_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "notes.txt"
+    file_.write_text("Line one\nLine two\n")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    mock_embed_result = ([[0.1] * 3], "voyage-context-3")
+
+    with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+        result = _index_prose_file(
+            file_, repo, "docs__repo", "voyage-context-3",
+            mock_col, mock_db, "fake-key",
+            git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+        )
+
+    assert isinstance(result, int) and not isinstance(result, bool), (
+        f"Expected int (not bool), got {type(result).__name__}: {result!r}"
+    )
+
+
+def test_index_prose_file_returns_zero_when_skipped(tmp_path: Path) -> None:
+    """_index_prose_file returns 0 (int) when staleness check passes."""
+    import hashlib
+    from nexus.indexer import _index_prose_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    content = "Line one\nLine two\n"
+    file_ = repo / "notes.txt"
+    file_.write_text(content)
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
+        "ids": [],
+    }
+    mock_db = MagicMock()
+
+    result = _index_prose_file(
+        file_, repo, "docs__repo", "voyage-context-3",
+        mock_col, mock_db, "fake-key",
+        git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+    )
+
+    assert result == 0, f"Expected 0 when skipped, got {result!r}"
+    assert isinstance(result, int) and not isinstance(result, bool)
+
+
+def test_index_prose_file_returns_positive_when_indexed(tmp_path: Path) -> None:
+    """_index_prose_file returns positive int equal to post-filter chunk count."""
+    from nexus.indexer import _index_prose_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "notes.txt"
+    # Write enough content to produce at least one chunk
+    file_.write_text("Line one\nLine two\nLine three\n")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    mock_embed_result = ([[0.1] * 3], "voyage-context-3")
+
+    with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+        result = _index_prose_file(
+            file_, repo, "docs__repo", "voyage-context-3",
+            mock_col, mock_db, "fake-key",
+            git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+        )
+
+    assert isinstance(result, int) and not isinstance(result, bool)
+    assert result > 0, f"Expected positive chunk count, got {result!r}"
+
+
+def test_index_pdf_file_returns_int_not_bool(tmp_path: Path) -> None:
+    """_index_pdf_file must return int, not bool, when a file is indexed."""
+    from nexus.indexer import _index_pdf_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "paper.pdf"
+    file_.write_bytes(b"%PDF-1.4 fake content")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    # _pdf_chunks returns list of (id, doc, metadata) tuples
+    fake_prepared = [
+        ("id1", "Page 1 content", {"source_title": "Test Paper", "page_number": 1,
+                                    "source_path": str(file_), "corpus": "docs__repo",
+                                    "embedding_model": "voyage-context-3",
+                                    "store_type": "prose", "source_agent": "nexus-indexer"}),
+    ]
+    mock_embed_result = ([[0.1] * 3], "voyage-context-3")
+
+    with patch("nexus.doc_indexer._pdf_chunks", return_value=fake_prepared):
+        with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+            result = _index_pdf_file(
+                file_, repo, "docs__repo", "voyage-context-3",
+                mock_col, mock_db, "fake-key",
+                git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+            )
+
+    assert isinstance(result, int) and not isinstance(result, bool), (
+        f"Expected int (not bool), got {type(result).__name__}: {result!r}"
+    )
+
+
+def test_index_pdf_file_returns_zero_when_skipped(tmp_path: Path) -> None:
+    """_index_pdf_file returns 0 (int) when staleness check passes."""
+    import hashlib
+    from nexus.indexer import _index_pdf_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_content = b"%PDF-1.4 fake content"
+    file_ = repo / "paper.pdf"
+    file_.write_bytes(file_content)
+    content_hash = hashlib.sha256(file_content).hexdigest()
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
+        "ids": [],
+    }
+    mock_db = MagicMock()
+
+    result = _index_pdf_file(
+        file_, repo, "docs__repo", "voyage-context-3",
+        mock_col, mock_db, "fake-key",
+        git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+    )
+
+    assert result == 0, f"Expected 0 when skipped, got {result!r}"
+    assert isinstance(result, int) and not isinstance(result, bool)
+
+
+def test_index_pdf_file_returns_positive_when_indexed(tmp_path: Path) -> None:
+    """_index_pdf_file returns positive int equal to post-filter chunk count."""
+    from nexus.indexer import _index_pdf_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "paper.pdf"
+    file_.write_bytes(b"%PDF-1.4 fake content")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    fake_prepared = [
+        ("id1", "Page 1 content", {"source_title": "Test Paper", "page_number": 1,
+                                    "source_path": str(file_), "corpus": "docs__repo",
+                                    "embedding_model": "voyage-context-3",
+                                    "store_type": "prose", "source_agent": "nexus-indexer"}),
+        ("id2", "Page 2 content", {"source_title": "Test Paper", "page_number": 2,
+                                    "source_path": str(file_), "corpus": "docs__repo",
+                                    "embedding_model": "voyage-context-3",
+                                    "store_type": "prose", "source_agent": "nexus-indexer"}),
+    ]
+    mock_embed_result = ([[0.1] * 3, [0.2] * 3], "voyage-context-3")
+
+    with patch("nexus.doc_indexer._pdf_chunks", return_value=fake_prepared):
+        with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+            result = _index_pdf_file(
+                file_, repo, "docs__repo", "voyage-context-3",
+                mock_col, mock_db, "fake-key",
+                git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+            )
+
+    assert isinstance(result, int) and not isinstance(result, bool)
+    assert result == 2, f"Expected 2 chunks indexed, got {result!r}"

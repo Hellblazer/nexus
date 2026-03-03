@@ -72,7 +72,7 @@ def test_unchanged_file_skips_embed(tmp_path: Path) -> None:
         score=1.0,
     )
 
-    assert result is False, "Should return False (skipped) when hash unchanged"
+    assert result == 0, "Should return 0 (skipped) when hash unchanged"
     voyage.embed.assert_not_called()
 
 
@@ -110,7 +110,7 @@ def test_modified_file_reembeds(tmp_path: Path) -> None:
         score=1.0,
     )
 
-    assert result is True, "Should return True (indexed) when hash changed"
+    assert result > 0, "Should return positive chunk count (indexed) when hash changed"
     voyage.embed.assert_called(), "Voyage embed must be called for modified file"
 
 
@@ -142,7 +142,7 @@ def test_new_file_embeds(tmp_path: Path) -> None:
         score=1.0,
     )
 
-    assert result is True, "New file should be indexed"
+    assert result > 0, "New file should be indexed (positive chunk count)"
     voyage.embed.assert_called()
 
 
@@ -183,7 +183,7 @@ def test_force_bypasses_staleness_code_file(tmp_path: Path) -> None:
         force=True,
     )
 
-    assert result is True, "force=True should return True (indexed) even when hash matches"
+    assert result > 0, "force=True should return int > 0 (indexed) even when hash matches"
     voyage.embed.assert_called()
 
 
@@ -223,7 +223,7 @@ def test_force_bypasses_staleness_prose_file(tmp_path: Path) -> None:
             force=True,
         )
 
-    assert result is True, "force=True should return True (indexed) even when hash matches"
+    assert result > 0, "force=True should return int > 0 (indexed) even when hash matches"
     mock_embed.assert_called()
 
 
@@ -279,5 +279,5 @@ def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
             force=True,
         )
 
-    assert result is True, "force=True should return True (indexed) even when hash matches"
+    assert result > 0, "force=True should return int > 0 (indexed) even when hash matches"
     mock_embed.assert_called()

@@ -442,10 +442,10 @@ def _index_code_file(
     score: float,
     chunk_lines: int | None = None,
     force: bool = False,
-) -> bool:
+) -> int:
     """Index a single code file into the code__ collection.
 
-    Returns True if the file was indexed (upserted), False if skipped.
+    Returns the post-filter chunk count (chunks upserted), or 0 if skipped/failed.
     """
     import hashlib as _hl
     from nexus.chunker import chunk_file
@@ -454,7 +454,7 @@ def _index_code_file(
         content = file.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError) as exc:
         _log.debug("skipped non-text file", path=str(file), error=type(exc).__name__)
-        return False
+        return 0
 
     content_hash = _hl.sha256(content.encode()).hexdigest()
     source_bytes = content.encode("utf-8")
@@ -472,12 +472,12 @@ def _index_code_file(
     if not force and existing["metadatas"]:
         stored = existing["metadatas"][0]
         if stored.get("content_hash") == content_hash and stored.get("embedding_model") == target_model:
-            return False
+            return 0
 
     chunks = chunk_file(file, content, chunk_lines=chunk_lines)
     if not chunks:
         _log.debug("skipped file with no chunks", path=str(file))
-        return False
+        return 0
     total_chunks = len(chunks)
 
     ids: list[str] = []
@@ -534,7 +534,7 @@ def _index_code_file(
         if d and d.strip()
     ]
     if not valid:
-        return False
+        return 0
     ids, documents, metadatas, embed_texts = map(list, zip(*valid))
 
     # Embed using prefixed texts for improved retrieval quality; raw documents are stored.
@@ -554,7 +554,7 @@ def _index_code_file(
         embeddings=embeddings,
         metadatas=metadatas,
     )
-    return True
+    return len(ids)
 
 
 def _index_prose_file(
@@ -569,13 +569,13 @@ def _index_prose_file(
     now_iso: str,
     score: float,
     force: bool = False,
-) -> bool:
+) -> int:
     """Index a single prose file into the docs__ collection.
 
     Uses SemanticMarkdownChunker for .md files, _line_chunk for all others.
     Embeds via _embed_with_fallback (CCE for voyage-context-3).
 
-    Returns True if the file was indexed (upserted), False if skipped.
+    Returns the post-filter chunk count (chunks upserted), or 0 if skipped/failed.
     """
     import hashlib as _hl
     from nexus.chunker import _line_chunk
@@ -586,7 +586,7 @@ def _index_prose_file(
         content = file.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError) as exc:
         _log.debug("skipped non-text file", path=str(file), error=type(exc).__name__)
-        return False
+        return 0
 
     content_hash = _hl.sha256(content.encode()).hexdigest()
 
@@ -599,7 +599,7 @@ def _index_prose_file(
     if not force and existing["metadatas"]:
         stored = existing["metadatas"][0]
         if stored.get("content_hash") == content_hash and stored.get("embedding_model") == target_model:
-            return False
+            return 0
 
     ext = file.suffix.lower()
     ids: list[str] = []
@@ -615,7 +615,7 @@ def _index_prose_file(
         chunks = SemanticMarkdownChunker().chunk(body, base_meta)
         if not chunks:
             _log.debug("skipped file with no chunks", path=str(file))
-            return False
+            return 0
 
         for chunk in chunks:
             title = f"{file.relative_to(repo)}:chunk-{chunk.chunk_index}"
@@ -661,7 +661,7 @@ def _index_prose_file(
         raw_chunks = _line_chunk(content)
         if not raw_chunks:
             if not content.strip():
-                return False
+                return 0
             raw_chunks = [(1, 1, content)]
         total_chunks = len(raw_chunks)
 
@@ -694,7 +694,7 @@ def _index_prose_file(
             metadatas.append(metadata)
 
     if not documents:
-        return False
+        return 0
 
     # For non-markdown prose, embed_texts is empty; normalise to documents so
     # the filter below can work uniformly across both paths.
@@ -708,7 +708,7 @@ def _index_prose_file(
         if d and d.strip()
     ]
     if not valid:
-        return False
+        return 0
     ids, documents, metadatas, embed_texts = map(list, zip(*valid))
 
     texts_to_embed = embed_texts
@@ -726,7 +726,7 @@ def _index_prose_file(
         embeddings=embeddings,
         metadatas=metadatas,
     )
-    return True
+    return len(ids)
 
 
 def _index_pdf_file(
@@ -741,11 +741,11 @@ def _index_pdf_file(
     now_iso: str,
     score: float,
     force: bool = False,
-) -> bool:
+) -> int:
     """Index a single PDF file into the docs__ collection.
 
     Uses PDF extraction + chunking from doc_indexer, embeds via _embed_with_fallback.
-    Returns True if the file was indexed, False if skipped.
+    Returns the post-filter chunk count (chunks upserted), or 0 if skipped/failed.
     """
     import hashlib as _hl
     from nexus.doc_indexer import _embed_with_fallback, _pdf_chunks
@@ -765,12 +765,12 @@ def _index_pdf_file(
     if not force and existing["metadatas"]:
         stored = existing["metadatas"][0]
         if stored.get("content_hash") == content_hash_hex and stored.get("embedding_model") == target_model:
-            return False
+            return 0
 
     prepared = _pdf_chunks(file, content_hash_hex, target_model, now_iso, collection_name)
     if not prepared:
         _log.debug("skipped PDF with no chunks", path=str(file))
-        return False
+        return 0
 
     ids = [p[0] for p in prepared]
     documents = [p[1] for p in prepared]
@@ -820,7 +820,7 @@ def _index_pdf_file(
         embeddings=embeddings,
         metadatas=metadatas,
     )
-    return True
+    return len(prepared)
 
 
 def _discover_and_index_rdrs(
