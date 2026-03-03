@@ -99,6 +99,61 @@ If a `.git/hooks/post-commit` already exists and is not nexus-managed:
 A file is considered "nexus-managed" if it contains the comment
 `# managed by nexus`.
 
+The nexus stanza is bounded by sentinel comments for reliable install/uninstall:
+
+```bash
+# >>> nexus managed begin >>>
+nx index repo "$(git rev-parse --show-toplevel)" &
+# <<< nexus managed end <<<
+```
+
+`uninstall` removes everything between (and including) the sentinel lines.
+
+### `nx hooks install` behaviour
+
+```
+$ nx hooks install
+Installing hooks for /path/to/repo…
+  ✓ post-commit  (created)
+  ✓ post-merge   (appended to existing hook)
+  ✓ post-rewrite (created)
+Done. Indexing will run in the background after each commit.
+```
+
+### `nx hooks uninstall` behaviour
+
+```
+$ nx hooks uninstall
+Removing nexus hooks from /path/to/repo…
+  ✓ post-commit  (removed)
+  ✓ post-merge   (stanza removed, existing hook preserved)
+  ✓ post-rewrite (removed)
+Done.
+```
+
+### `nx doctor` integration
+
+The "Nexus server (optional)" check in `doctor.py` currently imports from
+`commands/serve.py` and is deleted along with the serve command.
+
+It is replaced with a **hooks check** that iterates every registered repo and reports
+hook status:
+
+```
+  ✓ git hooks: /path/to/repo (post-commit, post-merge, post-rewrite)
+  ✗ git hooks: /path/to/other-repo — not installed
+    Fix: nx hooks install /path/to/other-repo
+```
+
+If no repos are registered yet:
+
+```
+  ✓ git hooks: no repos registered yet (run: nx index repo <path>)
+```
+
+The check is always `✓` (non-fatal) — missing hooks are a reminder, not an error,
+because indexing still works via `nx index repo` directly.
+
 ## Alternatives Considered
 
 ### B — Hybrid (keep serve, add hooks)
@@ -119,16 +174,21 @@ and more semantically correct (fires on git events, not arbitrary filesystem wri
 
 - [ ] `nx serve` command group is gone; `nx` help no longer lists it
 - [ ] `server.py` and `polling.py` are deleted; no references remain in the codebase
-- [ ] `nx hooks install` installs post-commit, post-merge, post-rewrite scripts
-- [ ] `nx hooks uninstall` removes nexus stanzas without destroying unrelated hook content
+- [ ] `nx hooks install` installs post-commit, post-merge, post-rewrite scripts;
+      output shows per-hook created/appended status
+- [ ] `nx hooks uninstall` removes nexus stanzas without destroying unrelated hook content;
+      output shows per-hook removed/preserved status
 - [ ] `nx hooks status` correctly identifies managed vs unmanaged vs absent hooks
 - [ ] `nx index repo` prints the reminder iff none of the three hooks are installed
-- [ ] Existing hook coexistence: appending and removal work correctly
+- [ ] Existing hook coexistence: appending and stanza removal work correctly
+- [ ] `nx doctor` shows per-repo hook status; missing hooks are non-fatal with Fix: hint
+- [ ] `nx doctor` no longer imports from `commands/serve.py`
 - [ ] All tests pass; deleted test files removed; new hook tests added
 - [ ] `docs/cli-reference.md`, `docs/repo-indexing.md`, `docs/contributing.md` updated
 
 ## Impact
 
-- **Removes** ~400 lines across `server.py`, `polling.py`, `commands/serve.py`
-- **Adds** ~150 lines in `commands/hooks.py` + tests
-- **Net**: simpler codebase, zero background processes, event-driven reindexing
+- **Removes** ~450 lines across `server.py`, `polling.py`, `commands/serve.py`
+- **Adds** ~200 lines in `commands/hooks.py` + doctor update + tests
+- **Net**: simpler codebase, zero background processes, event-driven reindexing,
+  better diagnostics
