@@ -959,7 +959,7 @@ def _run_index(repo: Path, registry: "RepoRegistry", chunk_lines: int | None = N
 
     info = registry.get(repo)
     if info is None:
-        return
+        return {}
 
     # C2: use deterministic naming function as fallback
     code_collection = info.get("code_collection", info["collection"])

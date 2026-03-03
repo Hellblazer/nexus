@@ -382,7 +382,7 @@ def batch_index_pdfs(
 ) -> dict[str, str]:
     """Index multiple PDFs sequentially, returning per-file status.
 
-    Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"failed"``.
+    Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"skipped"`` | ``"failed"``.
     Failures are logged and do not abort the remaining paths.
 
     Pass *force=True* to bypass the staleness check on every file.
@@ -411,7 +411,7 @@ def batch_index_markdowns(
     Pass *collection_name* to override the default ``docs__{corpus}`` target
     (used for RDR collections).
 
-    Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"failed"``.
+    Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"skipped"`` | ``"failed"``.
     Failures are logged and do not abort the remaining paths.
 
     Pass *force=True* to bypass the staleness check on every file.
