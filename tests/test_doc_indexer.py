@@ -1407,3 +1407,121 @@ def test_embed_with_fallback_all_empty_strings():
 
     assert embeddings == []
     mock_client.embed.assert_not_called()
+
+
+# ── nexus-mj98: force=True bypasses staleness check ──────────────────────────
+
+
+def test_force_bypasses_staleness_pdf(sample_pdf, monkeypatch):
+    """index_pdf(force=True) re-indexes even when content_hash and embedding_model match.
+
+    Without force=True the staleness check would return 0 (skip). With force=True
+    it must proceed to chunk, embed, and upsert — returning a non-zero chunk count.
+    """
+    set_credentials(monkeypatch)
+    content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+
+    mock_col = MagicMock()
+    # Staleness check returns matching hash + model (would normally cause skip)
+    mock_col.get.return_value = {
+        "ids": ["existing_id"],
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
+    }
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_chunk = MagicMock()
+    mock_chunk.text = "chunk text content"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 18, "page_number": 1}
+
+    def fake_embed(texts, model):
+        return [[0.1] * 5] * len(texts), model
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
+                mock_extractor_class.return_value.extract.return_value = MagicMock(
+                    text="extracted text",
+                    metadata={
+                        "extraction_method": "pymupdf4llm_markdown",
+                        "page_count": 1,
+                        "format": "markdown",
+                        "page_boundaries": [],
+                    },
+                )
+                mock_chunker_class.return_value.chunk.return_value = [mock_chunk]
+
+                result = index_pdf(sample_pdf, corpus="mybook", force=True, embed_fn=fake_embed)
+
+    assert result > 0, "force=True must bypass staleness skip and index the document"
+    mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+
+
+def test_force_bypasses_staleness_markdown(sample_md, monkeypatch):
+    """index_markdown(force=True) re-indexes even when content_hash and embedding_model match.
+
+    Without force=True the staleness check would return 0 (skip). With force=True
+    it must proceed to chunk, embed, and upsert — returning a non-zero chunk count.
+    """
+    set_credentials(monkeypatch)
+    content_hash = hashlib.sha256(sample_md.read_bytes()).hexdigest()
+
+    mock_col = MagicMock()
+    # Staleness check returns matching hash + model (would normally cause skip)
+    mock_col.get.return_value = {
+        "ids": ["existing_id"],
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
+    }
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_chunk = MagicMock()
+    mock_chunk.text = "chunk text"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {
+        "chunk_start_char": 0,
+        "chunk_end_char": 10,
+        "page_number": 0,
+        "header_path": "Hello",
+    }
+
+    def fake_embed(texts, model):
+        return [[0.1] * 5] * len(texts), model
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
+            mock_chunker_class.return_value.chunk.return_value = [mock_chunk]
+
+            result = index_markdown(sample_md, corpus="docs", force=True, embed_fn=fake_embed)
+
+    assert result > 0, "force=True must bypass staleness skip and index the document"
+    mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+
+
+def test_force_default_false_still_skips(sample_pdf, monkeypatch):
+    """Without force=True, the staleness skip is preserved (regression guard).
+
+    Verifies that the default force=False behavior is unchanged: when hash and
+    model both match the stored values, index_pdf returns 0 without chunking.
+    """
+    set_credentials(monkeypatch)
+    content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["existing_id"],
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
+    }
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
+            result = index_pdf(sample_pdf, corpus="mybook")
+
+    assert result == 0, "Default force=False must preserve the staleness skip"
+    mock_extractor_class.assert_not_called()
