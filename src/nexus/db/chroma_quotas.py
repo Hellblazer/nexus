@@ -23,6 +23,7 @@ class ChromaQuotas:
     # Data size
     MAX_EMBEDDING_DIMENSIONS: int = 4_096
     MAX_DOCUMENT_BYTES: int = 16_384
+    SAFE_CHUNK_BYTES: int = 12_288  # Target cap for all chunkers (4KB below MAX_DOCUMENT_BYTES)
     MAX_URI_BYTES: int = 256
     MAX_ID_BYTES: int = 128
     MAX_DB_NAME_BYTES: int = 128
@@ -50,6 +51,7 @@ class ChromaQuotas:
 
 #: Singleton quota instance using free-tier limits.
 QUOTAS = ChromaQuotas()
+SAFE_CHUNK_BYTES: int = QUOTAS.SAFE_CHUNK_BYTES
 
 
 # ── Error hierarchy ───────────────────────────────────────────────────────────

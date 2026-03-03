@@ -245,3 +245,37 @@ def test_spurious_split_resolved():
     assert len(chunks) == 1, (
         f"Expected 1 chunk after dedup fix, got {len(chunks)}"
     )
+
+
+# ── Phase 2b: byte cap post-pass ──────────────────────────────────────────────
+
+def test_md_chunker_byte_cap_enforced_on_large_code_fence() -> None:
+    """Code fence larger than SAFE_CHUNK_BYTES must be truncated in the post-pass."""
+    from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+    big_code = "x" * 15_000  # 15 KB > SAFE_CHUNK_BYTES (12 288)
+    text = f"# Section\n\n```python\n{big_code}\n```\n"
+
+    chunker = SemanticMarkdownChunker(preserve_code_blocks=True)
+    chunks = chunker.chunk(text, {})
+
+    assert len(chunks) >= 1
+    for c in chunks:
+        assert len(c.text.encode()) <= SAFE_CHUNK_BYTES, (
+            f"Chunk exceeds SAFE_CHUNK_BYTES: {len(c.text.encode())} bytes (limit {SAFE_CHUNK_BYTES})"
+        )
+
+
+def test_md_chunker_byte_cap_no_code_fence() -> None:
+    """Non-code content larger than SAFE_CHUNK_BYTES is also capped in the post-pass."""
+    from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+    big_code = "y" * 15_000  # 15 KB single-line fence (no heading → naive path likely)
+    text = f"```python\n{big_code}\n```"
+
+    chunker = SemanticMarkdownChunker(preserve_code_blocks=True)
+    chunks = chunker.chunk(text, {})
+
+    assert len(chunks) >= 1
+    for c in chunks:
+        assert len(c.text.encode()) <= SAFE_CHUNK_BYTES, (
+            f"Chunk exceeds SAFE_CHUNK_BYTES: {len(c.text.encode())} bytes (limit {SAFE_CHUNK_BYTES})"
+        )

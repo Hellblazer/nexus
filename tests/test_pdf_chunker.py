@@ -55,3 +55,20 @@ def test_chunk_returns_textchunk_instances():
     chunker = PDFChunker(chunk_chars=500)
     chunks = chunker.chunk("content", {})
     assert all(isinstance(c, TextChunk) for c in chunks)
+
+
+# ── Phase 2c: byte cap post-pass ──────────────────────────────────────────────
+
+def test_pdf_chunker_byte_cap_enforced() -> None:
+    """Chunks exceeding SAFE_CHUNK_BYTES must be truncated in the post-pass."""
+    from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+    # chunk_chars > SAFE_CHUNK_BYTES forces chunks that exceed the byte cap.
+    big_text = "a" * 20_000  # 20 KB ASCII
+    chunker = PDFChunker(chunk_chars=15_000)  # 15 KB per chunk > 12 288
+    chunks = chunker.chunk(big_text, {})
+
+    assert len(chunks) >= 1
+    for c in chunks:
+        assert len(c.text.encode()) <= SAFE_CHUNK_BYTES, (
+            f"PDF chunk exceeds SAFE_CHUNK_BYTES: {len(c.text.encode())} bytes (limit {SAFE_CHUNK_BYTES})"
+        )

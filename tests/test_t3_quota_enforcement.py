@@ -384,3 +384,75 @@ def test_put_write_semaphore_limits_concurrent_puts_to_10() -> None:
     assert max(active_at_once) <= QUOTAS.MAX_CONCURRENT_WRITES, (
         f"Max concurrent writes was {max(active_at_once)}, expected ≤ {QUOTAS.MAX_CONCURRENT_WRITES}"
     )
+
+
+# ── _write_batch last-resort drop-and-warn guard ──────────────────────────────
+
+def test_write_batch_drops_oversized_document() -> None:
+    """_write_batch silently drops documents exceeding MAX_DOCUMENT_BYTES."""
+    import chromadb
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+    from nexus.db.chroma_quotas import QUOTAS
+
+    client = chromadb.EphemeralClient()
+    ef = DefaultEmbeddingFunction()
+    db = T3Database(_client=client, _ef_override=ef)
+    col = db.get_or_create_collection("code__test_oversized")
+
+    oversized_doc = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
+    normal_doc = "hello world"
+
+    db._write_batch(
+        col, "code__test_oversized",
+        ids=["oversized-1", "normal-1"],
+        documents=[oversized_doc, normal_doc],
+        metadatas=[{"source_path": "big.py"}, {"source_path": "small.py"}],
+    )
+    result = col.get(ids=["normal-1"])
+    assert len(result["ids"]) == 1
+    assert result["ids"][0] == "normal-1"
+
+    result = col.get(ids=["oversized-1"])
+    assert len(result["ids"]) == 0
+
+
+def test_write_batch_passes_valid_documents() -> None:
+    """_write_batch upserts all documents within the byte limit."""
+    import chromadb
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+    client = chromadb.EphemeralClient()
+    ef = DefaultEmbeddingFunction()
+    db = T3Database(_client=client, _ef_override=ef)
+    col = db.get_or_create_collection("code__test_valid")
+
+    docs = [f"doc content {i}" for i in range(5)]
+    ids = [f"id-{i}" for i in range(5)]
+    metas = [{"source_path": f"file{i}.py"} for i in range(5)]
+
+    db._write_batch(col, "code__test_valid", ids=ids, documents=docs, metadatas=metas)
+
+    result = col.get(ids=ids)
+    assert len(result["ids"]) == 5
+
+
+def test_write_batch_drops_all_oversized_returns_early() -> None:
+    """_write_batch with only oversized docs does nothing (no upsert call)."""
+    import chromadb
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+    from nexus.db.chroma_quotas import QUOTAS
+
+    client = chromadb.EphemeralClient()
+    ef = DefaultEmbeddingFunction()
+    db = T3Database(_client=client, _ef_override=ef)
+    col = db.get_or_create_collection("code__test_all_oversized")
+
+    oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
+    db._write_batch(
+        col, "code__test_all_oversized",
+        ids=["big-1", "big-2"],
+        documents=[oversized, oversized],
+        metadatas=[{"source_path": "a.py"}, {"source_path": "b.py"}],
+    )
+    result = col.get()
+    assert len(result["ids"]) == 0
