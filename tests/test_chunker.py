@@ -103,9 +103,11 @@ def test_chunk_file_python_calls_codesplitter(tmp_path: Path) -> None:
     mock_node1 = MagicMock()
     mock_node1.text = "def foo():\n    pass"
     mock_node1.metadata = {}
+    mock_node1.start_char_idx = 0  # starts at beginning of file
     mock_node2 = MagicMock()
     mock_node2.text = "def bar():\n    pass"
     mock_node2.metadata = {}
+    mock_node2.start_char_idx = 21  # "def foo():\n    pass\n\n" = 21 chars
 
     with patch("nexus.chunker._make_code_splitter", return_value=[mock_node1, mock_node2]):
         chunks = chunk_file(f, f.read_text())
@@ -286,6 +288,7 @@ def test_chunk_file_ast_oversized_node_is_split(tmp_path: Path) -> None:
     big_node.text = f"def huge():\n{big_body}"
     assert len(big_node.text.encode()) > _CHUNK_MAX_BYTES, "test data must exceed cap"
     big_node.metadata = {}
+    big_node.start_char_idx = 0  # single node, starts at file beginning
 
     with patch("nexus.chunker._make_code_splitter", return_value=[big_node]):
         chunks = chunk_file(f, f.read_text())
@@ -293,3 +296,86 @@ def test_chunk_file_ast_oversized_node_is_split(tmp_path: Path) -> None:
     assert len(chunks) > 1
     for c in chunks:
         assert len(c["text"].encode()) <= _CHUNK_MAX_BYTES
+
+
+# ── AST line range accuracy (RDR-016) ────────────────────────────────────────
+
+def test_chunk_file_ast_line_ranges(tmp_path: Path) -> None:
+    """AST chunks report accurate per-chunk line ranges, not the whole-file extent.
+
+    With the bug: every chunk from a file gets line_start=1, line_end=<total lines>.
+    With the fix: each chunk's line_start and line_end reflect the actual code slice.
+    """
+    # 8-line file: Foo on lines 1-3, blank lines 4-5, Bar on lines 6-8
+    content = (
+        "class Foo:\n"           # line 1, char  0
+        "    def a(self):\n"     # line 2, char 11
+        "        return 1\n"     # line 3, char 28
+        "\n"                     # line 4, char 46
+        "\n"                     # line 5, char 47
+        "class Bar:\n"           # line 6, char 48
+        "    def b(self):\n"     # line 7, char 59
+        "        return 2\n"     # line 8, char 76
+    )
+    f = tmp_path / "two_classes.py"
+    f.write_text(content)
+
+    node1 = MagicMock()
+    node1.text = "class Foo:\n    def a(self):\n        return 1"
+    node1.metadata = {}
+    node1.start_char_idx = 0  # char 0 → line 1
+
+    node2 = MagicMock()
+    node2.text = "class Bar:\n    def b(self):\n        return 2"
+    node2.metadata = {}
+    node2.start_char_idx = 48  # char 48 → line 6 (5 newlines precede it)
+
+    with patch("nexus.chunker._make_code_splitter", return_value=[node1, node2]):
+        chunks = chunk_file(f, content)
+
+    assert len(chunks) == 2
+
+    # Chunk 0: class Foo (lines 1-3)
+    assert chunks[0]["line_start"] == 1, f"expected 1, got {chunks[0]['line_start']}"
+    assert chunks[0]["line_end"] == 3, f"expected 3, got {chunks[0]['line_end']}"
+
+    # Chunk 1: class Bar (lines 6-8)
+    assert chunks[1]["line_start"] == 6, f"expected 6, got {chunks[1]['line_start']}"
+    assert chunks[1]["line_end"] == 8, f"expected 8, got {chunks[1]['line_end']}"
+
+
+def test_chunk_file_ast_empty_text_node(tmp_path: Path) -> None:
+    """An empty-text AST node must not produce line_end < line_start."""
+    f = tmp_path / "empty_node.py"
+    content = "x = 1\n"
+    f.write_text(content)
+
+    mock_node = MagicMock()
+    mock_node.text = ""
+    mock_node.metadata = {}
+    mock_node.start_char_idx = 0
+
+    with patch("nexus.chunker._make_code_splitter", return_value=[mock_node]):
+        chunks = chunk_file(f, content)
+
+    assert len(chunks) == 1
+    assert chunks[0]["line_start"] <= chunks[0]["line_end"]
+
+
+def test_chunk_file_ast_none_start_char_idx(tmp_path: Path) -> None:
+    """When node.start_char_idx is None, falls back to line_start=1 without error."""
+    f = tmp_path / "none_idx.py"
+    content = "def foo():\n    pass\n"
+    f.write_text(content)
+
+    mock_node = MagicMock()
+    mock_node.text = "def foo():\n    pass"
+    mock_node.metadata = {}
+    mock_node.start_char_idx = None  # explicit None → defensive fallback path
+
+    with patch("nexus.chunker._make_code_splitter", return_value=[mock_node]):
+        chunks = chunk_file(f, content)
+
+    assert len(chunks) == 1
+    assert chunks[0]["line_start"] == 1
+    assert chunks[0]["line_end"] >= chunks[0]["line_start"]

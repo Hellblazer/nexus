@@ -207,9 +207,17 @@ def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list
                 result = []
                 for i, node in enumerate(nodes):
                     meta = {**base_meta, **node.metadata, "ast_chunked": True, "chunk_index": i, "chunk_count": count}
-                    # Ensure line_start / line_end exist (CodeSplitter may or may not provide)
-                    meta.setdefault("line_start", 1)
-                    meta.setdefault("line_end", len(content.splitlines()))
+                    # CodeSplitter.get_nodes_from_documents() always returns metadata={} —
+                    # no line_start/line_end. Derive per-chunk line numbers from the
+                    # TextNode character offsets (start_char_idx is populated and accurate).
+                    if node.start_char_idx is not None:
+                        line_start = content[:node.start_char_idx].count("\n") + 1
+                    else:
+                        line_start = 1  # defensive fallback; None not observed empirically
+                    # max() guard: str.splitlines() returns [] for empty text, giving -1 delta
+                    line_end = max(line_start, line_start + len(node.text.splitlines()) - 1)
+                    meta["line_start"] = line_start
+                    meta["line_end"] = line_end
                     meta["text"] = node.text
                     result.append(meta)
                 # Post-process: split any AST node that exceeds the byte cap
