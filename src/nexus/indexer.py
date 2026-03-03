@@ -841,6 +841,12 @@ def _discover_and_index_rdrs(
     M2: passes t3=db to avoid creating a redundant T3 client.
 
     Returns (indexed, skipped, failed) counts.
+
+    Note: ``on_file`` progress callbacks are intentionally NOT wired here.
+    RDR files are excluded from the main ``_run_index`` file loop and their
+    count is not known up front (discovered inside this function).  For
+    standalone RDR progress reporting, call ``batch_index_markdowns`` directly
+    with an ``on_file`` callback (Path B in the progress reporting design).
     """
     from nexus.doc_indexer import batch_index_markdowns
 
@@ -1050,7 +1056,9 @@ def _run_index(
     pdf_files.sort(key=lambda x: x[0], reverse=True)
     all_text_scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Fire on_start with total non-RDR file count
+    # Fire on_start with total non-RDR file count.
+    # Note: this fires before the credential check below.  Phase 2 (CLI) must
+    # handle CredentialsMissingError by closing the tqdm bar before re-raising.
     if on_start:
         on_start(len(code_files) + len(prose_files) + len(pdf_files))
 

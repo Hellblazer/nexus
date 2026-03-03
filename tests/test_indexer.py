@@ -1538,16 +1538,6 @@ _BASE_REGISTRY = {
 }
 
 
-def _make_run_index_patches(registry_info=None):
-    """Return a dict of standard patches needed for _run_index tests."""
-    return {
-        "nexus.frecency.batch_frecency": {},
-        "nexus.ripgrep_cache.build_cache": None,
-        "nexus.indexer._git_metadata": {},
-        "nexus.config.load_config": _DEFAULT_CONFIG,
-        "nexus.config.get_credential": "fake-key",
-    }
-
 
 def test_on_start_called_once_with_total_file_count(tmp_path: Path) -> None:
     """on_start fires exactly once with len(code) + len(prose) + len(pdf) files."""

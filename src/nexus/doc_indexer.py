@@ -7,6 +7,7 @@ override the collection name for other prefixes (e.g. ``rdr__``).
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -157,7 +158,7 @@ def _index_document(
     embed_fn: EmbedFn | None = None,
     force: bool = False,
     return_metadata: bool = False,
-) -> int | dict:
+) -> int | list[dict]:
     """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
 
     *chunk_fn(file_path, content_hash, target_model, now_iso)* produces the
@@ -230,7 +231,7 @@ def _index_document(
         col.delete(ids=stale_ids)
 
     if return_metadata:
-        return metadatas  # type: ignore[return-value]
+        return metadatas
     return len(prepared)
 
 
@@ -366,7 +367,8 @@ def index_pdf(
         force=force, return_metadata=return_metadata,
     )
     if not return_metadata:
-        return raw  # type: ignore[return-value]
+        assert isinstance(raw, int)
+        return raw
     if not isinstance(raw, list):
         return {"chunks": 0, "pages": [], "title": "", "author": ""}
     metadatas: list[dict] = raw
@@ -415,7 +417,8 @@ def index_markdown(
         force=force, return_metadata=return_metadata,
     )
     if not return_metadata:
-        return raw  # type: ignore[return-value]
+        assert isinstance(raw, int)
+        return raw
     if not isinstance(raw, list):
         return {"chunks": 0, "sections": 0}
     metadatas: list[dict] = raw
@@ -442,20 +445,19 @@ def batch_index_pdfs(
     ``on_file(path, chunks, elapsed_s)`` where *chunks* is the number of
     chunks upserted (0 for skipped/failed) and *elapsed_s* is wall time.
     """
-    import time as _time
     results: dict[str, str] = {}
     for path in paths:
-        t0 = _time.monotonic()
+        count: int = 0
+        t0 = time.monotonic()
         try:
             raw = index_pdf(path, corpus, t3=t3, force=force)
-            count: int = raw if isinstance(raw, int) else 0
+            count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
             _log.warning("batch_index_pdfs: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
-            count = 0
         if on_file:
-            on_file(path, int(count), _time.monotonic() - t0)
+            on_file(path, count, time.monotonic() - t0)
     return results
 
 
@@ -482,18 +484,17 @@ def batch_index_markdowns(
     ``on_file(path, chunks, elapsed_s)`` where *chunks* is the number of
     chunks upserted (0 for skipped/failed) and *elapsed_s* is wall time.
     """
-    import time as _time
     results: dict[str, str] = {}
     for path in paths:
-        t0 = _time.monotonic()
+        count: int = 0
+        t0 = time.monotonic()
         try:
             raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name, force=force)
-            count: int = raw if isinstance(raw, int) else 0
+            count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
             _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
-            count = 0
         if on_file:
-            on_file(path, int(count), _time.monotonic() - t0)
+            on_file(path, count, time.monotonic() - t0)
     return results

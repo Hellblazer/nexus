@@ -1637,3 +1637,159 @@ def test_batch_index_pdfs_on_file_none_safe_default(tmp_path):
 
     with patch("nexus.doc_indexer.index_pdf", return_value=1):
         batch_index_pdfs([pdf1], corpus="test")  # no on_file — must not raise
+
+# ── nexus-uj09: return_metadata tests ─────────────────────────────────────────
+
+def test_index_pdf_return_metadata_false_returns_int(sample_pdf, monkeypatch):
+    """return_metadata=False (default): index_pdf returns int chunk count."""
+    set_credentials(monkeypatch)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_chunk = MagicMock()
+    mock_chunk.text = "chunk content"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 13, "page_number": 1}
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                with patch("voyageai.Client", return_value=mock_voyage_client):
+                    mock_ext = MagicMock()
+                    mock_ext_cls.return_value = mock_ext
+                    mock_ext.extract.return_value = MagicMock(
+                        text="text", metadata={"extraction_method": "x", "page_count": 1,
+                                               "format": "markdown", "page_boundaries": []}
+                    )
+                    mock_chk_cls.return_value.chunk.return_value = [mock_chunk]
+                    result = index_pdf(sample_pdf, corpus="test")  # default return_metadata=False
+
+    assert isinstance(result, int), f"Expected int, got {type(result)}"
+    assert result == 1
+
+
+def test_index_pdf_return_metadata_true_returns_dict(sample_pdf, monkeypatch):
+    """return_metadata=True: index_pdf returns dict with chunks/pages/title/author."""
+    set_credentials(monkeypatch)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_chunk = MagicMock()
+    mock_chunk.text = "chunk content"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 13, "page_number": 2}
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                with patch("voyageai.Client", return_value=mock_voyage_client):
+                    mock_ext = MagicMock()
+                    mock_ext_cls.return_value = mock_ext
+                    mock_ext.extract.return_value = MagicMock(
+                        text="text", metadata={"extraction_method": "x", "page_count": 1,
+                                               "format": "markdown", "page_boundaries": [],
+                                               "title": "My Paper", "author": "A. Thor"}
+                    )
+                    mock_chk_cls.return_value.chunk.return_value = [mock_chunk]
+                    result = index_pdf(sample_pdf, corpus="test", return_metadata=True)
+
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert result["chunks"] == 1
+    assert isinstance(result["pages"], list)
+    assert isinstance(result["title"], str)
+    assert isinstance(result["author"], str)
+
+
+def test_index_pdf_return_metadata_true_skipped_file_returns_empty_dict(sample_pdf, monkeypatch):
+    """return_metadata=True on a skipped file (hash unchanged): returns empty-dict sentinel."""
+    set_credentials(monkeypatch)
+    import hashlib as _hl
+    content_hash = _hl.sha256(sample_pdf.read_bytes()).hexdigest()
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["existing"],
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
+    }
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker"):
+                with patch("voyageai.Client"):
+                    mock_ext = MagicMock()
+                    mock_ext_cls.return_value = mock_ext
+                    mock_ext.extract.return_value = MagicMock(
+                        text="text", metadata={"extraction_method": "x", "page_count": 1,
+                                               "format": "markdown", "page_boundaries": []}
+                    )
+                    result = index_pdf(sample_pdf, corpus="test", return_metadata=True)
+
+    assert isinstance(result, dict), f"Expected dict sentinel on skip, got {type(result)}"
+    assert result["chunks"] == 0
+    assert result["pages"] == []
+
+
+def test_index_markdown_return_metadata_true_returns_dict(sample_md, monkeypatch):
+    """return_metadata=True: index_markdown returns dict with chunks and sections."""
+    set_credentials(monkeypatch)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("voyageai.Client", return_value=mock_voyage_client):
+            result = index_markdown(sample_md, corpus="test", return_metadata=True)
+
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert "chunks" in result
+    assert "sections" in result
+    assert isinstance(result["chunks"], int)
+    assert isinstance(result["sections"], int)
+
+
+def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_md, monkeypatch):
+    """return_metadata=True on a skipped file (hash unchanged): returns empty-dict sentinel."""
+    set_credentials(monkeypatch)
+    import hashlib as _hl
+    content_hash = _hl.sha256(sample_md.read_bytes()).hexdigest()
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["existing"],
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
+    }
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("voyageai.Client"):
+            result = index_markdown(sample_md, corpus="test", return_metadata=True)
+
+    assert isinstance(result, dict), f"Expected dict sentinel on skip, got {type(result)}"
+    assert result["chunks"] == 0
+    assert result["sections"] == 0
