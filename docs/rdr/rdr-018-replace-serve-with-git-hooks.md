@@ -1,10 +1,12 @@
 ---
 title: "Replace nx serve Polling Server with Git Hooks"
 type: refactor
-status: draft
+status: accepted
 priority: P2
 author: Hal Hildebrand
 date: 2026-03-03
+accepted_date: 2026-03-03
+reviewed_by: "self"
 related_issues: []
 ---
 
