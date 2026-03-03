@@ -156,7 +156,8 @@ def _index_document(
     collection_name: str | None = None,
     embed_fn: EmbedFn | None = None,
     force: bool = False,
-) -> int:
+    return_metadata: bool = False,
+) -> int | dict:
     """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
 
     *chunk_fn(file_path, content_hash, target_model, now_iso)* produces the
@@ -170,6 +171,11 @@ def _index_document(
     When *embed_fn* is provided it replaces ``_embed_with_fallback`` and the
     Voyage AI credential check is skipped.  This supports local dry-run mode
     (ONNX / DefaultEmbeddingFunction) without requiring any API keys.
+
+    When *return_metadata* is True, returns the prepared chunk metadatas list
+    instead of a bare int.  Callers (index_pdf, index_markdown) use it to
+    build format-specific summary dicts.  Default False preserves the existing
+    int return type with zero overhead.
     """
     if embed_fn is None and not _has_credentials():
         return 0
@@ -223,6 +229,8 @@ def _index_document(
     if stale_ids:
         col.delete(ids=stale_ids)
 
+    if return_metadata:
+        return metadatas  # type: ignore[return-value]
     return len(prepared)
 
 
@@ -329,7 +337,8 @@ def index_pdf(
     collection_name: str | None = None,
     embed_fn: EmbedFn | None = None,
     force: bool = False,
-) -> int:
+    return_metadata: bool = False,
+) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
     By default the collection is ``docs__{corpus}``.  Pass *collection_name*
@@ -343,8 +352,30 @@ def index_pdf(
     credential check is bypassed.
 
     Pass *force=True* to bypass the staleness check and always re-index.
+
+    When *return_metadata* is True, returns a dict instead of an int::
+
+        {"chunks": int, "pages": list[int], "title": str, "author": str}
+
+    Metadata is derived from chunk metadatas produced during extraction
+    (no additional T3 query).  Default False preserves existing int behavior.
     """
-    return _index_document(pdf_path, corpus, _pdf_chunks, t3=t3, collection_name=collection_name, embed_fn=embed_fn, force=force)
+    raw = _index_document(
+        pdf_path, corpus, _pdf_chunks, t3=t3,
+        collection_name=collection_name, embed_fn=embed_fn,
+        force=force, return_metadata=return_metadata,
+    )
+    if not return_metadata:
+        return raw  # type: ignore[return-value]
+    if not isinstance(raw, list):
+        return {"chunks": 0, "pages": [], "title": "", "author": ""}
+    metadatas: list[dict] = raw
+    return {
+        "chunks": len(metadatas),
+        "pages": sorted({m.get("page_number", 0) for m in metadatas}),
+        "title": metadatas[0].get("source_title", "") if metadatas else "",
+        "author": metadatas[0].get("source_author", "") if metadatas else "",
+    }
 
 
 def index_markdown(
@@ -355,7 +386,8 @@ def index_markdown(
     collection_name: str | None = None,
     embed_fn: EmbedFn | None = None,
     force: bool = False,
-) -> int:
+    return_metadata: bool = False,
+) -> int | dict:
     """Index *md_path* into a T3 collection.
 
     By default the collection is ``docs__{corpus}``.  Pass *collection_name*
@@ -369,8 +401,26 @@ def index_markdown(
     credential check is bypassed.
 
     Pass *force=True* to bypass the staleness check and always re-index.
+
+    When *return_metadata* is True, returns a dict instead of an int::
+
+        {"chunks": int, "sections": int}
+
+    *sections* is the count of chunks with a non-empty ``section_title``
+    (i.e. produced under a heading).  Default False preserves existing int behavior.
     """
-    return _index_document(md_path, corpus, _markdown_chunks, t3=t3, collection_name=collection_name, embed_fn=embed_fn, force=force)
+    raw = _index_document(
+        md_path, corpus, _markdown_chunks, t3=t3,
+        collection_name=collection_name, embed_fn=embed_fn,
+        force=force, return_metadata=return_metadata,
+    )
+    if not return_metadata:
+        return raw  # type: ignore[return-value]
+    if not isinstance(raw, list):
+        return {"chunks": 0, "sections": 0}
+    metadatas: list[dict] = raw
+    sections = sum(1 for m in metadatas if m.get("section_title", ""))
+    return {"chunks": len(metadatas), "sections": sections}
 
 
 def batch_index_pdfs(
