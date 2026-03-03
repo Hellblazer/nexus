@@ -36,7 +36,7 @@ Confirmed on:
 
 ### The Chain
 
-1. `chunk_file()` enters the AST path for any extension in `AST_EXTENSIONS` (28 mappings, 18 languages).
+1. `chunk_file()` enters the AST path for any extension in `AST_EXTENSIONS` (27 mappings, 18 languages).
 2. `_make_code_splitter()` calls `llama_index.core.node_parser.CodeSplitter.get_nodes_from_documents()`.
 3. **`CodeSplitter` returns nodes with `node.metadata = {}`** — it never populates `line_start` or `line_end`. This is confirmed empirically (192-line Python file → 4 nodes, every `metadata = {}`).
 4. The current fallback at `chunker.py:210–212`:
@@ -63,7 +63,7 @@ Confirmed on:
 ### What Is Correct
 
 - `_extract_context()` itself is correct — all 5 unit tests in `tests/test_indexer_chunk_flow.py` pass when fed proper line ranges.
-- `DEFINITION_TYPES` node-type tables are correct for all 14 languages.
+- `DEFINITION_TYPES` node-type tables are correct for all 16 languages.
 - `_extract_name_from_node()` correctly handles decorated definitions, field-name API, and fallback scanning.
 - The **line-based fallback path** (`_line_chunk()`) is unaffected — it correctly tracks `(line_start, line_end, text)` per chunk.
 
@@ -89,11 +89,11 @@ Affects all 18 languages routed through the AST path:
 | Ruby | `.rb` |
 | PHP | `.php` |
 | Swift | `.swift` |
-| Kotlin | `.kt` |
-| Scala | `.scala` |
+| Kotlin | `.kt`, `.kts` |
+| Scala | `.scala`, `.sc` |
 | Lua | `.lua` |
 | Objective-C | `.m` |
-| Bash | `.sh` |
+| Bash | `.sh`, `.bash` |
 | R | `.r` |
 
 Unaffected: `.cl`, `.proto`, `.glsl`, `.wgsl`, `.hlsl`, `.metal`, `.frag`, `.vert`, `.comp` — these go through the line-based fallback.
@@ -122,21 +122,31 @@ for i, node in enumerate(nodes):
     if node.start_char_idx is not None:
         line_start = content[:node.start_char_idx].count('\n') + 1
     else:
-        line_start = 1
-    line_end = line_start + len(node.text.splitlines()) - 1
+        line_start = 1  # defensive fallback; None not observed empirically
+    # max() guard: str.splitlines() returns [] for empty text, giving -1 delta
+    line_end = max(line_start, line_start + len(node.text.splitlines()) - 1)
     meta["line_start"] = line_start
     meta["line_end"] = line_end
     meta["text"] = node.text
     result.append(meta)
 ```
 
-No changes required anywhere else. `_enforce_byte_cap()` will automatically receive correct `line_start` values and compute correct sub-chunk offsets.
+No changes required anywhere else. `_enforce_byte_cap()` will automatically receive correct `line_start` values and compute correct sub-chunk offsets — provided `node.start_char_idx` is not None. If the None fallback fires, `_enforce_byte_cap()` inherits `line_start = 1` and sub-chunk numbering degrades to the old behavior. The None path has not been observed empirically but is structurally possible per the llama-index `TextNode` definition.
 
 ## Tests Required
 
-- `test_chunk_file_ast_line_ranges` — verify `line_start`/`line_end` per chunk are correct for a multi-class Python file chunked via AST.
-- `test_chunk_file_ast_class_method_nonempty` — verify that `_extract_context()` downstream returns non-empty class/method names.
-- `test_chunk_file_java_line_ranges` — same for Java (requires `java` parser available in test env).
+**Prerequisite — update existing mocks (before implementing the fix):**
+The existing mock-based tests in `test_chunker.py` (`test_chunk_file_python_calls_codesplitter`,
+`test_chunk_file_ast_oversized_node_is_split`) use `MagicMock()` nodes without setting
+`start_char_idx`. After the fix, `content[:MagicMock()]` raises `TypeError`. These mocks must be
+updated to set `mock_node.start_char_idx = <integer>` before the fix is applied.
+
+**New tests (TDD: write red, then make green):**
+- `test_chunk_file_ast_line_ranges` — verify `line_start`/`line_end` per chunk are correct for a multi-class Python file chunked via AST; consecutive chunks must not all share lines 1-N.
+- `test_chunk_file_ast_class_method_nonempty` — verify that `_extract_context()` downstream returns non-empty class/method names when given the fixed line ranges.
+- `test_chunk_file_ast_empty_text_node` — verify that an empty-text node does not produce `line_end < line_start` (i.e., `max()` guard is exercised).
+- `test_chunk_file_ast_none_start_char_idx` — verify that `node.start_char_idx = None` falls back to `line_start = 1` without crashing.
+- `test_chunk_file_java_line_ranges` — same as `test_chunk_file_ast_line_ranges` for Java (skip if java parser unavailable in test env).
 - Existing `test_indexer_chunk_flow.py` tests must continue to pass.
 
 ## Remediation Steps
