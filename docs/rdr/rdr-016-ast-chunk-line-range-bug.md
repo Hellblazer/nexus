@@ -1,10 +1,12 @@
 ---
 title: "AST Chunk Line Range Bug: CodeSplitter Returns Empty Metadata, Breaking Context Prefix"
 type: bug
-status: open
+status: accepted
 priority: P1
 author: Hal Hildebrand
 date: 2026-03-03
+accepted_date: 2026-03-03
+reviewed_by: self
 related_issues: []
 ---
 
