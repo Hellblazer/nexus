@@ -48,17 +48,31 @@ nx index repo ./my-project
 | `pdf PATH` | Index a PDF document into T3 `docs__CORPUS` |
 | `md PATH` | Index a Markdown file into T3 `docs__CORPUS` |
 
-**`repo` flags:**
+**Common flags (all subcommands):**
 
 | Flag | Description |
 |------|-------------|
-| `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh) |
+| `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place) |
+| `--monitor` | Print per-file progress lines. Auto-enabled when stdout is not a TTY (piped, backgrounded, CI) |
+
+**`repo`-only flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
 
 **`pdf` and `md` flags:**
 
 | Flag | Description |
 |------|-------------|
 | `--corpus NAME` | Corpus name for the `docs__` collection (default: `default`) |
+
+**`pdf`-only flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
+| `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
 
 ---
 
