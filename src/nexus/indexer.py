@@ -440,6 +440,7 @@ def _index_code_file(
     now_iso: str,
     score: float,
     chunk_lines: int | None = None,
+    force: bool = False,
 ) -> bool:
     """Index a single code file into the code__ collection.
 
@@ -467,7 +468,7 @@ def _index_code_file(
         include=["metadatas"],
         limit=1,
     )
-    if existing["metadatas"]:
+    if not force and existing["metadatas"]:
         stored = existing["metadatas"][0]
         if stored.get("content_hash") == content_hash and stored.get("embedding_model") == target_model:
             return False
@@ -566,6 +567,7 @@ def _index_prose_file(
     git_meta: dict,
     now_iso: str,
     score: float,
+    force: bool = False,
 ) -> bool:
     """Index a single prose file into the docs__ collection.
 
@@ -593,7 +595,7 @@ def _index_prose_file(
         include=["metadatas"],
         limit=1,
     )
-    if existing["metadatas"]:
+    if not force and existing["metadatas"]:
         stored = existing["metadatas"][0]
         if stored.get("content_hash") == content_hash and stored.get("embedding_model") == target_model:
             return False
@@ -737,6 +739,7 @@ def _index_pdf_file(
     git_meta: dict,
     now_iso: str,
     score: float,
+    force: bool = False,
 ) -> bool:
     """Index a single PDF file into the docs__ collection.
 
@@ -758,7 +761,7 @@ def _index_pdf_file(
         include=["metadatas"],
         limit=1,
     )
-    if existing["metadatas"]:
+    if not force and existing["metadatas"]:
         stored = existing["metadatas"][0]
         if stored.get("content_hash") == content_hash_hex and stored.get("embedding_model") == target_model:
             return False
