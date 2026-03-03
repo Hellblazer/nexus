@@ -70,7 +70,7 @@ def test_index_pdf_command_indexes_file(runner: CliRunner, index_home: Path) -> 
     pdf = index_home / "doc.pdf"
     pdf.write_bytes(b"fake pdf")
 
-    with patch("nexus.doc_indexer.index_pdf", return_value=3) as mock_index:
+    with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 3, "pages": [], "title": "", "author": ""}) as mock_index:
         result = runner.invoke(main, ["index", "pdf", str(pdf)])
 
     assert result.exit_code == 0, result.output
@@ -91,7 +91,7 @@ def test_index_md_command_indexes_file(runner: CliRunner, index_home: Path) -> N
     md = index_home / "doc.md"
     md.write_text("# Hello\n\nWorld.\n")
 
-    with patch("nexus.doc_indexer.index_markdown", return_value=2) as mock_index:
+    with patch("nexus.doc_indexer.index_markdown", return_value={"chunks": 2, "sections": 0}) as mock_index:
         result = runner.invoke(main, ["index", "md", str(md)])
 
     assert result.exit_code == 0, result.output
@@ -201,7 +201,7 @@ def test_index_pdf_force_flag(runner: CliRunner, index_home: Path) -> None:
     pdf = index_home / "doc.pdf"
     pdf.write_bytes(b"fake pdf")
 
-    with patch("nexus.doc_indexer.index_pdf", return_value=5) as mock_index:
+    with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 5, "pages": [], "title": "", "author": ""}) as mock_index:
         result = runner.invoke(main, ["index", "pdf", str(pdf), "--force"])
 
     assert result.exit_code == 0, result.output
@@ -226,7 +226,7 @@ def test_index_md_force_flag(runner: CliRunner, index_home: Path) -> None:
     md = index_home / "doc.md"
     md.write_text("# Hello\n\nWorld.\n")
 
-    with patch("nexus.doc_indexer.index_markdown", return_value=2) as mock_index:
+    with patch("nexus.doc_indexer.index_markdown", return_value={"chunks": 2, "sections": 0}) as mock_index:
         result = runner.invoke(main, ["index", "md", str(md), "--force"])
 
     assert result.exit_code == 0, result.output
