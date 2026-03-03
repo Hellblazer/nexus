@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-03-03
+
+### Added
+- **`ContentClass.SKIP`** — fourth classification category silently ignores known-noise
+  files (config, markup, shader, lock) instead of emitting them into `docs__` collections.
+  18 extensions skipped: `.xml`, `.json`, `.yml`, `.yaml`, `.toml`, `.properties`,
+  `.ini`, `.cfg`, `.conf`, `.gradle`, `.html`, `.htm`, `.css`, `.svg`, `.cmd`, `.bat`,
+  `.ps1`, `.lock`.
+- **Expanded code extensions** — 9 new extensions classified as CODE: `.proto`, `.cl`,
+  `.comp`, `.frag`, `.vert`, `.metal`, `.glsl`, `.wgsl`, `.hlsl` (Protobuf and GPU
+  shaders now indexed into `code__` with `voyage-code-3`).
+- **Shebang detection** — extensionless files are classified as CODE when their first two
+  bytes are `#!`, SKIP otherwise (catches `Makefile`, `LICENSE`, etc. correctly).
+- **Context prefix injection (embed-only)** — each code chunk's embedding text is
+  prefixed with `// File: X  Class: Y  Method: Z  Lines: N–M`. The raw chunk text is
+  stored in ChromaDB unchanged; only the Voyage AI embedding call sees the prefix.
+  Improves recall for algorithm-level queries in domain-specific codebases.
+- **14-language class/method extraction** via tree-sitter `DEFINITION_TYPES` mapping
+  (Python, Java, Go, TypeScript, Rust, C, C++, C#, Ruby, PHP, Swift, Kotlin, Scala).
+  Used to populate the `class_name` and `method_name` fields in the context prefix.
+- **AST language expansion** — `AST_EXTENSIONS` expanded from 16 to 28 mappings across
+  19 parsers: Kotlin, Scala, Swift, PHP, Lua, Objective-C now receive AST-aware chunking.
+- **`preserve_code_blocks`** — `SemanticMarkdownChunker` now defaults to
+  `preserve_code_blocks=True`, preventing fenced code blocks from being split mid-content.
+- **`_STRUCTURAL_TOKEN_TYPES` blocklist** — `paragraph_open`, `list_item_open`,
+  `tr_open`, and similar structural markdown-it-py tokens are filtered so content
+  appears exactly once per chunk (eliminates duplication from open/close token pairs).
+
+### Changed
+- **Chunk metadata** now includes `class_name`, `method_name`, and `embedding_model`
+  fields on all code chunks.
+
+### Removed
+- **`--chunk-size` and `--no-chunk-warning`** flags removed from `nx index repo` —
+  chunk size is not user-configurable; these flags were dead after the AST-first pipeline.
+
 ## [1.1.1] - 2026-03-02
 
 ### Fixed
