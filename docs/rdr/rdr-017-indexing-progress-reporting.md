@@ -1,12 +1,14 @@
 ---
 title: "Indexing Progress Reporting: tqdm-Based Progress Bar for nx index"
 type: enhancement
-status: accepted
+status: implemented
 priority: P2
 author: Hal Hildebrand
 date: 2026-03-03
 accepted_date: 2026-03-03
 reviewed_by: "self"
+closed_date: 2026-03-04
+close_reason: implemented
 related_issues:
   - nexus-4iti
 ---

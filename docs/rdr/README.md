@@ -15,8 +15,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 
 | ID | Title | Type | Status | Created |
 | -- | ----- | ---- | ------ | ------- |
-| [RDR-001](rdr-001-rdr-process-validation.md) | RDR Process Validation | Architecture | Accepted | 2026-02-27 |
-| [RDR-002](rdr-002-t2-status-synchronization.md) | T2 Status Synchronization | Technical Debt | Accepted | 2026-02-27 |
+| [RDR-001](rdr-001-rdr-process-validation.md) | RDR Process Validation | Architecture | Implemented | 2026-02-27 |
+| [RDR-002](rdr-002-t2-status-synchronization.md) | T2 Status Synchronization | Technical Debt | Implemented | 2026-02-27 |
 | [RDR-004](rdr-004-four-store-architecture.md) | Four-Store T3 Architecture | Architecture | Closed | 2026-02-28 |
 | [RDR-005](rdr-005-chromadb-cloud-quota-enforcement.md) | ChromaDB Cloud Quota Enforcement | Architecture | Closed | 2026-02-28 |
 | [RDR-006](rdr-006-chunk-size-configuration.md) | File-Size Scoring Penalty for Code Search | Feature | Closed | 2026-02-28 |
@@ -30,8 +30,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-014](rdr-014-knowledge-base-retrieval-quality.md) | Knowledge Base Retrieval Quality: Code Context and Docs Deduplication | Bug | Closed | 2026-03-02 |
 | [RDR-015](rdr-015-indexing-pipeline-rethink.md) | Indexing Pipeline Rethink: Align Nexus with Arcaneum's Battle-Tested Implementation | Enhancement | Closed | 2026-03-02 |
 | [RDR-016](rdr-016-ast-chunk-line-range-bug.md) | AST Chunk Line Range Bug: CodeSplitter Returns Empty Metadata, Breaking Context Prefix | Bug | Closed | 2026-03-03 |
-| [RDR-017](rdr-017-indexing-progress-reporting.md) | Indexing Progress Reporting: tqdm-Based Progress Bar for nx index | Enhancement | Accepted | 2026-03-03 |
-| [RDR-018](rdr-018-replace-serve-with-git-hooks.md) | Replace nx serve Polling Server with Git Hooks | Refactor | Accepted | 2026-03-03 |
+| [RDR-017](rdr-017-indexing-progress-reporting.md) | Indexing Progress Reporting: tqdm-Based Progress Bar for nx index | Enhancement | Implemented | 2026-03-03 |
+| [RDR-018](rdr-018-replace-serve-with-git-hooks.md) | Replace nx serve Polling Server with Git Hooks | Refactor | Implemented | 2026-03-03 |
 
 ## RDR Process Documentation
 
