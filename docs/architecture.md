@@ -43,7 +43,7 @@ Data flows upward (T1 → T2 → T3).
 | **Storage** | `db/t1.py`, `db/t2.py`, `db/t3.py` | Tier implementations |
 | **Indexing** | `indexer.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py` | Repo indexing pipeline |
 | **Search** | `search_engine.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py` | Query, rank, rerank |
-| **Server** | `server.py`, `server_main.py`, `polling.py` | Daemon, HEAD polling, auto-reindex |
+| **Hooks** | `commands/hooks.py` | Git hook install/uninstall/status, sentinel-bounded stanza management |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py` | Configuration, naming, formatting, session lifecycle |
 
 ## Design Decisions
