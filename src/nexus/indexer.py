@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Code repository indexing pipeline."""
+import fcntl
 import fnmatch
 import subprocess
 import time
@@ -326,6 +327,33 @@ def _git_ls_files(repo: Path, *, include_untracked: bool = False) -> list[Path]:
     return paths
 
 
+def _current_head(repo: Path) -> str:
+    """Return the current HEAD commit hash for *repo*, or '' on error."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _repo_lock_path(repo: Path) -> Path:
+    """Return the per-repo lock file path: ~/.config/nexus/locks/<hash8>.lock.
+
+    Uses the same worktree-stable identity as the registry so two worktrees
+    of the same repo map to a single lock.
+    """
+    from nexus.registry import _repo_identity
+
+    _, path_hash = _repo_identity(repo)
+    return Path.home() / ".config" / "nexus" / "locks" / f"{path_hash}.lock"
+
+
 def index_repository(
     repo: Path,
     registry: "RepoRegistry",
@@ -333,6 +361,7 @@ def index_repository(
     frecency_only: bool = False,
     chunk_lines: int | None = None,
     force: bool = False,
+    on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
 ) -> dict[str, int]:
@@ -348,31 +377,53 @@ def index_repository(
     'pending_credentials' when T3 credentials are absent.
 
     *frecency_only* skips re-chunking and re-embedding; only updates the
-    ``frecency_score`` metadata field on existing T3 chunks.
+    ``frecency_score`` metadata field on existing T3 chunks.  Frecency-only
+    runs bypass the per-repo lock and do not update ``head_hash``.
 
     *chunk_lines* overrides the default chunk size (150 lines) for code files.
     When None, the module default is used.
 
+    *on_locked* controls behaviour when another process holds the repo lock:
+    ``'wait'`` (default) blocks until the lock is released; ``'skip'`` returns
+    ``{}`` immediately without indexing.  Frecency-only runs bypass the lock.
+
     Returns a stats dict (empty for frecency_only runs) with keys:
     ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
-    registry.update(repo, status="indexing")
+    lock_fd = None
+    if not frecency_only:
+        lock_path = _repo_lock_path(repo)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = open(lock_path, "w")  # noqa: SIM115  (must stay open while locked)
+        lock_flag = fcntl.LOCK_EX if on_locked == "wait" else fcntl.LOCK_EX | fcntl.LOCK_NB
+        try:
+            fcntl.flock(lock_fd, lock_flag)
+        except BlockingIOError:
+            # on_locked == "skip" and another process holds the lock
+            lock_fd.close()
+            return {}
+
     try:
-        if frecency_only:
-            _run_index_frecency_only(repo, registry)
-            stats: dict[str, int] = {}
-        else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, on_start=on_start, on_file=on_file)
-        registry.update(repo, status="ready")
-        return stats
-    except CredentialsMissingError:
-        registry.update(repo, status="pending_credentials")
-        # Re-raise so the polling loop skips recording head_hash for this repo.
-        # A clean return would incorrectly signal success (see polling.py).
-        raise
-    except Exception:
-        registry.update(repo, status="error")
-        raise
+        registry.update(repo, status="indexing")
+        try:
+            if frecency_only:
+                _run_index_frecency_only(repo, registry)
+                stats: dict[str, int] = {}
+            else:
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, on_start=on_start, on_file=on_file)
+                registry.update(repo, head_hash=_current_head(repo))
+            registry.update(repo, status="ready")
+            return stats
+        except CredentialsMissingError:
+            registry.update(repo, status="pending_credentials")
+            raise
+        except Exception:
+            registry.update(repo, status="error")
+            raise
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
 
 
 def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:

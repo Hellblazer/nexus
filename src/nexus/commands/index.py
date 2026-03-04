@@ -38,7 +38,14 @@ def index() -> None:
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print per-file progress lines. Auto-enabled when stdout is not a TTY.")
-def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool) -> None:
+@click.option(
+    "--on-locked",
+    type=click.Choice(["skip", "wait"]),
+    default="wait",
+    show_default=True,
+    help="Behaviour when another process holds the repo lock: skip exits immediately, wait blocks.",
+)
+def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, on_locked: str) -> None:
     """Register and immediately index a code repository at PATH.
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
@@ -83,7 +90,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool) 
                 click.echo(line)
 
     stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
-                             on_start=on_start, on_file=on_file)
+                             on_locked=on_locked, on_start=on_start, on_file=on_file)
     if bar:
         bar.close()
     if not frecency_only and stats:
