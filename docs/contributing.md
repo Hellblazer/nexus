@@ -175,11 +175,24 @@ Every step below is **required**. Missing any one of them has caused problems in
 | File | What to update |
 |------|----------------|
 | `pyproject.toml` | `version` field |
-| `uv.lock` | auto-updated by `uv sync` |
+| `uv.lock` | auto-updated by `uv sync` — **must be committed** |
 | `CHANGELOG.md` | move Unreleased → `[X.Y.Z]`, add empty Unreleased |
 | `nx/CHANGELOG.md` | add `[X.Y.Z]` entry |
 | `.claude-plugin/marketplace.json` | bump `"version"` in the `nx` plugin entry |
 | `docs/cli-reference.md` | update if any CLI flags changed |
+
+### Pre-push release checklist
+
+Before pushing the version-bump commit, verify:
+
+```bash
+git diff --name-only HEAD          # uv.lock must appear here
+nx --version                       # must print the new X.Y.Z
+grep "^version" pyproject.toml    # must match the tag you'll push
+```
+
+If `uv.lock` is not in the diff, you forgot to run `uv sync` or forgot to stage it.
+**Do not push the tag until `uv.lock` is committed.**
 
 ### One-time Release Infrastructure Setup
 
