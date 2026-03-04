@@ -18,6 +18,7 @@ _log = structlog.get_logger(__name__)
 
 from nexus.corpus import index_model_for_collection
 from nexus.db import make_t3
+from nexus.db.t3 import _chroma_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor
@@ -190,7 +191,8 @@ def _index_document(
     target_model = index_model_for_collection(collection_name)
 
     # Incremental sync: skip if file is already indexed with the same hash AND model
-    existing = col.get(
+    existing = _chroma_with_retry(
+        col.get,
         where={"source_path": str(file_path)},
         include=["metadatas"],
         limit=1,
@@ -225,10 +227,10 @@ def _index_document(
 
     # Prune stale chunks from a previous (larger) version of this file
     current_ids_set = set(ids)
-    all_existing = col.get(where={"source_path": str(file_path)}, include=[])
+    all_existing = _chroma_with_retry(col.get, where={"source_path": str(file_path)}, include=[])
     stale_ids = [eid for eid in all_existing["ids"] if eid not in current_ids_set]
     if stale_ids:
-        col.delete(ids=stale_ids)
+        _chroma_with_retry(col.delete, ids=stale_ids)
 
     if return_metadata:
         return metadatas

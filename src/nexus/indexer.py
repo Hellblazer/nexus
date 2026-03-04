@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nexus.corpus import index_model_for_collection
+from nexus.db.t3 import _chroma_with_retry
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 
 _log = structlog.get_logger(__name__)
@@ -467,7 +468,8 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     for collection_name in collection_names:
         col = db.get_or_create_collection(collection_name)
         for file, score in frecency_map.items():
-            existing = col.get(
+            existing = _chroma_with_retry(
+                col.get,
                 where={"source_path": str(file)},
                 include=["metadatas"],
             )
@@ -519,7 +521,8 @@ def _index_code_file(
     rel_path = file.relative_to(repo)
 
     # Staleness check
-    existing = col.get(
+    existing = _chroma_with_retry(
+        col.get,
         where={"source_path": str(file)},
         include=["metadatas"],
         limit=1,
@@ -646,7 +649,8 @@ def _index_prose_file(
     content_hash = _hl.sha256(content.encode()).hexdigest()
 
     # Staleness check
-    existing = col.get(
+    existing = _chroma_with_retry(
+        col.get,
         where={"source_path": str(file)},
         include=["metadatas"],
         limit=1,
@@ -812,7 +816,8 @@ def _index_pdf_file(
     content_hash_hex = content_hash.hexdigest()
 
     # Staleness check
-    existing = col.get(
+    existing = _chroma_with_retry(
+        col.get,
         where={"source_path": str(file)},
         include=["metadatas"],
         limit=1,
@@ -951,18 +956,18 @@ def _prune_misclassified(
     # Prose + PDF files should NOT have chunks in the code__ collection
     docs_paths = {str(f) for f in prose_files} | {str(f) for f in pdf_files}
     for source_path in docs_paths:
-        existing = code_col.get(where={"source_path": source_path}, include=[])
+        existing = _chroma_with_retry(code_col.get, where={"source_path": source_path}, include=[])
         if existing["ids"]:
-            code_col.delete(ids=existing["ids"])
+            _chroma_with_retry(code_col.delete, ids=existing["ids"])
             _log.debug("pruned misclassified chunks from code collection",
                        source_path=source_path, count=len(existing["ids"]))
 
     # Code files should NOT have chunks in the docs__ collection
     code_paths = {str(f) for f in code_files}
     for source_path in code_paths:
-        existing = docs_col.get(where={"source_path": source_path}, include=[])
+        existing = _chroma_with_retry(docs_col.get, where={"source_path": source_path}, include=[])
         if existing["ids"]:
-            docs_col.delete(ids=existing["ids"])
+            _chroma_with_retry(docs_col.delete, ids=existing["ids"])
             _log.debug("pruned misclassified chunks from docs collection",
                        source_path=source_path, count=len(existing["ids"]))
 
@@ -981,7 +986,7 @@ def _prune_deleted_files(
     for collection_name in (code_collection, docs_collection):
         col = db.get_or_create_collection(collection_name)
         # Get all chunks to find unique source_paths
-        all_chunks = col.get(include=["metadatas"])
+        all_chunks = _chroma_with_retry(col.get, include=["metadatas"])
         if not all_chunks["ids"]:
             continue
 
@@ -993,7 +998,7 @@ def _prune_deleted_files(
                 stale_ids.append(chunk_id)
 
         if stale_ids:
-            col.delete(ids=stale_ids)
+            _chroma_with_retry(col.delete, ids=stale_ids)
             _log.info("pruned deleted-file chunks",
                        collection=collection_name, count=len(stale_ids))
 
