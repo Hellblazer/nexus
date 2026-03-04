@@ -111,7 +111,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
 
         missing = [
             k
-            for k in ("chroma_api_key", "voyage_api_key", "chroma_tenant", "chroma_database")
+            for k in ("chroma_api_key", "voyage_api_key", "chroma_database")
             if not get_credential(k)
         ]
         if missing:

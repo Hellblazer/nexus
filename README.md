@@ -64,9 +64,7 @@ Every command targets one or more tiers:
 | `nx store` | T3 | Store knowledge in the cloud |
 | `nx memory` | T2 | Per-project persistent notes |
 | `nx scratch` | T1 | Ephemeral session scratch pad |
-| `nx serve` | — | Background daemon for auto-reindexing |
 | `nx collection` | T3 | Inspect and manage cloud collections |
-| `nx migrate` | T3 | Migrate collections from single-database to four-store layout |
 | `nx config` | — | Credentials and settings |
 
 ## RDR: Research-Design-Review

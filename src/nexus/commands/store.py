@@ -13,7 +13,6 @@ from nexus.ttl import parse_ttl
 def _t3() -> T3Database:
     from nexus.config import get_credential
 
-    tenant = get_credential("chroma_tenant")
     database = get_credential("chroma_database")
     api_key = get_credential("chroma_api_key")
     voyage_api_key = get_credential("voyage_api_key")
@@ -26,14 +25,9 @@ def _t3() -> T3Database:
         raise click.ClickException(
             "voyage_api_key not set — run: nx config set voyage_api_key <value>"
         )
-    if not tenant or not database:
-        missing = []
-        if not tenant:
-            missing.append("chroma_tenant")
-        if not database:
-            missing.append("chroma_database")
+    if not database:
         raise click.ClickException(
-            f"{', '.join(missing)} not set — run: nx config init"
+            "chroma_database not set — run: nx config init"
         )
     try:
         return make_t3()
