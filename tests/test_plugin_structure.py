@@ -766,6 +766,31 @@ class TestMarketplaceVersion:
                 f"Update .claude-plugin/marketplace.json when bumping version."
             )
 
+    def test_uv_lock_version_matches_pyproject(self) -> None:
+        """conexus version in uv.lock should match pyproject.toml version."""
+        import re
+        import tomllib
+
+        UV_LOCK_PATH = REPO_ROOT / "uv.lock"
+        assert UV_LOCK_PATH.exists(), f"uv.lock not found at {UV_LOCK_PATH}"
+
+        with self.PYPROJECT_PATH.open("rb") as f:
+            pyproject = tomllib.load(f)
+        pyproject_version = pyproject["project"]["version"]
+
+        lock_text = UV_LOCK_PATH.read_text()
+        # Find the conexus package block and extract its version
+        m = re.search(
+            r'\[\[package\]\]\s+name\s*=\s*"conexus"\s+version\s*=\s*"([^"]+)"',
+            lock_text,
+        )
+        assert m is not None, "Could not find conexus package entry in uv.lock"
+        lock_version = m.group(1)
+        assert lock_version == pyproject_version, (
+            f"uv.lock conexus version {lock_version!r} != pyproject.toml "
+            f"{pyproject_version!r}. Run 'uv sync' and commit uv.lock."
+        )
+
 
 # ── Plugin root manifest ──────────────────────────────────────────────────────
 
