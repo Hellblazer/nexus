@@ -36,7 +36,6 @@ classifiers = [
 dependencies = [
     "chromadb>=0.6",
     "click>=8.1",
-    "flask>=3.0",
     "llama-index-core==0.12.7",
     "markdown-it-py>=4.0.0",
     "pymupdf>=1.26.6",
@@ -48,7 +47,6 @@ dependencies = [
     "tqdm>=4.65",
     "tree-sitter-language-pack==0.7.1",
     "voyageai>=0.2",
-    "waitress>=3.0",
 ]
 
 [project.urls]

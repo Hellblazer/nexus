@@ -12,8 +12,6 @@ def test_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     """Without any config files, defaults are returned."""
     monkeypatch.setenv("HOME", str(tmp_path))
     config = load_config(repo_root=tmp_path)
-    assert config["server"]["port"] == 7890
-    assert config["server"]["headPollInterval"] == 10
     assert config["embeddings"]["rerankerModel"] == "rerank-2.5"
     assert "codeModel" not in config["embeddings"]
     assert "docsModel" not in config["embeddings"]
@@ -24,29 +22,28 @@ def test_config_merge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     global_dir = tmp_path / ".config" / "nexus"
     global_dir.mkdir(parents=True)
     (global_dir / "config.yml").write_text(
-        yaml.dump({"server": {"port": 7890, "headPollInterval": 10}})
+        yaml.dump({"embeddings": {"rerankerModel": "rerank-2.5"}})
     )
 
-    (tmp_path / ".nexus.yml").write_text(yaml.dump({"server": {"port": 9999}}))
+    (tmp_path / ".nexus.yml").write_text(yaml.dump({"embeddings": {"rerankerModel": "rerank-3.0"}}))
 
     monkeypatch.setenv("HOME", str(tmp_path))
     config = load_config(repo_root=tmp_path)
 
-    assert config["server"]["port"] == 9999          # per-repo wins
-    assert config["server"]["headPollInterval"] == 10  # global preserved
+    assert config["embeddings"]["rerankerModel"] == "rerank-3.0"  # per-repo wins
 
 
 def test_config_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Env var NX_SERVER_PORT overrides config file values."""
+    """Env var NX_EMBEDDINGS_RERANKER_MODEL overrides config file values."""
     global_dir = tmp_path / ".config" / "nexus"
     global_dir.mkdir(parents=True)
-    (global_dir / "config.yml").write_text(yaml.dump({"server": {"port": 7890}}))
+    (global_dir / "config.yml").write_text(yaml.dump({"embeddings": {"rerankerModel": "rerank-2.5"}}))
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("NX_SERVER_PORT", "8888")
+    monkeypatch.setenv("NX_EMBEDDINGS_RERANKER_MODEL", "rerank-3.0")
 
     config = load_config(repo_root=tmp_path)
-    assert config["server"]["port"] == 8888
+    assert config["embeddings"]["rerankerModel"] == "rerank-3.0"
 
 
 
@@ -57,20 +54,8 @@ def test_config_missing_files_returns_defaults(
     monkeypatch.setenv("HOME", str(tmp_path))
     config = load_config(repo_root=tmp_path)
     assert isinstance(config, dict)
-    assert "server" in config
+    assert "embeddings" in config
 
-
-# ── Gap 9: _apply_env_overrides ValueError for non-integer port ──────────
-
-def test_config_env_override_invalid_int_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """NX_SERVER_PORT=notanint raises ValueError from _apply_env_overrides."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("NX_SERVER_PORT", "notanint")
-
-    with pytest.raises(ValueError, match="Invalid value.*NX_SERVER_PORT"):
-        load_config(repo_root=tmp_path)
 
 
 # ── Gap 10: set_credential temp file cleanup on write failure ──────────────
@@ -126,7 +111,7 @@ def test_config_global_non_dict_yaml_returns_defaults(
     config = load_config(repo_root=tmp_path)
     assert isinstance(config, dict)
     # Should fall back to defaults since the YAML was not a dict
-    assert config["server"]["port"] == 7890
+    assert config["embeddings"]["rerankerModel"] == "rerank-2.5"
 
 
 def test_config_repo_non_dict_yaml_returns_defaults(
@@ -140,7 +125,7 @@ def test_config_repo_non_dict_yaml_returns_defaults(
     config = load_config(repo_root=tmp_path)
     assert isinstance(config, dict)
     # Should fall back to defaults since the YAML was not a dict
-    assert config["server"]["port"] == 7890
+    assert config["embeddings"]["rerankerModel"] == "rerank-2.5"
 
 
 # ── Gap 12: set_credential unknown credential name ──────────────────────
