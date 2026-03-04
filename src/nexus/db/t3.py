@@ -303,14 +303,15 @@ class T3Database:
                 chunk_docs = documents[start : start + size]
                 chunk_metas = metadatas[start : start + size]
                 if embeddings is not None:
-                    col.upsert(
+                    _chroma_with_retry(
+                        col.upsert,
                         ids=chunk_ids,
                         documents=chunk_docs,
                         embeddings=embeddings[start : start + size],
                         metadatas=chunk_metas,
                     )
                 else:
-                    col.upsert(ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
+                    _chroma_with_retry(col.upsert, ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
 
     def _delete_batch(self, col, collection_name: str, ids: list[str]) -> None:
         """Split *ids* into ≤300-record chunks and delete each.
@@ -320,7 +321,7 @@ class T3Database:
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection_name):
             for start in range(0, len(ids), size):
-                col.delete(ids=ids[start : start + size])
+                _chroma_with_retry(col.delete, ids=ids[start : start + size])
 
     # ── Collection access ─────────────────────────────────────────────────────
 
@@ -328,8 +329,9 @@ class T3Database:
         """Get or create a T3 collection with the appropriate embedding function."""
         from nexus.corpus import validate_collection_name
         validate_collection_name(name)
-        return self._client_for(name).get_or_create_collection(
-            name, embedding_function=self._embedding_fn(name)
+        return _chroma_with_retry(
+            self._client_for(name).get_or_create_collection,
+            name, embedding_function=self._embedding_fn(name),
         )
 
     # ── Write ─────────────────────────────────────────────────────────────────
@@ -458,7 +460,8 @@ class T3Database:
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection):
             for start in range(0, len(ids), size):
-                col.update(
+                _chroma_with_retry(
+                    col.update,
                     ids=ids[start : start + size],
                     metadatas=metadatas[start : start + size],
                 )
@@ -499,7 +502,7 @@ class T3Database:
                     )
             except _ChromaNotFoundError:
                 continue  # collection doesn't exist, skip it
-            count = col.count()
+            count = _chroma_with_retry(col.count)
             if count == 0:
                 continue
             actual_n = min(n_results, count, QUOTAS.MAX_QUERY_RESULTS)
@@ -524,7 +527,7 @@ class T3Database:
                 }
             if where is not None:
                 query_kwargs["where"] = where
-            qr = col.query(**query_kwargs)
+            qr = _chroma_with_retry(col.query, **query_kwargs)
             for doc_id, doc, meta, dist in zip(
                 qr["ids"][0],
                 qr["documents"][0],
@@ -578,7 +581,8 @@ class T3Database:
             offset = 0
             page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
             while True:
-                result = col.get(
+                result = _chroma_with_retry(
+                    col.get,
                     where=ttl_where,
                     include=["metadatas"],
                     limit=page_limit,
@@ -611,7 +615,7 @@ class T3Database:
             return []
         clamped = min(limit, QUOTAS.MAX_QUERY_RESULTS)
         with self._read_sem(collection):
-            result = col.get(include=["metadatas"], limit=clamped)
+            result = _chroma_with_retry(col.get, include=["metadatas"], limit=clamped)
         return [
             {"id": doc_id, **meta}
             for doc_id, meta in zip(result["ids"], result["metadatas"])
@@ -648,7 +652,7 @@ class T3Database:
 
         def _count(name: str) -> dict:
             col = self._client_for(name).get_collection(name)
-            return {"name": name, "count": col.count()}
+            return {"name": name, "count": _chroma_with_retry(col.count)}
 
         result: list[dict] = []
         with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
@@ -687,7 +691,8 @@ class T3Database:
         offset = 0
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         while True:
-            result = col.get(
+            result = _chroma_with_retry(
+                col.get,
                 where={"source_path": source_path},
                 include=[],
                 limit=page_limit,
@@ -711,7 +716,7 @@ class T3Database:
             col = self._client_for(name).get_collection(name)
         except _ChromaNotFoundError:
             raise KeyError(f"Collection not found: {name!r}") from None
-        return {"count": col.count(), "metadata": col.metadata or {}}
+        return {"count": _chroma_with_retry(col.count), "metadata": col.metadata or {}}
 
     def collection_metadata(self, collection_name: str) -> dict:
         """Return metadata dict for a collection.
@@ -727,7 +732,7 @@ class T3Database:
             raise KeyError(f"Collection not found: {collection_name!r}") from None
         return {
             "name": collection_name,
-            "count": col.count(),
+            "count": _chroma_with_retry(col.count),
             "embedding_model": embedding_model_for_collection(collection_name),
             "index_model": index_model_for_collection(collection_name),
         }
