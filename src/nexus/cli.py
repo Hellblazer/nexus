@@ -8,6 +8,7 @@ from nexus.commands.collection import collection
 from nexus.commands.config_cmd import config_group
 from nexus.commands.doctor import doctor_cmd
 from nexus.commands.hook import hook_group
+from nexus.commands.hooks import hooks
 from nexus.commands.index import index
 from nexus.commands.memory import memory
 from nexus.commands.migrate import migrate
@@ -43,6 +44,7 @@ main.add_command(config_group, name="config")
 main.add_command(doctor_cmd, name="doctor")
 hook_group.hidden = True
 main.add_command(hook_group, name="hook")
+main.add_command(hooks)
 main.add_command(index)
 main.add_command(memory)
 main.add_command(migrate)
