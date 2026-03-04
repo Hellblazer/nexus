@@ -186,8 +186,8 @@ moves it from code to prose, or a previously-PROSE extension is now SKIP), the
 misclassification pruner deletes chunks from the old collection. Previously-indexed
 SKIP files are cleaned automatically on the next `nx index repo` run.
 
-HEAD polling via `nx serve` monitors registered repositories and triggers automatic
-re-indexing when `git rev-parse HEAD` changes.
+Git hooks (`post-commit`, `post-merge`, `post-rewrite`) trigger automatic re-indexing
+in the background after each qualifying git operation. Install them with `nx hooks install`.
 
 ## Searching Indexed Repos
 

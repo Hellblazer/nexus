@@ -191,26 +191,23 @@ nx collection list
 
 ---
 
-## nx serve
+## nx hooks
 
-Background daemon for indexing and search.
+Git hook management for automatic repo indexing.
 
 ```
-nx serve start
+nx hooks install [PATH]
 ```
 
 | Subcommand | Description |
 |------------|-------------|
-| `start` | Start background daemon |
-| `stop` | Stop daemon |
-| `status` | Uptime and per-repo indexing state |
-| `logs` | Recent server log output (last 20 lines by default) |
+| `install [PATH]` | Install `post-commit`, `post-merge`, `post-rewrite` hooks (default: `.`) |
+| `uninstall [PATH]` | Remove nexus hook stanza; leaves other hook content intact |
+| `status [PATH]` | Show hook status for each hook file |
 
-**`logs` flags:**
+Hooks run `nx index repo` in the background after each qualifying git operation, appending output to `~/.config/nexus/index.log`. If a hook file already exists, the nexus stanza is appended (sentinel-bounded) without overwriting existing content.
 
-| Flag | Description |
-|------|-------------|
-| `-n` / `--lines NUM` | Number of log lines to show (default: 20) |
+**Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
 
 ---
 
@@ -278,4 +275,4 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks: ChromaDB API key, ChromaDB tenant, all four T3 databases (`{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`), Voyage AI key, ripgrep binary, git binary, Nexus server.
+Checks: ChromaDB API key, ChromaDB tenant, all four T3 databases (`{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`), Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time.

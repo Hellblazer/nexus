@@ -28,8 +28,6 @@ Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.co
 
 | YAML path | Env var | Default | Description |
 |---|---|---|---|
-| `server.port` | `NX_SERVER_PORT` | `7890` | HTTP port for `nx serve` |
-| `server.headPollInterval` | `NX_SERVER_HEAD_POLL_INTERVAL` | `10` | Seconds between HEAD checks per repo |
 | `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | Voyage reranker for multi-corpus merge |
 | `client.host` | `NX_CLIENT_HOST` | `localhost` | Override ChromaDB host URL |
 
@@ -55,8 +53,7 @@ Merge behavior: nested dict keys are **additive** (both global and per-repo keys
 |---|---|
 | `~/.config/nexus/config.yml` | Global config and credentials |
 | `~/.config/nexus/memory.db` | T2 SQLite database |
-| `~/.config/nexus/repos.json` | Registered repos for `nx serve` |
+| `~/.config/nexus/repos.json` | Registered repos (`nx index repo` writes here) |
 | `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |
-| `~/.config/nexus/server.pid` | Server PID file |
-| `~/.config/nexus/serve.log` | Server log output |
+| `~/.config/nexus/index.log` | Background indexing log (written by git hooks) |
 | `.nexus.yml` | Per-repo config overrides |
