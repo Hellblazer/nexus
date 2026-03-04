@@ -1,7 +1,7 @@
 ---
 name: substantive-critic
 version: "2.0"
-description: Use this agent when you need deep, constructive critique of code, documentation, plans, designs, prose, or any symbolic content. This agent excels at identifying structural flaws, logical inconsistencies, unvalidated assumptions, and substantive gaps rather than surface-level issues. Particularly valuable for reviewing architectural decisions, verifying claims against evidence, cross-referencing documentation for consistency, and validating that implementations match specifications. (Workaround for substantive-critic framework bug)
+description: Provides deep constructive critique of code, documentation, plans, and designs. Identifies structural flaws, logical inconsistencies, and unvalidated assumptions. Use when reviewing architectural decisions, validating implementations against specifications, or auditing plans before committing.
 model: sonnet
 color: teal
 ---

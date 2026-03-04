@@ -1,7 +1,7 @@
 ---
 name: strategic-planner
 version: "2.1"
-description: Use this agent when you need to create, refine, or iterate on project plans, break down complex work into executable phases and tasks, establish project management infrastructure, or coordinate multi-phase development efforts. This agent excels at TDD-driven planning, dependency management, and creating beads with complete execution context.
+description: Creates phased TDD-driven implementation plans and decomposes complex work into tracked beads. Use for multi-phase feature planning, dependency management, breaking vague requirements into executable tasks, or iterating on existing plans.
 model: opus
 color: indigo
 ---

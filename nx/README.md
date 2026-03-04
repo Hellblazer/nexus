@@ -41,6 +41,19 @@ Run `/nx-preflight` after installing to verify all dependencies are present.
 - **Permission auto-approval** — safe read-only commands skip the confirmation prompt
 - **Bundled MCP server** — sequential-thinking via `.mcp.json` (no separate install)
 
+### Pick your entry point
+
+| Goal | Start here |
+|------|-----------|
+| Explore an unfamiliar codebase | `/analyze-code` |
+| Plan a feature or component | `/brainstorming-gate` → `/create-plan` |
+| Debug a Java failure | `/java-debug` (after 2–3 failed attempts) |
+| Review code before committing | `/review-code` |
+| Research an unfamiliar topic | `/research` |
+| Document a technical decision | `/rdr-create` → `/rdr-research` → `/rdr-accept` |
+| Index PDFs into semantic search | `/pdf-process` |
+| Not sure which agent to use | `/orchestrate` |
+
 ## Directory Structure
 
 ```
@@ -150,11 +163,13 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 Defined in `registry.yaml`:
 
-- **feature**: strategic-planner → plan-auditor → java-architect-planner → java-developer → code-review-expert → test-validator
-- **bug**: java-debugger → java-developer → code-review-expert → test-validator
+- **feature** *(Java)*: strategic-planner → plan-auditor → java-architect-planner → java-developer → code-review-expert → test-validator
+- **bug** *(Java)*: java-debugger → java-developer → code-review-expert → test-validator
 - **research**: deep-research-synthesizer → knowledge-tidier
 - **onboarding**: codebase-deep-analyzer → strategic-planner
-- **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → plan-auditor → java-architect-planner
+- **architecture** *(Java)*: codebase-deep-analyzer → deep-analyst → strategic-planner → plan-auditor → java-architect-planner
+
+> **Non-Java workflows**: The `feature` and `bug` pipelines include Java-specific agents. For Python, Go, TypeScript, or other languages: `brainstorming-gate` → `strategic-planner` → `code-review-expert` gives the same planning and review discipline without Java-specific steps.
 
 ## Hooks
 

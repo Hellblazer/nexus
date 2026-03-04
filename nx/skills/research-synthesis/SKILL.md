@@ -10,11 +10,10 @@ Delegates to the **deep-research-synthesizer** agent. See [registry.yaml](../../
 ## When This Skill Activates
 
 - Researching a new topic or technology
-- Investigating best practices
-- Comparing different approaches
-- Learning about unfamiliar concepts
-- Questions requiring information synthesis
-- User says "research", "find out", "best practices"
+- Investigating best practices for an unfamiliar domain
+- Comparing different approaches or frameworks
+- Questions requiring synthesis from multiple sources
+- When nx T3 search returns insufficient context for a decision
 
 ## Agent Invocation
 

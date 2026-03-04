@@ -30,9 +30,8 @@ Delegates to the **java-developer** agent (sonnet). See [registry.yaml](../../re
 ## When This Skill Activates
 
 - After plan-auditor approves a plan (required prerequisite)
-- When user says "implement", "write code", "build this"
-- When bead for implementation task is in_progress
-- Executing tasks from approved plan
+- When a bead for an implementation task is in_progress
+- Executing tasks from an approved implementation plan
 - Writing or modifying production Java code
 
 ## Agent Invocation
