@@ -247,26 +247,7 @@ def test_promote_cmd_remove_deletes_t2_entry(runner: CliRunner, mem_home: Path, 
     assert "removed" in result.output.lower()
 
 
-# ── nexus-mox: promote_cmd four-credential guard ──────────────────────────────
-
-def test_promote_cmd_missing_tenant_raises(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
-    """promote fails when chroma_tenant is absent even if api keys are present."""
-    row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
-
-    def cred_side_effect(key: str) -> str:
-        # Return empty string only for chroma_tenant
-        return "" if key == "chroma_tenant" else "fake-value"
-
-    with patch("nexus.commands.memory.T2Database", return_value=db):
-        with patch("nexus.commands.memory.get_credential", side_effect=cred_side_effect):
-            result = runner.invoke(
-                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
-            )
-
-    assert result.exit_code != 0
-    assert "chroma_tenant" in result.output
-    assert "not set" in result.output.lower()
-
+# ── nexus-mox: promote_cmd credential guard ───────────────────────────────────
 
 def test_promote_cmd_missing_database_raises(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
     """promote fails when chroma_database is absent even if api keys are present."""

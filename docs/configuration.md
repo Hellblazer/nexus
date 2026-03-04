@@ -13,16 +13,20 @@ Each level is deep-merged, with higher-priority values winning.
 
 ## Credentials
 
-| Config key | Env var | Required for |
-|---|---|---|
-| `chroma_api_key` | `CHROMA_API_KEY` | T3 (cloud storage) |
-| `chroma_tenant` | `CHROMA_TENANT` | T3 |
-| `chroma_database` | `CHROMA_DATABASE` | T3 (base name — see below) |
-| `voyage_api_key` | `VOYAGE_API_KEY` | T3 (embeddings) |
+| Config key | Env var | Required | Notes |
+|---|---|---|---|
+| `chroma_api_key` | `CHROMA_API_KEY` | Yes | ChromaDB Cloud API key |
+| `chroma_database` | `CHROMA_DATABASE` | Yes | Base name for four T3 databases (see below) |
+| `voyage_api_key` | `VOYAGE_API_KEY` | Yes | Voyage AI embeddings key |
+| `chroma_tenant` | `CHROMA_TENANT` | No | Auto-inferred from API key; only needed for multi-workspace setups |
 
 Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.config/nexus/config.yml`.
 
-**`chroma_database` is a base name.** Nexus uses it to derive four database names: `{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`. For example, `chroma_database = nexus` creates connections to `nexus_code`, `nexus_docs`, `nexus_rdr`, and `nexus_knowledge`. All four must exist in your ChromaDB Cloud dashboard. Use `nx doctor` to check their status.
+**`chroma_database` is a base name.** Nexus uses it to derive four database names: `{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`. For example, `chroma_database = nexus` creates connections to `nexus_code`, `nexus_docs`, `nexus_rdr`, and `nexus_knowledge`. Use `nx doctor` to check their status.
+
+**`chroma_tenant` is optional.** The ChromaDB `CloudClient` infers the tenant UUID directly from your API key. You only need to set it explicitly if you belong to multiple Chroma Cloud workspaces.
+
+**Database creation is automatic.** `nx config init` provisions all four required databases on Chroma Cloud using your API key — no dashboard visit required. If provisioning fails (e.g., plan restrictions), create the four databases manually in the Chroma Cloud dashboard.
 
 ## Settings
 

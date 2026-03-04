@@ -77,18 +77,16 @@ def doctor_cmd() -> None:
     if not chroma_key:
         failed = True
         _fix(lines,
-             "nx config set chroma_api_key <your-key>",
-             "Get key: https://trychroma.com")
+             "nx config init                           (interactive wizard)",
+             "nx config set chroma_api_key <your-key>  (set individually)",
+             "Get key: https://trychroma.com  →  Cloud  →  API Keys")
 
-    # ── CHROMA_TENANT ─────────────────────────────────────────────────────────
+    # ── CHROMA_TENANT (optional — inferred from API key if not set) ──────────
     chroma_tenant = get_credential("chroma_tenant")
-    lines.append(_check_line("ChromaDB  (CHROMA_TENANT)",   bool(chroma_tenant),
-                              "set" if chroma_tenant else "not set"))
-    if not chroma_tenant:
-        failed = True
-        _fix(lines,
-             "nx config set chroma_tenant <your-tenant>",
-             "Get value: https://trychroma.com  (Dashboard → Settings)")
+    lines.append(_check_line("ChromaDB  (CHROMA_TENANT)",
+                              True,
+                              chroma_tenant if chroma_tenant
+                              else "not set (auto-inferred from API key — set explicitly only for multi-workspace)"))
 
     # ── CHROMA_DATABASE ───────────────────────────────────────────────────────
     chroma_database = get_credential("chroma_database")
@@ -97,17 +95,18 @@ def doctor_cmd() -> None:
     if not chroma_database:
         failed = True
         _fix(lines,
-             "nx config set chroma_database <your-database>",
-             "Get value: https://trychroma.com  (Dashboard → Settings)")
+             "nx config init                           (interactive wizard, also provisions databases)",
+             "nx config set chroma_database <base-name>",
+             "e.g. nx config set chroma_database nexus")
 
     # ── ChromaDB four-store databases ────────────────────────────────────────
-    if chroma_key and chroma_tenant and chroma_database:
+    if chroma_key and chroma_database:
         db_ok = True
         for t in _STORE_TYPES:
             db_name = f"{chroma_database}_{t}"
             try:
                 chromadb.CloudClient(
-                    tenant=chroma_tenant, database=db_name, api_key=chroma_key
+                    tenant=chroma_tenant or None, database=db_name, api_key=chroma_key
                 )
                 lines.append(_check_line(f"ChromaDB  ({db_name})", True, "reachable"))
             except Exception as exc:
@@ -117,9 +116,9 @@ def doctor_cmd() -> None:
                 lines.append(_check_line(f"ChromaDB  ({db_name})", False, "not reachable"))
         if not db_ok:
             _fix(lines,
-                 "Create these databases in your ChromaDB Cloud dashboard:",
-                 *[f"  - {chroma_database}_{t}" for t in _STORE_TYPES],
-                 "Then run: nx migrate t3  (to copy data from the old single store)")
+                 "Run 'nx config init' to provision databases automatically — no dashboard visit needed.",
+                 "Or create these databases manually in the ChromaDB Cloud dashboard:",
+                 *[f"  - {chroma_database}_{t}" for t in _STORE_TYPES])
 
     # ── VOYAGE_API_KEY ────────────────────────────────────────────────────────
     voyage_key = get_credential("voyage_api_key")
@@ -128,8 +127,9 @@ def doctor_cmd() -> None:
     if not voyage_key:
         failed = True
         _fix(lines,
-             "nx config set voyage_api_key <your-key>",
-             "Get key: https://www.voyageai.com")
+             "nx config init                           (interactive wizard)",
+             "nx config set voyage_api_key <your-key>  (set individually)",
+             "Get key: https://voyageai.com  →  Dashboard  →  API Keys")
 
     # ── ripgrep ───────────────────────────────────────────────────────────────
     rg_path = shutil.which("rg")
@@ -155,13 +155,12 @@ def doctor_cmd() -> None:
 
     # ── bd (beads, optional) ──────────────────────────────────────────────────
     bd_path = shutil.which("bd")
-    lines.append(_check_line("bd (beads, optional)",        True,
-                              bd_path or "not found — task tracking unavailable, install: https://github.com/BeadsProject/beads"))
-
-    # ── uv (optional) ─────────────────────────────────────────────────────────
-    uv_path = shutil.which("uv")
-    lines.append(_check_line("uv (optional)",               True,
-                              uv_path or "not found — pip install conexus works too"))
+    if bd_path:
+        lines.append(_check_line("bd (beads, optional)", True, bd_path))
+    else:
+        lines.append(_check_line("bd (beads, optional)", True,
+                                 "not found — task tracking unavailable"))
+        _fix(lines, "https://github.com/BeadsProject/beads")
 
     # ── git hooks ─────────────────────────────────────────────────────────────
     # Hooks are optional and always non-fatal — always ✓, report status in detail.
@@ -176,7 +175,7 @@ def doctor_cmd() -> None:
 
     if not repos:
         lines.append(_check_line("git hooks", True,
-                                 "no repos registered (run: nx index repo <path>)"))
+                                 "no repos registered — run: nx index repo <path>"))
     else:
         for repo_str in repos:
             repo_path = Path(repo_str)
@@ -213,10 +212,10 @@ def doctor_cmd() -> None:
                                  f"{log_path} (last write: {age_str})"))
     else:
         lines.append(_check_line("index log", True,
-                                 f"{log_path} (not created yet — hooks have not fired)"))
+                                 f"{log_path} (not created yet — git hooks have not fired)"))
 
     click.echo("\n".join(lines))
 
     if failed:
-        click.echo("\nRun 'nx config init' for an interactive setup wizard.")
+        click.echo("\nRun 'nx config init' to set up credentials and provision databases automatically.")
         raise click.exceptions.Exit(1)

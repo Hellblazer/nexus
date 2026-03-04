@@ -54,30 +54,24 @@ Run the interactive wizard:
 nx config init
 ```
 
-It walks through each credential and shows where to sign up. Alternatively, set them individually:
+It walks through each credential, shows where to sign up, and **automatically provisions the four required ChromaDB databases** — no dashboard visit needed. Alternatively, set credentials individually:
 
 ```bash
 nx config set chroma_api_key sk-...
-nx config set chroma_tenant YOUR_TENANT_UUID
-nx config set chroma_database default_database
+nx config set chroma_database nexus          # your chosen base name
 nx config set voyage_api_key pa-...
 ```
 
 Credentials are stored in `~/.config/nexus/config.yml`. Environment variables always take precedence:
 
-| Config key | Environment variable |
-|-----------|---------------------|
-| `chroma_api_key` | `CHROMA_API_KEY` |
-| `chroma_tenant` | `CHROMA_TENANT` |
-| `chroma_database` | `CHROMA_DATABASE` |
-| `voyage_api_key` | `VOYAGE_API_KEY` |
+| Config key | Env var | Notes |
+|---|---|---|
+| `chroma_api_key` | `CHROMA_API_KEY` | Required |
+| `chroma_database` | `CHROMA_DATABASE` | Required — short base name you choose (e.g. `nexus`) |
+| `voyage_api_key` | `VOYAGE_API_KEY` | Required |
+| `chroma_tenant` | `CHROMA_TENANT` | Optional — inferred from your API key; only set for multi-workspace |
 
-**ChromaDB tenant** is the UUID shown on your Cloud settings page, not the URL slug.
-**ChromaDB database** is the base name for your four T3 databases. If you set `chroma_database = nexus`, Nexus will use `nexus_code`, `nexus_docs`, `nexus_rdr`, and `nexus_knowledge`. You must create all four in your ChromaDB Cloud dashboard before running `nx index` or `nx store`.
-
-**Creating the four databases**: In the ChromaDB Cloud dashboard, create four databases named `{base}_code`, `{base}_docs`, `{base}_rdr`, and `{base}_knowledge` (where `{base}` is your chosen base name). Run `nx doctor` to verify all four are reachable.
-
-**Upgrading from an older single-database setup**: If you have existing data in a single ChromaDB database from a pre-four-store version of Nexus, run `nx migrate t3` to copy your collections to the new layout. The operation is idempotent — already-migrated collections are skipped.
+**`chroma_database` is a base name.** Nexus derives four database names from it: `{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`. These are provisioned automatically during `nx config init`.
 
 ## Verify
 
@@ -85,7 +79,7 @@ Credentials are stored in `~/.config/nexus/config.yml`. Environment variables al
 nx doctor
 ```
 
-This checks all credentials, required tools (`rg`, `git`), and whether the Nexus server is running. Fix anything marked with a cross before proceeding.
+This checks all credentials, required tools (`rg`, `git`), and connectivity to each T3 database. Fix anything marked with `✗` before proceeding. If a database is unreachable, run `nx config init` to provision it automatically.
 
 ## Index your first repo
 
@@ -172,6 +166,33 @@ claude --plugin-dir ./nx
 ```
 
 The plugin provides 14 agents, 27 skills, session hooks, slash commands, a bundled MCP server (sequential-thinking), and standard pipelines. See [nx/README.md](../nx/README.md) for details.
+
+## Troubleshooting first-run issues
+
+**`nx doctor` reports credentials not set**
+Run `nx config init` — the interactive wizard prompts for each key and saves to `~/.config/nexus/config.yml`.
+
+**Provisioning failed during `nx config init`**
+If your ChromaDB plan restricts automatic database creation, create the four databases manually in the [ChromaDB Cloud dashboard](https://trychroma.com):
+```
+{base}_code    {base}_docs    {base}_rdr    {base}_knowledge
+```
+where `{base}` is the value you set for `chroma_database`.
+
+**`nx index repo .` fails with "credentials not set"**
+`nx index repo` requires T3 credentials (ChromaDB + Voyage AI). Run `nx config init` first.
+Local commands (`nx memory`, `nx scratch`) work with no credentials at all.
+
+**First index is slow or hits a rate limit**
+Large repos can take a few minutes and may briefly hit Voyage AI rate limits. Add `--monitor` to watch per-file progress:
+```bash
+nx index repo . --monitor
+```
+Re-running after a partial index is safe — files are skipped when their content hash is unchanged.
+
+**`nx search` returns no results after indexing**
+Verify the index completed: run `nx doctor` and check that all four ChromaDB databases are reachable.
+If the index was interrupted, re-run `nx index repo .` — it resumes from where it left off.
 
 ## Next steps
 

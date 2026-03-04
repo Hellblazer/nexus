@@ -7,8 +7,6 @@ description: Use when architectural decisions, implementations, or documentation
 
 Delegates to the **substantive-critic** agent. See [registry.yaml](../../registry.yaml) for details.
 
-**Note**: The `classifyHandoffIfNeeded is not defined` framework error can affect any custom agent including this one. Work is complete despite this error. See CLAUDE.md Known Issues section.
-
 ## When This Skill Activates
 
 - After completing a design document or specification

@@ -1,7 +1,7 @@
 ---
 name: test-validator
 version: "2.0"
-description: Verifies test coverage, runs test suites, validates test quality, and ensures code changes have adequate testing. Use after implementation to verify test adequacy or when test failures need systematic analysis.
+description: Verifies test coverage, runs test suites, and validates test quality for code changes. Use after implementation, before marking work complete, or when test failures need systematic root-cause analysis.
 model: sonnet
 color: lime
 ---

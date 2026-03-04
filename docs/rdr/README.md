@@ -1,6 +1,17 @@
 # RDR Index
 
-Active and closed RDRs for the Nexus project. Updated by `/rdr-list` and `/rdr-close`.
+An RDR (Research-Design-Review) is a short document that records a technical decision: the problem, what was found, what was chosen, and what was rejected. They exist so decisions are reproducible, searchable, and useful as agent context. Each RDR is written once and never deleted — closing an RDR means updating its status, not removing it.
+
+**When to write one:**
+
+- A design choice has non-obvious trade-offs
+- You investigated two or more options before deciding
+- A bug required root-cause analysis, not just a patch
+- A decision will be hard to reverse or expensive if wrong
+- External constraints (API limits, vendor behavior) shaped the solution
+- A previous decision turned out to be wrong and you're correcting it
+- You're about to refactor something others depend on
+- The "why" won't be obvious from the code alone
 
 | ID | Title | Type | Status | Created |
 | -- | ----- | ---- | ------ | ------- |

@@ -38,7 +38,7 @@ Scratch and memory commands work with zero API keys. Cloud search requires [Chro
 
 1. Walks tracked files via `git ls-files` (respects `.gitignore`)
 2. Classifies each file by extension — code, prose, or PDF
-3. Chunks code with tree-sitter AST parsing (12 languages) and prose with semantic markdown splitting
+3. Chunks code with tree-sitter AST parsing (19 languages, 27 file types) and prose with semantic markdown splitting
 4. Embeds each chunk with a purpose-built Voyage AI model
 5. Routes results to separate collections: `code__<repo>`, `docs__<repo>`, and `rdr__<repo>` for RDR documents
 6. Computes git frecency scores so recently-touched files rank higher in hybrid search
@@ -64,9 +64,7 @@ Every command targets one or more tiers:
 | `nx store` | T3 | Store knowledge in the cloud |
 | `nx memory` | T2 | Per-project persistent notes |
 | `nx scratch` | T1 | Ephemeral session scratch pad |
-| `nx serve` | — | Background daemon for auto-reindexing |
 | `nx collection` | T3 | Inspect and manage cloud collections |
-| `nx migrate` | T3 | Migrate collections from single-database to four-store layout |
 | `nx config` | — | Credentials and settings |
 
 ## RDR: Research-Design-Review

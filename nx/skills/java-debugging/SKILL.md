@@ -31,9 +31,8 @@ Delegates to the **java-debugger** agent (model: opus).
 - Test failures after 2-3 fix attempts
 - NullPointerException or other exceptions with unclear causes
 - Non-deterministic or flaky test failures
-- Performance issues requiring investigation
+- Performance issues requiring systematic investigation
 - Any bug where the root cause is not immediately obvious
-- When user says "debug", "investigate", or "why is this failing"
 
 ## Agent Invocation
 

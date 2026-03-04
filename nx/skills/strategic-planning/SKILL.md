@@ -9,12 +9,11 @@ Delegates to the **strategic-planner** agent. See [registry.yaml](../../registry
 
 ## When This Skill Activates
 
-- Before implementing a new feature
-- When asked to add new functionality
-- Before building a new component or module
-- For any development task requiring multiple steps
-- When breaking down complex work into tasks
-- Before architectural changes
+- Before implementing a feature, component, or module
+- After brainstorming-gate approves a design — decompose into executable tasks
+- When creating beads for a multi-phase effort
+- When breaking vague requirements into concrete, sequenced steps
+- Before architectural changes affecting multiple files or modules
 
 ## Agent Invocation
 

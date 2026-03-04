@@ -77,7 +77,7 @@ class T3Database:
                 db_name = f"{database}_{t}"
                 try:
                     _clients[t] = chromadb.CloudClient(
-                        tenant=tenant, database=db_name, api_key=api_key
+                        tenant=tenant or None, database=db_name, api_key=api_key
                     )
                 except Exception as exc:
                     _log.debug("cloud_client_connect_failed", database=db_name, error=str(exc))

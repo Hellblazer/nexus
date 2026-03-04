@@ -59,12 +59,13 @@ def test_store_put_missing_voyage_api_key(
     assert "voyage_api_key" in result.output.lower()
 
 
-def test_store_put_missing_tenant(
+def test_store_put_missing_database(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
+    """chroma_database missing (and only that) causes a clear error; tenant is optional."""
     monkeypatch.setenv("CHROMA_API_KEY", "ck")
     monkeypatch.setenv("VOYAGE_API_KEY", "vk")
-    monkeypatch.delenv("CHROMA_TENANT", raising=False)
+    monkeypatch.delenv("CHROMA_TENANT", raising=False)   # tenant absent — should not matter
     monkeypatch.delenv("CHROMA_DATABASE", raising=False)
     src = tmp_path / "f.txt"
     src.write_text("content")
@@ -72,7 +73,31 @@ def test_store_put_missing_tenant(
     result = runner.invoke(main, ["store", "put", str(src)])
 
     assert result.exit_code != 0
-    assert "tenant" in result.output.lower() or "database" in result.output.lower()
+    assert "chroma_database" in result.output.lower()
+
+
+def test_store_put_tenant_optional(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """chroma_tenant absent is not an error — CloudClient infers it from the API key."""
+    monkeypatch.setenv("CHROMA_API_KEY", "ck")
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk")
+    monkeypatch.delenv("CHROMA_TENANT", raising=False)
+    monkeypatch.setenv("CHROMA_DATABASE", "mydb")
+    src = tmp_path / "f.txt"
+    src.write_text("content")
+
+    with patch("nexus.commands.store._t3") as mock_t3:
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.put.return_value = "doc-id-1"
+        mock_t3.return_value = mock_db
+        result = runner.invoke(
+            main, ["store", "put", str(src), "--title", "test"]
+        )
+
+    assert result.exit_code == 0, result.output
 
 
 # ── nx store put ──────────────────────────────────────────────────────────────

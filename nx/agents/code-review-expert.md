@@ -1,7 +1,7 @@
 ---
 name: code-review-expert
 version: "2.0"
-description: Reviews code for quality, best practices, and potential improvements. Use proactively after completing features or immediately after writing significant code changes.
+description: Reviews code for quality, security, and best practices. Use proactively after completing features or immediately after writing significant code changes.
 model: sonnet
 color: purple
 ---

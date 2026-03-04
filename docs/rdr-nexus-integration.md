@@ -1,23 +1,18 @@
 # RDR: Nexus Integration
 
-The iterative nature of RDRs creates an information management problem. A
-real project produces dozens of design documents recording decisions, pivots,
-refinements, and failures. Without tooling, it becomes difficult to figure
-out the current state — what's active, what was superseded, how things
-changed, and why. This is the problem Nexus solves.
-
-Nexus search, indexing, and metadata tracking are integrated into the RDR
-process at the foundation, not bolted on as an afterthought. Every RDR is
-semantically searchable the moment it is committed. Metadata is queryable
-without parsing markdown. Agents receive prior-art context automatically.
-The result is that the RDR corpus stays navigable as it grows, rather than
-becoming the kind of documentation graveyard that teams learn to ignore.
+Nexus indexes every RDR the moment it is committed. Search, filter, and retrieve
+past decisions without parsing markdown.
 
 ---
 
-## T2 -- RDR Metadata
+## T2 — RDR Metadata
 
-Each RDR has a T2 record in the `{repo}_rdr` project. Fields:
+Each RDR has a T2 record in the `{repo}_rdr` project. Query with:
+
+```bash
+nx memory search "caching" --project myrepo_rdr
+nx memory search "status:draft" --project nexus_rdr
+```
 
 | Field | Description |
 |---|---|
@@ -38,83 +33,86 @@ Each RDR has a T2 record in the `{repo}_rdr` project. Fields:
 | `archived` | Whether content has been archived to T3 |
 | `file_path` | Relative path to the markdown file |
 
-T2 enables fast listing, filtering, and status tracking without parsing
-markdown. FTS5 search works across all RDR records:
+T2 is the authoritative source. The markdown file is the human-readable
+persistence layer. Timestamps let you reconstruct which decisions were active
+at any point in time.
+
+---
+
+## T3 — Permanent Archival
+
+`/rdr-close` indexes the RDR into the `rdr__` collection via VoyageAI embeddings.
+RDRs committed to the repo are also indexed immediately by `nx index repo`.
+
+**Search commands:**
 
 ```bash
-nx memory search "caching" --project myrepo_rdr
+nx search "caching strategy" --corpus rdr
+nx search "chromadb quota" --corpus rdr --n 5
+nx search "authentication" --corpus rdr --n 3
 ```
 
+Cross-project search works automatically. Decisions from one project surface
+when researching similar problems in another.
+
+### What an agent sees
+
+When an agent queries `--corpus rdr`, the highest-signal chunks returned are:
+
+- **Problem Statement** — the most semantically dense chunk; best for
+  determining relevance. A well-written Problem Statement is the single most
+  valuable thing for agent context.
+- **Proposed Solution** — surfaces implementation approach and trade-offs.
+
+Evidence classification (`Verified`, `Documented`, `Assumed`) is visible in
+search result metadata. Agents can distinguish validated constraints from
+working assumptions without reading the full file.
+
+The result metadata includes `file_path`, so an agent can load the full RDR
+when it needs depth beyond the top chunks.
+
 ---
 
-## T3 -- Permanent Archival
+## Smart Repo Indexing
 
-When `/rdr-close` runs, it indexes the RDR content via `nx index rdr` into the
-`rdr__` collection with semantic embeddings via VoyageAI. This enables:
+`nx index repo` auto-discovers `docs/rdr/*.md` files and routes them to
+`rdr__<repo>` using the `voyage-context-3` model. Draft RDRs are indexed and
+findable immediately — no need to wait for `/rdr-close`.
 
-- **Semantic search** across all past decisions:
-  ```bash
-  nx search "authentication strategy" --corpus rdr
-  ```
-- **Cross-project discovery**: decisions from one project surface when
-  researching similar problems in another project.
-- **Agent context**: spawned agents can query T3 to find relevant prior art
-  before proposing new solutions.
+Index a single RDR or directory independently:
 
-T3 records are tagged with the RDR's type, priority, and extracted key terms
-for filtered retrieval.
-
----
-
-## Smart Repo Indexing -- RDR Discovery
-
-The `nx index repo` pipeline auto-discovers `docs/rdr/*.md` files and routes
-them to a dedicated `rdr__<repo>` collection using the `voyage-context-3`
-embedding model. This means RDR content is semantically searchable as soon as
-it is committed, even before formal archival via `/rdr-close`.
-
-You can also index RDR documents independently: `nx index rdr [PATH]`.
-
-This is particularly useful during active research: an RDR in Draft status
-is already indexed and findable by agents working on related problems.
+```bash
+nx index rdr docs/rdr/rdr-015-indexing-pipeline-rethink.md
+nx index rdr docs/rdr/
+```
 
 ---
 
 ## Beads Integration
 
-RDR tracks decisions (research, design, review). Beads tracks implementation
-work items. They connect at close time: `/rdr-close` decomposes the
-Implementation Plan into beads, giving implementation agents concrete tasks
-tracked via `bd`. The `epic_bead` field in each RDR's T2 record links the
-decision to its work items.
-
-Automated connections:
-
-- `nx search "topic"` against the knowledge corpus surfaces RDR decisions as prior art during planning.
-- `rdr_hook.py` reports RDR document count and indexing status at session start.
-
-RDR T2 metadata includes timestamps, so you can find which decisions were
-active at any point without manual cross-referencing.
+`/rdr-close` decomposes the Implementation Plan into beads (epic + tasks).
+The `epic_bead` T2 field links each decision to its work items. The
+`SubagentStart` hook injects T2 memory context and the active bead, so spawned
+agents pick up where the last session left off.
 
 ---
 
 ## Agent Workflow
 
-RDR integration with agents supports the iterative cycle — build, discover,
-write another RDR:
+1. **Before new work**: search T3 for prior RDRs — `nx search "topic" --corpus rdr`. A new RDR often refines an earlier one; the search surfaces that chain.
+2. **During research**: `/rdr-research` can delegate to `deep-research-synthesizer` or `codebase-deep-analyzer` for heavy investigation.
+3. **At gate time**: `substantive-critic` provides independent review.
+4. **At accept time**: `/rdr-accept` updates T2 first, then repairs the file to match.
+5. **After close**: `/rdr-close` creates beads and archives to T3.
 
-1. **Before new work**: agents search T3 for relevant prior RDRs. A new RDR
-   often refines or extends an earlier one, and the search surfaces that chain
-   of reasoning.
-2. **During research**: `/rdr-research` can delegate to `deep-research-synthesizer`
-   or `codebase-deep-analyzer` for heavy investigation.
-3. **At gate time**: the `substantive-critic` agent provides independent review.
-4. **At accept time**: `/rdr-accept` verifies the gate result, updates T2
-   first (process authority), then repairs the file to match. T2 is the
-   authoritative source; the file is the human-readable persistence layer.
-5. **After close**: `/rdr-close` creates beads (epic + tasks), giving
-   implementation agents concrete work items tracked via `bd`. The
-   `SubagentStart` hook injects T2 memory context and the active bead, so
-   spawned agents know what task they're continuing.
-6. **Post-implementation**: the post-mortem template captures what was learned,
-   which often feeds into the next RDR.
+---
+
+## From Post-Mortem to Next RDR
+
+Post-mortem findings map directly to improvements in the next design:
+
+- **Unvalidated assumption** → add a Spike task to the next RDR's research phase before writing the Proposed Solution.
+- **Missing failure mode** → add an explicit failure mode entry to the next RDR's risk section.
+- **Framework API detail wrong** → standard fix: run `nx search "<api>" --corpus rdr` and grep the source before writing the Proposed Solution.
+- **Scope creep** → narrow the next RDR's Problem Statement; if the problem has two parts, write two RDRs.
+- **Implementation diverged from design** → flag the delta in the post-mortem and open a follow-up RDR to record the actual solution.

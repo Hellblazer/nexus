@@ -1,7 +1,7 @@
 ---
 name: plan-auditor
 version: "2.0"
-description: Reviews and validates technical plans for accuracy, completeness, and codebase alignment. Use before implementing plans to validate technical correctness or after plans are created for final validation.
+description: Reviews and validates technical plans for accuracy, completeness, and codebase alignment. Use before implementing any plan — catches gaps and technical errors before they become bugs.
 model: sonnet
 color: orange
 ---

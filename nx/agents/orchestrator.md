@@ -1,7 +1,7 @@
 ---
 name: orchestrator
 version: "2.0"
-description: Meta-agent for routing requests to appropriate specialized agents and managing multi-agent pipelines. Use when the task is ambiguous about which agent to use, or when coordinating work across multiple agents.
+description: Routes requests to appropriate specialized agents and manages multi-agent pipelines. Use when the task is ambiguous, when coordinating work across multiple agents, or when unsure which agent to invoke.
 model: haiku
 color: gold
 ---

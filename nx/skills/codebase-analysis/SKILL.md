@@ -9,12 +9,11 @@ Delegates to the **codebase-deep-analyzer** agent (model: sonnet).
 
 ## When This Skill Activates
 
-- Exploring a new codebase or module
-- Onboarding to a project
-- Trying to understand how a feature works
+- Exploring a new codebase or module before making changes
+- Onboarding to a project — understanding structure and patterns
+- Trying to understand how a feature works or where something is defined
 - Before undertaking major refactoring
-- When asking "how does X work?" or "where is Y defined?"
-- Understanding dependencies between components
+- Mapping dependencies between components or modules
 
 ## Agent Invocation
 

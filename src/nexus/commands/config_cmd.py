@@ -13,13 +13,15 @@ from nexus.config import (
     set_credential,
 )
 
-# ── Signup URLs shown during `nx config init` ─────────────────────────────────
+# ── Signup hints shown during `nx config init` ────────────────────────────────
 
 _SIGNUP = {
-    "chroma_api_key":    "https://trychroma.com  (Cloud → API Keys)",
-    "chroma_tenant":     "https://trychroma.com  (Cloud → Settings → Tenant ID)",
-    "chroma_database":   "https://trychroma.com  (Cloud → Settings → Database)",
-    "voyage_api_key":    "https://voyageai.com   (Dashboard → API Keys)",
+    "chroma_api_key":  "https://trychroma.com  →  Cloud  →  API Keys",
+    "chroma_database": (
+        "Choose a short base name (e.g. 'nexus'). Nexus will provision four databases:\n"
+        "    {base}_code  {base}_docs  {base}_rdr  {base}_knowledge"
+    ),
+    "voyage_api_key":  "https://voyageai.com   →  Dashboard  →  API Keys",
 }
 
 
@@ -124,6 +126,9 @@ def config_list() -> None:
 
 # ── init ──────────────────────────────────────────────────────────────────────
 
+_SEP = "─" * 60
+
+
 @config_group.command("init")
 def config_init() -> None:
     """Interactive wizard to configure all required credentials.
@@ -131,15 +136,15 @@ def config_init() -> None:
     Skips any credential already present in the environment.
     Saves to ~/.config/nexus/config.yml.
     """
-    click.echo("Nexus credential setup\n")
-    click.echo("Keys are stored in ~/.config/nexus/config.yml")
-    click.echo("Environment variables always take precedence.\n")
+    config_path = _global_config_path()
+    click.echo("Nexus setup wizard\n")
+    click.echo(f"Credentials are stored in {config_path}")
+    click.echo("Environment variables (CHROMA_API_KEY, etc.) always take precedence.\n")
 
     _required = [
-        ("chroma_api_key",    "ChromaDB Cloud API key"),
-        ("chroma_tenant",     "ChromaDB tenant ID"),
-        ("chroma_database",   "ChromaDB database name"),
-        ("voyage_api_key",    "Voyage AI API key"),
+        ("chroma_api_key",  "ChromaDB Cloud API key"),
+        ("chroma_database", "ChromaDB database base name"),
+        ("voyage_api_key",  "Voyage AI API key"),
     ]
 
     for key, label in _required:
@@ -147,20 +152,51 @@ def config_init() -> None:
         existing_env = os.environ.get(env_var, "")
         existing_file = get_credential(key)
 
+        click.echo(_SEP)
         if existing_env:
-            click.echo(f"  {label}: already set via environment ({env_var}={_mask(existing_env)})")
+            click.echo(f"{label}")
+            click.echo(f"  Already set via environment: {env_var}={_mask(existing_env)}")
+            click.echo("  (skipping — unset the environment variable to override here)")
             continue
 
-        url = _SIGNUP.get(key, "")
-        if url:
-            click.echo(f"  Get yours at: {url}")
+        hint = _SIGNUP.get(key, "")
+        if hint:
+            click.echo(f"{label}")
+            click.echo(f"  {hint}")
 
         current = _mask(existing_file) if existing_file else None
-        prompt_text = f"  {label}"
-        val = click.prompt(prompt_text, default=current or "", show_default=bool(current))
+        val = click.prompt(
+            f"\n  Enter value",
+            default=current or "",
+            show_default=bool(current),
+            prompt_suffix=" > ",
+        )
 
         if val and val != current:
             set_credential(key, val)
 
-    click.echo(f"\nSaved to {_global_config_path()}")
-    click.echo("Run 'nx doctor' to verify all services are reachable.")
+    click.echo(_SEP)
+    click.echo(f"\nCredentials saved to {config_path}")
+
+    # Auto-provision the four T3 databases if both required credentials are now set.
+    api_key = get_credential("chroma_api_key")
+    database = get_credential("chroma_database")
+    if api_key and database:
+        click.echo(f"\nProvisioning ChromaDB Cloud databases for base name '{database}'…")
+        try:
+            from nexus.commands._provision import _cloud_admin_client, ensure_databases
+            admin = _cloud_admin_client(api_key)
+            created = ensure_databases(admin, base=database)
+            for db_name, was_created in sorted(created.items()):
+                icon = "+" if was_created else "·"
+                status = "created" if was_created else "already exists"
+                click.echo(f"  {icon} {db_name}: {status}")
+        except Exception as exc:
+            click.echo(f"\n  Warning: could not auto-provision databases ({exc}).")
+            click.echo("  Create these databases manually in the ChromaDB Cloud dashboard:")
+            for t in ("code", "docs", "rdr", "knowledge"):
+                click.echo(f"    - {database}_{t}")
+
+    click.echo("\nNext steps:")
+    click.echo("  nx doctor          — verify all services are reachable")
+    click.echo("  nx index repo .    — index your current repository")
