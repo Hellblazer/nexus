@@ -6,6 +6,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-03-04
+
+### Fixed
+- **ChromaDB transient error retry** — all ChromaDB Cloud network calls in `db/t3.py`,
+  `indexer.py`, and `doc_indexer.py` are now wrapped with `_chroma_with_retry`: exponential
+  backoff (2 → 4 → 8 → 16 → 30 s, capped) retrying up to 5 times on HTTP 429/502/503/504
+  and transport-level errors (`ConnectError`, `ReadTimeout`). Non-retryable errors raise
+  immediately. Fixes multi-thousand-file indexing runs aborted by a single transient 504.
+
+### Docs
+- **Transient Error Resilience section** added to `docs/repo-indexing.md` documenting
+  retry behaviour and link to RDR-019.
+- **Pre-push release checklist** added to `docs/contributing.md` to catch missing
+  `uv.lock` commits before tagging.
+
+### Tests
+- Unit and integration tests for `_is_retryable_chroma_error` and `_chroma_with_retry`.
+- `test_uv_lock_version_matches_pyproject` added to `TestMarketplaceVersion` — CI now
+  enforces that `pyproject.toml`, `uv.lock`, and `marketplace.json` all carry the same
+  version.
+
+## [1.5.0] - 2026-03-04
+
+### Added
+- **Auto-provision T3 databases** — `nx config init` now creates the ChromaDB Cloud tenant
+  and database automatically; `nx migrate` has been removed.
+
+### Fixed
+- `chroma_tenant` is now optional in credential validation.
+- Resolve real tenant UUID before admin calls; use `get_database` for existence check.
+
+### Docs
+- White-glove UX polish: help text, wizard flow, troubleshooting, plugin agents/skills,
+  and RDR documentation.
+- RDR-001, 002, 017, 018 closed as implemented.
+
+### Tests
+- Coverage gaps from test-validator audit closed.
+
 ## [1.4.0] - 2026-03-03
 
 ### Added

@@ -4,6 +4,20 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-03-04
+
+### Changed
+- Plugin version aligned with Nexus CLI 1.5.1. No plugin-level functional changes
+  this release; all changes (ChromaDB transient retry, release process improvements)
+  are in the CLI.
+
+## [1.5.0] - 2026-03-04
+
+### Changed
+- Plugin version aligned with Nexus CLI 1.5.0. No plugin-level functional changes
+  this release; all changes (auto-provision T3 databases, nx migrate removal, UX polish)
+  are in the CLI.
+
 ## [1.4.0] - 2026-03-03
 
 ### Changed
