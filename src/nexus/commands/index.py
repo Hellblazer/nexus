@@ -98,6 +98,20 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool) 
             if rdr_failed:
                 parts.append(f"{rdr_failed} failed")
             click.echo(f"  RDR documents: {', '.join(parts)} (collection rdr__)")
+    if not frecency_only:
+        try:
+            from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir
+            hdir = _effective_hooks_dir(path)
+            hook_names = ("post-commit", "post-merge", "post-rewrite")
+            any_managed = any(
+                SENTINEL_BEGIN in (hdir / n).read_text()
+                for n in hook_names
+                if (hdir / n).exists()
+            )
+            if not any_managed:
+                click.echo("Tip: run `nx hooks install` to auto-index this repo on every commit.")
+        except Exception:
+            pass  # Don't let hook detection break indexing
     click.echo("Done.")
 
 
