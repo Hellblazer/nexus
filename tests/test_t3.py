@@ -33,6 +33,17 @@ def test_cloudclient_init(mock_chromadb: tuple) -> None:
         assert call.kwargs["api_key"] == "secret"
 
 
+def test_cloudclient_receives_none_for_empty_tenant(mock_chromadb: tuple) -> None:
+    """Empty-string tenant is coerced to None so CloudClient infers it from the API key."""
+    chromadb_m, _ = mock_chromadb
+    T3Database(tenant="", database="mydb", api_key="key")
+    for c in chromadb_m.CloudClient.call_args_list:
+        assert c.kwargs["tenant"] is None, (
+            "Expected tenant=None when empty string is passed; "
+            f"got tenant={c.kwargs['tenant']!r}"
+        )
+
+
 # ── AC2: VoyageAI embedding function selection ────────────────────────────────
 
 def test_voyage_embedding_fn_code_collection(mock_chromadb: tuple) -> None:

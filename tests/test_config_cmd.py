@@ -160,6 +160,34 @@ def test_config_init_writes_provided_values(runner: CliRunner, fake_home: Path) 
     assert creds.get("voyage_api_key") == "voyage-key"
 
 
+def test_config_init_provisions_databases_success(runner: CliRunner, fake_home: Path) -> None:
+    """nx config init reports each database status when provisioning succeeds."""
+    from unittest.mock import MagicMock, patch
+
+    mock_admin = MagicMock()
+    created = {"mydb_code": True, "mydb_docs": False, "mydb_rdr": True, "mydb_knowledge": False}
+    with patch("nexus.commands._provision._cloud_admin_client", return_value=mock_admin), \
+         patch("nexus.commands._provision.ensure_databases", return_value=created):
+        result = runner.invoke(main, ["config", "init"], input="ck-key\nmydb\nvoyage-key\n")
+
+    assert result.exit_code == 0, result.output
+    assert "mydb_code" in result.output
+    assert "created" in result.output
+    assert "already exists" in result.output
+
+
+def test_config_init_provisioning_failure_is_a_warning(runner: CliRunner, fake_home: Path) -> None:
+    """Provisioning failure is shown as a warning; init still succeeds."""
+    from unittest.mock import patch
+
+    with patch("nexus.commands._provision._cloud_admin_client",
+               side_effect=Exception("network timeout")):
+        result = runner.invoke(main, ["config", "init"], input="ck-key\nmydb\nvoyage-key\n")
+
+    assert result.exit_code == 0, result.output
+    assert "warning" in result.output.lower() or "could not" in result.output.lower()
+
+
 def test_config_init_shows_signup_urls(runner: CliRunner, fake_home: Path) -> None:
     """nx config init output includes URLs to obtain the required keys."""
     result = runner.invoke(main, ["config", "init"], input="\n\n\n")
