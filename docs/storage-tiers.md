@@ -47,7 +47,7 @@ Each content type routes to a dedicated ChromaDB Cloud database derived from the
 | `{base}_rdr` | `rdr__*` | Indexed RDR documents |
 | `{base}_knowledge` | `knowledge__*` | Agent outputs, notes, stored knowledge |
 
-All four databases must exist in your ChromaDB Cloud dashboard before using T3. Run `nx doctor` to verify connectivity. If upgrading from a single-database setup, run `nx migrate t3` to copy existing collections.
+All four databases are provisioned automatically by `nx config init`. Run `nx doctor` to verify connectivity.
 
 Collections are namespaced by corpus type using `__` (double underscore) as separator:
 

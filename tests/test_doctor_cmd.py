@@ -297,9 +297,11 @@ def test_doctor_partial_credentials() -> None:
         result = runner.invoke(main, ["doctor"])
 
     assert result.exit_code == 1
-    # Missing ones should be listed with fix hints
+    # CHROMA_TENANT is optional — shown informationally but no fix hint
     assert "CHROMA_TENANT" in result.output
-    assert "nx config set chroma_tenant" in result.output
+    assert "nx config set chroma_tenant" not in result.output
+    # Missing CHROMA_DATABASE should produce a fix hint
+    assert "nx config set chroma_database" in result.output
     # Present keys should show as set, not have fix hints
     assert "nx config set chroma_api_key" not in result.output
     assert "nx config set voyage_api_key" not in result.output
@@ -426,7 +428,7 @@ def test_doctor_four_store_one_unreachable_fails_with_fix_hint() -> None:
 
     assert result.exit_code == 1
     assert "not reachable" in result.output
-    assert "nx migrate t3" in result.output
+    assert "nx config init" in result.output
 
 
 def test_doctor_four_store_error_does_not_expose_exception_text() -> None:

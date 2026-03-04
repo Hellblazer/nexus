@@ -80,15 +80,11 @@ def doctor_cmd() -> None:
              "nx config set chroma_api_key <your-key>",
              "Get key: https://trychroma.com")
 
-    # ── CHROMA_TENANT ─────────────────────────────────────────────────────────
+    # ── CHROMA_TENANT (optional — inferred from API key if not set) ──────────
     chroma_tenant = get_credential("chroma_tenant")
-    lines.append(_check_line("ChromaDB  (CHROMA_TENANT)",   bool(chroma_tenant),
-                              "set" if chroma_tenant else "not set"))
-    if not chroma_tenant:
-        failed = True
-        _fix(lines,
-             "nx config set chroma_tenant <your-tenant>",
-             "Get value: https://trychroma.com  (Dashboard → Settings)")
+    lines.append(_check_line("ChromaDB  (CHROMA_TENANT)",
+                              True,
+                              chroma_tenant if chroma_tenant else "not set (auto-inferred from API key)"))
 
     # ── CHROMA_DATABASE ───────────────────────────────────────────────────────
     chroma_database = get_credential("chroma_database")
@@ -97,17 +93,17 @@ def doctor_cmd() -> None:
     if not chroma_database:
         failed = True
         _fix(lines,
-             "nx config set chroma_database <your-database>",
-             "Get value: https://trychroma.com  (Dashboard → Settings)")
+             "nx config set chroma_database <your-base-name>",
+             "e.g. nx config set chroma_database nexus")
 
     # ── ChromaDB four-store databases ────────────────────────────────────────
-    if chroma_key and chroma_tenant and chroma_database:
+    if chroma_key and chroma_database:
         db_ok = True
         for t in _STORE_TYPES:
             db_name = f"{chroma_database}_{t}"
             try:
                 chromadb.CloudClient(
-                    tenant=chroma_tenant, database=db_name, api_key=chroma_key
+                    tenant=chroma_tenant or None, database=db_name, api_key=chroma_key
                 )
                 lines.append(_check_line(f"ChromaDB  ({db_name})", True, "reachable"))
             except Exception as exc:
@@ -117,9 +113,9 @@ def doctor_cmd() -> None:
                 lines.append(_check_line(f"ChromaDB  ({db_name})", False, "not reachable"))
         if not db_ok:
             _fix(lines,
-                 "Create these databases in your ChromaDB Cloud dashboard:",
-                 *[f"  - {chroma_database}_{t}" for t in _STORE_TYPES],
-                 "Then run: nx migrate t3  (to copy data from the old single store)")
+                 "Run 'nx config init' to provision the databases automatically.",
+                 "Or create these databases in your ChromaDB Cloud dashboard:",
+                 *[f"  - {chroma_database}_{t}" for t in _STORE_TYPES])
 
     # ── VOYAGE_API_KEY ────────────────────────────────────────────────────────
     voyage_key = get_credential("voyage_api_key")

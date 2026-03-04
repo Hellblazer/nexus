@@ -515,16 +515,15 @@ def test_migrate_t3_ensure_databases_is_idempotent(runner: CliRunner) -> None:
     silencing in ensure_databases() against a live Chroma Cloud endpoint.
     """
     import os
-    from nexus.commands.migrate import ensure_databases, _cloud_admin_client
+    from nexus.commands._provision import ensure_databases, _cloud_admin_client
 
     api_key = os.environ.get("CHROMA_API_KEY", "")
-    tenant = os.environ.get("CHROMA_TENANT", "")
     database = os.environ.get("CHROMA_DATABASE", "")
 
     admin = _cloud_admin_client(api_key)
     # First call may create or find existing; second call must not raise
-    first = ensure_databases(admin, tenant=tenant, base=database)
-    second = ensure_databases(admin, tenant=tenant, base=database)
+    first = ensure_databases(admin, base=database)
+    second = ensure_databases(admin, base=database)
 
     from nexus.db.t3 import _STORE_TYPES
     expected_keys = {f"{database}_{t}" for t in _STORE_TYPES}
@@ -535,34 +534,5 @@ def test_migrate_t3_ensure_databases_is_idempotent(runner: CliRunner) -> None:
     )
 
 
-@pytest.mark.integration
-@requires_t3
-def test_migrate_t3_cmd_with_real_source(runner: CliRunner) -> None:
-    """nx migrate t3 runs against live Chroma Cloud and reports a valid summary line.
-
-    Uses the current credentials to verify end-to-end: source connection,
-    database auto-creation, collection enumeration, and idempotent copy.
-    The source is the old unsuffixed database; if it doesn't exist the command
-    will fail to connect and exit with a clear error (that failure mode is also tested).
-    """
-    import os
-    database = os.environ.get("CHROMA_DATABASE", "")
-
-    result = runner.invoke(main, ["migrate", "t3", "--verbose"])
-
-    # Either the source database exists and migration runs to completion,
-    # or it does not exist and the command exits with an explicit error.
-    # In either case the exit code must be determinate (no unhandled exception).
-    if result.exit_code == 0:
-        # Successful run: summary line must be present
-        assert "Done:" in result.output, (
-            f"Expected 'Done:' summary line, got:\n{result.output}"
-        )
-        assert "collection(s) processed" in result.output
-    else:
-        # Expected failure: source not found or credentials problem
-        assert "Error" in result.output, (
-            f"Non-zero exit but no 'Error' in output:\n{result.output}"
-        )
 
 

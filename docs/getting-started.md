@@ -58,26 +58,26 @@ It walks through each credential and shows where to sign up. Alternatively, set 
 
 ```bash
 nx config set chroma_api_key sk-...
-nx config set chroma_tenant YOUR_TENANT_UUID
-nx config set chroma_database default_database
+nx config set chroma_database nexus          # your chosen base name
 nx config set voyage_api_key pa-...
 ```
 
 Credentials are stored in `~/.config/nexus/config.yml`. Environment variables always take precedence:
 
-| Config key | Environment variable |
-|-----------|---------------------|
-| `chroma_api_key` | `CHROMA_API_KEY` |
-| `chroma_tenant` | `CHROMA_TENANT` |
-| `chroma_database` | `CHROMA_DATABASE` |
-| `voyage_api_key` | `VOYAGE_API_KEY` |
+| Config key | Env var | Notes |
+|---|---|---|
+| `chroma_api_key` | `CHROMA_API_KEY` | Required |
+| `chroma_database` | `CHROMA_DATABASE` | Required — base name you choose |
+| `voyage_api_key` | `VOYAGE_API_KEY` | Required |
+| `chroma_tenant` | `CHROMA_TENANT` | Optional — inferred automatically from API key |
 
-**ChromaDB tenant** is the UUID shown on your Cloud settings page, not the URL slug.
-**ChromaDB database** is the base name for your four T3 databases. If you set `chroma_database = nexus`, Nexus will use `nexus_code`, `nexus_docs`, `nexus_rdr`, and `nexus_knowledge`. You must create all four in your ChromaDB Cloud dashboard before running `nx index` or `nx store`.
+**ChromaDB database** is the base name you choose for your four T3 databases.
+If you set `chroma_database = nexus`, Nexus connects to `nexus_code`, `nexus_docs`, `nexus_rdr`, and `nexus_knowledge`.
 
-**Creating the four databases**: In the ChromaDB Cloud dashboard, create four databases named `{base}_code`, `{base}_docs`, `{base}_rdr`, and `{base}_knowledge` (where `{base}` is your chosen base name). Run `nx doctor` to verify all four are reachable.
+**`nx config init` creates the databases automatically.** After you supply your API key and base name, the wizard provisions all four databases on Chroma Cloud. No dashboard visit required.
 
-**Upgrading from an older single-database setup**: If you have existing data in a single ChromaDB database from a pre-four-store version of Nexus, run `nx migrate t3` to copy your collections to the new layout. The operation is idempotent — already-migrated collections are skipped.
+> **Tenant and database creation are automatic.** Nexus derives the tenant UUID from your API key and provisions the four required databases during `nx config init`. You do not need to visit the ChromaDB Cloud dashboard for initial setup.
+
 
 ## Verify
 

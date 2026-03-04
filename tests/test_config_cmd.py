@@ -147,7 +147,7 @@ def test_config_list_shows_non_secret_settings(runner: CliRunner, fake_home: Pat
 
 def test_config_init_writes_provided_values(runner: CliRunner, fake_home: Path) -> None:
     """nx config init with all inputs writes all credentials to config.yml."""
-    inputs = "chroma-key\nmy-tenant\nmy-db\nvoyage-key\n"
+    inputs = "chroma-key\nmy-db\nvoyage-key\n"
     result = runner.invoke(main, ["config", "init"], input=inputs)
     assert result.exit_code == 0, result.output
 
@@ -156,12 +156,13 @@ def test_config_init_writes_provided_values(runner: CliRunner, fake_home: Path) 
     data = yaml.safe_load(config_path.read_text())
     creds = data.get("credentials", {})
     assert creds.get("chroma_api_key") == "chroma-key"
+    assert creds.get("chroma_database") == "my-db"
     assert creds.get("voyage_api_key") == "voyage-key"
 
 
 def test_config_init_shows_signup_urls(runner: CliRunner, fake_home: Path) -> None:
     """nx config init output includes URLs to obtain the required keys."""
-    result = runner.invoke(main, ["config", "init"], input="\n\n\n\n")
+    result = runner.invoke(main, ["config", "init"], input="\n\n\n")
     output = result.output
     assert "trychroma.com" in output or "chromadb" in output.lower()
     assert "voyageai.com" in output or "voyage" in output.lower()

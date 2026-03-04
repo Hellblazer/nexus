@@ -17,8 +17,7 @@ from nexus.config import (
 
 _SIGNUP = {
     "chroma_api_key":    "https://trychroma.com  (Cloud → API Keys)",
-    "chroma_tenant":     "https://trychroma.com  (Cloud → Settings → Tenant ID)",
-    "chroma_database":   "https://trychroma.com  (Cloud → Settings → Database)",
+    "chroma_database":   "https://trychroma.com  (Cloud → Dashboard — choose a base name, e.g. 'nexus')",
     "voyage_api_key":    "https://voyageai.com   (Dashboard → API Keys)",
 }
 
@@ -136,10 +135,9 @@ def config_init() -> None:
     click.echo("Environment variables always take precedence.\n")
 
     _required = [
-        ("chroma_api_key",    "ChromaDB Cloud API key"),
-        ("chroma_tenant",     "ChromaDB tenant ID"),
-        ("chroma_database",   "ChromaDB database name"),
-        ("voyage_api_key",    "Voyage AI API key"),
+        ("chroma_api_key",  "ChromaDB Cloud API key"),
+        ("chroma_database", "ChromaDB database base name (e.g. 'nexus')"),
+        ("voyage_api_key",  "Voyage AI API key"),
     ]
 
     for key, label in _required:
@@ -163,4 +161,24 @@ def config_init() -> None:
             set_credential(key, val)
 
     click.echo(f"\nSaved to {_global_config_path()}")
+
+    # Auto-provision the four T3 databases if both required credentials are now set.
+    api_key = get_credential("chroma_api_key")
+    database = get_credential("chroma_database")
+    if api_key and database:
+        click.echo("\nProvisioning ChromaDB Cloud databases…")
+        try:
+            from nexus.commands._provision import _cloud_admin_client, ensure_databases
+            admin = _cloud_admin_client(api_key)
+            created = ensure_databases(admin, base=database)
+            for db_name, was_created in created.items():
+                status = "created" if was_created else "already exists"
+                click.echo(f"  {db_name}: {status}")
+        except Exception as exc:
+            click.echo(
+                f"  Warning: could not auto-create databases ({exc}).\n"
+                "  Create these databases in your ChromaDB Cloud dashboard if needed:\n"
+                + "\n".join(f"    - {database}_{t}" for t in ("code", "docs", "rdr", "knowledge"))
+            )
+
     click.echo("Run 'nx doctor' to verify all services are reachable.")
