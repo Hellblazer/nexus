@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests for ChromaDB transient-error retry helpers.
+"""Unit tests and integration tests for ChromaDB transient-error retry.
 
-TDD RED phase: these tests import _is_retryable_chroma_error and
-_chroma_with_retry from nexus.db.t3, which do not exist yet.  All
-tests are expected to fail with ImportError until T2 (TDD GREEN) is
-implemented.
+Unit tests (T1/T2): test _is_retryable_chroma_error and _chroma_with_retry
+helpers directly.
+
+Integration tests (T3): verify that retry propagates through public API
+methods — search(), _write_batch(), list_store(), and _index_code_file().
+These tests are added in TDD RED phase; they fail until the call sites in
+db/t3.py (T4) and indexer.py (T5) are wrapped with _chroma_with_retry.
 
 RDR: docs/rdr/rdr-019-chromadb-transient-retry.md
 """
@@ -144,3 +147,129 @@ def test_backoff_curve_2_4_8_16() -> None:
         call(8.0),
         call(16.0),
     ]
+
+
+# ── Integration: retry propagation through public API methods ─────────────────
+#
+# These tests are TDD RED: they fail until call sites are wrapped (T4/T5).
+# Tests 1, 3, 4 pass after T4 (db/t3.py wrapping).
+# Test 2 passes after T5 (indexer.py wrapping).
+
+
+@pytest.fixture
+def t3_mock():
+    """T3Database wired to a single MagicMock ChromaDB client."""
+    with patch("nexus.db.t3.chromadb") as chromadb_m:
+        mock_client = MagicMock()
+        chromadb_m.CloudClient.return_value = mock_client
+        from nexus.db.t3 import T3Database
+        db = T3Database(tenant="t", database="d", api_key="k")
+        yield db, mock_client
+
+
+def test_search_retries_on_503(t3_mock) -> None:
+    """search() retries when col.query raises a chained 503 on the first attempt.
+
+    Fails at TDD RED (col.query not wrapped); passes after T4.
+    """
+    db, mock_client = t3_mock
+    mock_col = MagicMock()
+    mock_client.get_collection.return_value = mock_col
+    mock_col.count.return_value = 2
+
+    exc = _make_chained_exc(503)
+    valid_result = {
+        "ids": [["id-1"]],
+        "documents": [["content"]],
+        "metadatas": [[{"source_path": "f.py"}]],
+        "distances": [[0.1]],
+    }
+    mock_col.query.side_effect = [exc, valid_result]
+
+    with patch("nexus.db.t3.time"):
+        results = db.search("query text", ["code__myrepo"])
+
+    assert len(results) == 1
+
+
+def test_write_batch_retries_on_504(t3_mock) -> None:
+    """_write_batch retries when col.upsert raises 504 on the first attempt.
+
+    Fails at TDD RED (col.upsert not wrapped); passes after T4.
+    """
+    db, _ = t3_mock
+    mock_col = MagicMock()
+    mock_col.upsert.side_effect = [Exception("504 Gateway Time-out"), None]
+
+    with patch("nexus.db.t3.time"):
+        db._write_batch(
+            mock_col,
+            "code__myrepo",
+            ["id-1"],
+            ["def hello(): pass"],
+            [{"source_path": "hello.py"}],
+        )
+
+    assert mock_col.upsert.call_count == 2
+
+
+def test_list_store_retries_on_read_timeout(t3_mock) -> None:
+    """list_store retries when col.get raises ReadTimeout on the first attempt.
+
+    Fails at TDD RED (col.get not wrapped); passes after T4.
+    """
+    db, mock_client = t3_mock
+    mock_col = MagicMock()
+    mock_client.get_collection.return_value = mock_col
+    mock_col.get.side_effect = [
+        httpx.ReadTimeout("timed out"),
+        {
+            "ids": ["id-1"],
+            "metadatas": [{
+                "title": "finding.md", "tags": "", "ttl_days": 0,
+                "expires_at": "", "indexed_at": "2026-01-01T00:00:00+00:00",
+            }],
+        },
+    ]
+
+    with patch("nexus.db.t3.time"):
+        results = db.list_store("knowledge__mystore")
+
+    assert len(results) == 1
+
+
+def test_index_code_file_retries_on_connect_error(tmp_path) -> None:
+    """_index_code_file retries when col.get raises ConnectError on the first attempt.
+
+    Fails at TDD RED (col.get in indexer.py not wrapped); passes after T5.
+    """
+    from nexus.indexer import _index_code_file
+
+    src = tmp_path / "hello.py"
+    src.write_text("def hello(): pass\n")
+
+    mock_col = MagicMock()
+    mock_col.get.side_effect = [
+        httpx.ConnectError("connection refused"),
+        {"ids": [], "metadatas": []},
+    ]
+    mock_db = MagicMock()
+    mock_voyage = MagicMock()
+    mock_voyage.embed.return_value = MagicMock(embeddings=[[0.1, 0.2]])
+
+    with patch("nexus.db.t3.time"):
+        result = _index_code_file(
+            file=src,
+            repo=tmp_path,
+            collection_name="code__myrepo",
+            target_model="voyage-4",
+            col=mock_col,
+            db=mock_db,
+            voyage_client=mock_voyage,
+            git_meta={},
+            now_iso="2026-01-01T00:00:00+00:00",
+            score=1.0,
+        )
+
+    assert result >= 0  # completed without raising
+    assert mock_col.get.call_count == 2
