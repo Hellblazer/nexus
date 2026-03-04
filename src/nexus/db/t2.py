@@ -229,7 +229,7 @@ class T2Database:
     ) -> list[dict[str, Any]]:
         """List entries ordered by timestamp descending. Optionally filtered.
 
-        Returns a summary view with columns: id, title, agent, timestamp.
+        Returns a summary view with columns: id, project, title, agent, timestamp.
         Use get() or get_all() for full row content including the text body.
         """
         conditions: list[str] = []
@@ -241,10 +241,10 @@ class T2Database:
             conditions.append("agent = ?")
             params.append(agent)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sql = f"SELECT id, title, agent, timestamp FROM memory {where} ORDER BY timestamp DESC"
+        sql = f"SELECT id, project, title, agent, timestamp FROM memory {where} ORDER BY timestamp DESC"
         with self._lock:
             rows = self.conn.execute(sql, params).fetchall()
-        return [dict(zip(("id", "title", "agent", "timestamp"), row)) for row in rows]
+        return [dict(zip(("id", "project", "title", "agent", "timestamp"), row)) for row in rows]
 
     def get_projects_with_prefix(self, prefix: str) -> list[dict[str, Any]]:
         """Return all distinct project namespaces whose name starts with *prefix*.

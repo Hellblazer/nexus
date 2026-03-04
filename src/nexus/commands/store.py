@@ -65,6 +65,12 @@ def put_cmd(
 
     SOURCE may be a file path or '-' to read from stdin.  When reading from
     stdin, --title is required.
+
+    \b
+    Examples:
+      nx store put ./notes.md --collection knowledge --tags "arch,decision"
+      echo "key insight" | nx store put - --title "finding-01" --collection knowledge
+      nx store put ./doc.md --ttl 30d --title "sprint-notes"
     """
     if source == "-":
         if not title:

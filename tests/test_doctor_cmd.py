@@ -478,7 +478,7 @@ def test_doctor_missing_bd_does_not_fail() -> None:
 
 
 def test_doctor_missing_uv_does_not_fail() -> None:
-    """Missing uv is reported as informational but does not cause exit code 1."""
+    """uv is an install-time tool and is not checked by doctor at all."""
     runner = _runner()
 
     def which_side_effect(name):
@@ -497,7 +497,6 @@ def test_doctor_missing_uv_does_not_fail() -> None:
         result = runner.invoke(main, ["doctor"])
 
     assert result.exit_code == 0
-    assert "uv" in result.output
 
 
 # ── _check helper ────────────────────────────────────────────────────────────

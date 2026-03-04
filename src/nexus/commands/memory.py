@@ -86,7 +86,7 @@ def list_cmd(project: str | None, agent: str | None) -> None:
         return
     for e in entries:
         agent_str = e["agent"] or "-"
-        click.echo(f"[{e['id']}] {e['title']}  ({agent_str}, {e['timestamp']})")
+        click.echo(f"[{e['id']}] {e['project']}/{e['title']}  ({agent_str}, {e['timestamp']})")
 
 
 @memory.command("expire")

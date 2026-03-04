@@ -36,7 +36,7 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 ## T3 -- Permanent Knowledge
 
-Backed by four `chromadb.CloudClient` instances with `VoyageAIEmbeddingFunction`. Requires environment variables: `CHROMA_API_KEY`, `CHROMA_TENANT`, `CHROMA_DATABASE`, `VOYAGE_API_KEY`.
+Backed by four `chromadb.CloudClient` instances with `VoyageAIEmbeddingFunction`. Requires `CHROMA_API_KEY`, `CHROMA_DATABASE`, and `VOYAGE_API_KEY`. `CHROMA_TENANT` is optional — the CloudClient infers the tenant UUID from your API key.
 
 Each content type routes to a dedicated ChromaDB Cloud database derived from the `CHROMA_DATABASE` base name:
 
