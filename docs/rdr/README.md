@@ -32,7 +32,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-016](rdr-016-ast-chunk-line-range-bug.md) | AST Chunk Line Range Bug: CodeSplitter Returns Empty Metadata, Breaking Context Prefix | Bug | Closed | 2026-03-03 |
 | [RDR-017](rdr-017-indexing-progress-reporting.md) | Indexing Progress Reporting: tqdm-Based Progress Bar for nx index | Enhancement | Implemented | 2026-03-03 |
 | [RDR-018](rdr-018-replace-serve-with-git-hooks.md) | Replace nx serve Polling Server with Git Hooks | Refactor | Implemented | 2026-03-03 |
-| [RDR-019](rdr-019-chromadb-transient-retry.md) | ChromaDB Transient HTTP Error Retry | Bug Fix | Accepted | 2026-03-04 |
+| [RDR-019](rdr-019-chromadb-transient-retry.md) | ChromaDB Transient HTTP Error Retry | Bug Fix | Closed | 2026-03-04 |
 
 ## RDR Process Documentation
 

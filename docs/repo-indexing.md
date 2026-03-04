@@ -189,6 +189,22 @@ SKIP files are cleaned automatically on the next `nx index repo` run.
 Git hooks (`post-commit`, `post-merge`, `post-rewrite`) trigger automatic re-indexing
 in the background after each qualifying git operation. Install them with `nx hooks install`.
 
+## Transient Error Resilience
+
+All ChromaDB Cloud network calls (staleness checks, upserts, deletes, queries) are wrapped
+with `_chroma_with_retry` — an exponential backoff helper in `db/t3.py`. If a call raises a
+transient error (HTTP 502/503/504/429, or a transport-level error such as `ConnectError` or
+`ReadTimeout`), it is retried up to 5 times with delays of 2 → 4 → 8 → 16 → 30 s (capped).
+Non-retryable errors (400, 401, 403, 404) raise immediately without retry.
+
+Each retry attempt is logged at WARNING level with the event key
+`chroma_transient_error_retry`. After 5 failed attempts the original exception propagates
+and the indexing job fails fast.
+
+This means a single transient 504 from the ChromaDB Cloud gateway no longer aborts a
+multi-thousand-file indexing run. See [RDR-019](rdr/rdr-019-chromadb-transient-retry.md)
+for the full decision record.
+
 ## Searching Indexed Repos
 
 ```bash

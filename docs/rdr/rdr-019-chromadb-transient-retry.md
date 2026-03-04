@@ -2,7 +2,7 @@
 title: "ChromaDB Transient HTTP Error Retry"
 id: RDR-019
 type: Bug Fix
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
