@@ -2,6 +2,7 @@
 """nx doctor — health check for all required services."""
 import shutil
 import sys
+from pathlib import Path
 
 import chromadb
 import click
@@ -9,6 +10,8 @@ import structlog
 
 from nexus.config import get_credential
 from nexus.db.t3 import _STORE_TYPES
+from nexus.commands.hooks import _effective_hooks_dir, SENTINEL_BEGIN
+from nexus.registry import RepoRegistry
 
 _log = structlog.get_logger(__name__)
 
@@ -160,14 +163,57 @@ def doctor_cmd() -> None:
     lines.append(_check_line("uv (optional)",               True,
                               uv_path or "not found — pip install conexus works too"))
 
-    # ── Nexus server ──────────────────────────────────────────────────────────
-    # Server is optional for most commands; always ✓, report status in detail.
-    from nexus.commands.serve import _read_pid, _process_running
-    pid = _read_pid()
-    server_running = pid is not None and _process_running(pid)
-    lines.append(_check_line("Nexus server (optional)",     True,
-                              f"running (PID {pid})" if server_running else
-                              "not running — start with: nx serve start"))
+    # ── git hooks ─────────────────────────────────────────────────────────────
+    # Hooks are optional and always non-fatal — always ✓, report status in detail.
+    _hook_names = ("post-commit", "post-merge", "post-rewrite")
+    _registry_path = Path.home() / ".config" / "nexus" / "repos.json"
+
+    try:
+        reg = RepoRegistry(_registry_path)
+        repos = reg.all()
+    except Exception:
+        repos = []
+
+    if not repos:
+        lines.append(_check_line("git hooks", True,
+                                 "no repos registered (run: nx index repo <path>)"))
+    else:
+        for repo_str in repos:
+            repo_path = Path(repo_str)
+            try:
+                hdir = _effective_hooks_dir(repo_path)
+                installed = [
+                    n for n in _hook_names
+                    if (hdir / n).exists() and SENTINEL_BEGIN in (hdir / n).read_text()
+                ]
+                if installed:
+                    lines.append(_check_line("git hooks", True,
+                                             f"{repo_path} ({', '.join(installed)})"))
+                else:
+                    lines.append(_check_line("git hooks", True,
+                                             f"{repo_path} — not installed"))
+                    _fix(lines, f"nx hooks install {repo_path}")
+            except Exception:
+                lines.append(_check_line("git hooks", True,
+                                         f"{repo_path} — could not check"))
+
+    # ── index log ─────────────────────────────────────────────────────────────
+    import time as _time
+    log_path = Path.home() / ".config" / "nexus" / "index.log"
+    if log_path.exists():
+        mtime = log_path.stat().st_mtime
+        age_s = _time.time() - mtime
+        if age_s < 60:
+            age_str = f"{int(age_s)}s ago"
+        elif age_s < 3600:
+            age_str = f"{int(age_s // 60)} minutes ago"
+        else:
+            age_str = f"{int(age_s // 3600)} hours ago"
+        lines.append(_check_line("index log", True,
+                                 f"{log_path} (last write: {age_str})"))
+    else:
+        lines.append(_check_line("index log", True,
+                                 f"{log_path} (not created yet — hooks have not fired)"))
 
     click.echo("\n".join(lines))
 
