@@ -48,13 +48,11 @@ self._client = voyageai.Client(api_key=self.api_key)
 ```
 No `timeout` param in the constructor signature. `self._client` is a public attribute.
 
-**Fix options (in preference order):**
-1. Subclass `VoyageAIEmbeddingFunction`, call `super().__init__(...)`, then overwrite:
-   `self._client = voyageai.Client(api_key=self.api_key, timeout=N)`
-2. Post-construct patching: create instance, then `ef._client = voyageai.Client(..., timeout=N)`.
-   Works but relies on `_client` remaining public — fragile.
-
-Option 1 (subclass) is clean and upgrade-safe.
+Initial analysis suggested subclassing `VoyageAIEmbeddingFunction` to inject a timeout.
+Finding 5 supersedes this: `VoyageAIEmbeddingFunction.__call__` is never invoked in this
+codebase — all embed/query paths bypass the EF entirely. Subclassing would add complexity
+for a dead code path. The timeout must be applied directly at the three `voyageai.Client`
+construction sites identified in Findings 5 and 7.
 
 ### Finding 3: `chromadb.CloudClient` — no direct timeout param, but `Settings` works
 
@@ -73,22 +71,30 @@ The real hang risk is on the Voyage AI side (embedding), not ChromaDB directly.
 **Action:** Pass `settings=Settings(chroma_query_request_timeout_seconds=N)` to
 `CloudClient` to allow future configurability; keep default at 60s.
 
-### Finding 5: `indexer.py` constructs a second independent `voyageai.Client` — the actual hot path
+### Finding 5: Three independent `voyageai.Client` instances — none have a timeout
 
-`src/nexus/indexer.py:1153` constructs:
-```python
-voyage_client = voyageai.Client(api_key=voyage_key)
-```
-This client calls `voyage_client.embed()` for every code file batch — it is the primary
-Voyage AI call site during `nx index repo`. The observed WitnessBootstrap.java hang
-almost certainly came from this path. The RDR-019 `_chroma_with_retry` wrapper does
-**not** wrap this call. The `T3Database.__init__` fix alone does not touch it.
+All three are constructed without `timeout=`:
+
+| Site | File | Line | Path |
+|---|---|---|---|
+| `T3Database.__init__` | `db/t3.py` | ~129 | CCE (`_cce_embed`) — `docs__`/`knowledge__` |
+| `index_repository` | `indexer.py` | 1153 | Code file batch embed — `code__` (hot path) |
+| `_embed_with_fallback` | `doc_indexer.py` | 115 | Prose/PDF embed — `docs__` |
+
+`indexer.py:1153` is the hot path for code indexing (the observed WitnessBootstrap.java
+hang). `doc_indexer._embed_with_fallback` is the hot path for prose/PDF indexing —
+equally vulnerable. `T3Database.__init__` covers the CCE path.
+
+**Note on `_embed_with_fallback` interaction with retry**: `_embed_with_fallback` wraps
+the Voyage AI call in `try/except Exception` that falls back to `voyage-4` on any error.
+This means a timeout inside it would silently degrade embedding quality rather than retry.
+The `_voyage_with_retry` wrapper must go around the CCE call *inside* `_embed_with_fallback`
+(or replace the fallback logic), not outside it.
 
 **VoyageAIEmbeddingFunction is structurally attached but never called**: The EF attached
 to collections via `_embedding_fn()` / `_query_ef()` in `t3.py` is bypassed at all embed
 and query times — `col.upsert()` receives precomputed `embeddings=`, and `col.query()`
-receives `query_embeddings=`. Subclassing `VoyageAIEmbeddingFunction` to inject a timeout
-would add complexity for a dead code path. **Do not subclass.**
+receives `query_embeddings=`. **Do not subclass.**
 
 ### Finding 6: Full retryable Voyage AI error surface
 
@@ -105,17 +111,18 @@ subtypes than to enumerate retryable ones.
 
 ### Decision
 
-1. Add `timeout=read_timeout_seconds` (default: **120s**) to both `voyageai.Client`
-   instances: in `T3Database.__init__` (CCE path) and in `indexer.py` (code embed hot path).
-2. Create a `_voyage_with_retry` helper (or rename `_chroma_with_retry` to `_with_retry`)
-   and wrap `_cce_embed()` and `indexer.py`'s `voyage_client.embed()` call sites.
-3. Update `_is_retryable_chroma_error` → rename to `_is_retryable_api_error` and add
-   soft-import check for `voyageai.VoyageError` subtypes (retryable ones listed above).
-4. Pass `Settings(chroma_query_request_timeout_seconds=120)` to `CloudClient` (already
-   defaults to 60s, but align with Voyage AI timeout for consistency).
+1. Add `timeout=read_timeout_seconds` (default: **120s**) to all three `voyageai.Client`
+   instances: `T3Database.__init__`, `indexer.py:1153`, and `doc_indexer._embed_with_fallback:115`.
+2. Add `_voyage_with_retry` to `db/t3.py` (alongside `_chroma_with_retry`); import it in
+   `indexer.py` and `doc_indexer.py`. Wrap: `_cce_embed()`, `indexer.py` batch embed,
+   and the CCE call inside `_embed_with_fallback` (inside the existing `try` block, before
+   the fallback, so timeout errors retry rather than silently degrade to `voyage-4`).
+3. Rename `_is_retryable_chroma_error` → `_is_retryable_api_error`; soft-import
+   `voyageai.VoyageError`; handle retryable subtypes (Finding 6).
+4. Pass `Settings(chroma_query_request_timeout_seconds=60)` to `CloudClient` — keep the
+   existing 60s default; this makes it explicitly configurable without changing behaviour.
 5. **Do not** subclass `VoyageAIEmbeddingFunction` — its `__call__` is never reached.
-6. Add `read_timeout_seconds` to `~/.config/nexus/config.yml` and thread through
-   `make_t3()` factory.
+6. Add `read_timeout_seconds` to `~/.config/nexus/config.yml`; thread through `make_t3()`.
 
 ### Finding 4: `voyageai.error.Timeout` is NOT an `httpx.TransportError` — retry helper needs update
 
@@ -164,14 +171,16 @@ propagate as unhandled exceptions and abort the indexing run rather than retryin
    `_is_retryable_api_error` now covers both surfaces — but separate naming avoids
    confusion at call sites.
 
-4. **Wire `timeout` into both `voyageai.Client` instances:**
-   - `T3Database.__init__`: `voyageai.Client(api_key=..., timeout=read_timeout_seconds)`
-   - `indexer.py:1153`: `voyageai.Client(api_key=..., timeout=read_timeout_seconds)`,
-     reading timeout from config.
+4. **Wire `timeout` into all three `voyageai.Client` instances:**
+   - `T3Database.__init__` (~line 129): `voyageai.Client(api_key=..., timeout=read_timeout_seconds)`
+   - `indexer.py:1153`: `voyageai.Client(api_key=..., timeout=read_timeout_seconds)`
+   - `doc_indexer._embed_with_fallback:115`: `voyageai.Client(api_key=..., timeout=read_timeout_seconds)`
 
 5. **Wrap Voyage AI call sites with `_voyage_with_retry`:**
    - `T3Database._cce_embed()`: wrap `self._voyage_client.contextualized_embed(...)`
-   - `indexer.py`: wrap `voyage_client.embed(...)` at the code-file batch embed call site.
+   - `indexer.py`: wrap `voyage_client.embed(...)` at the batch embed call site
+   - `doc_indexer._embed_with_fallback`: wrap the `client.contextualized_embed(...)` call
+     *inside* the existing `try` block so timeout errors retry rather than fall back silently
 
 6. **Pass `Settings` to `CloudClient`**:
    `Settings(chroma_query_request_timeout_seconds=read_timeout_seconds)`.
@@ -189,7 +198,10 @@ propagate as unhandled exceptions and abort the indexing run rather than retryin
 - [ ] ChromaDB Cloud queries respect `chroma_query_request_timeout_seconds` (default: 120s).
 - [ ] `_is_retryable_api_error` returns True for `voyageai.error.Timeout`, `APIConnectionError`,
       `ServiceUnavailableError`, `RateLimitError`, `TryAgain`; False for auth/invalid errors.
-- [ ] `_cce_embed()` and `indexer.py` code-embed call sites are wrapped with retry helper.
+- [ ] All three `voyageai.Client` instances are constructed with `timeout=read_timeout_seconds`.
+- [ ] `_cce_embed()`, `indexer.py` batch embed, and `doc_indexer._embed_with_fallback` CCE call are wrapped with `_voyage_with_retry`.
+- [ ] Timeout in `_embed_with_fallback` retries rather than silently falling back to `voyage-4`.
 - [ ] Unit tests cover retryable/non-retryable Voyage AI error classification.
-- [ ] Integration test: mock Voyage AI timeout → verify retry fires → fails cleanly after max attempts.
-- [ ] Timeout is configurable via `read_timeout_seconds` in `~/.config/nexus/config.yml`.
+- [ ] Integration test: mock Voyage AI timeout → retry fires → fails cleanly after max attempts.
+- [ ] Test asserts `voyageai.Client` is instantiated with the configured `timeout` value.
+- [ ] Timeout configurable via `read_timeout_seconds` in `~/.config/nexus/config.yml`.
