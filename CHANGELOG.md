@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-03-03
+
+### Added
+- **File lock on `index_repository`** — per-repo `fcntl.flock` prevents concurrent
+  indexing of the same repository. Supports `--on-locked skip` (return immediately,
+  default) and `--on-locked wait` (block until lock released).
+- **`nx hooks install / uninstall / status`** — installs `post-commit`, `post-merge`,
+  and `post-rewrite` git hooks that automatically trigger `nx index repo` on each
+  commit/merge. Hooks use a sentinel-bounded stanza so they compose safely with
+  pre-existing hook scripts.
+- **Hooks reminder in `nx index repo`** — on first successful index, if no hooks are
+  installed the CLI prints a one-time suggestion to run `nx hooks install`.
+- **`nx doctor` hooks check** — reports hook installation status and checks the index
+  log for recent errors.
+
+### Removed
+- **`nx serve` / Flask / Waitress** — the polling server and all associated code
+  (`server.py`, `server_main.py`, `polling.py`, `commands/serve.py`) have been
+  deleted. Git hooks replace the auto-indexing use-case. Dependencies `flask>=3.0`
+  and `waitress>=3.0` removed from `pyproject.toml`.
+
+### Docs
+- `cli-reference.md`: `nx serve` section replaced with `nx hooks` section.
+- `repo-indexing.md`: HEAD polling explanation replaced with git hooks explanation.
+- `architecture.md`: Server module row replaced with Hooks module row.
+- `configuration.md`: `server.port` / `server.headPollInterval` rows removed.
+- `contributing.md`: `nx hooks install` added to development setup steps.
+
 ## [1.3.0] - 2026-03-03
 
 ### Added

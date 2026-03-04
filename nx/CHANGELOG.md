@@ -4,6 +4,12 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-03-03
+
+### Changed
+- Plugin version aligned with Nexus CLI 1.4.0. No plugin-level functional changes
+  this release; all changes (file lock, git hooks, `nx serve` removal) are in the CLI.
+
 ## [1.3.0] - 2026-03-03
 
 ### Changed
