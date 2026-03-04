@@ -136,11 +136,11 @@ def test_config_list_shows_credential_names(runner: CliRunner, fake_home: Path) 
 
 
 def test_config_list_shows_non_secret_settings(runner: CliRunner, fake_home: Path) -> None:
-    """nx config list shows server and other non-secret settings."""
+    """nx config list shows indexing and other non-secret settings."""
     result = runner.invoke(main, ["config", "list"])
     assert result.exit_code == 0, result.output
-    # Server port should be visible
-    assert "port" in result.output or "server" in result.output.lower()
+    # Indexing section should be visible
+    assert "indexing" in result.output.lower()
 
 
 # ── nx config init ────────────────────────────────────────────────────────────

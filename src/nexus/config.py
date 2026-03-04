@@ -30,11 +30,6 @@ CREDENTIALS: dict[str, str] = {
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 _DEFAULTS: dict[str, Any] = {
-    "server": {
-        "port": 7890,
-        "headPollInterval": 10,
-        "ignorePatterns": [],
-    },
     "embeddings": {
         "rerankerModel": "rerank-2.5",
     },
@@ -55,8 +50,6 @@ _DEFAULTS: dict[str, Any] = {
 
 # Env var → (section, key, type) mapping
 _ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
-    "NX_SERVER_PORT": ("server", "port", int),
-    "NX_SERVER_HEAD_POLL_INTERVAL": ("server", "headPollInterval", int),
     "NX_EMBEDDINGS_RERANKER_MODEL": ("embeddings", "rerankerModel", str),
     "NX_CLIENT_HOST": ("client", "host", str),
 }
@@ -90,11 +83,6 @@ def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-
-def default_port() -> int:
-    """Return the default server port from built-in defaults."""
-    return _DEFAULTS["server"]["port"]
-
 
 def _global_config_path() -> Path:
     return Path.home() / ".config" / "nexus" / "config.yml"

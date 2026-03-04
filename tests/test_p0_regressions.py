@@ -6,16 +6,13 @@ with `uv run pytest tests/test_p0_regressions.py -x -q`.
 """
 from __future__ import annotations
 
-import signal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-from click.testing import CliRunner
 
-from nexus.cli import main
 from nexus.db.t1 import T1Database
 from nexus.db.t3 import T3Database
 from nexus.md_chunker import SemanticMarkdownChunker
@@ -153,42 +150,7 @@ def test_registry_recovers_from_corrupt_json(tmp_path: Path) -> None:
     )
 
 
-# ── Test 5: stop_cmd returns non-zero when server still alive after timeout ────
-
-def test_serve_stop_returns_nonzero_when_process_never_dies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """nx serve stop must exit with a non-zero code if the process refuses to die.
-
-    Regression guard: an early implementation always exited 0 regardless of
-    whether the server process had actually terminated, masking stuck-server
-    failures from callers and CI scripts.
-    """
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    pid_path = tmp_path / ".config" / "nexus" / "server.pid"
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-    pid_path.write_text("12345")
-
-    runner = CliRunner()
-
-    with patch("nexus.commands.serve.os.kill") as mock_kill:
-        # kill(pid, 0) must succeed (process appears alive for signal delivery)
-        # kill(pid, SIGTERM) must also succeed.
-        mock_kill.return_value = None
-
-        with patch("nexus.commands.serve._process_running", return_value=True):
-            with patch("nexus.commands.serve.time.sleep"):  # skip real sleeping
-                result = runner.invoke(main, ["serve", "stop"])
-
-    assert result.exit_code != 0, (
-        "nx serve stop must return a non-zero exit code when the server process "
-        "is still running after the grace period.  "
-        f"Got exit_code={result.exit_code}, output={result.output!r}"
-    )
-
-
-# ── Test 6: SemanticMarkdownChunker sets chunk_start_char and chunk_end_char ──
+# ── Test 5: SemanticMarkdownChunker sets chunk_start_char and chunk_end_char ──
 
 def test_semantic_chunker_sets_char_offsets() -> None:
     """Every chunk produced by SemanticMarkdownChunker must carry char offset metadata.
