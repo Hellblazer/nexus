@@ -8,6 +8,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.5.2] - 2026-03-05
 
+### Added
+- **Voyage AI read timeout** (RDR-020) — all `voyageai.Client` construction sites now
+  receive `timeout=120.0` (configurable via `voyageai.read_timeout_seconds` in config or
+  `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` env var) and `max_retries=3`. Prevents indefinite
+  hangs on stalled Voyage AI API calls.
+- **Voyage AI transient-error retry** — `_voyage_with_retry` wraps all six Voyage AI
+  call sites (CCE embed, fallback embed, standard embed, code embed, rerank) with
+  exponential backoff (1 → 2 → 4 s, capped at 10 s) retrying `APIConnectionError` and
+  `TryAgain` up to 3 times. Errors handled by the built-in `max_retries` tenacity layer
+  (Timeout, RateLimitError, ServiceUnavailableError) are kept disjoint.
+
 ### Refactor
 - **`nexus.retry` leaf module** — moved `_chroma_with_retry`, `_is_retryable_chroma_error`,
   `_voyage_with_retry`, and `_is_retryable_voyage_error` from `db/t3.py` into a new
