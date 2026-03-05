@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-03-05
+
+### Refactor
+- **`nexus.retry` leaf module** — moved `_chroma_with_retry`, `_is_retryable_chroma_error`,
+  `_voyage_with_retry`, and `_is_retryable_voyage_error` from `db/t3.py` into a new
+  `retry.py` with no `nexus.*` imports. Eliminates a local-import workaround in
+  `scoring.py` that was required to avoid a circular-import test-isolation bug.
+
 ## [1.5.1] - 2026-03-04
 
 ### Fixed
