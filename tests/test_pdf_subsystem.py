@@ -71,7 +71,7 @@ def ruled_table_pdf(pdf_fixtures_dir: Path) -> Path:
     return path
 
 
-def _fake_embed(chunks, model, api_key, input_type="document"):
+def _fake_embed(chunks, model, api_key, input_type="document", timeout=120.0):
     """Embedding stub: returns unit vectors without calling Voyage AI."""
     return [[0.1] * 5] * len(chunks), "test-local"
 

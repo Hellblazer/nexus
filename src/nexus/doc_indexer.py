@@ -87,6 +87,7 @@ def _embed_with_fallback(
     model: str,
     api_key: str,
     input_type: str = "document",
+    timeout: float = 120.0,
 ) -> tuple[list[list[float]], str]:
     """Embed chunks using CCE when possible, falling back to voyage-4 on failure.
 
@@ -112,7 +113,7 @@ def _embed_with_fallback(
             limit=_CCE_MAX_TOTAL_CHUNKS,
         )
     import voyageai
-    client = voyageai.Client(api_key=api_key)
+    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=3)
     if model == "voyage-context-3":
         if len(chunks) < 2:
             # CCE requires 2+ chunks; fall back to voyage-4 (the query-time model)
@@ -215,11 +216,12 @@ def _index_document(
     if embed_fn is not None:
         embeddings, actual_model = embed_fn(documents, target_model)
     else:
-        from nexus.config import get_credential
+        from nexus.config import get_credential, load_config
         voyage_key = get_credential("voyage_api_key")
         if not voyage_key:
             raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
+        timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model

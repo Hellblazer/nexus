@@ -166,6 +166,7 @@ class T3Database:
         api_key: str = "",
         voyage_api_key: str = "",
         *,
+        read_timeout_seconds: float = 120.0,
         _client=None,
         _ef_override=None,
     ) -> None:
@@ -178,7 +179,8 @@ class T3Database:
         self._sems_lock = threading.Lock()
         self._quota_validator = QuotaValidator()
         self._voyage_client: voyageai.Client | None = (
-            voyageai.Client(api_key=voyage_api_key) if voyage_api_key else None
+            voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=3)
+            if voyage_api_key else None
         )
         if _client is not None:
             # Test injection: single client serves all store types.

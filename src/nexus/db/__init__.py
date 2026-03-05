@@ -24,11 +24,15 @@ def make_t3(*, _client=None, _ef_override=None) -> T3Database:
     * ``_ef_override`` — override the embedding function (e.g.
       ``DefaultEmbeddingFunction()``) to avoid Voyage AI API calls.
     """
+    from nexus.config import load_config
+    cfg = load_config()
+    read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)
     return T3Database(
         tenant=get_credential("chroma_tenant"),
         database=get_credential("chroma_database"),
         api_key=get_credential("chroma_api_key"),
         voyage_api_key=get_credential("voyage_api_key"),
+        read_timeout_seconds=read_timeout_seconds,
         _client=_client,
         _ef_override=_ef_override,
     )

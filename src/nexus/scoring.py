@@ -110,8 +110,13 @@ def _voyage_client():
     with _voyage_lock:
         if _voyage_instance is None:
             import voyageai
-            from nexus.config import get_credential
-            _voyage_instance = voyageai.Client(api_key=get_credential("voyage_api_key"))
+            from nexus.config import get_credential, load_config
+            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+            _voyage_instance = voyageai.Client(
+                api_key=get_credential("voyage_api_key"),
+                timeout=timeout,
+                max_retries=3,
+            )
     return _voyage_instance
 
 

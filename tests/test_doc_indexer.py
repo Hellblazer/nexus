@@ -218,7 +218,7 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
     mock_t3.get_or_create_collection.return_value = mock_col
     mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert
 
-    def fake_embed(chunks, model, api_key, input_type="document"):
+    def fake_embed(chunks, model, api_key, input_type="document", timeout=120.0):
         return [[0.1] * 5] * len(chunks), "test-local"
 
     with patch("nexus.doc_indexer._embed_with_fallback", side_effect=fake_embed):

@@ -4,6 +4,7 @@ Covers:
   - _is_retryable_voyage_error oracle (nexus-k8dv)
   - _voyage_with_retry wrapper (nexus-k8dv)
   - _reset_voyage_client singleton reset (nexus-b1m0)
+  - voyageai.Client timeout + max_retries wired at all 4 sites (nexus-oh22)
 """
 
 from unittest.mock import MagicMock, patch
@@ -89,6 +90,52 @@ def test_voyage_with_retry_try_again_retries() -> None:
     result = _voyage_with_retry(fn)
     assert result == "result"
     assert fn.call_count == 2
+
+
+# ── _reset_voyage_client singleton reset ──────────────────────────────────────
+
+# ── nexus-oh22: voyageai.Client timeout + max_retries at all 4 sites ──────────
+
+def test_t3_database_voyage_client_has_timeout() -> None:
+    """T3Database.__init__ passes timeout=read_timeout_seconds and max_retries=3."""
+    from nexus.db.t3 import T3Database
+
+    with patch("nexus.db.t3.voyageai.Client") as mock_ctor:
+        mock_ctor.return_value = MagicMock()
+        T3Database(voyage_api_key="test-key", read_timeout_seconds=60.0, _client=MagicMock())
+        mock_ctor.assert_called_once_with(
+            api_key="test-key",
+            timeout=60.0,
+            max_retries=3,
+        )
+
+
+def test_embed_with_fallback_voyage_client_has_timeout() -> None:
+    """_embed_with_fallback passes timeout and max_retries=3 to voyageai.Client."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+    mock_client.contextualized_embed.return_value = MagicMock(
+        embeddings=[[0.1] * 1024, [0.2] * 1024]
+    )
+    with patch("voyageai.Client", return_value=mock_client) as mock_ctor:
+        _embed_with_fallback(["chunk one", "chunk two"], "voyage-context-3", "test-key", timeout=75.0)
+        mock_ctor.assert_called_once_with(api_key="test-key", timeout=75.0, max_retries=3)
+
+
+def test_scoring_voyage_client_has_timeout() -> None:
+    """_voyage_client() reads timeout from config and passes it to voyageai.Client."""
+    import nexus.scoring as scoring
+    scoring._reset_voyage_client()
+
+    with patch("voyageai.Client") as mock_ctor, \
+         patch("nexus.config.get_credential", return_value="test-key"), \
+         patch("nexus.config.load_config", return_value={"voyageai": {"read_timeout_seconds": 55}}):
+        mock_ctor.return_value = MagicMock()
+        scoring._voyage_client()
+        mock_ctor.assert_called_once_with(api_key="test-key", timeout=55, max_retries=3)
+
+    scoring._reset_voyage_client()
 
 
 # ── _reset_voyage_client singleton reset ──────────────────────────────────────

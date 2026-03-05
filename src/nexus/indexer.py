@@ -627,6 +627,7 @@ def _index_prose_file(
     now_iso: str,
     score: float,
     force: bool = False,
+    timeout: float = 120.0,
 ) -> int:
     """Index a single prose file into the docs__ collection.
 
@@ -773,7 +774,7 @@ def _index_prose_file(
     texts_to_embed = embed_texts
 
     # Embed via _embed_with_fallback (CCE for voyage-context-3)
-    embeddings, actual_model = _embed_with_fallback(texts_to_embed, target_model, voyage_key)
+    embeddings, actual_model = _embed_with_fallback(texts_to_embed, target_model, voyage_key, timeout=timeout)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
@@ -800,6 +801,7 @@ def _index_pdf_file(
     now_iso: str,
     score: float,
     force: bool = False,
+    timeout: float = 120.0,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -868,7 +870,7 @@ def _index_pdf_file(
         }
         metadatas.append(augmented)
 
-    embeddings, actual_model = _embed_with_fallback(embed_texts_pdf, target_model, voyage_key)
+    embeddings, actual_model = _embed_with_fallback(embed_texts_pdf, target_model, voyage_key, timeout=timeout)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
@@ -1045,6 +1047,7 @@ def _run_index(
     ignore_patterns: list[str] = list(dict.fromkeys(DEFAULT_IGNORE + cfg_patterns))
     indexing_config: dict = cfg.get("indexing", {})
     rdr_paths: list[str] = indexing_config.get("rdr_paths", ["docs/rdr"])
+    read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)
 
     # Collect git metadata once for all chunks
     git_meta = _git_metadata(repo)
@@ -1150,7 +1153,7 @@ def _run_index(
     # Initialize collections and models
     code_model = index_model_for_collection(code_collection)
     docs_model = index_model_for_collection(docs_collection)
-    voyage_client = voyageai.Client(api_key=voyage_key)
+    voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=3)
     _log.debug("creating collections", code=code_collection, docs=docs_collection)
     code_col = db.get_or_create_collection(code_collection)
     docs_col = db.get_or_create_collection(docs_collection)
@@ -1179,6 +1182,7 @@ def _run_index(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
+            timeout=read_timeout_seconds,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
@@ -1192,6 +1196,7 @@ def _run_index(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
+            timeout=read_timeout_seconds,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
