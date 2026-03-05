@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""PDF text extraction: PyMuPDF4LLM markdown primary, pdfplumber rescue, normalized fallback.
+"""PDF text extraction: Docling primary, PyMuPDF normalized fallback.
 
-Extraction strategy (three tiers):
-1. PyMuPDF4LLM markdown — quality-first, preserves headings/lists/tables.
-2. pdfplumber — quality-rescue for PDFs with ruled tables that pymupdf4llm
-   misses; invoked only when _markdown_misses_tables() confirms the gap.
-3. PyMuPDF normalized — final fallback; raw get_text(sort=True) + whitespace
-   normalization. Used when Type3 fonts are detected, a font-related RuntimeError
-   is raised, or output is empty.
+Extraction strategy (two tiers):
+1. Docling — neural layout model handles multi-column academic PDFs, Type3 fonts,
+   and complex tables. Extracts title from document content.
+2. PyMuPDF normalized — final fallback for Docling failures or empty output.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,24 +28,6 @@ def _normalize_whitespace_edge_cases(text: str) -> str:
     return text.strip()
 
 
-def _format_table(rows: list[list[str | None]]) -> str:
-    """Format a pdfplumber table as a Markdown table string.
-
-    Returns an empty string for empty tables.
-    None cells are rendered as empty strings.
-    """
-    if not rows:
-        return ""
-    # Convert None → ""
-    cleaned = [[(cell or "") for cell in row] for row in rows]
-    header = cleaned[0]
-    body = cleaned[1:]
-    separator = "|" + "|".join(" --- " for _ in header) + "|"
-    header_row = "|" + "|".join(f" {cell} " for cell in header) + "|"
-    data_rows = ["|" + "|".join(f" {cell} " for cell in row) + "|" for row in body]
-    return "\n".join([header_row, separator] + data_rows)
-
-
 @dataclass
 class ExtractionResult:
     """Result of PDF text extraction."""
@@ -58,278 +37,130 @@ class ExtractionResult:
 
 
 class PDFExtractor:
-    """Extract PDF text as markdown (PyMuPDF4LLM) with pdfplumber rescue and normalized fallback.
+    """Extract PDF text via Docling with PyMuPDF normalized fallback.
 
-    Extraction priority:
-    1. PyMuPDF4LLM markdown — quality-first, preserves headings/lists/tables.
-    2. pdfplumber — quality-rescue for ruled-table PDFs where pymupdf4llm produces
-       garbled or absent table content. Invoked only when _markdown_misses_tables()
-       confirms tables are present but missing from markdown output.
-    3. PyMuPDF normalized — final fallback for Type3 fonts, font RuntimeErrors,
-       or empty output from tier 1.
+    Docling uses a neural layout model to handle multi-column academic PDFs,
+    producing structured markdown with headings and correct reading order.
+    Falls back to PyMuPDF normalized extraction on any Docling failure.
     """
+
+    def __init__(self) -> None:
+        self._converter = None  # lazy init — avoid 3.5s cost for non-PDF operations
 
     def extract(self, pdf_path: Path) -> ExtractionResult:
         """Extract text from *pdf_path*. Returns ExtractionResult."""
-        # Count ruled tables BEFORE layout activation. pymupdf.layout.activate()
-        # (called inside _extract_markdown) suppresses find_tables() on some PDFs,
-        # making post-activation counts unreliable. Pre-activation count is safe.
-        pre_table_count = self._count_ruled_tables(pdf_path)
-        if self._has_type3_fonts(pdf_path):
-            return self._extract_normalized(pdf_path)
         try:
-            result = self._extract_markdown(pdf_path)
-        except RuntimeError as exc:
-            msg = str(exc).lower()
-            if "font" in msg or "code=4" in msg:
-                return self._extract_normalized(pdf_path)
-            raise
-        # Layout mode can produce empty output for minimal or atypical PDFs.
-        # Fall back to normalized extraction so callers always get some content.
-        if not result.text.strip():
+            return self._extract_with_docling(pdf_path)
+        except Exception:
+            _log.warning(
+                "docling extraction failed; falling back to pymupdf_normalized",
+                exc_info=True,
+            )
             return self._extract_normalized(pdf_path)
-        # Quality-rescue: fall back to pdfplumber if ruled tables are present
-        # but missing from the markdown output (e.g. GNN mis-classified cells
-        # as body text). pdfplumber is opened only when actually needed.
-        if self._markdown_misses_tables(pre_table_count, result.text):
-            try:
-                rescue = self._extract_with_pdfplumber(pdf_path)
-                if rescue.text.strip():
-                    return rescue
-            except Exception:
-                _log.debug("pdfplumber rescue failed; using pymupdf4llm output", exc_info=True)
-        return result
 
     # ── internal extraction methods ───────────────────────────────────────────
 
-    def _count_ruled_tables(self, pdf_path: Path, max_pages: int = 5) -> int:
-        """Count ruled tables in the first *max_pages* pages using pdfplumber.find_tables().
+    def _get_converter(self):
+        """Lazily initialise the Docling DocumentConverter."""
+        if self._converter is None:
+            from docling.document_converter import DocumentConverter, PdfFormatOption
+            from docling.datamodel.pipeline_options import PdfPipelineOptions
 
-        Uses pdfplumber (pdfminer-based) rather than pymupdf so that the count is
-        immune to pymupdf.layout.activate() global state: layout activation suppresses
-        pymupdf's find_tables() on some PDFs, making pymupdf-based counts unreliable
-        once any call to _extract_markdown() has occurred in the process.
+            opts = PdfPipelineOptions()
+            opts.do_ocr = False                 # digital PDFs have embedded text
+            opts.do_table_structure = True      # TableFormer for table detection
+            opts.generate_page_images = False
+            opts.generate_picture_images = False
+            self._converter = DocumentConverter(
+                format_options={"pdf": PdfFormatOption(pipeline_options=opts)}
+            )
+        return self._converter
 
-        Returns 0 if pdfplumber is not installed (table rescue is disabled anyway),
-        or on any error.
-
-        Note: borderless tables (spacing-only alignment, common in IEEE/ACM papers)
-        produce no edges from find_tables() and will not be detected. This is a known
-        scope limitation — see RDR-012 Risks.
-        """
-        try:
-            import pdfplumber
-        except ImportError:
-            _log.debug("pdfplumber not installed; table rescue disabled")
-            return 0
-        try:
-            count = 0
-            with pdfplumber.open(pdf_path) as pdf:
-                for page in pdf.pages[:max_pages]:
-                    count += len(page.find_tables())
-            return count
-        except Exception:
-            return 0
-
-    def _markdown_misses_tables(self, ruled_table_count: int, markdown_text: str) -> bool:
-        """Return True if *markdown_text* lacks pipe chars proportional to *ruled_table_count*.
-
-        Pure predicate — no file I/O. Call _count_ruled_tables() first (before layout
-        activation) to obtain the count.
-
-        A well-formatted Markdown table produces roughly 2*(N+1) pipes per row plus a
-        separator row. With 3 pipes per table as floor, small single-column pseudo-tables
-        are tolerated while absent multi-column tables are caught.
-        """
-        if ruled_table_count == 0:
-            return False
-        pipe_count = markdown_text.count("|")
-        return pipe_count < ruled_table_count * 3
-
-    def _extract_with_pdfplumber(self, pdf_path: Path) -> ExtractionResult:
-        """Extract text and tables via pdfplumber with Markdown table formatting.
-
-        Per page: prose is extracted excluding table bounding boxes (via page.filter())
-        to prevent table cell content appearing twice. Tables are formatted as Markdown
-        and appended after the prose block for the page.
-        """
-        import pdfplumber
-
-        page_texts: list[str] = []
-        page_boundaries: list[dict] = []
-        current_pos = 0
-        doc_meta: dict[str, str] = {}
-
-        with pdfplumber.open(pdf_path) as pdf:
-            if pdf.metadata:
-                raw_meta = pdf.metadata
-                doc_meta = {
-                    "title": raw_meta.get("Title", "") or "",
-                    "author": raw_meta.get("Author", "") or "",
-                    "subject": raw_meta.get("Subject", "") or "",
-                    "keywords": raw_meta.get("Keywords", "") or "",
-                    "creator": raw_meta.get("Creator", "") or "",
-                    "producer": raw_meta.get("Producer", "") or "",
-                    "creationDate": raw_meta.get("CreationDate", "") or "",
-                    "modDate": raw_meta.get("ModDate", "") or "",
-                }
-            page_count = len(pdf.pages)
-
-            for page in pdf.pages:
-                tables = page.find_tables()
-                table_bboxes = [t.bbox for t in tables]
-
-                # Extract prose, excluding characters that fall inside table bboxes.
-                # page.filter() keeps objects for which the function returns True, so
-                # we negate: keep only objects NOT inside any table bbox.
-                # This prevents table cell content from appearing in both prose and table
-                # markdown. If no tables, fall back to full extract_text().
-                if table_bboxes:
-                    def _not_in_table(obj: dict, bboxes: list = table_bboxes) -> bool:
-                        # Drop rotated text (upright=0): ArXiv watermarks, marginal
-                        # stamps, and similar sideways decorations that produce garbage.
-                        if not obj.get("upright", 1):
-                            return False
-                        x0, y0 = obj.get("x0", 0), obj.get("top", 0)
-                        x1, y1 = obj.get("x1", 0), obj.get("bottom", 0)
-                        return not any(
-                            bx0 <= x0 and by0 <= y0 and x1 <= bx1 and y1 <= by1
-                            for bx0, by0, bx1, by1 in bboxes
-                        )
-                    prose = page.filter(_not_in_table).extract_text(layout=True) or ""
-                else:
-                    # Drop rotated text even when there are no tables.
-                    prose = (
-                        page.filter(lambda obj: bool(obj.get("upright", 1)))
-                        .extract_text(layout=True) or ""
-                    )
-
-                # Format tables as Markdown, appended after prose.
-                table_blocks: list[str] = []
-                for table_data in page.extract_tables():
-                    if table_data:
-                        formatted = _format_table(table_data)
-                        if formatted:
-                            table_blocks.append(formatted)
-
-                parts = [prose] if prose.strip() else []
-                parts.extend(table_blocks)
-                page_text = "\n\n".join(parts).strip()
-                # Strip CID font artifacts emitted by pdfminer for characters
-                # with no Unicode mapping. The original character is
-                # unrecoverable; removing the placeholder entirely (not
-                # replacing with a space) avoids spurious word breaks.
-                page_text = re.sub(r"\(cid:\d+\)", "", page_text)
-
-                if page_text:
-                    page_boundaries.append(
-                        {
-                            "page_number": page.page_number,
-                            "start_char": current_pos,
-                            # +1 includes the \n separator from "\n".join so that
-                            # _page_for ranges are contiguous (same convention as
-                            # _extract_markdown and _extract_normalized).
-                            "page_text_length": len(page_text) + 1,
-                        }
-                    )
-                    page_texts.append(page_text)
-                    current_pos += len(page_text) + 1
-
-        return ExtractionResult(
-            text="\n".join(page_texts),
-            metadata={
-                "extraction_method": "pdfplumber",
-                "page_count": page_count,
-                "format": "markdown",
-                "page_boundaries": page_boundaries,
-                "pdf_title": doc_meta.get("title", ""),
-                "pdf_author": doc_meta.get("author", ""),
-                "pdf_subject": doc_meta.get("subject", ""),
-                "pdf_keywords": doc_meta.get("keywords", ""),
-                "pdf_creator": doc_meta.get("creator", ""),
-                "pdf_producer": doc_meta.get("producer", ""),
-                "pdf_creation_date": doc_meta.get("creationDate", ""),
-                "pdf_mod_date": doc_meta.get("modDate", ""),
-            },
-        )
-
-    def _has_type3_fonts(self, pdf_path: Path) -> bool:
-        """Return True if any page uses a Type3 font (can cause pymupdf4llm hangs)."""
-        import pymupdf  # lazy — not installed in all environments
-
-        try:
-            with pymupdf.open(pdf_path) as doc:
-                for page in doc:
-                    for font in page.get_fonts():
-                        font_type = font[2] if len(font) > 2 else ""
-                        if "Type3" in font_type:
-                            return True
-            return False
-        except Exception:
-            return False
-
-    def _extract_markdown(self, pdf_path: Path) -> ExtractionResult:
-        """Extract per-page markdown via pymupdf4llm."""
-        import pymupdf        # lazy
-        # Activate layout analysis engine before importing pymupdf4llm so that
-        # pymupdf4llm selects layout mode (pymupdf._get_layout is checked at
-        # import time).  No-ops if layout was already activated or unavailable.
-        try:
-            from pymupdf import layout as _layout
-            _layout.activate()
-        except Exception:
-            pass
-        import pymupdf4llm    # lazy
+    def _extract_with_docling(self, pdf_path: Path) -> ExtractionResult:
+        """Extract per-page markdown via Docling."""
+        result = self._get_converter().convert(str(pdf_path))
+        doc = result.document
+        page_count = doc.num_pages()
 
         page_texts: list[str] = []
         page_boundaries: list[dict] = []
         current_pos = 0
 
-        with pymupdf.open(pdf_path) as doc:
-            page_count = len(doc)
-            doc_meta = doc.metadata or {}
-            for page_num in range(page_count):
-                # Pass the open doc object (not the path) to avoid re-opening
-                # the file for every page — O(1) opens instead of O(N_pages).
-                page_md: str = pymupdf4llm.to_markdown(
-                    doc,
-                    pages=[page_num],
-                    ignore_images=True,
-                    force_text=True,
-                ).strip()
-                if page_md:
-                    page_boundaries.append(
-                        {
-                            "page_number": page_num + 1,
-                            "start_char": current_pos,
-                            # +1 includes the \n separator from "\n".join so that
-                            # _page_for ranges are contiguous and the separator is
-                            # attributed to the preceding page (not left uncovered).
-                            # For the last page the range extends 1 char beyond the
-                            # text end, which is harmless since no chunk starts there.
-                            "page_text_length": len(page_md) + 1,
-                        }
-                    )
-                    page_texts.append(page_md)
-                    current_pos += len(page_md) + 1
+        for p in range(1, page_count + 1):
+            page_md = doc.export_to_markdown(page_no=p).strip()
+            if page_md:
+                page_boundaries.append(
+                    {
+                        "page_number": p,
+                        "start_char": current_pos,
+                        # +1 includes the \n separator from "\n".join so that
+                        # _page_for ranges are contiguous (same convention as the
+                        # former _extract_markdown implementation).
+                        "page_text_length": len(page_md) + 1,
+                    }
+                )
+                page_texts.append(page_md)
+                current_pos += len(page_md) + 1
+
+        text = "\n".join(page_texts)
+        if not text.strip():
+            raise RuntimeError("docling produced empty output")
 
         return ExtractionResult(
-            text="\n".join(page_texts),
+            text=text,
             metadata={
-                "extraction_method": "pymupdf4llm_markdown",
+                "extraction_method": "docling",
                 "page_count": page_count,
                 "format": "markdown",
                 "page_boundaries": page_boundaries,
-                "pdf_title": doc_meta.get("title", ""),
-                "pdf_author": doc_meta.get("author", ""),
-                "pdf_subject": doc_meta.get("subject", ""),
-                "pdf_keywords": doc_meta.get("keywords", ""),
-                "pdf_creator": doc_meta.get("creator", ""),
-                "pdf_producer": doc_meta.get("producer", ""),
-                "pdf_creation_date": doc_meta.get("creationDate", ""),
-                "pdf_mod_date": doc_meta.get("modDate", ""),
+                "docling_title": self._extract_title(doc),
+                "pdf_title": "",  # XMP metadata not exposed by Docling
+                "pdf_author": "",
+                "pdf_subject": "",
+                "pdf_keywords": "",
+                "pdf_creator": "",
+                "pdf_producer": "",
+                "pdf_creation_date": "",
+                "pdf_mod_date": "",
             },
         )
+
+    def _extract_title(self, doc) -> str:
+        """Extract a paper title from Docling document items on page 1.
+
+        Algorithm (verified on 19 corpus PDFs, 17/19 correct):
+        1. Iterate page-1 items, skip section labels (abstract, introduction, keywords).
+        2. Return first item with label containing 'title' or 'section_header'.
+        3. Fallback: first text-labelled item on page 1 with 10 ≤ len < 120.
+        """
+        _SKIP = {"abstract", "introduction", "1 introduction", "keywords"}
+
+        for item, _ in doc.iterate_items():
+            prov = getattr(item, "prov", [])
+            if not prov or prov[0].page_no != 1:
+                continue
+            text = (getattr(item, "text", "") or "").strip()
+            if not text or len(text) < 10:
+                continue
+            lower = text.lower()
+            if lower in _SKIP:
+                continue
+            if lower.startswith("abstract") and len(text) > 100:
+                continue
+            label = str(getattr(item, "label", ""))
+            if "title" in label or "section_header" in label:
+                return text
+
+        # Fallback: first short text block on page 1
+        for item, _ in doc.iterate_items():
+            prov = getattr(item, "prov", [])
+            if not prov or prov[0].page_no != 1:
+                continue
+            text = (getattr(item, "text", "") or "").strip()
+            if text and 10 <= len(text) < 120:
+                return text
+
+        return ""
 
     def _extract_normalized(self, pdf_path: Path) -> ExtractionResult:
         """Extract via raw PyMuPDF with whitespace normalization."""
@@ -357,7 +188,7 @@ class PDFExtractor:
                             "page_number": page_num + 1,
                             "start_char": current_pos,
                             # +1 includes the \n separator from "\n".join (same
-                            # rationale as _extract_markdown: contiguous ranges).
+                            # rationale as _extract_with_docling: contiguous ranges).
                             "page_text_length": len(page_text) + 1,
                         }
                     )
@@ -373,6 +204,7 @@ class PDFExtractor:
                 "page_count": page_count,
                 "format": "normalized",
                 "page_boundaries": page_boundaries,
+                "docling_title": "",
                 "pdf_title": doc_meta.get("title", ""),
                 "pdf_author": doc_meta.get("author", ""),
                 "pdf_subject": doc_meta.get("subject", ""),

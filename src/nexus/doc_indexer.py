@@ -263,7 +263,11 @@ def _pdf_chunks(
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
             "source_path": str(pdf_path),
-            "source_title": result.metadata.get("pdf_title", ""),
+            "source_title": (
+                result.metadata.get("docling_title", "")
+                or result.metadata.get("pdf_title", "")
+                or pdf_path.stem.replace("_", " ").replace("-", " ")
+            ),
             "source_author": result.metadata.get("pdf_author", ""),
             "source_date": result.metadata.get("pdf_creation_date", ""),
             "corpus": corpus,

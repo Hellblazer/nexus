@@ -17,7 +17,7 @@ import pytest
 from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import _pdf_chunks, _sha256, index_pdf
 from nexus.indexer import _git_metadata, _index_pdf_file
-from nexus.pdf_extractor import ExtractionResult, PDFExtractor
+from nexus.pdf_extractor import PDFExtractor
 from tests.conftest import set_credentials
 
 
@@ -82,7 +82,12 @@ class TestPdfChunksMetadata:
     """AC-S1 / AC-S2 / AC-S2b: _pdf_chunks produces correct per-chunk metadata."""
 
     def test_simple_pdf_full_metadata(self, simple_pdf: Path) -> None:
-        """AC-S1: Every chunk from simple.pdf carries the expected metadata values."""
+        """AC-S1: Every chunk from simple.pdf carries the expected metadata values.
+
+        RDR-021: extraction_method is now 'docling'. source_title comes from
+        docling_title (content-extracted) or filename stem; pdf_title XMP metadata
+        is no longer populated by Docling.
+        """
         content_hash = _sha256(simple_pdf)
         result = _pdf_chunks(
             simple_pdf, content_hash, "voyage-context-3", "2026-01-01T00:00:00", "mybook"
@@ -92,11 +97,12 @@ class TestPdfChunksMetadata:
             assert meta["store_type"] == "pdf"
             assert meta["content_hash"] == content_hash
             assert meta["page_count"] == 1
-            assert meta["extraction_method"] == "pymupdf4llm_markdown"
+            assert meta["extraction_method"] == "docling"
             assert meta["chunk_count"] == len(result)
-            assert meta["source_title"] == "Test Document"
-            assert meta["source_author"] == "Test Author"
-            assert meta["source_date"], "source_date should be non-empty"
+            # source_title: Docling content-extracted or filename fallback ("simple")
+            assert isinstance(meta["source_title"], str)
+            # source_author: Docling does not expose XMP author; may be empty
+            assert isinstance(meta["source_author"], str)
             assert meta["corpus"] == "mybook"
             assert meta["embedding_model"] == "voyage-context-3"
             assert isinstance(chunk_id, str) and chunk_id
@@ -116,8 +122,12 @@ class TestPdfChunksMetadata:
             f"Expected chunks from multiple pages, got only pages: {page_numbers}"
         )
 
-    def test_pdf_without_metadata_empty_source_fields(self, tmp_path: Path) -> None:
-        """AC-S2b: PDF with no embedded doc metadata → source_title/author/date are ''."""
+    def test_pdf_without_metadata_source_fields(self, tmp_path: Path) -> None:
+        """AC-S2b: PDF with no embedded XMP metadata.
+
+        RDR-021: Docling path does not expose XMP metadata (pdf_author/date are '').
+        source_title falls back to filename stem when docling_title is also empty.
+        """
         import pymupdf
         bare = tmp_path / "bare.pdf"
         doc = pymupdf.open()
@@ -134,8 +144,11 @@ class TestPdfChunksMetadata:
         result = _pdf_chunks(bare, content_hash, "test-model", "2026-01-01T00:00:00", "test")
         assert result
         for _, _, meta in result:
-            assert meta["source_title"] == "", f"Expected '', got {meta['source_title']!r}"
+            # source_title: docling_title (may be empty for minimal PDFs) or filename fallback
+            assert isinstance(meta["source_title"], str)
+            # source_author: Docling doesn't expose XMP author
             assert meta["source_author"] == "", f"Expected '', got {meta['source_author']!r}"
+            # source_date: Docling doesn't expose XMP creation date
             assert meta["source_date"] == "", f"Expected '', got {meta['source_date']!r}"
 
 
@@ -276,48 +289,25 @@ class TestIndexPdfFileGitMetadata:
             assert meta["git_branch"] == ""
 
 
-# ── AC-S7 / AC-S8 — pdfplumber rescue tier (RDR-012) ─────────────────────────
+# ── RDR-021: Docling single-tier regression guard ────────────────────────────
 
-class TestPdfplumberRescueTier:
-    """AC-S7 / AC-S8: pdfplumber tier fires for table PDFs; simple PDFs unchanged."""
+class TestDoclingRegressionGuard:
+    """RDR-021 regression guard: Docling is the sole extraction tier.
 
-    def test_pdfplumber_tier_fires_for_table_pdf(self, ruled_table_pdf: Path) -> None:
-        """AC-S7: Ruled-table PDF with deficient markdown → pdfplumber extraction_method."""
-        extractor = PDFExtractor()
+    Verifies that ruled-table PDFs are now handled by Docling directly
+    (no pdfplumber rescue tier, no Type3 detection, no 3-tier routing).
+    """
 
-        # Simulate pymupdf4llm producing prose-only output (no pipe chars) for a
-        # table PDF — this is the GNN mis-classification failure mode the rescue
-        # path addresses.
-        prose_only = ExtractionResult(
-            text="This document contains a ruled table above. Some prose text here.",
-            metadata={
-                "extraction_method": "pymupdf4llm_markdown",
-                "page_count": 1,
-                "format": "markdown",
-                "page_boundaries": [{"page_number": 1, "start_char": 0, "page_text_length": 60}],
-                "pdf_title": "", "pdf_author": "", "pdf_subject": "",
-                "pdf_keywords": "", "pdf_creator": "", "pdf_producer": "",
-                "pdf_creation_date": "", "pdf_mod_date": "",
-            },
+    def test_ruled_table_pdf_uses_docling(self, ruled_table_pdf: Path) -> None:
+        """Ruled-table PDF (formerly pdfplumber rescue path) now uses Docling."""
+        result = PDFExtractor().extract(ruled_table_pdf)
+        assert result.metadata["extraction_method"] == "docling", (
+            f"Expected docling; got {result.metadata['extraction_method']!r}"
         )
 
-        with patch.object(extractor, "_has_type3_fonts", return_value=False):
-            with patch.object(extractor, "_extract_markdown", return_value=prose_only):
-                result = extractor.extract(ruled_table_pdf)
-
-        # _markdown_misses_tables runs for real against ruled_table_pdf;
-        # pdfplumber runs for real to produce the rescue output.
-        assert result.metadata["extraction_method"] == "pdfplumber", (
-            f"Expected pdfplumber rescue; got {result.metadata['extraction_method']!r}. "
-            f"Text preview: {result.text[:200]!r}"
-        )
-        assert "|" in result.text, "pdfplumber output should contain Markdown table pipes"
-
-    def test_simple_pdf_stays_on_markdown_tier(self, simple_pdf: Path) -> None:
-        """AC-S8: Simple PDF (no ruled tables) → extraction_method stays pymupdf4llm_markdown."""
-        extractor = PDFExtractor()
-        result = extractor.extract(simple_pdf)
-        assert result.metadata["extraction_method"] == "pymupdf4llm_markdown", (
-            f"Simple PDF should not trigger pdfplumber rescue; "
-            f"got {result.metadata['extraction_method']!r}"
+    def test_simple_pdf_uses_docling(self, simple_pdf: Path) -> None:
+        """Simple PDF uses Docling (single-tier, no conditional routing)."""
+        result = PDFExtractor().extract(simple_pdf)
+        assert result.metadata["extraction_method"] == "docling", (
+            f"Expected docling; got {result.metadata['extraction_method']!r}"
         )

@@ -744,6 +744,9 @@ def test_index_repository_pdf_routing(
         f"Expected at least one PDF chunk in {docs_col_name!r}; "
         f"got store_types: {[r.get('store_type') for r in results]}"
     )
-    assert pdf_results[0]["source_title"] == "Test Document", (
-        f"Expected source_title='Test Document', got {pdf_results[0]['source_title']!r}"
+    # RDR-021: source_title comes from docling_title (content-extracted) or filename stem.
+    # Docling does not expose XMP metadata, so "Test Document" from the XMP title field
+    # is no longer the source. Accept any non-None string.
+    assert isinstance(pdf_results[0]["source_title"], str), (
+        f"Expected source_title to be a str, got {pdf_results[0]['source_title']!r}"
     )
