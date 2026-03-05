@@ -6,6 +6,7 @@ import threading
 
 import structlog
 
+from nexus.retry import _voyage_with_retry
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
@@ -110,9 +111,21 @@ def _voyage_client():
     with _voyage_lock:
         if _voyage_instance is None:
             import voyageai
-            from nexus.config import get_credential
-            _voyage_instance = voyageai.Client(api_key=get_credential("voyage_api_key"))
+            from nexus.config import get_credential, load_config
+            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+            _voyage_instance = voyageai.Client(
+                api_key=get_credential("voyage_api_key"),
+                timeout=timeout,
+                max_retries=3,
+            )
     return _voyage_instance
+
+
+def _reset_voyage_client() -> None:
+    """Reset the cached Voyage AI client singleton (for test isolation only)."""
+    global _voyage_instance
+    with _voyage_lock:
+        _voyage_instance = None
 
 
 def rerank_results(
@@ -135,7 +148,8 @@ def rerank_results(
     documents = [r.content for r in results]
     client = _voyage_client()
     try:
-        rerank_response = client.rerank(
+        rerank_response = _voyage_with_retry(
+            client.rerank,
             query=query,
             documents=documents,
             model=model,

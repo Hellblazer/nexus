@@ -18,7 +18,7 @@ _log = structlog.get_logger(__name__)
 
 from nexus.corpus import index_model_for_collection
 from nexus.db import make_t3
-from nexus.db.t3 import _chroma_with_retry
+from nexus.retry import _chroma_with_retry, _voyage_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor
@@ -87,6 +87,7 @@ def _embed_with_fallback(
     model: str,
     api_key: str,
     input_type: str = "document",
+    timeout: float = 120.0,
 ) -> tuple[list[list[float]], str]:
     """Embed chunks using CCE when possible, falling back to voyage-4 on failure.
 
@@ -112,7 +113,7 @@ def _embed_with_fallback(
             limit=_CCE_MAX_TOTAL_CHUNKS,
         )
     import voyageai
-    client = voyageai.Client(api_key=api_key)
+    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=3)
     if model == "voyage-context-3":
         if len(chunks) < 2:
             # CCE requires 2+ chunks; fall back to voyage-4 (the query-time model)
@@ -124,8 +125,9 @@ def _embed_with_fallback(
             any_fallback = False
             for batch in batches:
                 try:
-                    result = client.contextualized_embed(
-                        inputs=[batch], model=model, input_type=input_type
+                    result = _voyage_with_retry(
+                        client.contextualized_embed,
+                        inputs=[batch], model=model, input_type=input_type,
                     )
                     all_embeddings.extend(result.results[0].embeddings)
                 except Exception as exc:
@@ -134,7 +136,7 @@ def _embed_with_fallback(
                                  error=str(exc), batch_size=len(batch))
                     for j in range(0, len(batch), _EMBED_BATCH_SIZE):
                         sub = batch[j:j + _EMBED_BATCH_SIZE]
-                        fb = client.embed(texts=sub, model="voyage-4", input_type=input_type)
+                        fb = _voyage_with_retry(client.embed, texts=sub, model="voyage-4", input_type=input_type)
                         all_embeddings.extend(fb.embeddings)
             if all_embeddings:
                 # Report voyage-4 if any batch fell back — forces re-index on next run
@@ -144,7 +146,7 @@ def _embed_with_fallback(
     all_emb: list[list[float]] = []
     for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
         batch = chunks[i:i + _EMBED_BATCH_SIZE]
-        result = client.embed(texts=batch, model=model, input_type=input_type)
+        result = _voyage_with_retry(client.embed, texts=batch, model=model, input_type=input_type)
         all_emb.extend(result.embeddings)
     return all_emb, model
 
@@ -215,11 +217,12 @@ def _index_document(
     if embed_fn is not None:
         embeddings, actual_model = embed_fn(documents, target_model)
     else:
-        from nexus.config import get_credential
+        from nexus.config import get_credential, load_config
         voyage_key = get_credential("voyage_api_key")
         if not voyage_key:
             raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key)
+        timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model

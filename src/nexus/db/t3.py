@@ -5,10 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
-import time
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Literal
 
 import chromadb
 import chromadb.errors
@@ -28,63 +26,12 @@ _log = structlog.get_logger(__name__)
 # nexus_rdr, nexus_knowledge.
 _STORE_TYPES: tuple[str, ...] = ("code", "docs", "rdr", "knowledge")
 
-
-# ── ChromaDB transient-error retry ───────────────────────────────────────────
-
-_RETRYABLE_FRAGMENTS: frozenset[str] = frozenset({
-    "502", "503", "504", "429",
-    "bad gateway", "service unavailable", "gateway time-out", "too many requests",
-})
-_RETRYABLE_HTTP_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
-
-
-def _is_retryable_chroma_error(exc: BaseException) -> bool:
-    """Return True if *exc* represents a transient ChromaDB Cloud error worth retrying.
-
-    Check order:
-    1. Transport-level errors (ConnectError, ReadTimeout, RemoteProtocolError) — always retry.
-    2. Chained httpx.HTTPStatusError — authoritative integer status code check.
-    3. String fallback — plain Exception message body (gateway HTML or chroma JSON).
-    """
-    # 1. Transport-level errors — no HTTP response, but clearly transient.
-    if isinstance(exc, httpx.TransportError):
-        return True
-    # 2. ChromaDB wraps HTTPStatusError as Exception(resp.text); original is __context__.
-    ctx = exc.__context__
-    if isinstance(ctx, httpx.HTTPStatusError):
-        return ctx.response.status_code in _RETRYABLE_HTTP_STATUSES
-    # 3. Fallback: scan the message body for retryable status tokens.
-    msg = str(exc).lower()
-    return any(fragment in msg for fragment in _RETRYABLE_FRAGMENTS)
-
-
-def _chroma_with_retry(
-    fn: Callable[..., Any],
-    *args: Any,
-    max_attempts: int = 5,
-    **kwargs: Any,
-) -> Any:
-    """Call *fn* with exponential backoff on transient ChromaDB Cloud errors.
-
-    Retries up to *max_attempts* times (default 5).  Backoff starts at 2 s,
-    doubles each attempt, capped at 30 s.  Non-retryable errors raise immediately.
-    """
-    delay = 2.0
-    for attempt in range(1, max_attempts + 1):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as exc:
-            if attempt == max_attempts or not _is_retryable_chroma_error(exc):
-                raise
-            _log.warning(
-                "chroma_transient_error_retry",
-                attempt=attempt,
-                delay=delay,
-                error=str(exc)[:120],
-            )
-            time.sleep(delay)
-            delay = min(delay * 2, 30.0)
-
+from nexus.retry import (
+    _chroma_with_retry,
+    _is_retryable_chroma_error,
+    _is_retryable_voyage_error,
+    _voyage_with_retry,
+)
 
 class T3Database:
     """T3 ChromaDB CloudClient permanent knowledge store.
@@ -114,6 +61,7 @@ class T3Database:
         api_key: str = "",
         voyage_api_key: str = "",
         *,
+        read_timeout_seconds: float = 120.0,
         _client=None,
         _ef_override=None,
     ) -> None:
@@ -126,7 +74,8 @@ class T3Database:
         self._sems_lock = threading.Lock()
         self._quota_validator = QuotaValidator()
         self._voyage_client: voyageai.Client | None = (
-            voyageai.Client(api_key=voyage_api_key) if voyage_api_key else None
+            voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=3)
+            if voyage_api_key else None
         )
         if _client is not None:
             # Test injection: single client serves all store types.
@@ -222,7 +171,8 @@ class T3Database:
         the original CCE/voyage-4 mismatch.
         """
         assert self._voyage_client is not None, "_cce_embed called without voyage_api_key"
-        result = self._voyage_client.contextualized_embed(
+        result = _voyage_with_retry(
+            self._voyage_client.contextualized_embed,
             inputs=[[text]],
             model="voyage-context-3",
             input_type=input_type,

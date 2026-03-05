@@ -46,12 +46,16 @@ _DEFAULTS: dict[str, Any] = {
         "rdr_paths": ["docs/rdr"],
         "include_untracked": False,
     },
+    "voyageai": {
+        "read_timeout_seconds": 120,
+    },
 }
 
 # Env var → (section, key, type) mapping
 _ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
     "NX_EMBEDDINGS_RERANKER_MODEL": ("embeddings", "rerankerModel", str),
     "NX_CLIENT_HOST": ("client", "host", str),
+    "NX_VOYAGEAI_READ_TIMEOUT_SECONDS": ("voyageai", "read_timeout_seconds", int),
 }
 
 

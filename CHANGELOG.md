@@ -6,11 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-03-05
+
+### Refactor
+- **`nexus.retry` leaf module** — moved `_chroma_with_retry`, `_is_retryable_chroma_error`,
+  `_voyage_with_retry`, and `_is_retryable_voyage_error` from `db/t3.py` into a new
+  `retry.py` with no `nexus.*` imports. Eliminates a local-import workaround in
+  `scoring.py` that was required to avoid a circular-import test-isolation bug.
+
 ## [1.5.1] - 2026-03-04
 
 ### Fixed
 - **ChromaDB transient error retry** — all ChromaDB Cloud network calls in `db/t3.py`,
-  `indexer.py`, and `doc_indexer.py` are now wrapped with `_chroma_with_retry`: exponential
+  `indexer.py`, and `doc_indexer.py` are now wrapped with `_chroma_with_retry` (from
+  `retry.py`): exponential
   backoff (2 → 4 → 8 → 16 → 30 s, capped) retrying up to 5 times on HTTP 429/502/503/504
   and transport-level errors (`ConnectError`, `ReadTimeout`). Non-retryable errors raise
   immediately. Fixes multi-thousand-file indexing runs aborted by a single transient 504.

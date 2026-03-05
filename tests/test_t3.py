@@ -308,7 +308,7 @@ def test_search_cce_collection_uses_query_embeddings(mock_chromadb: tuple) -> No
         results = db.search("four store t3 architecture", ["rdr__nexus-abc123"], n_results=5)
 
     # voyageai.Client instantiated with the voyage_api_key
-    mock_vo_mod.Client.assert_called_once_with(api_key="vkey")
+    mock_vo_mod.Client.assert_called_once_with(api_key="vkey", timeout=120.0, max_retries=3)
     # contextualized_embed called with the query wrapped in a list-of-list
     mock_vo_inst.contextualized_embed.assert_called_once_with(
         inputs=[["four store t3 architecture"]],

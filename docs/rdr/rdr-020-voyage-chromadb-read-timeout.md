@@ -2,8 +2,10 @@
 id: RDR-020
 title: "Voyage AI and ChromaDB Client Read Timeouts"
 type: Bug Fix
-status: accepted
+status: closed
 accepted_date: 2026-03-04
+closed_date: 2026-03-05
+close_reason: implemented
 priority: P1
 created: 2026-03-04
 ---

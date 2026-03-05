@@ -129,6 +129,11 @@ def test_no_circular_imports():
         # Verify search_engine is not in their __dict__ as an imported sub-module
         assert not hasattr(scoring, "search_engine"), "scoring must not import search_engine"
         assert not hasattr(formatters, "search_engine"), "formatters must not import search_engine"
+
+        # nexus.retry must be a true leaf module — no nexus.db or search_engine
+        retry_mod = importlib.import_module("nexus.retry")
+        assert not hasattr(retry_mod, "search_engine"), "nexus.retry must not import search_engine"
+        assert not hasattr(retry_mod, "db"), "nexus.retry must not import nexus.db"
     finally:
         # Restore original sys.modules to avoid contaminating subsequent tests
         sys.modules.clear()
