@@ -145,9 +145,11 @@ def rerank_results(
 
     n = top_k or len(results)
     documents = [r.content for r in results]
+    from nexus.db.t3 import _voyage_with_retry
     client = _voyage_client()
     try:
-        rerank_response = client.rerank(
+        rerank_response = _voyage_with_retry(
+            client.rerank,
             query=query,
             documents=documents,
             model=model,

@@ -276,7 +276,8 @@ class T3Database:
         the original CCE/voyage-4 mismatch.
         """
         assert self._voyage_client is not None, "_cce_embed called without voyage_api_key"
-        result = self._voyage_client.contextualized_embed(
+        result = _voyage_with_retry(
+            self._voyage_client.contextualized_embed,
             inputs=[[text]],
             model="voyage-context-3",
             input_type=input_type,

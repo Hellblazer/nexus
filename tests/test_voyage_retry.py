@@ -92,8 +92,6 @@ def test_voyage_with_retry_try_again_retries() -> None:
     assert fn.call_count == 2
 
 
-# ── _reset_voyage_client singleton reset ──────────────────────────────────────
-
 # ── nexus-oh22: voyageai.Client timeout + max_retries at all 4 sites ──────────
 
 def test_t3_database_voyage_client_has_timeout() -> None:
@@ -134,6 +132,115 @@ def test_scoring_voyage_client_has_timeout() -> None:
         mock_ctor.return_value = MagicMock()
         scoring._voyage_client()
         mock_ctor.assert_called_once_with(api_key="test-key", timeout=55, max_retries=3)
+
+    scoring._reset_voyage_client()
+
+
+# ── nexus-vdly: _voyage_with_retry wraps all Voyage AI call sites ─────────────
+
+def test_cce_embed_retries_api_connection_error() -> None:
+    """_cce_embed retries once on APIConnectionError then returns the result."""
+    from nexus.db.t3 import T3Database
+
+    success_result = MagicMock()
+    success_result.results = [MagicMock()]
+    success_result.results[0].embeddings = [[0.1] * 1024]
+    mock_voyage = MagicMock()
+    mock_voyage.contextualized_embed.side_effect = [_ve.APIConnectionError("down"), success_result]
+
+    with patch("nexus.db.t3.voyageai.Client", return_value=mock_voyage), \
+         patch("nexus.db.t3.time.sleep"):
+        db = T3Database(voyage_api_key="test-key", _client=MagicMock())
+        result = db._cce_embed("hello world")
+
+    assert mock_voyage.contextualized_embed.call_count == 2
+    assert result == [0.1] * 1024
+
+
+def test_embed_with_fallback_cce_path_retries_api_connection_error() -> None:
+    """CCE path in _embed_with_fallback retries before returning the result."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    success_result = MagicMock()
+    success_result.results = [MagicMock()]
+    success_result.results[0].embeddings = [[0.1] * 1024, [0.2] * 1024]
+    mock_client = MagicMock()
+    mock_client.contextualized_embed.side_effect = [_ve.APIConnectionError("down"), success_result]
+
+    with patch("voyageai.Client", return_value=mock_client), \
+         patch("nexus.db.t3.time.sleep"):
+        embeddings, model = _embed_with_fallback(["chunk one", "chunk two"], "voyage-context-3", "test-key")
+
+    assert mock_client.contextualized_embed.call_count == 2
+    assert model == "voyage-context-3"
+
+
+def test_embed_with_fallback_standard_path_retries_api_connection_error() -> None:
+    """Standard embed path in _embed_with_fallback retries on APIConnectionError."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    success_result = MagicMock()
+    success_result.embeddings = [[0.1] * 1024]
+    mock_client = MagicMock()
+    mock_client.embed.side_effect = [_ve.APIConnectionError("down"), success_result]
+
+    with patch("voyageai.Client", return_value=mock_client), \
+         patch("nexus.db.t3.time.sleep"):
+        embeddings, model = _embed_with_fallback(["one chunk"], "voyage-4", "test-key")
+
+    assert mock_client.embed.call_count == 2
+    assert model == "voyage-4"
+
+
+def test_index_code_file_embed_retries_api_connection_error(tmp_path) -> None:
+    """_index_code_file batch embed retries on APIConnectionError."""
+    from nexus.indexer import _index_code_file
+
+    py_file = tmp_path / "hello.py"
+    py_file.write_text("def hello():\n    return 'world'\n")
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_db = MagicMock()
+
+    success_result = MagicMock()
+    success_result.embeddings = [[0.1] * 1024]
+    mock_voyage = MagicMock()
+    mock_voyage.embed.side_effect = [
+        _ve.APIConnectionError("down"),
+        success_result, success_result, success_result,
+    ]
+
+    with patch("nexus.db.t3.time.sleep"):
+        _index_code_file(
+            py_file, tmp_path, "code__test", "voyage-code-3",
+            mock_col, mock_db, mock_voyage, {}, "2026-03-05T00:00:00",
+            score=0.5,
+        )
+
+    assert mock_voyage.embed.call_count >= 2
+
+
+def test_rerank_results_retries_then_degrades() -> None:
+    """rerank_results retries on APIConnectionError then degrades to unranked results."""
+    import nexus.scoring as scoring
+    scoring._reset_voyage_client()
+
+    from nexus.types import SearchResult
+    results = [
+        SearchResult(id="1", content="text", collection="code__repo", distance=0.1, metadata={})
+    ]
+    mock_client = MagicMock()
+    mock_client.rerank.side_effect = _ve.APIConnectionError("persistent")
+
+    with patch("voyageai.Client", return_value=mock_client), \
+         patch("nexus.config.get_credential", return_value="test-key"), \
+         patch("nexus.config.load_config", return_value={"voyageai": {"read_timeout_seconds": 120}}), \
+         patch("nexus.db.t3.time.sleep"):
+        returned = scoring.rerank_results(results, "query", top_k=1)
+
+    assert mock_client.rerank.call_count == 3  # 3 attempts then re-raises → caught by outer except
+    assert returned == results  # graceful degradation
 
     scoring._reset_voyage_client()
 

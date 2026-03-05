@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nexus.corpus import index_model_for_collection
-from nexus.db.t3 import _chroma_with_retry
+from nexus.db.t3 import _chroma_with_retry, _voyage_with_retry
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 
 _log = structlog.get_logger(__name__)
@@ -601,7 +601,7 @@ def _index_code_file(
     for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
         batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
         _log.debug("embedding batch", file=str(file), batch=f"{batch_start+1}-{min(batch_start+len(batch), total_chunks)}/{total_chunks}")
-        result = voyage_client.embed(texts=batch, model=target_model, input_type="document")
+        result = _voyage_with_retry(voyage_client.embed, texts=batch, model=target_model, input_type="document")
         embeddings.extend(result.embeddings)
 
     _log.debug("upserting", file=str(file), chunks=total_chunks)

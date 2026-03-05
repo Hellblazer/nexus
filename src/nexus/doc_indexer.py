@@ -18,7 +18,7 @@ _log = structlog.get_logger(__name__)
 
 from nexus.corpus import index_model_for_collection
 from nexus.db import make_t3
-from nexus.db.t3 import _chroma_with_retry
+from nexus.db.t3 import _chroma_with_retry, _voyage_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor
@@ -125,8 +125,9 @@ def _embed_with_fallback(
             any_fallback = False
             for batch in batches:
                 try:
-                    result = client.contextualized_embed(
-                        inputs=[batch], model=model, input_type=input_type
+                    result = _voyage_with_retry(
+                        client.contextualized_embed,
+                        inputs=[batch], model=model, input_type=input_type,
                     )
                     all_embeddings.extend(result.results[0].embeddings)
                 except Exception as exc:
@@ -135,7 +136,7 @@ def _embed_with_fallback(
                                  error=str(exc), batch_size=len(batch))
                     for j in range(0, len(batch), _EMBED_BATCH_SIZE):
                         sub = batch[j:j + _EMBED_BATCH_SIZE]
-                        fb = client.embed(texts=sub, model="voyage-4", input_type=input_type)
+                        fb = _voyage_with_retry(client.embed, texts=sub, model="voyage-4", input_type=input_type)
                         all_embeddings.extend(fb.embeddings)
             if all_embeddings:
                 # Report voyage-4 if any batch fell back — forces re-index on next run
@@ -145,7 +146,7 @@ def _embed_with_fallback(
     all_emb: list[list[float]] = []
     for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
         batch = chunks[i:i + _EMBED_BATCH_SIZE]
-        result = client.embed(texts=batch, model=model, input_type=input_type)
+        result = _voyage_with_retry(client.embed, texts=batch, model=model, input_type=input_type)
         all_emb.extend(result.embeddings)
     return all_emb, model
 
