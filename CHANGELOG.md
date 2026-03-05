@@ -10,7 +10,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 - **ChromaDB transient error retry** — all ChromaDB Cloud network calls in `db/t3.py`,
-  `indexer.py`, and `doc_indexer.py` are now wrapped with `_chroma_with_retry`: exponential
+  `indexer.py`, and `doc_indexer.py` are now wrapped with `_chroma_with_retry` (from
+  `retry.py`): exponential
   backoff (2 → 4 → 8 → 16 → 30 s, capped) retrying up to 5 times on HTTP 429/502/503/504
   and transport-level errors (`ConnectError`, `ReadTimeout`). Non-retryable errors raise
   immediately. Fixes multi-thousand-file indexing runs aborted by a single transient 504.
