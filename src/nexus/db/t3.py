@@ -86,6 +86,58 @@ def _chroma_with_retry(
             delay = min(delay * 2, 30.0)
 
 
+
+# ── Voyage AI transient-error retry ──────────────────────────────────────────
+
+try:
+    import voyageai.error as _voyageai_error
+    _VOYAGE_ERROR_TYPES: tuple[type, ...] | None = (
+        _voyageai_error.APIConnectionError,
+        _voyageai_error.TryAgain,
+    )
+except ImportError:  # pragma: no cover
+    _VOYAGE_ERROR_TYPES = None
+
+
+def _is_retryable_voyage_error(exc: BaseException) -> bool:
+    """Return True if *exc* is a transient Voyage AI error worth retrying.
+
+    Only APIConnectionError and TryAgain are retried here.  Timeout,
+    RateLimitError, and ServiceUnavailableError are handled by the built-in
+    ``max_retries`` on ``voyageai.Client`` (tenacity-based).  The two error
+    spaces are disjoint; do not add Voyage AI types to _is_retryable_chroma_error.
+    """
+    return bool(_VOYAGE_ERROR_TYPES and isinstance(exc, _VOYAGE_ERROR_TYPES))
+
+
+def _voyage_with_retry(
+    fn: Callable[..., Any],
+    *args: Any,
+    max_attempts: int = 3,
+    **kwargs: Any,
+) -> Any:
+    """Call *fn* with backoff on transient Voyage AI errors (APIConnectionError, TryAgain).
+
+    Retries up to *max_attempts* times (default 3).  Backoff starts at 1 s,
+    doubles each attempt, capped at 10 s.  Non-retryable errors raise immediately.
+    """
+    delay = 1.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if attempt == max_attempts or not _is_retryable_voyage_error(exc):
+                raise
+            _log.warning(
+                "voyage_transient_error_retry",
+                attempt=attempt,
+                delay=delay,
+                error=str(exc)[:120],
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, 10.0)
+
+
 class T3Database:
     """T3 ChromaDB CloudClient permanent knowledge store.
 

@@ -47,6 +47,22 @@ def test_config_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 
+def test_config_voyageai_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """load_config() returns voyageai.read_timeout_seconds == 120 by default."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = load_config(repo_root=tmp_path)
+    assert config["voyageai"]["read_timeout_seconds"] == 120
+
+
+def test_config_voyageai_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """NX_VOYAGEAI_READ_TIMEOUT_SECONDS overrides the default."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("NX_VOYAGEAI_READ_TIMEOUT_SECONDS", "60")
+    config = load_config(repo_root=tmp_path)
+    assert config["voyageai"]["read_timeout_seconds"] == 60
+    assert isinstance(config["voyageai"]["read_timeout_seconds"], int)
+
+
 def test_config_missing_files_returns_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -115,6 +115,13 @@ def _voyage_client():
     return _voyage_instance
 
 
+def _reset_voyage_client() -> None:
+    """Reset the cached Voyage AI client singleton (for test isolation only)."""
+    global _voyage_instance
+    with _voyage_lock:
+        _voyage_instance = None
+
+
 def rerank_results(
     results: list[SearchResult],
     query: str,
