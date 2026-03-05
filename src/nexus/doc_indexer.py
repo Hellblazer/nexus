@@ -18,7 +18,7 @@ _log = structlog.get_logger(__name__)
 
 from nexus.corpus import index_model_for_collection
 from nexus.db import make_t3
-from nexus.db.t3 import _chroma_with_retry, _voyage_with_retry
+from nexus.retry import _chroma_with_retry, _voyage_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor

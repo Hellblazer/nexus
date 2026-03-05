@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import voyageai.error as _ve
 
-from nexus.db.t3 import _is_retryable_voyage_error, _voyage_with_retry
+from nexus.retry import _is_retryable_voyage_error, _voyage_with_retry
 
 
 # ── _is_retryable_voyage_error oracle ─────────────────────────────────────────
@@ -72,7 +72,7 @@ def test_voyage_with_retry_success_after_transient() -> None:
 def test_voyage_with_retry_fires_3_times_then_raises() -> None:
     """Retries max_attempts=3 times on APIConnectionError then re-raises."""
     fn = MagicMock(side_effect=_ve.APIConnectionError("persistent"))
-    with patch("nexus.db.t3.time.sleep"), pytest.raises(_ve.APIConnectionError):
+    with patch("nexus.retry.time.sleep"), pytest.raises(_ve.APIConnectionError):
         _voyage_with_retry(fn, max_attempts=3)
     assert fn.call_count == 3
 
@@ -119,7 +119,7 @@ def test_embed_with_fallback_voyage_client_has_timeout() -> None:
     cce_result.results[0].embeddings = [[0.1] * 1024, [0.2] * 1024]
     mock_client.contextualized_embed.return_value = cce_result
     with patch("voyageai.Client", return_value=mock_client) as mock_ctor, \
-         patch("nexus.db.t3.time.sleep"):
+         patch("nexus.retry.time.sleep"):
         _embed_with_fallback(["chunk one", "chunk two"], "voyage-context-3", "test-key", timeout=75.0)
         mock_ctor.assert_called_once_with(api_key="test-key", timeout=75.0, max_retries=3)
 
@@ -152,7 +152,7 @@ def test_cce_embed_retries_api_connection_error() -> None:
     mock_voyage.contextualized_embed.side_effect = [_ve.APIConnectionError("down"), success_result]
 
     with patch("nexus.db.t3.voyageai.Client", return_value=mock_voyage), \
-         patch("nexus.db.t3.time.sleep"):
+         patch("nexus.retry.time.sleep"):
         db = T3Database(voyage_api_key="test-key", _client=MagicMock())
         result = db._cce_embed("hello world")
 
@@ -171,7 +171,7 @@ def test_embed_with_fallback_cce_path_retries_api_connection_error() -> None:
     mock_client.contextualized_embed.side_effect = [_ve.APIConnectionError("down"), success_result]
 
     with patch("voyageai.Client", return_value=mock_client), \
-         patch("nexus.db.t3.time.sleep"):
+         patch("nexus.retry.time.sleep"):
         embeddings, model = _embed_with_fallback(["chunk one", "chunk two"], "voyage-context-3", "test-key")
 
     assert mock_client.contextualized_embed.call_count == 2
@@ -188,7 +188,7 @@ def test_embed_with_fallback_standard_path_retries_api_connection_error() -> Non
     mock_client.embed.side_effect = [_ve.APIConnectionError("down"), success_result]
 
     with patch("voyageai.Client", return_value=mock_client), \
-         patch("nexus.db.t3.time.sleep"):
+         patch("nexus.retry.time.sleep"):
         embeddings, model = _embed_with_fallback(["one chunk"], "voyage-4", "test-key")
 
     assert mock_client.embed.call_count == 2
@@ -214,7 +214,7 @@ def test_index_code_file_embed_retries_api_connection_error(tmp_path) -> None:
         success_result, success_result, success_result,
     ]
 
-    with patch("nexus.db.t3.time.sleep"):
+    with patch("nexus.retry.time.sleep"):
         _index_code_file(
             py_file, tmp_path, "code__test", "voyage-code-3",
             mock_col, mock_db, mock_voyage, {}, "2026-03-05T00:00:00",
@@ -239,7 +239,7 @@ def test_rerank_results_retries_then_degrades() -> None:
     with patch("voyageai.Client", return_value=mock_client), \
          patch("nexus.config.get_credential", return_value="test-key"), \
          patch("nexus.config.load_config", return_value={"voyageai": {"read_timeout_seconds": 120}}), \
-         patch("nexus.db.t3.time.sleep"):
+         patch("nexus.retry.time.sleep"):
         returned = scoring.rerank_results(results, "query", top_k=1)
 
     assert mock_client.rerank.call_count == 3  # 3 attempts then re-raises → caught by outer except
@@ -290,7 +290,7 @@ def test_embed_with_fallback_cce_retry_then_degrade_e2e() -> None:
     mock_client.embed.return_value = voyage4_result
 
     with patch("voyageai.Client", return_value=mock_client), \
-         patch("nexus.db.t3.time.sleep"):
+         patch("nexus.retry.time.sleep"):
         # CCE requires >= 2 chunks; use two chunks to trigger the CCE path
         embeddings, model = _embed_with_fallback(
             ["chunk one", "chunk two"], "voyage-context-3", "test-key"
@@ -309,7 +309,7 @@ def test_embed_with_fallback_standard_path_propagates_after_retry_exhaustion() -
     mock_client.embed.side_effect = _ve.APIConnectionError("persistent")
 
     with patch("voyageai.Client", return_value=mock_client), \
-         patch("nexus.db.t3.time.sleep"), \
+         patch("nexus.retry.time.sleep"), \
          pytest.raises(_ve.APIConnectionError):
         _embed_with_fallback(["one chunk"], "voyage-4", "test-key")
 
@@ -324,6 +324,6 @@ def test_client_constructed_with_config_timeout() -> None:
     mock_client.embed.return_value = MagicMock(embeddings=[[0.1] * 1024])
 
     with patch("voyageai.Client", return_value=mock_client) as mock_ctor, \
-         patch("nexus.db.t3.time.sleep"):
+         patch("nexus.retry.time.sleep"):
         _embed_with_fallback(["chunk"], "voyage-4", "test-key", timeout=60.0)
         mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=3)

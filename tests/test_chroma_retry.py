@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, call, patch
 import httpx
 import pytest
 
-from nexus.db.t3 import _chroma_with_retry, _is_retryable_chroma_error
+from nexus.retry import _chroma_with_retry, _is_retryable_chroma_error
 
 
 # ── _is_retryable_chroma_error ────────────────────────────────────────────────
@@ -95,7 +95,7 @@ def test_retry_connect_error_twice_then_success() -> None:
             raise httpx.ConnectError("transient connect failure")
         return "ok"
 
-    with patch("nexus.db.t3.time") as mock_time:
+    with patch("nexus.retry.time") as mock_time:
         result = _chroma_with_retry(flaky_fn)
 
     assert result == "ok"
@@ -107,7 +107,7 @@ def test_all_attempts_exhausted_on_persistent_504() -> None:
     """fn raises 504 on every attempt; _chroma_with_retry raises after 5 attempts."""
     fn = MagicMock(side_effect=Exception("504 Gateway Time-out"))
 
-    with patch("nexus.db.t3.time"):
+    with patch("nexus.retry.time"):
         with pytest.raises(Exception, match="504"):
             _chroma_with_retry(fn, max_attempts=5)
 
@@ -118,7 +118,7 @@ def test_non_retryable_400_raises_immediately() -> None:
     """fn raises 400 on first attempt; _chroma_with_retry re-raises immediately without sleeping."""
     fn = MagicMock(side_effect=Exception("400 Bad Request: invalid collection name"))
 
-    with patch("nexus.db.t3.time") as mock_time:
+    with patch("nexus.retry.time") as mock_time:
         with pytest.raises(Exception, match="400"):
             _chroma_with_retry(fn)
 
@@ -137,7 +137,7 @@ def test_backoff_curve_2_4_8_16() -> None:
             raise Exception("503 Service Unavailable")
         return "done"
 
-    with patch("nexus.db.t3.time") as mock_time:
+    with patch("nexus.retry.time") as mock_time:
         result = _chroma_with_retry(fn_succeeds_on_5th, max_attempts=5)
 
     assert result == "done"
@@ -186,7 +186,7 @@ def test_search_retries_on_503(t3_mock) -> None:
     }
     mock_col.query.side_effect = [exc, valid_result]
 
-    with patch("nexus.db.t3.time"):
+    with patch("nexus.retry.time"):
         results = db.search("query text", ["code__myrepo"])
 
     assert len(results) == 1
@@ -201,7 +201,7 @@ def test_write_batch_retries_on_504(t3_mock) -> None:
     mock_col = MagicMock()
     mock_col.upsert.side_effect = [Exception("504 Gateway Time-out"), None]
 
-    with patch("nexus.db.t3.time"):
+    with patch("nexus.retry.time"):
         db._write_batch(
             mock_col,
             "code__myrepo",
@@ -232,7 +232,7 @@ def test_list_store_retries_on_read_timeout(t3_mock) -> None:
         },
     ]
 
-    with patch("nexus.db.t3.time"):
+    with patch("nexus.retry.time"):
         results = db.list_store("knowledge__mystore")
 
     assert len(results) == 1
@@ -257,7 +257,7 @@ def test_index_code_file_retries_on_connect_error(tmp_path) -> None:
     mock_voyage = MagicMock()
     mock_voyage.embed.return_value = MagicMock(embeddings=[[0.1, 0.2]])
 
-    with patch("nexus.db.t3.time"):
+    with patch("nexus.retry.time"):
         result = _index_code_file(
             file=src,
             repo=tmp_path,

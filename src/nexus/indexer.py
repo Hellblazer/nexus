@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nexus.corpus import index_model_for_collection
-from nexus.db.t3 import _chroma_with_retry, _voyage_with_retry
+from nexus.retry import _chroma_with_retry, _voyage_with_retry
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 
 _log = structlog.get_logger(__name__)
