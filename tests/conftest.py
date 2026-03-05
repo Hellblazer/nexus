@@ -149,9 +149,9 @@ def _make_type3_pdf(path: Path) -> None:
     - Object 6 is the CharProcs stream for 'A' (d0 + filled box)
     - Object 4 is the page content stream (draws 'A' using /F1)
 
-    pymupdf recognises Subtype=/Type3 via page.get_fonts(), which is all
-    _has_type3_fonts() requires.  get_text() on a Type3 glyph returns '' or
-    'A' depending on pymupdf version — either is acceptable for AC-U5.
+    Docling handles Type3 fonts via its own text extraction layer.
+    get_text() on a Type3 glyph returns '' or 'A' depending on pymupdf
+    version — used by pymupdf_normalized fallback if Docling fails.
     """
     glyph_stream = b"100 0 d0\n0 0 100 100 re f\n"
     content_stream = b"BT /F1 12 Tf 100 700 Td (A) Tj ET\n"

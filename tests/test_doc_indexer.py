@@ -109,7 +109,7 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch):
                     mock_extractor.extract.return_value = MagicMock(
                         text="extracted text",
                         metadata={
-                            "extraction_method": "pymupdf4llm_markdown",
+                            "extraction_method": "docling",
                             "page_count": 1,
                             "format": "markdown",
                             "page_boundaries": [],
@@ -812,7 +812,7 @@ def _make_pdf_mocks():
     mock_extract_result = MagicMock()
     mock_extract_result.text = "extracted text"
     mock_extract_result.metadata = {
-        "extraction_method": "pymupdf4llm_markdown",
+        "extraction_method": "docling",
         "page_count": 1,
         "format": "markdown",
         "page_boundaries": [],
@@ -1445,7 +1445,7 @@ def test_force_bypasses_staleness_pdf(sample_pdf, monkeypatch):
                 mock_extractor_class.return_value.extract.return_value = MagicMock(
                     text="extracted text",
                     metadata={
-                        "extraction_method": "pymupdf4llm_markdown",
+                        "extraction_method": "docling",
                         "page_count": 1,
                         "format": "markdown",
                         "page_boundaries": [],
