@@ -151,8 +151,15 @@ subtypes than to enumerate retryable ones.
    (add `voyageai:` section if absent). Add env var override `NX_VOYAGEAI_READ_TIMEOUT_SECONDS`
    to `_ENV_OVERRIDES`. Thread through `make_t3()` and `T3Database.__init__`.
    For `_embed_with_fallback`, add `timeout: float = 120.0` parameter to the function signature
-   and update both callers in `indexer.py` (lines 776 and 871) to pass `read_timeout_seconds`
-   read from `load_config()` at the top of `index_repository()`.
+   and update all THREE callers to pass `read_timeout_seconds`:
+   - `indexer.py:_index_prose_file` (call at line 776): add `timeout: float = 120.0` to
+     `_index_prose_file` signature; receive `read_timeout_seconds` from `index_repository` caller.
+   - `indexer.py:_index_pdf_file` (call at line 871): add `timeout: float = 120.0` to
+     `_index_pdf_file` signature; receive `read_timeout_seconds` from `index_repository` caller.
+   - `doc_indexer.py:_index_document` (call at line 222): read `load_config()["voyageai"]["read_timeout_seconds"]`
+     at line ~219 alongside `voyage_key`; pass as `timeout=read_timeout_seconds`.
+   `index_repository()` reads `read_timeout_seconds` from `load_config()` and passes it to both
+   `_index_prose_file` and `_index_pdf_file`.
    For `scoring.py:_voyage_client()`, read directly from `load_config()["voyageai"]["read_timeout_seconds"]`.
    The singleton has no reconfiguration path after first call; provide `_reset_voyage_client()`
    (test-only module-private) for testability.
@@ -240,7 +247,10 @@ correct behavior for an interactive path and should be documented as intentional
    - `indexer.py:1153`: `voyageai.Client(api_key=..., timeout=read_timeout_seconds, max_retries=3)`
      Read `read_timeout_seconds` from `load_config()` at the top of `index_repository()`; pass down.
    - `doc_indexer._embed_with_fallback:115`: add `timeout: float = 120.0` parameter; use it in Client construction;
-     update both `indexer.py` callers (lines 776 and 871) to pass `read_timeout_seconds`.
+     update all THREE callers to pass `read_timeout_seconds`:
+     * `indexer.py:_index_prose_file` (line 776): add `timeout` to `_index_prose_file` signature, pass from `index_repository`
+     * `indexer.py:_index_pdf_file` (line 871): add `timeout` to `_index_pdf_file` signature, pass from `index_repository`
+     * `doc_indexer.py:_index_document` (line 222): read from `load_config()` at line ~219 alongside `voyage_key`
    - `scoring.py:_voyage_client():114`: read from `load_config()["voyageai"]["read_timeout_seconds"]`.
 
 5. **Wrap remaining Voyage AI call sites with `_voyage_with_retry`** (for `APIConnectionError`/`TryAgain`):
@@ -281,7 +291,8 @@ correct behavior for an interactive path and should be documented as intentional
 - [ ] `_voyage_with_retry` (`max_attempts=3`) wraps: `_cce_embed()`, `indexer.py` batch embed, `doc_indexer._embed_with_fallback` CCE call (line 127), fallback call (line 137), and standard path batch loop (lines 144-148).
 - [ ] `scoring.py:rerank_results()` has `_voyage_with_retry` on `rerank()` call; outer exception handling provides intentional graceful degradation.
 - [ ] Timeout in `_embed_with_fallback` CCE path retries (`_voyage_with_retry`) rather than silently falling back to `voyage-4`.
-- [ ] `_embed_with_fallback` has `timeout: float = 120.0` parameter; both `indexer.py` callers pass `read_timeout_seconds`.
+- [ ] `_embed_with_fallback` has `timeout: float = 120.0` parameter; all three callers pass `read_timeout_seconds` (`indexer.py:_index_prose_file:776`, `indexer.py:_index_pdf_file:871`, `doc_indexer.py:_index_document:222`).
+- [ ] `_index_prose_file` and `_index_pdf_file` have `timeout: float = 120.0` parameter; `index_repository` passes `read_timeout_seconds` to both.
 - [ ] Unit tests cover `_is_retryable_voyage_error` for all error types; `_is_retryable_chroma_error` regression guard.
 - [ ] Test asserts `voyageai.Client` is instantiated with the configured `timeout` and `max_retries=3`.
 - [ ] `_reset_voyage_client()` exists in `scoring.py` for test isolation.
