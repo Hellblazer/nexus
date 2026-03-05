@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-03-05
+
+### Docs
+- Corrected release notes: 1.5.2 CHANGELOG now includes RDR-020 Voyage AI timeout
+  entries that were missing from the initial squash merge.
+
 ## [1.5.2] - 2026-03-05
 
 ### Added

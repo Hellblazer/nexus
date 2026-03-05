@@ -4,6 +4,11 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-03-05
+
+### Changed
+- Plugin version aligned with Nexus CLI 1.5.3. No plugin-level functional changes.
+
 ## [1.5.2] - 2026-03-05
 
 ### Changed
