@@ -145,6 +145,10 @@ def rerank_results(
 
     n = top_k or len(results)
     documents = [r.content for r in results]
+    # Local import: top-level import of nexus.db.t3 mutates nexus.db's attribute on the
+    # nexus package during test_no_circular_imports' module-reload phase, leaving
+    # nexus.db.t1 inaccessible for subsequent tests.  Keep this import local until
+    # _voyage_with_retry is moved to a leaf module (e.g. nexus.retry) with no upward deps.
     from nexus.db.t3 import _voyage_with_retry
     client = _voyage_client()
     try:

@@ -72,7 +72,7 @@ def test_voyage_with_retry_success_after_transient() -> None:
 def test_voyage_with_retry_fires_3_times_then_raises() -> None:
     """Retries max_attempts=3 times on APIConnectionError then re-raises."""
     fn = MagicMock(side_effect=_ve.APIConnectionError("persistent"))
-    with pytest.raises(_ve.APIConnectionError):
+    with patch("nexus.db.t3.time.sleep"), pytest.raises(_ve.APIConnectionError):
         _voyage_with_retry(fn, max_attempts=3)
     assert fn.call_count == 3
 
@@ -113,10 +113,13 @@ def test_embed_with_fallback_voyage_client_has_timeout() -> None:
     from nexus.doc_indexer import _embed_with_fallback
 
     mock_client = MagicMock()
-    mock_client.contextualized_embed.return_value = MagicMock(
-        embeddings=[[0.1] * 1024, [0.2] * 1024]
-    )
-    with patch("voyageai.Client", return_value=mock_client) as mock_ctor:
+    # CCE result structure: result.results[0].embeddings (not result.embeddings)
+    cce_result = MagicMock()
+    cce_result.results = [MagicMock()]
+    cce_result.results[0].embeddings = [[0.1] * 1024, [0.2] * 1024]
+    mock_client.contextualized_embed.return_value = cce_result
+    with patch("voyageai.Client", return_value=mock_client) as mock_ctor, \
+         patch("nexus.db.t3.time.sleep"):
         _embed_with_fallback(["chunk one", "chunk two"], "voyage-context-3", "test-key", timeout=75.0)
         mock_ctor.assert_called_once_with(api_key="test-key", timeout=75.0, max_retries=3)
 
