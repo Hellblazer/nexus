@@ -267,3 +267,60 @@ def test_reset_voyage_client_clears_singleton() -> None:
     _reset_voyage_client()
     assert scoring._voyage_instance is None
 
+
+
+# ── nexus-n4v9: integration tests ─────────────────────────────────────────────
+
+def test_embed_with_fallback_cce_retry_then_degrade_e2e() -> None:
+    """Full flow: CCE raises APIConnectionError 3 times (exhausting _voyage_with_retry),
+    except block catches and falls back to voyage-4 embed.
+    Verify: CCE called 3 times, fallback embed called once, returned model is 'voyage-4'.
+    """
+    from nexus.doc_indexer import _embed_with_fallback
+
+    cce_failure = _ve.APIConnectionError("persistent down")
+    voyage4_result = MagicMock()
+    voyage4_result.embeddings = [[0.1] * 1024]
+
+    mock_client = MagicMock()
+    mock_client.contextualized_embed.side_effect = cce_failure
+    mock_client.embed.return_value = voyage4_result
+
+    with patch("voyageai.Client", return_value=mock_client), \
+         patch("nexus.db.t3.time.sleep"):
+        # CCE requires >= 2 chunks; use two chunks to trigger the CCE path
+        embeddings, model = _embed_with_fallback(
+            ["chunk one", "chunk two"], "voyage-context-3", "test-key"
+        )
+
+    assert mock_client.contextualized_embed.call_count == 3  # 3 retry attempts
+    assert mock_client.embed.call_count == 1                  # fallback fired once
+    assert model == "voyage-4"
+
+
+def test_embed_with_fallback_standard_path_propagates_after_retry_exhaustion() -> None:
+    """Standard embed() raises APIConnectionError 3 times; exception propagates to caller."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+    mock_client.embed.side_effect = _ve.APIConnectionError("persistent")
+
+    with patch("voyageai.Client", return_value=mock_client), \
+         patch("nexus.db.t3.time.sleep"), \
+         pytest.raises(_ve.APIConnectionError):
+        _embed_with_fallback(["one chunk"], "voyage-4", "test-key")
+
+    assert mock_client.embed.call_count == 3
+
+
+def test_client_constructed_with_config_timeout() -> None:
+    """When config has voyageai.read_timeout_seconds=60, Client is built with timeout=60."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+    mock_client.embed.return_value = MagicMock(embeddings=[[0.1] * 1024])
+
+    with patch("voyageai.Client", return_value=mock_client) as mock_ctor, \
+         patch("nexus.db.t3.time.sleep"):
+        _embed_with_fallback(["chunk"], "voyage-4", "test-key", timeout=60.0)
+        mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=3)

@@ -273,3 +273,31 @@ def test_index_code_file_retries_on_connect_error(tmp_path) -> None:
 
     assert result >= 0  # completed without raising
     assert mock_col.get.call_count == 2
+
+
+# ── RDR-020 regression: _is_retryable_chroma_error disjoint from Voyage AI ───
+
+def test_chroma_error_unchanged_transport() -> None:
+    """_is_retryable_chroma_error still True for httpx.TransportError subclasses."""
+    assert _is_retryable_chroma_error(httpx.ConnectError("refused")) is True
+    assert _is_retryable_chroma_error(httpx.ReadTimeout("timeout")) is True
+
+
+def test_chroma_error_unchanged_503() -> None:
+    """_is_retryable_chroma_error still True for chained 503."""
+    assert _is_retryable_chroma_error(_make_chained_exc(503)) is True
+
+
+def test_chroma_error_unchanged_429() -> None:
+    """_is_retryable_chroma_error still True for chained 429."""
+    assert _is_retryable_chroma_error(_make_chained_exc(429)) is True
+
+
+def test_chroma_error_false_for_voyage_api_connection_error() -> None:
+    """_is_retryable_chroma_error returns False for voyageai.error.APIConnectionError.
+
+    The two error oracles must be disjoint: a Voyage AI error must not be
+    treated as a ChromaDB retryable error.
+    """
+    import voyageai.error as _ve
+    assert _is_retryable_chroma_error(_ve.APIConnectionError("down")) is False
