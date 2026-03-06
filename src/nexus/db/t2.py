@@ -322,13 +322,27 @@ class T2Database:
             ).fetchall()
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
-    def delete(self, project: str, title: str) -> bool:
-        """Delete an entry by (project, title). Returns True if a row was deleted."""
+    def delete(
+        self,
+        project: str | None = None,
+        title: str | None = None,
+        id: int | None = None,
+    ) -> bool:
+        """Delete an entry by (project, title) or by numeric id.
+
+        Returns True if a row was deleted.  Raises ValueError when neither
+        a valid (project, title) pair nor an id is supplied.
+        """
+        if id is not None:
+            sql = "DELETE FROM memory WHERE id = ?"
+            params: tuple = (id,)
+        elif project is not None and title is not None:
+            sql = "DELETE FROM memory WHERE project = ? AND title = ?"
+            params = (project, title)
+        else:
+            raise ValueError("Provide either id or both project and title.")
         with self._lock:
-            cursor = self.conn.execute(
-                "DELETE FROM memory WHERE project = ? AND title = ?",
-                (project, title),
-            )
+            cursor = self.conn.execute(sql, params)
             self.conn.commit()
         return cursor.rowcount > 0
 

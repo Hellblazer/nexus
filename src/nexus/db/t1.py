@@ -243,6 +243,25 @@ class T1Database:
             raise KeyError(f"No scratch entry: {id!r}")
         t2.put(project=project, title=title, content=entry["content"], tags=entry.get("tags", ""))
 
+
+    def delete(self, id: str) -> bool:
+        """Delete a scratch entry by its full ID.
+
+        Verifies session ownership before deleting — entries belonging to
+        other sessions return False without deleting.  Returns False when the
+        entry does not exist or the session does not own it; True on success.
+        """
+        def _do() -> bool:
+            result = self._col.get(ids=[id], include=["metadatas"])
+            if not result["ids"]:
+                return False
+            if result["metadatas"][0].get("session_id") != self._session_id:
+                return False
+            self._col.delete(ids=[id])
+            return True
+
+        return self._exec(_do)
+
     # ── Clear ─────────────────────────────────────────────────────────────────
 
     def clear(self) -> int:

@@ -628,3 +628,66 @@ def test_search_no_path_returns_all(runner: CliRunner, env_creds) -> None:
     assert where_filter is None, (
         f"Expected no where filter when path is absent, got: {where_filter}"
     )
+
+
+# ── nexus-1ofw: nx store delete ───────────────────────────────────────────────
+
+def test_store_delete_by_id_happy(runner: CliRunner, env_creds: None) -> None:
+    """delete --id removes the entry when it exists."""
+    mock_db = MagicMock()
+    mock_db.delete_by_id.return_value = True
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--id", "abcdef1234567890"])
+    assert result.exit_code == 0, result.output
+    mock_db.delete_by_id.assert_called_once()
+    assert "Deleted" in result.output
+
+
+def test_store_delete_by_id_not_found(runner: CliRunner, env_creds: None) -> None:
+    """delete --id exits non-zero when entry not found."""
+    mock_db = MagicMock()
+    mock_db.delete_by_id.return_value = False
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--id", "abcdef1234567890"])
+    assert result.exit_code != 0
+    assert "not found" in result.output
+
+
+def test_store_delete_by_title_yes(runner: CliRunner, env_creds: None) -> None:
+    """delete --title --yes deletes all matching entries without prompting."""
+    mock_db = MagicMock()
+    mock_db.find_ids_by_title.return_value = ["id1", "id2"]
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--title", "doc.md", "--yes"])
+    assert result.exit_code == 0, result.output
+    mock_db.batch_delete.assert_called_once()
+    assert "Deleted 2" in result.output
+
+
+def test_store_delete_by_title_not_found(runner: CliRunner, env_creds: None) -> None:
+    """delete --title exits non-zero when no entries match."""
+    mock_db = MagicMock()
+    mock_db.find_ids_by_title.return_value = []
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--title", "missing.md", "--yes"])
+    assert result.exit_code != 0
+    assert "not found" in result.output or "No entries" in result.output
+
+
+def test_store_delete_missing_collection_rejected(runner: CliRunner, env_creds: None) -> None:
+    """delete without --collection is rejected."""
+    result = runner.invoke(main, ["store", "delete", "--id", "abc"])
+    assert result.exit_code != 0
+
+
+def test_store_list_shows_16char_ids(runner: CliRunner, env_creds: None) -> None:
+    """nx store list shows 16-char document IDs."""
+    mock_db = MagicMock()
+    mock_db.list_store.return_value = [
+        {"id": "abcdef1234567890ff", "title": "doc.md", "tags": "", "ttl_days": 0,
+         "expires_at": "", "indexed_at": "2026-03-05"}
+    ]
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "list"])
+    assert result.exit_code == 0, result.output
+    assert "abcdef1234567890" in result.output  # 16 chars present

@@ -348,3 +348,103 @@ def test_t2_uses_session_module_for_session_id(db: T2Database) -> None:
 
     row = db.get(id=row_id)
     assert row["session"] == "test-sid-xyz"
+
+
+# ── nexus-tjsu: nx memory delete ─────────────────────────────────────────────
+
+def test_memory_delete_by_project_title(db: T2Database) -> None:
+    """delete() by project+title removes the entry and returns True."""
+    db.put(project="p", title="a.md", content="hello")
+    assert db.delete(project="p", title="a.md") is True
+    assert db.get(project="p", title="a.md") is None
+
+
+def test_memory_delete_by_id(db: T2Database) -> None:
+    """delete() by numeric id removes the entry and returns True."""
+    row_id = db.put(project="p", title="b.md", content="world")
+    assert db.delete(id=row_id) is True
+    assert db.get(id=row_id) is None
+
+
+def test_memory_delete_missing_returns_false(db: T2Database) -> None:
+    """delete() on a non-existent entry returns False."""
+    assert db.delete(project="no", title="such.md") is False
+    assert db.delete(id=99999) is False
+
+
+def test_memory_delete_invalid_args_raises(db: T2Database) -> None:
+    """delete() with neither id nor project+title raises ValueError."""
+    with pytest.raises(ValueError):
+        db.delete(project="p")  # title missing
+
+
+def test_memory_delete_fts5_not_searchable_after_delete(db: T2Database) -> None:
+    """After deleting an entry, FTS5 search no longer returns it."""
+    db.put(project="p", title="c.md", content="unique canary token xyzzy")
+    db.delete(project="p", title="c.md")
+    results = db.search("canary xyzzy")
+    assert not results
+
+
+def _t2_cm(db: T2Database):
+    """Return a mock context manager that yields db without closing it."""
+    from unittest.mock import MagicMock
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=db)
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
+def test_memory_delete_cmd_by_project_title(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """delete --project/--title removes the entry."""
+    db.put(project="proj", title="note.md", content="content to delete")
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+        result = runner.invoke(main, ["memory", "delete", "--project", "proj", "--title", "note.md", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Deleted" in result.output
+    assert db.get(project="proj", title="note.md") is None
+
+
+def test_memory_delete_cmd_by_id(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """delete --id shows project/title in confirmation and removes the entry."""
+    row_id = db.put(project="proj", title="note.md", content="delete by id content")
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+        result = runner.invoke(main, ["memory", "delete", "--id", str(row_id), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "proj/note.md" in result.output
+    assert db.get(id=row_id) is None
+
+
+def test_memory_delete_cmd_all(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """delete --project --all --yes removes all entries in the project."""
+    db.put(project="proj", title="a.md", content="a")
+    db.put(project="proj", title="b.md", content="b")
+    db.put(project="other", title="c.md", content="c")
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+        result = runner.invoke(main, ["memory", "delete", "--project", "proj", "--all", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Deleted 2" in result.output
+    assert db.list_entries(project="proj") == []
+    assert db.list_entries(project="other") != []  # other project untouched
+
+
+def test_memory_delete_cmd_all_without_project_rejected(runner: CliRunner, mem_home: Path) -> None:
+    """delete --all without --project is rejected."""
+    result = runner.invoke(main, ["memory", "delete", "--all", "--yes"])
+    assert result.exit_code != 0
+    assert "--all requires --project" in result.output
+
+
+def test_memory_delete_cmd_id_with_project_rejected(runner: CliRunner, mem_home: Path) -> None:
+    """delete --id combined with --project is rejected."""
+    result = runner.invoke(main, ["memory", "delete", "--id", "1", "--project", "p"])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
+
+
+def test_memory_delete_cmd_not_found(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    """delete with non-existent project/title exits non-zero."""
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+        result = runner.invoke(main, ["memory", "delete", "--project", "no", "--title", "such.md", "--yes"])
+    assert result.exit_code != 0
+    assert "not found" in result.output

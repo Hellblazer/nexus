@@ -375,3 +375,42 @@ def test_scratch_flagged_entries_excludes_unflagged(t1: T1Database) -> None:
     flagged = t1.flagged_entries()
     assert len(flagged) == 1
     assert flagged[0]["id"] == flagged_id
+
+
+# ── nexus-st9u: T1Database.delete ────────────────────────────────────────────
+
+def test_t1_delete_happy_path(t1: T1Database) -> None:
+    """delete() removes the entry and returns True."""
+    doc_id = t1.put(content="goodbye")
+    assert t1.delete(doc_id) is True
+    assert t1.get(doc_id) is None
+
+
+def test_t1_delete_not_found_returns_false(t1: T1Database) -> None:
+    """delete() on an unknown ID returns False without raising."""
+    assert t1.delete("nonexistent-id-00000000-0000-0000-0000") is False
+
+
+def test_t1_delete_session_isolation(tmp_path, monkeypatch) -> None:
+    """delete() does not remove entries owned by a different session."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_a = T1Database(session_id="session-aaaa-0000-0000-0000-000000000000")
+    session_b = T1Database(session_id="session-bbbb-0000-0000-0000-000000000000",
+                           client=session_a._client)  # same underlying collection
+
+    doc_id = session_a.put(content="owned by A")
+    # Session B cannot see or delete A's entry
+    assert session_b.delete(doc_id) is False
+    # Entry still exists for session A
+    assert session_a.get(doc_id) is not None
+    session_a.clear()
+    session_b.clear()
+
+
+def test_t1_delete_does_not_affect_other_entries(t1: T1Database) -> None:
+    """delete() removes only the targeted entry, leaving others intact."""
+    id1 = t1.put(content="keep me")
+    id2 = t1.put(content="delete me")
+    t1.delete(id2)
+    assert t1.get(id1) is not None
+    assert t1.get(id2) is None

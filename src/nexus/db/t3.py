@@ -657,6 +657,56 @@ class T3Database:
             self._delete_batch(col, collection_name, ids)
         return len(ids)
 
+    def delete_by_id(self, collection: str, doc_id: str) -> bool:
+        """Delete a single entry by its exact document ID. Returns True if found and deleted."""
+        try:
+            col = self._client_for(collection).get_collection(collection)
+        except _ChromaNotFoundError:
+            return False
+        result = _chroma_with_retry(col.get, ids=[doc_id], include=[])
+        if not result["ids"]:
+            return False
+        _chroma_with_retry(col.delete, ids=[doc_id])
+        return True
+
+    def find_ids_by_title(self, collection: str, title: str) -> list[str]:
+        """Return all document IDs whose title metadata exactly matches *title*.
+
+        Uses paginated ``col.get()`` to avoid the ChromaDB Cloud 300-record
+        truncation limit.
+        """
+        try:
+            col = self._client_for(collection).get_collection(collection)
+        except _ChromaNotFoundError:
+            return []
+        ids: list[str] = []
+        offset = 0
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        while True:
+            result = _chroma_with_retry(
+                col.get,
+                where={"title": title},
+                include=[],
+                limit=page_limit,
+                offset=offset,
+            )
+            page_ids = result["ids"]
+            ids.extend(page_ids)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+        return ids
+
+    def batch_delete(self, collection: str, ids: list[str]) -> None:
+        """Delete *ids* from *collection* in write-semaphore-bounded batches."""
+        if not ids:
+            return
+        try:
+            col = self._client_for(collection).get_collection(collection)
+        except _ChromaNotFoundError:
+            return
+        self._delete_batch(col, collection, ids)
+
     def collection_info(self, name: str) -> dict:
         """Return metadata for a collection (count, metadata dict).
 

@@ -89,6 +89,59 @@ def list_cmd(project: str | None, agent: str | None) -> None:
         click.echo(f"[{e['id']}] {e['project']}/{e['title']}  ({agent_str}, {e['timestamp']})")
 
 
+@memory.command("delete")
+@click.option("--project", "-p", default=None, help="Project namespace")
+@click.option("--title", "-t", default=None, help="Entry title")
+@click.option("--id", "entry_id", default=None, type=int, help="Numeric row ID")
+@click.option("--all", "all_entries", is_flag=True, default=False, help="Delete all entries in --project")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt")
+def delete_cmd(
+    project: str | None,
+    title: str | None,
+    entry_id: int | None,
+    all_entries: bool,
+    yes: bool,
+) -> None:
+    """Delete one or more memory entries."""
+    # Mutual exclusion — Click has no built-in mechanism; enforce manually.
+    if entry_id is not None and (project or title or all_entries):
+        raise click.UsageError("--id is mutually exclusive with --project, --title, and --all")
+    if all_entries and not project:
+        raise click.UsageError("--all requires --project")
+    if all_entries and title:
+        raise click.UsageError("--all and --title are mutually exclusive")
+    if entry_id is None and not all_entries and not (project and title):
+        raise click.UsageError("provide --id, or --project and --title, or --project and --all")
+
+    with T2Database(_default_db_path()) as db:
+        if all_entries:
+            entries = db.list_entries(project=project)
+            count = len(entries)
+            if count == 0:
+                raise click.ClickException(f"No entries found in project {project!r}")
+            if not yes:
+                n = "entry" if count == 1 else "entries"
+                click.echo(f"Found {count} {n} in {project!r}.")
+                click.confirm(f"Delete {count} {n} from {project!r}?", abort=True)
+            for e in entries:
+                db.delete(project=project, title=e["title"])
+            click.echo(f"Deleted {count} {'entry' if count == 1 else 'entries'} from {project!r}.")
+        else:
+            entry = db.get(id=entry_id) if entry_id is not None else db.get(project=project, title=title)
+            if entry is None:
+                raise click.ClickException("entry not found — use: nx memory list to see available entries")
+            if not yes:
+                preview = entry["content"][:120].replace("\n", " ")
+                click.echo(f"{entry['project']}/{entry['title']}")
+                click.echo(f"  {preview}")
+                click.confirm("Delete?", abort=True)
+            if entry_id is not None:
+                db.delete(id=entry_id)
+            else:
+                db.delete(project=entry["project"], title=entry["title"])
+            click.echo(f"Deleted: {entry['project']}/{entry['title']}")
+
+
 @memory.command("expire")
 def expire_cmd() -> None:
     """Remove TTL-expired memory entries."""

@@ -122,7 +122,7 @@ def list_cmd(collection: str, limit: int) -> None:
         return
     click.echo(f"{col_name}  ({len(entries)} {'entry' if len(entries) == 1 else 'entries'})\n")
     for e in entries:
-        doc_id = e.get("id", "")[:12]
+        doc_id = e.get("id", "")[:16]
         title = (e.get("title") or "")[:40]
         tags = e.get("tags") or ""
         ttl_days = e.get("ttl_days", 0)
@@ -135,6 +135,45 @@ def list_cmd(collection: str, limit: int) -> None:
         tag_str = f"  [{tags}]" if tags else ""
         click.echo(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
 
+
+
+@store.command("delete")
+@click.option("--collection", "-c", required=True,
+              help="Collection name (required)")
+@click.option("--id", "doc_id", default=None,
+              help="Exact 16-char document ID from 'nx store list'")
+@click.option("--title", default=None,
+              help="Exact title metadata match (deletes all matching chunks)")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="Skip confirmation prompt")
+def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool) -> None:
+    """Delete an entry from a T3 knowledge collection.
+
+    Use --id for a single known entry, --title to delete all chunks of a document.
+    To remove an entire collection use: nx collection delete <name>
+    """
+    if not doc_id and not title:
+        raise click.UsageError("provide --id or --title")
+    if doc_id and title:
+        raise click.UsageError("--id and --title are mutually exclusive")
+
+    col_name = t3_collection_name(collection)
+    db = _t3()
+
+    if doc_id:
+        if not db.delete_by_id(col_name, doc_id):
+            raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
+        click.echo(f"Deleted: {doc_id}  from  {col_name}")
+    else:
+        ids = db.find_ids_by_title(col_name, title)
+        if not ids:
+            raise click.ClickException(f"No entries with title {title!r} in {col_name}")
+        if not yes:
+            n = "entry" if len(ids) == 1 else "entries"
+            click.echo(f"Found {len(ids)} {n} with title {title!r} in {col_name}.")
+            click.confirm("Delete?", abort=True)
+        db.batch_delete(col_name, ids)
+        click.echo(f"Deleted {len(ids)} {'entry' if len(ids) == 1 else 'entries'} with title {title!r} from {col_name}.")
 
 @store.command("expire")
 def expire_cmd() -> None:

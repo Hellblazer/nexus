@@ -119,6 +119,28 @@ def promote_cmd(entry_id: str, project: str, title: str) -> None:
     click.echo(f"Promoted {entry_id} -> {project}/{title}")
 
 
+
+@scratch.command("delete")
+@click.argument("entry_id", metavar="ID")
+def delete_cmd(entry_id: str) -> None:
+    """Delete a scratch entry by ID prefix (as shown by 'nx scratch list')."""
+    t1 = _t1()
+    entries = t1.list_entries()
+    matches = [e["id"] for e in entries if e["id"].startswith(entry_id)]
+    # Exact match takes priority over prefix matches
+    exact = [m for m in matches if m == entry_id]
+    if exact:
+        matches = exact
+    if not matches:
+        raise click.ClickException(f"scratch entry {entry_id!r} not found")
+    if len(matches) > 1:
+        raise click.ClickException(
+            f"ambiguous ID prefix {entry_id!r} — {len(matches)} entries match; be more specific"
+        )
+    if not t1.delete(matches[0]):
+        raise click.ClickException(f"scratch entry {entry_id!r} not found")
+    click.echo(f"Deleted: {entry_id}")
+
 @scratch.command("clear")
 def clear_cmd() -> None:
     """Remove all T1 scratch entries for the current session."""
