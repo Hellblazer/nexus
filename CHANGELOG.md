@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-03-06
+
+### Fixed
+- **PermissionRequest hook** — auto-approve all `nx *` subcommands (previously only read-only
+  subcommands were approved). `nx collection delete` is explicitly denied and requires
+  user confirmation. New subcommands added in future releases are approved automatically.
+
 ## [1.6.0] - 2026-03-06
 
 ### Added
