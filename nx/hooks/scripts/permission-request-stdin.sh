@@ -59,8 +59,14 @@ if [[ "$TOOL" == "Bash" ]]; then
     exit 0
   fi
 
-  # Nexus read-only commands
-  if [[ "$COMMAND" =~ ^nx\ (search|store\ list|store\ get|memory\ list|memory\ get|memory\ search|scratch\ list|doctor|health|index) ]]; then
+  # Deny destructive nx commands that need explicit user confirmation
+  if [[ "$COMMAND" =~ ^nx\ collection\ delete ]]; then
+    echo "deny"
+    exit 0
+  fi
+
+  # Auto-approve all nx commands (nexus CLI)
+  if [[ "$COMMAND" =~ ^nx($|[[:space:]]) ]]; then
     echo "allow"
     exit 0
   fi
