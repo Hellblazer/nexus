@@ -88,6 +88,7 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 |------------|-------------|
 | `put FILE_OR_DASH` | Store document (use `-` for stdin) |
 | `list` | List stored entries |
+| `delete` | Delete a single entry by ID or title |
 | `expire` | Remove expired entries |
 
 **`put` flags:**
@@ -107,6 +108,17 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
 | `-n` / `--limit NUM` | Maximum entries to show (default: 200) |
 
+**`delete` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-c` / `--collection NAME` | Collection name (required) |
+| `--id ID` | Exact 16-char document ID from `nx store list` |
+| `--title TITLE` | Exact title metadata match (deletes all matching chunks) |
+| `-y` / `--yes` | Skip confirmation prompt |
+
+Note: IDs shown by `nx store list` are 16 hex chars. `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
+
 ---
 
 ## nx memory
@@ -124,6 +136,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | `get --project NAME --title NAME` | Read entry by project + title |
 | `search QUERY` | FTS5 keyword search |
 | `list` | List entries |
+| `delete` | Delete one or more entries |
 | `expire` | Remove expired entries |
 | `promote ID --collection NAME` | Promote entry to T3 by ID |
 
@@ -134,6 +147,18 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 **`promote` flags:** `--collection` (required), `--tags`, `--remove`
 
 **`search` flags:** `--project NAME`
+
+**`delete` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-p` / `--project NAME` | Project namespace |
+| `-t` / `--title NAME` | Entry title |
+| `--id ID` | Numeric row ID |
+| `--all` | Delete all entries in `--project` (requires `--project`) |
+| `-y` / `--yes` | Skip confirmation prompt |
+
+`--id` is mutually exclusive with `--project`, `--title`, and `--all`. Confirmation prompt shows `project/title` and content preview before deleting.
 
 ---
 
@@ -151,6 +176,7 @@ nx scratch put "hypothesis: cache invalidation is stale"
 | `get ID` | Retrieve by ID |
 | `search QUERY` | Search scratch notes |
 | `list` | List all notes |
+| `delete ID` | Delete one entry by ID prefix (no prompt) |
 | `flag ID` | Mark for auto-flush to T2 at session end |
 | `unflag ID` | Remove flush mark |
 | `promote ID --project NAME --title NAME` | Promote to T2 |

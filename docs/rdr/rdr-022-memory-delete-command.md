@@ -2,10 +2,12 @@
 id: RDR-022
 title: "Add delete subcommand to nx memory, nx store, nx scratch"
 type: enhancement
-status: accepted
+status: closed
 priority: P2
 created: 2026-03-05
 accepted_date: 2026-03-05
+closed_date: 2026-03-06
+close_reason: implemented
 ---
 
 # RDR-022: Add delete subcommand to nx memory, nx store, nx scratch

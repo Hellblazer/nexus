@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-03-06
+
+### Added
+- **`nx memory delete`** (RDR-022) — delete T2 memory entries by `--project`/`--title`,
+  `--id`, or `--project`/`--all`. Confirmation prompt shows `project/title` and content
+  preview. `--yes` bypasses prompts. `--all` requires `--project` and is mutually
+  exclusive with `--title` and `--id`.
+- **`nx store delete`** (RDR-022) — delete T3 knowledge entries by exact 16-char `--id`
+  or by `--title` (exact metadata match, paginated to handle multi-chunk documents).
+  `--collection` is required. `--yes` bypasses the `--title` confirmation prompt.
+- **`nx scratch delete`** (RDR-022) — delete a T1 scratch entry by ID prefix (as shown
+  by `nx scratch list`). No confirmation prompt (T1 is ephemeral). Session ownership is
+  verified before deleting — entries from other sessions cannot be removed.
+- `T2Database.delete()` overloaded with `id: int | None` keyword argument, matching the
+  `get()` API pattern.
+- `T3Database.delete_by_id()`, `find_ids_by_title()` (paginated), `batch_delete()`.
+- `T1Database.delete()` with two-step session-ownership check.
+
+### Changed
+- `nx store list` now shows the full 16-char document ID (previously truncated to 12),
+  enabling copy-paste into `nx store delete --id`.
+
 ## [1.5.3] - 2026-03-05
 
 ### Docs
