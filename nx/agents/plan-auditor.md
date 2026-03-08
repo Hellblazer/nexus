@@ -4,6 +4,7 @@ version: "2.0"
 description: Reviews and validates technical plans for accuracy, completeness, and codebase alignment. Use before implementing any plan — catches gaps and technical errors before they become bugs.
 model: sonnet
 color: orange
+tools: ["Read", "Grep", "Glob", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
 ---
 
 ## Usage Examples

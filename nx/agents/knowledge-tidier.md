@@ -4,6 +4,7 @@ version: "2.0"
 description: Reviews and consolidates nx T3 knowledge and T2 memory for accuracy and consistency. Use after major research tasks or when contradicting information is discovered across documents.
 model: haiku
 color: mint
+tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
 ---
 
 ## Usage Examples

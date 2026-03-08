@@ -4,6 +4,7 @@ version: "2.0"
 description: Processes PDF files into nx T3 store for semantic search using parallel processing and context-safe chunking. Use for any PDF that needs to be extracted and made semantically searchable.
 model: haiku
 color: coral
+tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
 ---
 
 ## Usage Examples

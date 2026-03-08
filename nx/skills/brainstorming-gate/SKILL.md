@@ -58,8 +58,16 @@ digraph brainstorming {
 3. **Ask clarifying questions** — one at a time, understand purpose/constraints/success criteria
 4. **Propose 2-3 approaches** — with trade-offs and your recommendation
 5. **Present design** — scaled to complexity, get user approval after each section
-6. **Write design doc** — save to `docs/plans/YYYY-MM-DD-<topic>-design.md`
-7. **Transition** — invoke strategic-planning skill to create implementation plan
+6. **RDR status check** — Scan the user request, design doc, and relay task for the
+   pattern `RDR-\d+`. For each match:
+   - Run: `nx memory get --project {repo}_rdr --title NNN`
+   - If status is not `accepted` or `closed`, **warn the user**:
+     "RDR-NNN is still {status}. Run `/rdr-gate NNN` and `/rdr-accept NNN`
+     before planning implementation."
+   - If the lookup fails or returns no result, warn and proceed (fail-open).
+   - If no `RDR-\d+` pattern is found, proceed normally.
+7. **Write design doc** — save to `docs/plans/YYYY-MM-DD-<topic>-design.md`
+8. **Transition** — invoke strategic-planning skill to create implementation plan
 
 ## Key Principles
 
