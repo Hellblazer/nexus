@@ -2,10 +2,12 @@
 id: RDR-023
 title: "Agent Tool Permissions Audit and Remediation"
 type: enhancement
-status: accepted
+status: closed
 priority: P1
 created: 2026-03-07
 accepted_date: 2026-03-07
+closed_date: 2026-03-07
+close_reason: implemented
 reviewed_by: self
 ---
 
