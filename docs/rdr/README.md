@@ -38,6 +38,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-022](rdr-022-memory-delete-command.md) | Add delete subcommand to nx memory, nx store, nx scratch | Enhancement | Closed | 2026-03-05 |
 | [RDR-023](rdr-023-agent-tool-permissions-audit.md) | Agent Tool Permissions Audit and Remediation | Enhancement | Closed | 2026-03-07 |
 | [RDR-024](rdr-024-rdr-process-guardrails.md) | RDR Process Guardrails: Prevent Implementation Before Gate/Accept | Enhancement | Closed | 2026-03-07 |
+| [RDR-025](rdr-025-language-agnostic-agents.md) | Generalize Java Agents to Language-Agnostic Developer/Debugger/Architect-Planner | Enhancement | Draft | 2026-03-08 |
 
 ## RDR Process Documentation
 
