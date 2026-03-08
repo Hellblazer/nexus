@@ -4,6 +4,21 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-03-07
+
+### Added
+- **Agent tool permissions** (RDR-023) — explicit `tools` frontmatter on all 14 agents
+  with least-privilege assignments and sequential thinking MCP tool.
+- **PermissionRequest hook expansion** (RDR-023) — auto-approve Read, Grep, Glob, Write,
+  Edit, WebSearch, WebFetch, Agent, and sequential thinking for subagents. Expanded Bash
+  allowlist with `uv run pytest`, additional `bd` subcommands, read-only `git branch`/`git tag`.
+- **RDR process guardrails** (RDR-024) — soft-warning pre-checks in brainstorming-gate
+  skill, strategic-planner relay validation, and bead context hook to catch implementation
+  on ungated RDRs.
+
+### Fixed
+- **git branch/tag hook patterns** — restricted to read-only forms only.
+
 ## [1.6.1] - 2026-03-06
 
 ### Changed

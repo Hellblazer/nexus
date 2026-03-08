@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-03-07
+
+### Added
+- **Agent tool permissions** (RDR-023) — all 14 nx agents now have explicit `tools`
+  frontmatter following least-privilege assignments. Each agent declares only the
+  tools it needs (Read/Grep/Glob, Bash, Write/Edit, WebSearch/WebFetch, Agent).
+  Sequential thinking MCP tool added to all agents uniformly.
+- **PermissionRequest hook expansion** (RDR-023) — auto-approve safe non-Bash tools
+  (Read, Grep, Glob, Write, Edit, WebSearch, WebFetch, Agent, sequential thinking)
+  so subagents are not silently denied. Bash allowlist expanded with `uv run pytest`,
+  additional `bd` subcommands, and read-only `git branch`/`git tag` forms.
+- **RDR process guardrails** (RDR-024) — soft-warning pre-checks at three workflow
+  points to catch implementation attempts on ungated/unaccepted RDRs:
+  brainstorming-gate skill (step 6), strategic-planner relay validation (step 6),
+  and bead context hook (regex RDR-NNN detection).
+
+### Fixed
+- **git branch/tag hook patterns** — restricted to read-only forms only (`git branch -a`,
+  `git tag -l`). Previously, bare `branch` and `tag` matched destructive operations
+  like `git branch -D` and `git tag -d`.
+
 ## [1.6.1] - 2026-03-06
 
 ### Fixed
