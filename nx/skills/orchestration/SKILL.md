@@ -29,11 +29,11 @@ digraph routing {
 
     "strategic-planner" [shape=ellipse];
     "plan-auditor" [shape=ellipse];
-    "java-architect-planner" [shape=ellipse];
-    "java-developer" [shape=ellipse];
+    "architect-planner" [shape=ellipse];
+    "developer" [shape=ellipse];
     "code-review-expert" [shape=ellipse];
     "test-validator" [shape=ellipse];
-    "java-debugger" [shape=ellipse];
+    "debugger" [shape=ellipse];
     "deep-analyst" [shape=ellipse];
     "substantive-critic" [shape=ellipse];
     "deep-research-synthesizer" [shape=ellipse];
@@ -49,14 +49,14 @@ digraph routing {
 
     "Plan a feature" -> "strategic-planner";
     "strategic-planner" -> "plan-auditor" [label="then"];
-    "plan-auditor" -> "java-architect-planner" [label="then"];
+    "plan-auditor" -> "architect-planner" [label="then"];
 
-    "Implement code" -> "java-developer";
-    "java-developer" -> "code-review-expert" [label="then"];
+    "Implement code" -> "developer";
+    "developer" -> "code-review-expert" [label="then"];
     "code-review-expert" -> "test-validator" [label="then"];
 
-    "Debug issue" -> "java-debugger";
-    "java-debugger" -> "deep-analyst" [label="if cross-cutting"];
+    "Debug issue" -> "debugger";
+    "debugger" -> "deep-analyst" [label="if cross-cutting"];
 
     "Review code" -> "code-review-expert";
     "code-review-expert" -> "substantive-critic" [label="if critical"];
@@ -97,9 +97,9 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 | Request Type | Primary Agent | Pipeline |
 |-------------|---------------|----------|
-| Plan a feature | strategic-planner | -> plan-auditor -> java-architect-planner |
-| Implement code | java-developer | -> code-review-expert -> test-validator |
-| Debug issue | java-debugger | -> (if cross-cutting) deep-analyst |
+| Plan a feature | strategic-planner | -> plan-auditor -> architect-planner |
+| Implement code | developer | -> code-review-expert -> test-validator |
+| Debug issue | debugger | -> (if cross-cutting) deep-analyst |
 | Review code | code-review-expert | -> (if critical) substantive-critic |
 | Research topic | deep-research-synthesizer | -> knowledge-tidier |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |

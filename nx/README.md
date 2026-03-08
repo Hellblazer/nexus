@@ -47,7 +47,7 @@ Run `/nx-preflight` after installing to verify all dependencies are present.
 |------|-----------|
 | Explore an unfamiliar codebase | `/analyze-code` |
 | Plan a feature or component | `/brainstorming-gate` → `/create-plan` |
-| Debug a Java failure | `/java-debug` (after 2–3 failed attempts) |
+| Debug a failure | `/debug` (after 2–3 failed attempts) |
 | Review code before committing | `/review-code` |
 | Research an unfamiliar topic | `/research` |
 | Document a technical decision | `/rdr-create` → `/rdr-research` → `/rdr-accept` |
@@ -93,9 +93,9 @@ nx/
     ├── codebase-analysis/   # → codebase-deep-analyzer agent
     ├── deep-analysis/       # → deep-analyst agent
     ├── substantive-critique/# → substantive-critic agent
-    ├── java-architecture/   # → java-architect-planner agent
-    ├── java-debugging/      # → java-debugger agent
-    ├── java-development/    # → java-developer agent
+    ├── architecture/        # → architect-planner agent
+    ├── debugging/           # → debugger agent
+    ├── development/         # → developer agent
     ├── knowledge-tidying/   # → knowledge-tidier agent
     ├── orchestration/       # → orchestrator agent
     ├── pdf-processing/      # → pdf-chromadb-processor agent
@@ -149,9 +149,9 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | deep-analyst | deep-analysis | `/deep-analysis` | opus | Complex problem investigation, root cause |
 | substantive-critic | substantive-critique | `/substantive-critique` | sonnet | Constructive critique of plans/designs/code |
 | deep-research-synthesizer | research-synthesis | `/research` | sonnet | Multi-source research with synthesis |
-| java-architect-planner | java-architecture | `/java-architecture` | opus | Java architecture design, execution plans |
-| java-debugger | java-debugging | `/java-debug` | opus | Hypothesis-driven Java debugging |
-| java-developer | java-development | `/java-implement` | sonnet | TDD implementation, test-first methodology |
+| architect-planner | architecture | `/architecture` | opus | Software architecture design, execution plans |
+| debugger | debugging | `/debug` | opus | Hypothesis-driven debugging |
+| developer | development | `/implement` | sonnet | TDD implementation, test-first methodology |
 | knowledge-tidier | knowledge-tidying | `/knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
 | orchestrator | orchestration | `/orchestrate` | haiku | Route requests to appropriate agents |
 | pdf-chromadb-processor | pdf-processing | `/pdf-process` | haiku | Index PDFs into nx store for semantic search |
@@ -163,13 +163,11 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 Defined in `registry.yaml`:
 
-- **feature** *(Java)*: strategic-planner → plan-auditor → java-architect-planner → java-developer → code-review-expert → test-validator
-- **bug** *(Java)*: java-debugger → java-developer → code-review-expert → test-validator
+- **feature**: strategic-planner → plan-auditor → architect-planner → developer → code-review-expert → test-validator
+- **bug**: debugger → developer → code-review-expert → test-validator
 - **research**: deep-research-synthesizer → knowledge-tidier
 - **onboarding**: codebase-deep-analyzer → strategic-planner
-- **architecture** *(Java)*: codebase-deep-analyzer → deep-analyst → strategic-planner → plan-auditor → java-architect-planner
-
-> **Non-Java workflows**: The `feature` and `bug` pipelines include Java-specific agents. For Python, Go, TypeScript, or other languages: `brainstorming-gate` → `strategic-planner` → `code-review-expert` gives the same planning and review discipline without Java-specific steps.
+- **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → plan-auditor → architect-planner
 
 ## Hooks
 
@@ -197,9 +195,9 @@ Defined in `registry.yaml`:
 - `/analyze-code` → codebase-deep-analyzer
 - `/review-code` → code-review-expert
 - `/test-validate` → test-validator
-- `/java-implement` → java-developer
-- `/java-debug` → java-debugger
-- `/java-architecture` → java-architect-planner
+- `/implement` → developer
+- `/debug` → debugger
+- `/architecture` → architect-planner
 - `/orchestrate` → orchestrator
 - `/knowledge-tidy` → knowledge-tidier
 - `/pdf-process` → pdf-chromadb-processor

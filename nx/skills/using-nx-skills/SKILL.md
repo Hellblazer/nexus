@@ -72,9 +72,9 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 | codebase-analysis | `/analyze-code` | Exploring unfamiliar codebase or understanding module structure before changes |
 | deep-analysis | `/deep-analysis` | Surface-level analysis is insufficient; hypothesis-driven investigation needed |
 | research-synthesis | `/research` | Researching unfamiliar topics or comparing technology approaches |
-| java-architecture | `/java-architecture` | Complex Java features need architectural design before implementation |
-| java-development | `/java-implement` | Plan approved; Java implementation work ready to begin |
-| java-debugging | `/java-debug` | Java tests fail or behavior is non-deterministic, especially after 2+ failed attempts |
+| architecture | `/architecture` | Complex features need architectural design before implementation |
+| development | `/implement` | Plan approved; implementation work ready to begin |
+| debugging | `/debug` | Tests fail or behavior is non-deterministic, especially after 2+ failed attempts |
 
 ### RDR Lifecycle (research-design-review documents)
 
@@ -137,7 +137,7 @@ When multiple skills could apply:
 
 1. **Discipline skills first** (brainstorming-gate) — these determine HOW to approach
 2. **Process skills second** (strategic-planning, code-review) — these guide workflow
-3. **Implementation skills third** (java-development, java-debugging) — these execute work
+3. **Implementation skills third** (development, debugging) — these execute work
 
 ## Skill Types
 

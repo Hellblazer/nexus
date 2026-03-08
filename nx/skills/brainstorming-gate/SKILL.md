@@ -41,7 +41,7 @@ digraph brainstorming {
 }
 ```
 
-**Terminal state: invoke strategic-planning.** Do NOT invoke java-development, java-architecture, or any other implementation skill. The ONLY next step is strategic-planning (to create the implementation plan).
+**Terminal state: invoke strategic-planning.** Do NOT invoke development, architecture, or any other implementation skill. The ONLY next step is strategic-planning (to create the implementation plan).
 
 ## Checklist
 

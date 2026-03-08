@@ -62,7 +62,7 @@ The agent will:
 
 After validation:
 - **Tests pass + coverage adequate**: `bd close <id>` with success note
-- **Tests fail**: Keep in_progress, may trigger java-debugging
+- **Tests fail**: Keep in_progress, may trigger debugging
 - **Coverage gaps**: Create new bead for missing tests
 
 ## Success Criteria

@@ -46,7 +46,7 @@
 
 ## Adding nx search Integration
 
-See java-developer.md or code-review-expert.md for example patterns:
+See developer.md or code-review-expert.md for example patterns:
 - Use natural language queries
 - Use `--hybrid` for code search (semantic + ripgrep)
 - Use `--n` in 10-30 range

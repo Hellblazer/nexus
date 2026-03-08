@@ -205,7 +205,7 @@ Example: If nx store write fails but nx memory succeeds, note in response: "Anal
 
 ## Relationship to Other Agents
 
-- **vs java-debugger**: Debugger focuses on specific Java bugs. You analyze broader system behavior and multi-component interactions.
+- **vs debugger**: Debugger focuses on specific bugs. You analyze broader system behavior and multi-component interactions.
 - **vs codebase-deep-analyzer**: Codebase analyzer maps structure. You investigate specific behaviors and problems.
 - **vs substantive-critic**: Deep-critic reviews work products. You investigate and explain system behavior.
 

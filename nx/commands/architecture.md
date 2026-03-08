@@ -1,8 +1,8 @@
 ---
-description: Design Java architecture and create phased execution plans using java-architect-planner agent
+description: Design architecture and create phased execution plans using architect-planner agent
 ---
 
-# Java Architecture Request
+# Architecture Request
 
 !{
   echo "## Context"
@@ -16,7 +16,7 @@ description: Design Java architecture and create phased execution plans using ja
     echo ""
   fi
 
-  # Maven/Gradle project structure
+  # Project structure
   echo "### Project Structure"
   echo '```'
   if [ -f "pom.xml" ]; then
@@ -25,8 +25,16 @@ description: Design Java architecture and create phased execution plans using ja
   elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
     echo "Gradle project"
     find . -name "build.gradle*" -not -path "./.gradle/*" -not -path "./build/*" 2>/dev/null | head -10
+  elif [ -f "pyproject.toml" ]; then
+    echo "Python project"
+  elif [ -f "go.mod" ]; then
+    echo "Go project"
+  elif [ -f "Cargo.toml" ]; then
+    echo "Rust project"
+  elif [ -f "package.json" ]; then
+    echo "Node.js/TypeScript project"
   else
-    echo "No Maven/Gradle project detected"
+    echo "Check CLAUDE.md for project type"
   fi
   echo '```'
   echo ""
@@ -46,7 +54,7 @@ description: Design Java architecture and create phased execution plans using ja
 
   echo "### Pipeline Position"
   echo ""
-  echo "strategic-planner -> plan-auditor -> java-architect-planner -> java-developer"
+  echo "strategic-planner -> plan-auditor -> architect-planner -> developer"
   echo ""
   echo "### Tip"
   echo ""
@@ -78,12 +86,12 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **java-architecture** skill with the following relay. Fill in dynamic fields from the context above:
+Invoke the **architecture** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
-## Relay: java-architect-planner
+## Relay: architect-planner
 
-**Task**: Design Java architecture for: $ARGUMENTS
+**Task**: Design architecture for: $ARGUMENTS
 **Bead**: [fill from active epic/feature bead above or create new]
 
 ### Input Artifacts
@@ -93,7 +101,7 @@ Invoke the **java-architecture** skill with the following relay. Fill in dynamic
 $ARGUMENTS
 
 ### Deliverable
-Comprehensive Java architecture design with component boundaries, interface contracts, dependency graph, phased execution plan with beads, and risk assessment with mitigations.
+Comprehensive architecture design with component boundaries, interface contracts, dependency graph, phased execution plan with beads, and risk assessment with mitigations.
 
 ### Quality Criteria
 - [ ] All requirements addressed in design
@@ -101,7 +109,7 @@ Comprehensive Java architecture design with component boundaries, interface cont
 - [ ] Integration points with existing code identified
 - [ ] Phased execution plan created with beads and dependencies
 - [ ] Risks identified with concrete mitigations
-- [ ] Design conforms to Java 24 patterns (var, modern concurrency, no synchronized)
+- [ ] Design follows project conventions (check CLAUDE.md)
 - [ ] Ready for plan-auditor validation
 
 **IMPORTANT**: After architecture is designed, MUST delegate to plan-auditor for validation before implementation begins.

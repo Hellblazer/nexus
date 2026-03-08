@@ -54,7 +54,7 @@ The plan-auditor agent uses `mcp__sequential-thinking__sequentialthinking`:
 
 ## Decision Outcomes
 
-**GO**: Proceed to java-developer with validated plan
+**GO**: Proceed to developer with validated plan
 **NO-GO**: Return to strategic-planner with specific issues for revision
 
 ## Agent-Specific PRODUCE

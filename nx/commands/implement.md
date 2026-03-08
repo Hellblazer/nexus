@@ -1,5 +1,5 @@
 ---
-description: Implement feature using java-developer agent
+description: Implement feature using developer agent
 ---
 
 # Implementation Request
@@ -37,6 +37,14 @@ description: Implement feature using java-developer agent
     echo "Maven project - use ./mvnw for builds"
   elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
     echo "Gradle project - use ./gradlew for builds"
+  elif [ -f "pyproject.toml" ]; then
+    echo "Python project - check CLAUDE.md for build/test commands"
+  elif [ -f "go.mod" ]; then
+    echo "Go project - use go build/test"
+  elif [ -f "Cargo.toml" ]; then
+    echo "Rust project - use cargo build/test"
+  elif [ -f "package.json" ]; then
+    echo "Node.js/TypeScript project - check CLAUDE.md for build/test commands"
   fi
   echo '```'
 
@@ -64,10 +72,10 @@ $ARGUMENTS
 
 **PREREQUISITE**: Plan must be validated by plan-auditor before implementation.
 
-Invoke the **java-development** skill with the following relay. Fill in dynamic fields from the context above:
+Invoke the **development** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
-## Relay: java-developer
+## Relay: developer
 
 **Task**: Implement "$ARGUMENTS" using TDD methodology
 **Bead**: [fill from active in_progress bead above]
@@ -82,12 +90,12 @@ Invoke the **java-development** skill with the following relay. Fill in dynamic 
 $ARGUMENTS
 
 ### Deliverable
-Working implementation with passing tests, following TDD red-green-refactor cycle. Code uses Java 24 patterns (var, modern concurrency, no synchronized).
+Working implementation with passing tests, following TDD red-green-refactor cycle.
 
 ### Quality Criteria
 - [ ] Tests written before implementation (TDD)
-- [ ] All tests pass (./mvnw test)
-- [ ] Code follows project conventions (Java 24, FP32-only for neural nets)
+- [ ] All tests pass (run the project's test command from CLAUDE.md)
+- [ ] Code follows project conventions (check CLAUDE.md)
 - [ ] No regressions introduced in existing tests
 
 **IMPORTANT**: After implementation completes, MUST delegate to code-review-expert for quality review.

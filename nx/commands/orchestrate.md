@@ -29,7 +29,7 @@ description: Route request to appropriate agent using orchestrator
 
   echo "### Available Agents"
   echo ""
-  echo "Development: java-developer, java-architect-planner, java-debugger"
+  echo "Development: developer, architect-planner, debugger"
   echo "Review: code-review-expert, plan-auditor, substantive-critic, test-validator"
   echo "Research: deep-research-synthesizer"
   echo "Analysis: deep-analyst, codebase-deep-analyzer, strategic-planner"
