@@ -9,7 +9,7 @@
       "name": "nx",
       "source": "./nx",
       "description": "Self-hosted three-tier knowledge management with 14 specialized agents, semantic search, and RDR decision tracking for Claude Code.",
-      "version": "1.7.1"
+      "version": "1.8.0"
     }
   ]
 }

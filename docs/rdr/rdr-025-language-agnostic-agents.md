@@ -2,10 +2,12 @@
 id: RDR-025
 title: "Generalize Java Agents to Language-Agnostic Developer/Debugger/Architect-Planner"
 type: enhancement
-status: accepted
+status: closed
 priority: P1
 created: 2026-03-08
 accepted_date: 2026-03-08
+closed_date: 2026-03-08
+close_reason: implemented
 reviewed_by: self
 related_issues: ["RDR-023"]
 ---

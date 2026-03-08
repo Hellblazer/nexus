@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-03-08
+
+### Changed
+- **Language-agnostic agents** (RDR-025) — renamed 3 Java-specific agents to
+  language-agnostic names: `java-developer` → `developer`, `java-debugger` →
+  `debugger`, `java-architect-planner` → `architect-planner`. Agents now read
+  CLAUDE.md at runtime to detect language, build system, test command, and coding
+  conventions. Slash commands renamed: `/java-implement` → `/implement`,
+  `/java-debug` → `/debug`, `/java-architecture` → `/architecture`.
+- **Plugin registry updated** — all pipelines, predecessor/successor chains,
+  naming aliases, and model summary reflect new agent names.
+
+### Added
+- **CLAUDE.md preflight check** — `/nx-preflight` now includes a section 6 that
+  validates CLAUDE.md has language, build system, and test command information.
+  Missing sections show `[?]` warnings (not errors).
+
 ## [1.7.1] - 2026-03-07
 
 ### Added

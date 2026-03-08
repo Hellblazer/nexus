@@ -4,6 +4,26 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-03-08
+
+### Changed
+- **Language-agnostic agents** (RDR-025) — renamed `java-developer` → `developer`,
+  `java-debugger` → `debugger`, `java-architect-planner` → `architect-planner`.
+  Agents use CLAUDE.md delegation for language/build/test detection at runtime.
+- **Skill and command renames** — `java-development/` → `development/`,
+  `java-debugging/` → `debugging/`, `java-architecture/` → `architecture/`.
+  Commands: `/java-implement` → `/implement`, `/java-debug` → `/debug`,
+  `/java-architecture` → `/architecture`.
+- **Registry updated** — all pipelines, predecessor/successor chains, naming aliases,
+  and model summary reflect new agent names.
+- **18 cross-reference files updated** — orchestrator, strategic-planner, test-validator,
+  plan-auditor, deep-analyst, deep-research-synthesizer, codebase-deep-analyzer,
+  shared protocols, 6 skill files, and orchestrate command.
+
+### Added
+- **CLAUDE.md preflight check** in `/nx-preflight` — validates language, build system,
+  and test command presence. Warnings only, not errors.
+
 ## [1.7.1] - 2026-03-07
 
 ### Added
