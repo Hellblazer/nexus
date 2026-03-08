@@ -47,7 +47,8 @@ description, model, color.
 The existing `permission-request-stdin.sh` hook only checks `$TOOL == "Bash"`
 with allow/deny rules for specific commands. For any non-Bash tool (Read, Write,
 Edit, WebSearch, etc.), the hook falls through to "ask user" — which means silent
-denial for subagents.
+denial for subagents. **The hook is the actual enforcement layer** — it determines
+what subagents can use at runtime regardless of other configuration.
 
 ### Finding 3: Sequential thinking is pervasive
 
@@ -61,15 +62,39 @@ The hook uses `.tool` and `.command` field names. These are confirmed working in
 production (commit 39f9c02 added nx auto-approval using these fields). The stale
 "TBD" comment in the hook was misleading.
 
+## Alternatives Considered
+
+**Approach A — tools frontmatter + expanded PermissionRequest hook only**: Add
+`tools` to each agent and expand the hook to auto-approve tools per category.
+Rejected because it requires maintaining two sources of truth with no proven
+interaction between them.
+
+**Approach B — tools frontmatter + `mode` parameter in skill invocations**: Have
+each skill pass `mode: "bypassPermissions"` when spawning agents, with the tools
+list as the security boundary. Rejected because skills must remember to set mode,
+and it grants blanket access within the listed tools without hook-level filtering.
+
+**Approach C (chosen) — Hybrid defense-in-depth**: Add tools frontmatter (intent
+documentation + possible enforcement) AND expand the hook (guaranteed enforcement).
+The hook is the known-working layer; tools frontmatter provides documentation and
+may also enforce — but the design does not depend on that assumption.
+
 ## Decision: Hybrid Defense-in-Depth (Approach C)
 
 Two independent layers:
 
-1. **`tools` frontmatter** — defines what each agent *should* use (least privilege)
-2. **PermissionRequest hook expansion** — ensures agents *can* use their tools
-   without silent denial
+1. **`tools` frontmatter** — documents what each agent *should* use and may
+   restrict tool availability at the Claude Code runtime level (unverified —
+   see Q2 below)
+2. **PermissionRequest hook expansion** — the guaranteed enforcement layer that
+   ensures agents *can* use their declared tools without silent denial
 
 ### Tool Assignments
+
+> **Note**: "sequential-thinking" in the table below abbreviates the full tool
+> identifier `mcp__plugin_nx_sequential-thinking__sequentialthinking`. The
+> design doc and impl-plan contain the full identifiers as deployed to agent
+> frontmatter.
 
 | Category | Tools | Agents |
 |----------|-------|--------|
@@ -84,24 +109,25 @@ Two independent layers:
 | Tool | Action | Rationale |
 |------|--------|-----------|
 | Read, Grep, Glob | Always allow | Read-only local tools, always safe |
-| Write, Edit | Always allow | Local file ops, controlled by agent tools list |
+| Write, Edit | Always allow | Local file ops; if `tools` frontmatter does NOT enforce at runtime, any agent can write files via the hook — acceptable risk given existing deny rules on destructive Bash commands |
 | WebSearch, WebFetch | Always allow | Read-only external, no mutations |
 | Agent | Always allow | Orchestrator delegation |
 | Sequential thinking | Always allow | Reasoning primitive, no side effects |
-| Bash (expanded allowlist) | Allow specific commands | git read, uv run pytest, bd management, nx CLI |
-| Bash (destructive) | Deny | git push --force, bd delete, etc. |
-| MCP tools (mixedbread, serena) | Ask user | Not auto-approved; agents use nx CLI instead |
+| Bash (expanded allowlist) | Allow specific commands | git read, uv run pytest, bd management (create/update/close/dep/remember/memories/sync/stats/doctor), nx CLI |
+| Bash (destructive) | Deny | git push --force, git reset --hard, git clean -f, bd delete, bd sync --force, nx collection delete, ./mvnw deploy |
+| MCP tools (mixedbread, serena) | Ask user | Not auto-approved; agents should use `nx` CLI via Bash instead. If an agent legitimately needs an MCP tool with no `nx` equivalent, its tool list and the hook must both be updated. |
 
 ## Resolved Questions
 
 **Q1** (tools: ["*"] vs omitting): Explicit per-agent tool lists are better than
-either option. They document intent, enforce least privilege, and serve as the
-security boundary.
+either option. They document intent and may enforce least privilege at runtime.
 
-**Q2** (does `tools` control access or just system prompt?): The `tools` field
-controls which tools appear in the agent's system prompt AND which tools are
-available. But the PermissionRequest hook is the enforcement layer — both are
-needed for defense-in-depth.
+**Q2** (does `tools` control access or just system prompt?): **Unverified.** We
+believe `tools` frontmatter restricts which tools are available to the agent, but
+no Claude Code documentation explicitly confirms runtime enforcement vs.
+system-prompt-only behavior. The hook provides fallback coverage regardless.
+Validation (nexus-ryjo) will test whether an agent without Bash in its tools list
+can actually execute shell commands — this will confirm the enforcement model.
 
 **Q3** (nx CLI via Bash vs dedicated MCP tools): Agents should use `nx` via Bash.
 The PermissionRequest hook already auto-approves `nx` commands. No need for
@@ -112,12 +138,17 @@ primitive with no side effects — no security reason to restrict it.
 
 ## Success Criteria
 
-- [x] All 14 agents have explicit `tools` in frontmatter
+Pre-conditions (verified before gate):
+
+- [x] All 14 agents have explicit `tools` in frontmatter (verified: `grep '^tools:' nx/agents/*.md` — 14 matches)
+- [x] PermissionRequest hook auto-approves safe tools (verified: JSON payload tests — all allow/deny/ask-user scenarios pass)
+- [x] Existing deny rules preserved (verified: destructive commands still denied in hook tests)
+
+Post-conditions (require validation bead nexus-ryjo):
+
 - [ ] knowledge-tidier can successfully run `nx store put` and `nx memory` commands
-- [x] No agent has broader tool access than its task requires
 - [ ] Agents that were previously failing due to permission denials now work
-- [x] PermissionRequest hook auto-approves safe tools (tested with JSON payloads)
-- [x] Existing deny rules preserved (destructive git, bd delete, etc.)
+- [ ] Confirm whether `tools` frontmatter enforces access at runtime (negative test: agent without Bash attempts shell command)
 
 ## Implementation
 
