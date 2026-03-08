@@ -34,7 +34,7 @@ agents:
       - "Security analysis"
       - "Best practices validation"
     typical_runtime: "15-30 seconds per file"
-    predecessors: [java-developer]
+    predecessors: [developer]
     successors: [test-validator]
 
   codebase-deep-analyzer:
@@ -97,13 +97,13 @@ agents:
     predecessors: []
     successors: [knowledge-tidier]
 
-  java-architect-planner:
+  architect-planner:
     model: opus
     version: "2.0"
     color: green
-    skill: java-architecture
-    slash_command: /java-architecture
-    description: "Designs Java architecture and creates phased execution plans"
+    skill: architecture
+    slash_command: /architecture
+    description: "Designs software architecture and creates phased execution plans"
     triggers:
       - "starting complex features requiring architectural design"
       - "planning multi-phase implementations"
@@ -115,19 +115,18 @@ agents:
       - "Integration patterns"
     typical_runtime: "60-120 seconds"
     predecessors: [strategic-planner, plan-auditor]
-    successors: [java-developer]
+    successors: [developer]
 
-  java-debugger:
+  debugger:
     model: opus
     version: "2.0"
     color: red
-    skill: java-debugging
-    slash_command: /java-debug
-    description: "Hypothesis-driven debugging for Java failures"
+    skill: debugging
+    slash_command: /debug
+    description: "Hypothesis-driven debugging for failures"
     triggers:
       - "test failures"
-      - "NullPointerException"
-      - "ClassCastException"
+      - "exceptions with unclear cause"
       - "after 2+ failed fix attempts"
       - "non-deterministic behavior"
     strengths:
@@ -136,14 +135,14 @@ agents:
       - "Stack trace analysis"
     typical_runtime: "30-90 seconds"
     predecessors: []
-    successors: [java-developer]
+    successors: [developer]
 
-  java-developer:
+  developer:
     model: sonnet
     version: "2.0"
     color: cyan
-    skill: java-development
-    slash_command: /java-implement
+    skill: development
+    slash_command: /implement
     description: "TDD implementation with test-first methodology"
     triggers:
       - "plan approved by plan-auditor"
@@ -153,9 +152,9 @@ agents:
     strengths:
       - "Test-first development"
       - "Clean code practices"
-      - "Modern Java patterns"
+      - "Modern language patterns"
     typical_runtime: "varies by complexity"
-    predecessors: [plan-auditor, java-architect-planner]
+    predecessors: [plan-auditor, architect-planner]
     successors: [code-review-expert, test-validator]
 
   knowledge-tidier:
@@ -233,7 +232,7 @@ agents:
       - "Codebase alignment"
     typical_runtime: "30-60 seconds"
     predecessors: [strategic-planner]
-    successors: [java-architect-planner, java-developer]
+    successors: [architect-planner, developer]
 
 
   strategic-planner:
@@ -293,7 +292,7 @@ agents:
       - "Test quality assessment"
       - "Gap identification"
     typical_runtime: "30-60 seconds"
-    predecessors: [java-developer, code-review-expert]
+    predecessors: [developer, code-review-expert]
     successors: []
 
 # =============================================================================
@@ -441,16 +440,16 @@ pipelines:
     sequence:
       - strategic-planner
       - plan-auditor
-      - java-architect-planner
-      - java-developer
+      - architect-planner
+      - developer
       - code-review-expert
       - test-validator
 
   bug:
     description: "Bug investigation and fix with review"
     sequence:
-      - java-debugger
-      - java-developer
+      - debugger
+      - developer
       - code-review-expert
       - test-validator
 
@@ -473,7 +472,7 @@ pipelines:
       - deep-analyst
       - strategic-planner
       - plan-auditor
-      - java-architect-planner
+      - architect-planner
 
 # =============================================================================
 # NAMING ALIASES
@@ -483,8 +482,8 @@ pipelines:
 
 naming_aliases:
   # Format: slash_command -> skill_directory (reason)
-  /java-implement: java-development    # Action-oriented naming
-  /java-debug: java-debugging          # Shorter, memorable
+  /implement: development              # Action-oriented naming
+  /debug: debugging                    # Shorter, memorable
   /create-plan: strategic-planning     # Avoids built-in /plan collision
   /research: research-synthesis        # Common usage
   /knowledge-tidy: knowledge-tidying   # Verb form preference
@@ -502,15 +501,15 @@ naming_aliases:
 model_summary:
   opus: # Complex reasoning, architecture, debugging
     - strategic-planner
-    - java-architect-planner
-    - java-debugger
+    - architect-planner
+    - debugger
     - deep-analyst
   sonnet: # Balanced - most common agents
     - code-review-expert
     - codebase-deep-analyzer
     - substantive-critic
     - deep-research-synthesizer
-    - java-developer
+    - developer
     - plan-auditor
     - test-validator
   haiku: # Fast, cheap - utility agents

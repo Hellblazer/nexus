@@ -174,8 +174,8 @@ Store using these naming conventions:
 
 ## Relationship to Other Agents
 
-- **vs java-developer**: Developer writes tests as part of TDD. You validate that tests are adequate.
-- **vs java-debugger**: Debugger investigates specific bugs. You analyze test suite health and patterns.
+- **vs developer**: Developer writes tests as part of TDD. You validate that tests are adequate.
+- **vs debugger**: Debugger investigates specific bugs. You analyze test suite health and patterns.
 - **vs code-review-expert**: Reviewer checks code quality. You specifically validate test coverage and quality.
 
 ## Validation Workflow

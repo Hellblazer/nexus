@@ -1,11 +1,11 @@
 ---
-name: java-architecture
-description: Use when complex Java features need architectural design before implementation, or when system design decisions span multiple modules
+name: architecture
+description: Use when complex features need architectural design before implementation, or when system design decisions span multiple modules
 ---
 
-# Java Architecture Skill
+# Architecture Skill
 
-Delegates to the **java-architect-planner** agent (model: opus).
+Delegates to the **architect-planner** agent (model: opus).
 
 ## Code Navigation
 
@@ -38,15 +38,15 @@ Delegates to the **java-architect-planner** agent (model: opus).
 ## Pipeline Position
 
 ```
-strategic-planner -> plan-auditor -> java-architect-planner -> java-developer
+strategic-planner -> plan-auditor -> architect-planner -> developer
 ```
 
 ## Agent Invocation
 
-Use the Task tool to invoke **java-architect-planner**:
+Use the Task tool to invoke **architect-planner**:
 
 ```markdown
-## Relay: java-architect-planner
+## Relay: architect-planner
 
 **Task**: [what needs to be done]
 **Bead**: [ID] or 'none'
@@ -67,7 +67,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Architecture Methodology
 
-The java-architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then `mcp__sequential-thinking__sequentialthinking`:
+The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then `mcp__sequential-thinking__sequentialthinking`:
 1. Understand system architecture and integration patterns
 2. Synthesize findings into architectural approach
 3. Define component boundaries and interfaces

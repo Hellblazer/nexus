@@ -14,7 +14,7 @@ Delegates to the **deep-analyst** agent (model: opus).
 - When understanding complex system behavior
 - When surface-level analysis is insufficient
 - When root cause analysis requires deep investigation
-- After java-debugger if issue is cross-cutting
+- After debugger if issue is cross-cutting
 
 ## Agent Invocation
 

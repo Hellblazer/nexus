@@ -189,7 +189,7 @@ Store using these naming conventions:
 ## Relationship to Other Agents
 
 - **vs deep-analyst**: You map codebase structure and patterns. Deep-analyst investigates specific behaviors and problems.
-- **vs java-architect-planner**: You analyze what exists. Architect plans what should be built.
+- **vs architect-planner**: You analyze what exists. Architect plans what should be built.
 - **vs code-review-expert**: You analyze broad codebase patterns. Reviewer focuses on specific code changes.
 
 **Quality Assurance:**

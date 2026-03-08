@@ -8,7 +8,7 @@ This file documents the standard context exchange protocol used by all agents fo
 
 These agents **MUST proactively search** for context before starting:
 - **strategic-planner**: Search nx T3 store for prior decisions, nx T2 memory for active work
-- **java-architect-planner**: Search nx T3 store for architectural patterns, design decisions
+- **architect-planner**: Search nx T3 store for architectural patterns, design decisions
 - **deep-research-synthesizer**: Search nx T3 store for prior research, web resources for related docs
 - **codebase-deep-analyzer**: Search nx T3 store for codebase knowledge, architecture notes
 
@@ -22,11 +22,11 @@ These agents **MUST proactively search** for context before starting:
 ### Relay-Reliant Agents (Execution & Validation)
 
 These agents **rely on relays** for context (do not proactively search):
-- **java-developer**: Expects architecture/plan in relay
+- **developer**: Expects architecture/plan in relay
 - **code-review-expert**: Expects files to review in relay
 - **plan-auditor**: Expects plan document in relay
 - **test-validator**: Expects code/test paths in relay
-- **java-debugger**: Expects failure description in relay
+- **debugger**: Expects failure description in relay
 
 **If relay is incomplete**, use RECOVER protocol (search as fallback).
 

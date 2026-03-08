@@ -1,5 +1,5 @@
 ---
-description: Debug test failures using java-debugger agent
+description: Debug test failures using debugger agent
 ---
 
 # Debug Request
@@ -19,30 +19,23 @@ description: Debug test failures using java-debugger agent
   echo ""
 
   # Check for recent test failures
+  echo "### Recent Test Failures"
+  echo '```'
   if [ -d "target/surefire-reports" ]; then
-    echo "### Recent Test Failures"
-    echo '```'
-    # Find failed test files
     FAILURES=$(find target/surefire-reports -name "*.txt" -exec grep -l "FAILURE\|ERROR" {} \; 2>/dev/null | head -5)
     if [ -n "$FAILURES" ]; then
       echo "$FAILURES"
-      echo ""
-      # Show first failure details
-      FIRST=$(echo "$FAILURES" | head -1)
-      if [ -f "$FIRST" ]; then
-        echo "--- First failure excerpt ---"
-        grep -A 10 "FAILURE\|ERROR" "$FIRST" 2>/dev/null | head -15
-      fi
     else
       echo "No recent failures in surefire-reports"
     fi
-    echo '```'
+  elif [ -d "reports" ]; then
+    find reports -name "*.xml" 2>/dev/null | head -5
+  elif [ -f "pytest.xml" ] || [ -f "test-results.xml" ]; then
+    echo "Test results file found"
   else
-    echo "### Build Status"
-    echo '```'
-    echo "No surefire-reports directory (run tests first: ./mvnw test)"
-    echo '```'
+    echo "No test output found — run the project's test command (check CLAUDE.md)"
   fi
+  echo '```'
 
   # Bead context
   echo ""
@@ -76,10 +69,10 @@ description: Debug test failures using java-debugger agent
 
 ## Action
 
-Invoke the **java-debugging** skill with the following relay. Fill in dynamic fields from the context above:
+Invoke the **debugging** skill with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
-## Relay: java-debugger
+## Relay: debugger
 
 **Task**: Investigate failure using hypothesis-driven debugging
 **Bead**: [fill from active bead above or create bug bead]
@@ -89,7 +82,7 @@ Invoke the **java-debugging** skill with the following relay. Fill in dynamic fi
 
 ### Context
 - Error message: [fill from test output above]
-- Stack trace: [fill key frames from surefire reports]
+- Stack trace: [fill key frames from test output]
 - Failed attempts: [fill what was already tried, or 'first attempt']
 
 ### Deliverable

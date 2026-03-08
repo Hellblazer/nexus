@@ -177,9 +177,9 @@ You will leverage Nexus to:
 
 ## Successor Enforcement (MANDATORY)
 
-After completing work, relay to `java-architect-planner` and `java-developer`.
+After completing work, relay to `architect-planner` and `developer`.
 
-**Condition**: Java projects → java-architect-planner, others → java-developer
+**Condition**: Architectural design needed → architect-planner; otherwise → developer
 **Rationale**: Validated plans proceed to architecture or implementation
 
 Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:

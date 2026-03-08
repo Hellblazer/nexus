@@ -82,6 +82,43 @@ disable-model-invocation: false
     echo "Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
   fi
   echo ""
+
+  # ── 6. CLAUDE.md Agent Readiness ────────────────────────────────────────────
+  echo "### 6. CLAUDE.md Agent Readiness"
+  echo ""
+  if [ -f "CLAUDE.md" ]; then
+    echo "[x] CLAUDE.md exists"
+    # Language detection (case-insensitive)
+    LANG_MATCH=$(grep -iE "Python|Java|Go|Rust|TypeScript|Node\.js|C\+\+|C#|Ruby|Kotlin|Swift|Scala" CLAUDE.md | head -1)
+    if [ -n "$LANG_MATCH" ]; then
+      echo "[x] Language detected: $(echo "$LANG_MATCH" | head -c 60)"
+    else
+      echo "[?] Language: not found (optional — agents can detect from build files)"
+    fi
+    # Build system detection
+    BUILD_MATCH=$(grep -iE "uv|maven|mvn|cargo|go build|go mod|npm|yarn|pnpm|gradle|make|cmake" CLAUDE.md | head -1)
+    if [ -n "$BUILD_MATCH" ]; then
+      echo "[x] Build system detected: $(echo "$BUILD_MATCH" | head -c 60)"
+    else
+      echo "[?] Build system: not found (optional)"
+    fi
+    # Test command detection
+    TEST_MATCH=$(grep -iE "pytest|mvn test|go test|cargo test|npm test|jest|vitest|make test|uv run pytest" CLAUDE.md | head -1)
+    if [ -n "$TEST_MATCH" ]; then
+      echo "[x] Test command detected: $(echo "$TEST_MATCH" | head -c 60)"
+    else
+      echo "[?] Test command: not found (optional)"
+    fi
+    echo ""
+    echo "Status: PASS (CLAUDE.md present)"
+  else
+    echo "[ ] CLAUDE.md not found"
+    echo ""
+    echo "Status: WARN"
+    echo "Agents work best when CLAUDE.md specifies language, build system, and test command."
+    echo "See: https://docs.anthropic.com/en/docs/claude-code/memory#claudemd"
+  fi
+  echo ""
 }
 
 ## Summary
@@ -95,6 +132,7 @@ Based on the preflight output above, produce a summary table:
 | bd (beads) | — | — |
 | superpowers | — | — |
 | uv | — | — |
+| CLAUDE.md | — | — |
 
 Fill in each row from the check results above. Use "PASS", "FAIL", or "WARN" for Status. Leave Action needed blank for passing checks; for failures/warnings, provide the install command or link.
 

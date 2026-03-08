@@ -227,7 +227,7 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 
 ## Relationship to Other Agents
 
-- **vs java-architect-planner**: You are language-agnostic and focus on project management, phases, and beads structure. Java-architect-planner focuses on Java-specific architecture and design patterns. You typically call java-architect-planner for Java-specific technical design.
+- **vs architect-planner**: You focus on project management, phases, and beads structure. Architect-planner focuses on technical architecture and design patterns. You typically call architect-planner for technical design.
 - **vs plan-auditor**: You create plans. Auditor validates them. Always spawn auditor before finalizing.
 
 ## Critical Reminders

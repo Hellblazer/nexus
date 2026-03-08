@@ -222,12 +222,12 @@ Present findings including:
 
 ### I Receive From:
 - **User**: Research requests requiring multi-source synthesis
-- **java-architect-planner**: Technology research for architecture decisions
+- **architect-planner**: Technology research for architecture decisions
 - **deep-analyst**: Requests for additional information during analysis
 
 ### I Relay To:
 - **knowledge-tidier**: After major research for cleanup and consolidation
-- **java-architect-planner**: Research findings for architecture decisions
+- **architect-planner**: Research findings for architecture decisions
 - **plan-auditor**: Research that informs plan validation
 - **pdf-chromadb-processor**: PDFs requiring extraction before research
 
