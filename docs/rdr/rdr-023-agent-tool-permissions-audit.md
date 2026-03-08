@@ -31,112 +31,97 @@ hit the same issue.
 1. **Audit all 14 nx agents** for their actual tool requirements
 2. **Add explicit `tools` frontmatter** to each agent, following the principle
    of least privilege
-3. **Verify** that agents with explicit tools can execute their core workflows
+3. **Expand PermissionRequest hook** to auto-approve safe tools for subagents
+4. **Verify** that agents with explicit tools can execute their core workflows
 
-## Current Agent Inventory
+## Research Findings
 
-| Agent | Model | Primary Tools Needed |
-|---|---|---|
-| knowledge-tidier | haiku | Bash (nx CLI), Read, Grep, Glob |
-| orchestrator | haiku | Read, Grep, Glob, Agent |
-| code-review-expert | sonnet | Read, Grep, Glob, Bash (git) |
-| plan-auditor | sonnet | Read, Grep, Glob |
-| strategic-planner | opus | Read, Grep, Glob, Bash (bd), Write |
-| substantive-critic | sonnet | Read, Grep, Glob |
-| codebase-deep-analyzer | sonnet | Read, Grep, Glob, Bash (git log) |
-| deep-analyst | opus | Read, Grep, Glob, Bash |
-| deep-research-synthesizer | sonnet | Read, Grep, Glob, Bash (nx CLI), WebSearch, WebFetch |
-| test-validator | sonnet | Read, Grep, Glob, Bash (test runners) |
-| java-developer | sonnet | Read, Write, Edit, Grep, Glob, Bash |
-| java-debugger | opus | Read, Grep, Glob, Bash |
-| java-architect-planner | opus | Read, Grep, Glob, Write |
-| pdf-chromadb-processor | haiku | Read, Bash (nx CLI, pdf tools) |
+### Finding 1: No agents have `tools` frontmatter
 
-## Proposed Tool Assignments
+Confirmed via `grep -c '^tools:' nx/agents/*.md` — zero matches across all 14
+agent files. All agents share the same frontmatter structure: name, version,
+description, model, color.
 
-### Read-only agents (analysis, review, critique)
+### Finding 2: PermissionRequest hook only handles Bash
 
-```yaml
-tools: ["Read", "Grep", "Glob"]
-```
+The existing `permission-request-stdin.sh` hook only checks `$TOOL == "Bash"`
+with allow/deny rules for specific commands. For any non-Bash tool (Read, Write,
+Edit, WebSearch, etc.), the hook falls through to "ask user" — which means silent
+denial for subagents.
 
-Agents: plan-auditor, substantive-critic
+### Finding 3: Sequential thinking is pervasive
 
-### Read + Bash agents (need CLI tools)
+12 of 14 agents reference `mcp__plugin_nx_sequential-thinking__sequentialthinking`
+in their system prompts. This is a reasoning primitive with no side effects — it
+should not be restricted.
 
-```yaml
-tools: ["Read", "Grep", "Glob", "Bash"]
-```
+### Finding 4: Hook JSON schema is validated
 
-Agents: code-review-expert (git), codebase-deep-analyzer (git),
-deep-analyst, test-validator, java-debugger
+The hook uses `.tool` and `.command` field names. These are confirmed working in
+production (commit 39f9c02 added nx auto-approval using these fields). The stale
+"TBD" comment in the hook was misleading.
 
-### Read + Bash + nx CLI agents (need nx store/memory/search)
+## Decision: Hybrid Defense-in-Depth (Approach C)
 
-```yaml
-tools: ["Read", "Grep", "Glob", "Bash"]
-```
+Two independent layers:
 
-Agents: knowledge-tidier (nx CLI), deep-research-synthesizer (nx CLI),
-pdf-chromadb-processor (nx CLI)
+1. **`tools` frontmatter** — defines what each agent *should* use (least privilege)
+2. **PermissionRequest hook expansion** — ensures agents *can* use their tools
+   without silent denial
 
-Note: `nx` commands run via Bash. No separate MCP tool needed if
-the agent uses `nx` CLI rather than direct MCP calls.
+### Tool Assignments
 
-### Read + Write agents (produce files)
+| Category | Tools | Agents |
+|----------|-------|--------|
+| Read-only | Read, Grep, Glob, sequential-thinking | plan-auditor, substantive-critic |
+| Read + Bash | Read, Grep, Glob, Bash, sequential-thinking | code-review-expert, codebase-deep-analyzer, deep-analyst, test-validator, java-debugger, knowledge-tidier, pdf-chromadb-processor |
+| Read + Bash + Web | Read, Grep, Glob, Bash, WebSearch, WebFetch, sequential-thinking | deep-research-synthesizer |
+| Read + Write + Bash | Read, Write, Edit, Grep, Glob, Bash, sequential-thinking | strategic-planner, java-developer, java-architect-planner |
+| Orchestrator | Read, Grep, Glob, Agent, sequential-thinking | orchestrator |
 
-```yaml
-tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
-```
+### Hook Expansion
 
-Agents: strategic-planner, java-developer, java-architect-planner
+| Tool | Action | Rationale |
+|------|--------|-----------|
+| Read, Grep, Glob | Always allow | Read-only local tools, always safe |
+| Write, Edit | Always allow | Local file ops, controlled by agent tools list |
+| WebSearch, WebFetch | Always allow | Read-only external, no mutations |
+| Agent | Always allow | Orchestrator delegation |
+| Sequential thinking | Always allow | Reasoning primitive, no side effects |
+| Bash (expanded allowlist) | Allow specific commands | git read, uv run pytest, bd management, nx CLI |
+| Bash (destructive) | Deny | git push --force, bd delete, etc. |
+| MCP tools (mixedbread, serena) | Ask user | Not auto-approved; agents use nx CLI instead |
 
-### Orchestrator (delegates to other agents)
+## Resolved Questions
 
-```yaml
-tools: ["Read", "Grep", "Glob", "Agent"]
-```
+**Q1** (tools: ["*"] vs omitting): Explicit per-agent tool lists are better than
+either option. They document intent, enforce least privilege, and serve as the
+security boundary.
 
-Agent: orchestrator
+**Q2** (does `tools` control access or just system prompt?): The `tools` field
+controls which tools appear in the agent's system prompt AND which tools are
+available. But the PermissionRequest hook is the enforcement layer — both are
+needed for defense-in-depth.
 
-## MCP Tool Consideration
+**Q3** (nx CLI via Bash vs dedicated MCP tools): Agents should use `nx` via Bash.
+The PermissionRequest hook already auto-approves `nx` commands. No need for
+dedicated MCP wrappers.
 
-Some agents attempt to use MCP tools directly (e.g., `mcp__mixedbread__search_store`,
-`mcp__plugin_serena_serena__find_symbol`). These should be evaluated case by case:
-
-- **Serena tools**: Used by code navigation agents. If an agent needs symbol-level
-  code navigation, add the relevant `mcp__plugin_serena_serena__*` tools.
-- **Mixedbread tools**: Used for T3 semantic search. Most agents should use
-  `nx search` via Bash instead (simpler, fewer permissions needed).
-- **Sequential thinking**: Used by deep-analyst and plan-auditor. Add
-  `mcp__plugin_nx_sequential-thinking__sequentialthinking` where needed.
-
-## Implementation Plan
-
-1. For each agent, review its system prompt for tool references
-2. Determine minimum tool set from actual usage patterns
-3. Add `tools` field to frontmatter
-4. Test each agent with a representative task
-5. Document any agents that need MCP tools explicitly
-
-## Open Questions
-
-**Q1**: Should we use `tools: ["*"]` (explicit all-access) vs omitting `tools`
-(implicit all-access)? The behavior may differ under different permission modes.
-
-**Q2**: Does the `tools` field in agent frontmatter actually control which tools
-the agent can call, or does it only affect which tools are listed in the agent's
-system prompt? If the latter, explicit `tools` may not solve the permission
-denial issue — the fix would need to be in the Agent tool's `mode` parameter
-(e.g., `mode: "bypassPermissions"`).
-
-**Q3**: Should agents that need `nx` CLI commands use Bash directly, or should
-there be dedicated MCP tools wrapping `nx` subcommands (avoiding the Bash
-permission issue entirely)?
+**Q4** (sequential thinking): Added to all 14 agents uniformly. It's a reasoning
+primitive with no side effects — no security reason to restrict it.
 
 ## Success Criteria
 
-- [ ] All 14 agents have explicit `tools` in frontmatter
+- [x] All 14 agents have explicit `tools` in frontmatter
 - [ ] knowledge-tidier can successfully run `nx store put` and `nx memory` commands
-- [ ] No agent has broader tool access than its task requires
+- [x] No agent has broader tool access than its task requires
 - [ ] Agents that were previously failing due to permission denials now work
+- [x] PermissionRequest hook auto-approves safe tools (tested with JSON payloads)
+- [x] Existing deny rules preserved (destructive git, bd delete, etc.)
+
+## Implementation
+
+- **Design**: `docs/plans/2026-03-07-rdr-023-agent-tool-permissions-design.md`
+- **Plan**: `docs/plans/2026-03-07-rdr-023-agent-tool-permissions-impl-plan.md`
+- **PR**: #74
+- **Epic**: nexus-qic4
