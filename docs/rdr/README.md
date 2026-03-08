@@ -36,7 +36,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-020](rdr-020-voyage-chromadb-read-timeout.md) | Voyage AI and ChromaDB Client Read Timeouts | Bug Fix | Closed | 2026-03-05 |
 | [RDR-021](rdr-021-docling-pdf-extraction.md) | Replace 3-Tier PDF Extraction Stack with Docling | Enhancement | Accepted | 2026-03-05 |
 | [RDR-022](rdr-022-memory-delete-command.md) | Add delete subcommand to nx memory, nx store, nx scratch | Enhancement | Closed | 2026-03-05 |
-| [RDR-023](rdr-023-agent-tool-permissions-audit.md) | Agent Tool Permissions Audit and Remediation | Enhancement | Draft | 2026-03-07 |
+| [RDR-023](rdr-023-agent-tool-permissions-audit.md) | Agent Tool Permissions Audit and Remediation | Enhancement | Accepted | 2026-03-07 |
 
 ## RDR Process Documentation
 
