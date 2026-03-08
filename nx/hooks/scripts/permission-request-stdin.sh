@@ -84,13 +84,23 @@ if [[ "$TOOL" == "Bash" ]]; then
 
   # Bead commands (safe task management)
   # Note: bd delete NOT included (destructive, denied above)
+  # Note: bd sync --force NOT included (denied above); plain sync IS safe
   if [[ "$COMMAND" =~ ^bd\ (list|show|search|prime|ready|status|create|update|close|dep|remember|memories|stats|doctor|sync) ]]; then
     echo "allow"
     exit 0
   fi
 
   # Read-only git commands
-  if [[ "$COMMAND" =~ ^git\ (log|diff|status|show|branch|tag|rev-parse|describe|remote\ -v) ]]; then
+  # Note: branch and tag restricted to list/query forms only (no create/delete)
+  if [[ "$COMMAND" =~ ^git\ (log|diff|status|show|rev-parse|describe|remote\ -v) ]]; then
+    echo "allow"
+    exit 0
+  fi
+  if [[ "$COMMAND" =~ ^git\ branch(\ (-a|-r|-v|-vv|--list))*$ ]]; then
+    echo "allow"
+    exit 0
+  fi
+  if [[ "$COMMAND" =~ ^git\ tag(\ (-l|--list))*$ ]]; then
     echo "allow"
     exit 0
   fi
