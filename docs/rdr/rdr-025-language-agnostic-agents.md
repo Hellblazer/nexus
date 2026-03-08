@@ -36,14 +36,13 @@ system prompts rather than read from project configuration at runtime.
 2. **Replace Java-specific sections** with CLAUDE.md delegation pattern
    (read project config at runtime, adapt to detected language)
 
-3. **Update cross-references** in orchestrator, test-validator, strategic-planner,
-   codebase-deep-analyzer, and any skills that reference the old agent names
+3. **Update all cross-references** — every file in the plugin that names the
+   old agents (see complete table below)
 
-4. **Add a preflight/doctor check** that validates CLAUDE.md has the sections
-   the agents need to function effectively (language, build system, test command,
-   coding conventions)
+4. **Add a preflight check** to `nx:nx-preflight` that validates CLAUDE.md has
+   the sections agents need (language, build system, test command)
 
-5. **Update plugin registry** (plugin.json, descriptions, skill names)
+5. **Update plugin registry, skills, and commands** with new names
 
 ## Research Findings
 
@@ -53,9 +52,9 @@ Line-by-line analysis of all three agents confirms:
 
 | Agent | Java-specific | Generic |
 |-------|--------------|---------|
-| java-developer | Identity line, Maven Mastery section, Java Coding Standards section, `mvn test` in completion protocol, cross-references | Relay Reception, Prior Implementation Search, Core Principles (Test-First, Spartan Design), 5-step workflow, Beads Integration, Context Protocol |
-| java-debugger | Identity line, Technical Expertise section (JMH, JUnit 5, Mockito), SLF4J/Logback, Maven dependency conflicts, cross-references | Core Debugging Philosophy, 8-thought Bug Investigation Pattern, 7-step Methodology, Evidence Collection, Documentation Strategy |
-| java-architect-planner | Identity line, Usage Examples (Java 24, Spring), Architectural Expertise (synchronized prohibition, Maven multi-module), cross-references | Planning Methodology, Architecture Analysis Pattern, Execution Principles, Quality Assurance, Documentation Requirements |
+| java-developer | Identity line, Maven Mastery section, Java Coding Standards section, `mvn test` in completion protocol, escalation triggers naming `java-debugger`/`java-architect-planner` | Relay Reception, Prior Implementation Search, Core Principles (Test-First, Spartan Design), 5-step workflow, Beads Integration, Context Protocol |
+| java-debugger | Identity line, Technical Expertise section (JMH, JUnit 5, Mockito), SLF4J/Logback, Maven dependency conflicts, successor relay naming `java-developer` | Core Debugging Philosophy, 8-thought Bug Investigation Pattern, 7-step Methodology, Evidence Collection, Documentation Strategy |
+| java-architect-planner | Identity line, Usage Examples (Java 24, Spring), Architectural Expertise (synchronized prohibition, Maven multi-module), successor relay naming `java-developer` | Planning Methodology, Architecture Analysis Pattern, Execution Principles, Quality Assurance, Documentation Requirements |
 
 ### Finding 2: Existing agents already demonstrate the polymorphic pattern
 
@@ -82,9 +81,8 @@ stack, and provides deterministic (explicit) rather than inferential language de
 ### Finding 5: A preflight check prevents degraded agent quality
 
 When CLAUDE.md is thin or absent, polymorphic agents produce lower quality output
-because they lack language/build/test context. A preflight command that checks for
-required sections prevents this — warn at session start rather than fail silently
-during agent work.
+because they lack language/build/test context. A preflight check at session start
+warns early rather than failing silently during agent work.
 
 ## Decision: Approach D — Polymorphic + CLAUDE.md Delegation
 
@@ -103,8 +101,8 @@ For each agent, replace Java-specific sections with:
 1. **Identity line**: Generic role + "Read CLAUDE.md to identify language, build system, and conventions"
 2. **Tool/framework sections**: CLAUDE.md lookup + fallback detection from build files (`pom.xml`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `package.json`)
 3. **Coding standards**: "Consult CLAUDE.md for project-specific conventions. Defaults when silent: prefer immutability, favor composition over inheritance, use modern language idioms"
-4. **Build/test commands**: Named examples per language + "check CLAUDE.md" as primary source
-5. **Cross-references**: Update all `java-developer` → `developer`, etc.
+4. **Build/test commands**: Top 5 language examples + "check CLAUDE.md" as primary source
+5. **Cross-references and escalation triggers**: Update all `java-developer` → `developer`, `java-debugger` → `debugger`, `java-architect-planner` → `architect-planner` — including Successor Enforcement and Automatic Escalation Triggers sections within each agent
 
 ### Language Detection Pattern (all three agents)
 
@@ -117,61 +115,118 @@ Before starting work:
 3. If detection fails: ask the user
 ```
 
-### Preflight/Doctor Check
+### Preflight Check (extend nx:nx-preflight)
 
-Add to the existing `nx:nx-preflight` skill (or create a new `/claude-md-check`
-command) a CLAUDE.md validation step:
+Add a CLAUDE.md validation section to the existing `nx:nx-preflight` skill.
+Detection heuristics (case-insensitive grep):
 
+- **Language**: grep for `Python`, `Java`, `Go`, `Rust`, `TypeScript`, `Node.js`,
+  `C++`, `C#`, `Ruby`, `Kotlin`, `Swift`, `Scala`
+- **Build system**: grep for `uv`, `maven`, `mvn`, `cargo`, `go build`, `go mod`,
+  `npm`, `yarn`, `pnpm`, `gradle`, `make`, `cmake`
+- **Test command**: grep for `pytest`, `mvn test`, `go test`, `cargo test`,
+  `npm test`, `jest`, `vitest`, `make test`
+
+Output format:
 ```
-CLAUDE.md Agent Readiness Check:
+CLAUDE.md Agent Readiness:
   [x] CLAUDE.md exists
-  [?] Language/runtime specified (e.g., "Python 3.12+", "Java 24", "Go 1.22")
-  [?] Build system specified (e.g., "uv", "Maven", "cargo")
-  [?] Test command specified (e.g., "uv run pytest", "mvn test", "go test ./...")
-  [?] Coding conventions section present
-
-  Warnings:
-  - "CLAUDE.md does not specify a test command. The developer and debugger
-     agents will ask you for it at runtime."
+  [x] Language detected: Python 3.12+
+  [x] Build system detected: uv
+  [x] Test command detected: uv run pytest
+  [?] Coding conventions section: not found (optional)
 ```
 
-Items marked `[?]` are warnings, not errors — the agents function without them
-but with reduced quality.
+Items marked `[?]` are warnings, not errors. Agents function without them but
+with reduced quality.
 
-## Cross-Reference Updates
+## Cross-Reference Updates (Complete)
 
-| File | Change |
-|------|--------|
-| `nx/agents/orchestrator.md` | Routing table: `java-developer` → `developer`, etc. |
-| `nx/agents/test-validator.md` | Relationship section cross-references |
-| `nx/agents/strategic-planner.md` | "java-architect-planner" → "architect-planner" |
+### Primary agent files (content rewrites — 20-25%)
+
+| File | Changes |
+|------|---------|
+| `nx/agents/java-developer.md` | Rename to `developer.md`, rewrite identity/Maven/standards/escalation sections |
+| `nx/agents/java-debugger.md` | Rename to `debugger.md`, rewrite identity/expertise/tool sections |
+| `nx/agents/java-architect-planner.md` | Rename to `architect-planner.md`, rewrite identity/expertise/examples |
+
+### Agent cross-references (name substitution)
+
+| File | References to update |
+|------|---------------------|
+| `nx/agents/orchestrator.md` | Routing table, Standard Pipelines |
+| `nx/agents/strategic-planner.md` | Relationship section |
+| `nx/agents/test-validator.md` | Relationship section |
+| `nx/agents/plan-auditor.md` | Successor Enforcement conditions, routing logic |
+| `nx/agents/deep-analyst.md` | Relationship section |
+| `nx/agents/deep-research-synthesizer.md` | Relationship section |
 | `nx/agents/codebase-deep-analyzer.md` | Verify for Java/Maven references |
-| `nx/skills/java-development/SKILL.md` | Rename to `development/SKILL.md` |
-| `nx/skills/java-debugging/SKILL.md` | Rename to `debugging/SKILL.md` |
-| `nx/skills/java-architecture/SKILL.md` | Rename to `architecture/SKILL.md` |
-| Plugin registry (`registry.yaml` or equivalent) | Update agent/skill names |
+| `nx/agents/_shared/CONTEXT_PROTOCOL.md` | Proactive search agents list, relay-reliant agents list |
+| `nx/agents/_shared/MAINTENANCE.md` | Example references |
+
+### Skills and commands (rename + content update)
+
+| File | Changes |
+|------|---------|
+| `nx/skills/java-development/SKILL.md` | Rename dir to `development/`, update relay target |
+| `nx/skills/java-debugging/SKILL.md` | Rename dir to `debugging/`, update relay target |
+| `nx/skills/java-architecture/SKILL.md` | Rename dir to `architecture/`, update relay target |
+| `nx/skills/orchestration/SKILL.md` | Routing diagram nodes + routing table |
+| `nx/skills/using-nx-skills/SKILL.md` | Skill directory table entries |
+| `nx/commands/java-implement.md` | Rename to `implement.md`, update relay target |
+| `nx/commands/java-debug.md` | Rename to `debug.md`, update relay target |
+| `nx/commands/java-architecture.md` | Rename to `architecture.md`, update relay target |
+
+### Plugin infrastructure
+
+| File | Changes |
+|------|---------|
+| `nx/registry.yaml` | Agent entries, predecessor/successor chains, all 5 pipeline definitions, model_summary, naming_aliases |
+| `nx/README.md` | Agent table, pipeline descriptions, entry points section |
 | `nx/hooks/hooks.json` | Verify no Java-specific references |
-| Using-nx-skills skill | Update skill directory table |
 
-## Open Questions
+### Verification command
 
-**Q1**: Should the old `java-*` agent names be kept as aliases for backwards
-compatibility, or removed entirely? Aliases add maintenance burden but prevent
-breakage for users who reference them directly.
+After all changes: `grep -rl "java-developer\|java-debugger\|java-architect" nx/`
+should return zero results (excluding changelogs and RDR docs).
 
-**Q2**: Should the preflight check be part of `nx:nx-preflight` (existing) or
-a standalone `/claude-md-check` command? The existing preflight checks nx
-dependencies; CLAUDE.md validation is a different concern.
+## Migration Impact
 
-**Q3**: For the developer agent, should the build system examples be exhaustive
-(every language) or limited to the top 5 (Java, Python, Go, Rust, TypeScript)?
-Exhaustive is more complete but adds token cost to every invocation.
+**Slash command changes**: `/java-implement` → `/implement`, `/java-debug` → `/debug`,
+`/java-architecture` → `/architecture`. Old commands will stop working immediately.
+No aliases — all references are plugin-internal and updated atomically in one PR.
+Users with muscle memory for the old commands will need to adjust.
+
+**RDR-023 consistency**: The `tools` frontmatter added by RDR-023 is embedded in
+the agent file header. File rename preserves it intact. RDR-023's closed
+documentation uses old agent names — acceptable since it's a permanent record.
+
+**plan-auditor routing simplification**: Currently routes "Java projects →
+java-architect-planner, others → java-developer." After rename, this becomes
+"architectural design needed → architect-planner; otherwise → developer" —
+simpler and language-agnostic.
+
+## Resolved Questions
+
+**Q1** (backwards-compat aliases): **No aliases.** All references to agent names
+are plugin-internal (Agent tool `subagent_type`, skills, orchestrator, registry).
+All updated atomically in one PR. No external consumers reference agent names by
+string. Users invoke via skill commands, not agent names directly.
+
+**Q2** (preflight location): **Extend `nx:nx-preflight`.** Same category as
+existing dependency checks — "is this project ready for nx agents?" One command
+for all readiness checks.
+
+**Q3** (build system examples): **Top 5 languages** (Java, Python, Go, Rust,
+TypeScript). Each example adds ~10 tokens. CLAUDE.md-first lookup handles anything
+not listed. Exhaustive lists (30+ build systems) add ~300 tokens with diminishing
+returns.
 
 ## Success Criteria
 
 - [ ] All three agents renamed and generalized (no Java-specific content in prompts)
-- [ ] All cross-references updated (no "java-developer" strings remain in agents/skills)
+- [ ] `grep -rl "java-developer\|java-debugger\|java-architect" nx/` returns zero results (excluding changelogs)
 - [ ] Agents function correctly for at least 3 non-Java languages (Python, Go, TypeScript)
 - [ ] Preflight check warns when CLAUDE.md lacks language/build/test sections
-- [ ] Existing Java projects continue to work (CLAUDE.md provides the Java context)
+- [ ] Nexus project's own CLAUDE.md passes the preflight check without warnings
 - [ ] Plugin registry updated with new names and descriptions
