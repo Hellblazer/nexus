@@ -2,9 +2,11 @@
 id: RDR-024
 title: "RDR Process Guardrails: Prevent Implementation Before Gate/Accept"
 type: enhancement
-status: draft
+status: accepted
 priority: P2
 created: 2026-03-07
+accepted_date: 2026-03-07
+reviewed_by: self
 related_issues: ["RDR-023"]
 ---
 
