@@ -26,81 +26,142 @@ is tracked by an RDR that needs to pass through the gate/accept lifecycle first.
 
 ## Scope
 
-Add pre-checks at three points in the workflow to catch implementation attempts
-on ungated/unaccepted RDRs:
+Add soft-warning pre-checks at three points in the workflow to catch
+implementation attempts on ungated/unaccepted RDRs:
 
 1. **Brainstorming-gate skill** — after design approval, before invoking
-   strategic-planning, check if the work references an RDR. If so, verify the
-   RDR is in `accepted` status.
+   strategic-planning, scan for RDR references and check status.
 
-2. **Strategic-planner agent** — when creating an implementation plan that
-   references an RDR, verify the RDR is `accepted` before proceeding.
+2. **Strategic-planner agent** — when creating an implementation plan,
+   scan relay for RDR references and warn if not accepted.
 
-3. **Bead creation hook** — when `bd create` references an RDR (in description
-   or notes), warn if the RDR is not yet accepted.
+3. **Bead creation hook** — when `bd create` description mentions an RDR,
+   warn if the RDR is not yet accepted.
+
+## Research Findings
+
+### Finding 1: Brainstorming-gate has clear insertion point
+
+The skill checklist (steps 5-7) provides a natural insertion between "Present
+design / User approves" and "Write design doc / Invoke strategic-planning".
+A new step 6a fits cleanly. The relay template already has structured fields
+(Task, Bead, Input Artifacts) that can be scanned for RDR references.
+
+### Finding 2: Strategic-planner relay reception is extensible
+
+The agent already validates 5 relay fields in its Relay Reception section
+(lines 20-36). Adding an RDR status check as step 6 is consistent with the
+existing pattern. This is the most reliable guardrail because it runs after
+brainstorming-gate, providing defense-in-depth.
+
+### Finding 3: Bead hook is feasible but should stay simple
+
+The existing `bead_context_hook.py` is 36 lines with no subprocess
+infrastructure. Adding `nx memory get` as a subprocess call adds 1-2s latency
+to every `bd create`. **Recommendation**: regex-only warning (detect `RDR-\d+`
+pattern, warn to check status) without actually querying T2. This is zero
+latency and still surfaces the reminder.
+
+### Finding 4: Skills and prompts are advisory — soft warnings are the ceiling
+
+Claude Code does not enforce skill instructions as hard gates. A skill saying
+"STOP" can be overridden by the user or ignored by the model. The only true
+hard block mechanism is a PreToolUse hook returning "deny". For skills and
+agent prompts, soft warnings (print message, ask user to confirm) are the
+realistic enforcement level.
+
+### Finding 5: Regex RDR detection is sufficient
+
+RDR IDs follow pattern `RDR-NNN` which is trivially matchable with regex
+`r'RDR-(\d+)'`. In the RDR-023 session, the relay included "RDR-023" in the
+task description and design doc filename. Convention already exists — no new
+detection mechanism needed.
 
 ## Proposed Solution
 
 ### Guardrail 1: Brainstorming-gate skill amendment
 
 Add a section to the brainstorming-gate skill (`nx/skills/brainstorming-gate/SKILL.md`)
-between "Present design" and "Save design doc" steps:
+between "Present design" and "Save design doc" steps. Uses passive detection
+(regex scan) rather than requiring prior knowledge of an RDR:
 
 ```
-6a. **RDR status check** — If this work is tracked by an RDR:
-    - Run: `nx memory get --project {repo}_rdr --title {id}`
-    - If status is not "accepted": STOP. Print:
+6a. **RDR status check** — Scan the relay task, bead description, and user
+    request for the pattern `RDR-\d+`. For each match:
+    - Run: `nx memory get --project {repo}_rdr --title NNN`
+    - If status is not "accepted" or "closed": warn the user:
       "RDR-NNN is still {status}. Run /rdr-gate NNN and /rdr-accept NNN
        before planning implementation."
-    - If no RDR exists for this work, proceed normally.
+    - If the lookup fails or returns no result, warn and proceed (fail-open).
+    - If no RDR pattern is found, proceed normally.
 ```
 
 ### Guardrail 2: Strategic-planner agent pre-check
 
 Add to the strategic-planner agent system prompt (`nx/agents/strategic-planner.md`)
-a relay validation step:
+relay validation step 6, after existing field checks:
 
 ```
-Before creating an implementation plan, check if the relay references an RDR:
-- If an RDR ID is mentioned (e.g., "RDR-023"), verify its status via
-  `nx memory get --project {repo}_rdr --title {id}`
-- If status is not "accepted", report: "Cannot create implementation plan —
-  RDR-NNN is {status}. Gate and accept the RDR first."
-- If no RDR is referenced, proceed normally.
+6. **RDR status check** — Scan the relay Task field and Input Artifacts for
+   the pattern `RDR-\d+`. For each match:
+   - Run: `nx memory get --project {repo}_rdr --title NNN`
+   - If status is not "accepted" or "closed", warn: "RDR-NNN is {status}.
+     Consider running /rdr-gate NNN and /rdr-accept NNN first."
+   - If the lookup fails, warn and proceed (fail-open).
+   - If no RDR pattern found, proceed normally.
 ```
 
 ### Guardrail 3: Bead context hook enhancement
 
-Extend the existing `bead_context_hook.py` (`nx/hooks/scripts/bead_context_hook.py`)
-to detect RDR references in newly created beads:
+Extend `bead_context_hook.py` (`nx/hooks/scripts/bead_context_hook.py`) to
+detect RDR references. **Regex-only, no T2 lookup** (zero latency):
 
 ```python
-# After bead creation, check if description/notes mention an RDR
-rdr_refs = re.findall(r'RDR-(\d+)', bead_description)
-for rdr_id in rdr_refs:
-    status = get_rdr_status(rdr_id)  # via nx memory get
-    if status not in ('accepted', 'closed'):
-        print(f"Warning: Bead references RDR-{rdr_id} (status: {status}). "
-              f"Consider running /rdr-gate {rdr_id} before implementation.")
+import re
+
+# After bead creation, scan description for RDR references
+rdr_refs = re.findall(r'RDR-(\d+)', command)
+if rdr_refs:
+    rdr_list = ', '.join(f'RDR-{r}' for r in rdr_refs)
+    result = {
+        "message": f"Bead references {rdr_list}. "
+                   f"Verify RDR status before implementation: "
+                   f"/rdr-show {rdr_refs[0]}"
+    }
+    print(json.dumps(result))
 ```
 
-## Open Questions
+## Resolved Questions
 
-**Q1**: Should the guardrails be hard blocks (prevent proceeding) or soft
-warnings (print warning but allow override)? Hard blocks are safer but may
-frustrate when the RDR lifecycle is intentionally skipped for trivial changes.
+**Q1** (hard blocks vs soft warnings): **Soft warnings only.** Skills and agent
+prompts are advisory — Claude Code cannot enforce hard blocks at this layer.
+The user can always say "proceed anyway." This is acceptable: the goal is to
+make the agent aware of the RDR status so it flags the issue, not to prevent
+all possible bypasses.
 
-**Q2**: Should there be an `--override-rdr-check` flag for cases where the
-user deliberately wants to implement before accepting (e.g., prototyping)?
+**Q2** (override flag): **Not needed.** Since all guardrails are soft warnings,
+there is nothing to override. The user simply proceeds if they choose to.
 
-**Q3**: How should the guardrails detect which RDR is associated with the
-current work? Options: (a) explicit RDR ID in the relay/bead, (b) keyword
-matching against RDR titles, (c) user must specify.
+**Q3** (RDR detection mechanism): **Regex `RDR-(\d+)` on relay fields and bead
+descriptions.** This pattern is already convention. No keyword matching or user
+specification needed.
+
+## Design Notes
+
+**Fail-open policy**: All three guardrails fail open. If `nx memory get` is
+unavailable, returns no result, or the T2 project name is wrong, the guardrail
+warns and proceeds rather than blocking. Advisory checks should never break
+workflows.
+
+**T2 storage convention**: Guardrails 1 and 2 assume RDR status is stored in T2
+under `nx memory get --project {repo}_rdr --title NNN`. This is the convention
+used by `/rdr-gate` and `/rdr-accept`. If the T2 record doesn't exist, the
+guardrail falls back to "warn and proceed."
 
 ## Success Criteria
 
-- [ ] Brainstorming-gate warns when referenced RDR is not accepted
-- [ ] Strategic-planner refuses to create plans for unaccepted RDRs
-- [ ] Bead creation warns when referencing unaccepted RDRs
-- [ ] Override mechanism exists for intentional process bypasses
+- [ ] Brainstorming-gate scans for `RDR-\d+` and warns when status is not accepted
+- [ ] Strategic-planner scans relay for `RDR-\d+` and warns when status is not accepted
+- [ ] Bead creation hook detects `RDR-\d+` in description and prints reminder
+- [ ] All guardrails fail open (no workflow breakage when T2 is unavailable)
 - [ ] No false positives for work not tracked by an RDR
