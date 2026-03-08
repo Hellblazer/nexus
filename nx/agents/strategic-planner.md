@@ -26,6 +26,13 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 3. [ ] **Input Artifacts** section with at least one artifact
 4. [ ] **Deliverable** description
 5. [ ] At least one **Quality Criterion** in checkbox format
+6. [ ] **RDR status check** — Scan the relay Task field and Input Artifacts for
+   the pattern `RDR-\d+`. For each match, run:
+   `nx memory get --project {repo}_rdr --title NNN`
+   If status is not `accepted` or `closed`, warn the user:
+   "RDR-NNN is {status}. Consider running `/rdr-gate NNN` and `/rdr-accept NNN` first."
+   If the lookup fails or returns no result, warn and proceed (fail-open).
+   If no RDR pattern is found, proceed normally.
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
 1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
