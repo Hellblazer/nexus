@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-03-07
+
+### Added
+- **Project-local `/release` skill** — enforces the full release checklist from
+  `docs/contributing.md` as an actionable step-by-step workflow. Prevents skipping
+  steps like `uv tool install --reinstall` or using `gh release create` instead
+  of `git tag`.
+
 ## [1.7.0] - 2026-03-07
 
 ### Added
