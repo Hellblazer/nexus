@@ -4,6 +4,7 @@ version: "2.0"
 description: Provides thorough analysis of complex problems and intricate system relationships. Use when investigating performance mysteries, debugging multi-component interactions, or understanding system behavior.
 model: opus
 color: blue
+tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
 ---
 
 ## Usage Examples

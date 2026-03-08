@@ -4,6 +4,7 @@ version: "2.0"
 description: Designs comprehensive Java architecture and creates phased execution plans for complex projects. Use when starting new features requiring architectural design or planning multi-phase implementations.
 model: opus
 color: green
+tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
 ---
 
 ## Usage Examples

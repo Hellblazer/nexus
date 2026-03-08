@@ -4,6 +4,7 @@ version: "2.0"
 description: Provides deep constructive critique of code, documentation, plans, and designs. Identifies structural flaws, logical inconsistencies, and unvalidated assumptions. Use when reviewing architectural decisions, validating implementations against specifications, or auditing plans before committing.
 model: sonnet
 color: teal
+tools: ["Read", "Grep", "Glob", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
 ---
 
 ## Usage Examples
