@@ -19,14 +19,10 @@ class ContentClass(Enum):
     SKIP = "skip"
 
 
-# Canonical code extensions — the greppable, authoritative list.
-_CODE_EXTENSIONS: frozenset[str] = frozenset({
-    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs",
-    ".cpp", ".cc", ".c", ".h", ".hpp", ".rb", ".cs", ".sh", ".bash",
-    ".kt", ".swift", ".scala", ".r", ".m", ".php",
-    # GPU shaders and Protobuf schemas
-    ".proto", ".cl", ".comp", ".frag", ".vert", ".metal", ".glsl", ".wgsl", ".hlsl",
-})
+# Derived from LANGUAGE_REGISTRY to prevent drift (RDR-028).
+from nexus.languages import LANGUAGE_REGISTRY, GPU_SHADER_EXTENSIONS
+
+_CODE_EXTENSIONS: frozenset[str] = frozenset(LANGUAGE_REGISTRY.keys()) | GPU_SHADER_EXTENSIONS
 
 # Extensions for known-noise files that should never be indexed.
 _SKIP_EXTENSIONS: frozenset[str] = frozenset({

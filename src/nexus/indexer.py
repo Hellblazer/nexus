@@ -29,41 +29,14 @@ DEFAULT_IGNORE: list[str] = [
 # Voyage AI embed() API limit: https://docs.voyageai.com/reference/embeddings-api
 _VOYAGE_EMBED_BATCH_SIZE = 128
 
-_EXT_TO_LANGUAGE: dict[str, str] = {
-    ".py": "python",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".java": "java",
-    ".go": "go",
-    ".rs": "rust",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".c": "c",
-    ".h": "c",
-    ".hpp": "cpp",
-    ".rb": "ruby",
-    ".cs": "c_sharp",
-    ".sh": "bash",
-    ".bash": "bash",
-    ".kt": "kotlin",
-    ".swift": "swift",
-    ".scala": "scala",
-    ".r": "r",
-    ".m": "objc",
-    ".php": "php",
-    ".lua": "lua",
-    ".cxx": "cpp",
-    ".kts": "kotlin",
-    ".sc": "scala",
-}
+from nexus.languages import LANGUAGE_REGISTRY
 
 # Comment character for each language used to build the embed-only context prefix.
 _COMMENT_CHARS: dict[str, str] = {
     "python": "#",
     "javascript": "//",
     "typescript": "//",
+    "tsx": "//",
     "java": "//",
     "go": "//",
     "rust": "//",
@@ -79,6 +52,18 @@ _COMMENT_CHARS: dict[str, str] = {
     "r": "#",
     "objc": "//",
     "lua": "--",
+    "proto": "//",
+    "elixir": "#",
+    "haskell": "--",
+    "clojure": ";",
+    "dart": "//",
+    "zig": "//",
+    "julia": "#",
+    "elisp": ";",
+    "erlang": "%",
+    "ocaml": "(*",
+    "ocaml_interface": "(*",
+    "perl": "#",
 }
 
 # Tree-sitter node types → semantic code_type, per language.
@@ -98,6 +83,14 @@ DEFINITION_TYPES: dict[str, dict[str, str]] = {
         "generator_function_declaration": "function",
     },
     "typescript": {
+        "function_declaration": "function",
+        "class_declaration": "class",
+        "method_definition": "method",
+        "interface_declaration": "interface",
+        "type_alias_declaration": "type",
+        "arrow_function": "function",
+    },
+    "tsx": {
         "function_declaration": "function",
         "class_declaration": "class",
         "method_definition": "method",
@@ -175,6 +168,30 @@ DEFINITION_TYPES: dict[str, dict[str, str]] = {
     "lua": {
         "function_declaration": "function",
         "local_function": "function",
+    },
+    "dart": {
+        "class_definition": "class",
+        "method_signature": "method",
+        "function_signature": "function",
+    },
+    "haskell": {
+        "function": "function",
+        "data_type": "class",
+    },
+    "julia": {
+        "function_definition": "function",
+        "struct_definition": "class",
+    },
+    "ocaml": {
+        "value_definition": "function",
+        "type_definition": "class",
+        "module_definition": "module",
+    },
+    "perl": {
+        "subroutine_declaration_statement": "function",
+    },
+    "erlang": {
+        "function_clause": "function",
     },
 }
 
@@ -516,7 +533,7 @@ def _index_code_file(
     content_hash = _hl.sha256(content.encode()).hexdigest()
     source_bytes = content.encode("utf-8")
     ext = file.suffix.lower()
-    language = _EXT_TO_LANGUAGE.get(ext, "")
+    language = LANGUAGE_REGISTRY.get(ext, "")
     comment_char = _COMMENT_CHARS.get(language, "#")
     rel_path = file.relative_to(repo)
 

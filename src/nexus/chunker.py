@@ -9,46 +9,7 @@ from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
 
 _log = structlog.get_logger()
 
-# Extensions supported by llama-index CodeSplitter / tree-sitter-language-pack.
-# Values are tree-sitter-language-pack language names (may differ from the logical
-# language names in indexer._EXT_TO_LANGUAGE, e.g. .tsx → "tsx" here vs "typescript"
-# for comment/context purposes; .cs → "c_sharp" in both dicts).
-AST_EXTENSIONS: dict[str, str] = {
-    # Core web/scripting
-    ".py": "python",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    # Systems languages
-    ".c": "c",
-    ".h": "c",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".cxx": "cpp",
-    ".hpp": "cpp",
-    ".rs": "rust",
-    ".go": "go",
-    # JVM family
-    ".java": "java",
-    ".kt": "kotlin",
-    ".kts": "kotlin",
-    ".scala": "scala",
-    ".sc": "scala",
-    # .NET
-    ".cs": "c_sharp",
-    # Shell / scripting
-    ".sh": "bash",
-    ".bash": "bash",
-    # Mobile / cross-platform
-    ".swift": "swift",
-    ".m": "objc",
-    # Interpreted
-    ".rb": "ruby",
-    ".php": "php",
-    ".r": "r",
-    ".lua": "lua",
-}
+from nexus.languages import LANGUAGE_REGISTRY
 
 _CHUNK_LINES = 150
 _OVERLAP = 0.15
@@ -71,7 +32,9 @@ def _make_code_splitter(language: str, content: str, chunk_lines: int = _CHUNK_L
         from llama_index.core.node_parser import CodeSplitter  # type: ignore[import]
     from tree_sitter_language_pack import get_parser  # type: ignore[import]
 
-    parser = get_parser(language)
+    # tree-sitter-language-pack uses "csharp" not "c_sharp".
+    parser_name = "csharp" if language == "c_sharp" else language
+    parser = get_parser(parser_name)
     splitter = CodeSplitter(
         language=language,
         parser=parser,
@@ -197,7 +160,7 @@ def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list
     """
     effective_chunk_lines = chunk_lines if chunk_lines is not None else _CHUNK_LINES
     ext = file.suffix.lower()
-    language = AST_EXTENSIONS.get(ext)
+    language = LANGUAGE_REGISTRY.get(ext)
 
     base_meta = {
         "file_path": str(file),
