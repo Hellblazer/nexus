@@ -15,6 +15,11 @@ _CHUNK_LINES = 150
 _OVERLAP = 0.15
 # Alias for backward-compat with existing tests that import _CHUNK_MAX_BYTES.
 _CHUNK_MAX_BYTES = SAFE_CHUNK_BYTES
+# Lines longer than this threshold (bytes) are split at natural break points
+# before line-based chunking. Prevents minified JS/CSS from producing a single
+# oversized chunk that gets truncated.
+_LONG_LINE_THRESHOLD = SAFE_CHUNK_BYTES
+_BREAK_CHARS = (";", ",", "}", ")", "]")
 
 
 def _make_code_splitter(language: str, content: str, chunk_lines: int = _CHUNK_LINES) -> list:
@@ -45,6 +50,58 @@ def _make_code_splitter(language: str, content: str, chunk_lines: int = _CHUNK_L
     return splitter.get_nodes_from_documents([doc])
 
 
+def _split_long_line(line: str, max_chars: int) -> list[str]:
+    """Split a very long line into smaller segments at natural break points.
+
+    Used for minified code where a single line can be the entire file.
+    Prefers splitting at semicolons, commas, and closing brackets within
+    the last 20% of each segment.  Falls back to a hard cut at *max_chars*
+    when no natural break point is found.
+    """
+    if len(line) <= max_chars:
+        return [line]
+
+    segments: list[str] = []
+    pos = 0
+    while pos < len(line):
+        end = min(pos + max_chars, len(line))
+        if end < len(line):
+            # Search for a natural break in the last 20% of the segment
+            search_start = pos + int(max_chars * 0.8)
+            best_break = -1
+            for ch in _BREAK_CHARS:
+                bp = line.rfind(ch, search_start, end)
+                if bp > best_break:
+                    best_break = bp
+            if best_break > search_start:
+                end = best_break + 1  # include the break character
+        segments.append(line[pos:end])
+        pos = end
+    return segments
+
+
+def _expand_long_lines(content: str, max_bytes: int = _LONG_LINE_THRESHOLD) -> str:
+    """Pre-process content by splitting lines that exceed *max_bytes*.
+
+    Returns the content with long lines broken into shorter segments,
+    each ending at a natural code delimiter when possible.  This ensures
+    the downstream line-based chunker has reasonable-length lines to work with.
+    """
+    lines = content.splitlines()
+    has_long = any(len(ln.encode()) > max_bytes for ln in lines)
+    if not has_long:
+        return content
+    # Conservative char estimate: UTF-8 chars are ≤4 bytes, but code is mostly ASCII.
+    max_chars = max_bytes  # 1:1 for ASCII; will overshoot for multi-byte but that's safe
+    expanded: list[str] = []
+    for ln in lines:
+        if len(ln.encode()) > max_bytes:
+            expanded.extend(_split_long_line(ln, max_chars))
+        else:
+            expanded.append(ln)
+    return "\n".join(expanded)
+
+
 def _line_chunk(
     content: str,
     chunk_lines: int = _CHUNK_LINES,
@@ -64,6 +121,9 @@ def _line_chunk(
 
     Returns list of (line_start, line_end, text) tuples (1-indexed).
     """
+    # Pre-split long lines (minified code) so the line-based chunker
+    # has reasonable-length lines to work with.
+    content = _expand_long_lines(content, max_bytes=max_bytes)
     lines = content.splitlines()
     n = len(lines)
     if n == 0:
@@ -117,7 +177,9 @@ def _enforce_byte_cap(
             result.append(chunk)
             continue
 
-        # Oversized node: re-split line-by-line with binary-search byte cap.
+        # Oversized node: expand long lines (minified code), then re-split
+        # line-by-line with binary-search byte cap.
+        text = _expand_long_lines(text, max_bytes=max_bytes)
         base_ls: int = chunk.get("line_start", 1)
         lines = text.splitlines()
         pos = 0
