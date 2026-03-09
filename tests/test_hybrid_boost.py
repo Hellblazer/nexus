@@ -187,10 +187,11 @@ def test_boost_applied_to_vector_result_matching_rg_file_path(
 # ── 3. rg__cache filtered from output with fallback guard ───────────────────
 
 
-def test_rg_cache_results_filtered_from_output(
+def test_rg_signal_results_filtered_from_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """rg__cache results should not appear in final output."""
+    """rg__cache results for files ALREADY in vector results are filtered (signals only).
+    rg-only files (not in vector) are promoted with penalty per Phase 3 item 10."""
     monkeypatch.setenv("CHROMA_API_KEY", "k")
     monkeypatch.setenv("VOYAGE_API_KEY", "v")
     monkeypatch.setenv("CHROMA_TENANT", "t")
@@ -198,11 +199,12 @@ def test_rg_cache_results_filtered_from_output(
     monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
 
     cache_file = tmp_path / "repo-abcd1234.cache"
-    cache_file.write_text("/repo/main.py:1:hello\n")
+    cache_file.write_text("/repo/file.py:1:hello\n")
 
+    # Vector and rg hit for the SAME file — rg serves as signal, should be filtered
     vector = _sr(id="v1", distance=0.9, collection="code__repo-abcd1234",
                  file_path="/repo/file.py")
-    rg_hit = {"file_path": "/repo/main.py", "line_number": 1,
+    rg_hit = {"file_path": "/repo/file.py", "line_number": 1,
               "line_content": "hello", "frecency_score": 0.5}
 
     mock_t3 = MagicMock()
@@ -214,7 +216,8 @@ def test_rg_cache_results_filtered_from_output(
         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[vector]),
         patch("nexus.commands.search_cmd.search_ripgrep", return_value=[rg_hit]),
         patch("nexus.commands.search_cmd.load_config",
-              return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}),
+              return_value={"embeddings": {"rerankerModel": "rerank-2.5"},
+                            "search": {"hybrid_default": False}}),
     ):
         result = runner.invoke(
             __import__("nexus.cli", fromlist=["main"]).main,
@@ -224,8 +227,9 @@ def test_rg_cache_results_filtered_from_output(
     assert result.exit_code == 0, result.output
     import json
     data = json.loads(result.output)
-    collections = [r.get("collection") for r in data]
-    assert "rg__cache" not in collections, "rg__cache results should be filtered from output"
+    # Signal rg hit (same file as vector) should be filtered — only vector result remains
+    assert len(data) == 1
+    assert data[0].get("collection") == "code__repo-abcd1234"
 
 
 def test_rg_only_results_preserved_by_fallback(
@@ -455,3 +459,332 @@ def test_non_hybrid_search_unaffected() -> None:
     results = apply_hybrid_scoring([v1, v2], hybrid=False)
     assert results[0].id == "v1"  # lower distance = higher score
     assert results[1].id == "v2"
+
+
+# ── Phase 2: Item 6 — Scoring math tests ────────────────────────────────────
+
+
+def test_boost_math_exact_value() -> None:
+    """Boost applies exactly +0.15, capped at 1.0."""
+    from nexus.commands.search_cmd import EXACT_MATCH_BOOST
+    base_score = 0.6
+    boosted = min(1.0, base_score + EXACT_MATCH_BOOST)
+    assert boosted == pytest.approx(0.75)
+
+
+def test_boost_math_cap_at_one() -> None:
+    """Score 0.9 + 0.15 = 1.05, capped at 1.0."""
+    from nexus.commands.search_cmd import EXACT_MATCH_BOOST
+    base_score = 0.9
+    boosted = min(1.0, base_score + EXACT_MATCH_BOOST)
+    assert boosted == pytest.approx(1.0)
+
+
+def test_multiple_rg_hits_same_file_boost_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Multiple rg hits for the same file still boost the vector result only once."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
+
+    cache_file = tmp_path / "repo-abcd1234.cache"
+    cache_file.write_text("/repo/match.py:10:hello\n/repo/match.py:20:hello again\n")
+
+    vector = _sr(id="v1", distance=0.9, collection="code__repo-abcd1234",
+                 file_path="/repo/match.py")
+
+    rg_hits = [
+        {"file_path": "/repo/match.py", "line_number": 10,
+         "line_content": "hello", "frecency_score": 0.5},
+        {"file_path": "/repo/match.py", "line_number": 20,
+         "line_content": "hello again", "frecency_score": 0.4},
+    ]
+
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
+
+    runner = CliRunner()
+    with (
+        patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+        patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[vector]),
+        patch("nexus.commands.search_cmd.search_ripgrep", return_value=rg_hits),
+        patch("nexus.commands.search_cmd.load_config",
+              return_value={"embeddings": {"rerankerModel": "rerank-2.5"},
+                            "search": {"hybrid_default": False}}),
+    ):
+        result = runner.invoke(
+            __import__("nexus.cli", fromlist=["main"]).main,
+            ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank", "--json"],
+        )
+
+    assert result.exit_code == 0, result.output
+    import json
+    data = json.loads(result.output)
+    # Only one vector result should appear (rg hits filtered, no rg-only promotion)
+    assert len(data) == 1
+    assert data[0].get("source_path") == "/repo/match.py"
+
+
+# ── Phase 2: Item 7 — rg-only results (no vector overlap) ──────────────────
+
+
+def test_rg_no_vector_overlap_no_crash() -> None:
+    """When rg finds files that vector didn't, scoring doesn't crash."""
+    from nexus.scoring import apply_hybrid_scoring
+
+    # Only rg results, no vector
+    rg1 = _rg_sr(file_path="/repo/a.py")
+    rg2 = _rg_sr(file_path="/repo/b.py")
+
+    results = apply_hybrid_scoring([rg1, rg2], hybrid=True)
+    assert len(results) == 2
+    for r in results:
+        assert r.hybrid_score == pytest.approx(0.5)
+
+
+# ── Phase 2: Item 9 — search.hybrid_default config ─────────────────────────
+
+
+def test_hybrid_default_config_enables_hybrid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """search.hybrid_default=true enables hybrid when --hybrid not passed."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
+
+    cache_file = tmp_path / "repo-abcd1234.cache"
+    cache_file.write_text("/repo/match.py:10:hello\n")
+
+    rg_calls: list[int] = []
+
+    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True):
+        rg_calls.append(1)
+        return []
+
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
+
+    runner = CliRunner()
+    with (
+        patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+        patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]),
+        patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_search_ripgrep),
+        patch("nexus.commands.search_cmd.load_config",
+              return_value={"embeddings": {"rerankerModel": "rerank-2.5"},
+                            "search": {"hybrid_default": True}}),
+    ):
+        # Note: NO --hybrid flag passed
+        result = runner.invoke(
+            __import__("nexus.cli", fromlist=["main"]).main,
+            ["search", "query", "--corpus", "code", "--no-rerank"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert len(rg_calls) >= 1, (
+        "search_ripgrep should be called when search.hybrid_default=true"
+    )
+
+
+def test_hybrid_default_false_no_ripgrep(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """search.hybrid_default=false (default) does not invoke ripgrep."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
+
+    rg_calls: list[int] = []
+
+    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True):
+        rg_calls.append(1)
+        return []
+
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
+
+    runner = CliRunner()
+    with (
+        patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+        patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]),
+        patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_search_ripgrep),
+        patch("nexus.commands.search_cmd.load_config",
+              return_value={"embeddings": {"rerankerModel": "rerank-2.5"},
+                            "search": {"hybrid_default": False}}),
+    ):
+        result = runner.invoke(
+            __import__("nexus.cli", fromlist=["main"]).main,
+            ["search", "query", "--corpus", "code", "--no-rerank"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert len(rg_calls) == 0, (
+        "search_ripgrep should NOT be called when hybrid_default=false and no --hybrid"
+    )
+
+
+# ── Phase 3: Item 10 — rg-only results promoted with penalty ────────────────
+
+
+def test_rg_only_files_promoted_with_penalty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Files found only by rg (not in vector top-K) appear with penalized score."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
+
+    cache_file = tmp_path / "repo-abcd1234.cache"
+    cache_file.write_text("/repo/rg_only.py:5:exact match\n")
+
+    # Vector result for a DIFFERENT file
+    vector = _sr(id="v1", distance=0.9, collection="code__repo-abcd1234",
+                 file_path="/repo/vector_file.py")
+    # rg hit for a file NOT in vector results
+    rg_hit = {"file_path": "/repo/rg_only.py", "line_number": 5,
+              "line_content": "exact match", "frecency_score": 0.5}
+
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
+
+    runner = CliRunner()
+    with (
+        patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+        patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[vector]),
+        patch("nexus.commands.search_cmd.search_ripgrep", return_value=[rg_hit]),
+        patch("nexus.commands.search_cmd.load_config",
+              return_value={"embeddings": {"rerankerModel": "rerank-2.5"},
+                            "search": {"hybrid_default": False}}),
+    ):
+        result = runner.invoke(
+            __import__("nexus.cli", fromlist=["main"]).main,
+            ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank", "--json"],
+        )
+
+    assert result.exit_code == 0, result.output
+    import json
+    data = json.loads(result.output)
+
+    paths = [r.get("source_path", r.get("file_path")) for r in data]
+    assert "/repo/rg_only.py" in paths, (
+        "rg-only file should appear in results (promoted with penalty)"
+    )
+    assert "/repo/vector_file.py" in paths, (
+        "vector file should still appear"
+    )
+
+
+def test_rg_only_deduped_per_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Multiple rg hits for the same rg-only file produce only one result."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
+
+    cache_file = tmp_path / "repo-abcd1234.cache"
+    cache_file.write_text("/repo/rg_only.py:5:match1\n/repo/rg_only.py:10:match2\n")
+
+    rg_hits = [
+        {"file_path": "/repo/rg_only.py", "line_number": 5,
+         "line_content": "match1", "frecency_score": 0.5},
+        {"file_path": "/repo/rg_only.py", "line_number": 10,
+         "line_content": "match2", "frecency_score": 0.4},
+    ]
+
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
+
+    runner = CliRunner()
+    with (
+        patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+        patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]),
+        patch("nexus.commands.search_cmd.search_ripgrep", return_value=rg_hits),
+        patch("nexus.commands.search_cmd.load_config",
+              return_value={"embeddings": {"rerankerModel": "rerank-2.5"},
+                            "search": {"hybrid_default": False}}),
+    ):
+        result = runner.invoke(
+            __import__("nexus.cli", fromlist=["main"]).main,
+            ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank", "--json"],
+        )
+
+    assert result.exit_code == 0, result.output
+    import json
+    # Strip structlog warning lines before JSON — find the line starting with "["
+    lines = result.output.splitlines()
+    json_start = next(i for i, ln in enumerate(lines) if ln.strip() == "[")
+    data = json.loads("\n".join(lines[json_start:]))
+    rg_only_results = [r for r in data if r.get("file_path") == "/repo/rg_only.py"]
+    assert len(rg_only_results) == 1, (
+        f"Expected 1 rg-only result (deduped), got {len(rg_only_results)}"
+    )
+
+
+def test_rg_only_penalty_constant() -> None:
+    """RG_ONLY_PENALTY constant is exported and reasonable."""
+    from nexus.commands.search_cmd import RG_ONLY_PENALTY
+    assert 0.0 < RG_ONLY_PENALTY < 1.0
+    assert RG_ONLY_PENALTY == 0.8
+
+
+# ── Phase 3: Item 11 — Line-level match tracking ────────────────────────────
+
+
+def test_boosted_result_has_rg_matched_lines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Boosted vector results get rg_matched_lines in metadata for RDR-027."""
+    monkeypatch.setenv("CHROMA_API_KEY", "k")
+    monkeypatch.setenv("VOYAGE_API_KEY", "v")
+    monkeypatch.setenv("CHROMA_TENANT", "t")
+    monkeypatch.setenv("CHROMA_DATABASE", "d")
+    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
+
+    cache_file = tmp_path / "repo-abcd1234.cache"
+    cache_file.write_text("/repo/match.py:10:hello\n/repo/match.py:25:world\n")
+
+    vector = _sr(id="v1", distance=0.9, collection="code__repo-abcd1234",
+                 file_path="/repo/match.py")
+    rg_hits = [
+        {"file_path": "/repo/match.py", "line_number": 10,
+         "line_content": "hello", "frecency_score": 0.5},
+        {"file_path": "/repo/match.py", "line_number": 25,
+         "line_content": "world", "frecency_score": 0.4},
+    ]
+
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
+
+    runner = CliRunner()
+    with (
+        patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+        patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[vector]),
+        patch("nexus.commands.search_cmd.search_ripgrep", return_value=rg_hits),
+        patch("nexus.commands.search_cmd.load_config",
+              return_value={"embeddings": {"rerankerModel": "rerank-2.5"},
+                            "search": {"hybrid_default": False}}),
+    ):
+        result = runner.invoke(
+            __import__("nexus.cli", fromlist=["main"]).main,
+            ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank", "--json"],
+        )
+
+    assert result.exit_code == 0, result.output
+    import json
+    data = json.loads(result.output)
+    assert len(data) == 1
+    assert data[0].get("rg_matched_lines") == [10, 25], (
+        f"Expected rg_matched_lines=[10, 25], got {data[0].get('rg_matched_lines')}"
+    )

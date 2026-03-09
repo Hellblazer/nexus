@@ -8,7 +8,7 @@ from nexus.corpus import resolve_corpus
 from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
 from nexus.formatters import format_json, format_plain_with_context, format_vimgrep
-from nexus.scoring import apply_hybrid_scoring, rerank_results, round_robin_interleave
+from nexus.scoring import RG_FLOOR_SCORE, apply_hybrid_scoring, rerank_results, round_robin_interleave
 from nexus.search_engine import search_cross_corpus
 from nexus.types import SearchResult
 
@@ -34,6 +34,7 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
 
 _CONTENT_MAX_CHARS: int = 200
 EXACT_MATCH_BOOST: float = 0.15
+RG_ONLY_PENALTY: float = 0.8  # Multiplier for rg-only results (files not in vector top-K)
 
 # Directory where ripgrep cache files are stored (overridable in tests via monkeypatch)
 _CONFIG_DIR: Path = Path.home() / ".config" / "nexus"
@@ -177,6 +178,10 @@ def search_cmd(
     config = load_config()
     reranker_model = config["embeddings"]["rerankerModel"]
 
+    # Apply per-project hybrid default if --hybrid was not explicitly passed
+    if not hybrid:
+        hybrid = config.get("search", {}).get("hybrid_default", False)
+
     def _retrieve(q: str) -> list[SearchResult]:
         raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter)
         if hybrid:
@@ -204,16 +209,19 @@ def search_cmd(
             click.echo("No results.")
             return
 
-    # Pre-reranker: capture rg file paths while all results are present.
-    # The reranker's top_k may drop rg hits, so we capture before reranking.
+    # Pre-reranker: capture rg file paths and matched line numbers while all
+    # results are present. The reranker's top_k may drop rg hits.
     rg_file_paths: set[str] = set()
+    rg_matched_lines: dict[str, list[int]] = {}  # file_path → [line_numbers]
     if hybrid:
-        rg_file_paths = {
-            r.metadata.get("file_path", "")
-            for r in results
-            if r.collection == "rg__cache"
-        }
-        rg_file_paths.discard("")
+        for r in results:
+            if r.collection == "rg__cache":
+                fp = r.metadata.get("file_path", "")
+                if fp:
+                    rg_file_paths.add(fp)
+                    ln = r.metadata.get("line_start")
+                    if ln is not None:
+                        rg_matched_lines.setdefault(fp, []).append(int(ln))
 
     # Hybrid scoring
     results = apply_hybrid_scoring(results, hybrid=hybrid)
@@ -233,17 +241,36 @@ def search_cmd(
 
     # Post-reranker: apply exact-match boost using pre-captured rg file paths.
     # Fires unconditionally after both reranked and no-rerank paths.
+    # Also attach matched line numbers for downstream context windowing (RDR-027).
     if rg_file_paths:
         for r in results:
             src = r.metadata.get("source_path", r.metadata.get("file_path", ""))
             if src in rg_file_paths:
                 r.hybrid_score = min(1.0, r.hybrid_score + EXACT_MATCH_BOOST)
+                if src in rg_matched_lines:
+                    r.metadata["rg_matched_lines"] = rg_matched_lines[src]
 
-    # Filter rg__cache signals from output — they served as file_path linkage.
-    # Fallback guard: preserve rg results when no vector results survive.
+    # Filter rg__cache signals from output. Promote rg-only results (files that
+    # ripgrep found but vector search missed) with a penalty score.
     if hybrid:
-        vector_results = [r for r in results if r.collection != "rg__cache"]
-        results = vector_results if vector_results else results
+        vector_paths = {
+            r.metadata.get("source_path", r.metadata.get("file_path", ""))
+            for r in results if r.collection != "rg__cache"
+        }
+        seen_rg_paths: set[str] = set()
+        kept: list[SearchResult] = []
+        for r in results:
+            if r.collection != "rg__cache":
+                kept.append(r)
+            else:
+                fp = r.metadata.get("file_path", "")
+                if fp not in vector_paths and fp not in seen_rg_paths:
+                    # rg-only: file not in vector results — keep first hit, penalized
+                    r.hybrid_score = RG_FLOOR_SCORE * RG_ONLY_PENALTY
+                    kept.append(r)
+                    seen_rg_paths.add(fp)
+                # else: rg hit for a file already in vector results → drop (signal only)
+        results = kept if kept else results
 
     # --reverse: invert final order
     if reverse:
