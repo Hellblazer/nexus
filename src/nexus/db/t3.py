@@ -657,6 +657,28 @@ class T3Database:
             self._delete_batch(col, collection_name, ids)
         return len(ids)
 
+    def get_by_id(self, collection: str, doc_id: str) -> dict | None:
+        """Retrieve a single entry by its exact document ID.
+
+        Returns a dict with ``id``, ``content``, and all metadata fields,
+        or ``None`` if the entry does not exist.
+        """
+        try:
+            col = self._client_for(collection).get_collection(collection)
+        except _ChromaNotFoundError:
+            return None
+        with self._read_sem(collection):
+            result = _chroma_with_retry(
+                col.get, ids=[doc_id], include=["documents", "metadatas"]
+            )
+        if not result["ids"]:
+            return None
+        return {
+            "id": result["ids"][0],
+            "content": result["documents"][0],
+            **result["metadatas"][0],
+        }
+
     def delete_by_id(self, collection: str, doc_id: str) -> bool:
         """Delete a single entry by its exact document ID. Returns True if found and deleted."""
         try:
