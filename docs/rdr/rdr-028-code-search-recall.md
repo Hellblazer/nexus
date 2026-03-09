@@ -2,7 +2,7 @@
 title: "Code Search Recall — Language Registry Unification"
 id: RDR-028
 type: Enhancement
-status: accepted
+status: closed
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
