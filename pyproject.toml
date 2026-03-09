@@ -71,5 +71,6 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=7.0.0",
+    "syrupy>=4.0",
     "twine>=6.2.0",
 ]
