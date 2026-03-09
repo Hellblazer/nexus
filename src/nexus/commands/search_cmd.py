@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import os
 from pathlib import Path
 
 import click
@@ -7,7 +8,14 @@ from nexus.config import load_config
 from nexus.corpus import resolve_corpus
 from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
-from nexus.formatters import format_json, format_plain_with_context, format_vimgrep
+from nexus.formatters import (
+    _format_with_bat,
+    _is_bat_installed,
+    format_compact,
+    format_json,
+    format_plain_with_context,
+    format_vimgrep,
+)
 from nexus.scoring import RG_FLOOR_SCORE, apply_hybrid_scoring, rerank_results, round_robin_interleave
 from nexus.search_engine import search_cross_corpus
 from nexus.types import SearchResult
@@ -106,9 +114,15 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               help="Exclude chunks from files larger than N chunks (code corpora only; "
                    "knowledge/docs corpora lack chunk_count and will return no results)")
 @click.option("-A", "lines_after", default=0, type=int, metavar="N",
-              help="Show N lines of context after each result chunk")
+              help="Show N lines of context after each matching line")
+@click.option("-B", "lines_before", default=0, type=int, metavar="N",
+              help="Show N lines of context before each matching line (within-chunk)")
 @click.option("-C", "lines_context", default=0, type=int, metavar="N",
-              help="Show N lines of context after each result chunk (alias for -A N)")
+              help="Show N lines before and after each match (equivalent to -B N -A N)")
+@click.option("--bat", "use_bat", is_flag=True, default=False,
+              help="Syntax highlight with bat (ignored with --json/--vimgrep/--files)")
+@click.option("--compact", is_flag=True, default=False,
+              help="One line per result: path:line:text (grep-compatible)")
 @click.option("--reverse", "-r", is_flag=True, default=False,
               help="Reverse output order (highest-scoring last)")
 def search_cmd(
@@ -126,7 +140,10 @@ def search_cmd(
     where_pairs: tuple[str, ...],
     max_file_chunks: int | None,
     lines_after: int,
+    lines_before: int,
     lines_context: int,
+    use_bat: bool,
+    compact: bool,
     reverse: bool,
 ) -> None:
     """Semantic search across T3 knowledge collections.
@@ -139,8 +156,9 @@ def search_cmd(
     --corpus may be a prefix (code, docs, knowledge) or a fully-qualified
     collection name (code__myrepo).  Repeat --corpus to search multiple corpora.
     """
-    # -C N is alias for -A N
+    # -C N = -B N -A N (grep semantics: before + after)
     if lines_context:
+        lines_before = lines_context
         lines_after = lines_context
 
     # Build where filter: --where pairs only ($startswith is not a valid ChromaDB operator;
@@ -280,7 +298,7 @@ def search_cmd(
     if json_out:
         click.echo(format_json(results))
     elif vimgrep:
-        for line in format_vimgrep(results):
+        for line in format_vimgrep(results, query=query):
             click.echo(line)
     elif files_only:
         seen: set[str] = set()
@@ -289,14 +307,33 @@ def search_cmd(
             if file_path and file_path not in seen:
                 seen.add(file_path)
                 click.echo(file_path)
+    elif compact:
+        for line in format_compact(results, query=query):
+            click.echo(line)
     else:
-        for result in results:
-            for line in format_plain_with_context(
-                [result], lines_after=lines_after
-            ):
-                click.echo(line)
-            if show_content:
-                text = result.content
-                if len(text) > _CONTENT_MAX_CHARS:
-                    text = text[:_CONTENT_MAX_CHARS] + "..."
-                click.echo(f"  {text}")
+        # Check bat applicability
+        use_bat_effective = (
+            use_bat
+            and not no_color
+            and not os.environ.get("NO_COLOR")
+        )
+        if use_bat_effective and not _is_bat_installed():
+            click.echo("Warning: bat not found; showing plain output", err=True)
+            use_bat_effective = False
+
+        if use_bat_effective:
+            click.echo(_format_with_bat(results))
+        else:
+            for result in results:
+                for line in format_plain_with_context(
+                    [result],
+                    lines_after=lines_after,
+                    lines_before=lines_before,
+                    query=query,
+                ):
+                    click.echo(line)
+                if show_content:
+                    text = result.content
+                    if len(text) > _CONTENT_MAX_CHARS:
+                        text = text[:_CONTENT_MAX_CHARS] + "..."
+                    click.echo(f"  {text}")
