@@ -691,3 +691,64 @@ def test_store_list_shows_16char_ids(runner: CliRunner, env_creds: None) -> None
         result = runner.invoke(main, ["store", "list"])
     assert result.exit_code == 0, result.output
     assert "abcdef1234567890" in result.output  # 16 chars present
+
+
+# ── nx store get ──────────────────────────────────────────────────────────────
+
+def test_store_get_happy(runner: CliRunner, env_creds: None) -> None:
+    """get retrieves entry and displays content."""
+    mock_db = MagicMock()
+    mock_db.get_by_id.return_value = {
+        "id": "abcdef1234567890",
+        "content": "Important knowledge content here",
+        "title": "finding.md",
+        "tags": "arch,review",
+        "indexed_at": "2026-03-09T10:00:00+00:00",
+    }
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "get", "abcdef1234567890"])
+    assert result.exit_code == 0, result.output
+    assert "abcdef1234567890" in result.output
+    assert "finding.md" in result.output
+    assert "arch,review" in result.output
+    assert "Important knowledge content here" in result.output
+
+
+def test_store_get_not_found(runner: CliRunner, env_creds: None) -> None:
+    """get exits non-zero when entry not found."""
+    mock_db = MagicMock()
+    mock_db.get_by_id.return_value = None
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "get", "nonexistent12345"])
+    assert result.exit_code != 0
+    assert "not found" in result.output.lower()
+
+
+def test_store_get_json_output(runner: CliRunner, env_creds: None) -> None:
+    """get --json outputs valid JSON with all fields."""
+    import json
+    mock_db = MagicMock()
+    mock_db.get_by_id.return_value = {
+        "id": "abcdef1234567890",
+        "content": "test content",
+        "title": "doc.md",
+        "tags": "test",
+        "indexed_at": "2026-03-09",
+    }
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "get", "abcdef1234567890", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["id"] == "abcdef1234567890"
+    assert data["content"] == "test content"
+
+
+def test_store_get_custom_collection(runner: CliRunner, env_creds: None) -> None:
+    """get --collection routes to the correct collection."""
+    mock_db = MagicMock()
+    mock_db.get_by_id.return_value = {
+        "id": "abc123", "content": "x", "title": "t",
+    }
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        runner.invoke(main, ["store", "get", "abc123", "-c", "code__myrepo"])
+    mock_db.get_by_id.assert_called_once_with("code__myrepo", "abc123")

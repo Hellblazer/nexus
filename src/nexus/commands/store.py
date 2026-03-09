@@ -137,6 +137,45 @@ def list_cmd(collection: str, limit: int) -> None:
 
 
 
+@store.command("get")
+@click.argument("doc_id")
+@click.option("--collection", "-c", default="knowledge", show_default=True,
+              help="Collection name or prefix (default: knowledge)")
+@click.option("--json", "json_out", is_flag=True, default=False,
+              help="Output as JSON")
+def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
+    """Retrieve a T3 knowledge entry by its document ID.
+
+    DOC_ID is the 16-char hex ID shown by 'nx store list'.
+
+    \b
+    Examples:
+      nx store get a1b2c3d4e5f6g7h8
+      nx store get a1b2c3d4e5f6g7h8 --collection code__myrepo --json
+    """
+    col_name = t3_collection_name(collection)
+    entry = _t3().get_by_id(col_name, doc_id)
+    if entry is None:
+        raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
+
+    if json_out:
+        import json
+        click.echo(json.dumps(entry, indent=2))
+    else:
+        title = entry.get("title", "")
+        tags = entry.get("tags", "")
+        indexed_at = (entry.get("indexed_at") or "")[:10]
+        click.echo(f"ID:         {entry['id']}")
+        click.echo(f"Collection: {col_name}")
+        if title:
+            click.echo(f"Title:      {title}")
+        if tags:
+            click.echo(f"Tags:       {tags}")
+        if indexed_at:
+            click.echo(f"Indexed:    {indexed_at}")
+        click.echo(f"\n{entry.get('content', '')}")
+
+
 @store.command("delete")
 @click.option("--collection", "-c", required=True,
               help="Collection name (required)")
