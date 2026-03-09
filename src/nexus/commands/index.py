@@ -39,13 +39,19 @@ def index() -> None:
 @click.option("--monitor", is_flag=True, default=False,
               help="Print per-file progress lines. Auto-enabled when stdout is not a TTY.")
 @click.option(
+    "--force-stale",
+    is_flag=True,
+    default=False,
+    help="Re-index only if collection pipeline version is outdated (smart force).",
+)
+@click.option(
     "--on-locked",
     type=click.Choice(["skip", "wait"]),
     default="wait",
     show_default=True,
     help="Behaviour when another process holds the repo lock: skip exits immediately, wait blocks.",
 )
-def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, on_locked: str) -> None:
+def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, force_stale: bool, on_locked: str) -> None:
     """Register and immediately index a code repository at PATH.
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
@@ -56,6 +62,10 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
 
     if force and frecency_only:
         raise click.UsageError("--force and --frecency-only are mutually exclusive.")
+    if force_stale and force:
+        raise click.UsageError("--force-stale and --force are mutually exclusive.")
+    if force_stale and frecency_only:
+        raise click.UsageError("--force-stale and --frecency-only are mutually exclusive.")
 
     reg = _registry()
     path = path.resolve()
@@ -63,7 +73,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         reg.add(path)
         click.echo(f"Registered {path}.")
 
-    label = "Force-indexing" if force else ("Updating frecency scores" if frecency_only else "Indexing")
+    label = "Force-indexing" if force else ("Force-indexing stale" if force_stale else ("Updating frecency scores" if frecency_only else "Indexing"))
     click.echo(f"{label} {path}…")
 
     bar: tqdm | None = None
@@ -90,6 +100,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                 click.echo(line)
 
     stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
+                             force_stale=force_stale,
                              on_locked=on_locked, on_start=on_start, on_file=on_file)
     if bar:
         bar.close()
