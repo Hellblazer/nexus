@@ -80,6 +80,9 @@ def _check_orphan_t1(lines: list[str]) -> bool:
             os.kill(int(pid), 0)  # raises OSError if process is dead
         except OSError:
             orphans.append(sf.name)
+        except (ValueError, TypeError):
+            _log.debug("orphan_t1_invalid_pid", path=str(sf), pid=repr(pid))
+            continue
 
     if orphans:
         lines.append(_check_line(
@@ -93,7 +96,7 @@ def _check_orphan_t1(lines: list[str]) -> bool:
 
     lines.append(_check_line(
         "T1 sessions", True,
-        f"{len(session_files)} session file(s), all processes live",
+        f"{len(session_files)} session file(s), no orphans detected",
     ))
     return True
 

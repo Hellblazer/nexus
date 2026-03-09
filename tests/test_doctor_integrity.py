@@ -67,7 +67,7 @@ class TestCheckOrphanT1:
             result = _check_orphan_t1(lines)
         assert result is True
         assert "✓" in lines[0]
-        assert "all processes live" in lines[0]
+        assert "no orphans detected" in lines[0]
 
     def test_dead_pid_session_detected_as_orphan(self, tmp_path: Path) -> None:
         """A session file with a dead PID is detected as an orphan."""

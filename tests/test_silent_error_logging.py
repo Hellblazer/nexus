@@ -203,6 +203,26 @@ def test_session_start_stdin_parse_failed_logs_debug():
     assert any(e["event"] == "session_start_stdin_parse_failed" for e in cap)
 
 
+# ── Site 11: commands/index.py hook detection failure ─────────────────────────
+
+def test_hook_detection_failed_logs_debug(tmp_path):
+    """Site 11: hook detection exception in index_repo_cmd emits debug log."""
+    from nexus.commands.index import index_repo_cmd
+    from click.testing import CliRunner
+
+    # Create a minimal git repo so the command doesn't fail before reaching hook detection
+    import subprocess
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    (tmp_path / "test.txt").write_text("hello")
+
+    with patch("nexus.commands.hooks._effective_hooks_dir", side_effect=RuntimeError("broken")):
+        with capture_logs() as cap:
+            runner = CliRunner()
+            runner.invoke(index_repo_cmd, [str(tmp_path)])
+
+    assert any(e["event"] == "hook_detection_failed" for e in cap)
+
+
 # ── Site 12: commands/doctor.py registry load failure ─────────────────────────
 
 def test_doctor_registry_load_failed_logs_warning():
