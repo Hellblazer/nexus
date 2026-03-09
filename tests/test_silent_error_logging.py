@@ -126,13 +126,22 @@ def test_ppid_proc_read_failed_logs_debug():
     if sys.platform != "linux":
         pytest.skip("_ppid_of reads /proc, only testable on Linux")
 
+    import os
     from nexus.session import _ppid_of
 
-    with patch("builtins.open", side_effect=OSError("no such file")):
-        with capture_logs() as cap:
-            result = _ppid_of(99999)
+    # Use our own PID so /proc/{pid}/status exists on Linux.
+    pid = os.getpid()
+    original_read_text = Path.read_text
 
-    assert result is None
+    def failing_read_text(self, *args, **kwargs):
+        if str(self).startswith("/proc/"):
+            raise OSError("simulated permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    with patch.object(Path, "read_text", failing_read_text):
+        with capture_logs() as cap:
+            _ppid_of(pid)
+
     assert any(e["event"] == "ppid_proc_read_failed" for e in cap)
 
 
@@ -215,7 +224,10 @@ def test_hook_detection_failed_logs_debug(tmp_path):
     subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
     (tmp_path / "test.txt").write_text("hello")
 
-    with patch("nexus.commands.hooks._effective_hooks_dir", side_effect=RuntimeError("broken")):
+    # Mock index_repository to skip the actual indexing (needs API keys on CI),
+    # and _effective_hooks_dir to trigger the hook detection failure path.
+    with patch("nexus.indexer.index_repository", return_value={}), \
+         patch("nexus.commands.hooks._effective_hooks_dir", side_effect=RuntimeError("broken")):
         with capture_logs() as cap:
             runner = CliRunner()
             runner.invoke(index_repo_cmd, [str(tmp_path)])
