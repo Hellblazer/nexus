@@ -33,14 +33,29 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
     return result
 
 _CONTENT_MAX_CHARS: int = 200
+EXACT_MATCH_BOOST: float = 0.15
 
 # Directory where ripgrep cache files are stored (overridable in tests via monkeypatch)
 _CONFIG_DIR: Path = Path.home() / ".config" / "nexus"
 
+# Prefixes to strip when mapping collection names to cache file names
+_COLLECTION_PREFIXES = ("code__", "docs__", "rdr__", "knowledge__")
 
-def _find_rg_cache_paths() -> list[Path]:
-    """Return all ripgrep cache files in the nexus config directory."""
-    return list(_CONFIG_DIR.glob("*.cache"))
+
+def _find_rg_cache_paths(corpus: str | None = None) -> list[Path]:
+    """Return ripgrep cache files, optionally filtered by corpus.
+
+    When *corpus* is provided (e.g. ``"code__nexus-a1b2c3d4"``), strip the
+    collection prefix and glob for ``{slug}.cache`` instead of ``*.cache``.
+    """
+    if corpus is None:
+        return list(_CONFIG_DIR.glob("*.cache"))
+    slug = corpus
+    for prefix in _COLLECTION_PREFIXES:
+        if slug.startswith(prefix):
+            slug = slug[len(prefix):]
+            break
+    return list(_CONFIG_DIR.glob(f"{slug}.cache"))
 
 
 def _rg_hit_to_result(hit: dict) -> SearchResult:
@@ -165,7 +180,9 @@ def search_cmd(
     def _retrieve(q: str) -> list[SearchResult]:
         raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter)
         if hybrid:
-            for cache_path in _find_rg_cache_paths():
+            # Scope ripgrep to matching caches when a single corpus is targeted
+            rg_corpus = target_collections[0] if len(target_collections) == 1 else None
+            for cache_path in _find_rg_cache_paths(corpus=rg_corpus):
                 rg_hits = search_ripgrep(q, cache_path, n_results=n * 2)
                 raw.extend(_rg_hit_to_result(h) for h in rg_hits)
         return raw
@@ -187,6 +204,17 @@ def search_cmd(
             click.echo("No results.")
             return
 
+    # Pre-reranker: capture rg file paths while all results are present.
+    # The reranker's top_k may drop rg hits, so we capture before reranking.
+    rg_file_paths: set[str] = set()
+    if hybrid:
+        rg_file_paths = {
+            r.metadata.get("file_path", "")
+            for r in results
+            if r.collection == "rg__cache"
+        }
+        rg_file_paths.discard("")
+
     # Hybrid scoring
     results = apply_hybrid_scoring(results, hybrid=hybrid)
 
@@ -202,6 +230,20 @@ def search_cmd(
         for r in results:
             groups.setdefault(r.collection, []).append(r)
         results = round_robin_interleave(list(groups.values()))[:n]
+
+    # Post-reranker: apply exact-match boost using pre-captured rg file paths.
+    # Fires unconditionally after both reranked and no-rerank paths.
+    if rg_file_paths:
+        for r in results:
+            src = r.metadata.get("source_path", r.metadata.get("file_path", ""))
+            if src in rg_file_paths:
+                r.hybrid_score = min(1.0, r.hybrid_score + EXACT_MATCH_BOOST)
+
+    # Filter rg__cache signals from output — they served as file_path linkage.
+    # Fallback guard: preserve rg results when no vector results survive.
+    if hybrid:
+        vector_results = [r for r in results if r.collection != "rg__cache"]
+        results = vector_results if vector_results else results
 
     # --reverse: invert final order
     if reverse:
