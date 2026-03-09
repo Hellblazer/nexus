@@ -35,7 +35,7 @@ nx search "representative query" --corpus docs__{corpus-name} -m 3
 
 **Corpus naming**: Use `author-year-short-title` pattern. The `--corpus` flag auto-prepends `docs__` — do NOT include the prefix.
 
-## Agent Path (Batch/Complex Scenarios)
+## Agent Invocation (Batch/Complex Scenarios)
 
 Delegates to the **pdf-chromadb-processor** agent (haiku) for:
 - Multiple PDFs needing batch processing

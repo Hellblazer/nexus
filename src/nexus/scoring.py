@@ -14,6 +14,7 @@ _log = structlog.get_logger()
 _EPSILON = 1e-9
 _RERANK_MODEL = "rerank-2.5"
 _FILE_SIZE_THRESHOLD = 30
+RG_FLOOR_SCORE = 0.5
 
 
 def _file_size_factor(chunk_count: int) -> float:
@@ -76,7 +77,9 @@ def apply_hybrid_scoring(
     if hybrid and not has_code:
         _log.warning("--hybrid has no effect — no code corpus in scope")
 
-    distances = [r.distance for r in results]
+    # Exclude rg__cache from normalization window — distance=0.0 from ripgrep
+    # hits distorts the min-max range for real vector distances.
+    distances = [r.distance for r in results if r.collection != "rg__cache"]
     frecencies = [
         r.metadata.get("frecency_score", 0.0)
         for r in results
@@ -84,8 +87,11 @@ def apply_hybrid_scoring(
     ]
 
     for r in results:
+        if r.collection == "rg__cache":
+            r.hybrid_score = RG_FLOOR_SCORE
+            continue
         # Invert: distances are dissimilarity (smaller = better), so best match → v_norm=1.0
-        v_norm = 1.0 - min_max_normalize(r.distance, distances)
+        v_norm = 1.0 - min_max_normalize(r.distance, distances) if distances else 1.0
         if hybrid and r.collection.startswith("code__"):
             f_score = r.metadata.get("frecency_score", 0.0)
             f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
