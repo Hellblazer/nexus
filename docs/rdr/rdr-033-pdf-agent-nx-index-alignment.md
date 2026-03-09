@@ -2,7 +2,8 @@
 title: "PDF Processing Agent Should Delegate to nx index pdf"
 id: RDR-033
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-03-09
 priority: P1
 author: Hal Hildebrand
 reviewed-by: self

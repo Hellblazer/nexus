@@ -16,11 +16,11 @@ implementation_notes: ""
 
 ## Problem Statement
 
-`nx search --hybrid` fans out to both ChromaDB and ripgrep caches, appending ripgrep hits to the result set. However, `apply_hybrid_scoring()` does not apply any exact-match score boost. Ripgrep hits are scored purely by position-based frecency and vector distance normalization — there is no signal for whether the query text literally appears in a matched line. This means:
+`nx search --hybrid` fans out to both ChromaDB and ripgrep caches, appending ripgrep hits to the result set. Two bugs and a missing feature prevent this from improving result quality:
 
-1. **No exact-match boosting**: Searching for `def compute_frecency` returns semantically similar but non-literal matches ranked equally with exact matches. Ripgrep hits that contain the literal query are not promoted.
-2. **Recall gaps**: Canonical implementation files absent from ChromaDB's top-K candidate set (documented in RDR-006/007) are found by ripgrep but not scored higher for containing the exact query.
-3. **`distance=0.0` bug**: `_rg_hit_to_result()` (search_cmd.py:53) hardcodes `distance=0.0` for all ripgrep hits. After min-max normalization this yields `v_norm=1.0`, making every ripgrep hit appear maximally similar — regardless of actual relevance.
+1. **Reranker overwrites all scores**: When `--hybrid` injects `rg__cache` results, the collection count exceeds 1, triggering the Voyage reranker (`search_cmd.py:194`). The reranker overwrites every `hybrid_score` with its own relevance score (RDR-006 R8). Any pre-reranker scoring adjustment is discarded.
+2. **`distance=0.0` bug**: `_rg_hit_to_result()` (search_cmd.py:53) hardcodes `distance=0.0` for all ripgrep hits. After min-max normalization this yields `v_norm=1.0`, making every ripgrep hit appear maximally similar — regardless of actual relevance.
+3. **No post-reranker exact-match signal**: After reranking, there is no mechanism to boost results where the query literally appears in the file. Ripgrep identifies which files contain literal matches, but this signal is lost after the reranker overwrites scores.
 
 SeaGOAT (a sibling project at `/Users/hal.hildebrand/git/SeaGOAT/`) demonstrates that fusing ripgrep keyword hits with vector results produces strictly better results than either alone. Their implementation at `engine.py:125-155` fans out to both sources asynchronously and merges with weighted scoring. Crucially, `result.py:59-62` applies a multiplicative exact-match boost: `score = vector_distance / (1 + exact_matches)`.
 
@@ -55,36 +55,38 @@ SeaGOAT queries ChromaDB and ripgrep simultaneously via async fan-out in `engine
 
 ## Proposed Solution
 
-Add exact-match score boosting to the existing hybrid search path:
+Fix the scoring pipeline in three steps:
 
-1. Compute `exact_match_boost` in `apply_hybrid_scoring()` when the query text literally appears in the chunk content
-2. Link ripgrep hits to vector results by `file_path` during scoring so that vector results matching ripgrep files receive a boost
-3. Fix the `distance=0.0` bug in `_rg_hit_to_result()` (search_cmd.py:53) where all rg hits get `distance=0.0`, causing them to always receive `v_norm=1.0` after min-max normalization
+1. **Fix `distance=0.0` bug** in `_rg_hit_to_result()` — assign ripgrep hits a fixed `v_norm` floor (e.g., `0.8`) rather than fitting them into the same min-max window as ChromaDB distances, which have a different scale (`[0.85, 0.95]` typical for cosine)
+2. **Apply exact-match boost AFTER reranking** — a new `apply_exact_match_boost()` function runs after the reranker, using file_path linkage between ripgrep hits and reranked results to promote files with literal matches
+3. **Use file_path linkage as primary mechanism** — build a set of file paths from ripgrep hits; for each reranked result whose `source_path` is in that set, apply a score boost. This is more robust than `query in r.content` (which is tautological for rg hits and rarely matches multi-word queries in vector chunks)
 
-### Scoring Formula
+### Boost Mechanism
 
-The existing two-term formula:
+The boost is applied as a **post-reranker adjustment** in `search_cmd.py`, between reranking (line 196) and output formatting (line 211):
+
+```python
+# After reranking
+if hybrid:
+    rg_file_paths = {r.metadata["file_path"] for r in results if r.collection == "rg__cache"}
+    for r in results:
+        if r.metadata.get("source_path", r.metadata.get("file_path", "")) in rg_file_paths:
+            r.hybrid_score += EXACT_MATCH_BOOST  # 0.15
 ```
-score = 0.7 * vector_norm + 0.3 * frecency_norm
-```
 
-becomes a three-term additive formula:
-```
-final_score = vector_weight * vector_norm + frecency_weight * frecency_norm + exact_match_boost
-```
+Where `EXACT_MATCH_BOOST = 0.15`. This:
+- Operates on reranker output, so it is NOT overwritten
+- Uses file_path linkage (robust for all query types) rather than `query in r.content` (only works for short literal queries)
+- Applies to both vector results and rg results that share a file path with a ripgrep match
+- Is additive: a fixed `+0.15` reward for files containing the literal query, regardless of semantic score
 
-Where:
-- `vector_weight = 0.7` (existing)
-- `frecency_weight = 0.3` (existing)
-- `exact_match_boost = 0.15` when ripgrep finds the query literally in the chunk (new)
-
-**Additive vs. multiplicative justification**: SeaGOAT uses a multiplicative boost (`score = vector_distance / (1 + exact_matches)`) which halves the raw distance. This works well in SeaGOAT because scoring happens on raw distances before normalization. In Nexus, scoring happens on *normalized* values in [0, 1]. Additive is preferred here because: (a) an additive constant is easier to reason about and tune — `+0.15` means "exact match is worth ~21% of the max possible score (0.7)"; (b) multiplicative boost on normalized scores would couple the boost magnitude to the vector score, giving semantically close results a disproportionately large absolute boost while semantically distant exact matches (the case we most want to fix) get minimal benefit. The additive term gives a fixed reward regardless of vector similarity, directly addressing the recall gap.
+**Why additive over multiplicative**: SeaGOAT uses multiplicative (`score / (1 + exact_matches)`) on raw distances before normalization. Nexus applies the boost on post-reranker scores. Additive is preferred because: (a) `+0.15` is independent of the reranker's score magnitude — it provides a fixed promotion for exact matches; (b) multiplicative would couple boost magnitude to reranker score, over-promoting already-high results while under-promoting the low-ranked exact matches we most want to rescue.
 
 ### Integration Points
 
-- `scoring.py`: Add `exact_match_boost` computation to `apply_hybrid_scoring()`, accepting the query string as a new parameter
-- `commands/search_cmd.py`: Pass the query string to `apply_hybrid_scoring()` so it can compute exact-match presence; fix `distance=0.0` in `_rg_hit_to_result()`
-- `ripgrep_cache.py`: No changes needed — `search_ripgrep()` already accepts arbitrary queries
+- `commands/search_cmd.py`: Apply post-reranker boost using rg file_path set; fix `distance=0.0` in `_rg_hit_to_result()` with fixed `v_norm` floor; filter rg results from final output (they served as signals, vector results carry the content)
+- `scoring.py`: Minor — `apply_hybrid_scoring()` may need `rg__cache` collection handling for frecency blending
+- `ripgrep_cache.py`: No changes needed
 
 ## Alternatives Considered
 
@@ -94,7 +96,9 @@ Where:
 
 **C. BM25 via SQLite FTS5**: Build a full-text index in T2 alongside T3 vectors. Higher engineering cost than ripgrep integration and requires maintaining a parallel index. Deferred as a future enhancement.
 
-**D. Multiplicative boost (SeaGOAT-style)**: Use `score = score / (1 + exact_matches)` instead of additive `+0.15`. Rejected for Nexus because scoring operates on normalized [0,1] values, not raw distances (see justification above). Could be revisited if tuning shows additive is insufficient.
+**D. Multiplicative boost (SeaGOAT-style)**: Use `score = score / (1 + exact_matches)` instead of additive `+0.15`. Rejected for Nexus because the boost operates on post-reranker scores, not raw distances. Could be revisited if tuning shows additive is insufficient.
+
+**E. Pre-reranker boost in `apply_hybrid_scoring()`**: Add exact-match boost before the reranker. Rejected because the Voyage reranker overwrites all `hybrid_score` values (RDR-006 R8, search_cmd.py:194-196), making pre-reranker score adjustments invisible. The boost must be post-reranker.
 
 ## Trade-offs
 
@@ -123,9 +127,9 @@ Already done:
 - Fan-out to ripgrep in search_cmd.py:167-170
 
 TODO:
-1. Fix `distance=0.0` scoring bug in `_rg_hit_to_result()` — assign a synthetic distance (e.g., based on inverse frecency) instead of hardcoding 0.0, which distorts min-max normalization
-2. Add `exact_match_boost` to `apply_hybrid_scoring()` — accept `query: str` parameter, check whether `query` appears in `r.content`, add `+0.15` when found
-3. Link ripgrep hits to vector results by `file_path` for boosting — when a vector result's file_path matches a ripgrep hit, boost the vector result even though it was retrieved from ChromaDB
+1. Fix `distance=0.0` bug in `_rg_hit_to_result()` — assign a fixed `v_norm` floor (e.g., `0.8`) instead of hardcoding `distance=0.0` which distorts min-max normalization
+2. Add post-reranker `apply_exact_match_boost()` in `search_cmd.py` — build `rg_file_paths` set from ripgrep results, boost reranked results whose `source_path` is in that set by `+0.15`
+3. Filter `rg__cache` results from final output — they serve as file_path signals for boosting but should not appear in user-facing results (vector chunks carry the actual content)
 4. Address multi-repo cache contamination: `_find_rg_cache_paths()` returns ALL caches regardless of `--corpus`. Scope cache selection to match the target corpus.
 
 ### Phase 2: Tuning & Testing
@@ -140,34 +144,40 @@ TODO:
 
 ## Test Plan
 
-- Unit: mock ripgrep output, verify `exact_match_boost` adds +0.15 when query text appears in chunk content
+- Unit: post-reranker boost — mock reranked results + rg file_path set, verify `+0.15` applied to matching source_paths
+- Unit: boost survives reranking — mock reranker that overwrites scores, verify post-reranker boost is still visible
 - Unit: verify `distance=0.0` fix — rg hits should not all get `v_norm=1.0`
+- Unit: rg results filtered from final output — only vector results with boost appear
 - Unit: ripgrep timeout → graceful fallback to vector-only
 - Unit: ripgrep not installed → graceful fallback
-- Unit: file_path linkage — vector result boosted when matching rg hit exists
+- Unit: file_path linkage — vector result boosted when its source_path matches an rg hit file_path
 - Integration: search a fixture repo with known exact matches, verify they rank higher with --hybrid
 - Regression: existing non-hybrid searches produce identical results
 
 ## Finalization Gate
 
 ### Contradiction Check
-No internal contradictions found. The RDR correctly identifies that hybrid infrastructure (flag, fan-out, result appending) is already wired, and scopes the work to the scoring gap. The additive boost approach is explicitly justified against the multiplicative alternative. The `distance=0.0` bug is identified as both a problem (Problem Statement point 3) and a fix target (Implementation Plan step 1).
+No internal contradictions. The reranker interaction (RDR-006 R8) is now explicitly addressed: the boost is applied post-reranker, avoiding the overwrite problem. The `distance=0.0` bug and the post-reranker boost are complementary fixes targeting different pipeline stages. Alternative E documents why pre-reranker boosting was rejected.
 
 ### Assumption Verification
-- **A1**: `search_ripgrep()` returns hits with `line_content` containing the raw source line — verified in `ripgrep_cache.py:113-122`. A simple `query in r.content` substring check is sufficient for exact-match detection.
-- **A2**: `apply_hybrid_scoring()` receives all results (vector + ripgrep) in a single list — verified in `search_cmd.py:191`. The function can match by `file_path` metadata to link rg hits to vector results.
-- **A3**: The `0.15` boost value is meaningful relative to the `[0, 1]` score range — `0.15` is ~21% of the vector weight (0.7). This is large enough to promote exact matches but not so large that irrelevant exact matches dominate semantic results. Tuning in Phase 2 may adjust this.
+- **A1**: The Voyage reranker overwrites `hybrid_score` for all results when collection count > 1 — verified in `search_cmd.py:194-196` and documented in RDR-006 R8. This is why the boost MUST be post-reranker.
+- **A2**: Ripgrep hits carry `file_path` in metadata (`search_cmd.py:56`) and vector results carry `source_path` — verified. File_path linkage between the two is the primary boost mechanism.
+- **A3**: The `0.15` boost value is meaningful relative to reranker output scores. Tuning in Phase 2 may adjust this. The additive approach ensures exact matches get a fixed promotion regardless of reranker score.
+- **A4**: `rg__cache` results should not appear in final output — they serve as signals for file_path linkage. Filtering them out (Implementation Plan step 3) prevents raw ripgrep lines from appearing alongside chunk content.
 
 ### Scope Verification
-The change is contained to three files: `scoring.py` (add boost logic), `search_cmd.py` (pass query to scoring, fix distance bug), and tests. No changes to `search_engine.py`, `ripgrep_cache.py`, CLI flags, or the indexing pipeline. This is proportional to a P1 scoring enhancement.
+The change is contained to `search_cmd.py` (post-reranker boost + distance fix + rg filtering) and tests. `scoring.py` may need minor `rg__cache` handling. No changes to `search_engine.py`, `ripgrep_cache.py`, CLI flags, or the indexing pipeline.
 
 ### Cross-Cutting Concerns
-- **Performance**: No additional subprocess calls or API requests. The exact-match check is a Python `in` operator on strings already in memory. Negligible overhead.
-- **Backward compatibility**: Non-hybrid searches are unaffected — `exact_match_boost` is only computed when `hybrid=True`. The `apply_hybrid_scoring()` signature gains a `query` parameter; callers must be updated (only `search_cmd.py:191`).
-- **Multi-repo contamination**: Identified as a known risk (Implementation Plan step 4). Not blocking for Phase 1 but must be addressed before the feature is considered complete.
+- **Reranker interaction**: Explicitly handled — boost is post-reranker, not pre-reranker. The reranker still operates on the full result set (vector + rg), which means it can use rg hits to inform its relevance judgments before the boost is applied.
+- **Performance**: Post-reranker boost is a set lookup (`O(1)` per result) on file paths already in memory. Negligible overhead.
+- **Score bounds**: `hybrid_score` may exceed `1.0` after boost (`reranker_score + 0.15`). No downstream code enforces `[0, 1]` bounds. If needed, apply `min(1.0, score)` cap.
+- **Backward compatibility**: Non-hybrid searches are unaffected. The boost only fires when `hybrid=True` and rg results are present.
+- **Multi-repo contamination**: Identified as known risk (Implementation Plan step 4). Not blocking for Phase 1 but must be addressed.
+- **Frecency on rg hits**: `apply_hybrid_scoring()` gates frecency on `r.collection.startswith("code__")`. Ripgrep hits (`rg__cache`) bypass frecency blending — this is acceptable since rg hits are signals, not final results.
 
 ### Proportionality
-The implementation touches 2 production files and adds ~30 lines of scoring logic plus ~50 lines of tests. This is proportional to the problem: a well-scoped scoring enhancement that leverages existing infrastructure. No new dependencies, no architectural changes, no new CLI flags.
+The implementation touches 1-2 production files and adds ~20 lines of post-reranker boost logic plus ~60 lines of tests. This is proportional to the problem: a well-scoped scoring enhancement that leverages existing infrastructure. No new dependencies, no architectural changes, no new CLI flags.
 
 ## References
 
