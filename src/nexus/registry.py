@@ -177,5 +177,5 @@ class RepoRegistry:
             try:
                 os.unlink(tmp_path_str)
             except OSError:
-                pass
+                pass  # intentional: cleanup after re-raise
             raise

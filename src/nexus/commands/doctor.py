@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx doctor — health check for all required services."""
+import json
+import os
 import shutil
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -11,7 +14,9 @@ import structlog
 from nexus.config import get_credential
 from nexus.db.t3 import _STORE_TYPES
 from nexus.commands.hooks import _effective_hooks_dir, SENTINEL_BEGIN
+from nexus.commands._helpers import default_db_path
 from nexus.registry import RepoRegistry
+from nexus.session import SESSIONS_DIR
 
 _log = structlog.get_logger(__name__)
 
@@ -48,6 +53,129 @@ def _python_ok() -> tuple[bool, str]:
 # Keep old name so existing tests importing `_check` still work.
 def _check(label: str, ok: bool, detail: str = "") -> str:
     return _check_line(label, ok, detail)
+
+
+def _check_orphan_t1(lines: list[str]) -> bool:
+    """Check for orphaned T1 session files. Returns True if all clean."""
+    if not SESSIONS_DIR.exists():
+        lines.append(_check_line("T1 sessions", True, "no sessions directory"))
+        return True
+
+    session_files = list(SESSIONS_DIR.glob("*.session"))
+    if not session_files:
+        lines.append(_check_line("T1 sessions", True, "no session files"))
+        return True
+
+    orphans: list[str] = []
+    for sf in session_files:
+        try:
+            record = json.loads(sf.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue  # corrupt/unreadable — skip
+        pid = record.get("server_pid")
+        if pid is None:
+            continue
+        try:
+            os.kill(int(pid), 0)  # raises OSError if process is dead
+        except OSError:
+            orphans.append(sf.name)
+
+    if orphans:
+        lines.append(_check_line(
+            "T1 sessions", False,
+            f"{len(orphans)} orphaned session file(s): {', '.join(orphans)}",
+        ))
+        _fix(lines,
+             "Remove stale files: rm ~/.config/nexus/sessions/*.session",
+             "Or run: nx doctor (sweep runs automatically on session start)")
+        return False
+
+    lines.append(_check_line(
+        "T1 sessions", True,
+        f"{len(session_files)} session file(s), all processes live",
+    ))
+    return True
+
+
+def _check_t2_integrity(lines: list[str]) -> bool:
+    """Verify T2 SQLite + FTS5 index integrity. Returns True if all ok."""
+    db_path = default_db_path()
+    if not db_path.exists():
+        lines.append(_check_line("T2 integrity", True, "not created yet"))
+        return True
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            # PRAGMA integrity_check returns one row per problem; "ok" means clean.
+            rows = conn.execute("PRAGMA integrity_check").fetchall()
+            pragma_ok = len(rows) == 1 and rows[0][0] == "ok"
+            if not pragma_ok:
+                issues = "; ".join(r[0] for r in rows[:3])
+                lines.append(_check_line("T2 integrity", False, f"PRAGMA: {issues}"))
+                return False
+
+            # FTS5 integrity-check: raises OperationalError if index is corrupt.
+            conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')")
+            fts_ok = True
+        except sqlite3.OperationalError as exc:
+            lines.append(_check_line("T2 integrity", False, f"FTS5: {exc}"))
+            return False
+        finally:
+            conn.close()
+    except Exception as exc:
+        lines.append(_check_line("T2 integrity", False, f"could not open: {exc}"))
+        return False
+
+    if pragma_ok and fts_ok:
+        lines.append(_check_line("T2 integrity", True, "PRAGMA ok, FTS5 ok"))
+    return pragma_ok and fts_ok
+
+
+def _check_chroma_pagination(lines: list[str], client: object, db_name: str) -> bool:
+    """Spot-check one non-empty collection's count() vs paginated get(). Returns True if ok."""
+    try:
+        cols = client.list_collections()  # type: ignore[union-attr]
+    except Exception as exc:
+        lines.append(_check_line(f"ChromaDB pagination ({db_name})", False, f"list failed: {exc}"))
+        return False
+
+    # Find the first non-empty collection to audit.
+    target_col = None
+    for col in cols:
+        try:
+            if col.count() > 0:
+                target_col = col
+                break
+        except Exception:
+            continue
+
+    if target_col is None:
+        lines.append(_check_line(f"ChromaDB pagination ({db_name})", True, "no non-empty collections to audit"))
+        return True
+
+    try:
+        expected = target_col.count()
+        retrieved = 0
+        offset = 0
+        page_size = 300
+        while True:
+            batch = target_col.get(limit=page_size, offset=offset)
+            ids = batch.get("ids", [])
+            retrieved += len(ids)
+            if len(ids) < page_size:
+                break
+            offset += page_size
+
+        ok = retrieved == expected
+        detail = (
+            f"{target_col.name}: count={expected}, paginated={retrieved}"
+        )
+        lines.append(_check_line(f"ChromaDB pagination ({db_name})", ok, detail))
+        return ok
+    except Exception as exc:
+        lines.append(_check_line(f"ChromaDB pagination ({db_name})", False, f"audit failed: {exc}"))
+        return False
 
 
 @click.command("doctor")
@@ -208,7 +336,8 @@ def doctor_cmd() -> None:
     try:
         reg = RepoRegistry(_registry_path)
         repos = reg.all()
-    except Exception:
+    except Exception as exc:
+        _log.warning("doctor_registry_load_failed", error=str(exc))
         repos = []
 
     if not repos:
@@ -251,6 +380,29 @@ def doctor_cmd() -> None:
     else:
         lines.append(_check_line("index log", True,
                                  f"{log_path} (not created yet — git hooks have not fired)"))
+
+    # ── Orphan T1 process detection ───────────────────────────────────────────
+    # Non-fatal: stale session files are annoying but do not block operation.
+    _check_orphan_t1(lines)
+
+    # ── T2 database integrity ─────────────────────────────────────────────────
+    # Non-fatal: integrity failure is logged but does not set failed=True.
+    _check_t2_integrity(lines)
+
+    # ── ChromaDB pagination audit ─────────────────────────────────────────────
+    # Spot-check one non-empty collection per configured store (non-fatal).
+    if chroma_key and chroma_database:
+        for t in _STORE_TYPES:
+            db_name = f"{chroma_database}_{t}"
+            try:
+                client = chromadb.CloudClient(
+                    tenant=chroma_tenant or None, database=db_name, api_key=chroma_key
+                )
+                _check_chroma_pagination(lines, client, db_name)
+            except Exception as exc:
+                _log.debug("doctor_pagination_check_client_failed", db=db_name, error=str(exc))
+                lines.append(_check_line(f"ChromaDB pagination ({db_name})", True,
+                                         "skipped (client unavailable)"))
 
     click.echo("\n".join(lines))
 

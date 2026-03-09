@@ -94,7 +94,7 @@ def batch_frecency(repo: Path) -> dict[Path, float]:
             try:
                 current_ts = float(line[7:])
             except ValueError:
-                current_ts = None
+                current_ts = None  # intentional: corrupt git log line, skip
         elif current_ts is not None:
             file_path = repo / line
             days = max(0.0, (now - current_ts) / 86400.0)

@@ -52,7 +52,8 @@ def _infer_repo() -> str:
             capture_output=True, text=True, check=True, timeout=10,
         )
         return Path(result.stdout.strip()).name
-    except Exception:
+    except Exception as exc:
+        _log.debug("infer_repo_git_failed", error=str(exc))
         return Path.cwd().name
 
 
@@ -152,8 +153,8 @@ def session_end() -> str:
             r = json.loads(own_file.read_text())
             if isinstance(r, dict) and "session_id" in r:
                 own_record = r
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            _log.debug("session_end_own_record_corrupt", path=str(own_file), error=str(exc))
 
     # For T1 flush, use own record if available; otherwise walk the chain
     # (child-agent scenario where the parent's file is further up).
@@ -194,7 +195,7 @@ def session_end() -> str:
         try:
             own_file.unlink(missing_ok=True)
         except OSError:
-            pass
+            pass  # intentional: best-effort session file deletion
         tmpdir = own_record.get("tmpdir", "")
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)

@@ -10,6 +10,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import structlog
+
+_log = structlog.get_logger()
+
 
 class ContentClass(Enum):
     """Content classification for a repository file."""
@@ -43,7 +47,8 @@ def _has_shebang(path: Path) -> bool:
     try:
         with path.open("rb") as f:
             return f.read(2) == b"#!"
-    except OSError:
+    except OSError as exc:
+        _log.debug("has_shebang_read_failed", path=str(path), error=str(exc))
         return False
 
 

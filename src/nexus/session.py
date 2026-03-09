@@ -58,7 +58,7 @@ def _stable_pid() -> int:
         try:
             return int(raw)
         except ValueError:
-            pass
+            pass  # intentional: invalid NX_SESSION_PID env var, fall through to os.getsid(0)
     return os.getsid(0)
 
 
@@ -111,8 +111,8 @@ def _ppid_of(pid: int) -> int | None:
                 if line.startswith("PPid:"):
                     val = int(line.split()[1])
                     return val if val > 1 else None
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            _log.debug("ppid_proc_read_failed", pid=pid, error=str(exc))
 
     # Fallback: ps (macOS + Linux with procps)
     try:
@@ -196,8 +196,8 @@ def sweep_stale_sessions(
                     import shutil
                     shutil.rmtree(tmpdir, ignore_errors=True)
                 _try_remove_path(f)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            _log.debug("sweep_corrupt_session_file", path=str(f), error=str(exc))
 
 
 def _find_chroma() -> str | None:
@@ -302,7 +302,7 @@ def stop_t1_server(server_pid: int) -> None:
     except ChildProcessError:
         pass  # not our child (different parent process — acceptable)
     except OSError:
-        pass
+        pass  # intentional: process already gone after SIGKILL
 
 
 def write_session_record(
@@ -340,4 +340,4 @@ def _try_remove_path(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
     except OSError:
-        pass
+        pass  # intentional: best-effort file cleanup

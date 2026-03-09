@@ -138,7 +138,7 @@ def set_credential(name: str, value: str) -> None:
             try:
                 os.unlink(tmp_path)
             except OSError:
-                pass
+                pass  # intentional: cleanup after re-raise
             raise
 
 
