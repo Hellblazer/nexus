@@ -73,7 +73,14 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         reg.add(path)
         click.echo(f"Registered {path}.")
 
-    label = "Force-indexing" if force else ("Force-indexing stale" if force_stale else ("Updating frecency scores" if frecency_only else "Indexing"))
+    if force:
+        label = "Force-indexing"
+    elif force_stale:
+        label = "Force-indexing stale"
+    elif frecency_only:
+        label = "Updating frecency scores"
+    else:
+        label = "Indexing"
     click.echo(f"{label} {path}…")
 
     bar: tqdm | None = None

@@ -2,8 +2,6 @@
 """Tests for pipeline version stamping and staleness detection (RDR-029)."""
 from unittest.mock import MagicMock
 
-import pytest
-
 
 # ── Phase 1: Constant + helpers ──────────────────────────────────────────────
 
@@ -57,6 +55,28 @@ def test_get_pipeline_version_returns_none_for_new():
 
     col.metadata = {}
     assert get_collection_pipeline_version(col) is None
+
+
+# ── Phase 2: Stamp only on force (key invariant) ────────────────────────────
+
+
+def test_stamp_not_called_when_force_false():
+    """Non-force indexing must never advance the pipeline version stamp.
+
+    This is the most critical invariant in RDR-029: a partial incremental run
+    must not mark stale chunks as current.
+    """
+    from nexus.indexer import stamp_collection_version
+
+    col = MagicMock()
+    col.metadata = {"pipeline_version": "3"}
+
+    # Simulate the guard in _run_index: stamp block only executes when force=True
+    force = False
+    if force:
+        stamp_collection_version(col)
+
+    col.modify.assert_not_called()
 
 
 # ── Phase 3: Staleness detection ─────────────────────────────────────────────

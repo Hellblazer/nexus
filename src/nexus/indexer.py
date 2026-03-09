@@ -65,7 +65,7 @@ def check_pipeline_staleness(col: object, collection_name: str) -> bool:
             collection=collection_name,
             stored_version=stored,
             current_version=PIPELINE_VERSION,
-            hint=f"Run with --force to re-index.",
+            hint="Run with --force-stale to re-index stale collections, or --force to re-index all.",
         )
         return True
     return False
