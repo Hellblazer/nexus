@@ -2,7 +2,8 @@
 title: "Indexer Module Decomposition and Configuration Externalization"
 id: RDR-032
 type: Technical Debt
-status: draft
+status: accepted
+accepted_date: 2026-03-09
 priority: P3
 author: Hal Hildebrand
 reviewed-by: self
@@ -53,6 +54,20 @@ The `_index_code_file` and `_index_prose_file` functions each take 12 parameters
 - The indexer is the most-changed module (touched by RDR-014, 015, 016, 017, 025, 028)
 - `.nexus.yml` already exists as a per-project config mechanism but only controls `exclude_patterns`
 - Duplicated patterns: credential checking (3 locations), staleness check (3 locations)
+
+## Research Findings
+
+### F1: Dependency Graph is Acyclic (Verified — source inspection)
+
+The proposed module split will not create circular imports. `indexer.py` (orchestrator) imports `code_indexer` and `prose_indexer`. Both import from `indexer_utils`. `code_indexer` imports from `nexus.chunker` and `nexus.languages`. `prose_indexer` imports from `nexus.doc_indexer` and `nexus.md_chunker`. No reverse dependencies exist — `chunker`, `doc_indexer`, `md_chunker`, and `languages` do not import from `indexer`.
+
+### F2: 12-Parameter Functions are Primary Friction (Verified — code audit)
+
+The `_index_code_file` (line 546) and `_index_prose_file` (line 675) functions take 12 parameters including 4 untyped `object` parameters (`col`, `db`, `voyage_client`/`voyage_key`) that hide protocols. The parameter types are asymmetric: `_index_code_file` takes a pre-constructed `voyageai.Client`, while `_index_prose_file` and `_index_pdf_file` take a raw `voyage_key: str`. `IndexContext` eliminates this positional coupling.
+
+### F3: LANGUAGE_REGISTRY Stability (Verified — RDR-025, commit 32803fb)
+
+`LANGUAGE_REGISTRY` is a module-level dict defined in `nexus/languages.py` with no runtime state. Used at one call site in `_index_code_file` (line 576) to map file extensions to tree-sitter language names. This is a clean, stable dependency for the extracted `code_indexer.py`.
 
 ## Proposed Solution
 

@@ -2,7 +2,8 @@
 title: "Collection Portability — Export/Import for T3 Backup and Migration"
 id: RDR-031
 type: Feature
-status: draft
+status: accepted
+accepted_date: 2026-03-09
 priority: P3
 author: Hal Hildebrand
 reviewed-by: self
