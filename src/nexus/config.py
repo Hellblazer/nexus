@@ -46,6 +46,9 @@ _DEFAULTS: dict[str, Any] = {
         "rdr_paths": ["docs/rdr"],
         "include_untracked": False,
     },
+    "search": {
+        "hybrid_default": False,
+    },
     "voyageai": {
         "read_timeout_seconds": 120,
     },

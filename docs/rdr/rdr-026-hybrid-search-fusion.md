@@ -2,10 +2,8 @@
 title: "Hybrid Search — Exact-Match Score Boosting"
 id: RDR-026
 type: Feature
-status: closed
+status: accepted
 accepted_date: 2026-03-09
-close_date: 2026-03-09
-close_reason: implemented
 priority: P1
 author: Hal Hildebrand
 reviewed-by: self
