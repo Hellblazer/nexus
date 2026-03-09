@@ -71,31 +71,23 @@ class TestCheckOrphanT1:
 
     def test_dead_pid_session_detected_as_orphan(self, tmp_path: Path) -> None:
         """A session file with a dead PID is detected as an orphan."""
+        import subprocess
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
-        # PID 2 is init/systemd's child and PID 1 belongs to init — neither
-        # can be killed by a non-root user; use a clearly dead PID instead.
-        # We use a PID that is very unlikely to be alive: 2**22 - 1 (max on Linux).
-        dead_pid = (2 ** 22) - 1
+        # Spawn a short-lived process and wait for it to exit — guarantees a dead PID.
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        dead_pid = proc.pid
         self._make_session_file(sessions_dir, f"{dead_pid}.session", dead_pid)
         lines: list[str] = []
         with patch("nexus.commands.doctor.SESSIONS_DIR", sessions_dir):
             result = _check_orphan_t1(lines)
-        # If the PID happens to be live (extremely unlikely), we cannot assert orphan.
-        # But if dead (expected), check the output.
-        try:
-            os.kill(dead_pid, 0)
-            pid_alive = True
-        except OSError:
-            pid_alive = False
-
-        if not pid_alive:
-            assert result is False
-            assert "✗" in lines[0]
-            assert "orphaned" in lines[0]
-            assert "1 orphaned" in lines[0]
-            # Fix hint should be appended
-            assert any("rm" in line for line in lines)
+        assert result is False
+        assert "✗" in lines[0]
+        assert "orphaned" in lines[0]
+        assert "1 orphaned" in lines[0]
+        # Fix hint should be appended
+        assert any("rm" in line for line in lines)
 
     def test_corrupt_session_file_skipped(self, tmp_path: Path) -> None:
         """Corrupt (non-JSON) session files are skipped, not counted as orphans."""
@@ -123,27 +115,24 @@ class TestCheckOrphanT1:
 
     def test_multiple_orphans_count_reported(self, tmp_path: Path) -> None:
         """When multiple session files have dead PIDs, the count is reported."""
+        import subprocess
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
-        # Two definitely-dead PIDs
-        dead_pids = [(2 ** 22) - 1, (2 ** 22) - 2]
-        alive_check = []
+        # Spawn two short-lived processes to get guaranteed-dead PIDs
+        dead_pids = []
+        for _ in range(2):
+            proc = subprocess.Popen(["true"])
+            proc.wait()
+            dead_pids.append(proc.pid)
         for pid in dead_pids:
-            try:
-                os.kill(pid, 0)
-                alive_check.append(True)
-            except OSError:
-                alive_check.append(False)
             self._make_session_file(sessions_dir, f"{pid}.session", pid)
 
         lines: list[str] = []
         with patch("nexus.commands.doctor.SESSIONS_DIR", sessions_dir):
             result = _check_orphan_t1(lines)
 
-        if all(not a for a in alive_check):
-            # Both dead — expect 2 orphans reported
-            assert result is False
-            assert "2 orphaned" in lines[0]
+        assert result is False
+        assert "2 orphaned" in lines[0]
 
 
 # ── Step 6: T2 database integrity ────────────────────────────────────────────

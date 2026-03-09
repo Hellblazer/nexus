@@ -136,6 +136,22 @@ def test_ppid_proc_read_failed_logs_debug():
     assert any(e["event"] == "ppid_proc_read_failed" for e in cap)
 
 
+# ── Site 7: session.py sweep_stale_sessions corrupt file ──────────────────────
+
+def test_sweep_corrupt_session_file_logs_debug(tmp_path):
+    """Site 7: corrupt session file in sweep_stale_sessions emits debug-level log."""
+    from nexus.session import sweep_stale_sessions
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "999.session").write_text("not-json{{{")
+
+    with capture_logs() as cap:
+        sweep_stale_sessions(sessions_dir=sessions_dir)
+
+    assert any(e["event"] == "sweep_corrupt_session_file" for e in cap)
+
+
 # ── Site 8: hooks.py _infer_repo failure ──────────────────────────────────────
 
 def test_infer_repo_git_failed_logs_debug():
@@ -149,6 +165,28 @@ def test_infer_repo_git_failed_logs_debug():
     # Falls back to cwd name
     assert isinstance(result, str) and len(result) > 0
     assert any(e["event"] == "infer_repo_git_failed" for e in cap)
+
+
+# ── Site 9: hooks.py session_end own record corrupt ───────────────────────────
+
+def test_session_end_own_record_corrupt_logs_debug(tmp_path):
+    """Site 9: corrupt own session file in session_end emits debug-level log."""
+    import os
+    from nexus.hooks import session_end
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    # Write a corrupt file named after this process's parent PID
+    ppid = os.getppid()
+    corrupt_file = sessions_dir / f"{ppid}.session"
+    corrupt_file.write_text("not-valid-json{{{")
+
+    with patch("nexus.hooks.SESSIONS_DIR", sessions_dir), \
+         patch("nexus.hooks.find_ancestor_session", return_value=None):
+        with capture_logs() as cap:
+            session_end()
+
+    assert any(e["event"] == "session_end_own_record_corrupt" for e in cap)
 
 
 # ── Site 10: commands/hook.py stdin parse failure ─────────────────────────────

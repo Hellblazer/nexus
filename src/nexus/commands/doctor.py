@@ -70,8 +70,9 @@ def _check_orphan_t1(lines: list[str]) -> bool:
     for sf in session_files:
         try:
             record = json.loads(sf.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue  # corrupt/unreadable — skip
+        except (json.JSONDecodeError, OSError) as exc:
+            _log.debug("orphan_t1_session_corrupt", path=str(sf), error=str(exc))
+            continue
         pid = record.get("server_pid")
         if pid is None:
             continue
@@ -148,7 +149,7 @@ def _check_chroma_pagination(lines: list[str], client: object, db_name: str) -> 
                 target_col = col
                 break
         except Exception:
-            continue
+            continue  # intentional: skip collections that error on count()
 
     if target_col is None:
         lines.append(_check_line(f"ChromaDB pagination ({db_name})", True, "no non-empty collections to audit"))
@@ -160,7 +161,7 @@ def _check_chroma_pagination(lines: list[str], client: object, db_name: str) -> 
         offset = 0
         page_size = 300
         while True:
-            batch = target_col.get(limit=page_size, offset=offset)
+            batch = target_col.get(limit=page_size, offset=offset, include=[])
             ids = batch.get("ids", [])
             retrieved += len(ids)
             if len(ids) < page_size:

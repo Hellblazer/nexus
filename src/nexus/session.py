@@ -40,7 +40,7 @@ def read_claude_session_id() -> str | None:
         text = CLAUDE_SESSION_FILE.read_text().strip()
         return text or None
     except OSError:
-        return None
+        return None  # intentional: file not created yet, normal on first run
 
 
 def _stable_pid() -> int:
@@ -86,7 +86,7 @@ def read_session_id(ppid: int | None = None) -> str | None:
         text = session_file_path(ppid).read_text().strip()
         return text or None
     except OSError:
-        return None
+        return None  # intentional: session file not created yet, normal on first run
 
 
 # ── T1 server session management (RDR-010) ────────────────────────────────────
@@ -124,7 +124,7 @@ def _ppid_of(pid: int) -> int | None:
         val = int(out)
         return val if val > 1 else None
     except (subprocess.CalledProcessError, ValueError, FileNotFoundError, OSError):
-        return None
+        return None  # intentional: process gone or ps unavailable — expected during PPID walk
 
 
 def find_ancestor_session(
@@ -268,7 +268,7 @@ def start_t1_server() -> tuple[str, int, int, str]:
             conn.close()
             return _T1_SERVER_HOST, port, proc.pid, tmpdir
         except OSError:
-            time.sleep(0.2)
+            time.sleep(0.2)  # intentional: server not yet listening, retry loop
 
     proc.kill()
     raise RuntimeError(
@@ -282,20 +282,20 @@ def stop_t1_server(server_pid: int) -> None:
     try:
         os.kill(server_pid, signal.SIGTERM)
     except OSError:
-        return
+        return  # intentional: process already gone before SIGTERM
     # Wait up to 3 seconds for graceful exit
     deadline = time.time() + 3.0
     while time.time() < deadline:
         try:
             os.kill(server_pid, 0)  # check if alive
         except OSError:
-            return  # process gone
+            return  # intentional: process exited after SIGTERM — success
         time.sleep(0.1)
     # Escalate
     try:
         os.kill(server_pid, signal.SIGKILL)
     except OSError:
-        return
+        return  # intentional: process exited between poll and SIGKILL
     # Reap the zombie so it does not linger in the process table.
     try:
         os.waitpid(server_pid, os.WNOHANG)
