@@ -2,14 +2,17 @@
 title: "Search Results UX — Context Lines and Syntax Highlighting"
 id: RDR-027
 type: Feature
-status: draft
+status: closed
+accepted_date: 2026-03-09
+close_date: 2026-03-09
+close_reason: implemented
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-03-08
 related_issues: ["RDR-026"]
-related_tests: []
-implementation_notes: ""
+related_tests: ["tests/test_formatters.py"]
+implementation_notes: "All 3 phases in PR #91 — Phase 1 (context lines, -B, -C fix, bridge merging), Phase 2 (bat highlighting), Phase 3 (compact mode)"
 ---
 
 # RDR-027: Search Results UX — Context Lines and Syntax Highlighting
@@ -91,9 +94,14 @@ Extend the existing `-A`/`-C` implementation with keyword-matching line identifi
 
 ### Phase 2: Syntax Highlighting
 Add `--bat` flag to `nx search`:
-- Detect `bat` availability via `subprocess.run(["bat", "--version"])` with `FileNotFoundError` handling
-- Pipe each result through `bat` with appropriate `--file-name` for language detection and `--paging never`
-- Respect `--no-color` / `NO_COLOR` environment variable
+- Detect `bat` availability via `subprocess.run(["bat", "--version"])` with `FileNotFoundError` handling; cache result for the session
+- Batch results by `source_path`: group all result blocks for the same file, then call `bat` once per file with multiple `--line-range {start}:{end}` arguments. This avoids O(N) subprocess spawns for N results from the same file. Before constructing the bat command, sort line ranges by start and merge overlapping/adjacent ranges into contiguous spans (if `end[i] >= start[i+1] - 1`, merge them) to prevent duplicate output lines.
+- **Line range source**: When no context flags (`-A`/`-B`/`-C`) are set, bat receives `--line-range {line_start}:{line_end}` from chunk metadata. When context flags are active, `_format_with_bat` receives the pre-computed context blocks (from `_extract_context`) and uses their start/end line numbers for `--line-range`. If `line_end` is absent or 0 in metadata, derive it as `line_start + len(content.splitlines()) - 1`.
+- Pass `--file-name {source_path}` for language detection, `--paging never`, `--style=plain`
+- **Format interaction**: `--bat` applies only to the default plain output path. When `--json`, `--vimgrep`, or `--files` is active, `--bat` is silently ignored.
+- **Fallback behavior**: When `bat` is not installed and `--bat` is explicitly requested, emit a one-time warning ("bat not found; showing plain output") and fall back to `format_plain_with_context`. Do not error.
+- **Subprocess error handling**: Catch `subprocess.CalledProcessError` and `OSError` around each `bat` invocation; on failure, fall back to plain formatting for that file and log at debug level via structlog.
+- **`--no-color` interaction**: When `--no-color` is passed or `NO_COLOR` env var is set, skip `bat` entirely (bat respects `NO_COLOR` but skipping avoids the subprocess overhead). Remove the `--no-color` flag from being passed through to bat since bat handles `NO_COLOR` natively.
 
 ### Phase 3: Compact Mode
 Add `--compact` flag:
@@ -122,30 +130,36 @@ Add `--compact` flag:
 - `-C` semantic change is a breaking change (but feature is new, low impact)
 - Line identification heuristic may highlight wrong lines for semantic-only queries (no keyword overlap)
 - `-B` limited to within-chunk context (no pre-chunk lines)
-- `bat` adds subprocess overhead (~50ms per result)
+- `bat` adds subprocess overhead (~50ms per unique file, mitigated by per-file batching with `--line-range`)
 
 ## Implementation Plan
 
 1. Extend `format_plain_with_context` signature to accept `query: str | None = None`; pass query from `search_cmd` to formatter
-2. Add `_find_matching_lines(chunk_text, query)` -> list of line numbers (keyword match with first-line fallback)
+2. Add `_find_matching_lines(chunk_text: str, query: str, rg_matched_lines: list[int] | None = None, chunk_line_start: int = 0)` -> list of 0-based line indices within the chunk. When `rg_matched_lines` is provided (from RDR-026 hybrid search), translate absolute line numbers to chunk-relative indices and prefer those over keyword matching. Fall back to keyword match against query terms (split on `\W+`, case-insensitive substring match, line matches if any token appears), then to line 0 if no matches found.
 3. Add `_extract_context(lines, matches, before, after)` -> focused line blocks with bridge merging (within-chunk only)
 4. Add `-B` flag to `nx search` CLI
 5. Change `-C N` from after-alias to before+after (`-B N -A N`), update help text
-6. Add `_format_with_bat(file_path, line_start, line_end)` -> syntax-highlighted output
-7. Add `--bat` flag to `nx search` CLI
-8. Add `--compact` flag for single-line-per-result output
-9. Update `format_plain` and `format_vimgrep` formatters
+6. Add `_format_with_bat(results: list[SearchResult], context_blocks: dict[str, list[tuple[int,int]]] | None = None)` -> syntax-highlighted output. Groups results by `source_path`, merges overlapping/adjacent line ranges, calls `bat` once per file with deduplicated `--line-range` args. When `context_blocks` is provided (from Phase 1 `_extract_context`), uses those line ranges instead of full chunk metadata. Handles `FileNotFoundError`, `CalledProcessError`, and `OSError` with fallback to plain formatting per file. If `line_end` is absent or 0, derives it as `line_start + len(content.splitlines()) - 1`.
+7. Add `--bat` flag to `nx search` CLI. When `--no-color` or `NO_COLOR` is set, skip bat entirely.
+8. Add `--compact` flag for single-line-per-result output (format: `{source_path}:{line_no}:{best_matching_line}`)
+9. Update `format_vimgrep` to accept `query` parameter and use `_find_matching_lines` for line identification (same signature extension as `format_plain_with_context` in step 1). The vimgrep format becomes `{source_path}:{match_line_no}:{col}:{line_text}` where `match_line_no` is the best-matching line rather than always `line_start`.
 
 ## Test Plan
 
-- Unit: `_find_matching_lines` with known query/chunk pairs
+- Unit: `_find_matching_lines` with known query/chunk pairs (keyword match)
+- Unit: `_find_matching_lines` with `rg_matched_lines` provided — prefers rg lines over keyword match
+- Unit: `_find_matching_lines` with `rg_matched_lines` outside chunk range — falls back to keyword match
 - Unit: `_extract_context` with various before/after/bridge scenarios
 - Unit: `-B` on match at chunk start produces no pre-context (within-chunk boundary)
-- Unit: bat detection when bat not installed -> graceful fallback
+- Unit: bat detection when bat not installed -> graceful fallback with warning
+- Unit: bat subprocess error (CalledProcessError) -> falls back to plain formatting
+- Unit: `_format_with_bat` groups results by source_path (batches per file)
 - Integration: search with `-C 3` produces exactly 3+1+3 lines per match (before+match+after)
 - Integration: `-C N` is equivalent to `-B N -A N`
-- Integration: `--compact` produces grep-compatible output format
+- Integration: `--compact` produces grep-compatible output format (`path:line:text`)
+- Integration: `--bat` with `NO_COLOR` set skips bat entirely
 - Regression: search with no flags produces identical output to current behavior
+- Regression: `format_vimgrep` with `query=None` returns `line_start` as match line (backward-compat)
 
 ## Finalization Gate
 
@@ -159,10 +173,21 @@ Key assumption validated: `format_plain_with_context` operates solely on `r.cont
 Phase 1 is scoped to extending the existing `-A`/`-C` implementation, not building from scratch. The formatter signature change (adding `query` parameter) and `-C` semantic change are the two interface-level breaking changes, both documented. `-B` is new but constrained to within-chunk. Bridge merging is additive. Phase 2 (bat) and Phase 3 (compact) remain independent.
 
 ### Cross-Cutting Concerns
-The `query` parameter must be threaded from `search_cmd.search_cmd()` through to `format_plain_with_context`. This touches the call site at search_cmd.py:225-227 and the formatter signature at formatters.py:54-56. No other callers of `format_plain_with_context` exist in the codebase. The `-C` semantic change requires updating the Click help text at search_cmd.py:94-95 and the alias logic at search_cmd.py:127-128.
+Two parameter-threading changes are required:
+
+1. **`query` parameter**: Must be threaded from `search_cmd.search_cmd()` through to `format_plain_with_context`. This touches the call site at search_cmd.py:225-227 and the formatter signature at formatters.py:54-56. No other callers of `format_plain_with_context` exist in the codebase.
+
+2. **`rg_matched_lines` from RDR-026**: The hybrid search pipeline (search_cmd.py) already captures `rg_matched_lines` per result as metadata (dict mapping `source_path` to list of matched line numbers). This metadata must be threaded through to `_find_matching_lines` so that ripgrep-identified lines take priority over keyword heuristics. The threading path is: `search_cmd` → formatter → `_find_matching_lines(chunk_text, query, rg_matched_lines, chunk_line_start)`. The `chunk_line_start` parameter (from `r.metadata["line_start"]`) is needed to translate absolute rg line numbers to chunk-relative indices.
+
+3. **`-C` semantic change**: Requires updating the Click help text at search_cmd.py:94-95 and the alias logic at search_cmd.py:127-128.
 
 ### Proportionality
 This is a P2 UX enhancement. Phase 1 (context lines with keyword matching) is the highest-value change and can land independently. The design decisions (DD1: within-chunk `-B`, DD2: `-C` as before+after) are pragmatic choices that avoid over-engineering while delivering grep-familiar behavior. Phase 2 (bat) is ~20 lines of subprocess plumbing. Phase 3 (compact) is a formatting variant. Total scope is proportionate to the improvement in daily search ergonomics.
+
+## Revision History
+
+- **2026-03-09 (Gate 1 — BLOCKED)**: Substantive-critic identified 2 critical issues: (1) `_find_matching_lines` signature missing `rg_matched_lines` parameter from RDR-026, (2) bat invoked per-result instead of per-file. Also 4 significant: bat fallback unspecified, bat subprocess exceptions unhandled, `--no-color` dead code, `format_vimgrep` step 9 underspecified. All addressed in this revision.
+- **2026-03-09 (Gate 2 — PASSED)**: Re-gate found 0 critical, 2 significant (bat line-range source unspecified, overlapping ranges in per-file batching), 5 observations (vimgrep regression test, tokenization spec, format interaction, line_end fallback, stale docstring). All significant issues addressed; observations noted for implementation.
 
 ## References
 
