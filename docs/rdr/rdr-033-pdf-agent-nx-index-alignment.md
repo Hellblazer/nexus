@@ -9,8 +9,9 @@ reviewed-by: self
 created: 2026-03-08
 related_issues:
   - "RDR-011 - PDF Ingest Test Coverage (closed)"
-  - "RDR-012 - pdfplumber Extraction Tier (closed)"
+  - "RDR-012 - pdfplumber Extraction Tier (closed, superseded by RDR-021)"
   - "RDR-015 - Indexing Pipeline Rethink"
+  - "RDR-021 - Docling PDF Extraction (accepted)"
   - "RDR-032 - Indexer Decomposition"
 ---
 
@@ -65,7 +66,7 @@ Options:
 ```
 
 Capabilities:
-- Automatic text extraction (pymupdf4llm primary, pdfplumber fallback per RDR-012)
+- Automatic text extraction (Docling primary with neural layout analysis, PyMuPDF normalized fallback — per RDR-021)
 - Context-safe chunking with page boundary awareness
 - Embedding generation (local ONNX or API)
 - Staleness detection (skip already-indexed PDFs)
@@ -126,6 +127,8 @@ Rewrite the agent to be a thin orchestration layer around `nx index pdf`:
 2. For batch jobs, track via beads
 ```
 
+The `--corpus` argument maps to `docs__{corpus}` — corpus names like `grossberg-1978` are correct; full collection names like `docs__grossberg-1978` should not be passed as `--corpus`.
+
 The agent system prompt shrinks from 234 lines to ~40 lines. The agent's job becomes:
 - Parse user intent (which PDFs, what corpus name)
 - Call `nx index pdf` for each
@@ -182,7 +185,7 @@ Update step 13 to be the primary path but keep all the fallback extraction logic
 ### Risks and Mitigations
 
 - **Risk**: `nx index pdf` has bugs or limitations not covered by the agent's fallbacks
-  **Mitigation**: Fix them in `nx index pdf` — that's where extraction logic belongs. RDR-012 already added pdfplumber as a fallback tier.
+  **Mitigation**: Fix them in `nx index pdf` — that's where extraction logic belongs. The extraction stack already has a two-tier fallback (Docling primary, PyMuPDF normalized fallback — per RDR-021), and any new extraction improvements belong in `pdf_extractor.py`, not in the agent prompt.
 
 - **Risk**: Removing agent breaks existing workflows that reference `pdf-chromadb-processor`
   **Mitigation**: Keep the agent name, just rewrite the prompt. Skill invocation path unchanged.
@@ -203,6 +206,7 @@ Update step 13 to be the primary path but keep all the fallback extraction logic
 1. Add inline single-PDF path that doesn't spawn an agent
 2. Reserve agent spawn for batch/complex scenarios
 3. Document `nx index pdf` as the primary command in skill content
+4. Update skill's PRODUCE section to reference `nx index pdf` output format (collection name, chunk count, searchability), not `nx store put` schema — the current PRODUCE describes "Indexed PDF content stored via `nx store put`" which becomes stale after Phase 1
 
 ### Phase 3: Test
 
@@ -220,12 +224,39 @@ Update step 13 to be the primary path but keep all the fallback extraction logic
 - **Scenario**: Already-indexed PDF → **Verify**: Staleness check prevents re-indexing (or `--force` re-indexes)
 - **Scenario**: Corrupt/encrypted PDF → **Verify**: Clear error message, no partial state
 
+## Finalization Gate
+
+### Contradiction Check
+
+No internal contradictions found. The problem statement (agent reimplements extraction, fails in sandbox) is consistent with the proposed solution (delegate to `nx index pdf`). The extraction stack description now correctly references Docling/PyMuPDF (RDR-021), consistent with the actual `pdf_extractor.py` implementation. Option A (thin wrapper) and Option B (skill-only) are presented as alternatives, not as conflicting requirements.
+
+### Assumption Verification
+
+1. **`nx index pdf` covers all agent extraction scenarios**: Verified. The command handles single-PDF ingestion with Docling primary extraction, PyMuPDF normalized fallback, staleness detection, and atomic operation. The only gap is URL download (curl to /tmp), which the thin wrapper agent retains.
+2. **Sandbox blocks the agent's CLI tools**: Confirmed by the 2026-03-08 Kramer project failure. `pdftotext`, `pdfinfo`, `ghostscript`, and `pdftk` are external binaries that Claude Code's sandbox restricts. `nx index pdf` runs as a Python subprocess via the `nx` CLI, which is already in the tool allowlist.
+3. **`--corpus` maps to `docs__` collections**: Verified in `doc_indexer.py`. The `--corpus` flag prepends `docs__` automatically; passing `docs__grossberg-1978` would produce the malformed collection name `docs__docs__grossberg-1978`.
+
+### Scope Verification
+
+This RDR is scoped to the agent prompt and skill file — no changes to `nx index pdf`, `pdf_extractor.py`, or any Python source. The implementation plan has three phases: (1) rewrite agent prompt, (2) update skill, (3) test. All phases are documentation/config changes except testing. The RDR does not propose changes to the extraction pipeline itself; extraction improvements belong in RDR-021 and its successors.
+
+### Cross-Cutting Concerns
+
+- **Naming conventions**: The agent currently generates corpus names like `author-year-short-title` which is correct for the `--corpus` argument. The updated agent prompt must document that `--corpus` auto-prepends `docs__`, so the agent should not include the prefix.
+- **Skill PRODUCE section**: Currently references `nx store put`, which Phase 2 updates to reflect `nx index pdf` output. This is a documentation-only change but affects downstream agents that read the skill's PRODUCE contract.
+- **Backward compatibility**: The agent name (`pdf-chromadb-processor`) and skill invocation path (`/pdf-process`) remain unchanged. Existing workflows that reference these names continue to work.
+
+### Proportionality
+
+The effort is proportional to the problem. The 234-line agent prompt is provably broken (zero successful indexing in the observed failure) and the fix is a prompt rewrite to ~40 lines plus a skill update. No new dependencies, no new code, no migration. The risk of the change is low — `nx index pdf` is already the working path that the human operator discovered manually. This RDR simply makes the agent use the same path.
+
 ## References
 
-- `nx index pdf` implementation: `src/nexus/indexer.py`
+- `nx index pdf` implementation: `src/nexus/doc_indexer.py` (CLI: `src/nexus/commands/index.py`)
 - Current agent: `nx/agents/pdf-chromadb-processor.md`
 - Current skill: `nx/skills/pdf-processing/SKILL.md`
 - RDR-011: PDF Ingest Test Coverage
-- RDR-012: pdfplumber Extraction Tier
+- RDR-012: pdfplumber Extraction Tier (superseded by RDR-021)
 - RDR-015: Indexing Pipeline Rethink
+- RDR-021: Docling PDF Extraction (current extraction stack)
 - RDR-032: Indexer Module Decomposition
