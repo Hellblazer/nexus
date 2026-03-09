@@ -2,15 +2,17 @@
 title: "Search Results UX — Context Lines and Syntax Highlighting"
 id: RDR-027
 type: Feature
-status: accepted
+status: closed
 accepted_date: 2026-03-09
+close_date: 2026-03-09
+close_reason: implemented
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-03-08
 related_issues: ["RDR-026"]
-related_tests: []
-implementation_notes: ""
+related_tests: ["tests/test_formatters.py"]
+implementation_notes: "All 3 phases in PR #91 — Phase 1 (context lines, -B, -C fix, bridge merging), Phase 2 (bat highlighting), Phase 3 (compact mode)"
 ---
 
 # RDR-027: Search Results UX — Context Lines and Syntax Highlighting
