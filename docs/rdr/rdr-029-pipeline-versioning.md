@@ -2,7 +2,7 @@
 title: "Pipeline Versioning — Force Reindex and Collection Version Stamping"
 id: RDR-029
 type: Enhancement
-status: accepted
+status: closed
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self

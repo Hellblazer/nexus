@@ -42,7 +42,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-026](rdr-026-hybrid-search-fusion.md) | Hybrid Search — Vector + Ripgrep Query Fusion | Feature | Draft | 2026-03-08 |
 | [RDR-027](rdr-027-search-results-ux.md) | Search Results UX — Context Lines and Syntax Highlighting | Feature | Draft | 2026-03-08 |
 | [RDR-028](rdr-028-code-search-recall.md) | Code Search Recall — Language Registry Unification | Enhancement | Closed | 2026-03-08 |
-| [RDR-029](rdr-029-pipeline-versioning.md) | Pipeline Versioning — Force Reindex and Collection Version Stamping | Enhancement | Accepted | 2026-03-08 |
+| [RDR-029](rdr-029-pipeline-versioning.md) | Pipeline Versioning — Force Reindex and Collection Version Stamping | Enhancement | Closed | 2026-03-08 |
 | [RDR-030](rdr-030-reliability-hardening.md) | Reliability Hardening — Silent Error Audit and Logging Policy | Enhancement | Draft | 2026-03-08 |
 | [RDR-031](rdr-031-collection-portability.md) | Collection Portability — Export/Import for T3 Backup and Migration | Feature | Draft | 2026-03-08 |
 | [RDR-032](rdr-032-indexer-decomposition.md) | Indexer Module Decomposition and Configuration Externalization | Technical Debt | Draft | 2026-03-08 |
