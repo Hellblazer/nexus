@@ -17,7 +17,7 @@ CLI (cli.py + commands/)
     │     code: classify(SKIP|CODE|PROSE|PDF) → tree-sitter AST → context prefix → voyage-code-3 → code__<repo>
     │     prose: SemanticMarkdownChunker (md) or line-split → voyage-context-3 → docs__<repo>
     │     rdr:   SemanticMarkdownChunker → voyage-context-3 → rdr__<repo>
-    │     pdf:   PyMuPDF4LLM → voyage-context-3 → docs__<corpus>
+    │     pdf:   Docling (PyMuPDF fallback) → voyage-context-3 → docs__<corpus>
     │     skip:  .xml/.json/.yml/.html/.css/.lock/etc → silently ignored
     │
     ├── Search: query → retrieve → rerank → format

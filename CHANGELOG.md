@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Hybrid search score boosting** (RDR-026) — ripgrep exact-match results boost
+  vector search scores by `EXACT_MATCH_BOOST=0.15`. Pre-reranker capture of
+  `rg_file_paths` and `rg_matched_lines` metadata for downstream context windowing.
+  Ripgrep-only results (files not in vector top-K) kept with `RG_FLOOR_SCORE * 0.8`
+  penalty. Snapshot regression tests for search quality via syrupy.
+- **Context line windowing** (RDR-027 Phase 1) — `-A`/`-B`/`-C` flags now center
+  on matching lines within chunks (keyword match or rg_matched_lines) rather than
+  always showing from chunk start. `-C N` changed from after-only alias to
+  before+after (matching grep semantics). Bridge merging joins nearby matches
+  separated by ≤2 lines.
+- **Syntax highlighting** (RDR-027 Phase 2) — `--bat` flag pipes results through
+  `bat` with per-file batching, merged line ranges, and graceful fallback. Skipped
+  when `--no-color` or `NO_COLOR` is set.
+- **Compact mode** (RDR-027 Phase 3) — `--compact` flag outputs one line per result
+  in `path:line:text` format (grep-compatible).
+- **Query-aware vimgrep** — `--vimgrep` now reports the best-matching line within
+  the chunk when a query is provided, not always the first line.
+
 ## [1.8.0] - 2026-03-08
 
 ### Changed

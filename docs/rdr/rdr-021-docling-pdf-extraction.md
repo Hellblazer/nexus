@@ -2,8 +2,10 @@
 id: RDR-021
 title: "Replace 3-Tier PDF Extraction Stack with Docling"
 type: enhancement
-status: accepted
+status: closed
 accepted_date: 2026-03-05
+close_date: 2026-03-09
+close_reason: implemented
 reviewed-by: self
 priority: P2
 created: 2026-03-05

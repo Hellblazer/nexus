@@ -1,7 +1,7 @@
 ---
 title: "Indexing Progress Reporting: tqdm-Based Progress Bar for nx index"
 type: enhancement
-status: implemented
+status: closed
 priority: P2
 author: Hal Hildebrand
 date: 2026-03-03

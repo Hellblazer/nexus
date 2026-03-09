@@ -58,7 +58,7 @@ separate `rdr__<name>-<hash8>` collection via the batch markdown indexer.
 Code files are chunked via tree-sitter AST parsing using `llama-index` `CodeSplitter` and
 `tree-sitter-language-pack`.
 
-**AST-supported languages** (28 extension mappings, 19 parsers after Fix B):
+**AST-supported languages** (44 extension mappings, 31 parsers):
 
 | Extensions | Parser |
 |---|---|
@@ -81,6 +81,20 @@ Code files are chunked via tree-sitter AST parsing using `llama-index` `CodeSpli
 | `.php` | php |
 | `.r` | r |
 | `.lua` | lua |
+| `.proto` | proto |
+| `.ex`, `.exs` | elixir |
+| `.erl`, `.hrl` | erlang |
+| `.hs` | haskell |
+| `.clj`, `.cljs`, `.cljc` | clojure |
+| `.ml` | ocaml |
+| `.mli` | ocaml\_interface |
+| `.el` | elisp |
+| `.dart` | dart |
+| `.zig` | zig |
+| `.jl` | julia |
+| `.pl`, `.pm` | perl |
+
+Additionally, 8 GPU shader extensions (`.cl`, `.comp`, `.frag`, `.vert`, `.metal`, `.glsl`, `.wgsl`, `.hlsl`) are classified as CODE with line-based chunking (no AST parser).
 
 When AST parsing fails or no parser exists for the extension, the chunker falls back to
 line-based splitting: 150-line chunks with 15% overlap.
@@ -96,8 +110,9 @@ the file, class, method, and line range. The raw chunk text is stored in ChromaD
 <original chunk text>
 ```
 
-Class and method names are extracted by tree-sitter using `DEFINITION_TYPES` covering 14
-languages (Python, Java, Go, TypeScript, Rust, C, C++, C#, Ruby, PHP, Swift, Kotlin, Scala).
+Class and method names are extracted by tree-sitter using `DEFINITION_TYPES` covering 23
+languages (Python, JavaScript, TypeScript, TSX, Java, Go, Rust, C, C++, C#, Ruby, PHP,
+Swift, Kotlin, Scala, R, Lua, Dart, Haskell, Julia, OCaml, Perl, Erlang).
 For a chunk spanning multiple methods, the method field is empty. For unsupported languages
 or when parsing fails, the prefix falls back to `File + Lines` only.
 

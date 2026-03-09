@@ -2,7 +2,8 @@
 title: "Reliability Hardening — Silent Error Audit and Logging Policy"
 id: RDR-030
 type: Enhancement
-status: draft
+status: accepted
+accepted_date: 2026-03-09
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
@@ -22,8 +23,8 @@ This pattern makes debugging extremely difficult — the system silently falls b
 
 ## Context
 
-- `structlog` is already the logging framework (used throughout the codebase)
-- `nx doctor` exists but only checks configuration and connectivity, not data integrity
+- `structlog` is already the logging framework (used throughout the codebase); three modules (`commands/hook.py`, `commands/index.py`, `classifier.py`) lack a module-level `_log` binding and will need one added
+- `nx doctor` checks configuration, connectivity, and pipeline versioning (RDR-029), but not T1 process orphans, T2 FTS5 integrity, or ChromaDB pagination counts
 - RDR-019 and RDR-020 established retry patterns for external APIs, but internal error handling remains inconsistent
 
 ## Research Findings
@@ -57,9 +58,25 @@ This pattern makes debugging extremely difficult — the system silently falls b
 | nexus-738 | Formatters always emitted `:0:` line numbers — wrong output |
 | nexus-zmu | Pre-heading markdown content silently dropped |
 
-### F3: ChromaDB 300-Record Pagination (Verified — production discovery)
+### F3: ChromaDB 300-Record Pagination (Verified — production discovery + 2026-03-09 audit)
 
-ChromaDB Cloud's `get()` returns at most 300 entries per call. Code that calls `col.get()` without pagination silently misses data. Known fixed locations: `delete_by_source()`, `nx store delete --title`. Other call sites may still be vulnerable.
+ChromaDB Cloud's `get()` returns at most 300 entries per call. Code that calls `col.get()` without pagination silently misses data. Known fixed locations: `delete_by_source()`, `nx store delete --title`. Full audit (2026-03-09):
+- **Correctly paginated**: `expire()`, `delete_by_source()`, `find_ids_by_title()` — all use `limit=300` + offset loop
+- **Safe (exact/capped)**: `get_by_id()`, `delete_by_id()` (exact ID), staleness check (`limit=1`)
+- **Display truncation**: `list_store()` caps at `min(limit, 300)`, default 200 — UX, not correctness
+- **BUG: `doc_indexer.py:233`** — stale-chunk pruning `col.get(where={"source_path": ...})` has no `limit=`/pagination. For documents >300 chunks, orphan stale chunks survive re-indexing and pollute search results.
+
+### F4: New Silent Catch Sites (Verified — 2026-03-09 source scan)
+
+Three additional sites not in the original F1 audit:
+
+| Location | What's swallowed | Impact | Recommended level |
+|----------|-----------------|--------|--------------------|
+| `indexer.py:398` | `(OSError, subprocess.TimeoutExpired)` in `_current_head()` | Returns `""`, causing unnecessary full re-index next run | `debug` |
+| `md_chunker.py:73` | `yaml.YAMLError` in frontmatter parse | Metadata (title, author, date) silently lost — indexed without attribution | `warning` |
+| `classifier.py:46` | `OSError` in `_has_shebang()` | File classified as no-shebang when it can't be read | `debug` |
+
+**Total actionable silent-error sites: 14** (11 F1 + 3 F4).
 
 ## Proposed Solution
 
@@ -83,19 +100,19 @@ Any unimplemented code path must `raise NotImplementedError("...")` rather than 
 
 ## Implementation Plan
 
-### Phase 1: Silent Error Audit (11 locations)
-1. Add `_log.debug` (or `_log.warning` where degradation is user-visible) to all 11 identified catch-and-pass blocks
+### Phase 1: Silent Error Audit (14 locations)
+1. Add `_log.debug` (or `_log.warning` where degradation is user-visible) to all 14 identified catch-and-pass blocks (11 F1 + 3 F4)
 2. Review each for appropriate recovery behavior
-3. Add warning-level logs for fallback paths (session.py EphemeralClient fallback)
+3. Add warning-level logs for fallback paths (session.py EphemeralClient fallback, md_chunker frontmatter loss)
 
 ### Phase 2: nx doctor Expansion
-4. Add collection pipeline_version check
-5. Add orphan T1 process detection
+4. ~~Add collection pipeline_version check~~ — already implemented (RDR-029, `doctor.py:134-170`)
+5. Add orphan T1 process detection — scan `~/.config/nexus/sessions/` for records whose `server_pid` is not a live process; report count of orphaned records
 6. Add T2 database integrity check
 7. Add ChromaDB pagination audit (spot-check record counts)
 
-### Phase 2.5: ChromaDB Pagination Audit
-8. Audit all `col.get()` call sites in `db/t3.py` and `doc_indexer.py` for missing `limit=` / pagination loop; fix any found.
+### Phase 2.5: ChromaDB Pagination Fix (scope extension — discovered during audit)
+8. Fix `doc_indexer.py:233` stale-chunk pruning — add `limit=300` + offset pagination loop (only confirmed unpaginated site with real data-loss risk). Audit verified all other `col.get()` call sites in `db/t3.py` are already paginated or use exact-ID lookups. This is a correctness fix, not a logging change, but is included here because the audit that discovered it is integral to this RDR's research phase.
 
 ### Phase 3: Codebase Sweep
 9. grep for `except.*pass` and `except.*return` patterns
@@ -115,7 +132,7 @@ Any unimplemented code path must `raise NotImplementedError("...")` rather than 
 No contradictions found between the three proposed policies. Policy 1 (minimum logging) and Policy 2 (warn on degradation) are complementary: Policy 1 sets the floor (`debug`), Policy 2 raises it to `warning` for user-visible fallbacks. Policy 4 (stub code must raise) applies to unimplemented paths, not to the same catch blocks that Policies 1-2 cover — they target different code. The `nx doctor` expansion (Policy 3) is additive and does not conflict with logging changes.
 
 ### Assumption Verification
-- **Assumption: structlog is universally available.** Verified: `structlog` is a hard dependency in `pyproject.toml` and `_log = structlog.get_logger()` exists in all affected modules (`indexer.py`, `session.py`, `hooks.py`).
+- **Assumption: structlog is universally available.** Verified: `structlog` is a hard dependency in `pyproject.toml` and `_log = structlog.get_logger()` exists in most affected modules (`indexer.py`, `session.py`, `hooks.py`, `doctor.py`, `md_chunker.py`). Three modules (`commands/hook.py`, `commands/index.py`, `classifier.py`) lack a module-level `_log` binding — these need 2 lines per site (binding + log call) instead of 1.
 - **Assumption: All 11 silent catch sites are reachable.** Verified by source inspection. Each corresponds to a real try/except block in current `main`. The two `indexer.py:264-273` sites and `session.py:113-115` were initially missed but confirmed present.
 - **Assumption: P0 bug list is accurate.** Bead IDs are cited; the specific count "8 of 22" was softened to "8 known P0 bugs" since the total denominator is not independently verifiable from the current bead store.
 
@@ -129,6 +146,11 @@ This RDR is scoped to (a) cataloguing silent catches, (b) establishing logging p
 
 ### Proportionality
 The effort is modest — each silent catch site needs 1-2 lines of logging added. The `nx doctor` expansion (Phase 2) is the largest component but builds on existing infrastructure. The historical cost of silent failures (8 P0 bugs requiring multi-hour debugging each) far exceeds the implementation cost. Risk is low: adding logging cannot break existing behavior, and `nx doctor` checks are purely diagnostic.
+
+## Revision History
+
+- **2026-03-09 (Research)**: Codebase audit verified all 11 F1 sites still-silent, found 3 new sites (F4), confirmed 1 pagination bug (`doc_indexer.py:233`). Total actionable: 14 silent-error sites + 1 pagination fix.
+- **2026-03-09 (Gate — PASSED)**: 0 critical, 3 significant (all addressed): (1) Context falsely claimed nx doctor has no integrity checks — corrected (pipeline_version check exists from RDR-029, Step 4 struck), (2) 3 modules lack `_log` binding — documented in assumptions, (3) Phase 2.5 pagination fix is a correctness change, not logging — justified as audit discovery. 3 observations noted.
 
 ## References
 

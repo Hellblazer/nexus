@@ -2,7 +2,7 @@
 title: "RDR Process Validation"
 id: RDR-001
 type: architecture
-status: implemented
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
