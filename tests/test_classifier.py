@@ -64,17 +64,21 @@ def test_extensionless_shebang_bash(tmp_path: Path):
     assert classify_file(f) == ContentClass.CODE
 
 
-def test_code_extensions_set_matches_design():
-    """The canonical set must match the design doc exactly (including shader/proto additions)."""
+def test_code_extensions_derived_from_registry():
+    """_CODE_EXTENSIONS contains all LANGUAGE_REGISTRY keys plus GPU shader extensions."""
+    from nexus.languages import LANGUAGE_REGISTRY, GPU_SHADER_EXTENSIONS
     from nexus.classifier import _CODE_EXTENSIONS
-    expected = {
-        ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs",
-        ".cpp", ".cc", ".c", ".h", ".hpp", ".rb", ".cs", ".sh", ".bash",
-        ".kt", ".swift", ".scala", ".r", ".m", ".php",
-        # shader + protobuf extensions
-        ".proto", ".cl", ".comp", ".frag", ".vert", ".metal", ".glsl", ".wgsl", ".hlsl",
-    }
+    expected = frozenset(LANGUAGE_REGISTRY.keys()) | GPU_SHADER_EXTENSIONS
     assert _CODE_EXTENSIONS == expected
+
+
+@pytest.mark.parametrize("filename", [
+    "script.lua", "main.cxx", "build.kts", "app.sc",
+])
+def test_previously_missing_code_extensions(filename: str):
+    """Extensions that were missing from _CODE_EXTENSIONS now classify as CODE."""
+    from nexus.classifier import classify_file, ContentClass
+    assert classify_file(Path(filename)) == ContentClass.CODE, f"{filename} should be CODE"
 
 
 # ── SKIP extension coverage ────────────────────────────────────────────────────
