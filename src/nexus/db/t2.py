@@ -65,6 +65,7 @@ CREATE INDEX        IF NOT EXISTS idx_memory_timestamp     ON memory(timestamp);
 CREATE INDEX        IF NOT EXISTS idx_memory_ttl_timestamp ON memory(ttl, timestamp);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    title,
     content,
     tags,
     content='memory',
@@ -72,22 +73,50 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
 );
 
 CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
-    INSERT INTO memory_fts(rowid, content, tags) VALUES (new.id, new.content, new.tags);
+    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
 END;
 
 CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN
-    INSERT INTO memory_fts(memory_fts, rowid, content, tags)
-        VALUES ('delete', old.id, old.content, old.tags);
+    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
 END;
 
 CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
-    INSERT INTO memory_fts(memory_fts, rowid, content, tags)
-        VALUES ('delete', old.id, old.content, old.tags);
-    INSERT INTO memory_fts(rowid, content, tags) VALUES (new.id, new.content, new.tags);
+    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
+    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
 END;
 """
 
 _COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl")
+
+# ── FTS5 rebuild SQL (used for migration from old schema lacking 'title') ─────
+# These statements recreate only the FTS5 virtual table and its triggers after
+# the old (title-less) table has been dropped during _migrate_fts_if_needed().
+_FTS_REBUILD_SQL = """\
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    title,
+    content,
+    tags,
+    content='memory',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
+    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
+    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
+END;
+"""
 
 
 # ── Session discovery ─────────────────────────────────────────────────────────
@@ -115,6 +144,36 @@ class T2Database:
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
             if result and result[0].lower() != "wal":
                 _log.warning("WAL mode not available", actual_mode=result[0])
+            self._migrate_fts_if_needed()
+
+    def _migrate_fts_if_needed(self) -> None:
+        """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.
+
+        Safe to call multiple times — no-op when 'title' is already present.
+        FTS5 content tables are pure indexes; the authoritative data lives in
+        the ``memory`` table and is unaffected by dropping/recreating the FTS table.
+        """
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
+        ).fetchone()
+        if row is None or "title" in row[0]:
+            # Table missing (fresh DB handled by _SCHEMA_SQL) or already up to date
+            return
+
+        _log.info("Migrating memory_fts to include title column")
+        # Drop old triggers first (they reference the old column list)
+        self.conn.executescript("""\
+            DROP TRIGGER IF EXISTS memory_ai;
+            DROP TRIGGER IF EXISTS memory_ad;
+            DROP TRIGGER IF EXISTS memory_au;
+            DROP TABLE  IF EXISTS memory_fts;
+        """)
+        # Recreate with new schema + triggers
+        self.conn.executescript(_FTS_REBUILD_SQL)
+        # Rebuild the FTS index from the authoritative memory table
+        self.conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
+        self.conn.commit()
+        _log.info("memory_fts migration complete")
 
     def __enter__(self) -> "T2Database":
         return self
