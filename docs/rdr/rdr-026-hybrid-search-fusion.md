@@ -2,15 +2,17 @@
 title: "Hybrid Search — Exact-Match Score Boosting"
 id: RDR-026
 type: Feature
-status: accepted
+status: closed
 accepted_date: 2026-03-09
+close_date: 2026-03-09
+close_reason: implemented
 priority: P1
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-03-08
 related_issues: ["RDR-006", "RDR-007"]
-related_tests: ["tests/test_scoring.py", "tests/test_search_cmd.py"]
-implementation_notes: ""
+related_tests: ["tests/test_scoring.py", "tests/test_search_cmd.py", "tests/test_hybrid_boost.py"]
+implementation_notes: "PR #84 — Phase 1 complete"
 ---
 
 # RDR-026: Hybrid Search — Exact-Match Score Boosting
