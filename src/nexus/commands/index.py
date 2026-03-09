@@ -4,9 +4,12 @@ import sys
 from pathlib import Path
 
 import click
+import structlog
 from tqdm import tqdm
 
 from nexus.registry import RepoRegistry
+
+_log = structlog.get_logger()
 
 
 def _registry_path() -> Path:
@@ -135,8 +138,8 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
             )
             if not any_managed:
                 click.echo("Tip: run `nx hooks install` to auto-index this repo on every commit.")
-        except Exception:
-            pass  # Don't let hook detection break indexing
+        except Exception as exc:
+            _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
     click.echo("Done.")
 
 

@@ -4,8 +4,11 @@ import json
 import sys
 
 import click
+import structlog
 
 from nexus import hooks
+
+_log = structlog.get_logger()
 
 
 @click.group("hook")
@@ -21,8 +24,8 @@ def session_start_cmd() -> None:
     try:
         data = json.loads(sys.stdin.read())
         claude_session_id = data.get("session_id")
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("session_start_stdin_parse_failed", error=str(exc))
     output = hooks.session_start(claude_session_id=claude_session_id)
     click.echo(output)
 

@@ -185,6 +185,6 @@ def round_robin_interleave(
                 merged.append(next(it))
                 next_iters.append(it)
             except StopIteration:
-                pass
+                pass  # intentional: iterator exhaustion is normal control flow
         iterators = next_iters
     return merged

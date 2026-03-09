@@ -22,14 +22,17 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--where KEY=VALUE` | Metadata filter (repeatable; multiple flags are ANDed) |
 | `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |
 | `-m` / `--n` / `--max-results NUM` | Max results (default 10) |
-| `-A N` | Show N lines of context after each result chunk |
-| `-C N` | Show N lines of context after each result chunk (alias for `-A`) |
+| `-A N` | Show N lines of context after each matching line (within chunk) |
+| `-B N` | Show N lines of context before each matching line (within chunk) |
+| `-C N` | Show N lines before and after each match (equivalent to `-B N -A N`) |
 | `-c` / `--content` | Show matched text inline under each result (truncated at 200 chars) |
 | `-r` / `--reverse` | Reverse result order (highest-scoring last) |
-| `--vimgrep` | Output as `path:line:col:content` |
+| `--vimgrep` | Output as `path:line:col:content` (query-aware: reports best-matching line) |
 | `--json` | JSON array output |
 | `--files` | Unique file paths only |
-| `--no-color` | Disable colored output |
+| `--compact` | One line per result: `path:line:text` (grep-compatible) |
+| `--bat` | Syntax highlight with `bat` (ignored with `--json`/`--vimgrep`/`--files`) |
+| `--no-color` | Disable colored output (also skips `--bat`) |
 
 ---
 

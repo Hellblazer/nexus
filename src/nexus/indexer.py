@@ -263,14 +263,14 @@ def _extract_name_from_node(node) -> str:  # type: ignore[no-untyped-def]
         if child:
             try:
                 return child.text.decode("utf-8")
-            except (UnicodeDecodeError, AttributeError):
-                pass
+            except (UnicodeDecodeError, AttributeError) as exc:
+                _log.debug("extract_name_decode_failed", error=str(exc), exc_info=True)
     for child in node.children:
         if child.type in ("identifier", "name"):
             try:
                 return child.text.decode("utf-8")
-            except (UnicodeDecodeError, AttributeError):
-                pass
+            except (UnicodeDecodeError, AttributeError) as exc:
+                _log.debug("extract_name_child_decode_failed", error=str(exc), exc_info=True)
     return ""
 
 
@@ -298,12 +298,14 @@ def _extract_context(
     try:
         from tree_sitter_language_pack import get_parser  # lazy import
         parser = get_parser(language)
-    except Exception:
+    except Exception as exc:
+        _log.warning("get_parser_failed", language=language, error=str(exc), exc_info=True)
         return ("", "")
 
     try:
         tree = parser.parse(source)
-    except Exception:
+    except Exception as exc:
+        _log.debug("tree_parse_failed", language=language, error=str(exc))
         return ("", "")
 
     class_name = ""
@@ -395,7 +397,8 @@ def _current_head(repo: Path) -> str:
             timeout=30,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log.debug("current_head_failed", repo=str(repo), error=str(exc))
         return ""
 
 

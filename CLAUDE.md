@@ -69,7 +69,7 @@ src/nexus/           # Core package
   db/                # t1.py, t2.py, t3.py — tier implementations
   indexer.py         # Repo indexing pipeline (classify → chunk → embed → store)
   classifier.py      # File classification: CODE / PROSE / PDF / SKIP
-  chunker.py         # Tree-sitter AST chunking (19 languages)
+  chunker.py         # Tree-sitter AST chunking (31 languages)
   md_chunker.py      # Semantic markdown splitter for prose
   pdf_extractor.py   # Docling-based PDF extraction
   pdf_chunker.py     # PDF → chunks

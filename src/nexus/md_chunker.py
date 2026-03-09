@@ -70,7 +70,8 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         data = yaml.safe_load(fm_content) or {}
         if not isinstance(data, dict):
             data = {}
-    except yaml.YAMLError:
+    except yaml.YAMLError as exc:
+        _log.warning("frontmatter_parse_failed", error=str(exc))
         data = {}
     return data, rest
 

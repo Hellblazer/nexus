@@ -228,10 +228,24 @@ def _index_document(
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
 
-    # Prune stale chunks from a previous (larger) version of this file
+    # Prune stale chunks from a previous (larger) version of this file.
+    # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
     current_ids_set = set(ids)
-    all_existing = _chroma_with_retry(col.get, where={"source_path": str(file_path)}, include=[])
-    stale_ids = [eid for eid in all_existing["ids"] if eid not in current_ids_set]
+    stale_ids: list[str] = []
+    offset = 0
+    while True:
+        batch = _chroma_with_retry(
+            col.get,
+            where={"source_path": str(file_path)},
+            include=[],
+            limit=300,
+            offset=offset,
+        )
+        batch_ids = batch.get("ids", [])
+        stale_ids.extend(eid for eid in batch_ids if eid not in current_ids_set)
+        if len(batch_ids) < 300:
+            break
+        offset += 300
     if stale_ids:
         _chroma_with_retry(col.delete, ids=stale_ids)
 
