@@ -31,6 +31,45 @@ _VOYAGE_EMBED_BATCH_SIZE = 128
 
 from nexus.languages import LANGUAGE_REGISTRY
 
+# Pipeline version: bump when indexing changes invalidate existing embeddings.
+# History:
+#   v1-v3: pre-versioning (no version stamp in collection metadata)
+#   v4:    RDR-028 language registry + RDR-014 CCE prefixes
+PIPELINE_VERSION: str = "4"
+
+
+def stamp_collection_version(col: object) -> None:
+    """Write PIPELINE_VERSION to collection metadata, preserving existing keys."""
+    existing = getattr(col, "metadata", None) or {}
+    col.modify(metadata={**existing, "pipeline_version": PIPELINE_VERSION})  # type: ignore[attr-defined]
+
+
+def get_collection_pipeline_version(col: object) -> str | None:
+    """Return the pipeline_version from collection metadata, or None."""
+    meta = getattr(col, "metadata", None) or {}
+    return meta.get("pipeline_version")
+
+
+def check_pipeline_staleness(col: object, collection_name: str) -> bool:
+    """Check if collection has a stale pipeline version.
+
+    Returns True if the stored version differs from PIPELINE_VERSION.
+    Returns False for new collections (stored version is None) or matching versions.
+    """
+    stored = get_collection_pipeline_version(col)
+    if stored is None:
+        return False
+    if stored != PIPELINE_VERSION:
+        _log.warning(
+            "collection_pipeline_stale",
+            collection=collection_name,
+            stored_version=stored,
+            current_version=PIPELINE_VERSION,
+            hint=f"Run with --force to re-index.",
+        )
+        return True
+    return False
+
 # Comment character for each language used to build the embed-only context prefix.
 _COMMENT_CHARS: dict[str, str] = {
     "python": "#",
@@ -379,6 +418,7 @@ def index_repository(
     frecency_only: bool = False,
     chunk_lines: int | None = None,
     force: bool = False,
+    force_stale: bool = False,
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
@@ -428,7 +468,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, on_start=on_start, on_file=on_file)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file)
                 registry.update(repo, head_hash=_current_head(repo))
             registry.update(repo, status="ready")
             return stats
@@ -1031,6 +1071,7 @@ def _run_index(
     chunk_lines: int | None = None,
     *,
     force: bool = False,
+    force_stale: bool = False,
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
 ) -> dict[str, int]:
@@ -1176,6 +1217,22 @@ def _run_index(
     docs_col = db.get_or_create_collection(docs_collection)
     _log.debug("collections ready")
 
+    # Check pipeline version staleness (informational warning only)
+    check_pipeline_staleness(code_col, code_collection)
+    check_pipeline_staleness(docs_col, docs_collection)
+
+    # --force-stale: escalate to force if any collection is stale
+    if force_stale:
+        any_stale = (
+            get_collection_pipeline_version(code_col) not in (None, PIPELINE_VERSION)
+            or get_collection_pipeline_version(docs_col) not in (None, PIPELINE_VERSION)
+        )
+        if any_stale:
+            _log.info("force_stale_escalating", reason="stale collection detected")
+            force = True
+        else:
+            _log.info("force_stale_skipped", reason="all collections current")
+
     # Index code files → code__ (voyage-code-3, AST chunking)
     _log.debug("indexing code files", count=len(code_files))
     for score, file in code_files:
@@ -1241,6 +1298,21 @@ def _run_index(
     for _, f in pdf_files:
         all_current_paths.add(str(f))
     _prune_deleted_files(code_collection, docs_collection, all_current_paths, db)
+
+    # Stamp pipeline version on force indexing (after all work completes)
+    if force:
+        stamp_collection_version(code_col)
+        stamp_collection_version(docs_col)
+        # Stamp RDR collection if it was indexed
+        if rdr_indexed > 0:
+            from nexus.registry import _rdr_collection_name
+            rdr_col_name = _rdr_collection_name(repo)
+            try:
+                rdr_col = db.get_or_create_collection(rdr_col_name)
+                stamp_collection_version(rdr_col)
+            except Exception:
+                _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
+
     return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
 
 

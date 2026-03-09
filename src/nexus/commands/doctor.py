@@ -131,6 +131,43 @@ def doctor_cmd() -> None:
              "nx config set voyage_api_key <your-key>  (set individually)",
              "Get key: https://voyageai.com  →  Dashboard  →  API Keys")
 
+    # ── Pipeline version check ───────────────────────────────────────────────
+    if chroma_key and chroma_database and voyage_key:
+        from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
+
+        stale_count = 0
+        for store_type in _STORE_TYPES:
+            db_name = f"{chroma_database}_{store_type}"
+            try:
+                client = chromadb.CloudClient(
+                    tenant=chroma_tenant or None, database=db_name, api_key=chroma_key
+                )
+                cols = client.list_collections()
+                for col in cols:
+                    stored = get_collection_pipeline_version(col)
+                    if stored is None:
+                        lines.append(_check_line(
+                            f"pipeline ({col.name})", True,
+                            "no version stamp (index with --force to stamp)",
+                        ))
+                    elif stored != PIPELINE_VERSION:
+                        stale_count += 1
+                        lines.append(_check_line(
+                            f"pipeline ({col.name})", False,
+                            f"v{stored} (current: v{PIPELINE_VERSION})",
+                        ))
+                    else:
+                        lines.append(_check_line(
+                            f"pipeline ({col.name})", True, f"v{stored}",
+                        ))
+            except Exception as exc:
+                _log.debug("doctor_pipeline_check_failed", db=db_name, error=str(exc))
+        if stale_count:
+            failed = True
+            _fix(lines,
+                 "nx index repo <path> --force-stale  (re-index outdated collections)",
+                 "nx index repo <path> --force        (re-index all collections)")
+
     # ── ripgrep ───────────────────────────────────────────────────────────────
     rg_path = shutil.which("rg")
     lines.append(_check_line("ripgrep   (rg)",              bool(rg_path),

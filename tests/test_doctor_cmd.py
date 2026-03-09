@@ -400,7 +400,8 @@ def test_doctor_four_store_calls_cloud_client_four_times() -> None:
     ):
         result = runner.invoke(main, ["doctor"])
 
-    assert mock_cc.call_count == 4
+    # 4 for reachability check + 4 for pipeline version check = 8
+    assert mock_cc.call_count == 8
     # All four suffixed database names appear in output
     for suffix in ("_code", "_docs", "_rdr", "_knowledge"):
         assert suffix in result.output
