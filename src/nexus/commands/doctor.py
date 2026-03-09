@@ -162,6 +162,7 @@ def doctor_cmd() -> None:
                         ))
             except Exception as exc:
                 _log.debug("doctor_pipeline_check_failed", db=db_name, error=str(exc))
+                lines.append(_check_line(f"pipeline ({db_name})", False, "check failed"))
         if stale_count:
             failed = True
             _fix(lines,
