@@ -267,7 +267,12 @@ def test_cli_search_json_output(
             "--json",
         ])
     assert result.exit_code == 0, result.output
-    parsed = json.loads(result.output)
+    # CliRunner mixes stderr into stdout; structlog warnings may precede
+    # the JSON array.  Extract the JSON portion (first '[' to last ']').
+    output = result.output
+    start = output.index("[")
+    end = output.rindex("]") + 1
+    parsed = json.loads(output[start:end])
     assert isinstance(parsed, list)
     assert any(uid in item.get("content", "") for item in parsed)
 
