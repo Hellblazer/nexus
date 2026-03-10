@@ -16,14 +16,19 @@ _RERANK_MODEL = "rerank-2.5"
 _FILE_SIZE_THRESHOLD = 30
 RG_FLOOR_SCORE = 0.5
 
+# Default scoring weights (kept as module constants for backward compatibility).
+# Override by passing explicit weights to hybrid_score() / apply_hybrid_scoring().
+_VECTOR_WEIGHT: float = 0.7
+_FRECENCY_WEIGHT: float = 0.3
 
-def _file_size_factor(chunk_count: int) -> float:
+
+def _file_size_factor(chunk_count: int, threshold: int = _FILE_SIZE_THRESHOLD) -> float:
     """Return a [0, 1] penalty factor for files larger than the threshold.
 
-    Files at or below *_FILE_SIZE_THRESHOLD* chunks return 1.0 (no penalty).
+    Files at or below *threshold* chunks return 1.0 (no penalty).
     Larger files return threshold / chunk_count, linearly reducing the score.
     """
-    return min(1.0, _FILE_SIZE_THRESHOLD / max(1, chunk_count))
+    return min(1.0, threshold / max(1, chunk_count))
 
 
 def min_max_normalize(value: float, window: list[float]) -> float:
@@ -44,18 +49,31 @@ def min_max_normalize(value: float, window: list[float]) -> float:
     return (value - lo) / (hi - lo + _EPSILON)
 
 
-def hybrid_score(vector_norm: float, frecency_norm: float) -> float:
-    """Weighted combination: 0.7 * vector_norm + 0.3 * frecency_norm."""
-    return 0.7 * vector_norm + 0.3 * frecency_norm
+def hybrid_score(
+    vector_norm: float,
+    frecency_norm: float,
+    vector_weight: float = _VECTOR_WEIGHT,
+    frecency_weight: float = _FRECENCY_WEIGHT,
+) -> float:
+    """Weighted combination of vector and frecency scores.
+
+    Default weights (0.7 / 0.3) match the previous hard-coded values.
+    Pass explicit weights from TuningConfig to override.
+    """
+    return vector_weight * vector_norm + frecency_weight * frecency_norm
 
 
 def apply_hybrid_scoring(
     results: list[SearchResult],
     hybrid: bool,
+    *,
+    vector_weight: float = _VECTOR_WEIGHT,
+    frecency_weight: float = _FRECENCY_WEIGHT,
+    file_size_threshold: int = _FILE_SIZE_THRESHOLD,
 ) -> list[SearchResult]:
     """Compute hybrid scores for *results*.
 
-    For code__ corpora (hybrid=True): score = 0.7 * vector_norm + 0.3 * frecency_norm.
+    For code__ corpora (hybrid=True): score = vector_weight * vector_norm + frecency_weight * frecency_norm.
     For code__ corpora (hybrid=False): score = 1.0 * vector_norm.
     For docs__/knowledge__: score = 1.0 * vector_norm (frecency_score absent).
 
@@ -65,6 +83,10 @@ def apply_hybrid_scoring(
 
     If *hybrid* is True but no code__ collections appear in results, a warning
     is logged and all results use 1.0 * vector_norm.
+
+    *vector_weight*, *frecency_weight*, and *file_size_threshold* default to the
+    module constants (backward-compatible).  Pass values from TuningConfig to
+    honour per-repo configuration.
 
     Note: Mutates ``hybrid_score`` on each SearchResult in place before
     returning the sorted list.
@@ -95,12 +117,12 @@ def apply_hybrid_scoring(
         if hybrid and r.collection.startswith("code__"):
             f_score = r.metadata.get("frecency_score", 0.0)
             f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
-            r.hybrid_score = hybrid_score(v_norm, f_norm)
+            r.hybrid_score = hybrid_score(v_norm, f_norm, vector_weight, frecency_weight)
         else:
             r.hybrid_score = v_norm
         if r.collection.startswith("code__"):
             chunk_count = int(r.metadata.get("chunk_count", 1))
-            r.hybrid_score *= _file_size_factor(chunk_count)
+            r.hybrid_score *= _file_size_factor(chunk_count, file_size_threshold)
 
     return sorted(results, key=lambda r: r.hybrid_score, reverse=True)
 

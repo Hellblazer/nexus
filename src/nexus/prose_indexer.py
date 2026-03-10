@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""Prose file indexing: semantic markdown chunking and Voyage AI CCE embedding.
+
+Extracted from indexer.py (RDR-032).  Public API::
+
+    index_prose_file(ctx: IndexContext, file_path: Path) -> int
+
+Handles both Markdown files (SemanticMarkdownChunker) and plain prose
+(line-based chunking via _line_chunk).  Delegates to
+doc_indexer._embed_with_fallback for CCE-aware embedding.
+"""
+from __future__ import annotations
+
+import hashlib as _hl
+from pathlib import Path
+
+import structlog
+
+from nexus.index_context import IndexContext
+from nexus.indexer_utils import check_staleness
+
+_log = structlog.get_logger(__name__)
+
+
+def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
+    """Index a single prose file into the docs__ collection.
+
+    Uses SemanticMarkdownChunker for .md/.markdown files, _line_chunk for all
+    others.  Embeds via _embed_with_fallback (CCE for voyage-context-3).
+
+    Uses ``ctx`` in place of the old 12-parameter signature.
+
+    Returns the post-filter chunk count (chunks upserted), or 0 if
+    skipped (current) or failed.
+    """
+    from nexus.chunker import _line_chunk
+    from nexus.doc_indexer import _embed_with_fallback
+    from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as exc:
+        _log.debug("skipped non-text file", path=str(file_path), error=type(exc).__name__)
+        return 0
+
+    content_hash = _hl.sha256(content.encode()).hexdigest()
+
+    # Staleness check — skip if content + model unchanged
+    if not ctx.force and check_staleness(ctx.col, file_path, content_hash, ctx.embedding_model):
+        return 0
+
+    ext = file_path.suffix.lower()
+    ids: list[str] = []
+    documents: list[str] = []
+    metadatas: list[dict] = []
+    embed_texts: list[str] = []
+
+    if ext in (".md", ".markdown"):
+        # Markdown: use SemanticMarkdownChunker (M1: uses char offsets, not line numbers)
+        frontmatter, body = parse_frontmatter(content)
+        frontmatter_len = len(content) - len(body)
+        base_meta: dict = {"source_path": str(file_path), "corpus": ctx.corpus}
+        chunks = SemanticMarkdownChunker().chunk(body, base_meta)
+        if not chunks:
+            _log.debug("skipped file with no chunks", path=str(file_path))
+            return 0
+
+        for chunk in chunks:
+            title = f"{file_path.relative_to(ctx.repo_path)}:chunk-{chunk.chunk_index}"
+            doc_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
+            metadata: dict = {
+                "title": title,
+                "tags": "markdown",
+                "category": "prose",
+                "session_id": "",
+                "source_agent": "nexus-indexer",
+                "store_type": "prose",
+                "indexed_at": ctx.now_iso,
+                "expires_at": "",
+                "ttl_days": 0,
+                "source_path": str(file_path),
+                # M1: SemanticMarkdownChunker uses char offsets, not line numbers
+                "line_start": 0,
+                "line_end": 0,
+                "chunk_start_char": chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
+                "chunk_end_char": chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
+                "section_title": chunk.metadata.get("header_path", ""),
+                "frecency_score": float(ctx.score),
+                "chunk_index": chunk.chunk_index,
+                "chunk_count": len(chunks),
+                "corpus": ctx.corpus,
+                "embedding_model": ctx.embedding_model,
+                "content_hash": content_hash,
+                **ctx.git_meta,
+            }
+            ids.append(doc_id)
+            documents.append(chunk.text)
+            metadatas.append(metadata)
+            # Embed-only prefix: helps Voyage AI locate the right context without
+            # polluting stored text.  Use header_path from chunk metadata (the raw
+            # field, not the stored section_title which is the same string).
+            header_path = chunk.metadata.get("header_path", "")
+            if header_path:
+                embed_texts.append(f"## Section: {header_path}\n\n{chunk.text}")
+            else:
+                embed_texts.append(chunk.text)
+    else:
+        # Non-markdown prose: use line-based chunking
+        raw_chunks = _line_chunk(content)
+        if not raw_chunks:
+            if not content.strip():
+                return 0
+            raw_chunks = [(1, 1, content)]
+        total_chunks = len(raw_chunks)
+
+        for i, (ls, le, text) in enumerate(raw_chunks):
+            title = f"{file_path.relative_to(ctx.repo_path)}:{ls}-{le}"
+            doc_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
+            metadata = {
+                "title": title,
+                "tags": ext.lstrip("."),
+                "category": "prose",
+                "session_id": "",
+                "source_agent": "nexus-indexer",
+                "store_type": "prose",
+                "indexed_at": ctx.now_iso,
+                "expires_at": "",
+                "ttl_days": 0,
+                "source_path": str(file_path),
+                "line_start": ls,
+                "line_end": le,
+                "frecency_score": float(ctx.score),
+                "chunk_index": i,
+                "chunk_count": total_chunks,
+                "corpus": ctx.corpus,
+                "embedding_model": ctx.embedding_model,
+                "content_hash": content_hash,
+                **ctx.git_meta,
+            }
+            ids.append(doc_id)
+            documents.append(text)
+            metadatas.append(metadata)
+
+    if not documents:
+        return 0
+
+    # For non-markdown prose, embed_texts is empty; normalise to documents so
+    # the filter below can work uniformly across both paths.
+    if not embed_texts:
+        embed_texts = list(documents)
+
+    # Filter empty documents before embedding (Voyage AI rejects empty strings).
+    valid = [
+        (i, d, m, et)
+        for i, d, m, et in zip(ids, documents, metadatas, embed_texts)
+        if d and d.strip()
+    ]
+    if not valid:
+        return 0
+    ids, documents, metadatas, embed_texts = map(list, zip(*valid))
+
+    # Embed via _embed_with_fallback (CCE for voyage-context-3)
+    embeddings, actual_model = _embed_with_fallback(
+        embed_texts, ctx.embedding_model, ctx.voyage_key, timeout=ctx.timeout
+    )
+    if actual_model != ctx.embedding_model:
+        for m in metadatas:
+            m["embedding_model"] = actual_model
+
+    ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
+        collection_name=ctx.corpus,
+        ids=ids,
+        documents=documents,
+        embeddings=embeddings,
+        metadatas=metadatas,
+    )
+    return len(ids)

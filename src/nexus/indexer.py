@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Code repository indexing pipeline."""
+"""Code repository indexing pipeline — orchestrator.
+
+This module is responsible for:
+- Repository file discovery and classification dispatch
+- Constructing IndexContext and routing to per-type indexers
+- RDR markdown indexing (via doc_indexer)
+- Misclassification and deleted-file pruning
+- Frecency-only update runs
+- Pipeline version stamping
+- Per-repo locking
+
+Per-file indexing logic lives in focused sub-modules (RDR-032):
+  nexus.code_indexer   — code files (AST chunking, context extraction)
+  nexus.prose_indexer  — prose and markdown files (CCE embedding)
+  nexus.indexer_utils  — staleness check, credential check, shared helpers
+  nexus.index_context  — IndexContext dataclass
+"""
 import fcntl
 import fnmatch
 import subprocess
@@ -11,8 +27,17 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nexus.corpus import index_model_for_collection
-from nexus.retry import _chroma_with_retry, _voyage_with_retry
+from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
+
+# Re-exports from nexus.code_indexer for backward compatibility with tests that
+# import these names directly from nexus.indexer.
+from nexus.code_indexer import (  # noqa: F401
+    _extract_context,
+    _extract_name_from_node,
+    _COMMENT_CHARS,
+    DEFINITION_TYPES,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -29,7 +54,7 @@ DEFAULT_IGNORE: list[str] = [
 # Voyage AI embed() API limit: https://docs.voyageai.com/reference/embeddings-api
 _VOYAGE_EMBED_BATCH_SIZE = 128
 
-from nexus.languages import LANGUAGE_REGISTRY
+from nexus.languages import LANGUAGE_REGISTRY  # noqa: E402 — kept here for any existing imports
 
 # Pipeline version: bump when indexing changes invalidate existing embeddings.
 # History:
@@ -69,274 +94,6 @@ def check_pipeline_staleness(col: object, collection_name: str) -> bool:
         )
         return True
     return False
-
-# Comment character for each language used to build the embed-only context prefix.
-_COMMENT_CHARS: dict[str, str] = {
-    "python": "#",
-    "javascript": "//",
-    "typescript": "//",
-    "tsx": "//",
-    "java": "//",
-    "go": "//",
-    "rust": "//",
-    "cpp": "//",
-    "c": "//",
-    "c_sharp": "//",
-    "ruby": "#",
-    "php": "//",
-    "swift": "//",
-    "kotlin": "//",
-    "scala": "//",
-    "bash": "#",
-    "r": "#",
-    "objc": "//",
-    "lua": "--",
-    "proto": "//",
-    "elixir": "#",
-    "haskell": "--",
-    "clojure": ";",
-    "dart": "//",
-    "zig": "//",
-    "julia": "#",
-    "elisp": ";",
-    "erlang": "%",
-    "ocaml": "(*",
-    "ocaml_interface": "(*",
-    "perl": "#",
-}
-
-# Tree-sitter node types → semantic code_type, per language.
-# Ported from arcaneum/src/arcaneum/indexing/fulltext/ast_extractor.py:51-136.
-# Used by _extract_context to identify class/method boundaries in code chunks.
-DEFINITION_TYPES: dict[str, dict[str, str]] = {
-    "python": {
-        "function_definition": "function",
-        "class_definition": "class",
-        "decorated_definition": "decorated",
-    },
-    "javascript": {
-        "function_declaration": "function",
-        "class_declaration": "class",
-        "method_definition": "method",
-        "arrow_function": "function",
-        "generator_function_declaration": "function",
-    },
-    "typescript": {
-        "function_declaration": "function",
-        "class_declaration": "class",
-        "method_definition": "method",
-        "interface_declaration": "interface",
-        "type_alias_declaration": "type",
-        "arrow_function": "function",
-    },
-    "tsx": {
-        "function_declaration": "function",
-        "class_declaration": "class",
-        "method_definition": "method",
-        "interface_declaration": "interface",
-        "type_alias_declaration": "type",
-        "arrow_function": "function",
-    },
-    "java": {
-        "method_declaration": "method",
-        "class_declaration": "class",
-        "interface_declaration": "interface",
-        "enum_declaration": "class",
-        "constructor_declaration": "method",
-    },
-    "go": {
-        "function_declaration": "function",
-        "method_declaration": "method",
-        "type_declaration": "class",
-    },
-    "rust": {
-        "function_item": "function",
-        "impl_item": "class",
-        "struct_item": "class",
-        "trait_item": "interface",
-        "enum_item": "class",
-    },
-    "c": {
-        "function_definition": "function",
-        "struct_specifier": "class",
-    },
-    "cpp": {
-        "function_definition": "function",
-        "class_specifier": "class",
-        "struct_specifier": "class",
-    },
-    "c_sharp": {
-        "method_declaration": "method",
-        "class_declaration": "class",
-        "interface_declaration": "interface",
-        "struct_declaration": "class",
-    },
-    "ruby": {
-        "method": "method",
-        "class": "class",
-        "module": "module",
-    },
-    "php": {
-        "function_definition": "function",
-        "method_declaration": "method",
-        "class_declaration": "class",
-        "interface_declaration": "interface",
-        "trait_declaration": "class",
-    },
-    "swift": {
-        "function_declaration": "function",
-        "class_declaration": "class",
-        "struct_declaration": "class",
-        "protocol_declaration": "interface",
-    },
-    "kotlin": {
-        "function_declaration": "function",
-        "class_declaration": "class",
-        "object_declaration": "class",
-        "interface_declaration": "interface",
-    },
-    "scala": {
-        "function_definition": "function",
-        "class_definition": "class",
-        "object_definition": "class",
-        "trait_definition": "interface",
-    },
-    "r": {
-        "function_definition": "function",
-    },
-    "lua": {
-        "function_declaration": "function",
-        "local_function": "function",
-    },
-    "dart": {
-        "class_definition": "class",
-        "method_signature": "method",
-        "function_signature": "function",
-    },
-    "haskell": {
-        "function": "function",
-        "data_type": "class",
-    },
-    "julia": {
-        "function_definition": "function",
-        "struct_definition": "class",
-    },
-    "ocaml": {
-        "value_definition": "function",
-        "type_definition": "class",
-        "module_definition": "module",
-    },
-    "perl": {
-        "subroutine_declaration_statement": "function",
-    },
-    "erlang": {
-        "function_clause": "function",
-    },
-}
-
-_CLASS_SEMANTICS: frozenset[str] = frozenset({"class", "interface", "module"})
-_METHOD_SEMANTICS: frozenset[str] = frozenset({"function", "method", "decorated"})
-
-
-def _extract_name_from_node(node) -> str:  # type: ignore[no-untyped-def]
-    """Extract the identifier name from a tree-sitter definition node.
-
-    Adapted from arcaneum ast_extractor.py:366-386.  Uses the field-name API
-    first (most grammars expose 'name' or 'identifier' as named fields), then
-    falls back to scanning child nodes by type.
-
-    For ``decorated_definition`` (Python), the identifier lives inside the
-    wrapped ``function_definition`` / ``class_definition`` child — recurse
-    into that child once to retrieve the name.
-
-    Returns empty string (not 'anonymous') so callers can skip empty names.
-    """
-    # Python decorated_definition: the name is carried by the wrapped inner
-    # definition node, not by the decorated_definition node itself.
-    if node.type == "decorated_definition":
-        for child in node.children:
-            if child.type in ("function_definition", "class_definition", "async_function_definition"):
-                return _extract_name_from_node(child)
-        return ""
-    for field in ("name", "identifier"):
-        child = node.child_by_field_name(field)
-        if child:
-            try:
-                return child.text.decode("utf-8")
-            except (UnicodeDecodeError, AttributeError) as exc:
-                _log.debug("extract_name_decode_failed", error=str(exc), exc_info=True)
-    for child in node.children:
-        if child.type in ("identifier", "name"):
-            try:
-                return child.text.decode("utf-8")
-            except (UnicodeDecodeError, AttributeError) as exc:
-                _log.debug("extract_name_child_decode_failed", error=str(exc), exc_info=True)
-    return ""
-
-
-def _extract_context(
-    source: bytes,
-    language: str,
-    chunk_start_0idx: int,
-    chunk_end_0idx: int,
-) -> tuple[str, str]:
-    """Return (class_name, method_name) for the chunk at the given 0-indexed line range.
-
-    Walks the AST with depth-first pre-order traversal, pruning subtrees that
-    lie entirely outside the chunk range.  Class and method are the innermost
-    definitions whose ranges fully enclose the chunk — pre-order traversal
-    ensures outer definitions are visited before inner ones, so overwriting
-    gives the innermost result.
-
-    Returns ('', '') when the language is unsupported, tree-sitter is
-    unavailable, or no enclosing definition is found.
-    """
-    lang_types = DEFINITION_TYPES.get(language)
-    if not lang_types:
-        return ("", "")
-
-    try:
-        from tree_sitter_language_pack import get_parser  # lazy import
-        parser = get_parser(language)
-    except Exception as exc:
-        _log.warning("get_parser_failed", language=language, error=str(exc), exc_info=True)
-        return ("", "")
-
-    try:
-        tree = parser.parse(source)
-    except Exception as exc:
-        _log.debug("tree_parse_failed", language=language, error=str(exc))
-        return ("", "")
-
-    class_name = ""
-    method_name = ""
-
-    def _walk(node) -> None:  # type: ignore[no-untyped-def]
-        nonlocal class_name, method_name
-        node_start = node.start_point[0]
-        node_end = node.end_point[0]
-
-        # Prune: subtree lies entirely outside chunk range
-        if node_end < chunk_start_0idx or node_start > chunk_end_0idx:
-            return
-
-        code_type = lang_types.get(node.type)
-        if code_type:
-            # Only record when this definition fully encloses the chunk so that
-            # a chunk spanning two sibling methods returns method_name=''.
-            if node_start <= chunk_start_0idx and node_end >= chunk_end_0idx:
-                name = _extract_name_from_node(node)
-                if name:
-                    if code_type in _CLASS_SEMANTICS:
-                        class_name = name  # innermost enclosing class wins
-                    elif code_type in _METHOD_SEMANTICS:
-                        method_name = name  # innermost enclosing method wins
-
-        for child in node.children:
-            _walk(child)
-
-    _walk(tree.root_node)
-    return (class_name, method_name)
 
 
 def _git_metadata(repo: Path) -> dict:
@@ -543,7 +300,16 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
             db.update_chunks(collection=collection_name, ids=existing["ids"], metadatas=updated_metadatas)
 
 
-# ── Per-file indexing helpers ────────────────────────────────────────────────
+# ── Backward-compatible per-file wrappers ────────────────────────────────────
+# These wrappers preserve the old 12-parameter signatures so that:
+# 1. Existing tests that import and call _index_code_file/_index_prose_file
+#    directly continue to work unchanged.
+# 2. Tests that patch nexus.indexer._index_code_file or _index_prose_file
+#    still intercept the calls from _run_index.
+#
+# Implementation delegates to the clean IndexContext-based API in the
+# extracted sub-modules (nexus.code_indexer, nexus.prose_indexer).
+# The wrappers are intentionally thin — no logic here.
 
 
 def _index_code_file(
@@ -560,119 +326,29 @@ def _index_code_file(
     chunk_lines: int | None = None,
     force: bool = False,
 ) -> int:
-    """Index a single code file into the code__ collection.
+    """Index a single code file.  Delegates to nexus.code_indexer.index_code_file.
 
-    Returns the post-filter chunk count (chunks upserted), or 0 if skipped/failed.
+    Backward-compatible wrapper preserving the old 12-parameter signature.
+    See nexus.code_indexer.index_code_file for the canonical implementation.
     """
-    import hashlib as _hl
-    from nexus.chunker import chunk_file
+    from nexus.code_indexer import index_code_file
+    from nexus.index_context import IndexContext
 
-    try:
-        content = file.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError) as exc:
-        _log.debug("skipped non-text file", path=str(file), error=type(exc).__name__)
-        return 0
-
-    content_hash = _hl.sha256(content.encode()).hexdigest()
-    source_bytes = content.encode("utf-8")
-    ext = file.suffix.lower()
-    language = LANGUAGE_REGISTRY.get(ext, "")
-    comment_char = _COMMENT_CHARS.get(language, "#")
-    rel_path = file.relative_to(repo)
-
-    # Staleness check
-    existing = _chroma_with_retry(
-        col.get,
-        where={"source_path": str(file)},
-        include=["metadatas"],
-        limit=1,
+    ctx = IndexContext(
+        col=col,
+        db=db,
+        voyage_key="",  # code path uses voyage_client directly
+        voyage_client=voyage_client,
+        repo_path=repo,
+        corpus=collection_name,
+        embedding_model=target_model,
+        git_meta=git_meta,
+        now_iso=now_iso,
+        score=score,
+        chunk_lines=chunk_lines,
+        force=force,
     )
-    if not force and existing["metadatas"]:
-        stored = existing["metadatas"][0]
-        if stored.get("content_hash") == content_hash and stored.get("embedding_model") == target_model:
-            return 0
-
-    chunks = chunk_file(file, content, chunk_lines=chunk_lines)
-    if not chunks:
-        _log.debug("skipped file with no chunks", path=str(file))
-        return 0
-    total_chunks = len(chunks)
-
-    ids: list[str] = []
-    documents: list[str] = []
-    embed_texts: list[str] = []  # prefixed texts sent to Voyage AI; raw text stored in ChromaDB
-    metadatas: list[dict] = []
-
-    for i, chunk in enumerate(chunks):
-        title = f"{rel_path}:{chunk['line_start']}-{chunk['line_end']}"
-        doc_id = _hl.sha256(f"{collection_name}:{title}:chunk{i}".encode()).hexdigest()[:32]
-        class_ctx, method_ctx = _extract_context(
-            source_bytes, language, chunk["line_start"] - 1, chunk["line_end"] - 1
-        )
-        prefix = (
-            f"{comment_char} File: {rel_path}"
-            f"  Class: {class_ctx}  Method: {method_ctx}"
-            f"  Lines: {chunk['line_start']}-{chunk['line_end']}"
-        )
-        metadata: dict = {
-            "title": title,
-            "tags": ext.lstrip("."),
-            "category": "code",
-            "session_id": "",
-            "source_agent": "nexus-indexer",
-            "store_type": "code",
-            "indexed_at": now_iso,
-            "expires_at": "",
-            "ttl_days": 0,
-            "source_path": str(file),
-            "line_start": chunk["line_start"],
-            "line_end": chunk["line_end"],
-            "frecency_score": float(score),
-            "chunk_index": chunk.get("chunk_index", i),
-            "chunk_count": chunk.get("chunk_count", total_chunks),
-            "ast_chunked": chunk.get("ast_chunked", False),
-            "filename": chunk.get("filename", str(file.name)),
-            "file_extension": chunk.get("file_extension", ext),
-            "programming_language": language,
-            "corpus": collection_name,
-            "embedding_model": target_model,
-            "content_hash": content_hash,
-            **git_meta,
-        }
-        ids.append(doc_id)
-        documents.append(chunk["text"])
-        embed_texts.append(f"{prefix}\n{chunk['text']}")
-        metadatas.append(metadata)
-
-    # Filter out empty documents before embedding (Voyage AI rejects empty strings);
-    # keep embed_texts in sync with documents.
-    valid = [
-        (idx, d, m, et)
-        for idx, d, m, et in zip(ids, documents, metadatas, embed_texts)
-        if d and d.strip()
-    ]
-    if not valid:
-        return 0
-    ids, documents, metadatas, embed_texts = map(list, zip(*valid))
-
-    # Embed using prefixed texts for improved retrieval quality; raw documents are stored.
-    embeddings: list[list[float]] = []
-    total_chunks = len(documents)
-    for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
-        batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
-        _log.debug("embedding batch", file=str(file), batch=f"{batch_start+1}-{min(batch_start+len(batch), total_chunks)}/{total_chunks}")
-        result = _voyage_with_retry(voyage_client.embed, texts=batch, model=target_model, input_type="document")
-        embeddings.extend(result.embeddings)
-
-    _log.debug("upserting", file=str(file), chunks=total_chunks)
-    db.upsert_chunks_with_embeddings(
-        collection_name=collection_name,
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
-    return len(ids)
+    return index_code_file(ctx, file)
 
 
 def _index_prose_file(
@@ -689,164 +365,29 @@ def _index_prose_file(
     force: bool = False,
     timeout: float = 120.0,
 ) -> int:
-    """Index a single prose file into the docs__ collection.
+    """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
-    Uses SemanticMarkdownChunker for .md files, _line_chunk for all others.
-    Embeds via _embed_with_fallback (CCE for voyage-context-3).
-
-    Returns the post-filter chunk count (chunks upserted), or 0 if skipped/failed.
+    Backward-compatible wrapper preserving the old 12-parameter signature.
+    See nexus.prose_indexer.index_prose_file for the canonical implementation.
     """
-    import hashlib as _hl
-    from nexus.chunker import _line_chunk
-    from nexus.doc_indexer import _embed_with_fallback
-    from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
+    from nexus.prose_indexer import index_prose_file
+    from nexus.index_context import IndexContext
 
-    try:
-        content = file.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError) as exc:
-        _log.debug("skipped non-text file", path=str(file), error=type(exc).__name__)
-        return 0
-
-    content_hash = _hl.sha256(content.encode()).hexdigest()
-
-    # Staleness check
-    existing = _chroma_with_retry(
-        col.get,
-        where={"source_path": str(file)},
-        include=["metadatas"],
-        limit=1,
+    ctx = IndexContext(
+        col=col,
+        db=db,
+        voyage_key=voyage_key,
+        voyage_client=None,  # prose path uses voyage_key
+        repo_path=repo,
+        corpus=collection_name,
+        embedding_model=target_model,
+        git_meta=git_meta,
+        now_iso=now_iso,
+        score=score,
+        force=force,
+        timeout=timeout,
     )
-    if not force and existing["metadatas"]:
-        stored = existing["metadatas"][0]
-        if stored.get("content_hash") == content_hash and stored.get("embedding_model") == target_model:
-            return 0
-
-    ext = file.suffix.lower()
-    ids: list[str] = []
-    documents: list[str] = []
-    metadatas: list[dict] = []
-    embed_texts: list[str] = []
-
-    if ext in (".md", ".markdown"):
-        # Markdown: use SemanticMarkdownChunker (M1: uses char offsets, not line numbers)
-        frontmatter, body = parse_frontmatter(content)
-        frontmatter_len = len(content) - len(body)
-        base_meta: dict = {"source_path": str(file), "corpus": collection_name}
-        chunks = SemanticMarkdownChunker().chunk(body, base_meta)
-        if not chunks:
-            _log.debug("skipped file with no chunks", path=str(file))
-            return 0
-
-        for chunk in chunks:
-            title = f"{file.relative_to(repo)}:chunk-{chunk.chunk_index}"
-            doc_id = _hl.sha256(f"{collection_name}:{title}".encode()).hexdigest()[:32]
-            metadata: dict = {
-                "title": title,
-                "tags": "markdown",
-                "category": "prose",
-                "session_id": "",
-                "source_agent": "nexus-indexer",
-                "store_type": "prose",
-                "indexed_at": now_iso,
-                "expires_at": "",
-                "ttl_days": 0,
-                "source_path": str(file),
-                # M1: SemanticMarkdownChunker uses char offsets, not line numbers
-                "line_start": 0,
-                "line_end": 0,
-                "chunk_start_char": chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
-                "chunk_end_char": chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
-                "section_title": chunk.metadata.get("header_path", ""),
-                "frecency_score": float(score),
-                "chunk_index": chunk.chunk_index,
-                "chunk_count": len(chunks),
-                "corpus": collection_name,
-                "embedding_model": target_model,
-                "content_hash": content_hash,
-                **git_meta,
-            }
-            ids.append(doc_id)
-            documents.append(chunk.text)
-            metadatas.append(metadata)
-            # Embed-only prefix: helps Voyage AI locate the right context without
-            # polluting stored text.  Use header_path from chunk metadata (the raw
-            # field, not the stored section_title which is the same string).
-            header_path = chunk.metadata.get("header_path", "")
-            if header_path:
-                embed_texts.append(f"## Section: {header_path}\n\n{chunk.text}")
-            else:
-                embed_texts.append(chunk.text)
-    else:
-        # Non-markdown prose: use line-based chunking
-        raw_chunks = _line_chunk(content)
-        if not raw_chunks:
-            if not content.strip():
-                return 0
-            raw_chunks = [(1, 1, content)]
-        total_chunks = len(raw_chunks)
-
-        for i, (ls, le, text) in enumerate(raw_chunks):
-            title = f"{file.relative_to(repo)}:{ls}-{le}"
-            doc_id = _hl.sha256(f"{collection_name}:{title}".encode()).hexdigest()[:32]
-            metadata = {
-                "title": title,
-                "tags": ext.lstrip("."),
-                "category": "prose",
-                "session_id": "",
-                "source_agent": "nexus-indexer",
-                "store_type": "prose",
-                "indexed_at": now_iso,
-                "expires_at": "",
-                "ttl_days": 0,
-                "source_path": str(file),
-                "line_start": ls,
-                "line_end": le,
-                "frecency_score": float(score),
-                "chunk_index": i,
-                "chunk_count": total_chunks,
-                "corpus": collection_name,
-                "embedding_model": target_model,
-                "content_hash": content_hash,
-                **git_meta,
-            }
-            ids.append(doc_id)
-            documents.append(text)
-            metadatas.append(metadata)
-
-    if not documents:
-        return 0
-
-    # For non-markdown prose, embed_texts is empty; normalise to documents so
-    # the filter below can work uniformly across both paths.
-    if not embed_texts:
-        embed_texts = list(documents)
-
-    # Filter empty documents before embedding (Voyage AI rejects empty strings).
-    valid = [
-        (i, d, m, et)
-        for i, d, m, et in zip(ids, documents, metadatas, embed_texts)
-        if d and d.strip()
-    ]
-    if not valid:
-        return 0
-    ids, documents, metadatas, embed_texts = map(list, zip(*valid))
-
-    texts_to_embed = embed_texts
-
-    # Embed via _embed_with_fallback (CCE for voyage-context-3)
-    embeddings, actual_model = _embed_with_fallback(texts_to_embed, target_model, voyage_key, timeout=timeout)
-    if actual_model != target_model:
-        for m in metadatas:
-            m["embedding_model"] = actual_model
-
-    db.upsert_chunks_with_embeddings(
-        collection_name=collection_name,
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
-    return len(ids)
+    return index_prose_file(ctx, file)
 
 
 def _index_pdf_file(
@@ -1089,7 +630,7 @@ def _run_index(
     Returns a stats dict with ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
     from nexus.classifier import ContentClass, classify_file
-    from nexus.config import load_config
+    from nexus.config import get_credential, load_config
     from nexus.frecency import batch_frecency
     from nexus.registry import _docs_collection_name
     from nexus.ripgrep_cache import build_cache
@@ -1110,11 +651,16 @@ def _run_index(
     rdr_paths: list[str] = indexing_config.get("rdr_paths", ["docs/rdr"])
     read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)
 
+    # Load tuning config and use its chunk_lines if not overridden by caller
+    from nexus.config import _tuning_from_dict
+    tuning = _tuning_from_dict(cfg.get("tuning", {}))
+    effective_chunk_lines: int | None = chunk_lines if chunk_lines is not None else tuning.code_chunk_lines
+
     # Collect git metadata once for all chunks
     git_meta = _git_metadata(repo)
 
     # Compute frecency scores in a single git log pass
-    frecency_map = batch_frecency(repo)
+    frecency_map = batch_frecency(repo, decay_rate=tuning.decay_rate, timeout=tuning.git_log_timeout)
 
     # Build absolute RDR path set for exclusion
     rdr_abs_paths: set[Path] = set()
@@ -1189,7 +735,6 @@ def _run_index(
     build_cache(repo, cache_path, all_text_scored)
 
     # Credential check (required for T3 operations)
-    from nexus.config import get_credential
     voyage_key = get_credential("voyage_api_key")
     chroma_key = get_credential("chroma_api_key")
     if not voyage_key or not chroma_key:
@@ -1237,6 +782,8 @@ def _run_index(
             _log.info("force_stale_skipped", reason="all collections current")
 
     # Index code files → code__ (voyage-code-3, AST chunking)
+    # NOTE: calls _index_code_file (the module-level wrapper) so that tests
+    # patching nexus.indexer._index_code_file continue to intercept correctly.
     _log.debug("indexing code files", count=len(code_files))
     for score, file in code_files:
         _log.debug("indexing", file=str(file))
@@ -1244,13 +791,14 @@ def _run_index(
         chunks = _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
-            chunk_lines=chunk_lines,
+            chunk_lines=effective_chunk_lines,
             force=force,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
 
     # Index prose files → docs__ (voyage-context-3 via CCE)
+    # NOTE: calls _index_prose_file (the module-level wrapper) — same reason.
     _log.debug("indexing prose files", count=len(prose_files))
     for score, file in prose_files:
         _log.debug("indexing", file=str(file))

@@ -3,6 +3,7 @@ import copy
 import os
 import tempfile
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,101 @@ _log = structlog.get_logger(__name__)
 # os.replace() at the end; in-process safety requires this lock.
 _config_lock = threading.Lock()
 
-# ── Model constants ───────────────────────────────────────────────────────────
+# ── TuningConfig ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class TuningConfig:
+    """Tunable constants for the indexing and search pipeline.
+
+    All fields default to the values previously hard-coded in the respective
+    modules.  Users can override via the ``[tuning]`` section of ``.nexus.yml``
+    without changing source code.
+
+    Sections mirror the ``[tuning]`` YAML structure::
+
+        tuning:
+          scoring:
+            vector_weight: 0.7
+            frecency_weight: 0.3
+            file_size_threshold: 30
+          frecency:
+            decay_rate: 0.01
+          chunking:
+            code_chunk_lines: 150
+            pdf_chunk_chars: 1500
+          timeouts:
+            git_log: 30
+            ripgrep: 10
+    """
+
+    # scoring.py constants
+    vector_weight: float = 0.7
+    frecency_weight: float = 0.3
+    file_size_threshold: int = 30
+
+    # frecency.py constants
+    decay_rate: float = 0.01
+
+    # chunker.py / pdf_chunker.py constants
+    code_chunk_lines: int = 150
+    pdf_chunk_chars: int = 1500
+
+    # timeout constants
+    git_log_timeout: int = 30
+    ripgrep_timeout: int = 10
+
+
+def _tuning_from_dict(raw: dict[str, Any]) -> TuningConfig:
+    """Construct a TuningConfig from the raw ``tuning`` section of the config dict.
+
+    Unknown keys are silently ignored.  Invalid numeric types raise ValueError.
+    """
+    scoring = raw.get("scoring", {})
+    frecency = raw.get("frecency", {})
+    chunking = raw.get("chunking", {})
+    timeouts = raw.get("timeouts", {})
+
+    def _float(section: dict, key: str, default: float) -> float:
+        val = section.get(key, default)
+        try:
+            return float(val)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"tuning.{key}: expected a number, got {val!r}"
+            ) from exc
+
+    def _int(section: dict, key: str, default: int) -> int:
+        val = section.get(key, default)
+        try:
+            return int(val)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"tuning.{key}: expected an integer, got {val!r}"
+            ) from exc
+
+    return TuningConfig(
+        vector_weight=_float(scoring, "vector_weight", 0.7),
+        frecency_weight=_float(scoring, "frecency_weight", 0.3),
+        file_size_threshold=_int(scoring, "file_size_threshold", 30),
+        decay_rate=_float(frecency, "decay_rate", 0.01),
+        code_chunk_lines=_int(chunking, "code_chunk_lines", 150),
+        pdf_chunk_chars=_int(chunking, "pdf_chunk_chars", 1500),
+        git_log_timeout=_int(timeouts, "git_log", 30),
+        ripgrep_timeout=_int(timeouts, "ripgrep", 10),
+    )
+
+
+def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:
+    """Return a TuningConfig loaded from the merged configuration.
+
+    Reads ``load_config(repo_root)`` and extracts the ``[tuning]`` section.
+    Missing keys fall back to TuningConfig defaults (identical to previous
+    hard-coded values — no behavioral change for repos without ``[tuning]``).
+    """
+    cfg = load_config(repo_root=repo_root)
+    return _tuning_from_dict(cfg.get("tuning", {}))
+
 
 # ── Credential registry ───────────────────────────────────────────────────────
 # Maps config-file key → environment variable name
@@ -51,6 +146,24 @@ _DEFAULTS: dict[str, Any] = {
     },
     "voyageai": {
         "read_timeout_seconds": 120,
+    },
+    "tuning": {
+        "scoring": {
+            "vector_weight": 0.7,
+            "frecency_weight": 0.3,
+            "file_size_threshold": 30,
+        },
+        "frecency": {
+            "decay_rate": 0.01,
+        },
+        "chunking": {
+            "code_chunk_lines": 150,
+            "pdf_chunk_chars": 1500,
+        },
+        "timeouts": {
+            "git_log": 30,
+            "ripgrep": 10,
+        },
     },
 }
 
