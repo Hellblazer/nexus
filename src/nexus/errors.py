@@ -22,3 +22,19 @@ class CredentialsMissingError(NexusError):
 
 class CollectionNotFoundError(NexusError):
     """The requested ChromaDB collection does not exist."""
+
+
+class EmbeddingModelMismatch(NexusError):
+    """Export embedding model is incompatible with the target collection's model.
+
+    Importing an export produced with one embedding model into a collection
+    that uses a different model would silently corrupt search quality
+    (cross-model cosine similarity ≈ 0.05, i.e. random noise).
+    """
+
+
+class FormatVersionError(NexusError):
+    """Export file format version is newer than this version of Nexus supports.
+
+    Upgrade Nexus to import this file.
+    """
