@@ -63,6 +63,7 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
+| `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
 
 **`pdf` and `md` flags:**
 
@@ -90,8 +91,11 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | Subcommand | Description |
 |------------|-------------|
 | `put FILE_OR_DASH` | Store document (use `-` for stdin) |
+| `get DOC_ID` | Retrieve entry by 16-char hex ID (from `nx store list`) |
 | `list` | List stored entries |
 | `delete` | Delete a single entry by ID or title |
+| `export [COLLECTION]` | Export a collection to portable `.nxexp` backup |
+| `import FILE` | Import a `.nxexp` file into T3 |
 | `expire` | Remove expired entries |
 
 **`put` flags:**
@@ -121,6 +125,29 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | `-y` / `--yes` | Skip confirmation prompt |
 
 Note: IDs shown by `nx store list` are 16 hex chars. `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
+
+**`get` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
+| `--json` | Output as JSON |
+
+**`export` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-o` / `--output PATH` | Output file path (`.nxexp`) or directory (when `--all`) |
+| `--include GLOB` | Glob pattern matched against `source_path` (repeatable; OR logic) |
+| `--exclude GLOB` | Glob pattern matched against `source_path` (repeatable; OR logic) |
+| `--all` | Export every collection to separate `.nxexp` files |
+
+**`import` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-c` / `--collection NAME` | Override target collection name (default: from export header) |
+| `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
 
 ---
 

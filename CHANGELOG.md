@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-03-10
+
 ### Added
 - **Hybrid search score boosting** (RDR-026) — ripgrep exact-match results boost
   vector search scores by `EXACT_MATCH_BOOST=0.15`. Pre-reranker capture of
@@ -24,6 +26,62 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in `path:line:text` format (grep-compatible).
 - **Query-aware vimgrep** — `--vimgrep` now reports the best-matching line within
   the chunk when a query is provided, not always the first line.
+- **Unified language registry** (RDR-028) — consolidated `LANGUAGE_REGISTRY` in
+  `nexus.languages` maps 44 file extensions to 31 tree-sitter AST languages.
+  Single source of truth replaces scattered `AST_EXTENSIONS`, `_COMMENT_CHARS`,
+  and classifier extension sets. 8 new AST languages: Clojure, Dart, Elixir,
+  Erlang, Haskell, Julia, OCaml, Perl.
+- **Pipeline version stamping** (RDR-029) — `PIPELINE_VERSION` constant (currently 4)
+  stored in collection metadata. `--force-stale` flag on `nx index repo` re-indexes
+  only collections whose stamped version is outdated. `nx doctor` reports pipeline
+  version status per collection.
+- **Collection export/import** (RDR-031) — `nx store export` writes collections to
+  portable `.nxexp` files (JSON header + gzip-compressed msgpack stream of records
+  with embeddings). `nx store import` restores without re-embedding. Supports
+  `--include`/`--exclude` glob filters, `--all` for bulk export, `--remap` for
+  path substitution on import, and `--collection` for rename on import. Embedding
+  model mismatch is rejected to prevent vector space corruption.
+- **`nx store get`** — retrieve a T3 entry by its 16-char hex document ID, with
+  optional `--json` output.
+- **Minified code handling** — AST chunker detects minified files (avg line length
+  > 500 chars) and falls back to byte-based splitting instead of producing
+  single-chunk monsters.
+
+### Changed
+- **Indexer module decomposition** (RDR-032) — `indexer.py` split into focused
+  modules: `code_indexer.py` (AST chunking + context extraction), `prose_indexer.py`
+  (markdown indexing), `index_context.py` (IndexContext dataclass), `indexer_utils.py`
+  (shared utilities). Backward-compatible re-exports from `nexus.indexer`.
+- **TuningConfig externalized** (RDR-032) — `vector_weight`, `frecency_weight`,
+  `file_size_threshold`, `ripgrep_timeout`, `pdf_chunk_chars`, and other knobs
+  now read from `~/.config/nexus/config.yml` `[tuning]` section. Defaults derived
+  from `TuningConfig()` dataclass to prevent drift.
+
+### Fixed
+- **Reliability hardening** (RDR-030) — silent error audit across 24 catch-and-pass
+  blocks. All `except` blocks now log via structlog at appropriate levels. Log output
+  directed to stderr; warnings suppressed in structured search output. T2 FTS5
+  title field added to index for memory search.
+- **Streaming export/import** — export writes page-by-page directly to gzip stream
+  instead of accumulating all records in memory. Import flushes batches as records
+  are unpacked from a single file handle (eliminates TOCTOU window). msgpack
+  Unpacker limited to 10 MB buffer to prevent memory exhaustion on crafted input.
+- **IndexContext.voyage_key** marked `repr=False` to prevent API key leakage in
+  logs and tracebacks.
+- **Empty remap prefix guard** — `nx store import --remap ":foo"` now raises
+  `UsageError` instead of silently matching every path.
+- **Code indexer double-encode fix** — content hashing uses `source_bytes` directly
+  instead of re-encoding from the already-decoded string.
+
+### Docs
+- `cli-reference.md` updated with `nx store get`, `nx store export`, `nx store import`,
+  and `--force-stale` flag documentation.
+
+### Tests
+- 2209 tests (up from ~2050 in 1.8.0). New coverage for `_extract_context` (5 AST
+  scenarios), `index_code_file` happy path, `index_prose_file` non-markdown path,
+  exporter edge cases (empty collection, corrupt msgpack, remap validation),
+  and `TuningConfig` wiring.
 
 ## [1.8.0] - 2026-03-08
 
@@ -627,7 +685,8 @@ from rc10 — this entry marks the API, CLI, and plugin contract as stable.
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/Hellblazer/nexus/compare/v1.8.0...v1.9.0
 [1.0.0]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc10...v1.0.0
 [1.0.0rc10]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc9...v1.0.0rc10
 [1.0.0rc10]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc9...v1.0.0rc10

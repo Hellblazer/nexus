@@ -4,6 +4,17 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-03-10
+
+### Changed
+- **PDF agent rewrite** (RDR-033) — `pdf-chromadb-processor` agent v3.0 now delegates
+  entirely to `nx index pdf` instead of reimplementing extraction in bash. Eliminates
+  sandbox permission failures and context limit issues.
+
+### Added
+- **`nx store export`/`import` in pdf-processing skill** — agent can now suggest
+  backup workflows using the new export/import commands.
+
 ## [1.8.0] - 2026-03-08
 
 ### Changed
