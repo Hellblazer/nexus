@@ -313,8 +313,8 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         _log.debug("skipped non-text file", path=str(file_path), error=type(exc).__name__)
         return 0
 
-    content_hash = _hl.sha256(content.encode()).hexdigest()
     source_bytes = content.encode("utf-8")
+    content_hash = _hl.sha256(source_bytes).hexdigest()
     ext = file_path.suffix.lower()
     language = LANGUAGE_REGISTRY.get(ext, "")
     comment_char = _COMMENT_CHARS.get(language, "#")

@@ -30,8 +30,8 @@ class IndexContext:
     db: object              # T3 database (for upsert_chunks_with_embeddings)
 
     # Voyage AI — code path uses voyage_client; prose/PDF paths use voyage_key
-    voyage_key: str         # raw API key — single source of truth
-    voyage_client: object   # pre-constructed voyageai.Client (code path)
+    voyage_key: str = field(repr=False)  # raw API key — single source of truth; excluded from repr to prevent leaking
+    voyage_client: object | None        # pre-constructed voyageai.Client (code path)
 
     # Indexing scope
     repo_path: Path

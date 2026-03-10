@@ -9,7 +9,7 @@ Format: ``.nxexp`` (Nexus Export)
 Each record is a dict:
     {"id": str, "document": str, "metadata": dict, "embedding": bytes}
 
-Embeddings are stored as little-endian float32 bytes (numpy tostring).
+Embeddings are stored as little-endian float32 bytes (numpy tobytes).
 """
 from __future__ import annotations
 
@@ -278,9 +278,21 @@ def import_collection(
             "Upgrade Nexus to import this file."
         )
 
-    source_collection: str = header["collection_name"]
+    try:
+        source_collection: str = header["collection_name"]
+    except KeyError:
+        raise FormatVersionError(
+            f"Export file {input_path!r} is missing required header key 'collection_name'. "
+            "The file may be corrupt or was produced by an incompatible version."
+        )
     collection_name: str = target_collection or source_collection
-    export_model: str = header["embedding_model"]
+    try:
+        export_model: str = header["embedding_model"]
+    except KeyError:
+        raise FormatVersionError(
+            f"Export file {input_path!r} is missing required header key 'embedding_model'. "
+            "The file may be corrupt or was produced by an incompatible version."
+        )
     expected_model: str = index_model_for_collection(collection_name)
 
     if export_model != expected_model:
@@ -309,7 +321,7 @@ def import_collection(
     with open(input_path, "rb") as f:
         f.seek(header_len)
         with gzip.GzipFile(fileobj=f, mode="rb") as gz:
-            unpacker = msgpack.Unpacker(gz, raw=False)
+            unpacker = msgpack.Unpacker(gz, raw=False, max_buffer_size=10 * 1024 * 1024)
             for record in unpacker:
                 rec_id: str = record["id"]
                 doc: str = record["document"]

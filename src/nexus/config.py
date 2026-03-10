@@ -72,33 +72,34 @@ def _tuning_from_dict(raw: dict[str, Any]) -> TuningConfig:
     chunking = raw.get("chunking", {})
     timeouts = raw.get("timeouts", {})
 
-    def _float(section: dict, key: str, default: float) -> float:
+    def _float(section: dict, section_name: str, key: str, default: float) -> float:
         val = section.get(key, default)
         try:
             return float(val)
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"tuning.{key}: expected a number, got {val!r}"
+                f"tuning.{section_name}.{key}: expected a number, got {val!r}"
             ) from exc
 
-    def _int(section: dict, key: str, default: int) -> int:
+    def _int(section: dict, section_name: str, key: str, default: int) -> int:
         val = section.get(key, default)
         try:
             return int(val)
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"tuning.{key}: expected an integer, got {val!r}"
+                f"tuning.{section_name}.{key}: expected an integer, got {val!r}"
             ) from exc
 
+    _d = TuningConfig()  # source of defaults — single source of truth
     return TuningConfig(
-        vector_weight=_float(scoring, "vector_weight", 0.7),
-        frecency_weight=_float(scoring, "frecency_weight", 0.3),
-        file_size_threshold=_int(scoring, "file_size_threshold", 30),
-        decay_rate=_float(frecency, "decay_rate", 0.01),
-        code_chunk_lines=_int(chunking, "code_chunk_lines", 150),
-        pdf_chunk_chars=_int(chunking, "pdf_chunk_chars", 1500),
-        git_log_timeout=_int(timeouts, "git_log", 30),
-        ripgrep_timeout=_int(timeouts, "ripgrep", 10),
+        vector_weight=_float(scoring, "scoring", "vector_weight", _d.vector_weight),
+        frecency_weight=_float(scoring, "scoring", "frecency_weight", _d.frecency_weight),
+        file_size_threshold=_int(scoring, "scoring", "file_size_threshold", _d.file_size_threshold),
+        decay_rate=_float(frecency, "frecency", "decay_rate", _d.decay_rate),
+        code_chunk_lines=_int(chunking, "chunking", "code_chunk_lines", _d.code_chunk_lines),
+        pdf_chunk_chars=_int(chunking, "chunking", "pdf_chunk_chars", _d.pdf_chunk_chars),
+        git_log_timeout=_int(timeouts, "timeouts", "git_log", _d.git_log_timeout),
+        ripgrep_timeout=_int(timeouts, "timeouts", "ripgrep", _d.ripgrep_timeout),
     )
 
 
@@ -147,24 +148,26 @@ _DEFAULTS: dict[str, Any] = {
     "voyageai": {
         "read_timeout_seconds": 120,
     },
-    "tuning": {
+    # Derived from TuningConfig() at module load — single source of truth.
+    # Do not edit values here; change TuningConfig field defaults instead.
+    "tuning": (lambda _tc: {
         "scoring": {
-            "vector_weight": 0.7,
-            "frecency_weight": 0.3,
-            "file_size_threshold": 30,
+            "vector_weight": _tc.vector_weight,
+            "frecency_weight": _tc.frecency_weight,
+            "file_size_threshold": _tc.file_size_threshold,
         },
         "frecency": {
-            "decay_rate": 0.01,
+            "decay_rate": _tc.decay_rate,
         },
         "chunking": {
-            "code_chunk_lines": 150,
-            "pdf_chunk_chars": 1500,
+            "code_chunk_lines": _tc.code_chunk_lines,
+            "pdf_chunk_chars": _tc.pdf_chunk_chars,
         },
         "timeouts": {
-            "git_log": 30,
-            "ripgrep": 10,
+            "git_log": _tc.git_log_timeout,
+            "ripgrep": _tc.ripgrep_timeout,
         },
-    },
+    })(TuningConfig()),
 }
 
 # Env var → (section, key, type) mapping

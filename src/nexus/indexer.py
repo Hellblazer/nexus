@@ -29,6 +29,7 @@ import structlog
 from nexus.corpus import index_model_for_collection
 from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
+from nexus.indexer_utils import check_credentials, check_staleness
 
 # Re-exports from nexus.code_indexer for backward compatibility with tests that
 # import these names directly from nexus.indexer.
@@ -51,10 +52,6 @@ DEFAULT_IGNORE: list[str] = [
     "*.lock", "go.sum",
 ]
 
-# Voyage AI embed() API limit: https://docs.voyageai.com/reference/embeddings-api
-_VOYAGE_EMBED_BATCH_SIZE = 128
-
-from nexus.languages import LANGUAGE_REGISTRY  # noqa: E402 — kept here for any existing imports
 
 # Pipeline version: bump when indexing changes invalidate existing embeddings.
 # History:
@@ -264,15 +261,7 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
 
     voyage_key = get_credential("voyage_api_key")
     chroma_key = get_credential("chroma_api_key")
-    if not voyage_key or not chroma_key:
-        missing = []
-        if not voyage_key:
-            missing.append("voyage_api_key")
-        if not chroma_key:
-            missing.append("chroma_api_key")
-        raise CredentialsMissingError(
-            f"{', '.join(missing)} not set — run: nx config init"
-        )
+    check_credentials(voyage_key, chroma_key)
 
     frecency_map = batch_frecency(repo)
     db = make_t3()
@@ -403,11 +392,15 @@ def _index_pdf_file(
     score: float,
     force: bool = False,
     timeout: float = 120.0,
+    chunk_chars: int | None = None,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
     Uses PDF extraction + chunking from doc_indexer, embeds via _embed_with_fallback.
     Returns the post-filter chunk count (chunks upserted), or 0 if skipped/failed.
+
+    *chunk_chars* overrides the PDF chunk size (default 1500 chars).  Pass
+    ``tuning.pdf_chunk_chars`` from TuningConfig to honour per-repo config.
     """
     import hashlib as _hl
     from nexus.doc_indexer import _embed_with_fallback, _pdf_chunks
@@ -419,18 +412,10 @@ def _index_pdf_file(
     content_hash_hex = content_hash.hexdigest()
 
     # Staleness check
-    existing = _chroma_with_retry(
-        col.get,
-        where={"source_path": str(file)},
-        include=["metadatas"],
-        limit=1,
-    )
-    if not force and existing["metadatas"]:
-        stored = existing["metadatas"][0]
-        if stored.get("content_hash") == content_hash_hex and stored.get("embedding_model") == target_model:
-            return 0
+    if not force and check_staleness(col, file, content_hash_hex, target_model):
+        return 0
 
-    prepared = _pdf_chunks(file, content_hash_hex, target_model, now_iso, collection_name)
+    prepared = _pdf_chunks(file, content_hash_hex, target_model, now_iso, collection_name, chunk_chars=chunk_chars)
     if not prepared:
         _log.debug("skipped PDF with no chunks", path=str(file))
         return 0
@@ -737,15 +722,7 @@ def _run_index(
     # Credential check (required for T3 operations)
     voyage_key = get_credential("voyage_api_key")
     chroma_key = get_credential("chroma_api_key")
-    if not voyage_key or not chroma_key:
-        missing = []
-        if not voyage_key:
-            missing.append("voyage_api_key")
-        if not chroma_key:
-            missing.append("chroma_api_key")
-        raise CredentialsMissingError(
-            f"{', '.join(missing)} not set — run: nx config init"
-        )
+    check_credentials(voyage_key, chroma_key)
 
     import voyageai
     from datetime import UTC, datetime as _dt
@@ -822,6 +799,7 @@ def _run_index(
             voyage_key, git_meta, now_iso, score,
             force=force,
             timeout=read_timeout_seconds,
+            chunk_chars=tuning.pdf_chunk_chars,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)

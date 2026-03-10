@@ -352,6 +352,10 @@ def import_cmd(
                 f"got: {remap!r}"
             )
         old, new = remap.split(":", 1)
+        if not old:
+            raise click.UsageError(
+                f"--remap old prefix cannot be empty, got: {remap!r}"
+            )
         parsed_remaps.append((old, new))
 
     db = _t3()

@@ -729,7 +729,25 @@ class TestExportImportCLI:
                 ["store", "import", str(dummy), "--remap", "no_colon_here"],
             )
         assert result.exit_code != 0
-        assert "remap" in result.output.lower() or "colon" in result.output.lower() or result.exit_code != 0
+        assert "remap" in result.output.lower() or "colon" in result.output.lower()
+
+    def test_import_remap_empty_old_prefix_rejected(self, runner, env_creds, tmp_path):
+        """--remap with an empty old prefix (e.g. ':/new/path') is rejected with a clear error."""
+        from unittest.mock import MagicMock, patch
+        from nexus.cli import main
+
+        dummy = tmp_path / "dummy.nxexp"
+        dummy.write_bytes(b"not a real file")
+
+        mock_db = MagicMock()
+        with patch("nexus.commands.store._t3", return_value=mock_db):
+            result = runner.invoke(
+                main,
+                ["store", "import", str(dummy), "--remap", ":/new/path"],
+            )
+        assert result.exit_code != 0
+        output = result.output.lower()
+        assert "empty" in output or "remap" in output
 
     def test_export_single_collection_success(
         self, runner, env_creds, tmp_path, populated_db: T3Database
