@@ -2,8 +2,10 @@
 title: "Indexer Module Decomposition and Configuration Externalization"
 id: RDR-032
 type: Technical Debt
-status: accepted
+status: closed
 accepted_date: 2026-03-09
+closed_date: 2026-03-09
+close_reason: implemented
 priority: P3
 author: Hal Hildebrand
 reviewed-by: self
