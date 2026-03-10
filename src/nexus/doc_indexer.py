@@ -260,10 +260,18 @@ def _pdf_chunks(
     target_model: str,
     now_iso: str,
     corpus: str,
+    *,
+    chunk_chars: int | None = None,
 ) -> list[tuple[str, str, dict]]:
-    """Chunk a PDF and return (id, text, metadata) tuples."""
+    """Chunk a PDF and return (id, text, metadata) tuples.
+
+    *chunk_chars* overrides the default chunk size (1500 chars).  When None
+    the PDFChunker default is used.  Pass ``tuning.pdf_chunk_chars`` from
+    TuningConfig to honour per-repo configuration.
+    """
     result = PDFExtractor().extract(pdf_path)
-    chunks = PDFChunker().chunk(result.text, result.metadata)
+    chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
+    chunks = chunker.chunk(result.text, result.metadata)
     if not chunks:
         return []
 

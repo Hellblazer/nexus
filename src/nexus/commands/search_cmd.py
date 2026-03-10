@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 import structlog
 
-from nexus.config import load_config
+from nexus.config import get_tuning_config, load_config
 from nexus.corpus import resolve_corpus
 from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
@@ -206,6 +206,7 @@ def search_cmd(
 
     config = load_config()
     reranker_model = config["embeddings"]["rerankerModel"]
+    tuning = get_tuning_config()
 
     # Apply per-project hybrid default if --hybrid was not explicitly passed
     if not hybrid:
@@ -217,7 +218,7 @@ def search_cmd(
             # Scope ripgrep to matching caches when a single corpus is targeted
             rg_corpus = target_collections[0] if len(target_collections) == 1 else None
             for cache_path in _find_rg_cache_paths(corpus=rg_corpus):
-                rg_hits = search_ripgrep(q, cache_path, n_results=n * 2)
+                rg_hits = search_ripgrep(q, cache_path, n_results=n * 2, timeout=tuning.ripgrep_timeout)
                 raw.extend(_rg_hit_to_result(h) for h in rg_hits)
         return raw
 
@@ -252,8 +253,14 @@ def search_cmd(
                     if ln is not None:
                         rg_matched_lines.setdefault(fp, []).append(int(ln))
 
-    # Hybrid scoring
-    results = apply_hybrid_scoring(results, hybrid=hybrid)
+    # Hybrid scoring — pass tuning weights from config (honours per-repo .nexus.yml)
+    results = apply_hybrid_scoring(
+        results,
+        hybrid=hybrid,
+        vector_weight=tuning.vector_weight,
+        frecency_weight=tuning.frecency_weight,
+        file_size_threshold=tuning.file_size_threshold,
+    )
 
     # Reranking
     if not no_rerank and len(set(r.collection for r in results)) > 1:

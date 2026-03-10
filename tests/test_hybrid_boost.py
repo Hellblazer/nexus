@@ -402,7 +402,7 @@ def test_hybrid_search_uses_corpus_filter(
 
     rg_calls: list[Path] = []
 
-    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True):
+    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True, timeout=10):
         rg_calls.append(cache_path)
         return []
 
@@ -563,7 +563,7 @@ def test_hybrid_default_config_enables_hybrid(
 
     rg_calls: list[int] = []
 
-    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True):
+    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True, timeout=10):
         rg_calls.append(1)
         return []
 
@@ -603,7 +603,7 @@ def test_hybrid_default_false_no_ripgrep(
 
     rg_calls: list[int] = []
 
-    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True):
+    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True, timeout=10):
         rg_calls.append(1)
         return []
 

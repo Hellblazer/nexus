@@ -387,7 +387,7 @@ def test_hybrid_flag_triggers_ripgrep(
 
     rg_call_count = []
 
-    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True):
+    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True, timeout=10):
         rg_call_count.append(1)
         return []
 
