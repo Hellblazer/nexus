@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import logging
+import sys
 
 import click
 import structlog
@@ -17,7 +18,7 @@ from nexus.commands.store import store
 
 def _configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.WARNING
-    logging.basicConfig(level=level, format="%(message)s")
+    logging.basicConfig(level=level, format="%(message)s", stream=sys.stderr, force=True)
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(level),
     )
