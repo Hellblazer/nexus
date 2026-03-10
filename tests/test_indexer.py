@@ -464,14 +464,15 @@ def test_run_index_logs_skipped_binary_files(tmp_path: Path) -> None:
                         with patch("nexus.db.make_t3", return_value=mock_db):
                             with patch("nexus.chunker.chunk_file", return_value=[fake_chunk]):
                                 with patch("voyageai.Client", return_value=mock_voyage_client):
-                                    with patch("nexus.indexer._log") as mock_log:
+                                    with patch("nexus.indexer._log") as mock_log, \
+                                         patch("nexus.prose_indexer._log") as mock_prose_log:
                                         _run_index(repo, registry)
 
-    # Verify debug was called for the skipped binary file
-    debug_calls = mock_log.debug.call_args_list
-    skipped_calls = [c for c in debug_calls if "skipped non-text file" in str(c)]
+    # The "skipped non-text file" log moved to prose_indexer after RDR-032 decomposition
+    all_debug = mock_log.debug.call_args_list + mock_prose_log.debug.call_args_list
+    skipped_calls = [c for c in all_debug if "skipped non-text file" in str(c)]
     assert skipped_calls, (
-        f"Expected debug log for skipped binary file, got calls: {debug_calls}"
+        f"Expected debug log for skipped binary file, got calls: {all_debug}"
     )
 
 
@@ -507,14 +508,16 @@ def test_run_index_logs_empty_chunks(tmp_path: Path) -> None:
                         with patch("nexus.db.make_t3", return_value=mock_db):
                             with patch("nexus.chunker.chunk_file", return_value=[]):
                                 with patch("voyageai.Client"):
-                                    with patch("nexus.indexer._log") as mock_log:
+                                    with patch("nexus.indexer._log") as mock_log, \
+                                         patch("nexus.code_indexer._log") as mock_code_log:
                                         _run_index(repo, registry)
 
-    # Verify debug was called for the empty-chunks file
-    debug_calls = mock_log.debug.call_args_list
-    empty_calls = [c for c in debug_calls if "skipped file with no chunks" in str(c)]
+    # Verify debug was called for the empty-chunks file.
+    # After RDR-032, "skipped file with no chunks" is logged in code_indexer.
+    all_debug = mock_log.debug.call_args_list + mock_code_log.debug.call_args_list
+    empty_calls = [c for c in all_debug if "skipped file with no chunks" in str(c)]
     assert empty_calls, (
-        f"Expected debug log for empty chunks file, got calls: {debug_calls}"
+        f"Expected debug log for empty chunks file, got calls: {all_debug}"
     )
 
 

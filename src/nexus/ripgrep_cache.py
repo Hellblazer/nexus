@@ -46,12 +46,16 @@ def build_cache(
                 written_bytes += len(entry.encode("utf-8"))
 
 
+_DEFAULT_RIPGREP_TIMEOUT: int = 10
+
+
 def search_ripgrep(
     query: str,
     cache_path: Path,
     *,
     n_results: int = 50,
     fixed_strings: bool = True,
+    timeout: int = _DEFAULT_RIPGREP_TIMEOUT,
 ) -> list[dict]:
     """Run ripgrep against the line cache and return parsed hits.
 
@@ -68,6 +72,8 @@ def search_ripgrep(
 
     Returns [] if *cache_path* does not exist, ``rg`` is not installed, or the
     subprocess times out.
+
+    *timeout* defaults to 10 s; override via TuningConfig.ripgrep_timeout.
     """
     if not cache_path.exists():
         return []
@@ -88,13 +94,13 @@ def search_ripgrep(
             cmd,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=timeout,
         )
     except FileNotFoundError:
         _log.warning("rg not found — skipping ripgrep hybrid search")
         return []
     except subprocess.TimeoutExpired:
-        _log.warning("rg timed out after 10 s — skipping ripgrep results")
+        _log.warning("rg timed out after %d s — skipping ripgrep results", timeout)
         return []
 
     if proc.returncode == 2:
