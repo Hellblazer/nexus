@@ -38,6 +38,8 @@ dependencies = [
     "click>=8.1",
     "llama-index-core==0.12.7",
     "markdown-it-py>=4.0.0",
+    "msgpack>=1.0",
+    "numpy>=1.24",
     "pymupdf>=1.26.6",
     "pyyaml>=6.0",
     "structlog>=24.0",

@@ -219,3 +219,159 @@ def expire_cmd() -> None:
     """Remove T3 knowledge__ entries whose TTL has expired."""
     count = _t3().expire()
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
+
+
+@store.command("export")
+@click.argument("collection", default="", required=False)
+@click.option("--output", "-o", default=None,
+              help="Output file path (.nxexp) or directory (when --all).")
+@click.option("--include", "includes", multiple=True,
+              help="Glob pattern matched against source_path. Repeat for OR logic.")
+@click.option("--exclude", "excludes", multiple=True,
+              help="Glob pattern matched against source_path. Repeat for OR logic.")
+@click.option("--all", "export_all", is_flag=True, default=False,
+              help="Export every collection to separate .nxexp files.")
+def export_cmd(
+    collection: str,
+    output: str | None,
+    includes: tuple[str, ...],
+    excludes: tuple[str, ...],
+    export_all: bool,
+) -> None:
+    """Export a T3 collection to a portable .nxexp backup file.
+
+    The export preserves all documents, metadata, and embeddings, enabling
+    later import without re-embedding (saves Voyage AI API costs).
+
+    \b
+    Examples:
+      nx store export code__myrepo -o myrepo-backup.nxexp
+      nx store export code__myrepo --include "*.py" -o python-only.nxexp
+      nx store export --all
+      nx store export --all -o /path/to/backup-dir/
+    """
+    from datetime import date
+
+    from nexus.corpus import t3_collection_name as _t3col
+    from nexus.errors import EmbeddingModelMismatch, FormatVersionError
+    from nexus.exporter import export_collection
+
+    if export_all and collection:
+        raise click.UsageError("Cannot specify COLLECTION together with --all.")
+    if not export_all and not collection:
+        raise click.UsageError("Provide a COLLECTION name or use --all.")
+
+    db = _t3()
+
+    if export_all:
+        # One .nxexp file per collection; output may be a directory.
+        out_dir = Path(output) if output else Path.cwd()
+        if output and not out_dir.exists():
+            out_dir.mkdir(parents=True, exist_ok=True)
+        collections_info = db.list_collections()
+        if not collections_info:
+            click.echo("No collections found.")
+            return
+        today = date.today().isoformat()
+        total_exported = 0
+        for info in collections_info:
+            col_name: str = info["name"]
+            fname = f"{col_name}-{today}.nxexp"
+            out_path = out_dir / fname
+            try:
+                result = export_collection(
+                    db=db,
+                    collection_name=col_name,
+                    output_path=out_path,
+                    includes=includes,
+                    excludes=excludes,
+                )
+                click.echo(
+                    f"Exported {result['exported_count']:>6} records  "
+                    f"{col_name}  ->  {out_path.name}"
+                )
+                total_exported += result["exported_count"]
+            except Exception as exc:
+                click.echo(f"ERROR exporting {col_name}: {exc}", err=True)
+        click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
+    else:
+        col_name = collection if "__" in collection else _t3col(collection)
+        out_path = Path(output) if output else Path(f"{col_name}.nxexp")
+        try:
+            result = export_collection(
+                db=db,
+                collection_name=col_name,
+                output_path=out_path,
+                includes=includes,
+                excludes=excludes,
+            )
+        except (EmbeddingModelMismatch, FormatVersionError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        except Exception as exc:
+            raise click.ClickException(f"Export failed: {exc}") from exc
+
+        size_kb = result["file_bytes"] / 1024
+        click.echo(
+            f"Exported {result['exported_count']} records from {col_name} "
+            f"-> {out_path}  ({size_kb:.1f} KB, {result['elapsed_seconds']:.1f}s)"
+        )
+
+
+@store.command("import")
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--collection", "-c", default=None,
+              help="Override target collection name (default: from export header).")
+@click.option("--remap", "remaps", multiple=True,
+              help="Path substitution: /old/path:/new/path  (repeat for multiple remaps).")
+def import_cmd(
+    file: str,
+    collection: str | None,
+    remaps: tuple[str, ...],
+) -> None:
+    """Import a .nxexp export file into T3.
+
+    Embedding model validation is enforced: importing a code__ export into a
+    docs__ collection (or vice versa) is rejected to prevent silent corruption
+    of the target collection's vector space.
+
+    \b
+    Examples:
+      nx store import myrepo-backup.nxexp
+      nx store import myrepo-backup.nxexp --remap "/old/path:/new/path"
+      nx store import myrepo-backup.nxexp --collection code__newname
+    """
+    from nexus.errors import EmbeddingModelMismatch, FormatVersionError
+    from nexus.exporter import import_collection
+
+    # Parse --remap options (format: old:new).
+    parsed_remaps: list[tuple[str, str]] = []
+    for remap in remaps:
+        if ":" not in remap:
+            raise click.UsageError(
+                f"--remap requires old:new format (e.g. /old/path:/new/path), "
+                f"got: {remap!r}"
+            )
+        old, new = remap.split(":", 1)
+        parsed_remaps.append((old, new))
+
+    db = _t3()
+    input_path = Path(file)
+
+    try:
+        result = import_collection(
+            db=db,
+            input_path=input_path,
+            target_collection=collection,
+            remaps=parsed_remaps,
+        )
+    except FormatVersionError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except EmbeddingModelMismatch as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        raise click.ClickException(f"Import failed: {exc}") from exc
+
+    click.echo(
+        f"Imported {result['imported_count']} records into "
+        f"{result['collection_name']}  ({result['elapsed_seconds']:.1f}s)"
+    )
