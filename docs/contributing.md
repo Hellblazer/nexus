@@ -110,8 +110,17 @@ Every step below is **required**. Missing any one of them has caused problems in
    ```
    Do not proceed if any test fails.
 
-2. **Update `docs/cli-reference.md`** (if any CLI flags were added, changed, or removed)
-   Ensure every flag for every affected subcommand is documented with its description and any mutual-exclusion notes.
+2. **Audit docs against changes since last release**
+   Run `git log --oneline v<prev>..HEAD` and check each feature/fix against the docs:
+   - `docs/cli-reference.md` — new or changed CLI flags, subcommands
+   - `docs/architecture.md` — new modules, changed module responsibilities
+   - `docs/repo-indexing.md` — indexing pipeline changes, new languages, chunking behavior
+   - `docs/configuration.md` — new config keys or tuning parameters
+   - `docs/storage-tiers.md` — new storage capabilities (export, import, etc.)
+   - `README.md` — high-level feature descriptions, command table
+
+   Every user-visible feature must be documented before release. This step has been skipped
+   in the past and required patch releases to fix — hence it is now mandatory.
 
 3. **Bump the version in `pyproject.toml`**
    Change the `version` field (e.g. `"1.2.0"` → `"1.3.0"`).
@@ -140,8 +149,7 @@ Every step below is **required**. Missing any one of them has caused problems in
 
 8. **Commit all release artifacts directly to `main`**
    ```bash
-   git add pyproject.toml uv.lock CHANGELOG.md nx/CHANGELOG.md .claude-plugin/marketplace.json
-   # include docs/cli-reference.md if updated
+   git add pyproject.toml uv.lock CHANGELOG.md nx/CHANGELOG.md .claude-plugin/marketplace.json docs/
    git commit -m "chore: bump version to X.Y.Z"
    git push
    ```
@@ -179,7 +187,12 @@ Every step below is **required**. Missing any one of them has caused problems in
 | `CHANGELOG.md` | move Unreleased → `[X.Y.Z]`, add empty Unreleased |
 | `nx/CHANGELOG.md` | add `[X.Y.Z]` entry |
 | `.claude-plugin/marketplace.json` | bump `"version"` in the `nx` plugin entry |
-| `docs/cli-reference.md` | update if any CLI flags changed |
+| `docs/cli-reference.md` | new/changed CLI flags and subcommands |
+| `docs/architecture.md` | new/changed modules |
+| `docs/repo-indexing.md` | indexing pipeline changes |
+| `docs/configuration.md` | new config keys or tuning parameters |
+| `docs/storage-tiers.md` | new storage capabilities |
+| `README.md` | high-level feature descriptions |
 
 ### Pre-push release checklist
 

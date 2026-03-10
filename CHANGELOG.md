@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-03-10
+
+### Docs
+- **Documentation audit for 1.9.0 features** — all user-visible features now documented:
+  - `architecture.md`: module map updated with decomposed indexer modules (`code_indexer.py`,
+    `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `languages.py`) and `exporter.py`
+  - `configuration.md`: new `[tuning]` section documenting all `TuningConfig` parameters
+  - `storage-tiers.md`: T3 export/import section with usage examples and format description
+  - `repo-indexing.md`: CODE extension count corrected (52), pipeline versioning section,
+    minified code handling section
+  - `README.md`: store command description updated
+- **Release process hardened** — `docs/contributing.md` step 2 now requires a mandatory docs
+  audit against `git log` before every release, with a checklist of docs to verify. Quick
+  reference table expanded to list all docs that may need updates.
+
 ## [1.9.0] - 2026-03-10
 
 ### Added
@@ -685,7 +700,8 @@ from rc10 — this entry marks the API, CLI, and plugin contract as stable.
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.9.1...HEAD
+[1.9.1]: https://github.com/Hellblazer/nexus/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/Hellblazer/nexus/compare/v1.8.0...v1.9.0
 [1.0.0]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc10...v1.0.0
 [1.0.0rc10]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc9...v1.0.0rc10

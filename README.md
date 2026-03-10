@@ -61,7 +61,7 @@ Every command targets one or more tiers:
 |---------|------|-------------|
 | `nx search` | T3 | Semantic and hybrid search |
 | `nx index` | T3 | Index code repos, PDFs, and markdown |
-| `nx store` | T3 | Store knowledge in the cloud |
+| `nx store` | T3 | Store, export, and import knowledge |
 | `nx memory` | T2 | Per-project persistent notes |
 | `nx scratch` | T1 | Ephemeral session scratch pad |
 | `nx collection` | T3 | Inspect and manage cloud collections |

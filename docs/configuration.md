@@ -51,6 +51,35 @@ indexing:
 
 Merge behavior: nested dict keys are **additive** (both global and per-repo keys are retained). Scalar values and lists are **replacement** (the per-repo value wins entirely between config levels). However, `code_extensions` is additive to the **built-in** extension set — it extends the defaults, it does not replace them. `prose_extensions` wins over everything: if an extension appears in both lists, it is classified as prose. See [Repo Indexing](repo-indexing.md) for the full extension list and override semantics.
 
+## Tuning Parameters
+
+The `[tuning]` section in `~/.config/nexus/config.yml` controls search scoring, chunking, and timeout behavior. All values have sensible defaults — only override what you need.
+
+```yaml
+tuning:
+  vector_weight: 0.7              # weight for vector similarity in hybrid scoring
+  frecency_weight: 0.3            # weight for git frecency in hybrid scoring
+  file_size_threshold: 30         # chunks — files larger than this are down-ranked
+  decay_rate: 0.01                # frecency decay rate (higher = faster decay)
+  code_chunk_lines: 150           # target lines per code chunk (fallback splitter)
+  pdf_chunk_chars: 1500           # target chars per PDF chunk
+  git_log_timeout: 30             # seconds — timeout for git log subprocess
+  ripgrep_timeout: 10             # seconds — timeout for ripgrep subprocess in hybrid search
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `vector_weight` | `0.7` | Vector similarity weight in hybrid scoring formula |
+| `frecency_weight` | `0.3` | Git frecency weight in hybrid scoring formula |
+| `file_size_threshold` | `30` | Chunk count above which code files are down-ranked |
+| `decay_rate` | `0.01` | Exponential decay rate for frecency scoring |
+| `code_chunk_lines` | `150` | Target lines per code chunk (line-based fallback) |
+| `pdf_chunk_chars` | `1500` | Target characters per PDF chunk |
+| `git_log_timeout` | `30` | Timeout (seconds) for `git log` subprocess |
+| `ripgrep_timeout` | `10` | Timeout (seconds) for `rg` subprocess in hybrid search |
+
+These values are exposed as a `TuningConfig` dataclass in `nexus.config`. The search command, indexer, and scoring modules all read from this config — changes take effect on the next invocation without restarting anything.
+
 ## File Locations
 
 | File | Purpose |

@@ -63,6 +63,34 @@ Collections are namespaced by corpus type using `__` (double underscore) as sepa
 
 **Use for**: semantic search across sessions, institutional knowledge.
 
+## T3 Backup and Migration (Export/Import)
+
+Collections can be exported to portable `.nxexp` files that preserve all documents, metadata, and embeddings. Importing restores the collection without re-embedding — saving Voyage AI API costs and time.
+
+```bash
+# Export a single collection
+nx store export code__myrepo -o myrepo-backup.nxexp
+
+# Export with filters
+nx store export code__myrepo --include "*.py" --exclude "*/test_*" -o python-only.nxexp
+
+# Export all collections
+nx store export --all -o /path/to/backup-dir/
+
+# Import (restores to original collection name)
+nx store import myrepo-backup.nxexp
+
+# Import with path remapping (e.g., after moving a repo)
+nx store import myrepo-backup.nxexp --remap "/old/path:/new/path"
+
+# Import into a different collection
+nx store import myrepo-backup.nxexp --collection code__newname
+```
+
+**Format**: `.nxexp` files contain a JSON header line (format version, collection name, embedding model) followed by a gzip-compressed msgpack stream of records. Embeddings are stored as raw float32 bytes.
+
+**Safety**: Embedding model validation is enforced on import — importing a `code__` export (voyage-code-3) into a `docs__` collection (voyage-context-3) is rejected to prevent vector space corruption.
+
 ## Data Flow
 
 ```

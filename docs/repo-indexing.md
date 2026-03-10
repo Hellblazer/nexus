@@ -12,10 +12,9 @@ subprocess and attached to every chunk.
 
 Every file is classified into one of four categories:
 
-- **CODE** (32 extensions): `.py`, `.js`, `.jsx`, `.ts`, `.tsx`, `.java`, `.go`, `.rs`,
-  `.cpp`, `.cc`, `.c`, `.cxx`, `.h`, `.hpp`, `.rb`, `.cs`, `.sh`, `.bash`, `.kt`, `.kts`,
-  `.swift`, `.scala`, `.sc`, `.r`, `.m`, `.php`, `.lua`,
-  `.proto`, `.cl`, `.comp`, `.frag`, `.vert`, `.metal`, `.glsl`, `.wgsl`, `.hlsl`
+- **CODE** (52 extensions): 44 AST-supported extensions (see table below) plus 8 GPU
+  shader extensions (`.cl`, `.comp`, `.frag`, `.vert`, `.metal`, `.glsl`, `.wgsl`, `.hlsl`)
+  that receive line-based chunking
 - **PDF**: `.pdf` files are extracted and chunked separately, then stored in `docs__`.
 - **PROSE**: `.md`, `.markdown`, and any extension not in CODE, PDF, or SKIP.
 - **SKIP** (18 extensions — not indexed): `.xml`, `.json`, `.yml`, `.yaml`, `.toml`,
@@ -98,6 +97,13 @@ Additionally, 8 GPU shader extensions (`.cl`, `.comp`, `.frag`, `.vert`, `.metal
 
 When AST parsing fails or no parser exists for the extension, the chunker falls back to
 line-based splitting: 150-line chunks with 15% overlap.
+
+### Minified Code Handling
+
+The AST chunker detects minified files (average line length > 500 characters) and falls
+back to byte-based splitting instead of producing single oversized chunks. This prevents
+minified JavaScript, CSS, and similar files from consuming disproportionate storage and
+degrading search quality.
 
 ### Context Prefix Injection (Embed-Only)
 
@@ -203,6 +209,28 @@ SKIP files are cleaned automatically on the next `nx index repo` run.
 
 Git hooks (`post-commit`, `post-merge`, `post-rewrite`) trigger automatic re-indexing
 in the background after each qualifying git operation. Install them with `nx hooks install`.
+
+## Pipeline Versioning
+
+Every indexed collection stores a `PIPELINE_VERSION` stamp in its ChromaDB metadata. When
+the indexing pipeline changes (new chunking logic, updated context prefixes, etc.), the
+version is bumped. This enables targeted re-indexing:
+
+- **`--force`** — re-index all files unconditionally (ignores staleness and pipeline version)
+- **`--force-stale`** — re-index only collections whose stored pipeline version is older
+  than the current version. Files within those collections still use hash-based staleness
+  checks, so only changed files are re-embedded. This is the recommended flag after upgrading
+  Nexus to a version with pipeline changes.
+
+`nx doctor` reports the pipeline version status of each collection:
+
+```
+✓ pipeline (code__nexus-571b8edd): v4
+✓ pipeline (code__myrepo-abc12345): no version stamp (index with --force to stamp)
+```
+
+Collections without a version stamp were indexed before pipeline versioning was introduced.
+Run `nx index repo --force` once to stamp them.
 
 ## Transient Error Resilience
 
