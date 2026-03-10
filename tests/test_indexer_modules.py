@@ -182,15 +182,12 @@ def test_index_code_file_skips_current_file(tmp_path: Path) -> None:
     py_file = tmp_path / "hello.py"
     py_file.write_text("print('hello')\n")
 
-    mock_col = MagicMock()
-    # Simulate a current file (staleness check returns True = current)
-    mock_col.get.return_value = {
-        "metadatas": [{"content_hash": "any", "embedding_model": "voyage-code-3"}],
-        "ids": ["id1"],
-    }
+    import hashlib
+    content = py_file.read_text()
+    h = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     ctx = IndexContext(
-        col=mock_col,
+        col=MagicMock(),
         db=MagicMock(),
         voyage_key="key",
         voyage_client=MagicMock(),
@@ -203,10 +200,6 @@ def test_index_code_file_skips_current_file(tmp_path: Path) -> None:
     )
 
     with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry:
-        # Simulate: stored hash matches content hash → current
-        content = py_file.read_text()
-        import hashlib
-        h = hashlib.sha256(content.encode()).hexdigest()
         mock_retry.return_value = {
             "metadatas": [{"content_hash": h, "embedding_model": "voyage-code-3"}],
             "ids": ["id1"],
@@ -281,3 +274,144 @@ def test_index_prose_file_skips_current_file(tmp_path: Path) -> None:
         result = index_prose_file(ctx, md_file)
 
     assert result == 0
+
+
+# ── _extract_context with real Python source (032-S13) ───────────────────────
+
+
+def test_extract_context_free_function() -> None:
+    """_extract_context returns ('', function_name) for a free function."""
+    from nexus.code_indexer import _extract_context
+
+    source = b"def hello():\n    return 42\n"
+    class_name, method_name = _extract_context(source, "python", 0, 1)
+    assert class_name == ""
+    assert method_name == "hello"
+
+
+def test_extract_context_method_inside_class() -> None:
+    """_extract_context returns (class_name, method_name) for a method."""
+    from nexus.code_indexer import _extract_context
+
+    source = b"class Foo:\n    def bar(self):\n        return 1\n"
+    class_name, method_name = _extract_context(source, "python", 1, 2)
+    assert class_name == "Foo"
+    assert method_name == "bar"
+
+
+def test_extract_context_decorated_function() -> None:
+    """_extract_context finds the function name through a decorator."""
+    from nexus.code_indexer import _extract_context
+
+    source = b"@staticmethod\ndef helper():\n    pass\n"
+    class_name, method_name = _extract_context(source, "python", 0, 2)
+    assert class_name == ""
+    assert method_name == "helper"
+
+
+def test_extract_context_chunk_spanning_siblings() -> None:
+    """_extract_context returns ('', '') when chunk spans two sibling functions."""
+    from nexus.code_indexer import _extract_context
+
+    source = b"def foo():\n    pass\n\ndef bar():\n    pass\n"
+    # chunk_start=0 (foo) to chunk_end=4 (bar) — spans both siblings
+    class_name, method_name = _extract_context(source, "python", 0, 4)
+    assert class_name == ""
+    assert method_name == ""
+
+
+def test_extract_context_unsupported_language() -> None:
+    """_extract_context returns ('', '') for an unsupported language."""
+    from nexus.code_indexer import _extract_context
+
+    class_name, method_name = _extract_context(b"some content", "unknown_lang_xyz", 0, 0)
+    assert class_name == ""
+    assert method_name == ""
+
+
+# ── index_code_file happy path (032-S14) ─────────────────────────────────────
+
+
+def test_index_code_file_happy_path_new_file(tmp_path: Path) -> None:
+    """index_code_file chunks, embeds, and upserts a new Python file."""
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "example.py"
+    py_file.write_text("def greet(name):\n    return f'Hello {name}'\n")
+
+    mock_db = MagicMock()
+    mock_voyage = MagicMock()
+    # Simulate Voyage embed returning 2 embeddings (one per chunk)
+    mock_embed_result = MagicMock()
+    mock_embed_result.embeddings = [[0.1] * 128]
+    mock_voyage.embed.return_value = mock_embed_result
+
+    ctx = IndexContext(
+        col=MagicMock(),
+        db=mock_db,
+        voyage_key="key",
+        voyage_client=mock_voyage,
+        repo_path=tmp_path,
+        corpus="code__test",
+        embedding_model="voyage-code-3",
+        git_meta={"git_project_name": "test"},
+        now_iso="2026-01-01T00:00:00+00:00",
+        force=False,
+    )
+
+    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry:
+        # No existing chunks → file is new
+        mock_retry.return_value = {"metadatas": [], "ids": []}
+        result = index_code_file(ctx, py_file)
+
+    assert result >= 1
+    mock_voyage.embed.assert_called()
+    mock_db.upsert_chunks_with_embeddings.assert_called_once()
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args
+    assert call_kwargs[1]["collection_name"] == "code__test"
+    assert len(call_kwargs[1]["ids"]) == result
+
+
+# ── index_prose_file non-markdown path (032-S15) ────────────────────────────
+
+
+def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path: Path) -> None:
+    """index_prose_file uses _line_chunk for non-.md files and embed_texts defaults to documents."""
+    from nexus.prose_indexer import index_prose_file
+
+    txt_file = tmp_path / "notes.txt"
+    txt_file.write_text("Line one of notes.\nLine two of notes.\nLine three.\n")
+
+    mock_db = MagicMock()
+
+    ctx = IndexContext(
+        col=MagicMock(),
+        db=mock_db,
+        voyage_key="key",
+        voyage_client=None,
+        repo_path=tmp_path,
+        corpus="docs__test",
+        embedding_model="voyage-context-3",
+        git_meta={},
+        now_iso="2026-01-01T00:00:00+00:00",
+        force=False,
+    )
+
+    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry, \
+         patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
+        # File is new
+        mock_retry.return_value = {"metadatas": [], "ids": []}
+        mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
+        result = index_prose_file(ctx, txt_file)
+
+    assert result >= 1
+    mock_embed.assert_called_once()
+    # Verify embed_texts (first arg) equals documents for non-markdown
+    embed_call_args = mock_embed.call_args[0]
+    embed_texts = embed_call_args[0]
+    upsert_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
+    assert embed_texts == upsert_kwargs["documents"]
+    # Verify metadata has line_start/line_end (not char offsets like markdown)
+    meta = upsert_kwargs["metadatas"][0]
+    assert "line_start" in meta
+    assert meta["line_start"] >= 1
