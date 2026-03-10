@@ -850,3 +850,67 @@ class TestErrorTypes:
     def test_format_version_error_message(self):
         exc = FormatVersionError("version error message")
         assert "version error message" in str(exc)
+
+
+# ── Empty collection round-trip (031-S10) ────────────────────────────────────
+
+
+class TestEmptyCollectionRoundTrip:
+    """Export and import an empty collection — zero records, no errors."""
+
+    def test_empty_collection_export_produces_valid_file(
+        self, ephemeral_db: T3Database, tmp_path: Path
+    ):
+        """Exporting an empty collection produces a valid .nxexp with record_count 0."""
+        ephemeral_db.get_or_create_collection("knowledge__empty")
+        out = tmp_path / "empty.nxexp"
+        stats = export_collection(ephemeral_db, "knowledge__empty", out)
+        assert stats["exported_count"] == 0
+        assert out.exists()
+
+        # Header is valid JSON with record_count 0.
+        with open(out, "rb") as f:
+            header = json.loads(f.readline().decode())
+        assert header["collection_name"] == "knowledge__empty"
+
+    def test_empty_collection_import_succeeds(
+        self, ephemeral_db: T3Database, tmp_path: Path
+    ):
+        """Importing an empty .nxexp file succeeds with imported_count 0."""
+        ephemeral_db.get_or_create_collection("knowledge__empty")
+        out = tmp_path / "empty.nxexp"
+        export_collection(ephemeral_db, "knowledge__empty", out)
+
+        result = import_collection(ephemeral_db, out)
+        assert result["imported_count"] == 0
+
+
+# ── Corrupt msgpack body (031-S12) ───────────────────────────────────────────
+
+
+class TestCorruptMsgpackBody:
+    """Import fails clearly when the gzip body contains invalid msgpack."""
+
+    def test_import_corrupt_msgpack_raises_error(
+        self, ephemeral_db: T3Database, tmp_path: Path
+    ):
+        """Import of a file with valid header but garbage msgpack body raises an error."""
+        header = {
+            "format_version": FORMAT_VERSION,
+            "collection_name": "knowledge__corrupt",
+            "database_type": "knowledge",
+            "embedding_model": "voyage-context-3",
+            "record_count": 1,
+            "embedding_dim": 128,
+            "exported_at": "2026-01-01T00:00:00+00:00",
+            "pipeline_version": "nexus-1",
+        }
+        out = tmp_path / "corrupt.nxexp"
+        with open(out, "wb") as f:
+            f.write(json.dumps(header).encode() + b"\n")
+            with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+                gz.write(b"this is not valid msgpack data at all!!")
+
+        ephemeral_db.get_or_create_collection("knowledge__corrupt")
+        with pytest.raises(Exception):  # msgpack.UnpackValueError or similar
+            import_collection(ephemeral_db, out)

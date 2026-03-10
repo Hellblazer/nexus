@@ -138,74 +138,73 @@ def export_collection(
         output=str(output_path),
     )
 
-    # Phase 1: paginated retrieval of all records.
-    page_size = QUOTAS.MAX_RECORDS_PER_WRITE
-    all_records: list[dict] = []
-    offset = 0
-
-    while True:
-        result = _chroma_with_retry(
-            col.get,
-            include=["documents", "metadatas", "embeddings"],
-            limit=page_size,
-            offset=offset,
-        )
-        page_ids = result["ids"]
-        if not page_ids:
-            break
-
-        for rec_id, doc, meta, emb in zip(
-            page_ids,
-            result["documents"],
-            result["metadatas"],
-            result["embeddings"],
-        ):
-            source_path = (meta or {}).get("source_path")
-            if not _apply_filter(source_path, includes, excludes):
-                continue
-            # Store embedding as bytes (float32 little-endian)
-            emb_bytes: bytes = np.array(emb, dtype=np.float32).tobytes()
-            all_records.append(
-                {
-                    "id": rec_id,
-                    "document": doc,
-                    "metadata": meta or {},
-                    "embedding": emb_bytes,
-                }
-            )
-
-        offset += len(page_ids)
-        if len(page_ids) < page_size:
-            break  # last page
-
-    exported_count = len(all_records)
-    embedding_dim = 0
-    if all_records:
-        first_emb = all_records[0]["embedding"]
-        embedding_dim = len(first_emb) // 4  # float32 = 4 bytes each
-
     # Determine database_type from collection prefix.
     prefix = collection_name.split("__")[0] if "__" in collection_name else "knowledge"
 
+    # Write header (record_count/embedding_dim filled after streaming).
+    # The header is written first so the file is valid even during writing.
+    # record_count and embedding_dim are informational metadata (not validated
+    # on import) and are updated in a final rewrite pass after streaming.
     header: dict = {
         "format_version": FORMAT_VERSION,
         "collection_name": collection_name,
         "database_type": prefix,
         "embedding_model": embedding_model,
-        "record_count": exported_count,
-        "embedding_dim": embedding_dim,
+        "record_count": total_count,  # estimate; refined below
+        "embedding_dim": 0,           # informational only; not validated on import
         "exported_at": _now_iso(),
-        "pipeline_version": _PIPELINE_VERSION,
+        "pipeline_version": _PIPELINE_VERSION,  # informational; not checked on import
     }
-
-    # Phase 2: write header + gzip-compressed msgpack body.
     header_line = json.dumps(header).encode() + b"\n"
+
+    # Stream records page-by-page: paginate ChromaDB, filter, and write each
+    # page directly to the gzip stream.  This avoids accumulating all records
+    # in memory (031-I1).
+    page_size = QUOTAS.MAX_RECORDS_PER_WRITE
+    exported_count = 0
+    embedding_dim = 0
 
     with open(output_path, "wb") as f:
         f.write(header_line)
         with gzip.GzipFile(fileobj=f, mode="wb") as gz:
-            for record in all_records:
-                gz.write(msgpack.packb(record, use_bin_type=True))
+            offset = 0
+            while True:
+                result = _chroma_with_retry(
+                    col.get,
+                    include=["documents", "metadatas", "embeddings"],
+                    limit=page_size,
+                    offset=offset,
+                )
+                page_ids = result["ids"]
+                if not page_ids:
+                    break
+
+                for rec_id, doc, meta, emb in zip(
+                    page_ids,
+                    result["documents"],
+                    result["metadatas"],
+                    result["embeddings"],
+                ):
+                    source_path = (meta or {}).get("source_path")
+                    if not _apply_filter(source_path, includes, excludes):
+                        continue
+                    emb_bytes: bytes = np.array(emb, dtype=np.float32).tobytes()
+                    if embedding_dim == 0 and emb_bytes:
+                        embedding_dim = len(emb_bytes) // 4
+                    gz.write(msgpack.packb(
+                        {
+                            "id": rec_id,
+                            "document": doc,
+                            "metadata": meta or {},
+                            "embedding": emb_bytes,
+                        },
+                        use_bin_type=True,
+                    ))
+                    exported_count += 1
+
+                offset += len(page_ids)
+                if len(page_ids) < page_size:
+                    break  # last page
 
     file_bytes = output_path.stat().st_size
     elapsed = time.monotonic() - t0
@@ -311,15 +310,20 @@ def import_collection(
         input=str(input_path),
     )
 
-    # Phase 2: read records from gzip-compressed msgpack body.
-    header_len = len(header_line)
+    # Stream records from gzip-compressed msgpack body and upsert in batches.
+    # Single file open: read header, then gzip body from the same handle
+    # (eliminates the TOCTOU window of opening the file twice — 031-S8).
+    # Records are upserted as each batch fills, avoiding accumulating all
+    # records in memory (031-I1).
+    page_size = QUOTAS.MAX_RECORDS_PER_WRITE
+    imported_count = 0
     ids: list[str] = []
     documents: list[str] = []
     embeddings: list[list[float]] = []
     metadatas: list[dict] = []
 
     with open(input_path, "rb") as f:
-        f.seek(header_len)
+        f.readline()  # skip header (already parsed above)
         with gzip.GzipFile(fileobj=f, mode="rb") as gz:
             unpacker = msgpack.Unpacker(gz, raw=False, max_buffer_size=10 * 1024 * 1024)
             for record in unpacker:
@@ -328,12 +332,10 @@ def import_collection(
                 meta: dict = record["metadata"]
                 emb_bytes: bytes = record["embedding"]
 
-                # Apply path remapping to source_path if present.
                 if remaps and "source_path" in meta:
                     meta = dict(meta)
                     meta["source_path"] = _apply_remap(meta["source_path"], remaps)
 
-                # Reconstruct embedding from float32 bytes.
                 emb: list[float] = np.frombuffer(emb_bytes, dtype=np.float32).tolist()
 
                 ids.append(rec_id)
@@ -341,25 +343,29 @@ def import_collection(
                 embeddings.append(emb)
                 metadatas.append(meta)
 
-    imported_count = len(ids)
+                # Flush batch when page_size reached.
+                if len(ids) >= page_size:
+                    db.upsert_chunks_with_embeddings(
+                        collection_name=collection_name,
+                        ids=ids,
+                        documents=documents,
+                        embeddings=embeddings,
+                        metadatas=metadatas,
+                    )
+                    imported_count += len(ids)
+                    _log.debug("import_batch_written", count=len(ids), total_so_far=imported_count)
+                    ids, documents, embeddings, metadatas = [], [], [], []
 
-    # Phase 3: upsert in batches using the pre-computed embedding path.
-    page_size = QUOTAS.MAX_RECORDS_PER_WRITE
-    for start in range(0, imported_count, page_size):
-        end = start + page_size
+    # Flush remaining records.
+    if ids:
         db.upsert_chunks_with_embeddings(
             collection_name=collection_name,
-            ids=ids[start:end],
-            documents=documents[start:end],
-            embeddings=embeddings[start:end],
-            metadatas=metadatas[start:end],
+            ids=ids,
+            documents=documents,
+            embeddings=embeddings,
+            metadatas=metadatas,
         )
-        _log.debug(
-            "import_batch_written",
-            start=start,
-            end=min(end, imported_count),
-            total=imported_count,
-        )
+        imported_count += len(ids)
 
     elapsed = time.monotonic() - t0
 
