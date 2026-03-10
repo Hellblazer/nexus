@@ -7,6 +7,51 @@ import pytest
 
 from nexus.db.t2 import T2Database, _sanitize_fts5
 
+# Old FTS5 schema (without title) for migration tests
+_OLD_FTS_SCHEMA = """\
+PRAGMA journal_mode=WAL;
+
+CREATE TABLE IF NOT EXISTS memory (
+    id        INTEGER PRIMARY KEY,
+    project   TEXT    NOT NULL,
+    title     TEXT    NOT NULL,
+    session   TEXT,
+    agent     TEXT,
+    content   TEXT    NOT NULL,
+    tags      TEXT,
+    timestamp TEXT    NOT NULL,
+    ttl       INTEGER
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_project_title ON memory(project, title);
+CREATE INDEX        IF NOT EXISTS idx_memory_project       ON memory(project);
+CREATE INDEX        IF NOT EXISTS idx_memory_agent         ON memory(agent);
+CREATE INDEX        IF NOT EXISTS idx_memory_timestamp     ON memory(timestamp);
+CREATE INDEX        IF NOT EXISTS idx_memory_ttl_timestamp ON memory(ttl, timestamp);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    content,
+    tags,
+    content='memory',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
+    INSERT INTO memory_fts(rowid, content, tags) VALUES (new.id, new.content, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, content, tags)
+        VALUES ('delete', old.id, old.content, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, content, tags)
+        VALUES ('delete', old.id, old.content, old.tags);
+    INSERT INTO memory_fts(rowid, content, tags) VALUES (new.id, new.content, new.tags);
+END;
+"""
+
 
 def test_t2database_context_manager_closes_on_exit(tmp_path: Path) -> None:
     """T2Database used as a context manager closes the connection on __exit__."""
@@ -505,3 +550,122 @@ def test_sanitize_fts5_search_by_tag_hyphen_no_crash(db: T2Database) -> None:
     db.put(project="proj", title="notes.md", content="verification probe", tags="rdr")
     results = db.search_by_tag("verification-probe", "rdr")
     assert isinstance(results, list)
+
+
+# ── FTS5 title indexing ───────────────────────────────────────────────────────
+
+def test_t2_search_finds_entry_by_title_keyword(db: T2Database) -> None:
+    """search() returns entries whose title contains the search term."""
+    db.put(project="nexus", title="RDR-025-implementation.md", content="some generic content")
+    db.put(project="nexus", title="unrelated.md", content="other content here")
+
+    results = db.search("RDR-025")
+    assert len(results) == 1
+    assert results[0]["title"] == "RDR-025-implementation.md"
+
+
+def test_t2_search_title_with_project_filter(db: T2Database) -> None:
+    """search() with project filter finds by title within that project."""
+    db.put(project="proj_a", title="auth-design.md", content="generic text")
+    db.put(project="proj_b", title="auth-notes.md", content="generic text")
+
+    results = db.search("auth", project="proj_a")
+    assert len(results) == 1
+    assert results[0]["project"] == "proj_a"
+
+
+def test_t2_search_title_only_match_no_content_collision(db: T2Database) -> None:
+    """A term appearing only in title (not content) is still found by search()."""
+    unique_title_word = "xylophone99"
+    db.put(project="proj", title=f"{unique_title_word}.md", content="completely different words")
+
+    results = db.search(unique_title_word)
+    assert len(results) == 1
+    assert unique_title_word in results[0]["title"]
+
+
+def test_t2_search_title_update_triggers_reindex(db: T2Database) -> None:
+    """After UPDATE on memory table, FTS5 title index reflects the new title."""
+    # Insert with a title containing a unique word
+    db.put(project="proj", title="olduniquetitleword.md", content="content")
+    assert len(db.search("olduniquetitleword")) == 1
+
+    # Directly update the title — the au trigger should re-index title in FTS
+    db.conn.execute(
+        "UPDATE memory SET title='newuniquetitleword.md' WHERE project='proj' AND title='olduniquetitleword.md'"
+    )
+    db.conn.commit()
+
+    # Old title word should no longer be findable
+    assert db.search("olduniquetitleword") == []
+    # New title word should be findable
+    assert len(db.search("newuniquetitleword")) == 1
+
+
+# ── FTS5 migration (old schema without title) ─────────────────────────────────
+
+def _create_old_schema_db(path: Path) -> None:
+    """Create a SQLite DB using the old FTS5 schema (no title column) and insert rows."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_OLD_FTS_SCHEMA)
+    conn.execute(
+        "INSERT INTO memory (project, title, session, agent, content, tags, timestamp, ttl) "
+        "VALUES (?, ?, NULL, NULL, ?, ?, ?, ?)",
+        ("testproj", "RDR-007-design.md", "generic body content", "rdr", "2026-01-01T00:00:00Z", 30),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_t2_fts_migration_enables_title_search(tmp_path: Path) -> None:
+    """Opening an old-schema DB with T2Database migrates FTS5 to include title column.
+
+    After migration, searching for a term that appears only in the title must
+    return the entry, whereas the old schema would have returned nothing.
+    """
+    db_path = tmp_path / "old_schema.db"
+    _create_old_schema_db(db_path)
+
+    # Verify old schema: direct query shows row exists but FTS5 lacks title
+    conn = sqlite3.connect(str(db_path))
+    fts_schema = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
+    ).fetchone()[0]
+    assert "title" not in fts_schema, "Pre-condition: old schema should lack title"
+    conn.close()
+
+    # Now open with new T2Database code — migration should occur
+    with T2Database(db_path) as db:
+        # Verify migration updated the FTS schema
+        fts_schema_new = db.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
+        ).fetchone()[0]
+        assert "title" in fts_schema_new, "Post-migration: FTS5 schema should include title"
+
+        # Insert new entry so title search is tested on fresh data too
+        db.put(project="testproj", title="RDR-999-migration.md", content="unrelated body")
+
+        # The pre-existing row's title should be searchable after rebuild
+        results = db.search("RDR-007")
+        assert len(results) == 1, f"Expected to find RDR-007 by title; got {results}"
+        assert results[0]["title"] == "RDR-007-design.md"
+
+        # New entry title also searchable
+        results2 = db.search("RDR-999")
+        assert len(results2) == 1
+        assert results2[0]["title"] == "RDR-999-migration.md"
+
+
+def test_t2_fts_migration_is_idempotent(tmp_path: Path) -> None:
+    """Opening a DB that already has title in FTS5 schema does NOT re-migrate."""
+    db_path = tmp_path / "new_schema.db"
+
+    # Create DB with new schema
+    with T2Database(db_path) as db:
+        db.put(project="proj", title="existing-entry.md", content="content here")
+
+    # Open again — should not error or drop existing data
+    with T2Database(db_path) as db:
+        results = db.search("existing-entry")
+        assert len(results) == 1
+        assert results[0]["title"] == "existing-entry.md"
