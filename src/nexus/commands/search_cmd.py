@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import logging
 import os
 from pathlib import Path
 
 import click
+import structlog
 
 from nexus.config import load_config
 from nexus.corpus import resolve_corpus
@@ -156,6 +158,15 @@ def search_cmd(
     --corpus may be a prefix (code, docs, knowledge) or a fully-qualified
     collection name (code__myrepo).  Repeat --corpus to search multiple corpora.
     """
+    # Structured output modes (--json, --vimgrep, --files, --compact) must
+    # produce clean machine-parseable output.  Suppress log messages below
+    # ERROR so warnings don't pollute stdout.
+    if json_out or vimgrep or files_only or compact:
+        logging.getLogger().setLevel(logging.ERROR)
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.ERROR),
+        )
+
     # -C N = -B N -A N (grep semantics: before + after)
     if lines_context:
         lines_before = lines_context
