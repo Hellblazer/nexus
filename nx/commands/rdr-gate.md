@@ -168,35 +168,14 @@ print()
 
 # T2 metadata
 print("### T2 Metadata")
-try:
-    result = subprocess.run(
-        ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', t2_key],
-        capture_output=True, text=True, timeout=10)
-    t2_out = (result.stdout or '').strip()
-    print(t2_out if t2_out else f"No T2 record for RDR {t2_key}")
-except Exception as exc:
-    print(f"T2 not available: {exc}")
+print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\" to retrieve T2 metadata.")
 print()
 
 # T2 research findings
 print("### T2 Research Findings")
-try:
-    result = subprocess.run(
-        ['nx', 'memory', 'list', '--project', f'{repo_name}_rdr'],
-        capture_output=True, text=True, timeout=10)
-    list_out = (result.stdout or '').strip()
-    research_lines = [l for l in list_out.splitlines()
-                      if re.match(rf'^{t2_key}-research', l)]
-    if research_lines:
-        print('\n'.join(research_lines))
-    else:
-        print("No research findings recorded")
-        print()
-        print("> **Layer 1 check**: No research findings exist for this RDR.")
-        print(f"> Run `/rdr-research add {t2_key}` to record findings before gating.")
-        print("> Use `--skip-research` in your gate command to override.")
-except Exception as exc:
-    print(f"T2 not available: {exc}")
+print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"\" to list all entries, then filter for {t2_key}-research* titles.")
+print(f"If no research findings exist, run `/rdr-research add {t2_key}` to record findings before gating.")
+print(f"Use `--skip-research` in your gate command to override.")
 PYEOF
 }
 
@@ -215,15 +194,14 @@ All data is pre-loaded above — no additional tool calls needed.
   - **Layer 3 — AI critique**: Dispatch the `substantive-critic` agent via Task tool with the full RDR content. If the RDR has `related_issues` listing other RDR IDs, read those RDRs and include their content in the critique prompt — the critic should check for consistency and contradictions between related RDRs (P7).
 - Gate outcomes: **BLOCKED** (critical issues found, must fix and re-gate) or **PASSED** (no critical issues). Do not use "Conditional Accept" or other ad-hoc outcomes.
 - **Write T2 gate result** after completing all layers. Use the repo name from above:
-  ```bash
-  nx memory put - --project {repo_name}_rdr --title {id}-gate-latest --ttl permanent --tags rdr,gate <<'EOF'
+  Use **memory_put** tool: project="{repo_name}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate", content with:
+  ```
   outcome: "PASSED"  # or "BLOCKED"
   date: "YYYY-MM-DD"
   critical_count: 0
   significant_count: 2
   observation_count: 3
   summary: "One-sentence summary of gate result"
-  EOF
   ```
   This overwrites any previous gate result for this RDR, so only the latest gate run is stored.
 - **If PASSED**, print: `> Run '/rdr-accept <id>' to accept this RDR.`

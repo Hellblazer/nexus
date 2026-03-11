@@ -46,7 +46,7 @@ If unsure whether Serena is already activated, call `get_current_config` to chec
 | Pattern search across files | `search_for_pattern` | Grep (prefer Grep — it's faster) |
 | Find files by name | Glob | `find_file` |
 | Read a specific known file | Read | `read_file` |
-| Semantic/conceptual search | `nx search --hybrid` | Serena (no semantic search) |
+| Semantic/conceptual search | Use search tool: query="...", hybrid=true | Serena (no semantic search) |
 | Exact text, comments, config | Grep | Serena |
 
 ## Workflow Patterns

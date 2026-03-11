@@ -4,15 +4,18 @@
 
 ## How It Fits Together
 
-Nexus has three layers: a CLI that talks to three storage tiers, an indexing
-pipeline that fills them, and a search engine that queries across them.
+Nexus has three layers: a CLI (for humans) and an MCP server (for agents) that
+talk to three storage tiers, an indexing pipeline that fills them, and a search
+engine that queries across them.
 
 ```
-User / Agent
-    │
-    ▼
-CLI (cli.py + commands/)
-    │
+Human                   Agent (Claude Code)
+  │                         │
+  ▼                         ▼
+CLI (cli.py)            MCP Server (mcp_server.py)
+  │                         │
+  └──────────┬──────────────┘
+             │
     ├── Index: classify → chunk → embed → store
     │     code: classify(SKIP|CODE|PROSE|PDF) → tree-sitter AST → context prefix → voyage-code-3 → code__<repo>
     │     prose: SemanticMarkdownChunker (md) or line-split → voyage-context-3 → docs__<repo>
@@ -45,6 +48,7 @@ Data flows upward (T1 → T2 → T3).
 | **Export** | `exporter.py` | Collection export/import for T3 backup and migration (.nxexp format) |
 | **Search** | `search_engine.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py` | Query, rank, rerank |
 | **Hooks** | `commands/hooks.py` | Git hook install/uninstall/status, sentinel-bounded stanza management |
+| **MCP Server** | `mcp_server.py` | FastMCP server exposing T1/T2/T3 storage APIs as MCP tools |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py` | Configuration, naming, formatting, session lifecycle, transient-error retry |
 
 ## Design Decisions

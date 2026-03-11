@@ -4,7 +4,7 @@ version: "2.1"
 description: Creates phased TDD-driven implementation plans and decomposes complex work into tracked beads. Use for multi-phase feature planning, dependency management, breaking vague requirements into executable tasks, or iterating on existing plans.
 model: opus
 color: indigo
-tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
+tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples
@@ -28,16 +28,16 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 6. [ ] **RDR status check** — Scan the relay Task field and Input Artifacts for
    the pattern `RDR-\d+`. For each match, run:
-   `nx memory get --project {repo}_rdr --title NNN`
+   Use memory_get tool: project="{repo}_rdr", title="NNN"
    If status is not `accepted` or `closed`, warn the user:
    "RDR-NNN is {status}. Consider running `/rdr-gate NNN` and `/rdr-accept NNN` first."
    If the lookup fails or returns no result, warn and proceed (fail-open).
    If no RDR pattern is found, proceed normally.
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
-3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -76,20 +76,18 @@ Thought 8: Identify critical risks and mitigations
 
 Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to refine earlier analysis.
 2. Search relevant knowledge bases for prior art and context:
-   - nx T3 store: `nx search "relevant topic" --corpus knowledge --n 5`
-   - nx T2 memory: `nx memory get --project {project} --title plan.md`
+   - nx T3 store: Use search tool: query="relevant topic", corpus="knowledge", n=5
+   - nx T2 memory: Use memory_get tool: project="{project}", title="plan.md"
 3. Identify constraints, dependencies, and success criteria
 5. **Discover Relevant Project History and Patterns with nx search**:
-   ```bash
-   # Project structure and organization
-   nx search "project structure modules and how things are organized" --corpus code --hybrid --n 20
+   Project structure and organization:
+   Use search tool: query="project structure modules and how things are organized", corpus="code", n=20
 
-   # Similar feature implementations
-   nx search "similar features we have implemented before" --corpus knowledge --n 15
+   Similar feature implementations:
+   Use search tool: query="similar features we have implemented before", corpus="knowledge", n=15
 
-   # Technical patterns and decisions
-   nx search "architectural decisions and technical patterns in this project" --corpus knowledge --n 15
-   ```
+   Technical patterns and decisions:
+   Use search tool: query="architectural decisions and technical patterns in this project", corpus="knowledge", n=15
    Use findings to ensure your plan reuses established patterns, identify similar work that informs estimation, and reference prior decisions that apply to this feature.
 
 ### Phase 2: Plan Creation
@@ -125,8 +123,8 @@ Each bead must contain sufficient context for autonomous execution:
 ### Task: [Title]
 
 **Context**
-- Related nx memory docs: `nx memory list --project {project}`
-- nx store collections to search: `nx search "[keywords]" --corpus knowledge --n 5`
+- Related nx memory docs: Use memory_get tool: project="{project}", title=""
+- nx store collections to search: Use search tool: query="[keywords]", corpus="knowledge", n=5
 - Search keywords: [relevant terms for knowledge retrieval]
 
 **Prerequisites**
@@ -147,7 +145,7 @@ Each bead must contain sufficient context for autonomous execution:
 
 **Continuation State**
 - Update nx memory after each significant milestone:
-  `nx memory put "state content" --project {project} --title continuation-state.md --ttl 30d`
+  Use memory_put tool: content="state content", project="{project}", title="continuation-state.md"
 - Track: current step, completed items, blocking issues, next actions
 
 **Validation**
@@ -188,14 +186,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Bead Hierarchy**: Epic -> Phase -> Task structure
 - **Dependency Maps**: Use `bd dep add` for all relationships
 - **Planning Notes**: Use T1 scratch for intermediate analysis during planning; flag for T2 at session end:
-  ```bash
-  nx scratch put "Planning note: {consideration}" --tags "planning,analysis"
-  nx scratch flag <id> --project {project} --title planning-notes.md
-  ```
+  Use scratch tool: action="put", content="Planning note: {consideration}", tags="planning,analysis"
+  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="planning-notes.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project} --title {topic}.md` (e.g., `--project ART --title auth-implementation.md`)
+- **nx memory**: Use memory_put tool: project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
 ### Completion Protocol
@@ -204,21 +200,21 @@ Store using these naming conventions:
 
 **Sequence** (follow strictly):
 1. **Create Bead Hierarchy**: Create all beads (epic, phases, tasks) with dependencies
-2. **Write Plan to nx Memory**: Store complete plan: `nx memory put "plan content" --project {project} --title plan-{name}.md --ttl 30d`
+2. **Write Plan to nx Memory**: Store complete plan: Use memory_put tool: content="plan content", project="{project}", title="plan-{name}.md"
 3. **Store Dependency Map**: Use `bd dep add` for all relationships
-4. **Verify Persistence**: Confirm beads created (bd list) and memory written (`nx memory get --project {project} --title plan-{name}.md`)
+4. **Verify Persistence**: Confirm beads created (bd list) and memory written (Use memory_get tool: project="{project}", title="plan-{name}.md")
 5. **Generate Response**: Only after all above steps complete, generate final plan response
 
 **Verification Checklist**:
 - [ ] All beads created (always verify - use bd list, count must match plan)
 - [ ] Bead dependencies established (use bd show <id> for each dependency relationship)
-- [ ] nx memory plan file written (always verify - use nx memory get)
+- [ ] nx memory plan file written (always verify - use memory_get tool)
 - [ ] All data persisted before composing final response
 
 **If Verification Fails** (partial persistence):
 1. **Retry once**: Attempt failed operation again
 2. **Document partial state**: Note which beads/dependencies succeeded/failed in response
-3. **Persist recovery notes**: Write to nx memory as `--title plan-persistence-failure-{date}.md` with bead IDs and commands
+3. **Persist recovery notes**: Use memory_put tool: content="failure details with bead IDs", project="{project}", title="plan-persistence-failure-{date}.md"
 4. **Continue with response**: Include successfully created beads and manual commands for failed items
 
 Example: If 2 of 5 beads fail to create, note in response: "3 beads created successfully (IDs: epic-1, phase-1, task-1). Failed beads can be created manually with: bd create 'Title' -t type -p priority"
@@ -234,8 +230,8 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 
 ### For You (Strategic Planner)
 - **Always audit plans** via plan-auditor before presenting to user
-- **Keep continuation state current** via `nx memory put ... --title continuation-state.md`
-- **Search knowledge bases** before planning: `nx search` for T3, `nx memory search` for T2
+- **Keep continuation state current** via memory_put tool: title="continuation-state.md"
+- **Search knowledge bases** before planning: search tool for T3, memory_search tool for T2
 - **Use beads** (bd) for ALL task tracking - never markdown TODO lists
 
 ### Include in Every Bead
@@ -287,4 +283,4 @@ Before finalizing any plan:
 
 **Impact**: None on plan quality or output. The error notification can be safely ignored.
 
-**Workaround**: Review the agent's output file, beads (bd list), or nx memory (`nx memory list --project {project}`) - the complete plan will be present despite the error notification.
+**Workaround**: Review the agent's output file, beads (bd list), or nx memory (memory_get tool: project="{project}", title="") - the complete plan will be present despite the error notification.

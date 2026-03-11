@@ -195,4 +195,4 @@ All data is pre-loaded above — no additional tool calls needed.
 - Use the detected ID style (`RDR-NNN-*` or `NNN-*`) for the new filename.
 - If `$ARGUMENTS` contains a title, pre-fill it; otherwise prompt.
 - If the RDR directory does not exist, run bootstrap: create the directory and copy templates from `$CLAUDE_PLUGIN_ROOT/resources/rdr/`.
-- Register the new RDR in T2: `nx memory put ... --project {repo}_rdr --title {id}`.
+- Register the new RDR in T2: use **memory_put** tool: project="{repo}_rdr", title="{id}" with RDR metadata fields.

@@ -4,6 +4,24 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Nexus MCP server** (RDR-034) — bundled FastMCP server (`nx-mcp`) exposing 8
+  structured tools for direct T1/T2/T3 storage access. Agents no longer depend on
+  Bash for storage operations. Declared in `.mcp.json` alongside sequential-thinking.
+- **Plugin-wide MCP migration** — all 14 agents, `_shared/` protocols
+  (`CONTEXT_PROTOCOL.md`, `ERROR_HANDLING.md`), and 9 skills updated from CLI syntax
+  to MCP tool syntax (`mcp__plugin_nx_nexus__*`). Human-facing docs retain CLI syntax.
+- **Permission auto-approval** for all `mcp__plugin_nx_nexus__*` tools in the
+  PermissionRequest hook.
+
+### Changed
+- `id` parameter renamed to `entry_id` in scratch tool calls across all agent and
+  skill files (avoids Python builtin shadow).
+- Plugin README rewritten: MCP Servers section expanded with full tool documentation,
+  prerequisites table updated, permission section updated.
+
 ## [1.9.1] - 2026-03-10
 
 ### Changed

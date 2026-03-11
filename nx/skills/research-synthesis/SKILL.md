@@ -43,7 +43,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 The agent uses `mcp__sequential-thinking__sequentialthinking`:
 1. Form hypothesis about what information is needed
-2. Search nx store for existing knowledge: `nx search "topic" --corpus knowledge`
+2. Search nx store for existing knowledge: Use search tool: query="topic", corpus="knowledge"
 3. Search web resources for current information
 4. Analyze relevant code if applicable
 5. Synthesize findings from all sources
@@ -61,12 +61,10 @@ The agent uses `mcp__sequential-thinking__sequentialthinking`:
 
 ## Agent-Specific PRODUCE
 
-- **Research Synthesis**: Store in nx T3 as `printf "# Research: {topic}\n{content}\n" | nx store put - --collection knowledge --title "research-{topic}-{date}" --tags "research,{domain}"`
+- **Research Synthesis**: Store in nx T3 via store_put tool: content="# Research: {topic}\n{content}", collection="knowledge", title="research-{topic}-{date}", tags="research,{domain}"
 - **Source Citations**: Include in document content (not separate)
 - **Knowledge Gaps**: Create research beads for follow-up
 - **Cross-Reference Maps**: Document relationships in nx T3 document content
 - **Round Artifacts**: Use T1 scratch to track findings per research round:
-  ```bash
-  nx scratch put $'# Round {N} findings\n{content}' --tags "research,round-{N}"
-  nx scratch flag <id> --project {project} --title research-round-{N}.md
-  ```
+  - scratch tool: action="put", content="# Round {N} findings\n{content}", tags="research,round-{N}"
+  - scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="research-round-{N}.md"

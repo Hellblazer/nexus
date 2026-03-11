@@ -17,19 +17,14 @@ description: Index PDF files into nx store for semantic search using pdf-chromad
   echo ""
 
   echo "### Existing Indexed Collections"
-  echo '```'
-  if command -v nx &> /dev/null; then
-    nx store list 2>/dev/null | head -10 || echo "No collections found"
-  else
-    echo "nx not available"
-  fi
-  echo '```'
+  echo ""
+  echo "Use **store_list** tool to list existing indexed collections."
   echo ""
 
   echo "### Tip"
   echo ""
   echo "Specify PDF paths or a directory. The agent extracts text, chunks content,"
-  echo "and indexes into nx store T3 for semantic search via 'nx search'."
+  echo "and indexes into T3 for semantic search via the search tool."
 }
 
 ## PDFs to Process
@@ -43,7 +38,7 @@ Invoke the **pdf-processing** skill with the following relay. Fill in dynamic fi
 ```markdown
 ## Relay: pdf-chromadb-processor
 
-**Task**: Index "$ARGUMENTS" into nx store T3 for semantic search
+**Task**: Index "$ARGUMENTS" into T3 store for semantic search
 **Bead**: [fill from active bead above or 'none']
 
 ### Input Artifacts
@@ -53,14 +48,14 @@ Invoke the **pdf-processing** skill with the following relay. Fill in dynamic fi
 $ARGUMENTS
 
 ### Deliverable
-All specified PDFs extracted, chunked, and indexed in nx store T3 with metadata preserved (title, author, date) and searchability verified via `nx search` sample queries.
+All specified PDFs extracted, chunked, and indexed in T3 store with metadata preserved (title, author, date) and searchability verified via search tool sample queries.
 
 ### Quality Criteria
 - [ ] All PDFs processed without errors
 - [ ] Text properly extracted with layout preserved
 - [ ] Content chunked appropriately for semantic search
 - [ ] Metadata (title, author, date) preserved in document records
-- [ ] Documents searchable -- verified with `nx search` sample queries
+- [ ] Documents searchable -- verified with search tool sample queries
 - [ ] Collection name follows convention (docs__corpus-name)
 ```
 

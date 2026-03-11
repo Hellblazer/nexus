@@ -4,7 +4,7 @@ version: "2.0"
 description: Routes requests to appropriate specialized agents and manages multi-agent pipelines. Use when the task is ambiguous, when coordinating work across multiple agents, or when unsure which agent to invoke.
 model: haiku
 color: gold
-tools: ["Read", "Grep", "Glob", "Agent", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
+tools: ["Read", "Grep", "Glob", "Agent", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples
@@ -28,9 +28,9 @@ tools: ["Read", "Grep", "Glob", "Agent", "mcp__plugin_nx_sequential-thinking__se
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
-3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -145,15 +145,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - **Routing Decisions**: Document in response; for significant routing patterns, store in T3:
-  ```bash
-  printf "# Routing Pattern: {pattern}\n{rationale}\n" | nx store put - --collection knowledge --title "pattern-orchestrator-{routing-scenario}" --tags "routing,orchestration"
-  ```
+  Use store_put tool: content="# Routing Pattern: {pattern}\n{rationale}", collection="knowledge", title="pattern-orchestrator-{routing-scenario}", tags="routing,orchestration"
 - **Pipeline Coordination**: Track via beads with dependencies
 - **Interim Routing Notes**: Use T1 scratch for working notes during complex pipeline analysis:
-  ```bash
-  nx scratch put "Routing hypothesis: {agent} because {reason}" --tags "routing,pipeline"
-  nx scratch flag <id> --project {project} --title routing-notes.md  # if worth preserving
-  ```
+  Use scratch tool: action="put", content="Routing hypothesis: {agent} because {reason}", tags="routing,pipeline"
+  If worth preserving:
+  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="routing-notes.md"
 - **Context Aggregation**: Gather and pass through; don't create new storage
 - **Escalation Notes**: Create blocker beads when needed
 

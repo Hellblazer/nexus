@@ -4,7 +4,7 @@ version: "3.0"
 description: Indexes PDF files into nx T3 store for semantic search by delegating to nx index pdf. Use for any PDF that needs to be extracted and made semantically searchable.
 model: haiku
 color: coral
-tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
+tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples
@@ -27,9 +27,9 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
-3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -59,9 +59,7 @@ For each PDF in the input:
    - Add `--dry-run` first for large or unknown PDFs to preview extraction
 
 4. **Verify indexing**:
-   ```bash
-   nx search "representative query from the document" --corpus docs__{corpus-name} -m 3
-   ```
+   Use search tool: query="representative query from the document", corpus="docs__{corpus-name}", n=3
 
 5. **Report results**: chunk count, collection name, sample search results.
 
@@ -88,14 +86,11 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **T3 knowledge**: Indexed PDF content via `nx index pdf` (atomic pipeline — extraction, chunking, embedding, storage)
 - **Processing Reports**: Include in response with chunk count and collection name
 - **T2 memory**: Log index status after processing:
-  ```bash
-  nx memory put "PDF processed: {filename} → {corpus-name}, {N} chunks, {date}" \
-    --project {project} --title pdf-index-log.md --ttl 30d
-  ```
+  Use memory_put tool: content="PDF processed: {filename} -> {corpus-name}, {N} chunks, {date}", project="{project}", title="pdf-index-log.md"
 
 ## Relationship to Other Agents
 
-- **vs deep-research-synthesizer**: You index PDFs into T3. Synthesizer researches the indexed content via `nx search`.
+- **vs deep-research-synthesizer**: You index PDFs into T3. Synthesizer researches the indexed content via the search tool.
 - **vs knowledge-tidier**: You create raw indexed content. Tidier organizes and consolidates.
 
 ## Success Criteria
@@ -104,4 +99,4 @@ You have succeeded when:
 1. All requested PDFs are indexed via `nx index pdf`
 2. Semantic search returns relevant results for test queries
 3. Final report documents all PDFs processed, chunk counts, and any issues
-4. User can immediately search the processed content via `nx search "query" --corpus {corpus-name}`
+4. User can immediately search the processed content via search tool: query="query", corpus="{corpus-name}"

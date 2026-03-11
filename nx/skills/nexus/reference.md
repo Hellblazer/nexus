@@ -1,107 +1,180 @@
 # Nexus — Agent Usage Guide
 
-Nexus gives you a single CLI to index repositories, PDFs, and notes; search across all of them semantically; and manage persistent memory across sessions.
+Nexus provides MCP tools for semantic search, persistent memory, and knowledge management across sessions.
 
 **Three storage tiers:**
-- **T1 scratch** — in-memory, session-scoped (`nx scratch`)
-- **T2 memory** — local SQLite, survives restarts (`nx memory`)
-- **T3 knowledge** — ChromaDB cloud + Voyage AI, permanent (`nx search`, `nx store`, `nx index`)
+- **T1 scratch** — session-scoped (`scratch`, `scratch_manage` tools)
+- **T2 memory** — local SQLite, survives restarts (`memory_put`, `memory_get`, `memory_search` tools)
+- **T3 knowledge** — ChromaDB cloud + Voyage AI, permanent (`search`, `store_put`, `store_list` tools)
 
-## Search
+## MCP Tool Reference
 
-```bash
-nx search "query"                          # semantic search across all T3 knowledge
-nx search "query" --corpus code            # code collections only
-nx search "query" --corpus docs            # docs collections only
-nx search "query" --corpus knowledge       # knowledge collections only
-nx search "query" --corpus code --corpus docs  # multi-corpus with reranker merge
-nx search "query" --hybrid                 # semantic + ripgrep + git frecency (code only)
-nx search "query" --vimgrep               # path:line:col:content output
-nx search "query" --json                   # JSON array output
-nx search "query" --files                  # unique file paths only
-nx search "query" --content               # show matched text inline
-nx search "query" -C 3                    # 3 context lines around each result
+All nexus MCP tools are prefixed `mcp__plugin_nx_nexus__` in Claude Code.
+
+### search
+
+Semantic search across T3 knowledge collections.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | str | required | Search query string |
+| `corpus` | str | `"knowledge"` | Corpus prefix or full collection name |
+| `n` | int | `10` | Maximum results to return |
+
+```
+Use search tool: query="query"                                  # all T3 knowledge
+Use search tool: query="query", corpus="code"                   # code collections only
+Use search tool: query="query", corpus="docs"                   # docs collections only
+Use search tool: query="query", corpus="knowledge"              # knowledge collections only
+Use search tool: query="query", corpus="code__myrepo", n=15     # specific collection
 ```
 
-## Memory (T2 — persistent across sessions)
+### store_put
 
-```bash
-nx memory put "content" --project {repo} --title title.md
-nx memory put - --project {repo} --title title.md   # from stdin
-nx memory get --project {repo} --title title.md
-nx memory search "query"
-nx memory search "query" --project {repo}
-nx memory list --project {repo}
-nx memory expire                           # remove TTL-expired entries
-nx memory promote <id> --collection knowledge  # push to T3
+Store content in the T3 permanent knowledge store.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `content` | str | required | Text content to store |
+| `collection` | str | `"knowledge"` | Collection name or prefix |
+| `title` | str | `""` | Document title (recommended for dedup) |
+| `tags` | str | `""` | Comma-separated tags |
+| `ttl` | str | `"permanent"` | TTL: `Nd`, `Nw`, or `"permanent"` |
+
+```
+Use store_put tool: content="finding text", collection="knowledge", title="research-topic", tags="arch"
+Use store_put tool: content="notes", collection="knowledge", title="sprint-notes", ttl="30d"
 ```
 
-**Project naming**: Use purpose-specific suffixes for different memory domains:
+**TTL formats**: `30d` (30 days), `4w` (4 weeks), `permanent` or `never` (no expiry).
 
+### store_list
+
+List entries in a T3 knowledge collection.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `collection` | str | `"knowledge"` | Collection name or prefix |
+| `limit` | int | `200` | Maximum entries to return |
+
+```
+Use store_list tool: collection="knowledge"
+Use store_list tool: collection="knowledge__notes", limit=50
+```
+
+### memory_put
+
+Store a memory entry in T2 (SQLite). Upserts by (project, title).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `content` | str | required | Text content to store |
+| `project` | str | required | Project namespace |
+| `title` | str | required | Entry title (unique within project) |
+| `tags` | str | `""` | Comma-separated tags |
+| `ttl` | int | `30` | Time-to-live in days (0 for permanent) |
+
+```
+Use memory_put tool: content="content", project="{repo}", title="findings.md"
+Use memory_put tool: content="content", project="{repo}", title="findings.md", ttl=0
+```
+
+**Project naming**: Use purpose-specific suffixes:
 - bare `{repo}` — general project memory and notes
-- `{repo}_rdr` — RDR documents and gate results (populated by `/rdr-create`)
+- `{repo}_rdr` — RDR documents and gate results
 
-The session hook discovers all populated namespaces by prefix scan; content stored under any `{repo}_*` namespace surfaces at session start.
+### memory_get
 
-## Knowledge store (T3 — permanent, cloud)
+Retrieve a memory entry by project and title, or list entries if title is empty.
 
-```bash
-nx store put analysis.md --collection knowledge --tags "arch"
-echo "# Finding..." | nx store put - --collection knowledge --title "My Finding" --tags "research"
-nx store put notes.md --collection knowledge --tags "notes" --ttl 30d
-nx store list
-nx store list --collection knowledge__notes
-nx store expire
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `project` | str | required | Project namespace |
+| `title` | str | `""` | Entry title (empty = list all entries) |
+
+```
+Use memory_get tool: project="{repo}", title="findings.md"
+Use memory_get tool: project="{repo}", title=""              # list all entries
 ```
 
-**TTL formats**: `30d` (30 days), `4w` (4 weeks), `permanent` or `never` (no expiry). Use `Nd`/`Nw` format — NOT bare integers. Omit `--ttl` entirely for permanent entries.
+### memory_search
 
-## Scratch (T1 — session-scoped, cleared at session end)
+Full-text search across T2 memory entries.
 
-```bash
-nx scratch put "working hypothesis: the cache is stale"
-nx scratch search "cache"
-nx scratch list
-nx scratch get <id>
-nx scratch flag <id>                       # mark for auto-flush to T2 at session end
-nx scratch unflag <id>
-nx scratch promote <id> --project {repo} --title findings.md
-nx scratch clear
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | str | required | Search query (FTS5 syntax) |
+| `project` | str | `""` | Optional project filter |
+
+```
+Use memory_search tool: query="query"
+Use memory_search tool: query="query", project="{repo}"
 ```
 
-**Usage pattern**: Use T1 scratch for in-flight working notes (hypotheses, interim findings, checkpoints). Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via `nx store put`.
+### scratch
 
-## Indexing
+T1 session scratch pad — ephemeral within-session storage.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `action` | str | required | `"put"`, `"search"`, `"list"`, `"get"` |
+| `content` | str | `""` | Content to store (for `"put"`) |
+| `query` | str | `""` | Search query (for `"search"`) |
+| `tags` | str | `""` | Comma-separated tags (for `"put"`) |
+| `entry_id` | str | `""` | Entry ID (for `"get"`) |
+| `n` | int | `10` | Max results for search |
+
+```
+Use scratch tool: action="put", content="working hypothesis: the cache is stale"
+Use scratch tool: action="search", query="cache"
+Use scratch tool: action="list"
+Use scratch tool: action="get", entry_id="<id>"
+```
+
+### scratch_manage
+
+Manage scratch entries: flag for persistence or promote to T2.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `action` | str | required | `"flag"`, `"promote"` |
+| `entry_id` | str | required | Scratch entry ID |
+| `project` | str | `""` | Target project (required for promote) |
+| `title` | str | `""` | Target title (required for promote) |
+
+```
+Use scratch_manage tool: action="flag", entry_id="<id>"
+Use scratch_manage tool: action="promote", entry_id="<id>", project="{repo}", title="findings.md"
+```
+
+**Usage pattern**: Use T1 scratch for in-flight working notes. Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via store_put.
+
+## Indexing (CLI only)
+
+Indexing operations have no MCP equivalent — use `nx` CLI via Bash:
 
 ```bash
-nx index repo <path>                       # register and index a repo (classifies into code + docs collections)
+nx index repo <path>                       # register and index a repo
 nx index repo <path> --frecency-only       # refresh git frecency scores only (fast)
-nx index repo <path> --chunk-size 80       # smaller chunks for better search precision on large files
-nx index repo <path> --no-chunk-warning    # suppress large-file pre-scan warning
+nx index repo <path> --chunk-size 80       # smaller chunks for better precision
 nx index pdf <path> --corpus my-papers
 nx index md  <path> --corpus notes
 ```
 
-**Large-file warning**: before indexing, `nx index repo` scans for code files exceeding 30× the chunk size in lines. When large files are found a warning is printed suggesting a smaller `--chunk-size`. Suppress with `--no-chunk-warning` once you have tuned the value.
-
-## Health and server
+## Health and Server (CLI only)
 
 ```bash
 nx doctor                                  # verify all credentials and tools
-nx serve start                             # start background HEAD-polling daemon
-nx serve stop
-nx serve status
-nx serve logs
 ```
 
 ## Workflow — when and why to use each tier
 
 **Session lifecycle:**
-1. Search T3 for prior art before starting work: `nx search "topic" --corpus knowledge`
-2. Index the codebase once per repo: `nx index repo <path>`
+1. Search T3 for prior art before starting work: Use search tool: `query="topic", corpus="knowledge"`
+2. Index the codebase once per repo: `nx index repo <path>` (CLI)
 3. Use T1 scratch for working notes during the session
-4. Flag important scratch items for auto-promote to T2: `nx scratch flag <id>`
-5. Persist validated findings to T3 at session end: `nx store put`
+4. Flag important scratch items for auto-promote to T2: Use scratch_manage tool: `action="flag", entry_id="<id>"`
+5. Persist validated findings to T3 at session end: Use store_put tool
 
 **Tier selection:**
 - **T1 scratch**: hypotheses, interim findings, checkpoints — anything ephemeral to this session
@@ -118,26 +191,22 @@ nx serve logs
 
 ## T2 Search Constraints
 
-`nx memory search` uses FTS5 full-text search — it matches literal tokens, not semantic meaning. Rules:
+memory_search uses FTS5 full-text search — it matches literal tokens, not semantic meaning. Rules:
 
 - Use exact terms from the stored document, not conceptual paraphrases
 - `"retain slash commands"` works if those words appear verbatim in content
-- `"memory management plugin"` may return nothing if stored as "retain system" — even if the content is the same concept
-- Multi-word queries are AND-matched: all tokens must appear somewhere in the document. A broad single term (e.g., `"indexing"`) matches many entries; a three-term query returns only documents containing all three tokens
-- When results are empty: drop one term at a time to identify which token has no match. Consider `nx memory list --project {repo}` to browse titles directly, then `nx memory get` by title
-- **Title searches always return empty**: the FTS5 index covers `content` and `tags` only — not `title`. Searching for an entry by its title (e.g., `nx memory search "RDR-007"`) will find nothing even if that entry exists. Use `nx memory get --project {repo} --title {title}` for title-based lookup.
+- Multi-word queries are AND-matched: all tokens must appear somewhere in the document
+- When results are empty: drop one term at a time to identify which token has no match. Use memory_get with empty title to browse titles directly
+- **Title searches always return empty**: the FTS5 index covers `content` and `tags` only — not `title`. Use memory_get with the exact title for title-based lookup.
 
-## Code Search: When to Use nx vs Grep
+## Code Search: When to Use search vs Grep
 
 Use **Grep** (the Grep tool) for:
 - Finding a class or function by name: `class EmbeddingClient`
 - Locating all usages of a symbol: `EmbeddingClient`
 - Exact text matches: error messages, config keys, import paths
-- Any query where you know the literal text that will appear in the file
 
-Use **`nx search --corpus code__`** for:
+Use **search tool** with `corpus="code"` for:
 - Conceptual queries when you don't know the file name or function name
 - Finding "what handles PDF processing" across an unfamiliar codebase
 - Cross-file concept queries: "retry logic with exponential backoff"
-
-**Precision tip**: `code__` collections indexed with large chunk sizes can have precision issues — large files dominate results regardless of query specificity (RDR-006). Re-index with `nx index repo <path> --chunk-size 80` to improve precision. Until re-indexed, prefer Grep for code navigation. Use `nx search --corpus rdr__` and `--corpus docs__` freely — those collections have good precision.

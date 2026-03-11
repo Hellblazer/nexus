@@ -105,6 +105,8 @@ agents pick up where the last session left off.
 4. **At accept time**: `/rdr-accept` updates T2 first, then repairs the file to match.
 5. **After close**: `/rdr-close` creates beads and archives to T3.
 
+**MCP access**: Agents access all storage tiers via structured MCP tools (`mcp__plugin_nx_nexus__search`, `mcp__plugin_nx_nexus__memory_search`, etc.) rather than CLI commands. This eliminates Bash dependency and works reliably in background agents and restricted permission contexts. Human users continue using the `nx` CLI. See [nx/README.md](../nx/README.md#mcp-servers) for tool details.
+
 ---
 
 ## From Post-Mortem to Next RDR

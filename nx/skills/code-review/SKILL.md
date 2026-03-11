@@ -69,9 +69,9 @@ The code-review-expert agent uses hypothesis-driven review:
 
 ## Agent-Specific PRODUCE
 
-- **Session Scratch (T1)**: `nx scratch put "<notes>" --tags "review"` — working review notes during session; flagged items auto-promote to T2 at session end
-- **nx memory**: `nx memory put "..." --project {project} --title review-findings.md` — persistent review findings across sessions
-- **nx store** (optional): `echo "..." | nx store put - --collection knowledge --title "pattern-code-{topic}" --tags "pattern,code-review"` — recurring violation patterns worth long-term storage
+- **Session Scratch (T1)**: scratch tool: action="put", content="<notes>", tags="review" — working review notes during session; flagged items auto-promote to T2 at session end
+- **nx memory**: memory_put tool: content="...", project="{project}", title="review-findings.md" — persistent review findings across sessions
+- **nx store** (optional): store_put tool: content="...", collection="knowledge", title="pattern-code-{topic}", tags="pattern,code-review" — recurring violation patterns worth long-term storage
 - **Beads**: creates bug beads (`bd create "..." -t bug`) for critical findings that require follow-up work
 
 ## Success Criteria
@@ -83,4 +83,4 @@ The code-review-expert agent uses hypothesis-driven review:
 - [ ] At least one positive feedback item included
 - [ ] T2 memory updated with session findings (if multi-session work)
 
-**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.
+**Session Scratch (T1)**: Agent uses scratch tool for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.

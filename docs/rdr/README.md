@@ -47,6 +47,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-031](rdr-031-collection-portability.md) | Collection Portability — Export/Import for T3 Backup and Migration | Feature | Closed | 2026-03-08 |
 | [RDR-032](rdr-032-indexer-decomposition.md) | Indexer Module Decomposition and Configuration Externalization | Technical Debt | Closed | 2026-03-08 |
 | [RDR-033](rdr-033-pdf-agent-nx-index-alignment.md) | PDF Processing Agent Should Delegate to nx index pdf | Architecture | Closed | 2026-03-08 |
+| [RDR-034](rdr-034-mcp-server-agent-storage.md) | MCP Server for Agent Storage Operations | Architecture | Accepted | 2026-03-11 |
 
 ## RDR Process Documentation
 

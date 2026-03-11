@@ -55,8 +55,8 @@ The agent will:
 
 ## Agent-Specific PRODUCE
 
-- **Session Scratch (T1)**: `nx scratch put "<snapshot>" --tags "test-run"` — test run snapshots and interim findings during session
-- **nx memory**: `nx memory put "..." --project {project} --title test-validation-{date}.md` — quality metrics and coverage findings persisted across sessions
+- **Session Scratch (T1)**: scratch tool: action="put", content="<snapshot>", tags="test-run" — test run snapshots and interim findings during session
+- **nx memory**: memory_put tool: content="...", project="{project}", title="test-validation-{date}.md" — quality metrics and coverage findings persisted across sessions
 
 ## Bead Integration
 
@@ -75,4 +75,4 @@ After validation:
 - [ ] Bead status updated appropriately
 - [ ] T2 memory updated with session findings (if multi-session work)
 
-**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.
+**Session Scratch (T1)**: Agent uses scratch tool for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.

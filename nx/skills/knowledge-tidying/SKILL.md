@@ -32,7 +32,7 @@ Use the Task tool to invoke **knowledge-tidier**:
 Organized knowledge entries in T3
 
 ### Quality Criteria
-- [ ] Knowledge stored in Nexus T3 via nx store put
+- [ ] Knowledge stored in Nexus T3 via store_put tool
 - [ ] No contradictions with existing knowledge
 - [ ] Tags are meaningful for future retrieval
 ```
@@ -41,12 +41,10 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Nexus Storage Standards
 
-**Store to T3 knowledge** (`nx store put`):
-```bash
-echo "# content" | nx store put - --collection knowledge --title "research-topic" --tags "research"
-echo "# content" | nx store put - --collection knowledge --title "decision-component-name" --tags "decision,architecture"
-echo "# content" | nx store put - --collection knowledge --title "pattern-name" --tags "pattern"
-```
+**Store to T3 knowledge** (store_put tool):
+- store_put tool: content="# content", collection="knowledge", title="research-topic", tags="research"
+- store_put tool: content="# content", collection="knowledge", title="decision-component-name", tags="decision,architecture"
+- store_put tool: content="# content", collection="knowledge", title="pattern-name", tags="pattern"
 
 **Title conventions**:
 - `research-{topic}` - Research findings
@@ -56,33 +54,29 @@ echo "# content" | nx store put - --collection knowledge --title "pattern-name" 
 - `pattern-{pattern-name}` - Reusable patterns
 
 **Verify storage**:
-```bash
-nx search "topic" --corpus knowledge --n 5   # confirm searchable
-nx store list --collection knowledge  # list all knowledge entries
-```
+- Use search tool: query="topic", corpus="knowledge", n=5 — confirm searchable
+- Use store_list tool: collection="knowledge" — list all knowledge entries
 
 ## Contradiction Handling
 
 If contradictions found with existing knowledge:
-1. Search: `nx search "topic" --corpus knowledge` to find related entries
+1. Search: Use search tool: query="topic", corpus="knowledge" to find related entries
 2. Identify which is more current/accurate
 3. Replace the stale entry by re-storing with the corrected content
 
 ## Agent-Specific PRODUCE
 
-- **Consolidated Documents**: Store in nx T3 as `printf "# {topic}\n{consolidated-content}\n" | nx store put - --collection knowledge --title "consolidation-{date}-{scope}" --tags "consolidation,tidier"`
+- **Consolidated Documents**: Store in nx T3 via store_put tool: content="# {topic}\n{consolidated-content}", collection="knowledge", title="consolidation-{date}-{scope}", tags="consolidation,tidier"
 - **Archive Actions**: Moved documents go to `--collection knowledge__archive --title "{old-title}-archived-{date}"`, logged in nx T2 memory as `--project {project} --title archive-log.md`
 - **Contradiction Resolutions**: Updated directly in source nx T3 documents
 - **Review Artifacts**: Use T1 scratch to track review round findings:
-  ```bash
-  nx scratch put $'# Review Round {N}: {N} issues found\n{issue-list}' --tags "review,round-{N}"
-  nx scratch promote <id> --project {project} --title review-round-{N}.md
-  ```
+  - scratch tool: action="put", content="# Review Round {N}: {N} issues found\n{issue-list}", tags="review,round-{N}"
+  - scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="review-round-{N}.md"
 
 ## Success Criteria
 
-- [ ] Knowledge stored in Nexus T3 via `nx store put`
+- [ ] Knowledge stored in Nexus T3 via store_put tool
 - [ ] No contradictions with existing knowledge
-- [ ] Knowledge is searchable (verify with `nx search`)
+- [ ] Knowledge is searchable (verify with search tool)
 - [ ] Tags are meaningful for future retrieval
 - [ ] Title follows naming convention
