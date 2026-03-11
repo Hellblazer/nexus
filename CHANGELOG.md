@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-03-11
+
+### Fixed
+- Removed `SessionEnd` hook — Claude Code cancels hooks during process teardown,
+  producing a spurious "Hook cancelled" error on every exit. The T1 server stops
+  automatically when the process tree dies; the hook was effectively a no-op.
+
 ## [1.10.0] - 2026-03-11
 
 ### Added
@@ -724,7 +731,8 @@ from rc10 — this entry marks the API, CLI, and plugin contract as stable.
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.10.0...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.10.1...HEAD
+[1.10.1]: https://github.com/Hellblazer/nexus/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/Hellblazer/nexus/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/Hellblazer/nexus/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/Hellblazer/nexus/compare/v1.8.0...v1.9.0
