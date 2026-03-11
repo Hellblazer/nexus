@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-03-11
+
 ### Added
 - **MCP server for agent storage operations** (RDR-034) — FastMCP server (`nx-mcp`)
   exposing 8 structured tools for direct T1/T2/T3 access by agents without Bash
@@ -722,7 +724,8 @@ from rc10 — this entry marks the API, CLI, and plugin contract as stable.
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.9.1...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/Hellblazer/nexus/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/Hellblazer/nexus/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/Hellblazer/nexus/compare/v1.8.0...v1.9.0
 [1.0.0]: https://github.com/Hellblazer/nexus/compare/v1.0.0rc10...v1.0.0
