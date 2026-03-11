@@ -16,8 +16,8 @@ description: Use when needing detailed information about a specific RDR includin
 1. **Resolve RDR directory**: Read from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`.
 2. **Determine RDR ID**: From user's argument, or default to most recently modified RDR in `$RDR_DIR/`
 3. **Read the markdown file**: `$RDR_DIR/NNN-*.md`
-4. **Read T2 metadata** (if available): `nx memory get --project {repo}_rdr --title NNN`
-5. **Read research findings** (if available): `nx memory list --project {repo}_rdr` and filter titles matching `NNN-research-*`
+4. **Read T2 metadata** (if available): Use memory_get tool: project="{repo}_rdr", title="NNN"
+5. **Read research findings** (if available): Use memory_get tool: project="{repo}_rdr", title="" and filter titles matching `NNN-research-*`
 6. **Display unified view**:
 
 ### Output Format
@@ -61,9 +61,9 @@ This skill produces outputs directly (no agent delegation). It is read-only and 
 
 - **T3 knowledge**: Not produced (read-only operation)
 - **T2 memory**: Not produced (reads T2 records but does not write)
-- **T1 scratch**: Not produced; may optionally use `nx scratch put "RDR NNN show details" --tags "rdr,show"` for capturing display snapshots during review sessions
+- **T1 scratch**: Not produced; may optionally use scratch tool: action="put", content="RDR NNN show details", tags="rdr,show" for capturing display snapshots during review sessions
 
-**Session Scratch (T1)**: Use `nx scratch` for ephemeral notes if the user is comparing multiple RDRs. Flagged items auto-promote to T2 at session end.
+**Session Scratch (T1)**: Use scratch tool for ephemeral notes if the user is comparing multiple RDRs. Flagged items auto-promote to T2 at session end.
 
 ## Notes
 

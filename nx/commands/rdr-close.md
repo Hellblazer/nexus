@@ -162,14 +162,7 @@ if current_status.lower() not in ('accepted', 'final'):
 
 # T2 metadata (current status)
 print("### T2 Metadata (current status)")
-try:
-    result = subprocess.run(
-        ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', t2_key],
-        capture_output=True, text=True, timeout=10)
-    t2_out = (result.stdout or '').strip()
-    print(t2_out if t2_out else "No T2 record — will use file metadata")
-except Exception as exc:
-    print(f"T2 not available: {exc}")
+print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\" to retrieve T2 metadata.")
 print()
 
 # Implementation Plan section (for bead decomposition)
@@ -216,4 +209,4 @@ All data is pre-loaded above — no additional tool calls needed.
 - **Reverted / Abandoned**: offer post-mortem, no bead decomposition.
 - **Superseded**: prompt for superseding RDR ID, cross-link both files.
 - Post-mortem archive location: `{rdr_dir}/post-mortem/NNN-kebab-title.md`.
-- Update RDR file status field and register close in T2: `nx memory put ... --project {repo}_rdr --title {id}`.
+- Update RDR file status field and register close in T2: use **memory_put** tool: project="{repo}_rdr", title="{id}" with updated status fields.

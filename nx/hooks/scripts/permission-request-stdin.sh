@@ -48,6 +48,12 @@ if [[ "$TOOL" == "mcp__plugin_nx_sequential-thinking__sequentialthinking" ]]; th
   exit 0
 fi
 
+# Auto-approve all nexus MCP tools (storage tiers, search)
+if [[ "$TOOL" =~ ^mcp__plugin_nx_nexus__ ]]; then
+  echo "allow"
+  exit 0
+fi
+
 # --- Bash tool: deny dangerous commands first, then allow safe ones ---
 
 # Defense in depth: Deny dangerous commands even if wildcards match

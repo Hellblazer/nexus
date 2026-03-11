@@ -42,6 +42,6 @@ This skill executes directly — no agent delegation. All state mutations are pe
 
 Outputs produced directly by this skill (no agent delegation):
 
-- **T2 memory**: Updated status record via `nx memory put - --project {repo}_rdr --title NNN --ttl permanent --tags rdr,accepted`
+- **T2 memory**: Updated status record via memory_put tool: project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,accepted"
 - **Filesystem**: Updated RDR markdown (frontmatter `status: accepted`, `accepted_date`), regenerated `{rdr_dir}/README.md`
-- **T1 scratch**: Use `nx scratch put "RDR NNN: accepted YYYY-MM-DD"` for ephemeral tracking during multi-step acceptance flow
+- **T1 scratch**: Use scratch tool: action="put", content="RDR NNN: accepted YYYY-MM-DD" for ephemeral tracking during multi-step acceptance flow

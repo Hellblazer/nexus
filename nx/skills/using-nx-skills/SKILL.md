@@ -104,11 +104,11 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 
 **Read widest → narrowest before starting any research or implementation.**
 
-| Tier | Command | What's there | Read when... |
-|------|---------|--------------|--------------|
-| T3 | `nx search <query>` | Permanent knowledge across all sessions and projects | Before any research — if it's been learned, it's here |
-| T2 | `nx memory search <query>` | Project decisions, findings, session context | Before project work — past context and past decisions live here |
-| T1 | `nx scratch search <query>` | This session's discoveries, shared across all agents | Before doing work a sibling or parent agent may have already done |
+| Tier | Tool | What's there | Read when... |
+|------|------|--------------|--------------|
+| T3 | Use search tool: query="..." | Permanent knowledge across all sessions and projects | Before any research — if it's been learned, it's here |
+| T2 | Use memory_search tool: query="..." | Project decisions, findings, session context | Before project work — past context and past decisions live here |
+| T1 | Use scratch tool: action="search", query="..." | This session's discoveries, shared across all agents | Before doing work a sibling or parent agent may have already done |
 
 **Write path:** T1 (immediate, shared) → `--persist` flag to T2 (survives session end) → `/knowledge-tidy` to T3 (permanent, cross-project).
 

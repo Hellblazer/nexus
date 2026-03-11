@@ -133,9 +133,11 @@ system-prompt-only behavior. The hook provides fallback coverage regardless.
 Validation (nexus-ryjo) will test whether an agent without Bash in its tools list
 can actually execute shell commands — this will confirm the enforcement model.
 
-**Q3** (nx CLI via Bash vs dedicated MCP tools): Agents should use `nx` via Bash.
+**Q3** (nx CLI via Bash vs dedicated MCP tools): ~~Agents should use `nx` via Bash.
 The PermissionRequest hook already auto-approves `nx` commands. No need for
-dedicated MCP wrappers.
+dedicated MCP wrappers.~~ **Superseded by RDR-034**: Background agents cannot
+use Bash reliably; MCP tools provide direct structured access to T1/T2/T3 tiers.
+See `docs/rdr/rdr-034-mcp-server-agent-storage.md`.
 
 **Q4** (sequential thinking): Added to all 14 agents uniformly. It's a reasoning
 primitive with no side effects — no security reason to restrict it.

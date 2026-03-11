@@ -86,12 +86,10 @@ The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-
 
 ## Agent-Specific PRODUCE
 
-- **Architecture Designs**: Store in nx T3 as `printf "# Architecture: {component}\n{design}\n" | nx store put - --collection knowledge --title "architecture-{project}-{component}" --tags "architecture,design"`
-- **Execution Plans**: Store in nx T2 memory as `nx memory put "plan" --project {project} --title plan-{component}.md --ttl 30d`
-- **Design Decisions**: Store in nx T3 as `printf "# Decision: {topic}\n{rationale}\n" | nx store put - --collection knowledge --title "decision-architect-{topic}" --tags "decision,architecture"`
+- **Architecture Designs**: Store in nx T3 via store_put tool: content="# Architecture: {component}\n{design}", collection="knowledge", title="architecture-{project}-{component}", tags="architecture,design"
+- **Execution Plans**: Store in nx T2 memory via memory_put tool: content="plan", project="{project}", title="plan-{component}.md", ttl="30d"
+- **Design Decisions**: Store in nx T3 via store_put tool: content="# Decision: {topic}\n{rationale}", collection="knowledge", title="decision-architect-{topic}", tags="decision,architecture"
 - **Beads**: Epic → Phase → Task hierarchy with `bd dep add` for dependencies
 - **Design Notes**: Use T1 scratch for working notes during architecture analysis:
-  ```bash
-  nx scratch put "Design consideration: {note}" --tags "architecture,design"
-  nx scratch flag <id> --project {project} --title architecture-notes.md
-  ```
+  - scratch tool: action="put", content="Design consideration: {note}", tags="architecture,design"
+  - scratch_manage tool: action="flag", id="<id>", project="{project}", title="architecture-notes.md"

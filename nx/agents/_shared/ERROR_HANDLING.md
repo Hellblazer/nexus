@@ -18,8 +18,8 @@ This file documents common error handling patterns for agents.
 - Never silently swallow errors
 
 ### Knowledge Base Errors
-- Connection failures: verify nx CLI is available (`nx doctor`)
-- Write failures: check nx store permissions
+- Connection failures: verify nexus MCP tools are available; fall back to `nx` CLI via Bash
+- Write failures: check permissions and collection names
 - Duplicate ID errors: append timestamp suffix
 
 ### Context Management Errors
@@ -34,23 +34,23 @@ This file documents common error handling patterns for agents.
 **Session scope confusion** (accessing scratch from wrong session):
 - Error: scratch get returns "not found" even though you just wrote it
 - Cause: T1 is session-scoped; subagents each have their own T1 scope
-- Fix: Use T2 memory (`nx memory put/get`) for cross-agent relay within the same project
+- Fix: Use T2 memory (memory_put/memory_get tools) for cross-agent relay within the same project
 - Note: T1 scratch IDs are only valid within the session that created them
 
 **Scratch entry not found after session restart**:
-- Error: `nx scratch get <id>` returns error after session restart
+- Error: scratch `action="get"` returns error after session restart
 - Cause: T1 is ephemeral — wiped at SessionEnd unless flagged
-- Fix: Use `nx scratch flag <id>` BEFORE session ends to auto-promote to T2
+- Fix: Use scratch_manage `action="flag"` BEFORE session ends to auto-promote to T2
 - Prevention: Flag valuable scratch entries immediately after creation
 
 **Scratch promote fails (missing project)**:
-- Error: `nx scratch promote <id>` fails without `--project` and `--title`
-- Fix: Always specify both flags: `nx scratch promote <id> --project {project} --title notes.md`
+- Error: scratch_manage `action="promote"` fails without project and title
+- Fix: Always specify both: scratch_manage `action="promote", id="<id>", project="{project}", title="notes.md"`
 
 ### T2 Memory Errors
 
 **SQLite locked**:
-- Error: `database is locked` from `nx memory` commands
+- Error: `database is locked` from memory tools
 - Cause: Another process holds a write lock
 - Fix: Wait 1-2 seconds and retry; SQLite WAL mode minimizes this
 - Fallback: Use T1 scratch for writes, promote to T2 when lock clears
@@ -62,19 +62,18 @@ This file documents common error handling patterns for agents.
 - A 2-condition guard (without `!= ""`) would incorrectly delete permanent entries
 
 **Memory entry not found**:
-- Error: `nx memory get` returns nothing
-- Fix: Verify exact `--project` and `--title` values; use `nx memory list --project {project}` to see available entries
-- Fallback: Use `nx memory search "topic" --project {project}` for fuzzy retrieval
+- Error: memory_get returns "Not found"
+- Fix: Verify exact project and title values; use memory_get with empty title to list entries
+- Fallback: Use memory_search tool for fuzzy retrieval
 
 **TTL format errors**:
-- Valid formats: `30d`, `4w`, `permanent`, `never` (`permanent` and `never` are both aliases for no-expiry)
-- Invalid: `30`, `"30 days"`, `30days`
-- Always use the short-form: `--ttl 30d`
+- Valid ttl parameter values for memory_put: integer days (e.g., `ttl=30`)
+- Use `ttl=0` for permanent entries
 
 ### T3 Store Errors
 
 **TTL guard pattern (MANDATORY)**:
-```bash
+```
 # Always use 3-condition guard — 2-condition guard deletes permanent entries!
 # CORRECT (3 conditions):
 ttl_days > 0 AND expires_at != "" AND expires_at < now
@@ -83,15 +82,15 @@ ttl_days > 0 AND expires_at < now
 ```
 
 **ChromaDB connectivity failure**:
-- Error: `nx store put` or `nx search` fails with connection error
-- Fix: Check `nx doctor` for ChromaDB + Voyage AI API status
+- Error: search or store_put fails with connection error
+- Fix: Fall back to `nx` CLI via Bash tool (degraded mode)
 - Fallback: Write to T2 memory with note to promote to T3 later:
-  `nx memory put "content" --project {project} --title pending-t3-promotion.md`
+  Use memory_put tool: `content="content", project="{project}", title="pending-t3-promotion.md"`
 
 **Voyage AI API limit**:
 - Error: Rate limit or quota exceeded during embedding
 - Fix: Reduce batch size; wait and retry
-- Fallback: Store in T2 with `--tags "pending-t3-promotion"` for later batch upload
+- Fallback: Store in T2 with `tags="pending-t3-promotion"` for later batch upload
 
 **Collection name validation**:
 - Collection names use `__` as separator (NOT `::`)
@@ -100,5 +99,4 @@ ttl_days > 0 AND expires_at < now
 
 **Duplicate document ID**:
 - Error: `Document ID already exists`
-- Fix: Append timestamp suffix: `insight-developer-topic-$(date +%Y%m%d)`
-
+- Fix: Append timestamp suffix: `insight-developer-topic-20260311`

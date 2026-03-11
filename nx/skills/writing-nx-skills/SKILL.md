@@ -70,9 +70,9 @@ Do NOT inline the relay template. One source of truth: `agents/_shared/RELAY_TEM
 ### Storage Tier References
 
 Skills that produce outputs must document which tiers they use:
-- **T1 scratch**: `nx scratch put "..." --tags "..."` — session-scoped ephemeral notes
-- **T2 memory**: `nx memory put "..." --project {repo} --title file.md` — cross-session state
-- **T3 knowledge**: `nx store put ...` — permanent validated findings
+- **T1 scratch**: scratch tool: action="put", content="...", tags="..." — session-scoped ephemeral notes
+- **T2 memory**: memory_put tool: content="...", project="{repo}", title="file.md" — cross-session state
+- **T3 knowledge**: store_put tool: content="...", collection="knowledge", title="..." — permanent validated findings
 
 ### Registry Integration
 

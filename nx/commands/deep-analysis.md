@@ -32,24 +32,13 @@ description: Thorough analysis of complex problems using deep-analyst agent
   echo "The deep-analyst uses mcp__sequential-thinking__sequentialthinking: hypothesis → evidence → evaluation → conclusion."
   echo "For cross-cutting issues, this agent explores multiple components before converging on root cause."
 
-  # Project context
-  echo "### Project Context"
-  echo ""
-  if command -v nx &> /dev/null; then
-    PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
-    if [ -n "$PROJECT" ]; then
-      echo "**T2 Memory ($PROJECT):**"
-      echo '```'
-      nx memory list --project "$PROJECT" 2>/dev/null | head -8 || echo "No T2 memory"
-      echo '```'
-      echo ""
-      echo "**Session Scratch (T1):**"
-      echo '```'
-      nx scratch list 2>/dev/null | head -5 || echo "No T1 scratch"
-      echo '```'
-    fi
-  fi
 }
+
+### Project Context
+
+Gather project context using MCP tools:
+- Use **memory_get** tool: project="{project}", title="" to list T2 memory entries
+- Use **scratch** tool: action="list" to list T1 scratch entries
 
 ## Problem to Analyze
 
@@ -81,7 +70,7 @@ Root cause analysis with hypothesis chain, evidence inventory, confidence-rated 
 - [ ] Each conclusion supported by specific cited evidence
 - [ ] Recommendations are actionable and prioritized by impact
 
-**IMPORTANT**: After analysis completes, persist findings to nx store using knowledge-tidier.
+**IMPORTANT**: After analysis completes, persist findings using store_put tool (or delegate to knowledge-tidier).
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

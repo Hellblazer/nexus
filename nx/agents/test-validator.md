@@ -4,7 +4,7 @@ version: "2.0"
 description: Verifies test coverage, runs test suites, and validates test quality for code changes. Use after implementation, before marking work complete, or when test failures need systematic root-cause analysis.
 model: sonnet
 color: lime
-tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
+tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples
@@ -28,9 +28,9 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: `nx search "[task topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
-3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -151,23 +151,19 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Validation Reports**: Include in response
 - **Coverage Gaps**: Create task beads for missing tests
-- **Quality Metrics**: Store in nx T2 memory: `nx memory put "metrics" --project {project} --title test-metrics.md --ttl 30d`
+- **Quality Metrics**: Store in nx T2 memory: Use memory_put tool: content="metrics", project="{project}", title="test-metrics.md"
 - **Recurring Patterns**: Store test quality patterns in nx T3 for reuse across sessions:
-  ```bash
-  printf "# Test pattern: {pattern-name}\n{description}\n" | nx store put - --collection knowledge --title "pattern-test-{pattern-name}" --tags "testing,pattern"
-  ```
+  Use store_put tool: content="# Test pattern: {pattern-name}\n{description}", collection="knowledge", title="pattern-test-{pattern-name}", tags="testing,pattern"
 - **Regression Risks**: Document in relay notes
 - **Test Result Snapshots**: Use T1 scratch to capture test run state during analysis:
-  ```bash
-  # Capture test run result
-  nx scratch put $'Test run {timestamp}: {N} passed, {M} failed\n{summary}' --tags "test-results"
-  # For multi-session validation, promote to T2
-  nx scratch promote <id> --project {project} --title test-validation-{date}.md
-  ```
+  Capture test run result:
+  Use scratch tool: action="put", content="Test run {timestamp}: {N} passed, {M} failed\n{summary}", tags="test-results"
+  For multi-session validation, promote to T2:
+  Use scratch_manage tool: action="promote", id="<id>", project="{project}", title="test-validation-{date}.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project} --title {topic}.md` (e.g., `--project ART --title auth-implementation.md`)
+- **nx memory**: Use memory_put tool: project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
 

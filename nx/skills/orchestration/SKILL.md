@@ -116,12 +116,8 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 ## Agent-Specific PRODUCE
 
 - **Routing Decisions**: Document in response; for significant routing patterns store in nx T3:
-  ```bash
-  printf "# Routing Pattern: {pattern}\n{rationale}\n" | nx store put - --collection knowledge --title "pattern-orchestrator-{scenario}" --tags "routing,orchestration"
-  ```
+  store_put tool: content="# Routing Pattern: {pattern}\n{rationale}", collection="knowledge", title="pattern-orchestrator-{scenario}", tags="routing,orchestration"
 - **Pipeline Plans**: Relay to first agent in pipeline using standard relay format
 - **Escalation Notes**: Create blocker beads when routing is blocked
 - **Routing Notes**: Use T1 scratch during complex pipeline analysis:
-  ```bash
-  nx scratch put "Routing hypothesis: {agent} because {reason}" --tags "routing,pipeline"
-  ```
+  scratch tool: action="put", content="Routing hypothesis: {agent} because {reason}", tags="routing,pipeline"

@@ -58,27 +58,15 @@ description: Design architecture and create phased execution plans using archite
   echo ""
   echo "### Tip"
   echo ""
-  echo "The agent uses nx search --corpus code --hybrid (30-50 results) for discovery,"
+  echo "The agent uses the search tool with corpus='code' and hybrid=true (30-50 results) for discovery,"
   echo "then LSP for precision navigation (documentSymbol, goToImplementation, findReferences)."
-
-  # Project context
-  echo "### Project Context"
-  echo ""
-  if command -v nx &> /dev/null; then
-    PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
-    if [ -n "$PROJECT" ]; then
-      echo "**T2 Memory ($PROJECT):**"
-      echo '```'
-      nx memory list --project "$PROJECT" 2>/dev/null | head -8 || echo "No T2 memory"
-      echo '```'
-      echo ""
-      echo "**Session Scratch (T1):**"
-      echo '```'
-      nx scratch list 2>/dev/null | head -5 || echo "No T1 scratch"
-      echo '```'
-    fi
-  fi
 }
+
+### Project Context
+
+Gather project context using MCP tools:
+- Use **memory_get** tool: project="{project}", title="" to list T2 memory entries
+- Use **scratch** tool: action="list" to list T1 scratch entries
 
 ## Feature/Component to Architect
 

@@ -2,6 +2,10 @@
 
 This file documents the standard context exchange protocol used by all agents for consistent relays, context recovery, and knowledge management.
 
+## Degraded Mode
+
+If nexus MCP tools (`mcp__plugin_nx_nexus__*`) are unavailable (e.g., MCP server not started, plugin not loaded), fall back to the `nx` CLI via Bash tool. MCP tools are the primary interface; CLI is the fallback.
+
 ## RECEIVE (Before Starting Work)
 
 ### Proactive Search Agents (Planning & Research)
@@ -15,9 +19,9 @@ These agents **MUST proactively search** for context before starting:
 **Search Sources in Order**:
 1. **Bead**: `bd show <id>` for task context, design field, dependencies
 2. **Project Infrastructure**: T2 memory and beads context is auto-injected by SessionStart and SubagentStart hooks
-3. **nx T3 store**: `nx search "[topic]" --corpus knowledge --n 5`
-4. **nx T2 memory**: `nx memory get --project {project} --title ACTIVE_INDEX.md`
-5. **T1 scratch** (current session): `nx scratch search "[topic]"` for any in-flight notes
+3. **nx T3 store**: Use search tool: `query="[topic]", corpus="knowledge", n=5`
+4. **nx T2 memory**: Use memory_get tool: `project="{project}", title="ACTIVE_INDEX.md"`
+5. **T1 scratch** (current session): Use scratch tool: `action="search", query="[topic]"`
 
 ### Relay-Reliant Agents (Execution & Validation)
 
@@ -48,20 +52,17 @@ T1 is session-scoped: all entries are wiped at SessionEnd unless flagged.
 - Step-by-step debug traces that may not be worth persisting
 - Routing or coordination notes within a pipeline run
 
-**T1 CLI:**
-```bash
-nx scratch put "<content>" [--tags TAG1,TAG2] [--persist] [--project PROJECT] [--title TITLE]
-# Note: --project/--title on 'put' pre-configure the T2 flush destination for flag/promote; they do NOT give cross-session access to the content.
-nx scratch get <id>
-nx scratch search "<query>" [--n N]
-nx scratch list
-nx scratch flag <id> [--project PROJECT] [--title TITLE]   # mark for auto-flush to T2 at SessionEnd
-nx scratch unflag <id>                                     # remove the auto-flush marking
-nx scratch promote <id> --project PROJECT --title TITLE    # immediate T2 copy
-nx scratch clear
+**T1 MCP Tools:**
+```
+Use scratch tool: action="put", content="<content>", tags="TAG1,TAG2"
+Use scratch tool: action="get", id="<id>"
+Use scratch tool: action="search", query="<query>", n=10
+Use scratch tool: action="list"
+Use scratch_manage tool: action="flag", id="<id>", project="PROJECT", title="TITLE"
+Use scratch_manage tool: action="promote", id="<id>", project="PROJECT", title="TITLE"
 ```
 
-The SessionEnd hook (`nx hook session-end`) runs automatically at session close and auto-promotes flagged T1 items to T2. This is not user-callable; flagging items with `nx scratch flag` is how you opt in.
+The SessionEnd hook runs automatically at session close and auto-promotes flagged T1 items to T2. Flagging items with scratch_manage `action="flag"` is how you opt in.
 
 **Promote to T2 when:**
 - Hypothesis validated (worth preserving across sessions)
@@ -70,27 +71,26 @@ The SessionEnd hook (`nx hook session-end`) runs automatically at session close 
 
 ## Storage Tier Quick Reference
 
-| Tier | Name | Scope | CLI Entry | Use Cases | TTL |
+| Tier | Name | Scope | MCP Tools | Use Cases | TTL |
 |------|------|-------|-----------|-----------|-----|
-| T1 | nx scratch | Session (ephemeral) | `nx scratch put` | Working notes, hypotheses, debug traces | Wiped on SessionEnd (flag to survive) |
-| T2 | nx memory | Per-project, persistent | `nx memory put` | Session state, project context, agent relay, active work | 30d default; `permanent` available |
-| T3 | nx store / nx search | Permanent, cross-session | `nx store put` | Research findings, architectural decisions, validated patterns | `permanent` or explicit TTL |
+| T1 | scratch | Session (ephemeral) | `scratch`, `scratch_manage` | Working notes, hypotheses, debug traces | Wiped on SessionEnd (flag to survive) |
+| T2 | memory | Per-project, persistent | `memory_put`, `memory_get`, `memory_search` | Session state, project context, agent relay, active work | 30d default; `permanent` available |
+| T3 | store / search | Permanent, cross-session | `search`, `store_put`, `store_list` | Research findings, architectural decisions, validated patterns | `permanent` or explicit TTL |
 
 ## Choosing Search Options
 
 Use the right search form for the task:
 
-| Goal | Command |
+| Goal | Tool Call |
 |---|---|
-| Find related prior knowledge | `nx search "topic" --corpus knowledge --n 5` |
+| Find related prior knowledge | Use search tool: `query="topic", corpus="knowledge", n=5` |
 | Research with uncertain vocabulary | Run 2 searches: primary term, then alternate framing |
-| Conceptual code search (unfamiliar codebase) | `nx search "concept" --corpus code --hybrid --n 15` |
-| Documentation search | `nx search "topic" --corpus docs --n 10` |
+| Conceptual code search (unfamiliar codebase) | Use search tool: `query="concept", corpus="code", n=15` |
+| Documentation search | Use search tool: `query="topic", corpus="docs", n=10` |
 | Exact code navigation | Use Grep tool instead — faster and more precise |
-| Cross-corpus research | Repeat `--corpus` flag (e.g., `--corpus knowledge --corpus docs`) |
-| Large-file noise reduction | Add `--max-file-chunks 20` to any `--corpus code` search |
+| Cross-corpus research | Run multiple search calls with different corpus values |
 
-**When NOT to use nx search:**
+**When NOT to use search:**
 - When the relay already contains the information needed
 - For simple, bounded tasks where prior knowledge is unlikely to change the approach
 - When Grep or file reads are faster and more precise (class/function lookups)
@@ -103,19 +103,19 @@ Agents produce artifacts based on their specialization:
 - **Analysis/Research**: Store in nx T3 store with appropriate title pattern
 - **Session State**: Store in nx T2 memory for multi-session work
 - **Interim Working Notes**: Use T1 scratch for session-scoped state; promote to T2 when validated:
-  ```bash
+  ```
   # Store ephemeral working note
-  nx scratch put "<hypothesis or interim finding>" --tags "hypothesis"
+  Use scratch tool: action="put", content="<hypothesis or interim finding>", tags="hypothesis"
   # Flag for auto-flush to T2 at session end
-  nx scratch flag <id> --project {project} --title interim-notes.md
+  Use scratch_manage tool: action="flag", id="<id>", project="{project}", title="interim-notes.md"
   # Or promote immediately
-  nx scratch promote <id> --project {project} --title interim-findings.md
+  Use scratch_manage tool: action="promote", id="<id>", project="{project}", title="interim-findings.md"
   ```
 
 ### Naming Conventions
 
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: `--project {project} --title {topic}.md` (e.g., `--project ART --title auth-implementation.md`)
+- **nx memory**: `project="{project}", title="{topic}.md"` (e.g., `project="ART", title="auth-implementation.md"`)
 
 
 ## RELAY (Standard Format)
@@ -150,9 +150,9 @@ See [RELAY_TEMPLATE.md](./RELAY_TEMPLATE.md) for the full template, extended tem
 ## RECOVER (If Context Missing)
 
 If expected context not received:
-1. Search nx T3 store for related prior work: `nx search "[topic]" --corpus knowledge --n 5`
-2. Check nx T2 memory for session state: `nx memory search "[topic]" --project {project}`
-3. Check T1 scratch for in-session notes: `nx scratch search "[topic]"`
+1. Search nx T3 store for related prior work: Use search tool: `query="[topic]", corpus="knowledge", n=5`
+2. Check nx T2 memory for session state: Use memory_search tool: `query="[topic]", project="{project}"`
+3. Check T1 scratch for in-session notes: Use scratch tool: `action="search", query="[topic]"`
 4. Query `bd list --status=in_progress` for active work
 5. Document assumption in bead notes
 6. Flag incomplete context in downstream relay
@@ -176,47 +176,46 @@ All agents should:
 - `analysis-` - Deep analysis findings
 - `insight-` - Developer/agent discoveries
 
-### Storage Commands
-```bash
+### Storage Tools
+```
 # Store a document
-echo "content" | nx store put - --collection knowledge --title "research-topic-date" --tags "category"
+Use store_put tool: content="content", collection="knowledge", title="research-topic-date", tags="category"
 
 # Search stored knowledge
-nx search "query" --corpus knowledge --n 5
-nx search "query" --corpus knowledge --json
+Use search tool: query="query", corpus="knowledge", n=5
 
 # List stored documents
-nx store list --collection knowledge
+Use store_list tool: collection="knowledge"
 ```
 
 ### Metadata
-nx store uses `--tags` for categorization (comma-separated strings).
+store_put uses `tags` parameter for categorization (comma-separated strings).
 
 ## nx Memory Organization
 
 Three project namespaces are in use:
-- `{repo}` — agent working notes and relay state (e.g., `--project nexus`)
-- `{repo}_rdr` — RDR records and gate results (e.g., `--project nexus_rdr`)
+- `{repo}` — agent working notes and relay state (e.g., `project="nexus"`)
+- `{repo}_rdr` — RDR records and gate results (e.g., `project="nexus_rdr"`)
 
 Common titles under `{repo}`:
-- `--title hypotheses.md` - Current working hypotheses
-- `--title findings.md` - Validated discoveries
-- `--title blockers.md` - Active blockers and impediments
-- `--title relay.md` - Pending relay context
+- `title="hypotheses.md"` - Current working hypotheses
+- `title="findings.md"` - Validated discoveries
+- `title="blockers.md"` - Active blockers and impediments
+- `title="relay.md"` - Pending relay context
 
-### Memory Commands
-```bash
+### Memory Tools
+```
 # Write to memory
-nx memory put "content" --project {project} --title findings.md --ttl 30d
+Use memory_put tool: content="content", project="{project}", title="findings.md", ttl=30
 
 # Read from memory
-nx memory get --project {project} --title findings.md
+Use memory_get tool: project="{project}", title="findings.md"
 
 # Search memory
-nx memory search "query" --project {project}
+Use memory_search tool: query="query", project="{project}"
 
 # List memory files
-nx memory list --project {project}
+Use memory_get tool: project="{project}", title=""
 ```
 
 ## Usage in Agent Files

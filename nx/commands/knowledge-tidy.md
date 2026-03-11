@@ -11,13 +11,8 @@ description: Persist and organize knowledge into nx store using knowledge-tidier
   echo ""
 
   echo "### Existing Knowledge"
-  echo '```'
-  if command -v nx &> /dev/null; then
-    nx store list --collection knowledge 2>/dev/null | head -10 || echo "No knowledge store entries found"
-  else
-    echo "nx not available"
-  fi
-  echo '```'
+  echo ""
+  echo "Use **store_list** tool: collection='knowledge' to list existing knowledge entries."
   echo ""
 
   # Active beads context
@@ -34,26 +29,14 @@ description: Persist and organize knowledge into nx store using knowledge-tidier
   echo "### Storage Standards"
   echo ""
   echo "Title conventions: research-{topic}, decision-{component}-{name}, pattern-{name}, debug-{component}-{issue}"
-  echo "All entries go to: nx store put --collection knowledge"
-
-  # Project context
-  echo "### Project Context"
-  echo ""
-  if command -v nx &> /dev/null; then
-    PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
-    if [ -n "$PROJECT" ]; then
-      echo "**T2 Memory ($PROJECT):**"
-      echo '```'
-      nx memory list --project "$PROJECT" 2>/dev/null | head -8 || echo "No T2 memory"
-      echo '```'
-      echo ""
-      echo "**Session Scratch (T1):**"
-      echo '```'
-      nx scratch list 2>/dev/null | head -5 || echo "No T1 scratch"
-      echo '```'
-    fi
-  fi
+  echo "All entries stored via store_put tool: collection='knowledge'"
 }
+
+### Project Context
+
+Gather project context using MCP tools:
+- Use **memory_get** tool: project="{project}", title="" to list T2 memory entries
+- Use **scratch** tool: action="list" to list T1 scratch entries
 
 ## Knowledge to Persist
 
@@ -79,11 +62,11 @@ $ARGUMENTS
 Knowledge persisted to nx store T3 with correct title convention, meaningful tags, contradiction check against existing entries, and verified searchability.
 
 ### Quality Criteria
-- [ ] Knowledge stored via `nx store put --collection knowledge`
+- [ ] Knowledge stored via store_put tool: collection="knowledge"
 - [ ] No contradictions with existing entries (checked and resolved)
 - [ ] Title follows naming convention (research-*, decision-*, pattern-*, debug-*)
 - [ ] Tags are meaningful and consistent with existing tag vocabulary
-- [ ] Searchable -- verified with `nx search "topic" --corpus knowledge`
+- [ ] Searchable -- verified with search tool: query="topic", corpus="knowledge"
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

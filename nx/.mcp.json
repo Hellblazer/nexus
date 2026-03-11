@@ -2,5 +2,9 @@
   "sequential-thinking": {
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+  },
+  "nexus": {
+    "command": "nx-mcp",
+    "args": []
   }
 }

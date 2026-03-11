@@ -59,8 +59,8 @@ The plan-auditor agent uses `mcp__sequential-thinking__sequentialthinking`:
 
 ## Agent-Specific PRODUCE
 
-- **Session Scratch (T1)**: `nx scratch put "<notes>" --tags "audit"` — audit working notes during session; flagged items auto-promote to T2 at session end
-- **nx store**: `echo "..." | nx store put - --collection knowledge --title "validation-plan-{plan-id}" --tags "validation,audit"` — audit results for the validated plan
+- **Session Scratch (T1)**: scratch tool: action="put", content="<notes>", tags="audit" — audit working notes during session; flagged items auto-promote to T2 at session end
+- **nx store**: store_put tool: content="...", collection="knowledge", title="validation-plan-{plan-id}", tags="validation,audit" — audit results for the validated plan
 - **Beads**: creates gap/risk beads (`bd create "..." -t task`) for major issues found during validation
 
 ## Success Criteria
@@ -72,4 +72,4 @@ The plan-auditor agent uses `mcp__sequential-thinking__sequentialthinking`:
 - [ ] Clear go/no-go decision provided
 - [ ] If no-go, specific issues identified
 
-**Session Scratch (T1)**: Agent uses `nx scratch` for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.
+**Session Scratch (T1)**: Agent uses scratch tool for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.

@@ -146,19 +146,10 @@ if current_status.lower() not in ('draft', 'accepted'):
     sys.exit(0)
 
 # Check T2 status for idempotency / self-healing
+# Use memory_get tool: project="{repo_name}_rdr", title="{t2_key}" to retrieve T2 status
 t2_status = None
-try:
-    t2_result = subprocess.run(
-        ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', t2_key],
-        capture_output=True, text=True, timeout=10)
-    t2_content = (t2_result.stdout or '').strip()
-    if t2_content:
-        for t2_line in t2_content.splitlines():
-            if t2_line.strip().startswith('status:'):
-                t2_status = t2_line.strip().split(':', 1)[1].strip().strip('"').strip("'").lower()
-                break
-except Exception:
-    pass
+print(f"**T2 lookup needed**: Use memory_get tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\"")
+print()
 
 # Two-way idempotency: both agree on accepted → true no-op
 if current_status.lower() == 'accepted' and t2_status == 'accepted':
@@ -177,34 +168,13 @@ elif t2_status == 'accepted' and current_status.lower() != 'accepted':
 
 # Check T2 gate result
 print("### T2 Gate Result")
-try:
-    result = subprocess.run(
-        ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', f'{t2_key}-gate-latest'],
-        capture_output=True, text=True, timeout=10)
-    gate_out = (result.stdout or '').strip()
-    if gate_out:
-        print(gate_out)
-    else:
-        print(f"No gate result found for RDR {t2_key}")
-        print()
-        print(f"> **BLOCKED**: No gate record in T2. Run `/rdr-gate {t2_key}` first.")
-        sys.exit(0)
-except Exception as exc:
-    print(f"T2 not available: {exc}")
-    print()
-    print("> **Warning**: Cannot verify gate result from T2. The Action section will check gate status.")
+print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}-gate-latest\" to retrieve gate result.")
+print(f"If no gate record exists, run `/rdr-gate {t2_key}` first.")
 print()
 
 # T2 metadata (for context)
 print("### T2 Metadata")
-try:
-    result = subprocess.run(
-        ['nx', 'memory', 'get', '--project', f'{repo_name}_rdr', '--title', t2_key],
-        capture_output=True, text=True, timeout=10)
-    t2_out = (result.stdout or '').strip()
-    print(t2_out if t2_out else f"No T2 record for RDR {t2_key}")
-except Exception as exc:
-    print(f"T2 not available: {exc}")
+print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\" to retrieve T2 metadata.")
 print()
 
 print(f"**RDR file path:** `{rdr_file}`")
@@ -222,11 +192,7 @@ All data is pre-loaded above — no additional tool calls needed.
 - **Verify gate**: Check that the T2 Gate Result above shows `outcome: "PASSED"`. If it shows `BLOCKED` or is missing, report **BLOCKED** and stop.
 - **Self-healing check**: If T2 metadata already shows `status: "accepted"` but the file shows `draft`, update the file to match T2 (repair the file). Report the repair and stop.
 - **Update T2 first** (T2 is the process authority):
-  ```bash
-  nx memory put - --project {repo_name}_rdr --title {id} --ttl permanent --tags rdr,{type} <<'EOF'
-  ... (same fields from T2 Metadata above, with status: "accepted", accepted_date: "YYYY-MM-DD")
-  EOF
-  ```
+  Use **memory_put** tool: content="... (same fields from T2 Metadata above, with status: \"accepted\", accepted_date: \"YYYY-MM-DD\")", project="{repo_name}_rdr", title="{id}", ttl="permanent", tags="rdr,{type}"
 - **Update the RDR file**: Change `status: draft` to `status: accepted` in the YAML frontmatter. Add `accepted_date: YYYY-MM-DD` if not present.
 - **Update `reviewed-by`**: If `reviewed-by` is empty or placeholder, set to `self` (solo review).
 - **Regenerate README**: Update `{rdr_dir}/README.md` index to reflect the new status.

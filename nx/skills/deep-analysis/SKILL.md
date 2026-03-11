@@ -62,11 +62,9 @@ The deep-analyst uses `mcp__sequential-thinking__sequentialthinking`:
 
 ## Agent-Specific PRODUCE
 
-- **Analysis Findings**: Store in nx T3 as `printf "# Analysis: {topic}\n{findings}\n" | nx store put - --collection knowledge --title "analysis-{topic}-{date}" --tags "analysis"`
+- **Analysis Findings**: Store in nx T3 via store_put tool: content="# Analysis: {topic}\n{findings}", collection="knowledge", title="analysis-{topic}-{date}", tags="analysis"
 - **Hypothesis Results**: Document with confidence levels in nx T3
 - **Recommendations**: Include in relay to downstream agent (strategic-planner)
 - **Analysis Chain**: Use T1 scratch to track hypothesis progression during investigation:
-  ```bash
-  nx scratch put $'Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}' --tags "analysis,step-{N}"
-  nx scratch promote <id> --project {project} --title analysis-chain.md
-  ```
+  - scratch tool: action="put", content="Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}", tags="analysis,step-{N}"
+  - scratch_manage tool: action="promote", id="<id>", project="{project}", title="analysis-chain.md"

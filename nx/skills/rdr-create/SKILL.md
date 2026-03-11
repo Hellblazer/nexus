@@ -75,29 +75,11 @@ Replace `[NUMBER]` with the assigned ID and `[TITLE]` with the user's title.
 
 ### Step 4: Write T2 record
 
-```bash
-nx memory put - --project {repo}_rdr --title {NNN} --ttl permanent --tags rdr,{type} <<'EOF'
-id: "NNN"
-prefix: "PREFIX"
-title: "User's Title"
-status: "Draft"
-type: "Feature"
-priority: "Medium"
-created: "YYYY-MM-DD"
-gated: ""
-closed: ""
-close_reason: ""
-superseded_by: ""
-supersedes: ""
-epic_bead: ""
-archived: false
-file_path: "$RDR_DIR/NNN-kebab-title.md"
-EOF
-```
+Use memory_put tool: content="id: NNN\nprefix: PREFIX\ntitle: User's Title\nstatus: Draft\ntype: Feature\npriority: Medium\ncreated: YYYY-MM-DD\ngated: \nclosed: \nclose_reason: \nsuperseded_by: \nsupersedes: \nepic_bead: \narchived: false\nfile_path: $RDR_DIR/NNN-kebab-title.md", project="{repo}_rdr", title="{NNN}", ttl="permanent", tags="rdr,{type}"
 
 ### Step 5: Regenerate README index
 
-Read all T2 records for `{repo}_rdr` project via `nx memory list --project {repo}_rdr`. If T2 is empty (first create before T2 write completes), also scan filesystem frontmatter. Generate the index table and update `$RDR_DIR/README.md`.
+Read all T2 records for `{repo}_rdr` project via memory_get tool: project="{repo}_rdr", title="". If T2 is empty (first create before T2 write completes), also scan filesystem frontmatter. Generate the index table and update `$RDR_DIR/README.md`.
 
 ### Step 6: Stage files
 
@@ -133,11 +115,11 @@ Next: Fill in Problem Statement and Context, then use /rdr-research to add findi
 This skill produces outputs directly (no agent delegation):
 
 - **T3 knowledge**: Not produced at create time (archival happens at `/rdr-close`)
-- **T2 memory**: RDR metadata record via `nx memory put - --project {repo}_rdr --title {NNN} --ttl permanent --tags rdr,{type}`
-- **T1 scratch**: Working notes during creation via `nx scratch put "RDR NNN: scaffolding" --tags "rdr,create"` (optional, for tracking multi-step creation)
+- **T2 memory**: RDR metadata record via memory_put tool: project="{repo}_rdr", title="{NNN}", ttl="permanent", tags="rdr,{type}"
+- **T1 scratch**: Working notes during creation via scratch tool: action="put", content="RDR NNN: scaffolding", tags="rdr,create" (optional, for tracking multi-step creation)
 - **Filesystem**: `docs/rdr/NNN-kebab-title.md`, updated `docs/rdr/README.md`
 
-**Session Scratch (T1)**: Use `nx scratch` for ephemeral working notes if the creation involves multiple prompts or complex ID assignment. Flagged items auto-promote to T2 at session end.
+**Session Scratch (T1)**: Use scratch tool for ephemeral working notes if the creation involves multiple prompts or complex ID assignment. Flagged items auto-promote to T2 at session end.
 
 ## Does NOT
 

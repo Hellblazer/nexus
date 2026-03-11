@@ -44,27 +44,27 @@
 2. All agents automatically use new version
 3. No per-agent edits needed
 
-## Adding nx search Integration
+## Adding Search Integration
 
 See developer.md or code-review-expert.md for example patterns:
-- Use natural language queries
-- Use `--hybrid` for code search (semantic + ripgrep)
-- Use `--n` in 10-30 range
+- Use natural language queries in the search MCP tool
+- Pass `corpus="code"` for code search
+- Use `n` in 10-30 range
 
 Example section:
 ```markdown
-## Code Discovery with nx search
+## Code Discovery with Search
 
 **Find Related Code**:
-```bash
-nx search "how does feature X work in our codebase" --corpus code --hybrid --n 15
+```
+Use search tool: query="how does feature X work in our codebase", corpus="code", n=15
 ```
 
 ### Integration with Workflow
 1. User requests task
-2. Use `nx search` to understand existing patterns
+2. Use search tool to understand existing patterns
 3. Execute task following discovered patterns
-4. Store discoveries in nx store if novel
+4. Store discoveries via store_put tool if novel
 ```
 
 ## Consistency Checks
@@ -101,8 +101,7 @@ Update version in frontmatter when making significant changes to an agent.
 - Each agent should have `### Agent-Specific PRODUCE` section
 - Content comes from original agent's PRODUCE section
 
-**nx search not returning results**:
-- Run `nx index repo <path>` first to index the repo
-- Use `--hybrid` flag for best results with code
-- Try broader queries if results are sparse
-- Use `nx doctor` to verify Nexus server is running
+**MCP tools not available**:
+- Check that the nexus MCP server is registered in `.mcp.json`
+- Verify `nx-mcp` entry point is installed: `which nx-mcp`
+- Fall back to `nx` CLI via Bash tool (degraded mode)
