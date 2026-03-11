@@ -62,6 +62,8 @@ See [architecture.md](architecture.md) for the full module map.
 
 See `nx/README.md` for the plugin structure. Skills live in `nx/skills/<name>/SKILL.md`, agents in `nx/agents/<name>.md`, and both are registered in `nx/registry.yaml`.
 
+**MCP tools in agent frontmatter**: All agents include nexus MCP tools (`mcp__plugin_nx_nexus__*`) in their `tools:` list and reference MCP tool syntax (not CLI commands) in their body text. When creating or editing an agent, use MCP tool calls for storage tier operations — agents should never depend on Bash for T1/T2/T3 access. See `nx/README.md` § MCP Servers for tool names and parameters.
+
 ## Version Pinning
 
 Two packages have known breaking incompatibilities and must be pinned to exact versions in `pyproject.toml`:

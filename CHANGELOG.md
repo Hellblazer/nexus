@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **MCP server for agent storage operations** (RDR-034) — FastMCP server (`nx-mcp`)
+  exposing 8 structured tools for direct T1/T2/T3 access by agents without Bash
+  dependency. Tools: `search`, `store_put`, `store_list`, `memory_put`, `memory_get`,
+  `memory_search`, `scratch`, `scratch_manage`. Thread-safe lazy singletons with
+  double-checked locking for T1/T3; per-call context managers for T2. Collection
+  name cache with 60s TTL and short-circuit for fully-qualified corpus names.
+  Entry point: `nx-mcp = "nexus.mcp_server:main"` in pyproject.toml.
+- **Plugin migration to MCP tools** — all 14 agents, shared protocols, and 9 skills
+  updated from CLI syntax (`nx scratch put ...`) to MCP tool syntax
+  (`mcp__plugin_nx_nexus__scratch`). Human-facing docs (`docs/`) retain CLI syntax.
+
+### Changed
+- `id` parameter renamed to `entry_id` in `scratch()` and `scratch_manage()` MCP tools
+  to avoid shadowing Python builtin.
+
+### Docs
+- Architecture diagram updated with dual Human→CLI / Agent→MCP access paths.
+- Storage tiers doc notes two access paths (CLI for humans, MCP for agents).
+- Plugin README expanded with full MCP Servers section and permission auto-approval.
+- Contributing guide notes MCP tool requirements for agent authoring.
+
 ## [1.9.1] - 2026-03-10
 
 ### Docs

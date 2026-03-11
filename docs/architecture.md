@@ -4,15 +4,18 @@
 
 ## How It Fits Together
 
-Nexus has three layers: a CLI that talks to three storage tiers, an indexing
-pipeline that fills them, and a search engine that queries across them.
+Nexus has three layers: a CLI (for humans) and an MCP server (for agents) that
+talk to three storage tiers, an indexing pipeline that fills them, and a search
+engine that queries across them.
 
 ```
-User / Agent
-    │
-    ▼
-CLI (cli.py + commands/)
-    │
+Human                   Agent (Claude Code)
+  │                         │
+  ▼                         ▼
+CLI (cli.py)            MCP Server (mcp_server.py)
+  │                         │
+  └──────────┬──────────────┘
+             │
     ├── Index: classify → chunk → embed → store
     │     code: classify(SKIP|CODE|PROSE|PDF) → tree-sitter AST → context prefix → voyage-code-3 → code__<repo>
     │     prose: SemanticMarkdownChunker (md) or line-split → voyage-context-3 → docs__<repo>

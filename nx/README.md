@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-14 agents, 27 skills, session hooks, slash commands, and a bundled MCP server for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
+14 agents, 27 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
 
 ## Installation
 
@@ -23,7 +23,7 @@ The `nx` CLI and plugin work independently, but the plugin's full agent and skil
 
 | Dependency | Required for | Install |
 |-----------|-------------|---------|
-| **`nx` CLI** | All hooks and skills that run `nx` commands | See [Getting Started](../docs/getting-started.md) |
+| **`nx` CLI** | Hook scripts, indexing, and CLI-only operations (agents use MCP tools) | See [Getting Started](../docs/getting-started.md) |
 | **`bd` (Beads)** | Task tracking in all agents | [github.com/BeadsProject/beads](https://github.com/BeadsProject/beads) |
 | **superpowers plugin** | Cross-referenced skills (brainstorming, TDD, verification, writing-plans) | `/plugin marketplace add anthropics/claude-plugins-official` |
 
@@ -38,8 +38,8 @@ Run `/nx-preflight` after installing to verify all dependencies are present.
 - **27 skills** — 6 standalone + 14 agent-delegating + 7 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
-- **Permission auto-approval** — safe read-only commands skip the confirmation prompt
-- **Bundled MCP server** — sequential-thinking via `.mcp.json` (no separate install)
+- **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
+- **Two bundled MCP servers** — nexus (T1/T2/T3 storage tools) and sequential-thinking via `.mcp.json`
 
 ### Pick your entry point
 
@@ -79,7 +79,7 @@ nx/
 │       ├── setup.sh                  # One-time setup checks
 │       ├── subagent-start.sh         # Context prep for spawned subagents
 │       └── t2_prefix_scan.py         # T2 multi-namespace prefix scan for session context
-├── .mcp.json                # Bundled MCP servers (sequential-thinking)
+├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
 ├── CHANGELOG.md             # Version history (Keep a Changelog format)
 └── skills/
@@ -211,9 +211,27 @@ Defined in `registry.yaml`:
 
 The plugin ships `.mcp.json` which Claude Code picks up automatically on install:
 
-| Server | Purpose |
-|--------|---------|
-| `sequential-thinking` | Compaction-resilient reasoning chains via `mcp__sequential-thinking__sequentialthinking` |
+| Server | Purpose | Tools |
+|--------|---------|-------|
+| `nexus` | T1/T2/T3 storage tier access for agents (RDR-034) | `search`, `store_put`, `store_list`, `memory_put`, `memory_get`, `memory_search`, `scratch`, `scratch_manage` |
+| `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
+
+### Nexus MCP Server (`nx-mcp`)
+
+The nexus server exposes 8 structured MCP tools that give agents direct access to all three storage tiers without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+
+**Tool names** follow Claude Code's naming convention: `mcp__plugin_nx_nexus__<tool_name>` (e.g., `mcp__plugin_nx_nexus__search`).
+
+**Resource management**:
+- T1 and T3 use thread-safe lazy singletons (expensive to initialize, reused across the session)
+- T2 uses per-call context managers (SQLite WAL, microsecond open)
+- All errors return `"Error: {message}"` strings — no exceptions surface as framework errors
+
+**Agent frontmatter**: All 14 agents include nexus MCP tools in their `tools:` list and reference MCP tool syntax (not CLI commands) in their body text. CLI fallback instructions are documented in the shared Context Protocol for degraded scenarios.
+
+**Human CLI**: The `nx` CLI remains the primary interface for human users. All `docs/` documentation uses CLI syntax. The MCP server is transparent to human workflows.
+
+### Sequential Thinking
 
 No separate install required — `npx` fetches `@modelcontextprotocol/server-sequential-thinking` on first use.
 
@@ -250,11 +268,13 @@ When skills delegate to agents, they use a standardized relay format defined in 
 
 ### Permission Auto-Approval
 
-The permission hook auto-approves safe read-only operations:
+The permission hook auto-approves safe operations:
 
+- **nexus MCP tools**: all `mcp__plugin_nx_nexus__*` tools (search, store, memory, scratch)
+- **sequential thinking**: `mcp__plugin_nx_sequential-thinking__sequentialthinking`
 - **beads**: `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
 - **git**: `git log`, `git diff`, `git status`, `git show`, `git branch -a`
-- **nexus**: `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx doctor`
+- **nexus CLI**: `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx doctor`
 - **maven**: `mvn help:*`, `mvn dependency:tree`, `mvn dependency:analyze`
 
 Dangerous commands (force-push, `bd delete`, deploys) are always denied.
