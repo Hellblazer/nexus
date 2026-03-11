@@ -183,7 +183,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   Note a finding during review:
   Use scratch tool: action="put", content="Critical: {issue description} in {file}:{line}", tags="review,critical"
   If review spans multiple sessions, promote notes to T2:
-  Use scratch_manage tool: action="flag", id="<id>", project="{project}", title="review-notes.md"
+  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="review-notes.md"
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

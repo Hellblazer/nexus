@@ -71,7 +71,7 @@ If contradictions found with existing knowledge:
 - **Contradiction Resolutions**: Updated directly in source nx T3 documents
 - **Review Artifacts**: Use T1 scratch to track review round findings:
   - scratch tool: action="put", content="# Review Round {N}: {N} issues found\n{issue-list}", tags="review,round-{N}"
-  - scratch_manage tool: action="promote", id="<id>", project="{project}", title="review-round-{N}.md"
+  - scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="review-round-{N}.md"
 
 ## Success Criteria
 

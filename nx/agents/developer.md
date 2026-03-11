@@ -125,7 +125,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   Store checkpoint during implementation:
   Use scratch tool: action="put", content="Checkpoint: {step} complete. {notes}", tags="impl,checkpoint"
   Promote to T2 when validated:
-  Use scratch_manage tool: action="promote", id="<id>", project="{project}", title="checkpoints.md"
+  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="checkpoints.md"
 - **Implementation Notes**: Store in Nexus memory if multi-session: Use memory_put tool: content="content", project="{project}", title="impl-notes.md"
 - **Implementation Discoveries**: Store non-obvious findings that future implementers would
   need to know and could not easily rediscover:

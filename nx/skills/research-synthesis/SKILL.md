@@ -67,4 +67,4 @@ The agent uses `mcp__sequential-thinking__sequentialthinking`:
 - **Cross-Reference Maps**: Document relationships in nx T3 document content
 - **Round Artifacts**: Use T1 scratch to track findings per research round:
   - scratch tool: action="put", content="# Round {N} findings\n{content}", tags="research,round-{N}"
-  - scratch_manage tool: action="flag", id="<id>", project="{project}", title="research-round-{N}.md"
+  - scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="research-round-{N}.md"

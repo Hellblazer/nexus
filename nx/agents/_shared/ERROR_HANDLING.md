@@ -45,7 +45,7 @@ This file documents common error handling patterns for agents.
 
 **Scratch promote fails (missing project)**:
 - Error: scratch_manage `action="promote"` fails without project and title
-- Fix: Always specify both: scratch_manage `action="promote", id="<id>", project="{project}", title="notes.md"`
+- Fix: Always specify both: scratch_manage `action="promote", entry_id="<id>", project="{project}", title="notes.md"`
 
 ### T2 Memory Errors
 

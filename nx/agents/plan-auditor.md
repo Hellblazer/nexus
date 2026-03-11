@@ -198,7 +198,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Audit Working Notes**: Track issues found during audit in T1 scratch:
   Use scratch tool: action="put", content="Audit issue: {component} - {description}", tags="audit,issue"
   Promote all at end to T2 for audit trail:
-  Use scratch_manage tool: action="promote", id="<id>", project="{project}", title="audit-notes-{date}.md"
+  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="audit-notes-{date}.md"
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

@@ -55,11 +55,11 @@ T1 is session-scoped: all entries are wiped at SessionEnd unless flagged.
 **T1 MCP Tools:**
 ```
 Use scratch tool: action="put", content="<content>", tags="TAG1,TAG2"
-Use scratch tool: action="get", id="<id>"
+Use scratch tool: action="get", entry_id="<id>"
 Use scratch tool: action="search", query="<query>", n=10
 Use scratch tool: action="list"
-Use scratch_manage tool: action="flag", id="<id>", project="PROJECT", title="TITLE"
-Use scratch_manage tool: action="promote", id="<id>", project="PROJECT", title="TITLE"
+Use scratch_manage tool: action="flag", entry_id="<id>", project="PROJECT", title="TITLE"
+Use scratch_manage tool: action="promote", entry_id="<id>", project="PROJECT", title="TITLE"
 ```
 
 The SessionEnd hook runs automatically at session close and auto-promotes flagged T1 items to T2. Flagging items with scratch_manage `action="flag"` is how you opt in.
@@ -107,9 +107,9 @@ Agents produce artifacts based on their specialization:
   # Store ephemeral working note
   Use scratch tool: action="put", content="<hypothesis or interim finding>", tags="hypothesis"
   # Flag for auto-flush to T2 at session end
-  Use scratch_manage tool: action="flag", id="<id>", project="{project}", title="interim-notes.md"
+  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="interim-notes.md"
   # Or promote immediately
-  Use scratch_manage tool: action="promote", id="<id>", project="{project}", title="interim-findings.md"
+  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="interim-findings.md"
   ```
 
 ### Naming Conventions

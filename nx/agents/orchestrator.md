@@ -150,7 +150,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Interim Routing Notes**: Use T1 scratch for working notes during complex pipeline analysis:
   Use scratch tool: action="put", content="Routing hypothesis: {agent} because {reason}", tags="routing,pipeline"
   If worth preserving:
-  Use scratch_manage tool: action="flag", id="<id>", project="{project}", title="routing-notes.md"
+  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="routing-notes.md"
 - **Context Aggregation**: Gather and pass through; don't create new storage
 - **Escalation Notes**: Create blocker beads when needed
 

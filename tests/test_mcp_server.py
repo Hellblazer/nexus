@@ -89,12 +89,14 @@ def test_search_returns_results(t3):
     """search tool returns formatted results from T3."""
     t3.put(collection="knowledge__test", content="chromadb vector database", title="doc1")
     result = search(query="vector database", corpus="knowledge__test", n=5)
+    assert not result.startswith("Error:"), f"search returned error: {result}"
     assert "vector database" in result.lower() or "doc1" in result
 
 
 def test_search_no_results(t3):
     """search tool returns 'No results.' when nothing matches."""
     result = search(query="nonexistent topic", corpus="knowledge__empty")
+    assert not result.startswith("Error:"), f"search returned error: {result}"
     # Either "No collections" or "No results."
     assert "no" in result.lower()
 
@@ -112,6 +114,7 @@ def test_store_list(t3):
     """store_list returns listing after put."""
     store_put(content="listed entry", collection="knowledge", title="list-test")
     result = store_list(collection="knowledge")
+    assert not result.startswith("Error:"), f"store_list returned error: {result}"
     assert "entries" in result.lower() or "list-test" in result
 
 
@@ -177,7 +180,7 @@ def test_scratch_manage_flag(t1):
     """scratch_manage flag action marks entry."""
     put_result = scratch(action="put", content="flaggable entry")
     doc_id = put_result.split("Stored:")[1].strip()
-    result = scratch_manage(action="flag", id=doc_id)
+    result = scratch_manage(action="flag", entry_id=doc_id)
     assert "Flagged:" in result
 
 
@@ -185,7 +188,7 @@ def test_scratch_manage_promote(t1, t2_path):
     """scratch_manage promote copies entry to T2."""
     put_result = scratch(action="put", content="promotable content")
     doc_id = put_result.split("Stored:")[1].strip()
-    result = scratch_manage(action="promote", id=doc_id, project="promo", title="promoted.md")
+    result = scratch_manage(action="promote", entry_id=doc_id, project="promo", title="promoted.md")
     assert "Promoted:" in result
     # Verify it actually landed in T2
     with T2Database(t2_path) as t2:
@@ -204,8 +207,25 @@ def test_error_missing_params(t1):
     result = scratch(action="search", query="")
     assert result.startswith("Error:")
 
-    result = scratch_manage(action="promote", id="fake-id")
+    result = scratch(action="get", entry_id="")
     assert result.startswith("Error:")
+
+    result = scratch_manage(action="promote", entry_id="fake-id")
+    assert result.startswith("Error:")
+
+
+def test_store_put_empty_content(t3):
+    """store_put rejects empty content."""
+    result = store_put(content="", collection="knowledge", title="empty")
+    assert result.startswith("Error:")
+    assert "content" in result.lower()
+
+
+def test_memory_put_empty_content(t2_path):
+    """memory_put rejects empty content."""
+    result = memory_put(content="", project="testproj", title="empty.md")
+    assert result.startswith("Error:")
+    assert "content" in result.lower()
 
 
 def test_no_ansi_in_output(t1, t3, t2_path):

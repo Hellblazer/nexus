@@ -60,3 +60,29 @@ async def test_mcp_server_round_trip():
             })
             text = result.content[0].text
             assert "integration test" in text or "No scratch" in text
+
+            # Call memory_put (no external API keys needed)
+            result = await session.call_tool("memory_put", {
+                "content": "integration memory test",
+                "project": "mcp-integ",
+                "title": "round-trip.md",
+            })
+            text = result.content[0].text
+            assert "Stored:" in text
+            assert "mcp-integ/round-trip.md" in text
+
+            # Call memory_get
+            result = await session.call_tool("memory_get", {
+                "project": "mcp-integ",
+                "title": "round-trip.md",
+            })
+            text = result.content[0].text
+            assert "integration memory test" in text
+
+            # Call memory_search
+            result = await session.call_tool("memory_search", {
+                "query": "integration",
+                "project": "mcp-integ",
+            })
+            text = result.content[0].text
+            assert "integration" in text.lower()

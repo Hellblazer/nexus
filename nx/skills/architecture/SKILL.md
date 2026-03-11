@@ -92,4 +92,4 @@ The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-
 - **Beads**: Epic → Phase → Task hierarchy with `bd dep add` for dependencies
 - **Design Notes**: Use T1 scratch for working notes during architecture analysis:
   - scratch tool: action="put", content="Design consideration: {note}", tags="architecture,design"
-  - scratch_manage tool: action="flag", id="<id>", project="{project}", title="architecture-notes.md"
+  - scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="architecture-notes.md"

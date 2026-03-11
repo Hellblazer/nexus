@@ -67,4 +67,4 @@ The deep-analyst uses `mcp__sequential-thinking__sequentialthinking`:
 - **Recommendations**: Include in relay to downstream agent (strategic-planner)
 - **Analysis Chain**: Use T1 scratch to track hypothesis progression during investigation:
   - scratch tool: action="put", content="Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}", tags="analysis,step-{N}"
-  - scratch_manage tool: action="promote", id="<id>", project="{project}", title="analysis-chain.md"
+  - scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="analysis-chain.md"

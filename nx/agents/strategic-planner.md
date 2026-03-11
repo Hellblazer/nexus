@@ -187,7 +187,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Dependency Maps**: Use `bd dep add` for all relationships
 - **Planning Notes**: Use T1 scratch for intermediate analysis during planning; flag for T2 at session end:
   Use scratch tool: action="put", content="Planning note: {consideration}", tags="planning,analysis"
-  Use scratch_manage tool: action="flag", id="<id>", project="{project}", title="planning-notes.md"
+  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="planning-notes.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

@@ -121,14 +121,14 @@ T1 session scratch pad — ephemeral within-session storage.
 | `content` | str | `""` | Content to store (for `"put"`) |
 | `query` | str | `""` | Search query (for `"search"`) |
 | `tags` | str | `""` | Comma-separated tags (for `"put"`) |
-| `id` | str | `""` | Entry ID (for `"get"`) |
+| `entry_id` | str | `""` | Entry ID (for `"get"`) |
 | `n` | int | `10` | Max results for search |
 
 ```
 Use scratch tool: action="put", content="working hypothesis: the cache is stale"
 Use scratch tool: action="search", query="cache"
 Use scratch tool: action="list"
-Use scratch tool: action="get", id="<id>"
+Use scratch tool: action="get", entry_id="<id>"
 ```
 
 ### scratch_manage
@@ -138,13 +138,13 @@ Manage scratch entries: flag for persistence or promote to T2.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `action` | str | required | `"flag"`, `"promote"` |
-| `id` | str | required | Scratch entry ID |
+| `entry_id` | str | required | Scratch entry ID |
 | `project` | str | `""` | Target project (required for promote) |
 | `title` | str | `""` | Target title (required for promote) |
 
 ```
-Use scratch_manage tool: action="flag", id="<id>"
-Use scratch_manage tool: action="promote", id="<id>", project="{repo}", title="findings.md"
+Use scratch_manage tool: action="flag", entry_id="<id>"
+Use scratch_manage tool: action="promote", entry_id="<id>", project="{repo}", title="findings.md"
 ```
 
 **Usage pattern**: Use T1 scratch for in-flight working notes. Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via store_put.
@@ -173,7 +173,7 @@ nx doctor                                  # verify all credentials and tools
 1. Search T3 for prior art before starting work: Use search tool: `query="topic", corpus="knowledge"`
 2. Index the codebase once per repo: `nx index repo <path>` (CLI)
 3. Use T1 scratch for working notes during the session
-4. Flag important scratch items for auto-promote to T2: Use scratch_manage tool: `action="flag", id="<id>"`
+4. Flag important scratch items for auto-promote to T2: Use scratch_manage tool: `action="flag", entry_id="<id>"`
 5. Persist validated findings to T3 at session end: Use store_put tool
 
 **Tier selection:**

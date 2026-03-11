@@ -11,6 +11,8 @@ Architecture:
 """
 from __future__ import annotations
 
+import threading
+import time
 import warnings
 
 from mcp.server.fastmcp import FastMCP
@@ -25,18 +27,27 @@ mcp = FastMCP("nexus")
 
 _t1_instance = None
 _t1_isolated = False
+_t1_lock = threading.Lock()
+
 _t3_instance = None
+_t3_lock = threading.Lock()
+
+_collections_cache: list[str] = []
+_collections_cache_ts: float = 0.0
+_COLLECTIONS_CACHE_TTL = 60.0  # seconds
 
 
 def _get_t1():
     """Return (T1Database, is_isolated) — lazy init on first call."""
     global _t1_instance, _t1_isolated
     if _t1_instance is None:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            from nexus.db.t1 import T1Database
-            _t1_instance = T1Database()
-            _t1_isolated = any("EphemeralClient" in str(w.message) for w in caught)
+        with _t1_lock:
+            if _t1_instance is None:  # double-checked locking
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    from nexus.db.t1 import T1Database
+                    _t1_instance = T1Database()
+                    _t1_isolated = any("EphemeralClient" in str(w.message) for w in caught)
     return _t1_instance, _t1_isolated
 
 
@@ -44,9 +55,21 @@ def _get_t3():
     """Return T3Database singleton — lazy init on first call."""
     global _t3_instance
     if _t3_instance is None:
-        from nexus.db import make_t3
-        _t3_instance = make_t3()
+        with _t3_lock:
+            if _t3_instance is None:  # double-checked locking
+                from nexus.db import make_t3
+                _t3_instance = make_t3()
     return _t3_instance
+
+
+def _get_collection_names() -> list[str]:
+    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds."""
+    global _collections_cache, _collections_cache_ts
+    now = time.monotonic()
+    if now - _collections_cache_ts > _COLLECTIONS_CACHE_TTL:
+        _collections_cache = [c["name"] for c in _get_t3().list_collections()]
+        _collections_cache_ts = now
+    return _collections_cache
 
 
 def _t2_ctx():
@@ -60,9 +83,12 @@ def _t2_ctx():
 def _reset_singletons():
     """Reset lazy singletons (for tests only)."""
     global _t1_instance, _t1_isolated, _t3_instance
+    global _collections_cache, _collections_cache_ts
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
+    _collections_cache = []
+    _collections_cache_ts = 0.0
 
 
 def _inject_t1(t1, *, isolated: bool = False):
@@ -92,11 +118,14 @@ def search(query: str, corpus: str = "knowledge", n: int = 10) -> str:
     try:
         from nexus.search_engine import search_cross_corpus
         t3 = _get_t3()
-        all_collections = [c["name"] for c in t3.list_collections()]
-        target = resolve_corpus(corpus, all_collections)
+        if "__" in corpus:
+            target = [corpus]  # fully qualified — skip enumeration
+        else:
+            target = resolve_corpus(corpus, _get_collection_names())
         if not target:
             return f"No collections match corpus {corpus!r}"
         results = search_cross_corpus(query, target, n_results=n, t3=t3)
+        results.sort(key=lambda r: r.distance)
         if not results:
             return "No results."
         lines: list[str] = []
@@ -130,6 +159,8 @@ def store_put(
         ttl: Time-to-live: Nd (days), Nw (weeks), or "permanent"
     """
     try:
+        if not content:
+            return "Error: content is required"
         days = parse_ttl(ttl)
         ttl_days = days if days is not None else 0
         col_name = t3_collection_name(collection)
@@ -196,6 +227,8 @@ def memory_put(
         ttl: Time-to-live in days (default 30, 0 for permanent)
     """
     try:
+        if not content:
+            return "Error: content is required"
         with _t2_ctx() as db:
             row_id = db.put(
                 project=project,
@@ -269,7 +302,7 @@ def scratch(
     content: str = "",
     query: str = "",
     tags: str = "",
-    id: str = "",
+    entry_id: str = "",
     n: int = 10,
 ) -> str:
     """T1 session scratch pad — ephemeral within-session storage.
@@ -279,7 +312,7 @@ def scratch(
         content: Content to store (for "put")
         query: Search query (for "search")
         tags: Comma-separated tags (for "put")
-        id: Entry ID (for "get")
+        entry_id: Entry ID (for "get")
         n: Max results for search
     """
     try:
@@ -316,11 +349,11 @@ def scratch(
             return "\n".join(lines)
 
         elif action == "get":
-            if not id:
-                return "Error: id is required for get"
-            entry = t1.get(id)
+            if not entry_id:
+                return "Error: entry_id is required for get"
+            entry = t1.get(entry_id)
             if entry is None:
-                return f"{prefix}Not found: {id}"
+                return f"{prefix}Not found: {entry_id}"
             return f"{prefix}{entry['content']}"
 
         else:
@@ -332,7 +365,7 @@ def scratch(
 @mcp.tool()
 def scratch_manage(
     action: str,
-    id: str,
+    entry_id: str,
     project: str = "",
     title: str = "",
 ) -> str:
@@ -340,7 +373,7 @@ def scratch_manage(
 
     Args:
         action: One of "flag", "promote"
-        id: Scratch entry ID
+        entry_id: Scratch entry ID
         project: Target project for promote (required for promote)
         title: Target title for promote (required for promote)
     """
@@ -349,15 +382,15 @@ def scratch_manage(
         prefix = "[T1 isolated] " if isolated else ""
 
         if action == "flag":
-            t1.flag(id, project=project, title=title)
-            return f"{prefix}Flagged: {id}"
+            t1.flag(entry_id, project=project, title=title)
+            return f"{prefix}Flagged: {entry_id}"
 
         elif action == "promote":
             if not project or not title:
                 return "Error: project and title are required for promote"
             with _t2_ctx() as t2:
-                t1.promote(id, project=project, title=title, t2=t2)
-            return f"{prefix}Promoted: {id} -> {project}/{title}"
+                t1.promote(entry_id, project=project, title=title, t2=t2)
+            return f"{prefix}Promoted: {entry_id} -> {project}/{title}"
 
         else:
             return f"Error: unknown action {action!r}. Use: flag, promote"

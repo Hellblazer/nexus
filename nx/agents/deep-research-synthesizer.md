@@ -131,7 +131,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   After each round of research:
   Use scratch tool: action="put", content="# Round {N} findings\n{content}", tags="research,round-{N}"
   If valuable, flag for T2 persistence:
-  Use scratch_manage tool: action="flag", id="<id>", project="{project}", title="research-round-{N}.md"
+  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="research-round-{N}.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

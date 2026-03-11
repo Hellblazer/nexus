@@ -32,7 +32,7 @@ Use store_list tool: collection="knowledge"
 
 # Scratch (T1)
 Use scratch tool: action="put", content="working note"
-Use scratch_manage tool: action="flag", id="<id>"       # auto-promote to T2 at session end
+Use scratch_manage tool: action="flag", entry_id="<id>"       # auto-promote to T2 at session end
 ```
 
 ## Indexing (CLI only — no MCP equivalent)

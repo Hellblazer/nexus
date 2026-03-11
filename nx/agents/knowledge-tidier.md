@@ -209,7 +209,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   After each review round:
   Use scratch tool: action="put", content="# Review Round {N}: {N} issues found\n{issue-list}", tags="review,round-{N}"
   Promote summary to T2 for cross-session continuity:
-  Use scratch_manage tool: action="promote", id="<id>", project="{project}", title="review-round-{N}.md"
+  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="review-round-{N}.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

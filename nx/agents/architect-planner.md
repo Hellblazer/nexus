@@ -172,7 +172,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Design Working Notes**: Use T1 scratch during architectural design exploration:
   Use scratch tool: action="put", content="Design option: {option} - pros: {pros} cons: {cons}", tags="design,architecture"
   After design decision made, promote to T2:
-  Use scratch_manage tool: action="promote", id="<id>", project="{project}", title="design-exploration.md"
+  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="design-exploration.md"
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

@@ -141,7 +141,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Critique Notes**: Use T1 scratch to track issues found during critique:
   Use scratch tool: action="put", content="Issue [{severity}]: {description} in {location}", tags="critique,{severity}"
   Promote summary to T2 for tracking:
-  Use scratch_manage tool: action="promote", id="<id>", project="{project}", title="critique-notes.md"
+  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="critique-notes.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)

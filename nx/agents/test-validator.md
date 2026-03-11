@@ -159,7 +159,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   Capture test run result:
   Use scratch tool: action="put", content="Test run {timestamp}: {N} passed, {M} failed\n{summary}", tags="test-results"
   For multi-session validation, promote to T2:
-  Use scratch_manage tool: action="promote", id="<id>", project="{project}", title="test-validation-{date}.md"
+  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="test-validation-{date}.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
