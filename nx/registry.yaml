@@ -232,8 +232,26 @@ agents:
       - "Codebase alignment"
     typical_runtime: "30-60 seconds"
     predecessors: [strategic-planner]
-    successors: [architect-planner, developer]
+    successors: [architect-planner, developer, plan-enricher]
 
+  plan-enricher:
+    model: sonnet
+    version: "1.0"
+    color: emerald
+    skill: enrich-plan
+    slash_command: /enrich-plan
+    description: "Enriches beads with audit findings and execution context"
+    triggers:
+      - "plan-auditor completes in RDR planning chain"
+      - "user says enrich beads or groom plan"
+      - "beads need audit findings folded in"
+    strengths:
+      - "Bead enrichment"
+      - "Audit finding integration"
+      - "Execution context assembly"
+    typical_runtime: "30-60 seconds"
+    predecessors: [plan-auditor]
+    successors: []
 
   strategic-planner:
     model: opus
@@ -336,7 +354,8 @@ rdr_skills:
   rdr-accept:
     slash_command: /rdr-accept
     command_file: commands/rdr-accept.md
-    description: "Accept a gated RDR — verify gate PASSED, update T2 and file status"
+    description: "Accept a gated RDR — verify gate PASSED, update status, optional planning dispatch"
+    dispatches_to: [strategic-planner]
     triggers:
       - "accept this RDR"
       - "mark RDR as accepted"
@@ -345,7 +364,7 @@ rdr_skills:
   rdr-close:
     slash_command: /rdr-close
     command_file: commands/rdr-close.md
-    description: "Close RDR with post-mortem, bead decomposition, T3 archive"
+    description: "Close RDR with post-mortem, bead status advisory, T3 archive"
     triggers:
       - "close this RDR"
       - "RDR done"
@@ -440,6 +459,7 @@ pipelines:
     sequence:
       - strategic-planner
       - plan-auditor
+      - plan-enricher  # conditional: only when rdr-planning-context T1 tag present
       - architect-planner
       - developer
       - code-review-expert
@@ -511,6 +531,7 @@ model_summary:
     - deep-research-synthesizer
     - developer
     - plan-auditor
+    - plan-enricher
     - test-validator
   haiku: # Fast, cheap - utility agents
     - knowledge-tidier

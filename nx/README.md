@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-14 agents, 27 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
+15 agents, 28 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
 
 ## Installation
 
@@ -34,8 +34,8 @@ Run `/nx-preflight` after installing to verify all dependencies are present.
 
 ## What You Get
 
-- **14 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **27 skills** — 6 standalone + 14 agent-delegating + 7 RDR workflow
+- **15 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
+- **28 skills** — 6 standalone + 15 agent-delegating + 7 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
@@ -65,7 +65,7 @@ nx/
 │   │   ├── MAINTENANCE.md       # How to maintain/update agents
 │   │   ├── README.md            # _shared directory guide (this section)
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
-│   └── *.md                 # 14 specialized agent definitions
+│   └── *.md                 # 15 specialized agent definitions
 ├── commands/
 │   └── *.md                 # Slash commands (/research, /create-plan, /review-code, etc.)
 ├── hooks/
@@ -104,7 +104,8 @@ nx/
     ├── strategic-planning/  # → strategic-planner agent
     ├── test-validation/     # → test-validator agent
     ├── rdr-accept/          # RDR workflow: accept a gated RDR
-    ├── rdr-close/           # RDR workflow: close RDR, create beads
+    ├── enrich-plan/         # → plan-enricher agent
+    ├── rdr-close/           # RDR workflow: close RDR, bead advisory
     ├── rdr-create/          # RDR workflow: create new RDR from template
     ├── rdr-gate/            # RDR workflow: quality gate before finalizing
     ├── rdr-list/            # RDR workflow: list RDRs with status
@@ -138,7 +139,7 @@ Skills that provide guidance directly without delegating to an agent.
 | using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring nx plugin skills |
 
-## Agents (14)
+## Agents (15)
 
 See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, predecessors/successors).
 
@@ -156,6 +157,7 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | orchestrator | orchestration | `/orchestrate` | haiku | Route requests to appropriate agents |
 | pdf-chromadb-processor | pdf-processing | `/pdf-process` | haiku | Index PDFs into nx store for semantic search |
 | plan-auditor | plan-validation | `/plan-audit` | sonnet | Validate plans before execution |
+| plan-enricher | enrich-plan | `/enrich-plan` | sonnet | Enrich beads with audit findings and execution context |
 | strategic-planner | strategic-planning | `/create-plan` | opus | Implementation planning, task decomposition |
 | test-validator | test-validation | `/test-validate` | sonnet | Test coverage and quality validation |
 
@@ -163,7 +165,7 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 Defined in `registry.yaml`:
 
-- **feature**: strategic-planner → plan-auditor → architect-planner → developer → code-review-expert → test-validator
+- **feature**: strategic-planner → plan-auditor → plan-enricher *(conditional)* → architect-planner → developer → code-review-expert → test-validator
 - **bug**: debugger → developer → code-review-expert → test-validator
 - **research**: deep-research-synthesizer → knowledge-tidier
 - **onboarding**: codebase-deep-analyzer → strategic-planner
@@ -203,6 +205,7 @@ Defined in `registry.yaml`:
 - `/pdf-process` → pdf-chromadb-processor
 - `/deep-analysis` → deep-analyst
 - `/substantive-critique` → substantive-critic
+- `/enrich-plan` → plan-enricher
 
 **RDR commands**: `/rdr-create`, `/rdr-list`, `/rdr-show`, `/rdr-research`, `/rdr-gate`, `/rdr-accept`, `/rdr-close`
 

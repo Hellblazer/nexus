@@ -15,6 +15,8 @@
      │
   [Accepted]
      │
+     │ optional: strategic-planner → plan-auditor → plan-enricher
+     │
      │ /rdr-close --reason implemented
      ▼
 [Implemented]
@@ -57,12 +59,14 @@ formal validation and archival — use them when the decision is load-bearing.
 ```
 /rdr-accept 016
 # Verifies gate result, updates status → accepted
+# Auto-detects multi-phase RDR → offers planning handoff
+# If yes: planner → auditor → enricher → beads ready
 ```
 
 ```
 /rdr-close 016 --reason implemented
 # Creates post-mortem template
-# Decomposes Implementation Plan → beads
+# Displays bead status advisory (if beads exist from accept-time planning)
 # Indexes RDR into rdr__ collection
 ```
 
@@ -178,6 +182,12 @@ Author/reviewer decision point. The gate validates; acceptance is deliberate.
 3. Updates the **RDR file** frontmatter to match.
 4. Regenerates `docs/rdr/README.md`.
 5. Stages modified files via `git add`.
+6. **Planning handoff** (optional): counts `### Phase` headings in the
+   Implementation Plan. If 2+ phases, defaults to yes; otherwise defaults to no.
+   - If accepted: writes T1 `rdr-planning-context` tag, dispatches
+     `strategic-planner` → `plan-auditor` → `plan-enricher` chain.
+   - Plan-enricher enriches beads with audit findings and writes epic bead ID to T2.
+   - If declined: no beads created — accept is complete.
 
 **Self-healing**: if T2 shows `accepted` but the file still shows `draft`,
 `/rdr-accept` repairs the file to match T2.
@@ -186,7 +196,7 @@ Author/reviewer decision point. The gate validates; acceptance is deliberate.
 
 ## Close (`/rdr-close`)
 
-Finalizes an Accepted RDR and sets up implementation tracking.
+Finalizes an Accepted RDR.
 
 Requires status: **Accepted**. Blocked otherwise — use `--force` to override.
 
@@ -194,7 +204,8 @@ Close reasons: `implemented` · `reverted` · `abandoned` · `superseded`
 
 Steps:
 1. Creates `docs/rdr/post-mortem/NNN-kebab-title.md` for drift analysis.
-2. Decomposes the Implementation Plan into beads: one epic, one task per step.
+2. **Bead status advisory**: if T2 has an `epic_bead` field (set during accept-time
+   planning), displays bead statuses. Advisory only — the human decides which to close.
 3. Indexes RDR content via `nx index rdr` into the `rdr__` collection.
 4. Updates T2 with close date, close reason, and final status.
 5. Regenerates `docs/rdr/README.md`.
