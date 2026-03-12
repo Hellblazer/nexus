@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.2] - 2026-03-12
+
 ### Fixed
 - **Remove `tools:` frontmatter from all 14 agents** (RDR-035) — Claude Code bug
   where explicit `tools:` in plugin agents filters out MCP tools. Agents now inherit
