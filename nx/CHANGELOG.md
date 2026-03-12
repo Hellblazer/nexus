@@ -4,6 +4,13 @@ All notable changes to the nx plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Remove `tools:` frontmatter from all 14 agents** (RDR-035) — Claude Code bug
+  where explicit `tools:` in plugin agents filters out MCP tools. Agents now inherit
+  all tools from the parent session. PermissionRequest hook remains as enforcement.
+
 ## [1.10.1] - 2026-03-11
 
 ### Fixed

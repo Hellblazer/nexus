@@ -227,7 +227,7 @@ The nexus server exposes 8 structured MCP tools that give agents direct access t
 - T2 uses per-call context managers (SQLite WAL, microsecond open)
 - All errors return `"Error: {message}"` strings — no exceptions surface as framework errors
 
-**Agent frontmatter**: All 14 agents include nexus MCP tools in their `tools:` list and reference MCP tool syntax (not CLI commands) in their body text. CLI fallback instructions are documented in the shared Context Protocol for degraded scenarios.
+**Agent frontmatter**: Agents do NOT declare a `tools:` field — Claude Code has a confirmed bug (GitHub #13605, #21560, #25200) where explicit `tools:` in plugin-defined agents filters out MCP tools. Agents inherit all tools from the parent session. The PermissionRequest hook provides runtime enforcement. Agent body text references MCP tool syntax (not CLI commands). See RDR-035.
 
 **Human CLI**: The `nx` CLI remains the primary interface for human users. All `docs/` documentation uses CLI syntax. The MCP server is transparent to human workflows.
 
