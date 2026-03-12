@@ -1,6 +1,6 @@
 ---
 name: enrich-plan
-description: Use after plan-audit to enrich beads with audit findings, execution context, and codebase alignment for autonomous execution
+description: Use when beads need enrichment with audit findings, execution context, and codebase alignment after plan-audit validates
 ---
 
 # Enrich Plan Skill
@@ -42,6 +42,13 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 ## Session Scope Note
 
 T1 scratch is session-scoped. Standalone invocation only works within the same session where `/plan-audit` ran. Cross-session use requires re-running `/plan-audit` first to populate T1 with audit findings.
+
+## Agent-Specific PRODUCE
+
+- **Enriched Beads**: Updated via `bd update <id> --description "..."` with execution-ready context
+- **T2 memory**: Epic bead ID written via memory_put tool: project="{repo}_rdr", title="NNN"
+- **T1 scratch**: Enrichment summary via scratch tool: action="put", tags="enrichment-complete"
+- **Console output**: Enriched plan summary table
 
 ## Success Criteria
 
