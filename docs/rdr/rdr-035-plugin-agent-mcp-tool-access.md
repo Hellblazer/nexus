@@ -2,8 +2,10 @@
 title: "Fix Plugin Agent MCP Tool Access"
 id: RDR-035
 type: bugfix
-status: accepted
+status: closed
 accepted_date: 2026-03-12
+closed_date: 2026-03-12
+close_reason: implemented
 priority: P0
 author: Hal Hildebrand
 reviewed-by: self
