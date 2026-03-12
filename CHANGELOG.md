@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.3] - 2026-03-12
+
+### Fixed
+- **PyPI README links** — converted all relative markdown links to absolute GitHub URLs
+  so documentation links work on the PyPI project page
+
+### Docs
+- Updated RDR section in README to reflect actual usage (35+ RDRs and counting) rather
+  than hypothetical projections; added concrete cross-reference example (RDR-035/023)
+
 ## [1.10.2] - 2026-03-12
 
 ### Fixed

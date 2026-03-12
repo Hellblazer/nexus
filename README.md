@@ -13,13 +13,14 @@ Three layers, each useful on its own, each building on the last:
 
 2. **A Claude Code plugin** (`nx/`) — 14 agents, 27 skills, session hooks, slash commands, and two bundled MCP servers. Agents access all three storage tiers via structured MCP tools (no Bash dependency), search indexed code before proposing changes, and coordinate through standard pipelines (plan, implement, review, test). Works with the CLI; does not require RDR.
 
-3. **A structured decision framework** ([RDR](docs/rdr/README.md)) — Research-Design-Review documents: the traction control for agentic development. Each decision is a short document with classified evidence (Verified, Documented, or Assumed). Write one, build it, learn something, write another. Nexus keeps the growing corpus searchable and navigable. Fully optional.
+3. **A structured decision framework** ([RDR](https://github.com/Hellblazer/nexus/blob/main/docs/rdr/README.md)) — Research-Design-Review documents: the traction control for agentic development. Each decision is a short document with classified evidence (Verified, Documented, or Assumed). Write one, build it, learn something, write another — Nexus itself has 35+ and counting. The growing corpus stays searchable and navigable. Fully optional.
 
 Use just the CLI. Add the plugin. Adopt RDR later, or never. Each layer amplifies the ones below it but none requires the ones above.
 
 ## Quick Start
 
 ```bash
+# CLI
 uv tool install conexus          # install the nx CLI from PyPI
 
 nx config init                   # configure API keys
@@ -28,9 +29,13 @@ nx doctor                        # verify setup
 nx index repo .                  # index current repo
 nx search "authentication flow"  # semantic search
 nx search "auth" --hybrid        # semantic + git frecency
+
+# Claude Code plugin (optional)
+/plugin marketplace add Hellblazer/nexus
+/plugin install nx@nexus-plugins
 ```
 
-Scratch and memory commands work with zero API keys. Cloud search requires [ChromaDB](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) accounts — both offer free tiers that cover all typical Nexus usage. See [Getting Started](docs/getting-started.md).
+Scratch and memory commands work with zero API keys. Cloud search requires [ChromaDB](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) accounts — both offer free tiers that cover all typical Nexus usage. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md).
 
 ## Repository Indexing
 
@@ -43,7 +48,7 @@ Scratch and memory commands work with zero API keys. Cloud search requires [Chro
 5. Routes results to separate collections: `code__<repo>`, `docs__<repo>`, and `rdr__<repo>` for RDR documents
 6. Computes git frecency scores so recently-touched files rank higher in hybrid search
 
-Auto-discovers RDR documents in `docs/rdr/` and indexes them into a dedicated collection. Stable across git worktrees. Configurable per-repo via `.nexus.yml`. See [Repo Indexing](docs/repo-indexing.md).
+Auto-discovers RDR documents in `docs/rdr/` and indexes them into a dedicated collection. Stable across git worktrees. Configurable per-repo via `.nexus.yml`. See [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md).
 
 ## The CLI
 
@@ -69,7 +74,7 @@ Every command targets one or more tiers:
 
 ## RDR: Research-Design-Review
 
-Agentic coding is like driving on slick ice — fast, powerful, and easy to lose control of. RDR is the traction control: a short document where you state the problem, record what you know, describe the plan, and note what you rejected. It gives humans a structured way to steer LLM-driven development and feed discoveries back into the next decision.
+Agentic coding is like driving on slick ice — fast, powerful, and easy to lose control of. RDR is the traction control: a short document where you state the problem, record what you find, describe the plan, and note what you rejected. It gives humans a structured way to steer LLM-driven development and feed discoveries back into the next decision.
 
 Each finding is classified so readers know what is solid and what is a guess:
 
@@ -79,9 +84,9 @@ Each finding is classified so readers know what is solid and what is a guess:
 | **Documented** | Supported by external documentation only |
 | **Assumed** | Unverified — flag it if your design depends on it |
 
-RDRs are iterative, not waterfall. You write one, build it, learn something, and write another. A real project might produce 20+ RDRs over its lifetime — foundation decisions, mid-project pivots when assumptions break, performance fixes from real usage, quality refinements from actual data. Each one builds on what you learned implementing the last.
+RDRs are iterative, not waterfall. You write one, build it, learn something, and write another. Nexus itself has produced 35+ RDRs across its development — from early architectural decisions through mid-project pivots when assumptions broke, bug investigations that uncovered framework-level issues, and quality refinements driven by real usage. Each one builds on what was learned implementing the last, and the pace doesn't slow down as the project matures. New capabilities surface new decisions.
 
-That many design documents create an information management problem. Nexus handles it: every RDR is semantically searchable the moment it is committed, metadata is queryable without parsing markdown, and agents receive prior-art context automatically. The corpus stays navigable as it grows. See [RDR Overview](docs/rdr-overview.md).
+A growing corpus of design documents creates an information management problem. Nexus handles it: every RDR is semantically searchable the moment it is committed, metadata is queryable without parsing markdown, and agents receive prior-art context automatically. When you write RDR-035, the agent already knows what RDR-023 decided and why — contradictions and superseded assumptions surface during the gate review, not after deployment. The corpus stays navigable and useful as it grows. See [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md).
 
 ## The Plugin
 
@@ -101,22 +106,22 @@ The plugin provides:
 - **Standard pipelines** — feature, bug, and research workflows with built-in review gates
 - **Two bundled MCP servers** — nexus (8 storage tier tools for agents) and sequential-thinking, both via `.mcp.json`
 
-Each agent runs on a model matched to its task: opus for complex reasoning, sonnet for implementation, haiku for utility. The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task-level tracking — session hooks prime bead context, RDR close decomposes decisions into beads, and branch naming ties back to bead IDs. See [nx/README.md](nx/README.md) for the full plugin documentation.
+Each agent runs on a model matched to its task: opus for complex reasoning, sonnet for implementation, haiku for utility. The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task-level tracking — session hooks prime bead context, RDR close decomposes decisions into beads, and branch naming ties back to bead IDs. See [nx/README.md](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) for the full plugin documentation.
 
 ## Documentation
 
 | Document | What it covers |
 |----------|---------------|
-| [Getting Started](docs/getting-started.md) | Install, configure, first index and search |
-| [CLI Reference](docs/cli-reference.md) | Every command, every flag |
-| [Storage Tiers](docs/storage-tiers.md) | T1/T2/T3 architecture and data flow |
-| [Memory and Tasks](docs/memory-and-tasks.md) | T2 memory, beads integration, session context |
-| [Repo Indexing](docs/repo-indexing.md) | Smart file classification, chunking, frecency |
-| [Configuration](docs/configuration.md) | Config hierarchy, .nexus.yml, settings |
-| [Architecture](docs/architecture.md) | Module map, design decisions |
-| [Contributing](docs/contributing.md) | Dev setup, testing, code style |
+| [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) | Install, configure, first index and search |
+| [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) | Every command, every flag |
+| [Storage Tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md) | T1/T2/T3 architecture and data flow |
+| [Memory and Tasks](https://github.com/Hellblazer/nexus/blob/main/docs/memory-and-tasks.md) | T2 memory, beads integration, session context |
+| [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) | Smart file classification, chunking, frecency |
+| [Configuration](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md) | Config hierarchy, .nexus.yml, settings |
+| [Architecture](https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md) | Module map, design decisions |
+| [Contributing](https://github.com/Hellblazer/nexus/blob/main/docs/contributing.md) | Dev setup, testing, code style |
 
-**RDR (Research-Design-Review):** [Overview](docs/rdr-overview.md) · [Workflow](docs/rdr-workflow.md) · [Nexus Integration](docs/rdr-nexus-integration.md) · [Templates](docs/rdr-templates.md) · [Project RDR Index](docs/rdr/README.md)
+**RDR (Research-Design-Review):** [Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md) · [Workflow](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-workflow.md) · [Nexus Integration](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-nexus-integration.md) · [Templates](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-templates.md) · [Project RDR Index](https://github.com/Hellblazer/nexus/blob/main/docs/rdr/README.md)
 
 ## Prerequisites
 
@@ -126,4 +131,4 @@ Each agent runs on a model matched to its task: opus for complex reasoning, sonn
 
 ## License
 
-AGPL-3.0-or-later. See [LICENSE](LICENSE).
+AGPL-3.0-or-later. See [LICENSE](https://github.com/Hellblazer/nexus/blob/main/LICENSE).
