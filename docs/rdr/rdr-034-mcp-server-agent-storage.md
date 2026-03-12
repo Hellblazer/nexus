@@ -309,16 +309,34 @@ tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_nexus__search", "mcp__pl
 
 Bash remains in the tools list for non-nx operations (git, bd, pytest, etc.).
 
+## Post-Implementation Note (RDR-035, 2026-03-12)
+
+The MCP server architecture is correct and working. However, the statement in the Problem
+Statement — "MCP tools, by contrast, are first-class tool calls that are always available
+when the MCP server is registered and the tool appears in the agent's `tools:` frontmatter"
+— was incorrect for plugin-defined agents.
+
+Claude Code has a confirmed bug (GitHub #13605, #21560, #25200) where explicit `tools:`
+declarations in plugin agent frontmatter cause MCP tools to be filtered out of the agent's
+tool inventory. The fix (RDR-035) is to remove the `tools:` field entirely, allowing agents
+to inherit all tools including MCP from the parent session. The PermissionRequest hook
+provides runtime enforcement.
+
+The MCP server, tool definitions, agent body references, and permission hook are all correct
+as designed. Only the `tools:` frontmatter in agent files needed to change.
+
+See `docs/rdr/rdr-035-plugin-agent-mcp-tool-access.md`.
+
 ## Success Criteria
 
-- [ ] All 8 MCP tools pass unit tests with ephemeral clients
-- [ ] T1 PPID chain verification test passes
-- [ ] Integration test confirms round-trip MCP tool calls
-- [ ] All 63 agent-consumed files updated to MCP tool references
-- [ ] Permission hook pre-approves `mcp__plugin_nx_nexus__*` tools
-- [ ] No agent references `nx scratch/memory/store/search` via Bash
-- [ ] Background agent (knowledge-tidier) successfully persists to T3 via MCP
-- [ ] `uv run pytest` passes (no regressions)
+- [x] All 8 MCP tools pass unit tests with ephemeral clients
+- [x] T1 PPID chain verification test passes
+- [x] Integration test confirms round-trip MCP tool calls
+- [x] All 63 agent-consumed files updated to MCP tool references
+- [x] Permission hook pre-approves `mcp__plugin_nx_nexus__*` tools
+- [ ] ~~No agent references `nx scratch/memory/store/search` via Bash~~ — agents may use either path
+- [x] Background agent (knowledge-tidier) successfully persists to T3 via MCP — **Verified 2026-03-12 after RDR-035 fix**
+- [x] `uv run pytest` passes (no regressions)
 
 ## Implementation Phases
 

@@ -4,7 +4,6 @@ version: "2.0"
 description: Designs comprehensive software architecture and creates phased execution plans for complex projects. Use when starting new features requiring architectural design or planning multi-phase implementations.
 model: opus
 color: green
-tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples

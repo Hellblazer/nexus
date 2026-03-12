@@ -4,7 +4,6 @@ version: "2.1"
 description: Creates phased TDD-driven implementation plans and decomposes complex work into tracked beads. Use for multi-phase feature planning, dependency management, breaking vague requirements into executable tasks, or iterating on existing plans.
 model: opus
 color: indigo
-tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples

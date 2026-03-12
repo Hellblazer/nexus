@@ -4,7 +4,6 @@ version: "2.0"
 description: Routes requests to appropriate specialized agents and manages multi-agent pipelines. Use when the task is ambiguous, when coordinating work across multiple agents, or when unsure which agent to invoke.
 model: haiku
 color: gold
-tools: ["Read", "Grep", "Glob", "Agent", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples
