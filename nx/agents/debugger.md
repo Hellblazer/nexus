@@ -4,7 +4,6 @@ version: "2.0"
 description: Systematically investigates bugs, test failures, and performance issues using hypothesis-driven debugging. Use when encountering bugs after 2-3 failed fix attempts or facing non-deterministic failures.
 model: opus
 color: red
-tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples

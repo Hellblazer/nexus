@@ -4,7 +4,6 @@ version: "2.0"
 description: Reviews and validates technical plans for accuracy, completeness, and codebase alignment. Use before implementing any plan — catches gaps and technical errors before they become bugs.
 model: sonnet
 color: orange
-tools: ["Read", "Grep", "Glob", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples

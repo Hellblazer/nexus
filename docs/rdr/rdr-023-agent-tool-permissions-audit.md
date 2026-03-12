@@ -142,6 +142,24 @@ See `docs/rdr/rdr-034-mcp-server-agent-storage.md`.
 **Q4** (sequential thinking): Added to all 14 agents uniformly. It's a reasoning
 primitive with no side effects — no security reason to restrict it.
 
+## Supersession Note (RDR-035, 2026-03-12)
+
+**The `tools:` frontmatter approach from this RDR has been reversed.** Claude Code has a
+confirmed bug (GitHub #13605, #21560, #25200) where explicit `tools:` declarations in
+plugin-defined agents cause MCP tool filtering — MCP tools are excluded from the agent's
+tool inventory even when explicitly listed in the array. This rendered the entire MCP
+server (RDR-034) non-functional for plugin agents.
+
+**Fix**: All 14 agents have had `tools:` removed from frontmatter. Agents now inherit all
+tools from the parent session, including MCP tools. The PermissionRequest hook (also from
+this RDR) remains as the runtime enforcement layer — this part of the design is unaffected.
+
+**Q2 answer confirmed**: The `tools` frontmatter field DOES enforce tool restrictions at
+runtime, but the enforcement incorrectly filters MCP tools. This was the "unverified"
+question from this RDR — now answered definitively.
+
+See `docs/rdr/rdr-035-plugin-agent-mcp-tool-access.md`.
+
 ## Success Criteria
 
 Pre-conditions (verified before gate):
@@ -149,12 +167,13 @@ Pre-conditions (verified before gate):
 - [x] All 14 agents have explicit `tools` in frontmatter (verified: `grep '^tools:' nx/agents/*.md` — 14 matches)
 - [x] PermissionRequest hook auto-approves safe tools (verified: JSON payload tests — all allow/deny/ask-user scenarios pass)
 - [x] Existing deny rules preserved (verified: destructive commands still denied in hook tests)
+- [x] ~~Tools frontmatter~~ **Reversed by RDR-035** — `tools:` removed from all agents due to MCP filtering bug
 
 Post-conditions (require validation bead nexus-ryjo):
 
-- [ ] knowledge-tidier can successfully run `nx store put` and `nx memory` commands
-- [ ] Agents that were previously failing due to permission denials now work
-- [ ] Confirm whether `tools` frontmatter enforces access at runtime (negative test: agent without Bash attempts shell command)
+- [x] knowledge-tidier can successfully run `nx store put` and `nx memory` commands — **Verified via MCP tools after RDR-035 fix**
+- [x] Agents that were previously failing due to permission denials now work — **Verified 2026-03-12**
+- [x] Confirm whether `tools` frontmatter enforces access at runtime — **Yes, it does — and it incorrectly filters MCP tools (RDR-035)**
 
 ## Implementation
 

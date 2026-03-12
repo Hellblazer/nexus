@@ -4,7 +4,6 @@ version: "2.0"
 description: Verifies test coverage, runs test suites, and validates test quality for code changes. Use after implementation, before marking work complete, or when test failures need systematic root-cause analysis.
 model: sonnet
 color: lime
-tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples

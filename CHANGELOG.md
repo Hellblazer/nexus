@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Remove `tools:` frontmatter from all 14 agents** (RDR-035) — Claude Code has a
+  confirmed bug where explicit `tools:` declarations in plugin-defined agents filter
+  out MCP tools, rendering the MCP server non-functional for subagents. Agents now
+  inherit all tools from the parent session; the PermissionRequest hook remains as
+  runtime enforcement.
+
 ## [1.10.1] - 2026-03-11
 
 ### Fixed

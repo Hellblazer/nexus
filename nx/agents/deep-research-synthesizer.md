@@ -4,7 +4,6 @@ version: "2.0"
 description: Conducts comprehensive research across nx knowledge store, memory, web resources, and code repositories. Use when needing multi-source research synthesis or building comprehensive understanding of new technologies.
 model: sonnet
 color: teal
-tools: ["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_nexus__scratch_manage"]
 ---
 
 ## Usage Examples
