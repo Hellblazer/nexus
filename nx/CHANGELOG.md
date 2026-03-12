@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-03-12
+
+### Added
+- **plan-enricher agent** — enriches beads with audit findings, execution context, and
+  codebase alignment after plan-auditor validates (sonnet, emerald)
+- **enrich-plan skill + `/enrich-plan` command** — invoke plan-enricher standalone or
+  via RDR planning chain
+- **Planning handoff in `/rdr-accept`** — Step 7 auto-detects multi-phase RDRs and
+  offers to dispatch strategic-planner → plan-auditor → plan-enricher chain
+- **Conditional successor routing in plan-auditor** — T1 `rdr-planning-context` tag
+  with RDR ID correlation routes to plan-enricher only in RDR planning context
+
+### Changed
+- **`/rdr-close` bead decomposition → bead status advisory** — close no longer creates
+  beads; shows read-only status table, human decides which to close
+- **strategic-planner Phase 3** renamed "Audit Handoff"; removed "iterate" instruction
+- Registered plan-enricher in `registry.yaml` (agents, feature pipeline, model summary)
+- Updated `rdr-accept` description in registry to mention planning dispatch
+- Updated `rdr-close` description in registry, using-nx-skills, workflow docs
+- Agent count: 14 → 15; Skill count: 27 → 28
+
 ## [1.10.3] - 2026-03-12
 
 Plugin version aligned with Nexus CLI 1.10.3. No plugin-level functional changes.

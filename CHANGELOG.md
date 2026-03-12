@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-03-12
+
+### Added
+- **Post-accept planning workflow** (RDR-036) — `/rdr-accept` now offers an optional
+  planning handoff after acceptance: auto-detects multi-phase RDRs (2+ phases defaults
+  yes), dispatches `strategic-planner → plan-auditor → plan-enricher` chain to create
+  and enrich execution beads at accept time rather than close time
+- **plan-enricher agent** (sonnet) — terminal node in planning chain; enriches beads
+  with audit findings, execution context, file paths, and codebase alignment
+- **`/enrich-plan` skill and command** — invoke plan-enricher standalone or as part of
+  the RDR planning chain
+- **Conditional successor routing in plan-auditor** — uses T1 `rdr-planning-context`
+  tag with RDR ID correlation to route to plan-enricher only in RDR planning context
+
+### Changed
+- **`/rdr-close` bead decomposition replaced with advisory** — close no longer creates
+  beads; displays a read-only bead status table (if beads exist from accept-time
+  planning) and lets the human decide which to close
+- **strategic-planner Phase 3** renamed from "Audit and Iteration" to "Audit Handoff";
+  removed aspirational "iterate based on audit feedback" instruction
+- Plugin now has 15 agents (was 14) and 28 skills (was 27)
+
 ## [1.10.3] - 2026-03-12
 
 ### Fixed

@@ -11,9 +11,9 @@ Three layers, each useful on its own, each building on the last:
 
 1. **Semantic search and repository indexing** (`nx`) — Index any repo: code is chunked with tree-sitter AST parsing, prose with semantic markdown splitting, PDFs with layout-aware extraction. Search across all of it with a single command. Three storage tiers let you start local with zero API keys and add cloud search when you're ready.
 
-2. **A Claude Code plugin** (`nx/`) — 14 agents, 27 skills, session hooks, slash commands, and two bundled MCP servers. Agents access all three storage tiers via structured MCP tools (no Bash dependency), search indexed code before proposing changes, and coordinate through standard pipelines (plan, implement, review, test). Works with the CLI; does not require RDR.
+2. **A Claude Code plugin** (`nx/`) — 15 agents, 28 skills, session hooks, slash commands, and two bundled MCP servers. Agents access all three storage tiers via structured MCP tools (no Bash dependency), search indexed code before proposing changes, and coordinate through standard pipelines (plan, implement, review, test). Works with the CLI; does not require RDR.
 
-3. **A structured decision framework** ([RDR](https://github.com/Hellblazer/nexus/blob/main/docs/rdr/README.md)) — Research-Design-Review documents: the traction control for agentic development. Each decision is a short document with classified evidence (Verified, Documented, or Assumed). Write one, build it, learn something, write another — Nexus itself has 35+ and counting. The growing corpus stays searchable and navigable. Fully optional.
+3. **A structured decision framework** ([RDR](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md)) — Research-Design-Review documents: the traction control for agentic development. Each decision is a short document with classified evidence (Verified, Documented, or Assumed). Write one, build it, learn something, write another — Nexus itself has 35+ and counting. The growing corpus stays searchable and navigable. Fully optional.
 
 Use just the CLI. Add the plugin. Adopt RDR later, or never. Each layer amplifies the ones below it but none requires the ones above.
 
@@ -99,8 +99,8 @@ The `nx/` directory is a Claude Code plugin. Install via the marketplace:
 
 The plugin provides:
 
-- **14 agents** — code review, debugging, architecture planning, research synthesis, strategic planning, and more
-- **27 skills** — RDR workflow, TDD discipline, brainstorming gates, nexus CLI reference
+- **15 agents** — code review, debugging, architecture planning, research synthesis, strategic planning, bead enrichment, and more
+- **28 skills** — RDR workflow, TDD discipline, brainstorming gates, nexus CLI reference
 - **Session hooks** — auto-initialize scratch, surface T2 memory context, health-check dependencies, prime beads
 - **Slash commands** — `/research`, `/create-plan`, `/review-code`, `/rdr-create`, `/rdr-accept`, etc.
 - **Standard pipelines** — feature, bug, and research workflows with built-in review gates
