@@ -86,7 +86,7 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 | rdr-show | `/rdr-show` | Viewing full details and research findings for a specific RDR |
 | rdr-gate | `/rdr-gate` | RDR appears complete; needs structural + assumption + AI critique check |
 | rdr-accept | `/rdr-accept` | Gate returned PASSED; ready to officially accept the RDR |
-| rdr-close | `/rdr-close` | RDR implemented; close with optional post-mortem and bead decomposition |
+| rdr-close | `/rdr-close` | RDR implemented; close with optional post-mortem and bead status advisory |
 
 ### Standalone Reference
 

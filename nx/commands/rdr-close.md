@@ -1,5 +1,5 @@
 ---
-description: Close an RDR with optional post-mortem, bead decomposition, and T3 archival
+description: Close an RDR with optional post-mortem, bead status advisory, and T3 archival
 ---
 
 # RDR Close
@@ -165,20 +165,11 @@ print("### T2 Metadata (current status)")
 print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\" to retrieve T2 metadata.")
 print()
 
-# Implementation Plan section (for bead decomposition)
-print("### Implementation Plan (for bead decomposition)")
-ip_match = re.search(
-    r'^## Implementation Plan\s*\n(.*?)(?=^## |\Z)',
-    text, re.MULTILINE | re.DOTALL)
-if ip_match:
-    section = ip_match.group(1).strip()
-    # Limit to first 60 lines to avoid overwhelming output
-    lines = section.splitlines()[:60]
-    print('\n'.join(lines))
-    if len(section.splitlines()) > 60:
-        print(f"... ({len(section.splitlines()) - 60} more lines)")
-else:
-    print("_No `## Implementation Plan` section found in this RDR._")
+# Bead status advisory
+print("### Bead Status Advisory")
+print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\" to check for `epic_bead` field.")
+print(f"If `epic_bead` exists, run `bd show <epic-id>` to display child bead statuses.")
+print(f"If no `epic_bead`, skip advisory (user skipped planning at accept time).")
 print()
 
 # Active beads
@@ -205,8 +196,8 @@ All data is pre-loaded above — no additional tool calls needed.
 - RDR directory is shown above (from `.nexus.yml` `indexing.rdr_paths[0]`).
 - Parse RDR ID and close reason from `$ARGUMENTS` (e.g. `003 --reason implemented`).
 - Pre-check warning is shown above if status is not Final when reason is Implemented.
-- **Implemented**: review Implementation Plan above for divergences, optionally create post-mortem, decompose into beads.
-- **Reverted / Abandoned**: offer post-mortem, no bead decomposition.
+- **Implemented**: review for divergences, optionally create post-mortem, display bead status advisory.
+- **Reverted / Abandoned**: offer post-mortem.
 - **Superseded**: prompt for superseding RDR ID, cross-link both files.
 - Post-mortem archive location: `{rdr_dir}/post-mortem/NNN-kebab-title.md`.
 - Update RDR file status field and register close in T2: use **memory_put** tool: project="{repo}_rdr", title="{id}" with updated status fields.

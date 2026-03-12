@@ -178,6 +178,25 @@ print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\"
 print()
 
 print(f"**RDR file path:** `{rdr_file}`")
+print()
+
+# Phase count auto-detection for planning handoff
+ip_match = re.search(
+    r'^## Implementation Plan\s*\n(.*?)(?=^## |\Z)',
+    text, re.MULTILINE | re.DOTALL)
+phase_count = 0
+if ip_match:
+    phase_count = len(re.findall(r'^### Phase', ip_match.group(1), re.MULTILINE))
+
+print("### Planning Handoff")
+print(f"**Phase count detected:** {phase_count}")
+if phase_count >= 2:
+    print("**Recommendation:** Invoke strategic planner (multi-phase RDR)")
+    print("**Default:** yes")
+else:
+    print("**Recommendation:** Skip planning (single-phase or no implementation plan)")
+    print("**Default:** no")
+print()
 PYEOF
 }
 
@@ -197,4 +216,11 @@ All data is pre-loaded above — no additional tool calls needed.
 - **Update `reviewed-by`**: If `reviewed-by` is empty or placeholder, set to `self` (solo review).
 - **Regenerate README**: Update `{rdr_dir}/README.md` index to reflect the new status.
 - **Stage files**: `git add` the modified RDR file and README.
+- **Step 7 (Planning handoff)**: Use the phase count and recommendation above.
+  - Ask: "Invoke strategic planner to build execution beads? (y/n) [default from above]"
+  - If yes:
+    1. Write T1 scratch entry: Use scratch tool: action="put", content="RDR {id}: planning context for {title}", tags="rdr-planning-context,rdr-{id}"
+    2. Dispatch strategic-planner agent with full RDR content
+    3. Chain proceeds automatically: planner → auditor → enricher
+  - If no: Skip — accept is complete
 - Print confirmation: `> RDR {id} accepted. Ready for implementation or '/rdr-close {id} --reason implemented'.`

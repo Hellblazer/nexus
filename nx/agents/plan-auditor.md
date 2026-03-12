@@ -173,10 +173,20 @@ You will leverage Nexus to:
 
 ## Successor Enforcement (MANDATORY)
 
-After completing work, relay to `architect-planner` and `developer`.
+After completing work, determine successor based on context:
 
-**Condition**: Architectural design needed → architect-planner; otherwise → developer
-**Rationale**: Validated plans proceed to architecture or implementation
+**RDR Planning Chain Detection:**
+1. Search T1 scratch for `rdr-planning-context` tag: Use scratch tool: action="search", query="rdr-planning-context"
+2. If found, extract the RDR ID from the tag content
+3. Compare the RDR ID with any RDR reference in the current relay context (Task field, Input Artifacts)
+4. If both match → relay to `plan-enricher`
+5. If tag absent or RDR ID mismatch → use standard routing below
+
+**Standard Routing (standalone audit or non-RDR context):**
+- Architectural design needed → relay to `architect-planner`
+- Otherwise → relay to `developer`
+
+**Rationale**: When invoked as part of the RDR accept → plan → audit → enrich chain, the plan-enricher receives audit findings and enriches beads for autonomous execution (RDR-036 F-14). The RDR ID correlation prevents false positives when a session runs /rdr-accept for one RDR followed by an unrelated /plan-audit.
 
 Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
 - Task: Clear description of what successor should do

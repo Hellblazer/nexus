@@ -104,14 +104,12 @@ Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought
    - Reminder to use `mcp__sequential-thinking__sequentialthinking` for complex work
    - Context pointers to nx memory, nx store, or documentation
 
-### Phase 3: Audit and Iteration
+### Phase 3: Audit Handoff
 **MANDATORY**: Always use the plan-auditor agent to review plans before finalization:
 - Check for completeness and gaps
 - Identify redundancy and consolidation opportunities
 - Validate dependency ordering
 - Verify TDD compliance in task structure
-
-Iterate based on audit feedback until the plan passes review.
 
 
 
