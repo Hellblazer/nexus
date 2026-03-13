@@ -5,9 +5,9 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-AI coding agents lose all context between sessions — prior decisions, research findings, and accumulated project knowledge vanish with each new conversation. Nexus provides a solution to this by providing a lightweight knowledge management system with persistent memory and semantic search across code, projects, and accumulated knowledge. Agents and humans share the same tiered storage, so context built in one session is available in every session that follows.
+AI coding agents lose all context between sessions — prior decisions, research findings, and accumulated project knowledge vanish with each new conversation. Nexus provides a solution to this by providing a lightweight knowledge management system with persistent memory and semantic search across code, projects, and accumulated knowledge. Agents and teams share the same tiered storage, so context built in one session is available in every session that follows.
 
-Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system built on top of the storage tiers. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents. The result is a persistent decision history that agents consult before proposing new work and humans review to understand why the codebase evolved as it did.
+Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system built on top of the storage tiers. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents. The result is a persistent decision history that agents consult before proposing new work and teams review to understand why the codebase evolved as it did.
 
 ## What it does
 
