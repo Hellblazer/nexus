@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-03-13
+
+### Docs
+- **README rewrite** — problem-first framing centered on knowledge management
+  lifecycle rather than repository indexing. Three intro paragraphs: context loss
+  problem, Nexus as solution with compounding knowledge, RDR as human-AI design
+  system for team alignment.
+- **Three tiers, one lifecycle** — storage tier section rewritten to explain why
+  each tier exists (different lifetimes, different access patterns) and how agents
+  use them cooperatively. T1 consistently framed as inter-agent coordination, not
+  developer scratch pad.
+- **Getting Started reorganized** — local-first flow: Install → T1/T2 (no keys) →
+  Claude Code plugin → T3 semantic search. Readers get value before configuring
+  cloud credentials.
+- **RDR documentation overhaul** — Overview, Workflow, Nexus Integration, and
+  Templates all edited for readability. Reduced density, removed duplication across
+  documents, flattened deep heading nesting, removed excess section dividers.
+- **docs/README restructured** — Core Concepts / RDR / Plugin / Reference grouping
+  with improved descriptions.
+- **Cross-document consistency** — T1 terminology, Getting Started descriptions,
+  nav bar headers/footers, and link targets aligned across all docs.
+
 ## [1.11.1] - 2026-03-13
 
 ### Fixed
@@ -799,7 +821,8 @@ from rc10 — this entry marks the API, CLI, and plugin contract as stable.
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.11.1...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.12.0...HEAD
+[1.12.0]: https://github.com/Hellblazer/nexus/compare/v1.11.1...v1.12.0
 [1.11.1]: https://github.com/Hellblazer/nexus/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/Hellblazer/nexus/compare/v1.10.3...v1.11.0
 [1.10.3]: https://github.com/Hellblazer/nexus/compare/v1.10.2...v1.10.3
