@@ -62,6 +62,7 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 | code-review | `/review-code` | Code changes ready for quality, security, or best practices review |
 | strategic-planning | `/create-plan` | Multi-step work needs decomposition into tasks before any code |
 | plan-validation | `/plan-audit` | A plan exists and needs validation before implementation begins |
+| enrich-plan | `/enrich-plan` | Beads need enrichment with audit findings and execution context after plan-audit |
 | test-validation | `/test-validate` | Implementation complete; test coverage needs verification |
 | substantive-critique | `/substantive-critique` | Architectural decisions, multi-phase plans, or major docs need deep constructive critique |
 
