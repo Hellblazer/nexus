@@ -5,13 +5,13 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-AI coding agents are powerful, but they forget everything between sessions. They can't recall what you decided last week, what your teammate learned about the API, or that you already tried the approach they're about to suggest. Every session starts from zero.
+AI coding agents lose all context between sessions. Prior decisions, research findings, and accumulated project knowledge vanish with each new conversation.
 
-Nexus gives agents — and you — persistent memory and semantic search across your code, your projects, and your accumulated knowledge. Not just "better grep." A lightweight knowledge management system where agents and humans share context that survives beyond a single conversation.
+Nexus is a lightweight knowledge management system that provides persistent memory and semantic search across code, projects, and accumulated knowledge. Agents and humans share the same tiered storage, so context built in one session is available in every session that follows.
 
 ## What it does
 
-**Search by meaning, not just keywords.** `grep` finds exact strings. Nexus finds *concepts*: "how does authentication work?" returns the auth middleware, the login handler, and the JWT validation — even if none contain the word "authentication."
+**Semantic search.** Standard text search matches exact strings. Nexus matches by meaning: querying "how does authentication work" returns the auth middleware, the login handler, and the JWT validation — even when none contain the word "authentication."
 
 ```bash
 nx index repo .                  # index current repo
@@ -19,7 +19,7 @@ nx search "error handling"       # finds try/catch, Result types, error middlewa
 nx search "auth" --hybrid        # combine semantic + keyword matching
 ```
 
-**Remember things at every scale.** Quick notes for this session, project decisions that persist across months, reference material searchable across all your work — each at the right level of permanence.
+**Tiered persistent memory.** Session scratch, project-level decisions, and cross-project knowledge — each stored at the appropriate level of permanence and searchability.
 
 ```bash
 nx scratch put "the bug is in the retry logic"    # session-scoped, shared across agents
@@ -27,7 +27,7 @@ nx memory put --project myapp --title "DB choice"  "Chose Postgres over SQLite f
 nx store put --collection knowledge__myapp "API rate limit is 10k/min per the vendor docs"
 ```
 
-**Track decisions, not just code.** RDR (Research-Design-Review) documents record *why* you made a choice — the problem, what you found, what you picked, what you rejected. They're searchable alongside your code so "didn't we already decide about caching?" has a real answer instead of a Slack archaeology expedition.
+**Decision tracking.** RDR (Research-Design-Review) documents record the reasoning behind technical choices — the problem, what was investigated, what was chosen, and what was rejected. RDRs are indexed and searchable alongside code, so prior decisions surface automatically during new design work.
 
 ## Quick Start
 
@@ -44,17 +44,17 @@ Scratch (`nx scratch`) and memory (`nx memory`) work with **zero API keys** — 
 
 ## Three tiers, one lifecycle
 
-Each tier exists because different information has different lifetimes and different access patterns. Together they form an integrated memory system that agents use synergistically — extending Claude's context across sessions, across projects, and across knowledge islands that would otherwise stay siloed.
+Each tier serves a distinct purpose defined by information lifetime and access pattern. Together they form an integrated memory system that extends agent context across sessions, projects, and otherwise-siloed knowledge.
 
 | Tier | Purpose | Storage | API keys? |
 |------|---------|---------|-----------|
-| **Scratch** (T1) | Ephemeral session context — shared across all agents in a session, gone when you're done | In-memory ChromaDB | No |
-| **Memory** (T2) | Project-level persistence — decisions, context, findings with full-text search | Local SQLite + FTS5 | No |
+| **Scratch** (T1) | Ephemeral session context shared across all agents in a session | In-memory ChromaDB | No |
+| **Memory** (T2) | Project-level persistence with full-text search — decisions, findings, context | Local SQLite + FTS5 | No |
 | **Knowledge** (T3) | Permanent semantic knowledge — code, papers, docs, decisions searchable by meaning across all projects | ChromaDB cloud + Voyage AI | Yes (free tier) |
 
-T1 and T2 work with zero setup — no API keys, no accounts, fully local. T3 adds semantic search when you're ready: `nx config init` to connect, then index what matters to you.
+T1 and T2 require no API keys or external accounts. T3 adds semantic search via `nx config init`.
 
-An agent debugging a problem writes its hypotheses to T1 scratch so sibling agents don't repeat work. It checks T2 for project decisions that constrain the fix. It searches T3 for how similar problems were solved elsewhere. Each tier contributes context that no single conversation could hold.
+Agents use all three tiers cooperatively: T1 scratch prevents duplicate work across sibling agents within a session, T2 provides project decisions that constrain solutions, and T3 surfaces how similar problems were resolved in other contexts. Each tier contributes information that no single conversation context could hold.
 
 ## The CLI
 
@@ -74,7 +74,7 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 
 ## What you can index
 
-T3 isn't limited to code. Anything you want searchable by meaning can go in:
+T3 accepts any content that benefits from semantic retrieval:
 
 ```bash
 nx index repo .                          # code + docs + RDRs from a git repo
@@ -88,9 +88,7 @@ See [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-inde
 
 ## RDR: Research-Design-Review
 
-When you're coding fast — especially with AI agents — decisions happen quickly and the reasoning evaporates. A week later, nobody remembers *why* you picked Postgres over SQLite, or what the tradeoff was with the caching strategy.
-
-An RDR is a short document: the problem, what you found, what you chose, what you rejected. Nothing more. Each finding is tagged so readers know what's solid and what's a guess:
+Technical decisions made during rapid development — especially with AI agents — lose their reasoning quickly. An RDR captures the problem, investigation, chosen approach, and rejected alternatives in a structured, searchable format. Each finding is classified by evidence quality:
 
 | Tag | Meaning |
 |-----|---------|
@@ -98,9 +96,9 @@ An RDR is a short document: the problem, what you found, what you chose, what yo
 | **Documented** | Supported by external docs only |
 | **Assumed** | Unverified — flag it if your design depends on it |
 
-RDRs are iterative, not waterfall. Write one, build it, learn something, write another. Nexus has produced 35+ across its own development. The growing corpus stays searchable — when you start a new design, prior decisions surface automatically so you don't contradict yourself or redo settled work.
+RDRs are iterative: write, build, learn, revise. Nexus has produced 36 across its own development. The growing corpus remains searchable — prior decisions surface automatically when starting new design work, preventing contradictions and redundant investigation.
 
-RDR is fully optional. Use it when decisions matter; skip it when they don't. Start here: [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md).
+RDR is fully optional. See [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md) for the full process.
 
 ## Claude Code plugin
 
