@@ -128,15 +128,21 @@ def test_entries_1_to_5_include_snippet(tmp_path: Path) -> None:
 
 
 def test_entries_6_to_8_title_only(tmp_path: Path) -> None:
-    """Entries 6–8 per namespace appear without a snippet."""
+    """3 of 8 entries per namespace appear without a snippet (title-only).
+
+    With 8 entries: 5 get snippets (_SNIPPET_LIMIT), 3 are title-only.
+    We don't assert *which* entries are title-only because all entries share
+    the same second-level timestamp, making SQLite ordering non-deterministic.
+    """
     with _make_db(tmp_path) as db:
         for i in range(1, 9):
             db.put(project="repo", title=f"entry-{i}.md", content=f"Content of entry {i}")
         output = _run_scan(db, "repo")
-    lines = output.splitlines()
-    title_only = [l for l in lines if "entry-6.md" in l or "entry-7.md" in l or "entry-8.md" in l]
-    for line in title_only:
-        assert " — " not in line
+    entry_lines = [l for l in output.splitlines() if "entry-" in l]
+    with_snippet = [l for l in entry_lines if " — " in l]
+    without_snippet = [l for l in entry_lines if " — " not in l]
+    assert len(with_snippet) == _SNIPPET_LIMIT  # 5
+    assert len(without_snippet) == _TITLE_LIMIT - _SNIPPET_LIMIT  # 3
 
 
 def test_entries_beyond_8_appear_as_count(tmp_path: Path) -> None:
