@@ -40,6 +40,13 @@ nx index repo .                  # index your repo
 nx search "what does X do"       # search it
 ```
 
+For Claude Code, install the plugin:
+
+```bash
+/plugin marketplace add Hellblazer/nexus
+/plugin install nx@nexus-plugins
+```
+
 Scratch (`nx scratch`) and memory (`nx memory`) work with **zero API keys** — fully local. Semantic search requires [ChromaDB](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) accounts (free tiers available). See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
 
 ## Three tiers, one lifecycle
