@@ -29,7 +29,7 @@ nx memory search "status:draft" --project nexus_rdr
 | `close_reason` | Why the RDR was closed |
 | `superseded_by` | ID of the replacing RDR (if superseded) |
 | `supersedes` | ID of the RDR this one replaces |
-| `epic_bead` | Bead ID of the implementation epic (set at close) |
+| `epic_bead` | Bead ID of the implementation epic (set at accept, if planning chain runs) |
 | `archived` | Whether content has been archived to T3 |
 | `file_path` | Relative path to the markdown file |
 
@@ -90,10 +90,11 @@ nx index rdr docs/rdr/
 
 ## Beads Integration
 
-`/rdr-close` decomposes the Implementation Plan into beads (epic + tasks).
-The `epic_bead` T2 field links each decision to its work items. The
-`SubagentStart` hook injects T2 memory context and the active bead, so spawned
-agents pick up where the last session left off.
+`/rdr-accept` optionally decomposes the Implementation Plan into beads
+(epic + tasks) via the planning chain (strategic-planner → plan-auditor →
+plan-enricher). The `epic_bead` T2 field links each decision to its work
+items. The `SubagentStart` hook injects T2 memory context and the active
+bead, so spawned agents pick up where the last session left off.
 
 ---
 
@@ -102,8 +103,8 @@ agents pick up where the last session left off.
 1. **Before new work**: search T3 for prior RDRs — `nx search "topic" --corpus rdr`. A new RDR often refines an earlier one; the search surfaces that chain.
 2. **During research**: `/rdr-research` can delegate to `deep-research-synthesizer` or `codebase-deep-analyzer` for heavy investigation.
 3. **At gate time**: `substantive-critic` provides independent review.
-4. **At accept time**: `/rdr-accept` updates T2 first, then repairs the file to match.
-5. **After close**: `/rdr-close` creates beads and archives to T3.
+4. **At accept time**: `/rdr-accept` updates T2 first, then repairs the file to match. Optionally dispatches the planning chain to create implementation beads.
+5. **After close**: `/rdr-close` archives to T3 and displays bead status advisory.
 
 **MCP access**: Agents access all storage tiers via structured MCP tools (`mcp__plugin_nx_nexus__search`, `mcp__plugin_nx_nexus__memory_search`, etc.) rather than CLI commands. This eliminates Bash dependency and works reliably in background agents and restricted permission contexts. Human users continue using the `nx` CLI. See [nx/README.md](../nx/README.md#mcp-servers) for tool details.
 
@@ -118,3 +119,7 @@ Post-mortem findings map directly to improvements in the next design:
 - **Framework API detail wrong** → standard fix: run `nx search "<api>" --corpus rdr` and grep the source before writing the Proposed Solution.
 - **Scope creep** → narrow the next RDR's Problem Statement; if the problem has two parts, write two RDRs.
 - **Implementation diverged from design** → flag the delta in the post-mortem and open a follow-up RDR to record the actual solution.
+
+---
+
+**Reading order:** [Overview](rdr-overview.md) | [Workflow](rdr-workflow.md) | Nexus Integration (this page) | [Templates](rdr-templates.md) | [RDR Index](rdr/README.md)

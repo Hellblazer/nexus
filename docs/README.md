@@ -14,11 +14,13 @@
 
 ## RDR (Research-Design-Review)
 
-- [Overview](rdr-overview.md) — What RDRs are, evidence classification, the iterative pattern
-- [Workflow](rdr-workflow.md) — Create, research, gate, accept, close — slash commands
-- [Nexus Integration](rdr-nexus-integration.md) — How Nexus storage tiers and agents amplify RDRs
-- [Templates](rdr-templates.md) — Document and post-mortem template reference
-- [RDR Index](rdr/README.md) — All project RDRs with status
+Start here, read in order:
+
+1. [Overview](rdr-overview.md) — What RDRs are, when to write one, evidence classification
+2. [Workflow](rdr-workflow.md) — Create → Research → Gate → Accept → Close, with worked example
+3. [Nexus Integration](rdr-nexus-integration.md) — How storage tiers and agents amplify RDRs
+4. [Templates](rdr-templates.md) — Minimal and full examples, post-mortem template
+5. [RDR Index](rdr/README.md) — All project RDRs with status
 
 ## Development
 

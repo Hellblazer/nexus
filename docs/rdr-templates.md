@@ -164,3 +164,7 @@ Three dimensions:
 - **What the RDR got right** — research and decisions worth repeating
 - **What the RDR missed** — wrong assumptions, overlooked constraints
 - **What the RDR over-specified** — code rewritten, features deferred, config never used
+
+---
+
+**Reading order:** [Overview](rdr-overview.md) | [Workflow](rdr-workflow.md) | [Nexus Integration](rdr-nexus-integration.md) | Templates (this page) | [RDR Index](rdr/README.md)

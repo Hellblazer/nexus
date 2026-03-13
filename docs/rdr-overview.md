@@ -8,7 +8,7 @@ An RDR records a technical decision: problem, evidence, chosen solution, rejecte
 2. `/rdr-research add <id>` — appends a finding with an evidence classification tag
 3. `/rdr-gate <id>` — runs 3-layer validation: structure check, assumption audit, AI critique (optional but recommended for irreversible decisions)
 4. `/rdr-accept <id>` — locks the decision, sets status to Accepted
-5. `/rdr-close <id> --reason implemented` — archives the RDR and decomposes it into implementation beads
+5. `/rdr-close <id> --reason implemented` — archives the RDR, creates a post-mortem template, indexes to T3
 
 ## When to Write One
 
@@ -88,4 +88,26 @@ Draft --> Accepted --> Implemented
 
 ## Optional Rigor
 
-`/rdr-gate` runs a structural check, assumption audit, and AI critique before you commit. Use it when the decision is expensive to reverse. `/rdr-close` optionally generates a post-mortem comparing what was decided to what was built — useful for improving future RDRs. Neither is required for routine work.
+[`/rdr-gate`](rdr-workflow.md#gate-rdr-gate) runs a structural check, assumption audit, and AI critique before you commit. Use it when the decision is expensive to reverse. [`/rdr-close`](rdr-workflow.md#close-rdr-close) optionally generates a post-mortem comparing what was decided to what was built — useful for improving future RDRs. Neither is required for routine work.
+
+## Using RDR in Your Project
+
+RDR works in any repository — it doesn't require the Nexus CLI or plugin. The tooling amplifies RDRs (search, gate, agent context), but the core value is the document itself.
+
+**Minimal setup (no tooling):**
+
+1. Create `docs/rdr/` in your repo
+2. Copy the [template](rdr-templates.md) into `docs/rdr/TEMPLATE.md`
+3. Write your first RDR by hand — Problem Statement + Research Findings + Proposed Solution is enough
+
+**With Nexus CLI + plugin:**
+
+1. Run `/rdr-create` — it bootstraps the directory, templates, and README automatically on first use
+2. Use `/rdr-research`, `/rdr-gate`, `/rdr-accept`, `/rdr-close` for the full lifecycle
+3. RDRs are auto-indexed by `nx index repo` and searchable via `nx search --corpus rdr`
+
+See [Nexus Integration](rdr-nexus-integration.md) for how storage tiers and agents work with RDRs.
+
+---
+
+**Reading order:** Overview (this page) | [Workflow](rdr-workflow.md) | [Nexus Integration](rdr-nexus-integration.md) | [Templates](rdr-templates.md) | [RDR Index](rdr/README.md)

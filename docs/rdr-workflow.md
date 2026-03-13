@@ -256,3 +256,7 @@ status always advances, never regresses.
 | Both sides have different terminal states | File wins, warning logged |
 
 No file watchers or git hooks required.
+
+---
+
+**Reading order:** [Overview](rdr-overview.md) | Workflow (this page) | [Nexus Integration](rdr-nexus-integration.md) | [Templates](rdr-templates.md) | [RDR Index](rdr/README.md)
