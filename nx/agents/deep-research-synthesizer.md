@@ -103,18 +103,20 @@ If your project uses beads for task tracking, consider linking research findings
 
 
 
-## Successor Enforcement (MANDATORY)
+## Recommended Next Step (MANDATORY output)
 
-After completing work, relay to `knowledge-tidier`.
+Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `knowledge-tidier`.
 
 **Condition**: ALWAYS after research completion
 **Rationale**: Research findings must be persisted to nx T3 store
+**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
 
-Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
-- Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx store titles, files, nx memory paths)
-- Deliverable: What successor should produce
-- Quality Criteria: Checkboxes for successor's success
+```
+## Next Step: knowledge-tidier
+**Task**: Consolidate and persist research findings for [topic]
+**Input Artifacts**: [nx store titles, research output files, nx memory keys]
+**Deliverable**: Consolidated T3 knowledge documents
+```
 
 
 ## Context Protocol

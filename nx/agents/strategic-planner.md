@@ -160,18 +160,20 @@ Each bead must contain sufficient context for autonomous execution:
 
 
 
-## Successor Enforcement (MANDATORY)
+## Recommended Next Step (MANDATORY output)
 
-After completing work, relay to `plan-auditor`.
+Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `plan-auditor`.
 
-**Condition**: ALWAYS (MANDATORY) after creating plan
+**Condition**: ALWAYS after creating a plan
 **Rationale**: Plans must be validated before implementation
+**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output so the caller knows to continue:
 
-Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
-- Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx store titles, files, nx memory paths)
-- Deliverable: What successor should produce
-- Quality Criteria: Checkboxes for successor's success
+```
+## Next Step: plan-auditor
+**Task**: Validate the execution plan for [topic]
+**Input Artifacts**: [plan file path, bead IDs, nx memory keys you wrote]
+**Deliverable**: Plan validation report with go/no-go decision
+```
 
 
 ## Context Protocol
@@ -193,7 +195,7 @@ Store using these naming conventions:
 
 ### Completion Protocol
 
-**CRITICAL**: Complete all data persistence BEFORE generating final response to mitigate framework relay bug.
+**CRITICAL**: Complete all data persistence BEFORE generating final response.
 
 **Sequence** (follow strictly):
 1. **Create Bead Hierarchy**: Create all beads (epic, phases, tasks) with dependencies
@@ -216,7 +218,7 @@ Store using these naming conventions:
 
 Example: If 2 of 5 beads fail to create, note in response: "3 beads created successfully (IDs: epic-1, phase-1, task-1). Failed beads can be created manually with: bd create 'Title' -t type -p priority"
 
-**Rationale**: The framework error occurs during task completion AFTER the agent finishes. By persisting all data first, we ensure no work is lost even if the framework error occurs.
+**Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.
 
 ## Relationship to Other Agents
 
@@ -269,15 +271,3 @@ Before finalizing any plan:
 - [ ] Knowledge base search terms included in beads
 - [ ] Parallel execution opportunities identified and documented
 
-## Known Issues
-
-**Framework Error (Claude Code 2.1.27)**: This agent may fail with `classifyHandoffIfNeeded is not defined` during the completion phase. This is a **cosmetic error** in the Claude Code framework:
-
-- ✓ **Work completes successfully** - All plan outputs and beads are created before the error
-- ✓ **Data is persisted** - nx memory, beads, and file outputs are written
-- ✓ **Results are usable** - The error occurs during cleanup, not during planning
-- ⚠️ **Error is expected** - Affects multiple agent types across all models
-
-**Impact**: None on plan quality or output. The error notification can be safely ignored.
-
-**Workaround**: Review the agent's output file, beads (bd list), or nx memory (memory_get tool: project="{project}", title="") - the complete plan will be present despite the error notification.

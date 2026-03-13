@@ -129,18 +129,20 @@ Pattern: Form hypothesis -> Use search tool to gather evidence -> Validate with 
 
 
 
-## Successor Enforcement (MANDATORY)
+## Recommended Next Step (MANDATORY output)
 
-After completing work, relay to `developer`.
+Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `developer`.
 
 **Condition**: ALWAYS after identifying root cause
 **Rationale**: Bugs must be fixed after diagnosis
+**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
 
-Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
-- Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx knowledge IDs, files, nx memory)
-- Deliverable: What successor should produce
-- Quality Criteria: Checkboxes for successor's success
+```
+## Next Step: developer
+**Task**: Fix [root cause description]
+**Input Artifacts**: [diagnosis findings, affected files, nx memory keys]
+**Deliverable**: Bug fix with tests
+```
 
 
 ## Context Protocol
@@ -152,7 +154,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   Use store_put tool: content="# Debug: {symptom}\n## Root Cause\n{finding}\n## Evidence\n{key evidence}\n## Fix\n{fix applied}", collection="knowledge", title="debug-finding-{component}-{symptom}", tags="debug,rootcause"
   The structured sections make retrieved findings immediately actionable without further parsing.
 - **Hypothesis Trail**: Document in bead notes
-- **Fix Recommendations**: Include in relay to developer
+- **Fix Recommendations**: Include in output as "Recommended Next Step" for caller to dispatch developer
 - **Prevention Patterns**: Use store_put tool: content="...", collection="knowledge", title="pattern-prevention-{topic}", tags="pattern,prevention"
 - **Hypothesis Chain**: Use `mcp__sequential-thinking__sequentialthinking` for structured hypothesis-driven investigation
 

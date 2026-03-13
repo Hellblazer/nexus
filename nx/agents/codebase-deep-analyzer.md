@@ -143,18 +143,20 @@ When analyzing a codebase, check for `docs/rdr/` directory. If present:
 - RDR documents contain architectural decisions, trade-offs, and research — valuable context for codebase understanding
 
 
-## Successor Enforcement (CONDITIONAL)
+## Recommended Next Step (conditional output)
 
-After completing work, relay to `strategic-planner`.
+When your analysis reveals work that needs to be planned (e.g., refactoring, new features, debt remediation), your final output MUST include a next-step recommendation for the caller to dispatch `strategic-planner`. Skip if analysis is informational only.
 
-**Condition**: When analysis reveals work that needs to be planned (e.g., refactoring, new features, debt remediation). Skip if analysis is informational only.
+**Condition**: When analysis reveals actionable work
 **Rationale**: Analysis findings inform planning
+**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output when applicable:
 
-Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
-- Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx knowledge IDs, files, nx memory)
-- Deliverable: What successor should produce
-- Quality Criteria: Checkboxes for successor's success
+```
+## Next Step: strategic-planner
+**Task**: Create execution plan for [findings summary]
+**Input Artifacts**: [analysis output — nx knowledge IDs, files, nx memory keys]
+**Deliverable**: Phased execution plan with beads
+```
 
 
 ## Context Protocol

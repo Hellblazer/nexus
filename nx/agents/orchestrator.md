@@ -223,9 +223,9 @@ Use standard relay format for first agent:
 - Deliverable: [Output for next stage]
 - Quality Criteria: [Checkboxes]
 
-### Stage 2: Relay from [Agent 1] to [Agent 2]
+### Stage 2: Dispatch [Agent 2] (after Agent 1 completes)
 
-Agent 1 must relay to Agent 2 using standard format:
+Orchestrator dispatches Agent 2 with Agent 1's output:
 - Task: [What second agent does]
 - Input Artifacts: [Include Agent 1's output]
 - Deliverable: [Output for next stage or final]
@@ -236,7 +236,7 @@ Agent 1 must relay to Agent 2 using standard format:
 
 ### Quality Gates (MANDATORY)
 - [ ] Each agent validates relay before starting
-- [ ] Successor relationships from registry.yaml followed
+- [ ] Orchestrator dispatches each stage sequentially (agents cannot spawn agents)
 - [ ] Final deliverable meets end-to-end criteria
 ```
 

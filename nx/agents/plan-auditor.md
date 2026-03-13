@@ -171,28 +171,30 @@ You will leverage Nexus to:
 
 
 
-## Successor Enforcement (MANDATORY)
+## Recommended Next Step (MANDATORY output)
 
-After completing work, determine successor based on context:
+Your final output MUST include a clearly labeled next-step recommendation. Determine the recommendation based on context:
 
 **RDR Planning Chain Detection:**
 1. Search T1 scratch for `rdr-planning-context` tag: Use scratch tool: action="search", query="rdr-planning-context"
 2. If found, extract the RDR ID from the tag content
-3. Compare the RDR ID with any RDR reference in the current relay context (Task field, Input Artifacts)
-4. If both match → relay to `plan-enricher`
+3. Compare the RDR ID with any RDR reference in your task context
+4. If both match → recommend `plan-enricher`
 5. If tag absent or RDR ID mismatch → use standard routing below
 
 **Standard Routing (standalone audit or non-RDR context):**
-- Architectural design needed → relay to `architect-planner`
-- Otherwise → relay to `developer`
+- Architectural design needed → recommend `architect-planner`
+- Otherwise → recommend `developer`
 
-**Rationale**: When invoked as part of the RDR accept → plan → audit → enrich chain, the plan-enricher receives audit findings and enriches beads for autonomous execution (RDR-036 F-14). The RDR ID correlation prevents false positives when a session runs /rdr-accept for one RDR followed by an unrelated /plan-audit.
+**Rationale**: When invoked as part of the RDR accept → plan → audit → enrich chain, the plan-enricher receives audit findings and enriches beads (RDR-036 F-14). The RDR ID correlation prevents false positives.
+**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
 
-Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
-- Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx knowledge IDs, files, nx memory)
-- Deliverable: What successor should produce
-- Quality Criteria: Checkboxes for successor's success
+```
+## Next Step: [agent-name]
+**Task**: [what successor should do]
+**Input Artifacts**: [your output — nx knowledge IDs, files, nx memory keys]
+**Deliverable**: [what successor should produce]
+```
 
 
 ## Context Protocol
@@ -216,7 +218,7 @@ Store using these naming conventions:
 
 ### Completion Protocol
 
-**CRITICAL**: Complete all data persistence BEFORE generating final response to mitigate framework relay bug.
+**CRITICAL**: Complete all data persistence BEFORE generating final response.
 
 **Sequence** (follow strictly):
 1. **Persist Audit Results**: Write validation results to Nexus memory and Nexus knowledge store
@@ -239,7 +241,7 @@ Store using these naming conventions:
 
 Example: If bead update fails but Nexus memory succeeds, note in response: "Audit persisted to Nexus memory under project {project} title audit-{date}.md. Bead update failed - manual update needed with: bd update {id} --design 'recommendations'"
 
-**Rationale**: The framework error occurs during task completion AFTER the agent finishes. By persisting all data first, we ensure no work is lost even if the framework error occurs.
+**Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.
 
 ## Relationship to Other Agents
 
@@ -288,15 +290,3 @@ You will:
 
 Your goal is to ensure that when implementation begins, there are no surprises, no missing pieces, and no fundamental flaws that could derail the project. Be thorough, be critical, but also be constructive in your feedback.
 
-## Known Issues
-
-**Framework Error (Claude Code 2.1.27)**: This agent may fail with `classifyHandoffIfNeeded is not defined` during the completion phase. This is a **cosmetic error** in the Claude Code framework:
-
-- ✓ **Work completes successfully** - All audit outputs are produced before the error
-- ✓ **Data is persisted** - nx memory, nx store, and file outputs are written
-- ✓ **Results are usable** - The error occurs during cleanup, not during auditing
-- ⚠️ **Error is expected** - Affects multiple agent types across all models
-
-**Impact**: None on audit quality or output. The error notification can be safely ignored.
-
-**Workaround**: Review the agent's output file or task results - the complete audit will be present despite the error notification.

@@ -117,7 +117,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 - **Routing Decisions**: Document in response; for significant routing patterns store in nx T3:
   store_put tool: content="# Routing Pattern: {pattern}\n{rationale}", collection="knowledge", title="pattern-orchestrator-{scenario}", tags="routing,orchestration"
-- **Pipeline Plans**: Relay to first agent in pipeline using standard relay format
+- **Pipeline Plans**: Dispatch first agent in pipeline using standard relay format; orchestrate subsequent stages sequentially
 - **Escalation Notes**: Create blocker beads when routing is blocked
 - **Routing Notes**: Use T1 scratch during complex pipeline analysis:
   scratch tool: action="put", content="Routing hypothesis: {agent} because {reason}", tags="routing,pipeline"

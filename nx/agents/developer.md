@@ -99,18 +99,20 @@ You are an expert software developer who adapts to any language and build system
 
 
 
-## Successor Enforcement (MANDATORY)
+## Recommended Next Step (MANDATORY output)
 
-After completing work, relay to `code-review-expert` and `test-validator`.
+Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `code-review-expert` and `test-validator`.
 
 **Condition**: ALWAYS after implementation (not 'if significant')
 **Rationale**: All implementations require quality gates
+**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
 
-Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
-- Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx knowledge IDs, files, nx memory)
-- Deliverable: What successor should produce
-- Quality Criteria: Checkboxes for successor's success
+```
+## Next Step: code-review-expert, test-validator
+**Task**: Review implementation of [topic] for quality and test coverage
+**Input Artifacts**: [changed files, bead IDs, nx memory keys]
+**Deliverable**: Code review report + test validation report
+```
 
 
 ## Context Protocol

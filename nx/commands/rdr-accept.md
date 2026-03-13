@@ -218,9 +218,27 @@ All data is pre-loaded above — no additional tool calls needed.
 - **Stage files**: `git add` the modified RDR file and README.
 - **Step 7 (Planning handoff)**: Use the phase count and recommendation above.
   - Ask: "Invoke strategic planner to build execution beads? (y/n) [default from above]"
-  - If yes:
-    1. Write T1 scratch entry: Use scratch tool: action="put", content="RDR {id}: planning context for {title}", tags="rdr-planning-context,rdr-{id}"
-    2. Dispatch strategic-planner agent with full RDR content
-    3. Chain proceeds automatically: planner → auditor → enricher
-  - If no: Skip — accept is complete
-- Print confirmation: `> RDR {id} accepted. Ready for implementation or '/rdr-close {id} --reason implemented'.`
+  - **If no:** Skip — accept is complete. Print: `> RDR {id} accepted. Ready for implementation.`
+  - **If yes — execute the full chain (3 sequential dispatches):**
+
+    **Step 7a — Write T1 context:**
+    Write T1 scratch entry: Use scratch tool: action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file_path}", tags="rdr-planning-context,rdr-{id}"
+
+    **Step 7b — Dispatch strategic-planner:**
+    Dispatch `nx:strategic-planner` agent (via Agent tool, subagent_type="nx:strategic-planner") with prompt:
+    > Create phased execution plan for RDR-{id}: {title}. RDR file: {rdr_file_path}. Read the RDR content for implementation phases. Create epic and task beads with dependencies.
+    **Wait for the planner to complete before proceeding.**
+    Note the plan file path and bead IDs from the planner's output.
+
+    **Step 7c — Dispatch plan-auditor:**
+    After the planner completes, dispatch `nx:plan-auditor` agent (via Agent tool, subagent_type="nx:plan-auditor") with prompt:
+    > Audit the execution plan just created for RDR-{id}: {title}. Check T1 scratch for rdr-planning-context. Validate the plan against the codebase. Check beads created by the planner.
+    **Wait for the auditor to complete before proceeding.**
+
+    **Step 7d — Dispatch plan-enricher:**
+    After the auditor completes, dispatch `nx:plan-enricher` agent (via Agent tool, subagent_type="nx:plan-enricher") with prompt:
+    > Enrich all beads for RDR-{id}: {title} with audit findings from T1 scratch. Write epic bead ID to T2.
+    **Wait for the enricher to complete.**
+
+    **Step 7e — Report chain completion:**
+    Print: `> RDR {id} accepted. Planning chain complete: planner → auditor → enricher. Use 'bd ready' to see executable tasks.`

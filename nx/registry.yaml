@@ -15,6 +15,8 @@ generated_docs:
 # =============================================================================
 # Each agent maps to a skill directory and slash command.
 # Model options: opus (complex reasoning), sonnet (balanced), haiku (fast/cheap)
+# predecessors/successors: workflow routing hints (NOT automatic dispatch).
+# Agents output "Recommended Next Step" blocks; the caller orchestrates dispatch.
 
 agents:
   code-review-expert:
@@ -355,7 +357,7 @@ rdr_skills:
     slash_command: /rdr-accept
     command_file: commands/rdr-accept.md
     description: "Accept a gated RDR — verify gate PASSED, update status, optional planning dispatch"
-    dispatches_to: [strategic-planner]
+    dispatches_to: [strategic-planner, plan-auditor, plan-enricher]  # sequential chain, orchestrated by skill
     triggers:
       - "accept this RDR"
       - "mark RDR as accepted"

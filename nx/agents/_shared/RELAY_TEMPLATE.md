@@ -1,6 +1,6 @@
 # Relay Template
 
-All agent relays follow this standardized structure. Skills and agents reference this file instead of duplicating the template.
+All agent dispatches follow this standardized structure. **Relays are constructed by the caller** (main conversation, skill, or orchestrator) — not by agents themselves. Subagents cannot spawn other subagents; they output "Recommended Next Step" blocks that the caller uses to build the next relay.
 
 ## Required Fields
 

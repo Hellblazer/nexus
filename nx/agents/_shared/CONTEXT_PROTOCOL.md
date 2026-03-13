@@ -120,7 +120,9 @@ Agents produce artifacts based on their specialization:
 
 ## RELAY (Standard Format)
 
-All relays to downstream agents use this structure:
+Relays are constructed by the **caller** (main conversation, skill, or orchestrator) when dispatching agents. Agents do not construct relays to other agents — subagents cannot spawn subagents. Instead, agents output a "Recommended Next Step" block that the caller uses to build the next relay.
+
+Standard relay structure:
 
 ```
 ## Relay: [Target Agent]

@@ -134,9 +134,9 @@ Plan-enricher owns the T2 write for epic bead ID — the accept skill's executio
 - Flag any orphan beads (referenced but not found) or missing references
 - Report discrepancies to user before proceeding
 
-## NO Successor Enforcement
+## No Next Step (terminal node)
 
-Plan-enricher is the terminal node in the planning chain. It does NOT relay to any downstream agent.
+Plan-enricher is the terminal node in the planning chain. No successor recommendation is needed.
 
 After completing enrichment:
 1. Display enriched plan summary table to user:
@@ -164,7 +164,7 @@ Store using these naming conventions:
 
 ### Completion Protocol
 
-**CRITICAL**: Complete all data persistence BEFORE generating final response to mitigate framework relay bug.
+**CRITICAL**: Complete all data persistence BEFORE generating final response.
 
 **Sequence** (follow strictly):
 1. **Update All Beads**: Run `bd update` for every enriched bead
@@ -185,15 +185,4 @@ Store using these naming conventions:
 3. **Persist recovery notes**: Use memory_put tool: content="failure details", project="{project}", title="enrichment-failure-{date}.md"
 4. **Continue with response**: Include count of succeeded enrichments and list of failed bead IDs
 
-**Rationale**: The framework error occurs during task completion AFTER the agent finishes. By persisting all data first, we ensure no work is lost even if the framework error occurs.
-
-## Known Issues
-
-**Framework Error (Claude Code 2.1.27)**: This agent may fail with `classifyHandoffIfNeeded is not defined` during the completion phase. This is a **cosmetic error** in the Claude Code framework:
-
-- All bead updates and T2 writes complete successfully before the error
-- Data is persisted — enriched beads, T2 records, T1 scratch all written
-- The error occurs during cleanup, not during enrichment
-- Error notification can be safely ignored
-
-**Workaround**: Verify bead enrichment via `bd show <id>` and T2 record via memory_get tool — data will be present despite the error.
+**Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.

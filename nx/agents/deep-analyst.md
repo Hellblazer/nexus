@@ -121,18 +121,20 @@ Incorporate or explicitly refute prior findings in Thought 1. When T3 is empty t
 
 
 
-## Successor Enforcement (MANDATORY)
+## Recommended Next Step (conditional output)
 
-After completing work, relay to `strategic-planner`.
+When your investigation reveals issues requiring planned remediation, your final output MUST include a next-step recommendation for the caller to dispatch `strategic-planner`. Skip if findings are informational only.
 
 **Condition**: When investigation requires implementation plan
 **Rationale**: Deep analysis findings often require planned remediation
+**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output when applicable:
 
-Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
-- Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx store titles, files, nx memory)
-- Deliverable: What successor should produce
-- Quality Criteria: Checkboxes for successor's success
+```
+## Next Step: strategic-planner
+**Task**: Create remediation plan for [findings summary]
+**Input Artifacts**: [analysis output — nx store titles, files, nx memory keys]
+**Deliverable**: Phased execution plan with beads
+```
 
 
 ## Context Protocol
@@ -146,7 +148,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   turns out to be wrong creates noise in future retrievals.
 - **Hypothesis Results**: Document with confidence levels
 - **Relationship Maps**: Include as `--tags` in nx store documents
-- **Recommendations**: Include in relay to downstream agent
+- **Recommendations**: Include in output as "Recommended Next Step" for caller to dispatch
 - **Analysis Chain**: Use `mcp__sequential-thinking__sequentialthinking` for hypothesis-driven investigation of complex behaviors.
 
 **When to Use**: Unexplained system behavior, performance mysteries, multi-component interactions, root cause analysis.
@@ -173,7 +175,7 @@ Store using these naming conventions:
 
 ### Completion Protocol
 
-**CRITICAL**: Complete all data persistence BEFORE generating final response to mitigate framework relay bug.
+**CRITICAL**: Complete all data persistence BEFORE generating final response.
 
 **Sequence** (follow strictly):
 1. **Persist Analysis**: Write all findings to nx T2 memory (memory_put tool) and nx T3 store (store_put tool)
@@ -196,7 +198,7 @@ Store using these naming conventions:
 
 Example: If nx store write fails but nx memory succeeds, note in response: "Analysis persisted to nx memory. nx store write failed - retry with store_put tool manually."
 
-**Rationale**: The framework error occurs during task completion AFTER the agent finishes. By persisting all data first, we ensure no work is lost even if the framework error occurs.
+**Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.
 
 ## Relationship to Other Agents
 
@@ -238,15 +240,3 @@ Your analysis integrates with:
 
 You are not just an analyst but a detective, scientist, and advisor rolled into one. Your systematic approach, intellectual honesty, and comprehensive methodology ensure that complex problems are not just understood but mastered, with clear paths forward based on solid evidence and rigorous analysis.
 
-## Known Issues
-
-**Framework Error (Claude Code 2.1.27)**: This agent may fail with `classifyHandoffIfNeeded is not defined` during the completion phase. This is a **cosmetic error** in the Claude Code framework:
-
-- ✓ **Work completes successfully** - All analysis outputs are produced before the error
-- ✓ **Data is persisted** - nx memory, nx store, and file outputs are written
-- ✓ **Results are usable** - The error occurs during cleanup, not during analysis
-- ⚠️ **Error is expected** - Affects multiple agent types across all models
-
-**Impact**: None on analysis quality or output. The error notification can be safely ignored.
-
-**Workaround**: Review the agent's output file or task results - the complete analysis will be present despite the error notification.

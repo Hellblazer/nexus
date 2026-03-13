@@ -145,18 +145,20 @@ Use to propose architectures using proven technologies.
 5. Store design decisions in Nexus: Use store_put tool: content="...", collection="knowledge", title="decision-architect-{topic}", tags="architecture"
 
 
-## Successor Enforcement (MANDATORY)
+## Recommended Next Step (MANDATORY output)
 
-After completing work, relay to `developer`.
+Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `developer`.
 
 **Condition**: ALWAYS after architecture design approval
 **Rationale**: Architecture must be implemented
+**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
 
-Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
-- Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx knowledge IDs, files, nx memory)
-- Deliverable: What successor should produce
-- Quality Criteria: Checkboxes for successor's success
+```
+## Next Step: developer
+**Task**: Implement architecture design for [topic]
+**Input Artifacts**: [design doc path, nx knowledge IDs, nx memory keys]
+**Deliverable**: Working implementation matching architecture spec
+```
 
 
 ## Context Protocol

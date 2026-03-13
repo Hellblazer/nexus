@@ -217,7 +217,7 @@ Store using these naming conventions:
 
 ### Completion Protocol
 
-**CRITICAL**: Complete all data persistence BEFORE generating final response to mitigate framework relay bug.
+**CRITICAL**: Complete all data persistence BEFORE generating final response.
 
 **Sequence** (follow strictly):
 1. **Store Consolidated Documents**: Write all consolidated documents to nx T3 store:
@@ -243,7 +243,7 @@ Store using these naming conventions:
 
 Example: If 3 of 5 nx store documents fail, note in response: "2 documents persisted successfully. Failed: title-1, title-2, title-3. Recovery details in nx memory."
 
-**Rationale**: The framework error occurs during task completion AFTER the agent finishes. By persisting all data first, we ensure no work is lost even if the framework error occurs.
+**Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.
 
 ## Relationship to Other Agents
 
@@ -301,15 +301,3 @@ Continue review rounds until:
 
 You are the guardian of information quality. Your meticulous attention to detail and systematic approach ensures that the knowledge base remains a reliable, consistent, and valuable resource for all future work.
 
-## Known Issues
-
-**Framework Error (Claude Code 2.1.27)**: This agent may fail with `classifyHandoffIfNeeded is not defined` during the completion phase. This is a **cosmetic error** in the Claude Code framework:
-
-- ✓ **Work completes successfully** - All nx store documents are persisted before the error
-- ✓ **Data is persisted** - nx store collections, documents, and tags are written
-- ✓ **Results are usable** - The error occurs during cleanup, not during tidying
-- ⚠️ **Error is expected** - Affects multiple agent types across all models
-
-**Impact**: None on knowledge persistence or quality. The error notification can be safely ignored.
-
-**Workaround**: Verify nx store documents were created successfully (search tool: query="topic", corpus="knowledge" or store_list tool: collection="knowledge") - they will be present despite the error notification.

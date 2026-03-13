@@ -5,7 +5,7 @@ This directory contains shared resources used across multiple agents.
 ## Files
 
 - **CONTEXT_PROTOCOL.md**: Standard context exchange protocol for agent relays, context recovery, and knowledge management. All agents should reference this for consistent behavior.
-- **RELAY_TEMPLATE.md**: Canonical relay format with full template, extended template, and optional fields reference. Referenced by agents when constructing handoffs.
+- **RELAY_TEMPLATE.md**: Canonical relay format with full template, extended template, and optional fields reference. Used by skills and the main conversation when dispatching agents. Agents themselves do not construct relays (subagents cannot spawn subagents) — they output "Recommended Next Step" blocks that the caller uses to construct the next dispatch.
 - **ERROR_HANDLING.md**: T1/T2/T3 error patterns, TTL guard documentation, common failure modes and recovery steps.
 - **MAINTENANCE.md**: Agent maintenance procedures, consistency checks, and guidance on adding new agents.
 

@@ -36,7 +36,7 @@
 
 5. Add any specialized sections (Tool Usage, Problem-Solving, etc.)
 
-6. Add Relay Protocol section
+6. Add "Recommended Next Step" section (see existing agents for pattern — agents output a next-step block, the caller dispatches)
 
 ## Updating the Shared Context Protocol
 

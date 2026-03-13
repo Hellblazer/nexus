@@ -150,18 +150,20 @@ cross-file pattern discovery cannot be expressed as a grep.
 After establishing the pattern baseline, proceed to review the code against the discovered conventions.
 
 
-## Successor Enforcement (MANDATORY)
+## Recommended Next Step (MANDATORY output)
 
-After completing work, relay to `test-validator`.
+Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `test-validator`.
 
 **Condition**: ALWAYS after completing review
 **Rationale**: Test coverage must be validated after code review
+**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
 
-Use the standard relay format from [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md) with:
-- Task: Clear description of what successor should do
-- Input Artifacts: Include your output (nx knowledge IDs, files, nx memory)
-- Deliverable: What successor should produce
-- Quality Criteria: Checkboxes for successor's success
+```
+## Next Step: test-validator
+**Task**: Validate test coverage for reviewed changes
+**Input Artifacts**: [reviewed files, review findings, nx memory keys]
+**Deliverable**: Test validation report with coverage assessment
+```
 
 
 ## Context Protocol
