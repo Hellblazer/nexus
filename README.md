@@ -19,10 +19,10 @@ nx search "error handling"       # finds try/catch, Result types, error middlewa
 nx search "auth" --hybrid        # combine semantic + keyword matching
 ```
 
-**Persistent memory.** Session scratch, project-level decisions, and cross-project knowledge — each at the appropriate level of permanence.
+**Persistent memory.** Agents share ephemeral session context for inter-agent coordination, project-level decisions persist locally with full-text search, and cross-project knowledge is stored permanently with semantic retrieval.
 
 ```bash
-nx scratch put "the bug is in the retry logic"    # session-scoped, shared across agents
+nx scratch put "the bug is in the retry logic"    # T1: inter-agent session context
 nx memory put --project myapp --title "DB choice"  "Chose Postgres over SQLite for concurrency"
 nx store put --collection knowledge__myapp "API rate limit is 10k/min per the vendor docs"
 ```
@@ -48,11 +48,11 @@ Different information has different lifetimes. Together the three tiers form an 
 
 | Tier | Purpose | Storage | API keys? |
 |------|---------|---------|-----------|
-| **Scratch** (T1) | Ephemeral session context shared across all agents in a session | In-memory ChromaDB | No |
+| **Scratch** (T1) | Inter-agent session context — coordination and knowledge sharing across agent invocations | In-memory ChromaDB | No |
 | **Memory** (T2) | Project-level persistence with full-text search | Local SQLite + FTS5 | No |
 | **Knowledge** (T3) | Permanent semantic knowledge — code, papers, docs, decisions searchable by meaning | ChromaDB cloud + Voyage AI | Yes (free tier) |
 
-Agents use all three tiers cooperatively. T1 scratch prevents duplicate work across sibling agents within a session. T2 provides project decisions that constrain solutions. T3 surfaces how similar problems were resolved in other contexts.
+Agents use all three tiers cooperatively. T1 enables inter-agent communication — sharing findings and preventing duplicate work within a session. T2 provides project decisions that constrain solutions. T3 surfaces how similar problems were resolved in other contexts.
 
 ## The CLI
 
@@ -62,7 +62,7 @@ Agents use all three tiers cooperatively. T1 scratch prevents duplicate work acr
 | `nx index` | Index git repos, PDFs, and markdown into searchable collections |
 | `nx store` | Store, retrieve, export, and import knowledge entries |
 | `nx memory` | Per-project persistent notes (local, no API keys) |
-| `nx scratch` | Ephemeral session scratch pad (in-memory, no API keys) |
+| `nx scratch` | Inter-agent session context (in-memory, no API keys) |
 | `nx collection` | Inspect and manage cloud collections |
 | `nx config` | Credentials and settings |
 | `nx doctor` | Health check — verifies dependencies, credentials, connectivity |
