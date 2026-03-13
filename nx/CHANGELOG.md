@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-03-13
+
+### Fixed
+- **rdr-accept chain orchestration** — skill now explicitly dispatches all three
+  agents sequentially (strategic-planner → plan-auditor → plan-enricher) instead
+  of relying on agent-to-agent relay, which was impossible (subagents cannot spawn
+  subagents)
+- **Agent handoff model rewrite** — all 15 agents: "Successor Enforcement" →
+  "Recommended Next Step" output blocks. Shared templates (`RELAY_TEMPLATE.md`,
+  `CONTEXT_PROTOCOL.md`, `MAINTENANCE.md`, `README.md`) and 2 skills updated
+  to match
+- **Template variable mismatches** — `{rdr_file_path}`/`{path}` → `{rdr_file}`
+  in rdr-accept command and skill
+- **Stale "spawn" imperatives** in architect-planner, developer, orchestrator
+  rewritten to output-oriented language
+- **enrich-plan skill** added to using-nx-skills directory table
+
 ## [1.11.0] - 2026-03-12
 
 ### Added

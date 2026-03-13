@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-03-13
+
+### Fixed
+- **rdr-accept chain orchestration** — the planning chain (strategic-planner →
+  plan-auditor → plan-enricher) broke after the planner completed because agents
+  relied on impossible agent-to-agent relay (subagents cannot spawn subagents).
+  The accept skill now explicitly orchestrates all three sequential dispatches.
+- **Agent handoff model** — replaced "Successor Enforcement" sections across all
+  15 agents with "Recommended Next Step" output blocks. Agents now output structured
+  handoff recommendations; the caller (skill or main conversation) dispatches the
+  next agent. Removes dead code that instructed agents to use tools they don't have.
+- **Template variable mismatches** — `{rdr_file_path}` and `{path}` corrected to
+  `{rdr_file}` in rdr-accept command and skill
+- **Stale "spawn" imperatives** — architect-planner and developer agents updated
+  from "spawn X" to output-oriented language matching the new handoff model
+- **enrich-plan skill** added to using-nx-skills directory (was missing from
+  skill registry table)
+
 ## [1.11.0] - 2026-03-12
 
 ### Added
@@ -777,7 +795,11 @@ from rc10 — this entry marks the API, CLI, and plugin contract as stable.
 - Agentic search: multi-step Haiku query refinement
 - Phase 1–8 implementations covering all CLI surface
 
-[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.10.1...HEAD
+[Unreleased]: https://github.com/Hellblazer/nexus/compare/v1.11.1...HEAD
+[1.11.1]: https://github.com/Hellblazer/nexus/compare/v1.11.0...v1.11.1
+[1.11.0]: https://github.com/Hellblazer/nexus/compare/v1.10.3...v1.11.0
+[1.10.3]: https://github.com/Hellblazer/nexus/compare/v1.10.2...v1.10.3
+[1.10.2]: https://github.com/Hellblazer/nexus/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/Hellblazer/nexus/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/Hellblazer/nexus/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/Hellblazer/nexus/compare/v1.9.0...v1.9.1
