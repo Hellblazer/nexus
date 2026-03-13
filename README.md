@@ -40,7 +40,7 @@ nx index repo .                  # index your repo
 nx search "what does X do"       # search it
 ```
 
-For Claude Code, install the plugin:
+For Claude Code, also install the plugin:
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
