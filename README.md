@@ -7,7 +7,7 @@
 
 AI coding agents lose all context between sessions — prior decisions, research findings, and accumulated project knowledge vanish with each new conversation. Nexus provides a solution to this by providing a lightweight knowledge management system with persistent memory and semantic search across code, projects, and accumulated knowledge. Agents share the same tiered storage, so context is shared across agent invocations and sessions.
 
-Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system built on top of the storage tiers. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents that live in the repository alongside the code. Nexus enhances this with T2 metadata tracking and T3 semantic indexing of the RDR corpus, so team members and their agents can quickly get up to speed on a project's design history and maintain traction control as the codebase evolves.
+Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system built on top of the storage tiers. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents that live in the repository alongside the code. Nexus enhances this with T2 metadata tracking and T3 semantic indexing of the RDR corpus, so team members and their agents can quickly get up to speed on a project's design history and stay aligned as the codebase evolves.
 
 ## What it does
 
