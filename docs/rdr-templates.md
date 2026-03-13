@@ -8,8 +8,6 @@
 bug-fix RDR may need only Problem Statement, Research Findings, and Proposed
 Solution. A high-stakes architecture decision warrants everything.
 
----
-
 ## Minimal RDR Example
 
 A complete bug-fix RDR at its leanest:
@@ -56,8 +54,6 @@ conversion using `start_char_idx`/`end_char_idx`. No dependency changes needed.
 2. Add `test_ast_chunk_line_range_populated` in `test_chunker.py`
 3. Re-index affected collections (`code__*`)
 ````
-
----
 
 ## RDR Template
 
@@ -122,8 +118,6 @@ Each load-bearing assumption is a checkbox with verification status:
 | **Source Search** | API verified against dependency source code |
 | **Spike** | Behavior verified by running code against a live service |
 | **Docs Only** | Documentation reading only — insufficient for load-bearing assumptions |
-
----
 
 ## Post-Mortem Template
 

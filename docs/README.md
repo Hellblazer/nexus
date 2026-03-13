@@ -1,6 +1,6 @@
 # Nexus Documentation
 
-Nexus provides persistent memory and semantic search for AI coding agents. Start with Getting Started, then explore by topic.
+Nexus provides persistent memory and semantic search for AI coding agents. Begin with the getting started guide, then explore by topic.
 
 ## Getting Started
 
@@ -8,7 +8,7 @@ Nexus provides persistent memory and semantic search for AI coding agents. Start
 
 ## Core Concepts
 
-- [Storage Tiers](storage-tiers.md) — T1 (session scratch), T2 (project memory), T3 (semantic knowledge) — architecture and data flow
+- [Storage Tiers](storage-tiers.md) — T1 (inter-agent session context), T2 (project memory), T3 (semantic knowledge) — architecture and data flow
 - [Memory and Tasks](memory-and-tasks.md) — T2 memory, beads integration, session context
 - [Repo Indexing](repo-indexing.md) — File classification, tree-sitter chunking, frecency scoring
 - [Configuration](configuration.md) — Config hierarchy, `.nexus.yml`, settings

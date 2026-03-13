@@ -105,7 +105,7 @@ nx search "API changelog" --corpus docs
 nx search "database pool" --hybrid          # blend semantic + keyword matching
 ```
 
-Common flags: `--n 20` (result count), `--json`, `--files` (paths only), `-c` (show matched text).
+Common flags: `--n 20` (result count), `--json`, `--files` (paths only), `-c` (show matched text). The `--hybrid` flag requires [ripgrep](https://github.com/BurntSushi/ripgrep) (`brew install ripgrep` or your system package manager).
 
 ## Troubleshooting
 

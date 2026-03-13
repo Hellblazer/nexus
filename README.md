@@ -5,7 +5,9 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-As projects grow in complexity — more code, more decisions, more team members, more agent sessions — the volume of relevant context quickly exceeds what any single conversation or person can hold. AI coding agents lose all context between sessions, and the reasoning behind past decisions scatters across conversations, commits, and tribal knowledge. Nexus addresses this with a lightweight knowledge management system that provides persistent memory and semantic search across code, projects, and accumulated knowledge. Agents share the same tiered storage, so context is shared across agent invocations and sessions — and that knowledge compounds over time, becoming more valuable as the corpus grows.
+As projects grow in complexity — more code, more decisions, more team members, more agent sessions — the volume of relevant context quickly exceeds what any single conversation or person can hold. AI coding agents lose all context between sessions, and the reasoning behind past decisions scatters across conversations, commits, and tribal knowledge.
+
+Nexus addresses this with a lightweight knowledge management system that provides persistent memory and semantic search across code, projects, and accumulated knowledge. Agents share the same tiered storage, so context is shared across agent invocations and sessions — and that knowledge compounds over time, becoming more valuable as the corpus grows.
 
 Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents that live in the repository alongside the code. Nexus indexes the RDR corpus so team members and their agents can quickly get up to speed on a project's design history and stay aligned as the codebase evolves.
 
@@ -118,7 +120,7 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 
 | Document | What it covers |
 |----------|---------------|
-| [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) | Install, configure, first index and search |
+| [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) | Install, local usage, Claude Code plugin, semantic search setup |
 | [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) | Every command, every flag |
 | [Storage Tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md) | T1/T2/T3 architecture and data flow |
 | [Memory and Tasks](https://github.com/Hellblazer/nexus/blob/main/docs/memory-and-tasks.md) | T2 memory, beads integration, session context |
