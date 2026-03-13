@@ -61,4 +61,4 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 
 ---
 
-**Reading order:** [Overview](../rdr-overview.md) | [Workflow](../rdr-workflow.md) | [Nexus Integration](../rdr-nexus-integration.md) | [Templates](../rdr-templates.md)
+**Reading order:** [Overview](../rdr-overview.md) | [Workflow](../rdr-workflow.md) | [Nexus Integration](../rdr-nexus-integration.md) | [Templates](../rdr-templates.md) | RDR Index (this page)

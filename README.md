@@ -5,15 +5,15 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-Nexus helps you find things in your codebase by meaning, not just by name.
+As projects grow in complexity — more code, more decisions, more team members, more agent sessions — the volume of relevant context quickly exceeds what any single conversation or person can hold. AI coding agents lose all context between sessions, and the reasoning behind past decisions scatters across conversations, commits, and tribal knowledge.
 
-`grep` and IDE search find exact strings. Nexus finds *concepts*: "how does authentication work here?" returns the auth middleware, the login handler, the session management code, and the JWT validation — even if none of them contain the word "authentication." It understands what your code does, not just what it says.
+Nexus addresses this with a lightweight knowledge management system that provides persistent memory and semantic search across code, projects, and accumulated knowledge. Agents share the same tiered storage, so context is shared across agent invocations and sessions — and that knowledge compounds over time, becoming more valuable as the corpus grows.
 
-That matters most when you're working with AI coding agents. An agent that can search your codebase semantically before proposing changes makes fewer mistakes, avoids reinventing things that already exist, and builds on your actual architecture instead of guessing.
+Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents that live in the repository alongside the code. Nexus indexes the RDR corpus so team members and their agents can quickly get up to speed on a project's design history and stay aligned as the codebase evolves.
 
 ## What it does
 
-**Search by meaning.** Index any git repo. Code is parsed into logical chunks (functions, classes, methods) using tree-sitter across 31 languages. Prose and PDFs are split semantically. Everything is embedded with Voyage AI models so you search by concept, not keywords.
+**Semantic search.** Standard text search matches exact strings. Nexus matches by meaning: querying "how does authentication work" returns the auth middleware, the login handler, and the JWT validation — even when none contain the word "authentication."
 
 ```bash
 nx index repo .                  # index current repo
@@ -21,15 +21,15 @@ nx search "error handling"       # finds try/catch, Result types, error middlewa
 nx search "auth" --hybrid        # combine semantic + keyword matching
 ```
 
-**Remember things across sessions.** Scratch notes that disappear when you're done, project memory that persists locally, and permanent knowledge in the cloud — use whichever fits.
+**Persistent memory.** Agents share ephemeral session context for inter-agent coordination, project-level decisions persist locally with full-text search, and cross-project knowledge is stored permanently with semantic retrieval.
 
 ```bash
-nx scratch put "the bug is in the retry logic"    # gone after this session
+nx scratch put "the bug is in the retry logic"    # T1: inter-agent session context
 nx memory put --project myapp --title "DB choice"  "Chose Postgres over SQLite for concurrency"
 nx store put --collection knowledge__myapp "API rate limit is 10k/min per the vendor docs"
 ```
 
-**Track decisions, not just code.** RDR (Research-Design-Review) documents record *why* you made a choice — the problem, what you found, what you picked, what you rejected. They're searchable alongside your code so "didn't we already decide about caching?" has a real answer instead of a Slack archaeology expedition.
+**Decision tracking.** RDR documents record the reasoning behind technical choices and are searchable alongside code, so prior decisions surface automatically during new design work.
 
 ## Quick Start
 
@@ -42,64 +42,48 @@ nx index repo .                  # index your repo
 nx search "what does X do"       # search it
 ```
 
-Scratch (`nx scratch`) and memory (`nx memory`) work with **zero API keys** — no accounts needed, fully local. Semantic search (`nx search`, `nx index`) requires [ChromaDB](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) accounts — both offer free tiers that cover typical usage. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full setup walkthrough.
+For Claude Code, also install the plugin (see [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/nx/README.md)):
 
-## Storage: start local, add cloud when ready
+```bash
+/plugin marketplace add Hellblazer/nexus
+/plugin install nx@nexus-plugins
+```
 
-Nexus has three storage tiers so you can start with zero setup and add capabilities as you need them:
+Scratch (`nx scratch`) and memory (`nx memory`) work with **zero API keys** — fully local. Semantic search requires [ChromaDB](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) accounts (free tiers available). See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
 
-| What you need | Tier | Storage | API keys? |
-|--------------|------|---------|-----------|
-| Quick notes for this session | **Scratch** (T1) | In-memory | No |
-| Project notes that survive restarts | **Memory** (T2) | Local SQLite | No |
-| Search across all your code and knowledge | **Knowledge** (T3) | ChromaDB cloud + Voyage AI | Yes (free tier) |
+## Three tiers, one lifecycle
 
-You don't need to understand tiers to use Nexus. `nx scratch` just works. `nx memory` just works. When you want semantic search, run `nx config init` to add API keys and you're in T3 territory.
+Different information has different lifetimes. Together the three tiers form an integrated memory system that extends agent context across sessions and projects.
 
-## The CLI
+| Tier | Purpose | Storage | API keys? |
+|------|---------|---------|-----------|
+| **Scratch** (T1) | Inter-agent session context — coordination and knowledge sharing across agent invocations | In-memory ChromaDB | No |
+| **Memory** (T2) | Project-level persistence with full-text search | Local SQLite + FTS5 | No |
+| **Knowledge** (T3) | Permanent semantic knowledge — code, papers, docs, decisions searchable by meaning | ChromaDB cloud + Voyage AI | Yes (free tier) |
 
-| Command | What it does |
-|---------|-------------|
-| `nx search` | Semantic and hybrid search across indexed code, docs, and knowledge |
-| `nx index` | Index git repos, PDFs, and markdown into searchable collections |
-| `nx store` | Store, retrieve, export, and import knowledge entries |
-| `nx memory` | Per-project persistent notes (local, no API keys) |
-| `nx scratch` | Ephemeral session scratch pad (in-memory, no API keys) |
-| `nx collection` | Inspect and manage cloud collections |
-| `nx config` | Credentials and settings |
-| `nx doctor` | Health check — verifies dependencies, credentials, connectivity |
-| `nx hooks` | Install git hooks for automatic re-indexing on commit |
+Agents use all three tiers cooperatively. T1 enables inter-agent communication — sharing findings and preventing duplicate work within a session. T2 provides project decisions that constrain solutions. T3 surfaces how similar problems were resolved in other contexts. As the T3 knowledge base grows, it becomes the project's institutional memory — managing the information overload that accompanies complex designs and long-lived codebases.
 
-Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md).
+## What you can index
 
-## Repository indexing
+Code, documents, PDFs, and manual knowledge entries — anything that benefits from semantic search:
 
-`nx index repo` walks your git-tracked files and:
+```bash
+nx index repo .                          # code + docs + RDRs from a git repo
+nx index pdf paper.pdf --collection knowledge__ml  # reference papers
+nx store put --collection knowledge__ops "Redis maxmemory-policy: allkeys-lru for cache, noeviction for queues"
+```
 
-1. **Classifies** each file — code (52 extensions), prose (markdown), PDF, or skip (config, lock files)
-2. **Chunks** code into logical pieces using tree-sitter AST parsing (functions, classes, methods — not arbitrary line splits)
-3. **Chunks** prose at section boundaries, PDFs at layout boundaries
-4. **Embeds** each chunk with a purpose-matched Voyage AI model (`voyage-code-3` for code, `voyage-context-3` for prose)
-5. **Routes** to separate collections: `code__<repo>`, `docs__<repo>`, `rdr__<repo>`
-6. **Scores** with git frecency so recently-touched files rank higher
+Repository indexing (`nx index repo`) is the most automated path. It classifies git-tracked files, chunks code into logical pieces via tree-sitter AST parsing across 31 languages, and embeds each chunk with purpose-matched Voyage AI models. Recently-touched files rank higher via git frecency scoring.
 
-Configurable per-repo via `.nexus.yml`. Stable across git worktrees. See [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md).
+See [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) for details and `.nexus.yml` configuration.
 
 ## RDR: Research-Design-Review
 
-When you're coding fast — especially with AI agents — decisions happen quickly and the reasoning evaporates. A week later, nobody remembers *why* you picked Postgres over SQLite, or what the tradeoff was with the caching strategy.
+Technical decisions made during rapid development lose their reasoning quickly. An RDR captures the problem, investigation, chosen approach, and rejected alternatives in a structured document. Each research finding is tagged with its evidence quality — verified against source code, supported by documentation only, or assumed — so readers know which conclusions are load-bearing and which need further validation.
 
-An RDR is a short document: the problem, what you found, what you chose, what you rejected. Nothing more. Each finding is tagged so readers know what's solid and what's a guess:
+RDRs are iterative: write, build, learn, revise. The growing corpus remains searchable, so prior decisions surface automatically when starting new design work — preventing contradictions and avoiding redundant investigation across the team.
 
-| Tag | Meaning |
-|-----|---------|
-| **Verified** | Confirmed via source code search or working spike |
-| **Documented** | Supported by external docs only |
-| **Assumed** | Unverified — flag it if your design depends on it |
-
-RDRs are iterative, not waterfall. Write one, build it, learn something, write another. Nexus has produced 35+ across its own development. The growing corpus stays searchable — when you start a new design, prior decisions surface automatically so you don't contradict yourself or redo settled work.
-
-RDR is fully optional. Use it when decisions matter; skip it when they don't. Start here: [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md).
+RDR is fully optional. See [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md) for the full process.
 
 ## Claude Code plugin
 
@@ -110,23 +94,33 @@ The `nx/` directory is a Claude Code plugin that gives agents access to everythi
 /plugin install nx@nexus-plugins
 ```
 
-What the plugin adds:
-
-- **15 agents** — code review, debugging, architecture, research, strategic planning, and more — each on a model matched to its task (opus for reasoning, sonnet for implementation)
-- **28 skills** — RDR lifecycle, TDD discipline, brainstorming gates, CLI reference
-- **Session hooks** — auto-initialize scratch, surface project context, health-check dependencies
-- **Slash commands** — `/research`, `/create-plan`, `/review-code`, `/rdr-create`, `/rdr-accept`, etc.
-- **Two MCP servers** — 8 structured storage tools (agents access T1/T2/T3 without Bash) and sequential-thinking for hypothesis-driven reasoning
-
-Agents search your indexed code before proposing changes. They check prior RDR decisions before designing new features. They coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
+The plugin provides 15 specialized agents, 28 skills covering the RDR lifecycle and development workflows, session hooks for automatic context initialization, and MCP servers for structured storage access. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
 
 The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task tracking. See [nx/README.md](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) for the full plugin documentation.
+
+## CLI Reference
+
+The `nx` command provides direct access to all storage tiers, indexing, and search.
+
+| Command | What it does |
+|---------|-------------|
+| `nx search` | Semantic and hybrid search across indexed code, docs, and knowledge |
+| `nx index` | Index git repos, PDFs, and markdown into searchable collections |
+| `nx store` | Store, retrieve, export, and import knowledge entries |
+| `nx memory` | Per-project persistent notes (local, no API keys) |
+| `nx scratch` | Inter-agent session context (in-memory, no API keys) |
+| `nx collection` | Inspect and manage cloud collections |
+| `nx config` | Credentials and settings |
+| `nx doctor` | Health check — verifies dependencies, credentials, connectivity |
+| `nx hooks` | Install git hooks for automatic re-indexing on commit |
+
+Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md).
 
 ## Documentation
 
 | Document | What it covers |
 |----------|---------------|
-| [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) | Install, configure, first index and search |
+| [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) | Install, local usage, Claude Code plugin, semantic search setup |
 | [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) | Every command, every flag |
 | [Storage Tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md) | T1/T2/T3 architecture and data flow |
 | [Memory and Tasks](https://github.com/Hellblazer/nexus/blob/main/docs/memory-and-tasks.md) | T2 memory, beads integration, session context |
