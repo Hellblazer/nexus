@@ -5,7 +5,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-Nexus helps you find things in your codebase by meaning, not just by name.
+Nexus helps you find things in your codebase by semantic meaning, not just by name.
 
 `grep` and IDE search find exact strings. Nexus finds *concepts*: "how does authentication work here?" returns the auth middleware, the login handler, the session management code, and the JWT validation — even if none of them contain the word "authentication." It understands what your code does, not just what it says.
 
