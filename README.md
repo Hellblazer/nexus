@@ -54,22 +54,6 @@ Different information has different lifetimes. Together the three tiers form an 
 
 Agents use all three tiers cooperatively. T1 enables inter-agent communication — sharing findings and preventing duplicate work within a session. T2 provides project decisions that constrain solutions. T3 surfaces how similar problems were resolved in other contexts.
 
-## The CLI
-
-| Command | What it does |
-|---------|-------------|
-| `nx search` | Semantic and hybrid search across indexed code, docs, and knowledge |
-| `nx index` | Index git repos, PDFs, and markdown into searchable collections |
-| `nx store` | Store, retrieve, export, and import knowledge entries |
-| `nx memory` | Per-project persistent notes (local, no API keys) |
-| `nx scratch` | Inter-agent session context (in-memory, no API keys) |
-| `nx collection` | Inspect and manage cloud collections |
-| `nx config` | Credentials and settings |
-| `nx doctor` | Health check — verifies dependencies, credentials, connectivity |
-| `nx hooks` | Install git hooks for automatic re-indexing on commit |
-
-Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md).
-
 ## What you can index
 
 Code, documents, PDFs, and manual knowledge entries — anything that benefits from semantic search:
@@ -110,6 +94,24 @@ The `nx/` directory is a Claude Code plugin that gives agents access to everythi
 The plugin provides 15 specialized agents, 28 skills covering the RDR lifecycle and development workflows, session hooks for automatic context initialization, and MCP servers for structured storage access. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
 
 The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task tracking. See [nx/README.md](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) for the full plugin documentation.
+
+## CLI Reference
+
+The `nx` command provides direct access to all storage tiers, indexing, and search.
+
+| Command | What it does |
+|---------|-------------|
+| `nx search` | Semantic and hybrid search across indexed code, docs, and knowledge |
+| `nx index` | Index git repos, PDFs, and markdown into searchable collections |
+| `nx store` | Store, retrieve, export, and import knowledge entries |
+| `nx memory` | Per-project persistent notes (local, no API keys) |
+| `nx scratch` | Inter-agent session context (in-memory, no API keys) |
+| `nx collection` | Inspect and manage cloud collections |
+| `nx config` | Credentials and settings |
+| `nx doctor` | Health check — verifies dependencies, credentials, connectivity |
+| `nx hooks` | Install git hooks for automatic re-indexing on commit |
+
+Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md).
 
 ## Documentation
 
