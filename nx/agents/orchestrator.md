@@ -215,7 +215,7 @@ When orchestrating a pipeline:
 **Agents Involved**: [List in sequence with relay points]
 **Bead**: [Create orchestration bead ID] (status: in_progress)
 
-### Stage 1: Relay to [Agent Name]
+### Stage 1: Dispatch [Agent Name]
 
 Use standard relay format for first agent:
 - Task: [What first agent does]

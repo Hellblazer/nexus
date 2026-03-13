@@ -210,14 +210,14 @@ Present findings including:
 6. Practical applications and actionable insights
 7. Complete references with links where available
 
-## Relay Protocol
+## Workflow Position
 
 ### I Receive From:
 - **User**: Research requests requiring multi-source synthesis
 - **architect-planner**: Technology research for architecture decisions
 - **deep-analyst**: Requests for additional information during analysis
 
-### I Relay To:
+### I Hand Off To (via Recommended Next Step):
 - **knowledge-tidier**: After major research for cleanup and consolidation
 - **architect-planner**: Research findings for architecture decisions
 - **plan-auditor**: Research that informs plan validation

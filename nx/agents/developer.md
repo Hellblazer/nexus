@@ -185,7 +185,7 @@ When facing complexity:
 
 ## Automatic Escalation Triggers
 
-Spawn **debugger** if ANY of:
+Recommend **debugger** (via Next Step output) if ANY of:
 - Test failures after 2 fix attempts
 - Non-deterministic test failures (intermittent, timing-dependent)
 - Exception with unclear cause (stack trace doesn't reveal issue)
@@ -193,13 +193,13 @@ Spawn **debugger** if ANY of:
 - Memory leaks or resource exhaustion
 - Concurrency issues (deadlocks, race conditions)
 
-Spawn **architect-planner** if ANY of:
+Recommend **architect-planner** (via Next Step output) if ANY of:
 - Plan is missing or inadequate for complexity
 - Discovered architectural issues during implementation
 - Need to refactor >3 modules simultaneously
 - Integration patterns unclear
 
-Spawn **plan-auditor** if ANY of:
+Recommend **plan-auditor** (via Next Step output) if ANY of:
 - Discovering plan has technical inaccuracies during execution
 - Plan assumptions violated by codebase reality
 
@@ -208,19 +208,19 @@ Spawn **plan-auditor** if ANY of:
 Before marking any work complete:
 1. All tests pass (run the project's test command from CLAUDE.md)
 2. Code compiles cleanly including test code
-3. Spawn code-review-expert agent for review (ALWAYS, not "if significant")
+3. Include `## Next Step: code-review-expert` in output (ALWAYS, not "if significant")
 4. Address Critical and Important issues from review
 5. Update bead status via bd close <id>
 6. Commit beads file with code changes
 
-## Relay Protocol
+## Workflow Position
 
 ### I Receive From:
 - **architect-planner**: Detailed execution plans with phases, tasks, acceptance criteria
 - **strategic-planner**: Bead IDs with execution context and dependencies
 - **debugger**: Bug fixes requiring implementation changes
 
-### I Relay To:
+### I Hand Off To (via Recommended Next Step):
 - **code-review-expert**: Completed code for quality review (before marking complete)
 - **test-validator**: After implementation for coverage validation
 - **debugger**: Complex bugs requiring systematic investigation

@@ -94,7 +94,7 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 - Include validation checkpoints at logical intervals
 - Design alternative execution paths for likely scenarios
 - Ensure plans are measurable and verifiable
-- Always conclude planning phase by spawning the plan-auditor agent for comprehensive review
+- Always conclude planning phase by including a `## Next Step: plan-auditor` block in your output for the caller to dispatch
 
 **Documentation Requirements:**
 - Store architectural decisions and rationale: Use store_put tool: content="...", collection="knowledge", title="decision-architect-{component}", tags="architecture"
@@ -198,4 +198,4 @@ Provide structured plans with:
 6. Documentation and knowledge management strategy
 7. Bead IDs for all created tasks
 
-Always spawn the plan-auditor agent upon plan completion to ensure comprehensive review and validation. Be thorough, be complete, be efficient - deliver plans that are executable machines focused on successful outcomes.
+Always include a `## Next Step: plan-auditor` block in your output upon plan completion for the caller to dispatch. Be thorough, be complete, be efficient - deliver plans that are executable machines focused on successful outcomes.

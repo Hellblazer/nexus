@@ -31,7 +31,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
    - Ask: "Invoke strategic planner to build execution beads? (y/n) [default]"
    - **If no:** Continue — no beads created
    - **If yes — execute the full chain (3 sequential dispatches, orchestrated by this skill):**
-     1. Write T1 scratch entry tagged `rdr-planning-context`: Use scratch tool: action="put", content="RDR {id}: planning context for {title}. RDR file: {path}", tags="rdr-planning-context,rdr-{id}"
+     1. Write T1 scratch entry tagged `rdr-planning-context`: Use scratch tool: action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file}", tags="rdr-planning-context,rdr-{id}"
      2. **Dispatch strategic-planner** (Agent tool) — create phased plan with beads. **Wait for completion.**
      3. **Dispatch plan-auditor** (Agent tool) — audit the plan against codebase. T1 scratch has rdr-planning-context tag. **Wait for completion.**
      4. **Dispatch plan-enricher** (Agent tool) — enrich beads with audit findings, write epic bead ID to T2. **Wait for completion.**

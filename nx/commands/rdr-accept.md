@@ -222,11 +222,11 @@ All data is pre-loaded above — no additional tool calls needed.
   - **If yes — execute the full chain (3 sequential dispatches):**
 
     **Step 7a — Write T1 context:**
-    Write T1 scratch entry: Use scratch tool: action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file_path}", tags="rdr-planning-context,rdr-{id}"
+    Write T1 scratch entry: Use scratch tool: action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file}", tags="rdr-planning-context,rdr-{id}"
 
     **Step 7b — Dispatch strategic-planner:**
     Dispatch `nx:strategic-planner` agent (via Agent tool, subagent_type="nx:strategic-planner") with prompt:
-    > Create phased execution plan for RDR-{id}: {title}. RDR file: {rdr_file_path}. Read the RDR content for implementation phases. Create epic and task beads with dependencies.
+    > Create phased execution plan for RDR-{id}: {title}. RDR file: {rdr_file}. Read the RDR content for implementation phases. Create epic and task beads with dependencies.
     **Wait for the planner to complete before proceeding.**
     Note the plan file path and bead IDs from the planner's output.
 
