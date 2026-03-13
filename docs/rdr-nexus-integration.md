@@ -1,3 +1,7 @@
+**Reading order:** [Overview](rdr-overview.md) | [Workflow](rdr-workflow.md) | Nexus Integration (this page) | [Templates](rdr-templates.md) | [RDR Index](rdr/README.md)
+
+---
+
 # RDR: Nexus Integration
 
 Nexus indexes every RDR the moment it is committed. Search, filter, and retrieve

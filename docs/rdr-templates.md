@@ -1,3 +1,7 @@
+**Reading order:** [Overview](rdr-overview.md) | [Workflow](rdr-workflow.md) | [Nexus Integration](rdr-nexus-integration.md) | Templates (this page) | [RDR Index](rdr/README.md)
+
+---
+
 # RDR: Template Reference
 
 **Right-size to the decision.** Fill what helps; skip what doesn't. A quick

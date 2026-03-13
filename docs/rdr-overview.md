@@ -1,3 +1,7 @@
+**Reading order:** Overview (this page) | [Workflow](rdr-workflow.md) | [Nexus Integration](rdr-nexus-integration.md) | [Templates](rdr-templates.md) | [RDR Index](rdr/README.md)
+
+---
+
 # RDR: Research-Design-Review
 
 An RDR records a technical decision: problem, evidence, chosen solution, rejected alternatives. It exists so decisions can be reproduced, searched, and fed directly to agents as context.

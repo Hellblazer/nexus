@@ -1,3 +1,7 @@
+**Reading order:** [Overview](../rdr-overview.md) | [Workflow](../rdr-workflow.md) | [Nexus Integration](../rdr-nexus-integration.md) | [Templates](../rdr-templates.md) | RDR Index (this page)
+
+---
+
 # RDR Index
 
 An RDR (Research-Design-Review) is a short document that records a technical decision: the problem, what was found, what was chosen, and what was rejected. They exist so decisions are reproducible, searchable, and useful as agent context. Each RDR is written once and never deleted — closing an RDR means updating its status, not removing it.
