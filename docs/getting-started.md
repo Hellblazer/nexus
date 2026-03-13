@@ -34,6 +34,21 @@ nx memory get -p myproject -t auth-notes
 
 These are T1 and T2 — fully local, no accounts, no network. Many workflows start and end here.
 
+## Claude Code plugin
+
+For Claude Code, also install the plugin (see [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/nx/README.md)):
+
+```bash
+/plugin marketplace add Hellblazer/nexus
+/plugin install nx@nexus-plugins
+```
+
+The plugin gives agents direct access to all three storage tiers via MCP servers, plus specialized agents, skills, session hooks, and development workflows. For local development, load from a repo checkout:
+
+```bash
+claude --plugin-dir ./nx
+```
+
 ## Add semantic search (T3)
 
 When you want to search code, documents, and knowledge by meaning, set up T3 credentials.
@@ -91,21 +106,6 @@ nx search "database pool" --hybrid          # blend semantic + keyword matching
 ```
 
 Common flags: `--n 20` (result count), `--json`, `--files` (paths only), `-c` (show matched text).
-
-## Claude Code plugin
-
-For Claude Code, also install the plugin (see [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/nx/README.md)):
-
-```bash
-/plugin marketplace add Hellblazer/nexus
-/plugin install nx@nexus-plugins
-```
-
-The plugin gives agents direct access to all three storage tiers via MCP servers, plus specialized agents, skills, session hooks, and development workflows. For local development, load from a repo checkout:
-
-```bash
-claude --plugin-dir ./nx
-```
 
 ## Troubleshooting
 
