@@ -77,15 +77,9 @@ See [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-inde
 
 ## RDR: Research-Design-Review
 
-Technical decisions made during rapid development lose their reasoning quickly. An RDR captures the problem, investigation, chosen approach, and rejected alternatives. Each finding is classified by evidence quality:
+Technical decisions made during rapid development lose their reasoning quickly. An RDR captures the problem, investigation, chosen approach, and rejected alternatives in a structured document. Each research finding is tagged with its evidence quality — verified against source code, supported by documentation only, or assumed — so readers know which conclusions are load-bearing and which need further validation.
 
-| Tag | Meaning |
-|-----|---------|
-| **Verified** | Confirmed via source code search or working spike |
-| **Documented** | Supported by external docs only |
-| **Assumed** | Unverified — flag it if your design depends on it |
-
-RDRs are iterative: write, build, learn, revise. The growing corpus remains searchable, so prior decisions surface automatically when starting new design work.
+RDRs are iterative: write, build, learn, revise. The growing corpus remains searchable, so prior decisions surface automatically when starting new design work — preventing contradictions and avoiding redundant investigation across the team.
 
 RDR is fully optional. See [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md) for the full process.
 
