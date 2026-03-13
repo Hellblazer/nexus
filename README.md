@@ -5,7 +5,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-AI coding agents lose all context between sessions — prior decisions, research findings, and accumulated project knowledge vanish with each new conversation. Nexus addresses this with a lightweight knowledge management system that provides persistent memory and semantic search across code, projects, and accumulated knowledge. Agents share the same tiered storage, so context is shared across agent invocations and sessions — and that knowledge compounds over time, becoming more valuable as the corpus grows.
+As projects grow in complexity — more code, more decisions, more team members, more agent sessions — the volume of relevant context quickly exceeds what any single conversation or person can hold. AI coding agents lose all context between sessions, and the reasoning behind past decisions scatters across conversations, commits, and tribal knowledge. Nexus addresses this with a lightweight knowledge management system that provides persistent memory and semantic search across code, projects, and accumulated knowledge. Agents share the same tiered storage, so context is shared across agent invocations and sessions — and that knowledge compounds over time, becoming more valuable as the corpus grows.
 
 Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents that live in the repository alongside the code. Nexus indexes the RDR corpus so team members and their agents can quickly get up to speed on a project's design history and stay aligned as the codebase evolves.
 
@@ -59,7 +59,7 @@ Different information has different lifetimes. Together the three tiers form an 
 | **Memory** (T2) | Project-level persistence with full-text search | Local SQLite + FTS5 | No |
 | **Knowledge** (T3) | Permanent semantic knowledge — code, papers, docs, decisions searchable by meaning | ChromaDB cloud + Voyage AI | Yes (free tier) |
 
-Agents use all three tiers cooperatively. T1 enables inter-agent communication — sharing findings and preventing duplicate work within a session. T2 provides project decisions that constrain solutions. T3 surfaces how similar problems were resolved in other contexts.
+Agents use all three tiers cooperatively. T1 enables inter-agent communication — sharing findings and preventing duplicate work within a session. T2 provides project decisions that constrain solutions. T3 surfaces how similar problems were resolved in other contexts. As the T3 knowledge base grows, it becomes the project's institutional memory — managing the information overload that accompanies complex designs and long-lived codebases.
 
 ## What you can index
 
