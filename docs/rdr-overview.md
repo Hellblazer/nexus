@@ -6,68 +6,59 @@
 
 An RDR records a technical decision: problem, evidence, chosen solution, rejected alternatives. It exists so decisions can be reproduced, searched, and fed directly to agents as context.
 
-## Quick Start
+## Quick start
 
 1. `/rdr-create` — creates a new file with metadata prefilled, status set to Draft
 2. `/rdr-research add <id>` — appends a finding with an evidence classification tag
-3. `/rdr-gate <id>` — runs 3-layer validation: structure check, assumption audit, AI critique (optional but recommended for irreversible decisions)
+3. `/rdr-gate <id>` — runs 3-layer validation: structure check, assumption audit, AI critique (optional, recommended for irreversible decisions)
 4. `/rdr-accept <id>` — locks the decision, sets status to Accepted
 5. `/rdr-close <id> --reason implemented` — archives the RDR, creates a post-mortem template, indexes to T3
 
-## When to Write One
+Steps 3–5 add rigor for high-stakes decisions. For a straightforward bug fix, steps 1–2 plus writing the solution may be all you need.
 
-- A design choice has non-obvious trade-offs
-- You investigated two or more options before deciding
+## When to write one
+
+Write an RDR when the "why" behind a decision won't be obvious from the code or commit history alone:
+
+- A design choice has non-obvious trade-offs or you evaluated multiple options
 - A bug required root-cause analysis, not just a patch
-- A decision will be hard to reverse or expensive if wrong
-- External constraints (API limits, vendor behavior, third-party behavior) shaped the solution
+- External constraints (API limits, vendor behavior) shaped the solution
 - A previous decision turned out to be wrong and you're correcting it
-- You're about to refactor something others depend on
-- The "why" won't be obvious from the code or commit history alone
-- You discovered something during implementation that changes the original plan
+- You're refactoring something others depend on
+- Something discovered during implementation changes the original plan
 
-## Right-Sizing an RDR
+Not every decision needs an RDR. If the rationale is self-evident from the code, skip it.
 
-Not every RDR needs every section. Match depth to complexity.
+## Right-sizing
+
+Match depth to the decision's complexity.
 
 | Scenario | Sections needed | Example |
 |---|---|---|
-| **Minimal** (bug, 1 option) | Problem + Root Cause + Fix | AST line-range bug: splitter returns empty metadata |
+| **Minimal** (bug, single option) | Problem + Root Cause + Fix | AST line-range bug: splitter returns empty metadata |
 | **Full** (architecture, multiple options) | All sections | Four-store T3 architecture with quota enforcement |
 
-**The rule**: if you can state the problem, root cause, and fix in one paragraph, that IS the RDR. Don't add sections to look thorough.
+If you can state the problem, root cause, and fix in one paragraph, that IS the RDR. Don't add sections to look thorough.
 
-## Evidence Classification
+## Evidence classification
 
-Each research finding is tagged so readers know what is solid and what is a guess.
+Each research finding is tagged so readers — both human and agent — know what is solid and what needs further validation.
 
-| Classification | Meaning | Example |
-|---|---|---|
-| **Verified** | Confirmed via source code search or working spike | "grep confirms the API accepts batch writes" |
-| **Documented** | Supported by external documentation only | "Vendor docs state 10k RPS limit" |
-| **Assumed** | Unverified belief based on experience or inference | "Serialization overhead assumed negligible" |
-
-Flag assumptions that your design depends on. Low-stakes assumptions need no verification; load-bearing ones should be visible.
-
-## The Iterative Pattern
-
-The Nexus project produced 18 RDRs over two weeks. Here's what that looks like in practice:
-
-| RDRs | Theme |
+| Classification | Meaning |
 |---|---|
-| 001–002 | Foundation: process validation, T2 status synchronization |
-| 004–007 | Architecture: four-store layout, quota enforcement, scoring, agent session context |
-| 008–013 | Workflow integration, API cleanup, T1 cross-process sessions, PDF ingest tiers, memory simplification |
-| 014–016 | Retrieval quality: code context prefixes, pipeline rethink (cross-repo learning from Arcaneum), AST line-range bug |
-| 017–018 | Operational: progress bars, replace polling server with git hooks |
+| **Verified** | Confirmed via source code search or working spike |
+| **Documented** | Supported by external documentation only |
+| **Assumed** | Unverified belief based on experience or inference |
 
-RDR-015 exists because implementing RDR-014 exposed that Arcaneum had already solved the same indexing problems. RDR-016 exists because fixing RDR-014 uncovered a latent bug in the AST chunker. Each RDR is a step, not a plan.
+Flag assumptions that your design depends on. Low-stakes assumptions need no verification; load-bearing ones should be explicitly visible so they can be challenged or validated later.
 
-## What an Agent Sees
+## The iterative pattern
 
-When you run `nx search "topic" --corpus rdr`, the agent retrieves the Problem Statement, Proposed Solution, and evidence classifications for matching RDRs. A well-written Problem Statement and Proposed Solution are the most valuable parts — they give the agent enough context to implement or extend without reading the full document. The evidence classification tells the agent which parts of the design are verified facts versus assumptions it should check before relying on them.
+RDRs are not waterfall documents written once before implementation. They're iterative — write one, build, learn from what you find, write the next one. Each RDR builds on what earlier ones established, and sometimes an implementation reveals that a prior decision needs revisiting.
 
-## Statuses
+The Nexus project has produced 36 RDRs across its development. The corpus is searchable, so when starting a new design, prior decisions surface automatically — preventing contradictions and avoiding redundant investigation.
+
+## Statuses and types
 
 ```
 Draft --> Accepted --> Implemented
@@ -75,42 +66,34 @@ Draft --> Accepted --> Implemented
                        Reverted / Abandoned / Superseded
 ```
 
-- **Draft**: skeleton created, research in progress
-- **Accepted**: gate passed; decision formally accepted
-- **Implemented**: implementation complete, archived to T3
-- **Reverted**: implementation was rolled back
-- **Abandoned**: decision dropped before implementation
-- **Superseded**: replaced by a newer RDR (linked via `superseded_by` field)
+| Status | Meaning |
+|---|---|
+| **Draft** | Created, research in progress |
+| **Accepted** | Gate passed, decision formally accepted |
+| **Implemented** | Implementation complete, archived to T3 |
+| **Reverted** | Implementation rolled back |
+| **Abandoned** | Dropped before implementation |
+| **Superseded** | Replaced by a newer RDR (linked via `superseded_by`) |
 
-## Types
+**Types**: Feature, Bug Fix, Technical Debt, Framework Workaround, Architecture.
 
-- **Feature**: new capability or user-facing behavior
-- **Bug Fix**: root-cause analysis and fix strategy for a defect
-- **Technical Debt**: refactoring or cleanup of existing code
-- **Framework Workaround**: mitigation for a known framework limitation
-- **Architecture**: cross-cutting structural decision
+## Using RDR in your project
 
-## Optional Rigor
-
-[`/rdr-gate`](rdr-workflow.md#gate-rdr-gate) runs a structural check, assumption audit, and AI critique before you commit. Use it when the decision is expensive to reverse. [`/rdr-close`](rdr-workflow.md#close-rdr-close) optionally generates a post-mortem comparing what was decided to what was built — useful for improving future RDRs. Neither is required for routine work.
-
-## Using RDR in Your Project
-
-RDR works in any repository — it doesn't require the Nexus CLI or plugin. The tooling amplifies RDRs (search, gate, agent context), but the core value is the document itself.
+RDR works in any repository — it doesn't require the Nexus CLI or plugin. The tooling amplifies RDRs with search, validation, and agent context, but the core value is the document itself.
 
 **Minimal setup (no tooling):**
 
 1. Create `docs/rdr/` in your repo
 2. Copy the [template](rdr-templates.md) into `docs/rdr/TEMPLATE.md`
-3. Write your first RDR by hand — Problem Statement + Research Findings + Proposed Solution is enough
+3. Write your first RDR — Problem Statement + Research Findings + Proposed Solution is enough
 
 **With Nexus CLI + plugin:**
 
-1. Run `/rdr-create` — it bootstraps the directory, templates, and README automatically on first use
-2. Use `/rdr-research`, `/rdr-gate`, `/rdr-accept`, `/rdr-close` for the full lifecycle
+1. `/rdr-create` bootstraps the directory, templates, and README automatically on first use
+2. `/rdr-research`, `/rdr-gate`, `/rdr-accept`, `/rdr-close` manage the full lifecycle
 3. RDRs are auto-indexed by `nx index repo` and searchable via `nx search --corpus rdr`
 
-See [Nexus Integration](rdr-nexus-integration.md) for how storage tiers and agents work with RDRs.
+See [Nexus Integration](rdr-nexus-integration.md) for how agents and storage tiers work with RDRs.
 
 ---
 
