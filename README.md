@@ -9,6 +9,8 @@ AI coding agents lose all context between sessions. Prior decisions, research fi
 
 Nexus is a lightweight knowledge management system that provides persistent memory and semantic search across code, projects, and accumulated knowledge. Agents and humans share the same tiered storage, so context built in one session is available in every session that follows.
 
+Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system built on top of the storage tiers. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents. The result is a persistent decision history that agents consult before proposing new work and humans review to understand why the codebase evolved as it did.
+
 ## What it does
 
 **Semantic search.** Standard text search matches exact strings. Nexus matches by meaning: querying "how does authentication work" returns the auth middleware, the login handler, and the JWT validation — even when none contain the word "authentication."
