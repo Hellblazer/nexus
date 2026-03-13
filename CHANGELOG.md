@@ -23,6 +23,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from "spawn X" to output-oriented language matching the new handoff model
 - **enrich-plan skill** added to using-nx-skills directory (was missing from
   skill registry table)
+- **Flaky test on Python 3.13** — `test_entries_6_to_8_title_only` failed in CI
+  because all entries shared the same second-level timestamp, making SQLite
+  ordering non-deterministic. Test now asserts on snippet/title-only counts
+  rather than specific entry names.
 
 ## [1.11.0] - 2026-03-12
 
