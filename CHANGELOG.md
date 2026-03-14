@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-03-14
+
+### Docs
+- **README intro paragraph** — rewritten for clarity: leads with what Nexus is,
+  then what it provides, then the compounding value proposition.
+
 ## [1.12.0] - 2026-03-13
 
 ### Docs

@@ -5,9 +5,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-As projects grow in complexity — more code, more decisions, more team members, more agent sessions — the volume of relevant context quickly exceeds what any single conversation or person can hold. AI coding agents lose all context between sessions, and the reasoning behind past decisions scatters across conversations, commits, and tribal knowledge.
-
-Nexus addresses this with a lightweight knowledge management system that provides persistent memory and semantic search across code, projects, and accumulated knowledge. Agents share the same tiered storage, so context is shared across agent invocations and sessions — and that knowledge compounds over time, becoming more valuable as the corpus grows.
+Nexus is a lightweight knowledge management system for AI coding agents. It provides persistent memory and semantic search through tiered storage that preserves decisions, findings, and project knowledge across agent sessions. That knowledge compounds over time, becoming more valuable as the corpus grows.
 
 Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents that live in the repository alongside the code. Nexus indexes the RDR corpus so team members and their agents can quickly get up to speed on a project's design history and stay aligned as the codebase evolves.
 
