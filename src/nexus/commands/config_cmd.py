@@ -142,7 +142,7 @@ def config_init() -> None:
 
     _required = [
         ("chroma_api_key",  "ChromaDB Cloud API key"),
-        ("chroma_database", "ChromaDB database base name"),
+        ("chroma_database", "ChromaDB database name"),
         ("voyage_api_key",  "Voyage AI API key"),
     ]
 

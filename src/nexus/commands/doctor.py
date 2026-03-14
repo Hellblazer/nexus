@@ -226,8 +226,8 @@ def doctor_cmd() -> None:
     if not chroma_database:
         failed = True
         _fix(lines,
-             "nx config init                           (interactive wizard, also provisions databases)",
-             "nx config set chroma_database <base-name>",
+             "nx config init                           (interactive wizard, also provisions database)",
+             "nx config set chroma_database <name>",
              "e.g. nx config set chroma_database nexus")
 
     # ── ChromaDB database reachability ────────────────────────────────────────

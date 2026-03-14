@@ -70,7 +70,7 @@ Run the interactive wizard:
 nx config init
 ```
 
-This walks through each credential and automatically provisions the required ChromaDB databases. Alternatively, set credentials individually:
+This walks through each credential and automatically provisions the ChromaDB database. Alternatively, set credentials individually:
 
 ```bash
 nx config set chroma_api_key sk-...
