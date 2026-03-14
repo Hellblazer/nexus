@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, call, patch
 
+import chromadb.errors
 import httpx
 import pytest
 
@@ -161,7 +162,13 @@ def t3_mock():
     """T3Database wired to a single MagicMock ChromaDB client."""
     with patch("nexus.db.t3.chromadb") as chromadb_m:
         mock_client = MagicMock()
-        chromadb_m.CloudClient.return_value = mock_client
+
+        def _cloud_client_factory(**kwargs):
+            if kwargs.get("database", "").endswith("_code"):
+                raise chromadb.errors.NotFoundError("probe")
+            return mock_client
+
+        chromadb_m.CloudClient.side_effect = _cloud_client_factory
         from nexus.db.t3 import T3Database
         db = T3Database(tenant="t", database="d", api_key="k")
         yield db, mock_client

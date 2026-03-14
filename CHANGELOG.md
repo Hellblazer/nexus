@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking Changes
+- **T3 storage consolidated from 4 databases to 1** (RDR-037) — `chroma_database`
+  is now the actual database name, not a base prefix. All collection prefixes
+  (`code__*`, `docs__*`, `rdr__*`, `knowledge__*`) coexist in a single ChromaDB
+  Cloud database.
+  - `nx config init` provisions 1 database instead of 4
+  - `nx doctor` checks 1 database instead of 4
+  - Old four-database layout is auto-detected on startup with migration guidance
+  - Set `NX_MIGRATED=1` after migrating to skip the probe
+  - **Migration is non-destructive** — old databases are never modified or deleted.
+    They remain in your ChromaDB Cloud dashboard until you choose to remove them.
+  - Migration steps:
+    1. Export with the **pre-upgrade** version: `nx store export --all`
+    2. Upgrade nexus
+    3. Provision single DB: `nx config init` (creates `{chroma_database}`)
+    4. Re-index repos: `nx index repo .`
+    5. Import stored knowledge: `nx store import`
+    6. Set flag: `export NX_MIGRATED=1` (or `nx config set migrated 1`)
+    7. Verify: `nx doctor`
+    8. Optional: delete the 4 old databases from the ChromaDB Cloud dashboard
+
+### Changed
+- `T3Database.__init__` uses probe-first single-client connection (was four-client loop)
+- `_client_for()` is now a shim returning the single client (routing removed)
+- `ensure_databases()` creates 1 database (was 4)
+- `OldLayoutDetected` exception raised when old `{base}_code` database still exists
+
 ## [1.12.1] - 2026-03-14
 
 ### Docs

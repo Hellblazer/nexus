@@ -121,6 +121,7 @@ CREDENTIALS: dict[str, str] = {
     "chroma_tenant":     "CHROMA_TENANT",
     "chroma_database":   "CHROMA_DATABASE",
     "voyage_api_key":    "VOYAGE_API_KEY",
+    "migrated":          "NX_MIGRATED",
 }
 
 # ── Defaults ──────────────────────────────────────────────────────────────────

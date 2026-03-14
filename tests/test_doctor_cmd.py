@@ -385,38 +385,23 @@ def test_doctor_missing_rg_shows_platform_hints() -> None:
     assert "BurntSushi/ripgrep" in result.output
 
 
-# ── Four-store database check ─────────────────────────────────────────────────
+# ── Single-database check ─────────────────────────────────────────────────────
 
-def test_doctor_four_store_calls_cloud_client_four_times() -> None:
-    """doctor four-store check calls CloudClient for each store type."""
+def test_doctor_single_db_calls_cloud_client() -> None:
+    """doctor checks the single database (reachability + pipeline + pagination)."""
     runner = _runner()
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
-    with (
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()) as mock_cc,
-    ):
-        result = runner.invoke(main, ["doctor"])
+    mock_client = MagicMock()
+    mock_client.list_collections.return_value = []
 
-    # 4 for reachability + 4 for pipeline version + 4 for pagination audit = 12
-    assert mock_cc.call_count == 12
-    # All four suffixed database names appear in output
-    for suffix in ("_code", "_docs", "_rdr", "_knowledge"):
-        assert suffix in result.output
-
-
-def test_doctor_four_store_one_unreachable_fails_with_fix_hint() -> None:
-    """When one of the four stores is unreachable, exit code 1 and fix hint shown."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-
+    import chromadb.errors
     def cloud_client_side_effect(**kwargs):
-        if kwargs.get("database", "").endswith("_rdr"):
-            raise RuntimeError("connection refused")
-        return MagicMock()
+        db_name = kwargs.get("database", "")
+        # Old layout probe for {base}_code should fail
+        if db_name.endswith("_code"):
+            raise chromadb.errors.NotFoundError("probe: not found")
+        return mock_client
 
     with (
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
@@ -427,13 +412,31 @@ def test_doctor_four_store_one_unreachable_fails_with_fix_hint() -> None:
     ):
         result = runner.invoke(main, ["doctor"])
 
+    assert "reachable" in result.output
+
+
+def test_doctor_single_db_unreachable_fails_with_fix_hint() -> None:
+    """When the database is unreachable, exit code 1 and fix hint shown."""
+    runner = _runner()
+    mock_reg = MagicMock()
+    mock_reg.all.return_value = []
+
+    with (
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
+        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
+        patch("nexus.commands.doctor.chromadb.CloudClient",
+              side_effect=RuntimeError("connection refused")),
+    ):
+        result = runner.invoke(main, ["doctor"])
+
     assert result.exit_code == 1
     assert "not reachable" in result.output
     assert "nx config init" in result.output
 
 
-def test_doctor_four_store_error_does_not_expose_exception_text() -> None:
-    """doctor four-store check prints 'not reachable' without raw exception detail."""
+def test_doctor_single_db_error_does_not_expose_exception_text() -> None:
+    """doctor check prints 'not reachable' without raw exception detail."""
     runner = _runner()
     mock_reg = MagicMock()
     mock_reg.all.return_value = []

@@ -18,8 +18,7 @@ from nexus.config import (
 _SIGNUP = {
     "chroma_api_key":  "https://trychroma.com  →  Cloud  →  API Keys",
     "chroma_database": (
-        "Choose a short base name (e.g. 'nexus'). Nexus will provision four databases:\n"
-        "    {base}_code  {base}_docs  {base}_rdr  {base}_knowledge"
+        "Choose a database name (e.g. 'nexus'). Nexus will provision this database in ChromaDB Cloud."
     ),
     "voyage_api_key":  "https://voyageai.com   →  Dashboard  →  API Keys",
 }
@@ -143,7 +142,7 @@ def config_init() -> None:
 
     _required = [
         ("chroma_api_key",  "ChromaDB Cloud API key"),
-        ("chroma_database", "ChromaDB database base name"),
+        ("chroma_database", "ChromaDB database name"),
         ("voyage_api_key",  "Voyage AI API key"),
     ]
 
@@ -178,11 +177,11 @@ def config_init() -> None:
     click.echo(_SEP)
     click.echo(f"\nCredentials saved to {config_path}")
 
-    # Auto-provision the four T3 databases if both required credentials are now set.
+    # Auto-provision the T3 database if both required credentials are now set.
     api_key = get_credential("chroma_api_key")
     database = get_credential("chroma_database")
     if api_key and database:
-        click.echo(f"\nProvisioning ChromaDB Cloud databases for base name '{database}'…")
+        click.echo(f"\nProvisioning ChromaDB Cloud database '{database}'…")
         try:
             from nexus.commands._provision import _cloud_admin_client, ensure_databases
             admin = _cloud_admin_client(api_key)
@@ -192,10 +191,8 @@ def config_init() -> None:
                 status = "created" if was_created else "already exists"
                 click.echo(f"  {icon} {db_name}: {status}")
         except Exception as exc:
-            click.echo(f"\n  Warning: could not auto-provision databases ({exc}).")
-            click.echo("  Create these databases manually in the ChromaDB Cloud dashboard:")
-            for t in ("code", "docs", "rdr", "knowledge"):
-                click.echo(f"    - {database}_{t}")
+            click.echo(f"\n  Warning: could not auto-provision database ({exc}).")
+            click.echo(f"  Create '{database}' manually in the ChromaDB Cloud dashboard.")
 
     click.echo("\nNext steps:")
     click.echo("  nx doctor          — verify all services are reachable")

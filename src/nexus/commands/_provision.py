@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from nexus.db.t3 import _STORE_TYPES
-
 if TYPE_CHECKING:
     import chromadb
 
@@ -70,7 +68,7 @@ def ensure_databases(
     base: str,
     tenant: str = "default_tenant",
 ) -> dict[str, bool]:
-    """Create the four T3 databases if they do not already exist.
+    """Create the T3 database if it does not already exist.
 
     The ``tenant`` parameter is resolved to the real Chroma Cloud tenant UUID
     via :func:`_resolve_cloud_tenant` before any API calls are made.  The
@@ -78,7 +76,7 @@ def ensure_databases(
     passing the UUID causes ``create_database`` and ``get_database`` to behave
     correctly.
 
-    Returns a mapping of ``{db_name: created}`` where ``created=True`` means the
+    Returns a mapping of ``{base: created}`` where ``created=True`` means the
     database was freshly created and ``False`` means it already existed.
 
     ``UniqueConstraintError`` (HTTP 409) is silently swallowed.  For any other
@@ -96,19 +94,15 @@ def ensure_databases(
         _log.warning("provision.tenant_resolve_failed", error=str(exc))
         # Fall through with the provided tenant (works for self-hosted setups).
 
-    result: dict[str, bool] = {}
-    for t in _STORE_TYPES:
-        db_name = f"{base}_{t}"
+    try:
+        admin.create_database(base, tenant=tenant)
+        return {base: True}
+    except UniqueConstraintError:
+        return {base: False}
+    except ChromaError as exc:
+        # Verify actual existence before deciding whether to re-raise.
         try:
-            admin.create_database(db_name, tenant=tenant)
-            result[db_name] = True
-        except UniqueConstraintError:
-            result[db_name] = False
-        except ChromaError as exc:
-            # Verify actual existence before deciding whether to re-raise.
-            try:
-                admin.get_database(db_name, tenant=tenant)
-                result[db_name] = False
-            except Exception:
-                raise exc
-    return result
+            admin.get_database(base, tenant=tenant)
+            return {base: False}
+        except Exception:
+            raise exc

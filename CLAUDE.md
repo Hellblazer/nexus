@@ -48,11 +48,11 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 - T2: SQLite + FTS5 — persistent memory (`nx memory`)
 - T3: `chromadb.CloudClient` + `VoyageAIEmbeddingFunction` — permanent knowledge (`nx store`, `nx search`)
 
-**Four T3 ChromaDB databases** (separate chroma databases, not collections):
-- `{base}_code` → `code__*` collections, `voyage-code-3` for index, `voyage-4` for query
-- `{base}_docs` → `docs__*` collections, `voyage-context-3` (CCE) index + query
-- `{base}_rdr` → `rdr__*` collections, `voyage-context-3`
-- `{base}_knowledge` → `knowledge__*` collections, `voyage-context-3`
+**T3 ChromaDB database**: a single `chromadb.CloudClient` database (`CHROMA_DATABASE` value, e.g. `nexus`). All collection prefixes coexist in one database:
+- `code__*` collections — `voyage-code-3` for index, `voyage-4` for query
+- `docs__*` collections — `voyage-context-3` (CCE) index + query
+- `rdr__*` collections — `voyage-context-3`
+- `knowledge__*` collections — `voyage-context-3`
 
 **Collection naming**: always `__` as separator — `code__myrepo`, `docs__corpus`, `knowledge__topic` (colons are invalid in ChromaDB collection names).
 

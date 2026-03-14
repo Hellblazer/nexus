@@ -12,7 +12,6 @@ import click
 import structlog
 
 from nexus.config import get_credential
-from nexus.db.t3 import _STORE_TYPES
 from nexus.commands.hooks import _effective_hooks_dir, SENTINEL_BEGIN
 from nexus.commands._helpers import default_db_path
 from nexus.registry import RepoRegistry
@@ -227,30 +226,33 @@ def doctor_cmd() -> None:
     if not chroma_database:
         failed = True
         _fix(lines,
-             "nx config init                           (interactive wizard, also provisions databases)",
-             "nx config set chroma_database <base-name>",
+             "nx config init                           (interactive wizard, also provisions database)",
+             "nx config set chroma_database <name>",
              "e.g. nx config set chroma_database nexus")
 
-    # ── ChromaDB four-store databases ────────────────────────────────────────
+    # ── ChromaDB database reachability ────────────────────────────────────────
     if chroma_key and chroma_database:
-        db_ok = True
-        for t in _STORE_TYPES:
-            db_name = f"{chroma_database}_{t}"
-            try:
-                chromadb.CloudClient(
-                    tenant=chroma_tenant or None, database=db_name, api_key=chroma_key
-                )
-                lines.append(_check_line(f"ChromaDB  ({db_name})", True, "reachable"))
-            except Exception as exc:
-                db_ok = False
-                failed = True
-                _log.debug("db_not_reachable", db_name=db_name, error=str(exc))
-                lines.append(_check_line(f"ChromaDB  ({db_name})", False, "not reachable"))
-        if not db_ok:
+        try:
+            chromadb.CloudClient(
+                tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
+            )
+            lines.append(_check_line(f"ChromaDB  ({chroma_database})", True, "reachable"))
+        except Exception as exc:
+            failed = True
+            _log.debug("db_not_reachable", db_name=chroma_database, error=str(exc))
+            lines.append(_check_line(f"ChromaDB  ({chroma_database})", False, "not reachable"))
             _fix(lines,
-                 "Run 'nx config init' to provision databases automatically — no dashboard visit needed.",
-                 "Or create these databases manually in the ChromaDB Cloud dashboard:",
-                 *[f"  - {chroma_database}_{t}" for t in _STORE_TYPES])
+                 "Run 'nx config init' to provision the database automatically.",
+                 f"Or create '{chroma_database}' manually in the ChromaDB Cloud dashboard.")
+        # Warn if old four-database layout is still present
+        try:
+            chromadb.CloudClient(
+                tenant=chroma_tenant or None, database=f"{chroma_database}_code", api_key=chroma_key
+            )
+            lines.append(_check_line(f"ChromaDB  ({chroma_database}_code)", False,
+                                     "old layout detected — migrate and set NX_MIGRATED=1"))
+        except Exception:
+            pass  # Old layout absent — expected
 
     # ── VOYAGE_API_KEY ────────────────────────────────────────────────────────
     voyage_key = get_credential("voyage_api_key")
@@ -268,33 +270,31 @@ def doctor_cmd() -> None:
         from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
 
         stale_count = 0
-        for store_type in _STORE_TYPES:
-            db_name = f"{chroma_database}_{store_type}"
-            try:
-                client = chromadb.CloudClient(
-                    tenant=chroma_tenant or None, database=db_name, api_key=chroma_key
-                )
-                cols = client.list_collections()
-                for col in cols:
-                    stored = get_collection_pipeline_version(col)
-                    if stored is None:
-                        lines.append(_check_line(
-                            f"pipeline ({col.name})", True,
-                            "no version stamp (index with --force to stamp)",
-                        ))
-                    elif stored != PIPELINE_VERSION:
-                        stale_count += 1
-                        lines.append(_check_line(
-                            f"pipeline ({col.name})", False,
-                            f"v{stored} (current: v{PIPELINE_VERSION})",
-                        ))
-                    else:
-                        lines.append(_check_line(
-                            f"pipeline ({col.name})", True, f"v{stored}",
-                        ))
-            except Exception as exc:
-                _log.debug("doctor_pipeline_check_failed", db=db_name, error=str(exc))
-                lines.append(_check_line(f"pipeline ({db_name})", False, "check failed"))
+        try:
+            client = chromadb.CloudClient(
+                tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
+            )
+            cols = client.list_collections()
+            for col in cols:
+                stored = get_collection_pipeline_version(col)
+                if stored is None:
+                    lines.append(_check_line(
+                        f"pipeline ({col.name})", True,
+                        "no version stamp (index with --force to stamp)",
+                    ))
+                elif stored != PIPELINE_VERSION:
+                    stale_count += 1
+                    lines.append(_check_line(
+                        f"pipeline ({col.name})", False,
+                        f"v{stored} (current: v{PIPELINE_VERSION})",
+                    ))
+                else:
+                    lines.append(_check_line(
+                        f"pipeline ({col.name})", True, f"v{stored}",
+                    ))
+        except Exception as exc:
+            _log.debug("doctor_pipeline_check_failed", db=chroma_database, error=str(exc))
+            lines.append(_check_line(f"pipeline ({chroma_database})", False, "check failed"))
         if stale_count:
             failed = True
             _fix(lines,
@@ -394,22 +394,20 @@ def doctor_cmd() -> None:
     _check_t2_integrity(lines)
 
     # ── ChromaDB pagination audit ─────────────────────────────────────────────
-    # Spot-check one non-empty collection per configured store (non-fatal).
+    # Spot-check one non-empty collection in the configured database (non-fatal).
     if chroma_key and chroma_database:
-        for t in _STORE_TYPES:
-            db_name = f"{chroma_database}_{t}"
-            try:
-                client = chromadb.CloudClient(
-                    tenant=chroma_tenant or None, database=db_name, api_key=chroma_key
-                )
-                _check_chroma_pagination(lines, client, db_name)
-            except Exception as exc:
-                _log.debug("doctor_pagination_check_client_failed", db=db_name, error=str(exc))
-                lines.append(_check_line(f"ChromaDB pagination ({db_name})", True,
-                                         "skipped (client unavailable)"))
+        try:
+            client = chromadb.CloudClient(
+                tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
+            )
+            _check_chroma_pagination(lines, client, chroma_database)
+        except Exception as exc:
+            _log.debug("doctor_pagination_check_client_failed", db=chroma_database, error=str(exc))
+            lines.append(_check_line(f"ChromaDB pagination ({chroma_database})", True,
+                                     "skipped (client unavailable)"))
 
     click.echo("\n".join(lines))
 
     if failed:
-        click.echo("\nRun 'nx config init' to set up credentials and provision databases automatically.")
+        click.echo("\nRun 'nx config init' to set up credentials and provision the database automatically.")
         raise click.exceptions.Exit(1)

@@ -13,7 +13,6 @@ from nexus.commands._provision import (
     _resolve_cloud_tenant,
     ensure_databases,
 )
-from nexus.db.t3 import _STORE_TYPES
 
 
 # ── _resolve_cloud_tenant ─────────────────────────────────────────────────────
@@ -62,11 +61,7 @@ def test_resolve_cloud_tenant_propagates_network_error() -> None:
 # ── _cloud_admin_client ───────────────────────────────────────────────────────
 
 def test_cloud_admin_client_settings_wiring() -> None:
-    """AdminClient is built with the correct Chroma Cloud settings.
-
-    chromadb is imported inside _cloud_admin_client(), so we patch at the
-    chromadb module level rather than the _provision module level.
-    """
+    """AdminClient is built with the correct Chroma Cloud settings."""
     import chromadb as _chromadb_real
     from chromadb.auth.token_authn import TokenTransportHeader
 
@@ -103,21 +98,18 @@ def _patch_resolve(tenant_uuid: str = "uuid-123"):
     )
 
 
-def test_ensure_databases_creates_all_four() -> None:
-    """Fresh install: all four databases are created, result is {db: True}."""
+def test_ensure_databases_creates_single_db() -> None:
+    """Fresh install: single database is created, result is {base: True}."""
     admin = _make_admin()
     with _patch_resolve("t-uuid"):
         result = ensure_databases(admin, base="mynexus")
 
-    assert set(result.keys()) == {f"mynexus_{t}" for t in _STORE_TYPES}
-    assert all(v is True for v in result.values())
-    assert admin.create_database.call_count == 4
-    for t in _STORE_TYPES:
-        admin.create_database.assert_any_call(f"mynexus_{t}", tenant="t-uuid")
+    assert result == {"mynexus": True}
+    admin.create_database.assert_called_once_with("mynexus", tenant="t-uuid")
 
 
 def test_ensure_databases_idempotent_via_unique_constraint() -> None:
-    """Second call: UniqueConstraintError for each db → all False (already existed)."""
+    """Second call: UniqueConstraintError → {base: False} (already existed)."""
     from chromadb.errors import UniqueConstraintError
 
     admin = _make_admin()
@@ -125,13 +117,13 @@ def test_ensure_databases_idempotent_via_unique_constraint() -> None:
     with _patch_resolve():
         result = ensure_databases(admin, base="mynexus")
 
-    assert all(v is False for v in result.values())
+    assert result == {"mynexus": False}
     admin.get_database.assert_not_called()
 
 
 def test_ensure_databases_idempotent_via_chroma_error_get_succeeds() -> None:
     """Non-409 ChromaError + successful get_database → False (database exists)."""
-    from chromadb.errors import ChromaError, InternalError
+    from chromadb.errors import InternalError
 
     admin = _make_admin()
     admin.create_database.side_effect = InternalError("Permission denied.")
@@ -139,14 +131,12 @@ def test_ensure_databases_idempotent_via_chroma_error_get_succeeds() -> None:
     with _patch_resolve():
         result = ensure_databases(admin, base="mynexus")
 
-    assert all(v is False for v in result.values())
-    assert admin.get_database.call_count == 4
-    for t in _STORE_TYPES:
-        admin.get_database.assert_any_call(f"mynexus_{t}", tenant="uuid-123")
+    assert result == {"mynexus": False}
+    admin.get_database.assert_called_once_with("mynexus", tenant="uuid-123")
 
 
 def test_ensure_databases_reraises_when_get_also_fails() -> None:
-    """ChromaError on create + ChromaError on get → original error re-raised."""
+    """ChromaError on create + failure on get → original error re-raised."""
     from chromadb.errors import ChromaError, InternalError
 
     admin = _make_admin()
@@ -166,28 +156,5 @@ def test_ensure_databases_tenant_resolve_failure_falls_through() -> None:
         mock_resolve.side_effect = RuntimeError("network error")
         result = ensure_databases(admin, base="nexus", tenant="my-fallback-tenant")
 
-    # create_database should be called with the fallback tenant
-    for t in _STORE_TYPES:
-        admin.create_database.assert_any_call(f"nexus_{t}", tenant="my-fallback-tenant")
-    assert all(v is True for v in result.values())
-
-
-def test_ensure_databases_mixed_new_and_existing() -> None:
-    """First two databases are new, last two already exist (UniqueConstraintError)."""
-    from chromadb.errors import UniqueConstraintError
-
-    admin = _make_admin()
-    call_count = [0]
-    def create_side_effect(db_name, *, tenant):
-        call_count[0] += 1
-        if call_count[0] > 2:
-            raise UniqueConstraintError("exists")
-    admin.create_database.side_effect = create_side_effect
-
-    with _patch_resolve():
-        result = ensure_databases(admin, base="nexus")
-
-    created = [v for v in result.values() if v is True]
-    existed = [v for v in result.values() if v is False]
-    assert len(created) == 2
-    assert len(existed) == 2
+    admin.create_database.assert_called_once_with("nexus", tenant="my-fallback-tenant")
+    assert result == {"nexus": True}
