@@ -86,7 +86,7 @@ Credentials are stored in `~/.config/nexus/config.yml`. Environment variables (`
 nx doctor
 ```
 
-Checks credentials, required tools, and connectivity to each T3 database. Fix anything marked with `✗` before proceeding.
+Checks credentials, required tools, and connectivity to the T3 database. Fix anything marked with `✗` before proceeding.
 
 ### Index a repo
 
@@ -111,13 +111,13 @@ Common flags: `--n 20` (result count), `--json`, `--files` (paths only), `-c` (s
 
 **`nx doctor` reports credentials not set** — Run `nx config init` to walk through setup interactively.
 
-**Provisioning failed during `nx config init`** — If your ChromaDB plan restricts automatic database creation, create them manually in the [dashboard](https://trychroma.com): `{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge` (where `{base}` is your `chroma_database` value).
+**Provisioning failed during `nx config init`** — If your ChromaDB plan restricts automatic database creation, create the database manually in the [dashboard](https://trychroma.com) using your `chroma_database` value as the name.
 
 **`nx index repo .` fails with "credentials not set"** — Indexing requires T3 credentials. Run `nx config init` first. Local commands (`nx memory`, `nx scratch`) work without credentials.
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running after a partial index is safe — unchanged files are skipped.
 
-**`nx search` returns no results** — Run `nx doctor` to verify all databases are reachable. If indexing was interrupted, re-run `nx index repo .` to resume.
+**`nx search` returns no results** — Run `nx doctor` to verify the database is reachable. If indexing was interrupted, re-run `nx index repo .` to resume.
 
 ## Next steps
 

@@ -38,18 +38,9 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 ## T3 -- Permanent Knowledge
 
-Backed by four `chromadb.CloudClient` instances with `VoyageAIEmbeddingFunction`. Requires `CHROMA_API_KEY`, `CHROMA_DATABASE`, and `VOYAGE_API_KEY`. `CHROMA_TENANT` is optional — the CloudClient infers the tenant UUID from your API key.
+Backed by a single `chromadb.CloudClient` with `VoyageAIEmbeddingFunction`. Requires `CHROMA_API_KEY`, `CHROMA_DATABASE`, and `VOYAGE_API_KEY`. `CHROMA_TENANT` is optional — the CloudClient infers the tenant UUID from your API key.
 
-Each content type routes to a dedicated ChromaDB Cloud database derived from the `CHROMA_DATABASE` base name:
-
-| Database | Collections | Purpose |
-|----------|-------------|---------|
-| `{base}_code` | `code__*` | Indexed source code |
-| `{base}_docs` | `docs__*` | Indexed prose, PDFs, markdown |
-| `{base}_rdr` | `rdr__*` | Indexed RDR documents |
-| `{base}_knowledge` | `knowledge__*` | Agent outputs, notes, stored knowledge |
-
-All four databases are provisioned automatically by `nx config init`. Run `nx doctor` to verify connectivity.
+All collections coexist in one ChromaDB Cloud database (`CHROMA_DATABASE` value, e.g. `nexus`). The database is provisioned automatically by `nx config init`. Run `nx doctor` to verify connectivity.
 
 Collections are namespaced by corpus type using `__` (double underscore) as separator:
 

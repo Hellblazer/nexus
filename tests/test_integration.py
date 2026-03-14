@@ -525,10 +525,8 @@ def test_migrate_t3_ensure_databases_is_idempotent(runner: CliRunner) -> None:
     first = ensure_databases(admin, base=database)
     second = ensure_databases(admin, base=database)
 
-    from nexus.db.t3 import _STORE_TYPES
-    expected_keys = {f"{database}_{t}" for t in _STORE_TYPES}
-    assert set(first.keys()) == expected_keys
-    # All False on second call — databases already exist
+    assert set(first.keys()) == {database}
+    # All False on second call — database already exists
     assert all(not v for v in second.values()), (
         "Second ensure_databases call should return all False (already exists)"
     )

@@ -298,4 +298,4 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks: ChromaDB API key, ChromaDB tenant, all four T3 databases (`{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`), Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time.
+Checks: ChromaDB API key, ChromaDB tenant, T3 database (`CHROMA_DATABASE`), Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time.
