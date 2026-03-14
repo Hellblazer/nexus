@@ -58,6 +58,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-034](rdr-034-mcp-server-agent-storage.md) | MCP Server for Agent Storage Operations | Architecture | Accepted | 2026-03-11 |
 | [RDR-035](rdr-035-plugin-agent-mcp-tool-access.md) | Fix Plugin Agent MCP Tool Access | Bugfix | Closed | 2026-03-12 |
 | [RDR-036](rdr-036-post-accept-planning-workflow.md) | Post-Accept Planning Workflow | Enhancement | Accepted | 2026-03-12 |
+| [RDR-037](rdr-037-t3-database-consolidation.md) | T3 Database Consolidation | Enhancement | Accepted | 2026-03-14 |
 
 ---
 

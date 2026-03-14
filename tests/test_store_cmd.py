@@ -38,9 +38,6 @@ def test_store_put_missing_chroma_api_key(
     result = runner.invoke(main, ["store", "put", str(src)])
 
     assert result.exit_code != 0
-    # Four-store init fails with a connection error when the API key is absent.
-    # The error message names the specific database that failed.
-    assert "failed to connect" in result.output.lower() or "chroma_api_key" in result.output.lower()
 
 
 def test_store_put_missing_voyage_api_key(

@@ -172,8 +172,7 @@ def test_expire_processes_more_than_300_expired_records() -> None:
     mock_col.count.return_value = n_expired
 
     # Need to wire list_collections to return the mock collection
-    mock_client = db._clients["knowledge"]
-    mock_client.list_collections.return_value = [MagicMock(name="knowledge__test")]
+    db._client.list_collections.return_value = [MagicMock(name="knowledge__test")]
 
     total = db.expire()
 
@@ -204,8 +203,7 @@ def test_expire_accumulates_then_deletes_not_interleaved() -> None:
     }
     mock_col.get.side_effect = [page1, page2]
 
-    mock_client = db._clients["knowledge"]
-    mock_client.list_collections.return_value = [MagicMock(name="knowledge__test")]
+    db._client.list_collections.return_value = [MagicMock(name="knowledge__test")]
 
     db.expire()
 
@@ -233,11 +231,7 @@ def test_search_clamps_n_results_to_300_and_warns(caplog) -> None:
         "ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]
     }
 
-    with patch.object(db, "_clients", {"knowledge": db._clients["knowledge"],
-                                        "code": db._clients["code"],
-                                        "docs": db._clients["docs"],
-                                        "rdr": db._clients["rdr"]}):
-        db.search(query="test", collection_names=["knowledge__test"], n_results=500)
+    db.search(query="test", collection_names=["knowledge__test"], n_results=500)
 
     # Verify query was called with n_results ≤ 300
     assert mock_col.query.called

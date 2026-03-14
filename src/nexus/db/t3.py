@@ -15,15 +15,18 @@ import voyageai
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 import structlog
 
+from nexus.config import get_credential
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
 from nexus.db.chroma_quotas import QUOTAS, QuotaValidator
 
 _log = structlog.get_logger(__name__)
 
-# The four ChromaDB Cloud databases, one per content type.
-# ``chroma_database`` in config is the *base name*; each store is
-# ``{base}_{type}``.  Example: base="nexus" → nexus_code, nexus_docs,
-# nexus_rdr, nexus_knowledge.
+
+class OldLayoutDetected(RuntimeError):
+    """Raised when the old four-database ChromaDB layout is detected during init."""
+
+
+# Deprecated: kept as shim for _provision.py and doctor.py until Phase 2 removes their imports
 _STORE_TYPES: tuple[str, ...] = ("code", "docs", "rdr", "knowledge")
 
 from nexus.retry import (
@@ -36,22 +39,19 @@ from nexus.retry import (
 class T3Database:
     """T3 ChromaDB CloudClient permanent knowledge store.
 
-    Uses four separate ``chromadb.CloudClient`` instances — one per content
-    type — derived from the ``chroma_database`` base name:
+    Uses a single ``chromadb.CloudClient`` connected to the ``chroma_database``
+    base name directly.  All collection prefixes (``code__``, ``docs__``,
+    ``rdr__``, ``knowledge__``) coexist in one database.
 
-    - ``{base}_code``      for ``code__*`` collections
-    - ``{base}_docs``      for ``docs__*`` collections
-    - ``{base}_rdr``       for ``rdr__*`` collections
-    - ``{base}_knowledge`` for ``knowledge__*`` collections and fallback
-
-    All routing is internal to this class.  Every public caller
-    (``search_cmd``, ``indexer``, etc.) remains unchanged.
+    On first connection (no ``NX_MIGRATED`` flag), the constructor probes for
+    the old four-database layout by attempting to connect to ``{base}_code``.
+    If that database exists, ``OldLayoutDetected`` is raised.  If it does not
+    (``NotFoundError``), the new single-database layout is assumed.
 
     The ``_client`` and ``_ef_override`` keyword arguments are injection
     points for testing — pass an ``EphemeralClient`` and
     ``DefaultEmbeddingFunction`` to run the full code path without any API
-    keys.  When ``_client`` is provided, all four store types are mapped to
-    the same client (single-mock backward compatibility).
+    keys.
     """
 
     def __init__(
@@ -78,24 +78,34 @@ class T3Database:
             if voyage_api_key else None
         )
         if _client is not None:
-            # Test injection: single client serves all store types.
-            self._clients: dict[str, object] = {t: _client for t in _STORE_TYPES}
+            self._client = _client
         else:
-            _clients: dict[str, object] = {}
-            for t in _STORE_TYPES:
-                db_name = f"{database}_{t}"
+            migrated = get_credential("migrated")
+            if migrated:
+                self._client = chromadb.CloudClient(
+                    tenant=tenant or None, database=database, api_key=api_key
+                )
+            else:
                 try:
-                    _clients[t] = chromadb.CloudClient(
-                        tenant=tenant or None, database=db_name, api_key=api_key
+                    chromadb.CloudClient(
+                        tenant=tenant or None, database=f"{database}_code", api_key=api_key
                     )
-                except Exception as exc:
-                    _log.debug("cloud_client_connect_failed", database=db_name, error=str(exc))
-                    raise RuntimeError(
-                        f"Failed to connect to ChromaDB Cloud database {db_name!r}.\n"
-                        f"Ensure these four databases exist in your ChromaDB Cloud dashboard:\n"
-                        + "\n".join(f"  - {database}_{t2}" for t2 in _STORE_TYPES)
-                    ) from exc
-            self._clients = _clients
+                except _ChromaNotFoundError:
+                    # Old layout absent — connect to single database
+                    self._client = chromadb.CloudClient(
+                        tenant=tenant or None, database=database, api_key=api_key
+                    )
+                else:
+                    _log.warning(
+                        "old_layout_detected",
+                        database=database,
+                        msg="Old four-database layout detected. Set NX_MIGRATED=1 after migration.",
+                    )
+                    raise OldLayoutDetected(
+                        f"Old four-database layout detected: '{database}_code' exists.\n"
+                        f"Set NX_MIGRATED=1 or run 'nx config set migrated 1' "
+                        f"to use the new single-database layout."
+                    )
 
     # ── Context manager (no-op: CloudClient is stateless REST) ───────────────
 
@@ -108,29 +118,8 @@ class T3Database:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _client_for(self, collection_name: str) -> object:
-        """Route a collection name to the correct ChromaDB client.
-
-        Routing is by prefix (the part before ``__``):
-        - ``code__*``      → code client
-        - ``docs__*``      → docs client
-        - ``rdr__*``       → rdr client
-        - ``knowledge__*`` → knowledge client
-        - no ``__`` or unknown prefix → knowledge client (with a warning)
-        """
-        if "__" in collection_name:
-            prefix = collection_name.split("__")[0]
-        else:
-            _log.warning("collection_no_prefix", collection=collection_name)
-            prefix = "knowledge"
-        client = self._clients.get(prefix)
-        if client is None:
-            _log.warning(
-                "unknown_collection_prefix",
-                prefix=prefix,
-                collection=collection_name,
-            )
-            client = self._clients["knowledge"]
-        return client
+        """Return the ChromaDB client (single-database; routing removed per RDR-037)."""
+        return self._client
 
     def _embedding_fn(self, collection_name: str):
         """Return a VoyageAI EF (always voyage-4) for collection creation.
@@ -495,11 +484,6 @@ class T3Database:
         Only queries the knowledge store — TTL-managed entries are written
         via ``nx store put`` which routes to the knowledge store.
 
-        **Precondition**: the ``{base}_knowledge`` ChromaDB Cloud database must
-        exist before calling this method.  If the database has not yet been
-        created (e.g. the user upgraded but has not run ``nx migrate t3``),
-        the method logs a warning and returns 0 rather than raising.
-
         Only removes entries where ``ttl_days > 0`` AND ``expires_at != ""``
         AND ``expires_at < now``. Permanent entries (``ttl_days=0``,
         ``expires_at=""``) are always preserved.
@@ -512,7 +496,7 @@ class T3Database:
         now_iso = datetime.now(UTC).isoformat()
         ttl_where: dict = {"ttl_days": {"$gt": 0}}
         total = 0
-        kc = self._clients["knowledge"]
+        kc = self._client
         try:
             collections = kc.list_collections()
         except _ChromaNotFoundError:
@@ -574,34 +558,22 @@ class T3Database:
     def list_collections(self) -> list[dict]:
         """Return all T3 collections with their document counts.
 
-        Fans out across all four store clients, deduplicates by collection
-        name (relevant when all four clients are the same mock in tests), and
-        parallelizes count queries up to 8 concurrent requests.
-
-        Note: The enumeration phase makes four sequential HTTP calls (one per
-        store client) before the parallel count phase begins.  This is
-        acceptable because ``list_collections`` is only called from
-        non-hot-path commands (``nx collections``, ``nx store list``).
+        Queries the single ChromaDB client and parallelizes count queries
+        up to 8 concurrent requests.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        seen: set[str] = set()
-        names: list[str] = []
-        for client in self._clients.values():
-            try:
-                for col_or_name in client.list_collections():
-                    n = col_or_name if isinstance(col_or_name, str) else col_or_name.name
-                    if n not in seen:
-                        names.append(n)
-                        seen.add(n)
-            except _ChromaNotFoundError:
-                continue  # store not yet created, skip gracefully
+        try:
+            raw = self._client.list_collections()
+        except _ChromaNotFoundError:
+            return []
 
+        names = [c if isinstance(c, str) else c.name for c in raw]
         if not names:
             return []
 
         def _count(name: str) -> dict:
-            col = self._client_for(name).get_collection(name)
+            col = self._client.get_collection(name)
             return {"name": name, "count": _chroma_with_retry(col.count)}
 
         result: list[dict] = []
