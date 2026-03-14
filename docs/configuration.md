@@ -28,6 +28,8 @@ Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.co
 
 **Database creation is automatic.** `nx config init` provisions the database on Chroma Cloud using your API key — no dashboard visit required. If provisioning fails (e.g., plan restrictions), create the database manually in the Chroma Cloud dashboard.
 
+**Upgrading from the four-database layout?** If you previously used the four-database layout (`{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`), nexus will auto-detect it and show migration steps. The migration is non-destructive — old databases are never modified or deleted. Export your data with the pre-upgrade version before upgrading, then follow the guided steps. See the [CHANGELOG](../CHANGELOG.md) for the full migration path.
+
 ## Settings
 
 | YAML path | Env var | Default | Description |

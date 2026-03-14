@@ -15,9 +15,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `nx doctor` checks 1 database instead of 4
   - Old four-database layout is auto-detected on startup with migration guidance
   - Set `NX_MIGRATED=1` after migrating to skip the probe
-  - Migration path: export data with the **pre-upgrade** version
-    (`nx store export --all`), upgrade, create single DB (`nx config init`),
-    re-import (`nx store import`), set `NX_MIGRATED=1`
+  - **Migration is non-destructive** — old databases are never modified or deleted.
+    They remain in your ChromaDB Cloud dashboard until you choose to remove them.
+  - Migration steps:
+    1. Export with the **pre-upgrade** version: `nx store export --all`
+    2. Upgrade nexus
+    3. Provision single DB: `nx config init` (creates `{chroma_database}`)
+    4. Re-index repos: `nx index repo .`
+    5. Import stored knowledge: `nx store import`
+    6. Set flag: `export NX_MIGRATED=1` (or `nx config set migrated 1`)
+    7. Verify: `nx doctor`
+    8. Optional: delete the 4 old databases from the ChromaDB Cloud dashboard
 
 ### Changed
 - `T3Database.__init__` uses probe-first single-client connection (was four-client loop)

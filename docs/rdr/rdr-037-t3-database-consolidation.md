@@ -100,25 +100,26 @@ Replace the four `CloudClient` instances with one. The `chroma_database` config 
 To prevent this, the probe runs **before** the primary client connection. The init sequence is:
 
 1. **Probe first**: attempt `CloudClient(database="{base}_code")`. If this succeeds, the old four-database layout is detected.
-2. **Old layout detected**: temporarily connect all four old databases, emit a structured warning with migration steps, then raise `OldLayoutDetected` (a custom error subclass) to prevent silent operation against stale data. The temporary four-client connection allows `nx store export --all` to function even after upgrading, so users do not need to downgrade to export.
+2. **Old layout detected**: emit a structured warning with migration steps, then raise `OldLayoutDetected` (a custom error subclass) to prevent silent operation against stale data. No client is assigned — all CLI commands exit with the migration message.
 3. **Probe fails (404/NotFound)**: old layout does not exist. Proceed to connect to `{base}` as the single database.
+4. **Probe fails (other error)**: auth/network errors are wrapped in `RuntimeError` with a diagnostic message so CLI callers surface clean output.
 
-The warning emitted:
+The migration is **non-destructive** — old databases are never modified or deleted. They remain in the ChromaDB Cloud dashboard until the user chooses to remove them.
+
+To migrate (export must happen **before** upgrading):
 
 ```
-Old four-database layout detected ({base}_code, {base}_docs, {base}_rdr, {base}_knowledge).
-Nexus now uses a single database named '{base}'.
-
-To migrate:
-  1. nx store export --all           # back up knowledge entries (works with current install)
-  2. Create database '{base}' in your ChromaDB Cloud dashboard
-  3. Set environment variable NX_MIGRATED=1 or run: nx config set migrated true
+  1. nx store export --all           # back up knowledge entries (pre-upgrade version)
+  2. Upgrade nexus
+  3. nx config init                  # provisions single '{base}' database
   4. nx index repo .                 # re-index code, docs, and RDRs
   5. nx store import <exported-file> # restore knowledge entries
-  6. Delete the old {base}_code, {base}_docs, {base}_rdr, {base}_knowledge databases
+  6. export NX_MIGRATED=1            # or: nx config set migrated 1
+  7. nx doctor                       # verify everything works
+  8. (Optional) delete old {base}_code, {base}_docs, {base}_rdr, {base}_knowledge
 ```
 
-Step 1 works because the probe's temporary four-client connection allows the export command to reach the old `knowledge` database. Once the user sets the migration flag (step 3), subsequent runs skip the probe and connect to the single database.
+Once the user sets the migration flag (step 6), subsequent runs skip the probe and connect directly to the single database.
 
 `nx doctor` also surfaces this warning when the old layout is detected.
 
@@ -151,12 +152,12 @@ RDR-005's `_write_sems` and `_read_sems` are keyed by collection name, not by da
 
 ### Migration strategy
 
-Auto-detection at startup ensures no user is caught unaware. The probe-first design means `nx store export --all` works even after upgrading — the probe's temporary four-client connection reaches the old `knowledge` database. Users do not need to downgrade.
+Auto-detection at startup ensures no user is caught unaware. The probe-first design raises `OldLayoutDetected` with migration guidance before any operation proceeds.
 
-1. **`knowledge__` entries** — `nx store export --all` works at any point (before or after upgrade) because the probe connects to the old databases when detected. This is the only non-rederivable data.
+1. **`knowledge__` entries** — `nx store export --all` must be run with the **pre-upgrade** version (before `OldLayoutDetected` exists). This is the only non-rederivable data.
 2. **Code/docs/rdr collections** are derived from repo files — `nx index repo .` recreates them in the new single database.
-3. **Migration flag** — setting `NX_MIGRATED=1` or `nx config set migrated true` tells the init to skip the old-layout probe and connect directly to the single database.
-4. The old four databases can be deleted from the ChromaDB Cloud dashboard after migration is confirmed.
+3. **Migration flag** — setting `NX_MIGRATED=1` or `nx config set migrated 1` tells the init to skip the old-layout probe and connect directly to the single database.
+4. **Non-destructive** — the old four databases are never modified or deleted. They remain in the ChromaDB Cloud dashboard until the user manually removes them. They cost no compute, only storage slots.
 
 There is no automatic migration command. The export/import path already exists and is well-tested (RDR-031). The auto-detection warning guides users through the steps.
 
