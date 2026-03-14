@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-03-14
+
+Plugin version aligned with Nexus CLI 2.0.0. T3 backend consolidated from 4 databases to 1 (RDR-037). No plugin-level API changes — agents and skills work unchanged.
+
 ## [1.12.1] - 2026-03-14
 
 Plugin version aligned with Nexus CLI 1.12.1. No plugin-level functional changes.

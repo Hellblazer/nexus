@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-03-14
+
 ### Breaking Changes
 - **T3 storage consolidated from 4 databases to 1** (RDR-037) — `chroma_database`
   is now the actual database name, not a base prefix. All collection prefixes
