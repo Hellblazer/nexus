@@ -82,6 +82,15 @@ def test_migration_flag_skips_probe(mock_chromadb: tuple) -> None:
     assert db._client is not None
 
 
+def test_probe_auth_error_wraps_as_runtime_error(mock_chromadb: tuple) -> None:
+    """Auth errors during probe are wrapped in RuntimeError, not raw ChromaError."""
+    chromadb_m, _ = mock_chromadb
+    chromadb_m.CloudClient.side_effect = Exception("Permission denied.")
+
+    with pytest.raises(RuntimeError, match="Failed to connect"):
+        T3Database(tenant="t", database="mydb", api_key="bad-key")
+
+
 def test_client_injection_sets_single_client(mock_chromadb: tuple) -> None:
     """_client= injection sets self._client directly, bypassing CloudClient."""
     chromadb_m, _ = mock_chromadb

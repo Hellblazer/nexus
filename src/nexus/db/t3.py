@@ -26,7 +26,8 @@ class OldLayoutDetected(RuntimeError):
     """Raised when the old four-database ChromaDB layout is detected during init."""
 
 
-# Deprecated: kept as shim for _provision.py and doctor.py until Phase 2 removes their imports
+# Deprecated: no internal callers remain after RDR-037. Kept for one release
+# cycle in case external scripts import it. Will be removed in next major version.
 _STORE_TYPES: tuple[str, ...] = ("code", "docs", "rdr", "knowledge")
 
 from nexus.retry import (
@@ -95,6 +96,13 @@ class T3Database:
                     self._client = chromadb.CloudClient(
                         tenant=tenant or None, database=database, api_key=api_key
                     )
+                except Exception as probe_exc:
+                    # Auth errors, network errors, etc. during probe — wrap so
+                    # CLI callers (except RuntimeError) surface a clean message.
+                    raise RuntimeError(
+                        f"Failed to connect to ChromaDB Cloud (probe for '{database}_code').\n"
+                        f"Check CHROMA_API_KEY and network connectivity."
+                    ) from probe_exc
                 else:
                     _log.warning(
                         "old_layout_detected",
@@ -103,8 +111,8 @@ class T3Database:
                     )
                     raise OldLayoutDetected(
                         f"Old four-database layout detected: '{database}_code' exists.\n"
-                        f"Set NX_MIGRATED=1 or run 'nx config set migrated 1' "
-                        f"to use the new single-database layout."
+                        f"Export data with the pre-upgrade version first, then set "
+                        f"NX_MIGRATED=1 or run 'nx config set migrated 1'."
                     )
 
     # ── Context manager (no-op: CloudClient is stateless REST) ───────────────
