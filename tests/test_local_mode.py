@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for local T3 mode (RDR-038 Phase 1).
+"""Tests for local T3 mode (RDR-038).
 
 Covers:
 - config.py: is_local_mode(), _default_local_path()
@@ -7,6 +7,10 @@ Covers:
 - db/t3.py: T3Database local_mode init path
 - db/__init__.py: make_t3() local path
 - retry.py: sqlite3.OperationalError retryable
+- Staleness round-trip in local mode
+- Local mode collection lifecycle (put, search, expire, list)
+- Indexer pipeline credential gating in local mode
+- corpus.py model name consistency in local mode
 """
 from __future__ import annotations
 
@@ -278,3 +282,237 @@ class TestRetryableSqliteError:
             result = _chroma_with_retry(flaky_fn)
         assert result == "success"
         assert call_count == 3
+
+
+# ── Staleness round-trip ─────────────────────────────────────────────────────
+
+
+class TestLocalStaleness:
+    """Staleness detection works correctly in local mode."""
+
+    def test_staleness_skips_current_content(self, tmp_path: Path) -> None:
+        """Index, re-check → staleness returns True (skip)."""
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.indexer_utils import check_staleness
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        db = T3Database(local_mode=True, local_path=str(tmp_path / "chroma"), _ef_override=ef)
+        col = db.get_or_create_collection("code__test")
+
+        # Simulate indexed chunk
+        db.upsert_chunks(
+            "code__test",
+            ids=["chunk1"],
+            documents=["def hello(): pass"],
+            metadatas=[{
+                "source_path": "/repo/hello.py",
+                "content_hash": "abc123",
+                "embedding_model": "all-MiniLM-L6-v2",
+            }],
+        )
+        # Same hash + model → stale (skip)
+        assert check_staleness(col, "/repo/hello.py", "abc123", "all-MiniLM-L6-v2") is True
+
+    def test_staleness_detects_changed_content(self, tmp_path: Path) -> None:
+        """Changed content hash → not stale (re-index)."""
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.indexer_utils import check_staleness
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        db = T3Database(local_mode=True, local_path=str(tmp_path / "chroma"), _ef_override=ef)
+        col = db.get_or_create_collection("code__test")
+
+        db.upsert_chunks(
+            "code__test",
+            ids=["chunk1"],
+            documents=["def hello(): pass"],
+            metadatas=[{
+                "source_path": "/repo/hello.py",
+                "content_hash": "abc123",
+                "embedding_model": "all-MiniLM-L6-v2",
+            }],
+        )
+        # Different hash → not stale (re-index)
+        assert check_staleness(col, "/repo/hello.py", "def456", "all-MiniLM-L6-v2") is False
+
+    def test_staleness_detects_model_change(self, tmp_path: Path) -> None:
+        """Different embedding model → not stale (re-index)."""
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.indexer_utils import check_staleness
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        db = T3Database(local_mode=True, local_path=str(tmp_path / "chroma"), _ef_override=ef)
+        col = db.get_or_create_collection("code__test")
+
+        db.upsert_chunks(
+            "code__test",
+            ids=["chunk1"],
+            documents=["def hello(): pass"],
+            metadatas=[{
+                "source_path": "/repo/hello.py",
+                "content_hash": "abc123",
+                "embedding_model": "voyage-code-3",
+            }],
+        )
+        # Same hash but different model → not stale (re-index after mode switch)
+        assert check_staleness(col, "/repo/hello.py", "abc123", "all-MiniLM-L6-v2") is False
+
+
+# ── Collection lifecycle ─────────────────────────────────────────────────────
+
+
+class TestLocalCollectionLifecycle:
+    """Full collection lifecycle in local mode: create, put, search, expire, list, delete."""
+
+    def test_collection_lifecycle(self, tmp_path: Path) -> None:
+        """Exercise the full CRUD cycle on a local T3 database."""
+        from datetime import UTC, datetime, timedelta
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        db = T3Database(local_mode=True, local_path=str(tmp_path / "chroma"), _ef_override=ef)
+
+        # Put
+        doc_id = db.put(
+            collection="knowledge__lifecycle",
+            content="Rust is a systems programming language",
+            title="rust-fact",
+            tags="rust,systems",
+        )
+        assert doc_id
+
+        # Search
+        results = db.search("systems programming", collection_names=["knowledge__lifecycle"])
+        assert len(results) >= 1
+        assert any("Rust" in r.get("content", "") for r in results)
+
+        # List collections
+        collections = db.list_collections()
+        names = [c["name"] for c in collections]
+        assert "knowledge__lifecycle" in names
+
+        # List store
+        entries = db.list_store("knowledge__lifecycle")
+        assert len(entries) >= 1
+
+        # Delete
+        deleted = db.delete_by_id("knowledge__lifecycle", doc_id)
+        assert deleted is True
+
+    def test_expire_ttl_entries(self, tmp_path: Path) -> None:
+        """Expired TTL entries are removed by expire()."""
+        from datetime import UTC, datetime, timedelta
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        db = T3Database(local_mode=True, local_path=str(tmp_path / "chroma"), _ef_override=ef)
+
+        # Insert entry with expired TTL (past expires_at)
+        past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        db.put(
+            collection="knowledge__expire_test",
+            content="temporary data",
+            title="temp",
+            ttl_days=1,
+            expires_at=past,
+        )
+
+        # Insert permanent entry
+        db.put(
+            collection="knowledge__expire_test",
+            content="permanent data",
+            title="perm",
+            ttl_days=0,
+        )
+
+        deleted = db.expire()
+        assert deleted >= 1
+
+        # Permanent entry should survive
+        results = db.search("permanent", collection_names=["knowledge__expire_test"])
+        assert len(results) >= 1
+
+
+# ── Corpus model consistency ─────────────────────────────────────────────────
+
+
+class TestCorpusLocalModels:
+    """corpus.py returns local model names in local mode."""
+
+    def test_index_model_returns_local_name(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """index_model_for_collection returns local model in local mode."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path))
+        from nexus.corpus import index_model_for_collection
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        expected = LocalEmbeddingFunction().model_name
+        assert index_model_for_collection("code__test") == expected
+        assert index_model_for_collection("docs__test") == expected
+        assert index_model_for_collection("knowledge__test") == expected
+
+    def test_embedding_model_returns_local_name(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """embedding_model_for_collection returns local model in local mode."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path))
+        from nexus.corpus import embedding_model_for_collection
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        expected = LocalEmbeddingFunction().model_name
+        assert embedding_model_for_collection("code__test") == expected
+        assert embedding_model_for_collection("docs__test") == expected
+
+    def test_cloud_model_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Cloud mode model names are unchanged."""
+        monkeypatch.setenv("NX_LOCAL", "0")
+        from nexus.corpus import index_model_for_collection, embedding_model_for_collection
+        assert index_model_for_collection("code__test") == "voyage-code-3"
+        assert index_model_for_collection("docs__test") == "voyage-context-3"
+        assert embedding_model_for_collection("code__test") == "voyage-4"
+        assert embedding_model_for_collection("docs__test") == "voyage-context-3"
+
+
+# ── Frecency-only local mode ────────────────────────────────────────────────
+
+
+class TestFrecencyOnlyLocalMode:
+    """_run_index_frecency_only does not crash in local mode (B-2 coverage)."""
+
+    def test_frecency_only_no_crash_local_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Frecency-only update works in local mode without cloud credentials."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+
+        from nexus.indexer import _run_index_frecency_only
+
+        registry = MagicMock()
+        registry.get.return_value = {
+            "collection": "code__repo",
+            "code_collection": "code__repo",
+            "docs_collection": "docs__repo",
+        }
+
+        # Should not raise CredentialsMissingError
+        with patch("nexus.frecency.batch_frecency", return_value={}):
+            _run_index_frecency_only(tmp_path, registry)
+
+
+# ── Check local path writable ───────────────────────────────────────────────
+
+
+class TestCheckLocalPathWritable:
+    """check_local_path_writable validates the local ChromaDB path."""
+
+    def test_writable_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Writable path does not raise."""
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
+        from nexus.indexer_utils import check_local_path_writable
+        check_local_path_writable()  # should not raise
+
+    def test_unwritable_path_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unwritable path raises CredentialsMissingError."""
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", "/proc/nonexistent/chroma")
+        from nexus.indexer_utils import check_local_path_writable
+        from nexus.errors import CredentialsMissingError
+        with pytest.raises(CredentialsMissingError, match="not writable"):
+            check_local_path_writable()
