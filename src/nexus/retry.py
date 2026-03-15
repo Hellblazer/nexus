@@ -9,6 +9,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import sqlite3
+
 import httpx
 import structlog
 
@@ -25,21 +27,25 @@ _RETRYABLE_HTTP_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
 
 
 def _is_retryable_chroma_error(exc: BaseException) -> bool:
-    """Return True if *exc* represents a transient ChromaDB Cloud error worth retrying.
+    """Return True if *exc* represents a transient ChromaDB error worth retrying.
 
     Check order:
-    1. Transport-level errors (ConnectError, ReadTimeout, RemoteProtocolError) — always retry.
-    2. Chained httpx.HTTPStatusError — authoritative integer status code check.
-    3. String fallback — plain Exception message body (gateway HTML or chroma JSON).
+    1. sqlite3.OperationalError with 'locked' — PersistentClient concurrent access.
+    2. Transport-level errors (ConnectError, ReadTimeout, RemoteProtocolError) — always retry.
+    3. Chained httpx.HTTPStatusError — authoritative integer status code check.
+    4. String fallback — plain Exception message body (gateway HTML or chroma JSON).
     """
-    # 1. Transport-level errors — no HTTP response, but clearly transient.
+    # 1. PersistentClient concurrent write contention.
+    if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
+        return True
+    # 2. Transport-level errors — no HTTP response, but clearly transient.
     if isinstance(exc, httpx.TransportError):
         return True
-    # 2. ChromaDB wraps HTTPStatusError as Exception(resp.text); original is __context__.
+    # 3. ChromaDB wraps HTTPStatusError as Exception(resp.text); original is __context__.
     ctx = exc.__context__
     if isinstance(ctx, httpx.HTTPStatusError):
         return ctx.response.status_code in _RETRYABLE_HTTP_STATUSES
-    # 3. Fallback: scan the message body for retryable status tokens.
+    # 4. Fallback: scan the message body for retryable status tokens.
     msg = str(exc).lower()
     return any(fragment in msg for fragment in _RETRYABLE_FRAGMENTS)
 
