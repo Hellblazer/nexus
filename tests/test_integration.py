@@ -186,16 +186,17 @@ def test_t1_scratch_search(runner: CliRunner, tmp_path, monkeypatch) -> None:
 
 @pytest.mark.integration
 def test_doctor_runs_and_reports(runner: CliRunner) -> None:
-    """nx doctor completes without crashing and reports all five checks.
+    """nx doctor completes without crashing and reports key checks.
 
-    Exit code 0 = all credentials present; 1 = some missing. Both are valid
+    Exit code 0 = all checks pass; 1 = some failed. Both are valid
     in this test — we only care that the output covers each component.
+    In local mode (no API keys), checks local path and embedding model
+    instead of cloud credentials.
     """
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code in (0, 1), result.output
     output = result.output.lower()
-    assert "chroma" in output
-    assert "voyage" in output
+    assert "t3 mode" in output
     assert "ripgrep" in output or "rg" in output
     assert "git" in output
 

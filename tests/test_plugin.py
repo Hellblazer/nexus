@@ -200,8 +200,7 @@ def test_doctor_shows_all_checks(runner: CliRunner, fake_home: Path) -> None:
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code in (0, 1), result.output
     output_lower = result.output.lower()
-    assert "chroma" in output_lower or "chromadb" in output_lower
-    assert "voyage" in output_lower
+    assert "t3 mode" in output_lower
     assert "ripgrep" in output_lower or "rg" in output_lower
     assert "git" in output_lower
 
@@ -210,6 +209,7 @@ def test_doctor_missing_voyage_key_reports_warning(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """nx doctor reports warning and exits 1 when VOYAGE_API_KEY is unset."""
+    monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 1
