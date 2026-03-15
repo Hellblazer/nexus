@@ -74,6 +74,7 @@ def test_run_index_raises_credentials_missing_without_credentials(
         "docs_collection": "docs__repo",
     }
 
+    monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 
@@ -124,6 +125,7 @@ def test_cache_path_includes_repo_hash(tmp_path: Path, monkeypatch) -> None:
         "docs_collection": "docs__myproject",
     }
 
+    monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 
@@ -158,6 +160,7 @@ def test_run_index_skips_hidden_files(tmp_path: Path, monkeypatch) -> None:
         "docs_collection": "docs__repo",
     }
 
+    monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 
@@ -412,6 +415,7 @@ def test_frecency_only_raises_credentials_missing(tmp_path: Path, monkeypatch) -
         "docs_collection": "docs__repo",
     }
 
+    monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
 

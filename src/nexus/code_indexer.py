@@ -389,20 +389,26 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     # Embed using prefixed texts for improved retrieval quality; raw documents are stored.
     embeddings: list[list[float]] = []
     total_chunks = len(documents)
-    for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
-        batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
-        _log.debug(
-            "embedding batch",
-            file=str(file_path),
-            batch=f"{batch_start+1}-{min(batch_start+len(batch), total_chunks)}/{total_chunks}",
-        )
-        result = _voyage_with_retry(
-            ctx.voyage_client.embed,  # type: ignore[attr-defined]
-            texts=batch,
-            model=ctx.embedding_model,
-            input_type="document",
-        )
-        embeddings.extend(result.embeddings)
+    if ctx.embed_fn is not None:
+        # Local mode: use injected embedding function
+        for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
+            batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
+            embeddings.extend(ctx.embed_fn(batch))
+    else:
+        for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
+            batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
+            _log.debug(
+                "embedding batch",
+                file=str(file_path),
+                batch=f"{batch_start+1}-{min(batch_start+len(batch), total_chunks)}/{total_chunks}",
+            )
+            result = _voyage_with_retry(
+                ctx.voyage_client.embed,  # type: ignore[attr-defined]
+                texts=batch,
+                model=ctx.embedding_model,
+                input_type="document",
+            )
+            embeddings.extend(result.embeddings)
 
     _log.debug("upserting", file=str(file_path), chunks=total_chunks)
     ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]

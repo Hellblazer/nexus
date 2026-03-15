@@ -74,6 +74,25 @@ def check_credentials(voyage_key: str, chroma_key: str) -> None:
         )
 
 
+def check_local_path_writable() -> None:
+    """Validate that the local ChromaDB path is writable.
+
+    Raises:
+        CredentialsMissingError: When the local path cannot be written to.
+    """
+    from nexus.config import _default_local_path
+    local_path = _default_local_path()
+    try:
+        local_path.mkdir(parents=True, exist_ok=True)
+        test_file = local_path / ".write_test"
+        test_file.touch()
+        test_file.unlink()
+    except OSError as exc:
+        raise CredentialsMissingError(
+            f"Local ChromaDB path {local_path} is not writable: {exc}"
+        ) from exc
+
+
 def build_context_prefix(
     filename: object,
     comment_char: str,

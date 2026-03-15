@@ -29,7 +29,7 @@ import structlog
 from nexus.corpus import index_model_for_collection
 from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
-from nexus.indexer_utils import check_credentials, check_staleness
+from nexus.indexer_utils import check_credentials, check_local_path_writable, check_staleness
 
 # Re-exports from nexus.code_indexer for backward compatibility with tests that
 # import these names directly from nexus.indexer.
@@ -259,9 +259,13 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     code_collection = info.get("code_collection", info["collection"])
     docs_collection = info.get("docs_collection") or _docs_collection_name(repo)
 
-    voyage_key = get_credential("voyage_api_key")
-    chroma_key = get_credential("chroma_api_key")
-    check_credentials(voyage_key, chroma_key)
+    from nexus.config import is_local_mode
+    if not is_local_mode():
+        voyage_key = get_credential("voyage_api_key")
+        chroma_key = get_credential("chroma_api_key")
+        check_credentials(voyage_key, chroma_key)
+    else:
+        check_local_path_writable()
 
     frecency_map = batch_frecency(repo)
     db = make_t3()
@@ -314,6 +318,8 @@ def _index_code_file(
     score: float,
     chunk_lines: int | None = None,
     force: bool = False,
+    *,
+    embed_fn: Callable | None = None,
 ) -> int:
     """Index a single code file.  Delegates to nexus.code_indexer.index_code_file.
 
@@ -336,6 +342,7 @@ def _index_code_file(
         score=score,
         chunk_lines=chunk_lines,
         force=force,
+        embed_fn=embed_fn,
     )
     return index_code_file(ctx, file)
 
@@ -353,6 +360,8 @@ def _index_prose_file(
     score: float,
     force: bool = False,
     timeout: float = 120.0,
+    *,
+    embed_fn: Callable | None = None,
 ) -> int:
     """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
@@ -375,6 +384,7 @@ def _index_prose_file(
         score=score,
         force=force,
         timeout=timeout,
+        embed_fn=embed_fn,
     )
     return index_prose_file(ctx, file)
 
@@ -393,6 +403,8 @@ def _index_pdf_file(
     force: bool = False,
     timeout: float = 120.0,
     chunk_chars: int | None = None,
+    *,
+    embed_fn: Callable | None = None,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -456,7 +468,11 @@ def _index_pdf_file(
         }
         metadatas.append(augmented)
 
-    embeddings, actual_model = _embed_with_fallback(embed_texts_pdf, target_model, voyage_key, timeout=timeout)
+    if embed_fn is not None:
+        embeddings = embed_fn(embed_texts_pdf)
+        actual_model = target_model
+    else:
+        embeddings, actual_model = _embed_with_fallback(embed_texts_pdf, target_model, voyage_key, timeout=timeout)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
@@ -719,24 +735,44 @@ def _run_index(
     cache_path = Path.home() / ".config" / "nexus" / f"{_repo_basename}-{_repo_hash}.cache"
     build_cache(repo, cache_path, all_text_scored)
 
-    # Credential check (required for T3 operations)
-    voyage_key = get_credential("voyage_api_key")
-    chroma_key = get_credential("chroma_api_key")
-    check_credentials(voyage_key, chroma_key)
-
-    import voyageai
+    # Credential check and T3 setup
+    from nexus.config import is_local_mode as _is_local
     from datetime import UTC, datetime as _dt
     from nexus.db import make_t3
 
-    _log.debug("connecting to ChromaDB Cloud")
+    _local_mode = _is_local()
+    _embed_fn = None
+
+    if _local_mode:
+        check_local_path_writable()
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        _local_ef = LocalEmbeddingFunction()
+        _embed_fn = _local_ef  # callable: (texts) -> embeddings
+        local_model = _local_ef.model_name
+        code_model = local_model
+        docs_model = local_model
+        voyage_key = ""
+        voyage_client = None
+        # First-run tier notice
+        if _local_ef.model_name == "all-MiniLM-L6-v2":
+            _log.info(
+                "local_mode_tier0",
+                msg="Using basic embeddings (tier 0). For better code search quality: pip install conexus[local]",
+            )
+    else:
+        voyage_key = get_credential("voyage_api_key")
+        chroma_key = get_credential("chroma_api_key")
+        check_credentials(voyage_key, chroma_key)
+        import voyageai
+        code_model = index_model_for_collection(code_collection)
+        docs_model = index_model_for_collection(docs_collection)
+        voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=3)
+
+    _log.debug("connecting to ChromaDB")
     db = make_t3()
     _log.debug("ChromaDB connected")
     now_iso = _dt.now(UTC).isoformat()
 
-    # Initialize collections and models
-    code_model = index_model_for_collection(code_collection)
-    docs_model = index_model_for_collection(docs_collection)
-    voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=3)
     _log.debug("creating collections", code=code_collection, docs=docs_collection)
     code_col = db.get_or_create_collection(code_collection)
     docs_col = db.get_or_create_collection(docs_collection)
@@ -770,6 +806,7 @@ def _run_index(
             voyage_client, git_meta, now_iso, score,
             chunk_lines=effective_chunk_lines,
             force=force,
+            embed_fn=_embed_fn,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
@@ -785,6 +822,7 @@ def _run_index(
             voyage_key, git_meta, now_iso, score,
             force=force,
             timeout=read_timeout_seconds,
+            embed_fn=_embed_fn,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
@@ -800,6 +838,7 @@ def _run_index(
             force=force,
             timeout=read_timeout_seconds,
             chunk_chars=tuning.pdf_chunk_chars,
+            embed_fn=_embed_fn,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
