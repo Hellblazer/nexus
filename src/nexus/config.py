@@ -124,6 +124,45 @@ CREDENTIALS: dict[str, str] = {
     "migrated":          "NX_MIGRATED",
 }
 
+
+# ── Local mode helpers ───────────────────────────────────────────────────────
+
+
+def _default_local_path() -> Path:
+    """Return the default local ChromaDB PersistentClient path.
+
+    Precedence:
+      1. ``NX_LOCAL_CHROMA_PATH`` env var (explicit override)
+      2. ``$XDG_DATA_HOME/nexus/chroma``
+      3. ``~/.local/share/nexus/chroma``
+    """
+    override = os.environ.get("NX_LOCAL_CHROMA_PATH")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg) / "nexus" / "chroma"
+    return Path.home() / ".local" / "share" / "nexus" / "chroma"
+
+
+def is_local_mode() -> bool:
+    """Return True if nexus should use the local T3 backend.
+
+    Decision logic:
+      - ``NX_LOCAL=1`` → True  (explicit opt-in)
+      - ``NX_LOCAL=0`` → False (explicit opt-out)
+      - Otherwise: True when **both** CHROMA_API_KEY and VOYAGE_API_KEY are absent
+    """
+    nx_local = os.environ.get("NX_LOCAL", "").strip()
+    if nx_local == "1":
+        return True
+    if nx_local == "0":
+        return False
+    # Auto-detect: local mode when either cloud credential is missing
+    chroma_key = get_credential("chroma_api_key")
+    voyage_key = get_credential("voyage_api_key")
+    return not (chroma_key and voyage_key)
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 _DEFAULTS: dict[str, Any] = {

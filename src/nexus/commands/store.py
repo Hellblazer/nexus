@@ -11,24 +11,25 @@ from nexus.ttl import parse_ttl
 
 
 def _t3() -> T3Database:
-    from nexus.config import get_credential
+    from nexus.config import get_credential, is_local_mode
 
-    database = get_credential("chroma_database")
-    api_key = get_credential("chroma_api_key")
-    voyage_api_key = get_credential("voyage_api_key")
+    if not is_local_mode():
+        database = get_credential("chroma_database")
+        api_key = get_credential("chroma_api_key")
+        voyage_api_key = get_credential("voyage_api_key")
 
-    if not api_key:
-        raise click.ClickException(
-            "chroma_api_key not set — run: nx config set chroma_api_key <value>"
-        )
-    if not voyage_api_key:
-        raise click.ClickException(
-            "voyage_api_key not set — run: nx config set voyage_api_key <value>"
-        )
-    if not database:
-        raise click.ClickException(
-            "chroma_database not set — run: nx config init"
-        )
+        if not api_key:
+            raise click.ClickException(
+                "chroma_api_key not set — run: nx config set chroma_api_key <value>"
+            )
+        if not voyage_api_key:
+            raise click.ClickException(
+                "voyage_api_key not set — run: nx config set voyage_api_key <value>"
+            )
+        if not database:
+            raise click.ClickException(
+                "chroma_database not set — run: nx config init"
+            )
     try:
         return make_t3()
     except RuntimeError as exc:

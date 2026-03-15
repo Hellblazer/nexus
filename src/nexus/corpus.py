@@ -53,6 +53,9 @@ def embedding_model_for_collection(collection_name: str) -> str:
     the semantic spaces are compatible enough for effective retrieval.
 
     All other collections use voyage-4.
+
+    Note: in local mode, callers bypass this function and use
+    ``LocalEmbeddingFunction().model_name`` directly.
     """
     if collection_name.startswith(("docs__", "knowledge__", "rdr__")):
         return "voyage-context-3"
@@ -67,6 +70,9 @@ def index_model_for_collection(collection_name: str) -> str:
     knowledge__ → voyage-context-3 (CCE for richer cross-chunk context)
     rdr__       → voyage-context-3 (CCE for RDR decision documents)
     all others  → voyage-4         (standard embedding)
+
+    Note: in local mode, callers bypass this function and use
+    ``LocalEmbeddingFunction().model_name`` directly.
     """
     if collection_name.startswith("code__"):
         return "voyage-code-3"

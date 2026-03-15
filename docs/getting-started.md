@@ -49,9 +49,24 @@ The plugin gives agents direct access to all three storage tiers via MCP servers
 claude --plugin-dir ./nx
 ```
 
-## Add semantic search (T3)
+## Semantic search — local mode (zero config)
 
-When you want to search code, documents, and knowledge by meaning, set up T3 credentials.
+Nexus includes a local T3 backend that works immediately — no API keys, no accounts, no network.
+
+```bash
+nx index repo .           # index your codebase with local ONNX embeddings
+nx search "retry logic"   # semantic search, runs entirely on your machine
+```
+
+Local mode activates automatically when no cloud credentials are configured. It uses ChromaDB `PersistentClient` with bundled MiniLM-L6-v2 embeddings (384 dimensions). Data is stored at `~/.local/share/nexus/chroma`.
+
+**Upgrade embedding quality** with `pip install conexus[local]` to use `bge-base-en-v1.5` (768 dimensions) — better retrieval accuracy, especially for code search.
+
+To force local mode even when cloud credentials exist, set `NX_LOCAL=1`.
+
+## Semantic search — cloud mode
+
+When you want higher-quality embeddings (1024d Voyage AI), cross-chunk context (CCE), and reranking, set up T3 cloud credentials.
 
 ### Accounts
 
@@ -113,7 +128,7 @@ Common flags: `--n 20` (result count), `--json`, `--files` (paths only), `-c` (s
 
 **Provisioning failed during `nx config init`** — If your ChromaDB plan restricts automatic database creation, create the database manually in the [dashboard](https://trychroma.com) using your `chroma_database` value as the name.
 
-**`nx index repo .` fails with "credentials not set"** — Indexing requires T3 credentials. Run `nx config init` first. Local commands (`nx memory`, `nx scratch`) work without credentials.
+**`nx index repo .` fails with "credentials not set"** — In cloud mode, indexing requires T3 credentials. Run `nx config init` first, or use local mode (no credentials needed).
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running after a partial index is safe — unchanged files are skipped.
 

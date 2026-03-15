@@ -17,6 +17,13 @@ from nexus.db.t3 import T3Database
 def make_t3(*, _client=None, _ef_override=None) -> T3Database:
     """Return a :class:`T3Database` built from the current credentials.
 
+    In local mode (``is_local_mode()`` returns True), returns a T3Database
+    backed by ``chromadb.PersistentClient`` with a ``LocalEmbeddingFunction``.
+    No API keys required.
+
+    In cloud mode, returns a T3Database backed by ``chromadb.CloudClient``
+    with Voyage AI embeddings.
+
     Keyword-only injection points (for tests):
 
     * ``_client`` — substitute an ``EphemeralClient`` or ``MagicMock`` to
@@ -24,7 +31,22 @@ def make_t3(*, _client=None, _ef_override=None) -> T3Database:
     * ``_ef_override`` — override the embedding function (e.g.
       ``DefaultEmbeddingFunction()``) to avoid Voyage AI API calls.
     """
-    from nexus.config import load_config
+    from nexus.config import is_local_mode, load_config, _default_local_path
+
+    if is_local_mode() and _client is None:
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        import os
+
+        model_override = os.environ.get("NX_LOCAL_EMBED_MODEL", "")
+        ef = _ef_override or LocalEmbeddingFunction(
+            model_name=model_override if model_override else None,
+        )
+        return T3Database(
+            local_mode=True,
+            local_path=str(_default_local_path()),
+            _ef_override=ef,
+        )
+
     cfg = load_config()
     read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)
     return T3Database(

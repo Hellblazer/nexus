@@ -160,10 +160,14 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         return 0
     ids, documents, metadatas, embed_texts = map(list, zip(*valid))
 
-    # Embed via _embed_with_fallback (CCE for voyage-context-3)
-    embeddings, actual_model = _embed_with_fallback(
-        embed_texts, ctx.embedding_model, ctx.voyage_key, timeout=ctx.timeout
-    )
+    # Embed: local mode uses embed_fn; cloud uses _embed_with_fallback (CCE)
+    if ctx.embed_fn is not None:
+        embeddings = ctx.embed_fn(embed_texts)
+        actual_model = ctx.embedding_model
+    else:
+        embeddings, actual_model = _embed_with_fallback(
+            embed_texts, ctx.embedding_model, ctx.voyage_key, timeout=ctx.timeout
+        )
     if actual_model != ctx.embedding_model:
         for m in metadatas:
             m["embedding_model"] = actual_model

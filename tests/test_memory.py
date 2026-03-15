@@ -156,9 +156,10 @@ def test_promote_cmd_no_credentials_raises(runner: CliRunner, mem_home: Path, db
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
         with patch("nexus.commands.memory.get_credential", return_value=""):
-            result = runner.invoke(
-                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
-            )
+            with patch("nexus.config.is_local_mode", return_value=False):
+                result = runner.invoke(
+                    main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
+                )
 
     assert result.exit_code != 0
     assert "not set" in result.output.lower() or "config init" in result.output.lower()
@@ -187,7 +188,8 @@ def test_promote_cmd_calls_t3_put(runner: CliRunner, mem_home: Path, db: T2Datab
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
         with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
-            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+            with patch("nexus.config.is_local_mode", return_value=False):
+              with patch("nexus.db.make_t3", return_value=mock_t3):
                 result = runner.invoke(
                     main,
                     ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
@@ -214,7 +216,8 @@ def test_promote_cmd_permanent_entry_ttl_is_zero(runner: CliRunner, mem_home: Pa
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
         with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
-            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+            with patch("nexus.config.is_local_mode", return_value=False):
+              with patch("nexus.db.make_t3", return_value=mock_t3):
                 runner.invoke(
                     main,
                     ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
@@ -236,7 +239,8 @@ def test_promote_cmd_remove_deletes_t2_entry(runner: CliRunner, mem_home: Path, 
     _t2_cm = MagicMock(__enter__=MagicMock(return_value=db))
     with patch("nexus.commands.memory.T2Database", return_value=_t2_cm):
         with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
-            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+            with patch("nexus.config.is_local_mode", return_value=False):
+              with patch("nexus.db.make_t3", return_value=mock_t3):
                 result = runner.invoke(
                     main,
                     ["memory", "promote", str(row_id), "--collection", "knowledge__proj", "--remove"],
@@ -258,9 +262,10 @@ def test_promote_cmd_missing_database_raises(runner: CliRunner, mem_home: Path, 
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
         with patch("nexus.commands.memory.get_credential", side_effect=cred_side_effect):
-            result = runner.invoke(
-                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
-            )
+            with patch("nexus.config.is_local_mode", return_value=False):
+                result = runner.invoke(
+                    main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
+                )
 
     assert result.exit_code != 0
     assert "chroma_database" in result.output
@@ -289,7 +294,8 @@ def test_promote_cmd_expires_at_derived_from_t2_timestamp(
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
         with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
-            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+            with patch("nexus.config.is_local_mode", return_value=False):
+              with patch("nexus.db.make_t3", return_value=mock_t3):
                 result = runner.invoke(
                     main,
                     ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],
@@ -322,7 +328,8 @@ def test_promote_cmd_permanent_expires_at_is_empty(
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
         with patch("nexus.commands.memory.get_credential", return_value="fake-key"):
-            with patch("nexus.commands.memory.T3Database", return_value=mock_t3):
+            with patch("nexus.config.is_local_mode", return_value=False):
+              with patch("nexus.db.make_t3", return_value=mock_t3):
                 runner.invoke(
                     main,
                     ["memory", "promote", str(row_id), "--collection", "knowledge__proj"],

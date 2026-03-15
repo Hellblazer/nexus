@@ -46,7 +46,7 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 **Three storage tiers:**
 - T1: `chromadb.EphemeralClient` (or HTTP server via SessionStart hook) — session scratch (`nx scratch`)
 - T2: SQLite + FTS5 — persistent memory (`nx memory`)
-- T3: `chromadb.CloudClient` + `VoyageAIEmbeddingFunction` — permanent knowledge (`nx store`, `nx search`)
+- T3: `chromadb.PersistentClient` + local ONNX embeddings (local mode, zero-config) OR `chromadb.CloudClient` + `VoyageAIEmbeddingFunction` (cloud mode) — permanent knowledge (`nx store`, `nx search`)
 
 **T3 ChromaDB database**: a single `chromadb.CloudClient` database (`CHROMA_DATABASE` value, e.g. `nexus`). All collection prefixes coexist in one database:
 - `code__*` collections — `voyage-code-3` for index, `voyage-4` for query
@@ -66,7 +66,7 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 src/nexus/           # Core package
   cli.py             # Click entry point; registers all command groups
   commands/          # One file per CLI command group (index, search, memory, scratch, store, collection, config, hooks, doctor)
-  db/                # t1.py, t2.py, t3.py — tier implementations
+  db/                # t1.py, t2.py, t3.py — tier implementations; local_ef.py — local ONNX embeddings
   indexer.py         # Repo indexing pipeline (classify → chunk → embed → store)
   classifier.py      # File classification: CODE / PROSE / PDF / SKIP
   chunker.py         # Tree-sitter AST chunking (31 languages)

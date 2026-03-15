@@ -3,6 +3,7 @@
 """IndexContext dataclass: shared indexing parameters replacing 12-parameter function signatures."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,6 +21,10 @@ class IndexContext:
     prose/PDF paths that call doc_indexer._embed_with_fallback internally) and
     ``voyage_client`` (pre-constructed voyageai.Client, used by the code path
     that calls voyage_client.embed directly).
+
+    In local mode, ``embed_fn`` is set and ``voyage_client``/``voyage_key``
+    are empty.  Indexers check ``embed_fn`` first: when present, it replaces
+    all Voyage AI embedding calls.
 
     ``tuning`` provides configurable constants (chunk sizes, scoring weights,
     timeouts).  Defaults to the TuningConfig defaults when not supplied.
@@ -50,3 +55,7 @@ class IndexContext:
 
     # Optional tuning config; resolved lazily to avoid circular imports
     tuning: "TuningConfig | None" = field(default=None)
+
+    # Local mode embedding function: (texts: list[str]) -> list[list[float]]
+    # When set, replaces Voyage AI embedding in code_indexer and prose_indexer.
+    embed_fn: Callable[[list[str]], list[list[float]]] | None = field(default=None)

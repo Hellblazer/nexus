@@ -11,13 +11,31 @@ Four levels, highest priority wins:
 
 Each level is deep-merged, with higher-priority values winning.
 
-## Credentials
+## Local Mode
+
+Nexus auto-detects local mode when cloud credentials are absent. No configuration needed — just `pip install conexus && nx index repo .`.
+
+| Env var | Default | Description |
+|---|---|---|
+| `NX_LOCAL` | (auto) | `1` = force local, `0` = force cloud, unset = auto-detect |
+| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Override local ChromaDB storage path |
+| `NX_LOCAL_EMBED_MODEL` | (auto) | Force a specific local embedding model name |
+
+**Auto-detection**: When both `CHROMA_API_KEY` and `VOYAGE_API_KEY` are absent, local mode activates. Set `NX_LOCAL=1` to force local mode even with cloud credentials.
+
+**Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install `pip install conexus[local]` for tier 1 (bge-base-en-v1.5, 768d, better quality).
+
+**Storage path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`. Override with `NX_LOCAL_CHROMA_PATH`.
+
+**Switching modes**: Changing between local and cloud mode triggers automatic re-indexing on the next `nx index repo .` (embedding model mismatch detected by staleness check). Local and cloud embeddings are incompatible — there is no automatic migration.
+
+## Cloud Credentials
 
 | Config key | Env var | Required | Notes |
 |---|---|---|---|
-| `chroma_api_key` | `CHROMA_API_KEY` | Yes | ChromaDB Cloud API key |
-| `chroma_database` | `CHROMA_DATABASE` | Yes | ChromaDB Cloud database name (e.g. `nexus`) |
-| `voyage_api_key` | `VOYAGE_API_KEY` | Yes | Voyage AI embeddings key |
+| `chroma_api_key` | `CHROMA_API_KEY` | Cloud mode | ChromaDB Cloud API key |
+| `chroma_database` | `CHROMA_DATABASE` | Cloud mode | ChromaDB Cloud database name (e.g. `nexus`) |
+| `voyage_api_key` | `VOYAGE_API_KEY` | Cloud mode | Voyage AI embeddings key |
 | `chroma_tenant` | `CHROMA_TENANT` | No | Auto-inferred from API key; only needed for multi-workspace setups |
 
 Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.config/nexus/config.yml`.
@@ -87,6 +105,7 @@ These values are exposed as a `TuningConfig` dataclass in `nexus.config`. The se
 | File | Purpose |
 |---|---|
 | `~/.config/nexus/config.yml` | Global config and credentials |
+| `~/.local/share/nexus/chroma/` | Local T3 ChromaDB PersistentClient data (local mode) |
 | `~/.config/nexus/memory.db` | T2 SQLite database |
 | `~/.config/nexus/repos.json` | Registered repos (`nx index repo` writes here) |
 | `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |

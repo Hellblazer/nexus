@@ -38,16 +38,17 @@ from nexus.retry import (
 )
 
 class T3Database:
-    """T3 ChromaDB CloudClient permanent knowledge store.
+    """T3 ChromaDB permanent knowledge store.
 
-    Uses a single ``chromadb.CloudClient`` connected to the ``chroma_database``
-    base name directly.  All collection prefixes (``code__``, ``docs__``,
-    ``rdr__``, ``knowledge__``) coexist in one database.
+    Supports two modes:
+    - **Cloud mode** (default): ``chromadb.CloudClient`` connected to the configured
+      ChromaDB Cloud database.
+    - **Local mode** (``local_mode=True``): ``chromadb.PersistentClient`` using a
+      local directory — zero API keys required.
 
-    On first connection (no ``NX_MIGRATED`` flag), the constructor probes for
+    On first cloud connection (no ``NX_MIGRATED`` flag), the constructor probes for
     the old four-database layout by attempting to connect to ``{base}_code``.
-    If that database exists, ``OldLayoutDetected`` is raised.  If it does not
-    (``NotFoundError``), the new single-database layout is assumed.
+    If that database exists, ``OldLayoutDetected`` is raised.
 
     The ``_client`` and ``_ef_override`` keyword arguments are injection
     points for testing — pass an ``EphemeralClient`` and
@@ -62,10 +63,13 @@ class T3Database:
         api_key: str = "",
         voyage_api_key: str = "",
         *,
+        local_mode: bool = False,
+        local_path: str = "",
         read_timeout_seconds: float = 120.0,
         _client=None,
         _ef_override=None,
     ) -> None:
+        self._local_mode = local_mode
         self._voyage_api_key = voyage_api_key
         self._ef_override = _ef_override
         self._ef_cache: dict[str, object] = {}
@@ -74,6 +78,20 @@ class T3Database:
         self._read_sems: dict[str, threading.BoundedSemaphore] = {}
         self._sems_lock = threading.Lock()
         self._quota_validator = QuotaValidator()
+
+        # ── Local mode: PersistentClient, no cloud, no Voyage ────────────
+        if local_mode:
+            from pathlib import Path
+            p = Path(local_path)
+            p.mkdir(parents=True, exist_ok=True)
+            if _client is not None:
+                self._client = _client
+            else:
+                self._client = chromadb.PersistentClient(path=str(p))
+            self._voyage_client = None
+            return
+
+        # ── Cloud mode ───────────────────────────────────────────────────
         self._voyage_client: voyageai.Client | None = (
             voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=3)
             if voyage_api_key else None
@@ -320,11 +338,12 @@ class T3Database:
                 expires_at = ""
 
         # Determine whether this collection uses CCE.  When a voyage_api_key
-        # is available, CCE collections (docs__, knowledge__, rdr__) are embedded
-        # via _cce_embed() so that put()-stored entries are in the same vector
-        # space as the CCE-indexed chunks and can be found by search().
+        # is available and we're not in local mode, CCE collections (docs__,
+        # knowledge__, rdr__) are embedded via _cce_embed() so that put()-stored
+        # entries are in the same vector space as the CCE-indexed chunks.
         is_cce = (
-            bool(self._voyage_api_key)
+            not self._local_mode
+            and bool(self._voyage_api_key)
             and index_model_for_collection(collection) == "voyage-context-3"
         )
 
@@ -435,9 +454,10 @@ class T3Database:
             # CCE collections must be queried with voyage-context-3 via
             # contextualized_embed(); using query_texts would invoke the voyage-4
             # EF, producing vectors in an incompatible space (cosine sim ≈ 0.05).
-            # Skip CCE path when voyage_api_key is absent (test / offline mode).
+            # Skip CCE path in local mode or when voyage_api_key is absent.
             is_cce = (
-                bool(self._voyage_api_key)
+                not self._local_mode
+                and bool(self._voyage_api_key)
                 and index_model_for_collection(name) == "voyage-context-3"
             )
             try:
@@ -452,14 +472,17 @@ class T3Database:
             count = _chroma_with_retry(col.count)
             if count == 0:
                 continue
-            actual_n = min(n_results, count, QUOTAS.MAX_QUERY_RESULTS)
-            if n_results > QUOTAS.MAX_QUERY_RESULTS:
-                _log.warning(
-                    "search_n_results_clamped",
-                    requested=n_results,
-                    actual=actual_n,
-                    collection=name,
-                )
+            if self._local_mode:
+                actual_n = min(n_results, count)
+            else:
+                actual_n = min(n_results, count, QUOTAS.MAX_QUERY_RESULTS)
+                if n_results > QUOTAS.MAX_QUERY_RESULTS:
+                    _log.warning(
+                        "search_n_results_clamped",
+                        requested=n_results,
+                        actual=actual_n,
+                        collection=name,
+                    )
             if is_cce:
                 query_kwargs: dict = {
                     "query_embeddings": [self._cce_embed(query, input_type="query")],
@@ -555,7 +578,7 @@ class T3Database:
             col = self._client_for(collection).get_collection(collection)
         except _ChromaNotFoundError:
             return []
-        clamped = min(limit, QUOTAS.MAX_QUERY_RESULTS)
+        clamped = limit if self._local_mode else min(limit, QUOTAS.MAX_QUERY_RESULTS)
         with self._read_sem(collection):
             result = _chroma_with_retry(col.get, include=["metadatas"], limit=clamped)
         return [

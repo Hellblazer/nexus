@@ -578,8 +578,9 @@ def test_make_t3_uses_credentials(mock_chromadb: tuple) -> None:
         "chroma_api_key": "ck-abc",
         "voyage_api_key": "vk-xyz",
     }
-    with patch("nexus.db.get_credential", side_effect=lambda k: creds.get(k, "")):
-        db = make_t3()
+    with patch("nexus.config.is_local_mode", return_value=False):
+        with patch("nexus.db.get_credential", side_effect=lambda k: creds.get(k, "")):
+            db = make_t3()
 
     assert mock_chromadb[0].CloudClient.call_count == 2  # probe + connect
     connect_call = mock_chromadb[0].CloudClient.call_args_list[1]
