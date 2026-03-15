@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-03-15
+
+### Fixed
+- **Fully-qualify all skill slash command references** — all 19 files across agents,
+  commands, hooks, skills, and README now use `/nx:skill-name` instead of `/skill-name`.
+  Short-form references were not invocable by users because Claude Code requires the
+  `/<plugin>:<skill>` format for plugin-namespaced skills.
+
 ## [2.1.0] - 2026-03-15
 
 Plugin version aligned with Nexus CLI 2.1.0. Local T3 backend (RDR-038) enables zero-config semantic search — agents and MCP tools work with local embeddings when no cloud credentials are configured. No plugin-level API changes.

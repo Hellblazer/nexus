@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-03-15
+
+### Fixed
+- **Plugin skill references** — all 19 nx plugin files now use fully-qualified
+  `/nx:skill-name` form instead of short `/skill-name` which Claude Code cannot
+  resolve for plugin-namespaced skills. Affected agents, commands, hooks, skills,
+  and README.
+
 ## [2.1.0] - 2026-03-15
 
 ### Added
