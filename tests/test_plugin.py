@@ -220,6 +220,7 @@ def test_doctor_missing_chroma_key_reports_warning(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """nx doctor reports warning and exits 1 when CHROMA_API_KEY is unset."""
+    monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 1
