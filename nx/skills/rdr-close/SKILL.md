@@ -10,7 +10,7 @@ Reports bead status as advisory. Optionally delegates post-mortem archival to th
 ## When This Skill Activates
 
 - User says "close this RDR", "RDR done", "finish RDR"
-- User invokes `/rdr-close`
+- User invokes `/nx:rdr-close`
 - Implementation is complete and the RDR should be finalized
 
 ## Inputs
@@ -73,7 +73,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 ### Step 4: Update State
 
 1. Update T2 record: Use memory_put tool: content="... (same fields, status: Implemented, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
-   If T3 archive fails, set `archived: false` — retryable by re-running `/rdr-close`
+   If T3 archive fails, set `archived: false` — retryable by re-running `/nx:rdr-close`
 
 2. Update status in RDR markdown metadata
 3. Regenerate `docs/rdr/README.md` index
@@ -111,7 +111,7 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 The close operation performs multiple state mutations. If any step fails:
 - Each step emits clear status (e.g., "T2 updated ✓", "Bead advisory ✓", "T3 archive ✗ FAILED")
 - T2 `archived` flag tracks whether T3 archival succeeded
-- Re-running `/rdr-close` is idempotent: checks T2 state and skips completed steps
+- Re-running `/nx:rdr-close` is idempotent: checks T2 state and skips completed steps
 
 ## Relay Template (Use This Format)
 

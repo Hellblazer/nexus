@@ -29,7 +29,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
    the pattern `RDR-\d+`. For each match, run:
    Use memory_get tool: project="{repo}_rdr", title="NNN"
    If status is not `accepted` or `closed`, warn the user:
-   "RDR-NNN is {status}. Consider running `/rdr-gate NNN` and `/rdr-accept NNN` first."
+   "RDR-NNN is {status}. Consider running `/nx:rdr-gate NNN` and `/nx:rdr-accept NNN` first."
    If the lookup fails or returns no result, warn and proceed (fail-open).
    If no RDR pattern is found, proceed normally.
 

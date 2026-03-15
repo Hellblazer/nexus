@@ -8,7 +8,7 @@ description: Use when starting a new research-design-review document to think th
 ## When This Skill Activates
 
 - User says "create an RDR", "new RDR", "start an RDR"
-- User invokes `/rdr-create`
+- User invokes `/nx:rdr-create`
 - User wants to think through a technical decision — before, during, or after building
 
 ## Inputs
@@ -97,7 +97,7 @@ Created RDR PREFIX-NNN: "Title"
 File: docs/rdr/NNN-kebab-title.md
 Status: Draft
 
-Next: Fill in Problem Statement and Context, then use /rdr-research to add findings.
+Next: Fill in Problem Statement and Context, then use /nx:rdr-research to add findings.
 ```
 
 ## Success Criteria
@@ -114,7 +114,7 @@ Next: Fill in Problem Statement and Context, then use /rdr-research to add findi
 
 This skill produces outputs directly (no agent delegation):
 
-- **T3 knowledge**: Not produced at create time (archival happens at `/rdr-close`)
+- **T3 knowledge**: Not produced at create time (archival happens at `/nx:rdr-close`)
 - **T2 memory**: RDR metadata record via memory_put tool: project="{repo}_rdr", title="{NNN}", ttl="permanent", tags="rdr,{type}"
 - **T1 scratch**: Working notes during creation via scratch tool: action="put", content="RDR NNN: scaffolding", tags="rdr,create" (optional, for tracking multi-step creation)
 - **Filesystem**: `docs/rdr/NNN-kebab-title.md`, updated `docs/rdr/README.md`
@@ -123,7 +123,7 @@ This skill produces outputs directly (no agent delegation):
 
 ## Does NOT
 
-- Create beads (that happens at `/rdr-close`)
-- Run validation (that happens at `/rdr-gate`)
+- Create beads (that happens at `/nx:rdr-close`)
+- Run validation (that happens at `/nx:rdr-gate`)
 - Commit (user decides when to commit)
 - Run `nx index rdr` (user can do this manually or it happens at gate/close)

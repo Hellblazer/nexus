@@ -36,7 +36,7 @@ Invoke the **enrich-plan** skill with the following relay. Fill in dynamic field
 **Bead**: [fill from epic bead above or 'none']
 
 ### Input Artifacts
-- nx scratch: audit findings, plan structure, bead IDs (from same-session /plan-audit)
+- nx scratch: audit findings, plan structure, bead IDs (from same-session /nx:plan-audit)
 - Files: [fill from key files referenced in plan]
 
 ### Deliverable

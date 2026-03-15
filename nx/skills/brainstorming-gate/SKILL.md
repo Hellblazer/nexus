@@ -59,7 +59,7 @@ digraph brainstorming {
    pattern `RDR-\d+`. For each match:
    - Use memory_get tool: project="{repo}_rdr", title="NNN"
    - If status is not `accepted` or `closed`, **warn the user**:
-     "RDR-NNN is still {status}. Run `/rdr-gate NNN` and `/rdr-accept NNN`
+     "RDR-NNN is still {status}. Run `/nx:rdr-gate NNN` and `/nx:rdr-accept NNN`
      before planning implementation."
    - If the lookup fails or returns no result, warn and proceed (fail-open).
    - If no `RDR-\d+` pattern is found, proceed normally.
