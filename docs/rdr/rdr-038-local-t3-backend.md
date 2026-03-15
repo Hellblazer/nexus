@@ -2,10 +2,12 @@
 title: "Local T3 Backend"
 id: RDR-038
 type: architecture
-status: draft
+status: accepted
 priority: P1
 author: Hal Hildebrand
+reviewed-by: self
 created: 2026-03-14
+accepted_date: 2026-03-14
 related_issues:
   - "RDR-004 - Four Store Architecture"
   - "RDR-005 - ChromaDB Cloud Quota Enforcement"
