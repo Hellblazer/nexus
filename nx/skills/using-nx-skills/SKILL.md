@@ -53,53 +53,53 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 
 | Skill | Command | Invoke when... |
 |-------|---------|----------------|
-| brainstorming-gate | `/brainstorming-gate` | About to implement any feature, build any component, or change any behavior |
+| brainstorming-gate | `/nx:brainstorming-gate` | About to implement any feature, build any component, or change any behavior |
 
 ### Process (guide workflow and quality)
 
 | Skill | Command | Invoke when... |
 |-------|---------|----------------|
-| code-review | `/review-code` | Code changes ready for quality, security, or best practices review |
-| strategic-planning | `/create-plan` | Multi-step work needs decomposition into tasks before any code |
-| plan-validation | `/plan-audit` | A plan exists and needs validation before implementation begins |
-| enrich-plan | `/enrich-plan` | Beads need enrichment with audit findings and execution context after plan-audit |
-| test-validation | `/test-validate` | Implementation complete; test coverage needs verification |
-| substantive-critique | `/substantive-critique` | Architectural decisions, multi-phase plans, or major docs need deep constructive critique |
+| code-review | `/nx:review-code` | Code changes ready for quality, security, or best practices review |
+| strategic-planning | `/nx:create-plan` | Multi-step work needs decomposition into tasks before any code |
+| plan-validation | `/nx:plan-audit` | A plan exists and needs validation before implementation begins |
+| enrich-plan | `/nx:enrich-plan` | Beads need enrichment with audit findings and execution context after plan-audit |
+| test-validation | `/nx:test-validate` | Implementation complete; test coverage needs verification |
+| substantive-critique | `/nx:substantive-critique` | Architectural decisions, multi-phase plans, or major docs need deep constructive critique |
 
 ### Implementation (execute domain-specific work)
 
 | Skill | Command | Invoke when... |
 |-------|---------|----------------|
-| codebase-analysis | `/analyze-code` | Exploring unfamiliar codebase or understanding module structure before changes |
-| deep-analysis | `/deep-analysis` | Surface-level analysis is insufficient; hypothesis-driven investigation needed |
-| research-synthesis | `/research` | Researching unfamiliar topics or comparing technology approaches |
-| architecture | `/architecture` | Complex features need architectural design before implementation |
-| development | `/implement` | Plan approved; implementation work ready to begin |
-| debugging | `/debug` | Tests fail or behavior is non-deterministic, especially after 2+ failed attempts |
+| codebase-analysis | `/nx:analyze-code` | Exploring unfamiliar codebase or understanding module structure before changes |
+| deep-analysis | `/nx:deep-analysis` | Surface-level analysis is insufficient; hypothesis-driven investigation needed |
+| research-synthesis | `/nx:research` | Researching unfamiliar topics or comparing technology approaches |
+| architecture | `/nx:architecture` | Complex features need architectural design before implementation |
+| development | `/nx:implement` | Plan approved; implementation work ready to begin |
+| debugging | `/nx:debug` | Tests fail or behavior is non-deterministic, especially after 2+ failed attempts |
 
 ### RDR Lifecycle (research-design-review documents)
 
 | Skill | Command | Invoke when... |
 |-------|---------|----------------|
-| rdr-create | `/rdr-create` | Starting a new technical decision document |
-| rdr-research | `/rdr-research` | Adding or tracking structured research findings for an active RDR |
-| rdr-list | `/rdr-list` | Listing all RDRs with status, type, and priority |
-| rdr-show | `/rdr-show` | Viewing full details and research findings for a specific RDR |
-| rdr-gate | `/rdr-gate` | RDR appears complete; needs structural + assumption + AI critique check |
-| rdr-accept | `/rdr-accept` | Gate returned PASSED; ready to officially accept the RDR |
-| rdr-close | `/rdr-close` | RDR implemented; close with optional post-mortem and bead status advisory |
+| rdr-create | `/nx:rdr-create` | Starting a new technical decision document |
+| rdr-research | `/nx:rdr-research` | Adding or tracking structured research findings for an active RDR |
+| rdr-list | `/nx:rdr-list` | Listing all RDRs with status, type, and priority |
+| rdr-show | `/nx:rdr-show` | Viewing full details and research findings for a specific RDR |
+| rdr-gate | `/nx:rdr-gate` | RDR appears complete; needs structural + assumption + AI critique check |
+| rdr-accept | `/nx:rdr-accept` | Gate returned PASSED; ready to officially accept the RDR |
+| rdr-close | `/nx:rdr-close` | RDR implemented; close with optional post-mortem and bead status advisory |
 
 ### Standalone Reference
 
 | Skill | Command | Invoke when... |
 |-------|---------|----------------|
-| knowledge-tidying | `/knowledge-tidy` | 3+ validated findings or decisions need persisting to T3 for cross-session reuse |
-| orchestration | `/orchestrate` | After reading this directory, still unsure which agent fits the task |
-| pdf-processing | `/pdf-process` | PDF documents need indexing into nx store for semantic search |
-| nexus | `/nexus` | Running nx commands or unsure which nx subcommand to use |
-| serena-code-nav | `/serena-code-nav` | Navigating code by symbol — finding definitions, callers, type hierarchies, or safe renames |
-| cli-controller | `/cli-controller` | Controlling interactive CLI apps, REPLs, pdb, gdb, or spawning Claude Code instances |
-| writing-nx-skills | `/writing-nx-skills` | Creating new nx plugin skills or editing existing ones |
+| knowledge-tidying | `/nx:knowledge-tidy` | 3+ validated findings or decisions need persisting to T3 for cross-session reuse |
+| orchestration | `/nx:orchestrate` | After reading this directory, still unsure which agent fits the task |
+| pdf-processing | `/nx:pdf-process` | PDF documents need indexing into nx store for semantic search |
+| nexus | `/nx:nexus` | Running nx commands or unsure which nx subcommand to use |
+| serena-code-nav | `/nx:serena-code-nav` | Navigating code by symbol — finding definitions, callers, type hierarchies, or safe renames |
+| cli-controller | `/nx:cli-controller` | Controlling interactive CLI apps, REPLs, pdb, gdb, or spawning Claude Code instances |
+| writing-nx-skills | `/nx:writing-nx-skills` | Creating new nx plugin skills or editing existing ones |
 
 ## Storage Tier Protocol
 
@@ -111,7 +111,7 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 | T2 | Use memory_search tool: query="..." | Project decisions, findings, session context | Before project work — past context and past decisions live here |
 | T1 | Use scratch tool: action="search", query="..." | This session's discoveries, shared across all agents | Before doing work a sibling or parent agent may have already done |
 
-**Write path:** T1 (immediate, shared) → `--persist` flag to T2 (survives session end) → `/knowledge-tidy` to T3 (permanent, cross-project).
+**Write path:** T1 (immediate, shared) → `--persist` flag to T2 (survives session end) → `/nx:knowledge-tidy` to T3 (permanent, cross-project).
 
 ## Red Flags
 

@@ -12,7 +12,7 @@ Delegates Layer 3 to the **substantive-critic** agent (sonnet). See [registry.ya
 ## When This Skill Activates
 
 - User says "gate this RDR", "finalization check", "is this RDR ready?"
-- User invokes `/rdr-gate`
+- User invokes `/nx:rdr-gate`
 - User wants to validate an RDR before locking it as Final
 
 ## Input
@@ -114,9 +114,9 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 
 1. Write gate result to T2: Use memory_put tool: content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nsummary: One-sentence summary", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"
 2. Append gate findings to the RDR's Revision History section
-3. Print: `> Run '/rdr-accept <id>' to accept this RDR.`
+3. Print: `> Run '/nx:rdr-accept <id>' to accept this RDR.`
 
-Status remains **Draft** until the author explicitly accepts via `/rdr-accept`.
+Status remains **Draft** until the author explicitly accepts via `/nx:rdr-accept`.
 
 ### On Fail
 

@@ -118,7 +118,7 @@ args_clean = re.sub(r'--force', '', args_clean).strip()
 id_match = re.search(r'\d+', args_clean)
 
 if not id_match:
-    print("> **Usage**: `/rdr-close <id> [--reason implemented|reverted|abandoned|superseded]`")
+    print("> **Usage**: `/nx:rdr-close <id> [--reason implemented|reverted|abandoned|superseded]`")
     print()
     rdrs = get_all_rdrs(rdr_path)
     print("### Open/Draft RDRs")
@@ -156,7 +156,7 @@ if current_status.lower() not in ('accepted', 'final'):
         print()
     else:
         print(f"> **BLOCKED**: RDR status is `{current_status}`. Close requires status `accepted` or `final`.")
-        print(f"> Run `/rdr-gate` to validate, or use `--force` to override.")
+        print(f"> Run `/nx:rdr-gate` to validate, or use `--force` to override.")
         print()
         sys.exit(0)
 

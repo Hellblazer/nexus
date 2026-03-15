@@ -45,14 +45,14 @@ Run `/nx-preflight` after installing to verify all dependencies are present.
 
 | Goal | Start here |
 |------|-----------|
-| Explore an unfamiliar codebase | `/analyze-code` |
-| Plan a feature or component | `/brainstorming-gate` → `/create-plan` |
-| Debug a failure | `/debug` (after 2–3 failed attempts) |
-| Review code before committing | `/review-code` |
-| Research an unfamiliar topic | `/research` |
-| Document a technical decision | `/rdr-create` → `/rdr-research` → `/rdr-accept` |
-| Index PDFs into semantic search | `/pdf-process` |
-| Not sure which agent to use | `/orchestrate` |
+| Explore an unfamiliar codebase | `/nx:analyze-code` |
+| Plan a feature or component | `/nx:brainstorming-gate` → `/nx:create-plan` |
+| Debug a failure | `/nx:debug` (after 2–3 failed attempts) |
+| Review code before committing | `/nx:review-code` |
+| Research an unfamiliar topic | `/nx:research` |
+| Document a technical decision | `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-accept` |
+| Index PDFs into semantic search | `/nx:pdf-process` |
+| Not sure which agent to use | `/nx:orchestrate` |
 
 ## Directory Structure
 
@@ -67,7 +67,7 @@ nx/
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
 │   └── *.md                 # 15 specialized agent definitions
 ├── commands/
-│   └── *.md                 # Slash commands (/research, /create-plan, /review-code, etc.)
+│   └── *.md                 # Slash commands (/nx:research, /nx:create-plan, /nx:review-code, etc.)
 ├── hooks/
 │   ├── hooks.json           # Hook event → script wiring
 │   └── scripts/
@@ -145,21 +145,21 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 | Agent | Skill | Command | Model | Purpose |
 |-------|-------|---------|-------|---------|
-| code-review-expert | code-review | `/review-code` | sonnet | Code quality, security, best practices |
-| codebase-deep-analyzer | codebase-analysis | `/analyze-code` | sonnet | Architecture, patterns, dependency mapping |
-| deep-analyst | deep-analysis | `/deep-analysis` | opus | Complex problem investigation, root cause |
-| substantive-critic | substantive-critique | `/substantive-critique` | sonnet | Constructive critique of plans/designs/code |
-| deep-research-synthesizer | research-synthesis | `/research` | sonnet | Multi-source research with synthesis |
-| architect-planner | architecture | `/architecture` | opus | Software architecture design, execution plans |
-| debugger | debugging | `/debug` | opus | Hypothesis-driven debugging |
-| developer | development | `/implement` | sonnet | TDD implementation, test-first methodology |
-| knowledge-tidier | knowledge-tidying | `/knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
-| orchestrator | orchestration | `/orchestrate` | haiku | Route requests to appropriate agents |
-| pdf-chromadb-processor | pdf-processing | `/pdf-process` | haiku | Index PDFs into nx store for semantic search |
-| plan-auditor | plan-validation | `/plan-audit` | sonnet | Validate plans before execution |
-| plan-enricher | enrich-plan | `/enrich-plan` | sonnet | Enrich beads with audit findings and execution context |
-| strategic-planner | strategic-planning | `/create-plan` | opus | Implementation planning, task decomposition |
-| test-validator | test-validation | `/test-validate` | sonnet | Test coverage and quality validation |
+| code-review-expert | code-review | `/nx:review-code` | sonnet | Code quality, security, best practices |
+| codebase-deep-analyzer | codebase-analysis | `/nx:analyze-code` | sonnet | Architecture, patterns, dependency mapping |
+| deep-analyst | deep-analysis | `/nx:deep-analysis` | opus | Complex problem investigation, root cause |
+| substantive-critic | substantive-critique | `/nx:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
+| deep-research-synthesizer | research-synthesis | `/nx:research` | sonnet | Multi-source research with synthesis |
+| architect-planner | architecture | `/nx:architecture` | opus | Software architecture design, execution plans |
+| debugger | debugging | `/nx:debug` | opus | Hypothesis-driven debugging |
+| developer | development | `/nx:implement` | sonnet | TDD implementation, test-first methodology |
+| knowledge-tidier | knowledge-tidying | `/nx:knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
+| orchestrator | orchestration | `/nx:orchestrate` | haiku | Route requests to appropriate agents |
+| pdf-chromadb-processor | pdf-processing | `/nx:pdf-process` | haiku | Index PDFs into nx store for semantic search |
+| plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution |
+| plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with audit findings and execution context |
+| strategic-planner | strategic-planning | `/nx:create-plan` | opus | Implementation planning, task decomposition |
+| test-validator | test-validation | `/nx:test-validate` | sonnet | Test coverage and quality validation |
 
 ## Standard Pipelines
 
@@ -191,23 +191,23 @@ Defined in `registry.yaml`:
 ## Slash Commands
 
 **Agent commands** (`/command → agent`):
-- `/research` → deep-research-synthesizer
-- `/create-plan` → strategic-planner
-- `/plan-audit` → plan-auditor
-- `/analyze-code` → codebase-deep-analyzer
-- `/review-code` → code-review-expert
-- `/test-validate` → test-validator
-- `/implement` → developer
-- `/debug` → debugger
-- `/architecture` → architect-planner
-- `/orchestrate` → orchestrator
-- `/knowledge-tidy` → knowledge-tidier
-- `/pdf-process` → pdf-chromadb-processor
-- `/deep-analysis` → deep-analyst
-- `/substantive-critique` → substantive-critic
-- `/enrich-plan` → plan-enricher
+- `/nx:research` → deep-research-synthesizer
+- `/nx:create-plan` → strategic-planner
+- `/nx:plan-audit` → plan-auditor
+- `/nx:analyze-code` → codebase-deep-analyzer
+- `/nx:review-code` → code-review-expert
+- `/nx:test-validate` → test-validator
+- `/nx:implement` → developer
+- `/nx:debug` → debugger
+- `/nx:architecture` → architect-planner
+- `/nx:orchestrate` → orchestrator
+- `/nx:knowledge-tidy` → knowledge-tidier
+- `/nx:pdf-process` → pdf-chromadb-processor
+- `/nx:deep-analysis` → deep-analyst
+- `/nx:substantive-critique` → substantive-critic
+- `/nx:enrich-plan` → plan-enricher
 
-**RDR commands**: `/rdr-create`, `/rdr-list`, `/rdr-show`, `/rdr-research`, `/rdr-gate`, `/rdr-accept`, `/rdr-close`
+**RDR commands**: `/nx:rdr-create`, `/nx:rdr-list`, `/nx:rdr-show`, `/nx:rdr-research`, `/nx:rdr-gate`, `/nx:rdr-accept`, `/nx:rdr-close`
 
 
 ## MCP Servers

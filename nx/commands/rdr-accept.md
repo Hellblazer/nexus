@@ -110,7 +110,7 @@ if not rdr_path.exists():
 id_match = re.search(r'\d+', args)
 
 if not id_match:
-    print("> **Usage**: `/rdr-accept <id>` — e.g. `/rdr-accept 003` or `/rdr-accept RDR-003`")
+    print("> **Usage**: `/nx:rdr-accept <id>` — e.g. `/nx:rdr-accept 003` or `/nx:rdr-accept RDR-003`")
     print()
     rdrs = get_all_rdrs(rdr_path)
     draft_rdrs = [r for r in rdrs if r['status'].lower() == 'draft']
@@ -169,7 +169,7 @@ elif t2_status == 'accepted' and current_status.lower() != 'accepted':
 # Check T2 gate result
 print("### T2 Gate Result")
 print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}-gate-latest\" to retrieve gate result.")
-print(f"If no gate record exists, run `/rdr-gate {t2_key}` first.")
+print(f"If no gate record exists, run `/nx:rdr-gate {t2_key}` first.")
 print()
 
 # T2 metadata (for context)

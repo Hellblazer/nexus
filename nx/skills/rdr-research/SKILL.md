@@ -10,7 +10,7 @@ Optionally delegates to **deep-research-synthesizer** (sonnet) for evidence gath
 ## When This Skill Activates
 
 - User says "add research finding", "update RDR research", "verify assumption"
-- User invokes `/rdr-research`
+- User invokes `/nx:rdr-research`
 - User wants to record or classify a discovery during RDR planning
 
 ## Path Detection
@@ -19,7 +19,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 ## Subcommands
 
-### `/rdr-research add <id>`
+### `/nx:rdr-research add <id>`
 
 **Inputs** (prompt the user):
 1. **Finding text**: What was discovered
@@ -40,7 +40,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
      *Source: source description*
    ```
 
-### `/rdr-research status <id>`
+### `/nx:rdr-research status <id>`
 
 1. List T2 entries: Use memory_get tool: project="{repo}_rdr", title=""
 2. Filter titles matching `NNN-research-*`
@@ -54,7 +54,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
      - [seq 6] "Latency under 100ms" (docs only)
    ```
 
-### `/rdr-research verify <id> <finding-seq>`
+### `/nx:rdr-research verify <id> <finding-seq>`
 
 1. Read T2 record: Use memory_get tool: project="{repo}_rdr", title="NNN-research-{seq}"
 2. Prompt for new classification (verified or documented) and updated verification method

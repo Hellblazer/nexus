@@ -8,7 +8,7 @@ description: Use when needing detailed information about a specific RDR includin
 ## When This Skill Activates
 
 - User says "show RDR 003", "RDR details", "what's in RDR 5"
-- User invokes `/rdr-show`
+- User invokes `/nx:rdr-show`
 - User asks about a specific RDR's content or status
 
 ## Behavior
@@ -45,7 +45,7 @@ description: Use when needing detailed information about a specific RDR includin
 (not closed yet)
 ```
 
-7. If the RDR ID is not found, list available RDRs (delegate to `/rdr-list` behavior).
+7. If the RDR ID is not found, list available RDRs (delegate to `/nx:rdr-list` behavior).
 
 ## Success Criteria
 
@@ -53,7 +53,7 @@ description: Use when needing detailed information about a specific RDR includin
 - [ ] Research findings summarized by classification (Verified, Documented, Assumed)
 - [ ] Linked beads shown with status (if `epic_bead` is set in T2)
 - [ ] Supersedes/Superseded-by relationships displayed
-- [ ] Fallback to `/rdr-list` behavior if RDR ID not found
+- [ ] Fallback to `/nx:rdr-list` behavior if RDR ID not found
 
 ## Agent-Specific PRODUCE
 

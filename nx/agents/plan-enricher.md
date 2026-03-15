@@ -8,8 +8,8 @@ color: emerald
 
 ## Usage Examples
 
-- **RDR Planning Chain**: Receives relay from plan-auditor after `/rdr-accept` dispatches planning → enriches every bead with audit findings, file paths, and execution context
-- **Standalone Same-Session**: User runs `/plan-audit` then `/enrich-plan` manually → reads T1 scratch for audit context and enriches beads
+- **RDR Planning Chain**: Receives relay from plan-auditor after `/nx:rdr-accept` dispatches planning → enriches every bead with audit findings, file paths, and execution context
+- **Standalone Same-Session**: User runs `/nx:plan-audit` then `/nx:enrich-plan` manually → reads T1 scratch for audit context and enriches beads
 - **Degraded Mode**: T1 has no audit findings → warns user and proceeds with context-only enrichment (codebase search, file paths, line numbers)
 
 ---

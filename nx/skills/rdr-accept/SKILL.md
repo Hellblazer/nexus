@@ -10,7 +10,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 ## When This Skill Activates
 
 - User says "accept this RDR", "mark as accepted", "approve the RDR"
-- User invokes `/rdr-accept`
+- User invokes `/nx:rdr-accept`
 - Gate returns PASSED and user confirms acceptance
 
 ## Input

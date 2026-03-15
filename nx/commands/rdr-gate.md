@@ -111,7 +111,7 @@ if not rdr_path.exists():
 id_match = re.search(r'\d+', args)
 
 if not id_match:
-    print("> **Usage**: `/rdr-gate <id>` — e.g. `/rdr-gate 003` or `/rdr-gate RDR-003`")
+    print("> **Usage**: `/nx:rdr-gate <id>` — e.g. `/nx:rdr-gate 003` or `/nx:rdr-gate RDR-003`")
     print()
     rdrs = get_all_rdrs(rdr_path)
     print("### Available RDRs")
@@ -174,7 +174,7 @@ print()
 # T2 research findings
 print("### T2 Research Findings")
 print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"\" to list all entries, then filter for {t2_key}-research* titles.")
-print(f"If no research findings exist, run `/rdr-research add {t2_key}` to record findings before gating.")
+print(f"If no research findings exist, run `/nx:rdr-research add {t2_key}` to record findings before gating.")
 print(f"Use `--skip-research` in your gate command to override.")
 PYEOF
 }
@@ -204,5 +204,5 @@ All data is pre-loaded above — no additional tool calls needed.
   summary: "One-sentence summary of gate result"
   ```
   This overwrites any previous gate result for this RDR, so only the latest gate run is stored.
-- **If PASSED**, print: `> Run '/rdr-accept <id>' to accept this RDR.`
+- **If PASSED**, print: `> Run '/nx:rdr-accept <id>' to accept this RDR.`
 - If no ID given, show the available RDR table above and prompt for an ID.

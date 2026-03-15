@@ -11,8 +11,8 @@ Delegates to the **plan-enricher** agent (sonnet). See [registry.yaml](../../reg
 
 - After plan-auditor completes in RDR planning chain (automatic relay)
 - User says "enrich beads", "groom plan", "enrich plan"
-- User invokes `/enrich-plan`
-- After `/plan-audit` when beads need audit findings folded in
+- User invokes `/nx:enrich-plan`
+- After `/nx:plan-audit` when beads need audit findings folded in
 
 ## Agent Invocation
 
@@ -25,7 +25,7 @@ Use the Task tool to invoke **plan-enricher**:
 **Bead**: [epic bead ID] or 'none'
 
 ### Input Artifacts
-- nx scratch: audit findings, plan structure, bead IDs (from same-session /plan-audit)
+- nx scratch: audit findings, plan structure, bead IDs (from same-session /nx:plan-audit)
 - Files: [RDR file path if known]
 
 ### Deliverable
@@ -41,7 +41,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Session Scope Note
 
-T1 scratch is session-scoped. Standalone invocation only works within the same session where `/plan-audit` ran. Cross-session use requires re-running `/plan-audit` first to populate T1 with audit findings.
+T1 scratch is session-scoped. Standalone invocation only works within the same session where `/nx:plan-audit` ran. Cross-session use requires re-running `/nx:plan-audit` first to populate T1 with audit findings.
 
 ## Agent-Specific PRODUCE
 

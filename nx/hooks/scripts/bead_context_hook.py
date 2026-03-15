@@ -37,7 +37,7 @@ def main():
         messages.append(
             f"Bead references {rdr_list}. "
             f"Verify RDR status before implementation: "
-            f"/rdr-show {rdr_refs[0]}"
+            f"/nx:rdr-show {rdr_refs[0]}"
         )
 
     if messages:

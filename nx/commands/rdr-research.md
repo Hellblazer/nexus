@@ -181,7 +181,7 @@ else:
     else:
         print(f"No RDRs found in `{rdr_dir}`")
     print()
-    print("> **Usage**: `/rdr-research <id>` or `/rdr-research add <id>` or `/rdr-research verify <id> <seq>`")
+    print("> **Usage**: `/nx:rdr-research <id>` or `/nx:rdr-research add <id>` or `/nx:rdr-research verify <id> <seq>`")
 PYEOF
 }
 
