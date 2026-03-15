@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-03-15
+
+Plugin version aligned with Nexus CLI 2.1.0. Local T3 backend (RDR-038) enables zero-config semantic search — agents and MCP tools work with local embeddings when no cloud credentials are configured. No plugin-level API changes.
+
 ## [2.0.0] - 2026-03-14
 
 Plugin version aligned with Nexus CLI 2.0.0. T3 backend consolidated from 4 databases to 1 (RDR-037). No plugin-level API changes — agents and skills work unchanged.

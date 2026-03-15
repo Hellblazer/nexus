@@ -29,7 +29,8 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     └── Storage tiers
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
           T2: SQLite + FTS5 (persistent memory, project context)
-          T3: ChromaDB Cloud (single database) + Voyage AI (permanent knowledge)
+          T3: ChromaDB PersistentClient + ONNX (local, zero-config)
+              OR ChromaDB Cloud + Voyage AI (cloud, higher quality)
                 code__*       voyage-code-3 index / voyage-4 query
                 docs__*       voyage-context-3 (CCE) index + query
                 rdr__*        voyage-context-3 (CCE) index + query

@@ -6,6 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-03-15
+
+### Added
+- **Local T3 backend** (RDR-038) — zero-config semantic search using ChromaDB
+  `PersistentClient` + bundled ONNX MiniLM embeddings. `pip install conexus &&
+  nx index repo . && nx search "query"` works with no API keys.
+- `is_local_mode()` auto-detection: activates local mode when cloud credentials
+  are absent. Force with `NX_LOCAL=1` or `NX_LOCAL=0`.
+- `LocalEmbeddingFunction` with two tiers: tier 0 (bundled all-MiniLM-L6-v2,
+  384d) and tier 1 (fastembed bge-base-en-v1.5, 768d via `pip install conexus[local]`).
+- `NX_LOCAL_CHROMA_PATH` env var to override local ChromaDB storage path
+  (default: `~/.local/share/nexus/chroma`).
+- `nx doctor` shows local mode health checks: path, embedding model, collection
+  count, disk usage. Cloud checks skipped in local mode.
+- `[local]` optional dependency group: `pip install conexus[local]` for better
+  embedding quality via fastembed.
+- `sqlite3.OperationalError('database is locked')` added to retryable errors
+  for PersistentClient concurrent write handling.
+- Indexer pipeline local mode: `embed_fn` injection in `IndexContext`, local
+  embedding in code/prose/PDF indexers.
+- Search reranker skipped in local mode (no Voyage AI reranker available).
+- `memory promote` uses `make_t3()` — works seamlessly in both local and cloud mode.
+
+### Changed
+- `T3Database.__init__` accepts `local_mode` and `local_path` parameters
+  (first branch, before cloud probe).
+- `make_t3()` returns local or cloud T3Database based on `is_local_mode()`.
+- `store.py` `_t3()` skips cloud credential checks in local mode.
+- MAX_QUERY_RESULTS clamping and CCE embedding paths gated on `_local_mode`.
+
+### Docs
+- `getting-started.md`: local-first zero-config section before cloud setup.
+- `configuration.md`: local mode config reference (NX_LOCAL, NX_LOCAL_CHROMA_PATH).
+- `storage-tiers.md`: local vs cloud T3 comparison table with tier details.
+- `architecture.md`: updated T3 description for local/cloud backends.
+- `README.md`: updated Quick Start and tier table for zero-config local mode.
+- `CLAUDE.md`: updated T3 description and source layout for `local_ef.py`.
+
 ## [2.0.0] - 2026-03-14
 
 ### Breaking Changes

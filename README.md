@@ -33,12 +33,11 @@ nx store put --collection knowledge__myapp "API rate limit is 10k/min per the ve
 
 ```bash
 uv tool install conexus          # install the nx CLI
-nx config init                   # set up API keys
-nx doctor                        # verify everything works
-
-nx index repo .                  # index your repo
-nx search "what does X do"       # search it
+nx index repo .                  # index your repo (works immediately — no API keys needed)
+nx search "what does X do"       # semantic search, fully local
 ```
+
+Local mode uses bundled ONNX embeddings — zero configuration required. For higher-quality cloud embeddings, run `nx config init` to set up API keys. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
 
 For Claude Code, also install the plugin (see [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/nx/README.md)):
 
@@ -47,7 +46,7 @@ For Claude Code, also install the plugin (see [plugin documentation](https://git
 /plugin install nx@nexus-plugins
 ```
 
-Scratch (`nx scratch`) and memory (`nx memory`) work with **zero API keys** — fully local. Semantic search requires [ChromaDB](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) accounts (free tiers available). See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
+All three tiers work with **zero API keys** — including semantic search, which uses local ONNX embeddings by default. For higher-quality embeddings, optionally configure [ChromaDB Cloud](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) (free tiers available). See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
 
 ## Three tiers, one lifecycle
 
@@ -57,7 +56,7 @@ Different information has different lifetimes. Together the three tiers form an 
 |------|---------|---------|-----------|
 | **Scratch** (T1) | Inter-agent session context — coordination and knowledge sharing across agent invocations | In-memory ChromaDB | No |
 | **Memory** (T2) | Project-level persistence with full-text search | Local SQLite + FTS5 | No |
-| **Knowledge** (T3) | Permanent semantic knowledge — code, papers, docs, decisions searchable by meaning | ChromaDB cloud + Voyage AI | Yes (free tier) |
+| **Knowledge** (T3) | Permanent semantic knowledge — code, papers, docs, decisions searchable by meaning | Local ChromaDB (default) or ChromaDB Cloud + Voyage AI | No (local) / Yes (cloud) |
 
 Agents use all three tiers cooperatively. T1 enables inter-agent communication — sharing findings and preventing duplicate work within a session. T2 provides project decisions that constrain solutions. T3 surfaces how similar problems were resolved in other contexts. As the T3 knowledge base grows, it becomes the project's institutional memory — managing the information overload that accompanies complex designs and long-lived codebases.
 
