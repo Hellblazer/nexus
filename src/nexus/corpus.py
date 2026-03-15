@@ -42,42 +42,38 @@ def validate_collection_name(name: str) -> None:
         )
 
 
-def _local_model_name() -> str:
-    """Return the active local embedding model name (cached)."""
-    from nexus.db.local_ef import LocalEmbeddingFunction
-    return LocalEmbeddingFunction().model_name
-
-
 def embedding_model_for_collection(collection_name: str) -> str:
-    """Return the model used at QUERY time for a T3 collection.
+    """Return the Voyage AI model used at QUERY time for a T3 collection.
 
-    In local mode, all collections use the same local embedding model.
+    CCE collections (docs__, knowledge__, rdr__) must use voyage-context-3
+    at query time via contextualized_embed() — voyage-4 and voyage-context-3
+    are incompatible vector spaces (cosine similarity ≈ 0.05, i.e. random noise).
 
-    In cloud mode:
-    - CCE collections (docs__, knowledge__, rdr__) use voyage-context-3
-    - All other collections use voyage-4
+    code__ collections are indexed with voyage-code-3 but queried with voyage-4 —
+    the semantic spaces are compatible enough for effective retrieval.
+
+    All other collections use voyage-4.
+
+    Note: in local mode, callers bypass this function and use
+    ``LocalEmbeddingFunction().model_name`` directly.
     """
-    from nexus.config import is_local_mode
-    if is_local_mode():
-        return _local_model_name()
     if collection_name.startswith(("docs__", "knowledge__", "rdr__")):
         return "voyage-context-3"
     return "voyage-4"
 
 
 def index_model_for_collection(collection_name: str) -> str:
-    """Return the model used at INDEX time for a T3 collection.
+    """Return the Voyage AI model used at INDEX time for a T3 collection.
 
-    In local mode, all collections use the same local embedding model.
+    code__      → voyage-code-3    (code-optimised index; voyage-4 at query time)
+    docs__      → voyage-context-3 (CCE for richer cross-chunk context)
+    knowledge__ → voyage-context-3 (CCE for richer cross-chunk context)
+    rdr__       → voyage-context-3 (CCE for RDR decision documents)
+    all others  → voyage-4         (standard embedding)
 
-    In cloud mode:
-    - code__      → voyage-code-3
-    - docs__, knowledge__, rdr__ → voyage-context-3 (CCE)
-    - all others  → voyage-4
+    Note: in local mode, callers bypass this function and use
+    ``LocalEmbeddingFunction().model_name`` directly.
     """
-    from nexus.config import is_local_mode
-    if is_local_mode():
-        return _local_model_name()
     if collection_name.startswith("code__"):
         return "voyage-code-3"
     if collection_name.startswith(("docs__", "knowledge__", "rdr__")):

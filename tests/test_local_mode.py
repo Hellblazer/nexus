@@ -437,32 +437,21 @@ class TestLocalCollectionLifecycle:
 
 
 class TestCorpusLocalModels:
-    """corpus.py returns local model names in local mode."""
+    """In local mode, indexer uses LocalEmbeddingFunction model name directly.
 
-    def test_index_model_returns_local_name(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """index_model_for_collection returns local model in local mode."""
-        monkeypatch.setenv("NX_LOCAL", "1")
-        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path))
-        from nexus.corpus import index_model_for_collection
+    corpus.py model functions always return cloud model names (pure functions).
+    Local mode callers bypass corpus.py and use LocalEmbeddingFunction().model_name.
+    """
+
+    def test_local_ef_model_name_consistent(self) -> None:
+        """LocalEmbeddingFunction model name is stable and non-empty."""
         from nexus.db.local_ef import LocalEmbeddingFunction
-        expected = LocalEmbeddingFunction().model_name
-        assert index_model_for_collection("code__test") == expected
-        assert index_model_for_collection("docs__test") == expected
-        assert index_model_for_collection("knowledge__test") == expected
+        ef = LocalEmbeddingFunction()
+        assert ef.model_name
+        assert isinstance(ef.model_name, str)
 
-    def test_embedding_model_returns_local_name(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """embedding_model_for_collection returns local model in local mode."""
-        monkeypatch.setenv("NX_LOCAL", "1")
-        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path))
-        from nexus.corpus import embedding_model_for_collection
-        from nexus.db.local_ef import LocalEmbeddingFunction
-        expected = LocalEmbeddingFunction().model_name
-        assert embedding_model_for_collection("code__test") == expected
-        assert embedding_model_for_collection("docs__test") == expected
-
-    def test_cloud_model_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Cloud mode model names are unchanged."""
-        monkeypatch.setenv("NX_LOCAL", "0")
+    def test_corpus_functions_always_return_cloud_names(self) -> None:
+        """corpus.py model functions are pure — always return cloud model names."""
         from nexus.corpus import index_model_for_collection, embedding_model_for_collection
         assert index_model_for_collection("code__test") == "voyage-code-3"
         assert index_model_for_collection("docs__test") == "voyage-context-3"

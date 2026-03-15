@@ -156,9 +156,10 @@ def test_promote_cmd_no_credentials_raises(runner: CliRunner, mem_home: Path, db
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
         with patch("nexus.commands.memory.get_credential", return_value=""):
-            result = runner.invoke(
-                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
-            )
+            with patch("nexus.config.is_local_mode", return_value=False):
+                result = runner.invoke(
+                    main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
+                )
 
     assert result.exit_code != 0
     assert "not set" in result.output.lower() or "config init" in result.output.lower()
@@ -261,9 +262,10 @@ def test_promote_cmd_missing_database_raises(runner: CliRunner, mem_home: Path, 
 
     with patch("nexus.commands.memory.T2Database", return_value=db):
         with patch("nexus.commands.memory.get_credential", side_effect=cred_side_effect):
-            result = runner.invoke(
-                main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
-            )
+            with patch("nexus.config.is_local_mode", return_value=False):
+                result = runner.invoke(
+                    main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"]
+                )
 
     assert result.exit_code != 0
     assert "chroma_database" in result.output
