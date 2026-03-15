@@ -38,19 +38,40 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 ## T3 -- Permanent Knowledge
 
+T3 has two backends: **local** (zero-config) and **cloud** (higher quality).
+
+### Local backend (default when no cloud credentials)
+
+Backed by `chromadb.PersistentClient` with local ONNX embeddings. No API keys or network required. Data stored at `~/.local/share/nexus/chroma`.
+
+| | Tier 0 (bundled) | Tier 1 (`pip install conexus[local]`) |
+|---|---|---|
+| Model | all-MiniLM-L6-v2 | bge-base-en-v1.5 |
+| Dimensions | 384 | 768 |
+| Quality | Basic semantic matching | Better code & prose retrieval |
+| Install | Included | `pip install conexus[local]` |
+
+All collection types use the same local model (no per-prefix splitting). Reranking is unavailable in local mode.
+
+### Cloud backend
+
 Backed by a single `chromadb.CloudClient` with `VoyageAIEmbeddingFunction`. Requires `CHROMA_API_KEY`, `CHROMA_DATABASE`, and `VOYAGE_API_KEY`. `CHROMA_TENANT` is optional — the CloudClient infers the tenant UUID from your API key.
 
 All collections coexist in one ChromaDB Cloud database (`CHROMA_DATABASE` value, e.g. `nexus`). The database is provisioned automatically by `nx config init`. Run `nx doctor` to verify connectivity.
 
+### Collections
+
 Collections are namespaced by corpus type using `__` (double underscore) as separator:
 
-| Pattern | Contents | Index model | Query model |
-|---------|----------|-------------|-------------|
+| Pattern | Contents | Cloud index model | Cloud query model |
+|---------|----------|-------------------|-------------------|
 | `code__<repo>-<hash>` | Indexed source code | voyage-code-3 | voyage-4 |
 | `docs__<repo>-<hash>` | Indexed prose files | voyage-context-3 (CCE) | voyage-4 |
 | `rdr__<repo>-<hash>` | Indexed RDR documents | voyage-context-3 (CCE) | voyage-4 |
 | `docs__<corpus>` | Indexed PDFs and markdown | voyage-context-3 (CCE) | voyage-4 |
 | `knowledge__<topic>` | Stored agent outputs and notes | voyage-context-3 | voyage-4 |
+
+In local mode, all collections use the active local model for both index and query.
 
 **TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.
 
