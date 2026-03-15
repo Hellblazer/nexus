@@ -22,6 +22,7 @@ def test_doctor_all_healthy() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-fake-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -41,6 +42,7 @@ def test_doctor_missing_credentials_exit_1() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value=None),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -67,6 +69,7 @@ def test_doctor_missing_rg() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -88,6 +91,7 @@ def test_doctor_hooks_section_present() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -105,6 +109,7 @@ def test_doctor_hooks_no_repos_registered() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -131,7 +136,8 @@ def test_doctor_hooks_installed() -> None:
             (hooks_dir / name).write_text(f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
 
         with (
-            patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+            patch("nexus.config.is_local_mode", return_value=False),
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
             patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
             patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
             patch("nexus.commands.doctor._effective_hooks_dir", return_value=hooks_dir),
@@ -155,7 +161,8 @@ def test_doctor_hooks_not_installed() -> None:
         hooks_dir = Path(td)  # empty — no hook files
 
         with (
-            patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+            patch("nexus.config.is_local_mode", return_value=False),
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
             patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
             patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
             patch("nexus.commands.doctor._effective_hooks_dir", return_value=hooks_dir),
@@ -179,7 +186,8 @@ def test_doctor_hooks_check_always_nonfatal() -> None:
         hooks_dir = Path(td)  # empty — no hook files
 
         with (
-            patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+            patch("nexus.config.is_local_mode", return_value=False),
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
             patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
             patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
             patch("nexus.commands.doctor._effective_hooks_dir", return_value=hooks_dir),
@@ -199,6 +207,7 @@ def test_doctor_hooks_exception_does_not_propagate() -> None:
     mock_reg.all.return_value = ["/some/repo"]
 
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -221,6 +230,7 @@ def test_doctor_index_log_shows_path() -> None:
     mock_reg.all.return_value = []
 
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -246,7 +256,8 @@ def test_doctor_index_log_not_created_yet() -> None:
         # Do not create index.log — it should not exist
 
         with (
-            patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
+            patch("nexus.config.is_local_mode", return_value=False),
+        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
             patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
             patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
             patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
@@ -267,6 +278,7 @@ def test_doctor_does_not_mention_serve_start() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -290,6 +302,7 @@ def test_doctor_partial_credentials() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", side_effect=cred_side_effect),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -315,6 +328,7 @@ def test_doctor_python_version_shown() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -333,6 +347,7 @@ def test_doctor_python_version_too_old_fails() -> None:
     mock_reg.all.return_value = []
     with (
         patch("nexus.commands.doctor._python_ok", return_value=(False, "3.11.0")),
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -354,6 +369,7 @@ def test_doctor_missing_credential_shows_inline_fix() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value=None),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -373,6 +389,7 @@ def test_doctor_missing_rg_shows_platform_hints() -> None:
     mock_reg.all.return_value = []
 
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value=None),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -404,6 +421,7 @@ def test_doctor_single_db_calls_cloud_client() -> None:
         return mock_client
 
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -422,6 +440,7 @@ def test_doctor_single_db_unreachable_fails_with_fix_hint() -> None:
     mock_reg.all.return_value = []
 
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -442,6 +461,7 @@ def test_doctor_single_db_error_does_not_expose_exception_text() -> None:
     mock_reg.all.return_value = []
 
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -468,6 +488,7 @@ def test_doctor_missing_bd_does_not_fail() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -493,6 +514,7 @@ def test_doctor_missing_uv_does_not_fail() -> None:
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -511,3 +533,54 @@ def test_check_helper_format() -> None:
     assert "✓" in _check("Test", True)
     assert "✗" in _check("Test", False)
     assert "some detail" in _check("Test", True, "some detail")
+
+
+# ── Local mode ───────────────────────────────────────────────────────────────
+
+def test_doctor_local_mode_shows_local_checks(tmp_path: Path) -> None:
+    """In local mode, doctor shows local path, embedding model, and skips cloud checks."""
+    runner = _runner()
+    mock_reg = MagicMock()
+    mock_reg.all.return_value = []
+
+    with (
+        patch("nexus.config.is_local_mode", return_value=True),
+        patch("nexus.config._default_local_path", return_value=tmp_path / "chroma"),
+        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
+        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
+    ):
+        result = runner.invoke(main, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "local" in result.output.lower()
+    assert "Embedding model" in result.output
+    assert "CHROMA_API_KEY" not in result.output
+    assert "VOYAGE_API_KEY" not in result.output
+
+
+def test_doctor_local_mode_shows_collection_count(tmp_path: Path) -> None:
+    """In local mode with existing data, doctor shows collection count and disk usage."""
+    runner = _runner()
+    mock_reg = MagicMock()
+    mock_reg.all.return_value = []
+
+    # Create a local chroma dir with some data
+    chroma_path = tmp_path / "chroma"
+    import chromadb
+    from nexus.db.local_ef import LocalEmbeddingFunction
+    ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    client = chromadb.PersistentClient(path=str(chroma_path))
+    col = client.get_or_create_collection("knowledge__test", embedding_function=ef)
+    col.add(ids=["doc1"], documents=["test content"])
+
+    with (
+        patch("nexus.config.is_local_mode", return_value=True),
+        patch("nexus.config._default_local_path", return_value=chroma_path),
+        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
+        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
+    ):
+        result = runner.invoke(main, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "1 collections" in result.output
+    assert "on disk" in result.output

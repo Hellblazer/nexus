@@ -201,105 +201,157 @@ def doctor_cmd() -> None:
              "brew install python@3.12         (macOS)",
              "apt install python3.12           (Ubuntu/Debian)")
 
-    # ── CHROMA_API_KEY ────────────────────────────────────────────────────────
-    chroma_key = get_credential("chroma_api_key")
-    lines.append(_check_line("ChromaDB  (CHROMA_API_KEY)",  bool(chroma_key),
-                              "set" if chroma_key else "not set"))
-    if not chroma_key:
-        failed = True
-        _fix(lines,
-             "nx config init                           (interactive wizard)",
-             "nx config set chroma_api_key <your-key>  (set individually)",
-             "Get key: https://trychroma.com  →  Cloud  →  API Keys")
+    # ── T3 mode detection ────────────────────────────────────────────────────
+    from nexus.config import is_local_mode, _default_local_path
+    _local = is_local_mode()
 
-    # ── CHROMA_TENANT (optional — inferred from API key if not set) ──────────
-    chroma_tenant = get_credential("chroma_tenant")
-    lines.append(_check_line("ChromaDB  (CHROMA_TENANT)",
-                              True,
-                              chroma_tenant if chroma_tenant
-                              else "not set (auto-inferred from API key — set explicitly only for multi-workspace)"))
+    if _local:
+        # ── Local mode checks ────────────────────────────────────────────
+        lines.append(_check_line("T3 mode", True, "local (no API keys needed)"))
 
-    # ── CHROMA_DATABASE ───────────────────────────────────────────────────────
-    chroma_database = get_credential("chroma_database")
-    lines.append(_check_line("ChromaDB  (CHROMA_DATABASE)", bool(chroma_database),
-                              chroma_database if chroma_database else "not set"))
-    if not chroma_database:
-        failed = True
-        _fix(lines,
-             "nx config init                           (interactive wizard, also provisions database)",
-             "nx config set chroma_database <name>",
-             "e.g. nx config set chroma_database nexus")
+        # Local ChromaDB path
+        local_path = _default_local_path()
+        path_exists = local_path.exists()
+        if path_exists:
+            # Check writable
+            try:
+                test_file = local_path / ".doctor_test"
+                test_file.touch()
+                test_file.unlink()
+                lines.append(_check_line("Local ChromaDB path", True, str(local_path)))
+            except OSError:
+                failed = True
+                lines.append(_check_line("Local ChromaDB path", False, f"{local_path} — not writable"))
+                _fix(lines, f"Check permissions on {local_path}")
+        else:
+            lines.append(_check_line("Local ChromaDB path", True, f"{local_path} (will be created on first index)"))
 
-    # ── ChromaDB database reachability ────────────────────────────────────────
-    if chroma_key and chroma_database:
-        try:
-            chromadb.CloudClient(
-                tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
-            )
-            lines.append(_check_line(f"ChromaDB  ({chroma_database})", True, "reachable"))
-        except Exception as exc:
-            failed = True
-            _log.debug("db_not_reachable", db_name=chroma_database, error=str(exc))
-            lines.append(_check_line(f"ChromaDB  ({chroma_database})", False, "not reachable"))
-            _fix(lines,
-                 "Run 'nx config init' to provision the database automatically.",
-                 f"Or create '{chroma_database}' manually in the ChromaDB Cloud dashboard.")
-        # Warn if old four-database layout is still present
-        try:
-            chromadb.CloudClient(
-                tenant=chroma_tenant or None, database=f"{chroma_database}_code", api_key=chroma_key
-            )
-            lines.append(_check_line(f"ChromaDB  ({chroma_database}_code)", False,
-                                     "old layout detected — migrate and set NX_MIGRATED=1"))
-        except Exception:
-            pass  # Old layout absent — expected
+        # Embedding model
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        ef = LocalEmbeddingFunction()
+        lines.append(_check_line("Embedding model", True, f"{ef.model_name} ({ef.dimensions}d)"))
+        if ef.model_name == "all-MiniLM-L6-v2":
+            _fix(lines, "Upgrade: pip install conexus[local]  (768d bge-base, better quality)")
 
-    # ── VOYAGE_API_KEY ────────────────────────────────────────────────────────
-    voyage_key = get_credential("voyage_api_key")
-    lines.append(_check_line("Voyage AI (VOYAGE_API_KEY)",  bool(voyage_key),
-                              "set" if voyage_key else "not set"))
-    if not voyage_key:
-        failed = True
-        _fix(lines,
-             "nx config init                           (interactive wizard)",
-             "nx config set voyage_api_key <your-key>  (set individually)",
-             "Get key: https://voyageai.com  →  Dashboard  →  API Keys")
-
-    # ── Pipeline version check ───────────────────────────────────────────────
-    if chroma_key and chroma_database and voyage_key:
-        from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
-
-        stale_count = 0
-        try:
-            client = chromadb.CloudClient(
-                tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
-            )
-            cols = client.list_collections()
-            for col in cols:
-                stored = get_collection_pipeline_version(col)
-                if stored is None:
-                    lines.append(_check_line(
-                        f"pipeline ({col.name})", True,
-                        "no version stamp (index with --force to stamp)",
-                    ))
-                elif stored != PIPELINE_VERSION:
-                    stale_count += 1
-                    lines.append(_check_line(
-                        f"pipeline ({col.name})", False,
-                        f"v{stored} (current: v{PIPELINE_VERSION})",
-                    ))
+        # Collection count and disk usage
+        if path_exists:
+            try:
+                client = chromadb.PersistentClient(path=str(local_path))
+                cols = client.list_collections()
+                col_count = len(cols)
+                # Disk usage
+                total_bytes = sum(f.stat().st_size for f in local_path.rglob("*") if f.is_file())
+                if total_bytes < 1024 * 1024:
+                    size_str = f"{total_bytes / 1024:.1f} KB"
                 else:
-                    lines.append(_check_line(
-                        f"pipeline ({col.name})", True, f"v{stored}",
-                    ))
-        except Exception as exc:
-            _log.debug("doctor_pipeline_check_failed", db=chroma_database, error=str(exc))
-            lines.append(_check_line(f"pipeline ({chroma_database})", False, "check failed"))
-        if stale_count:
+                    size_str = f"{total_bytes / (1024 * 1024):.1f} MB"
+                lines.append(_check_line("Local collections", True, f"{col_count} collections, {size_str} on disk"))
+            except Exception as exc:
+                _log.debug("doctor_local_collections_failed", error=str(exc))
+                lines.append(_check_line("Local collections", True, "could not query"))
+    else:
+        # ── Cloud mode checks ────────────────────────────────────────────
+        lines.append(_check_line("T3 mode", True, "cloud"))
+
+        # CHROMA_API_KEY
+        chroma_key = get_credential("chroma_api_key")
+        lines.append(_check_line("ChromaDB  (CHROMA_API_KEY)",  bool(chroma_key),
+                                  "set" if chroma_key else "not set"))
+        if not chroma_key:
             failed = True
             _fix(lines,
-                 "nx index repo <path> --force-stale  (re-index outdated collections)",
-                 "nx index repo <path> --force        (re-index all collections)")
+                 "nx config init                           (interactive wizard)",
+                 "nx config set chroma_api_key <your-key>  (set individually)",
+                 "Get key: https://trychroma.com  →  Cloud  →  API Keys")
+
+        # CHROMA_TENANT (optional)
+        chroma_tenant = get_credential("chroma_tenant")
+        lines.append(_check_line("ChromaDB  (CHROMA_TENANT)",
+                                  True,
+                                  chroma_tenant if chroma_tenant
+                                  else "not set (auto-inferred from API key — set explicitly only for multi-workspace)"))
+
+        # CHROMA_DATABASE
+        chroma_database = get_credential("chroma_database")
+        lines.append(_check_line("ChromaDB  (CHROMA_DATABASE)", bool(chroma_database),
+                                  chroma_database if chroma_database else "not set"))
+        if not chroma_database:
+            failed = True
+            _fix(lines,
+                 "nx config init                           (interactive wizard, also provisions database)",
+                 "nx config set chroma_database <name>",
+                 "e.g. nx config set chroma_database nexus")
+
+        # ChromaDB reachability
+        if chroma_key and chroma_database:
+            try:
+                chromadb.CloudClient(
+                    tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
+                )
+                lines.append(_check_line(f"ChromaDB  ({chroma_database})", True, "reachable"))
+            except Exception as exc:
+                failed = True
+                _log.debug("db_not_reachable", db_name=chroma_database, error=str(exc))
+                lines.append(_check_line(f"ChromaDB  ({chroma_database})", False, "not reachable"))
+                _fix(lines,
+                     "Run 'nx config init' to provision the database automatically.",
+                     f"Or create '{chroma_database}' manually in the ChromaDB Cloud dashboard.")
+            # Old layout warning
+            try:
+                chromadb.CloudClient(
+                    tenant=chroma_tenant or None, database=f"{chroma_database}_code", api_key=chroma_key
+                )
+                lines.append(_check_line(f"ChromaDB  ({chroma_database}_code)", False,
+                                         "old layout detected — migrate and set NX_MIGRATED=1"))
+            except Exception:
+                pass
+
+        # VOYAGE_API_KEY
+        voyage_key = get_credential("voyage_api_key")
+        lines.append(_check_line("Voyage AI (VOYAGE_API_KEY)",  bool(voyage_key),
+                                  "set" if voyage_key else "not set"))
+        if not voyage_key:
+            failed = True
+            _fix(lines,
+                 "nx config init                           (interactive wizard)",
+                 "nx config set voyage_api_key <your-key>  (set individually)",
+                 "Get key: https://voyageai.com  →  Dashboard  →  API Keys")
+
+        # Pipeline version check
+        if chroma_key and chroma_database and voyage_key:
+            from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
+
+            stale_count = 0
+            try:
+                client = chromadb.CloudClient(
+                    tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
+                )
+                cols = client.list_collections()
+                for col in cols:
+                    stored = get_collection_pipeline_version(col)
+                    if stored is None:
+                        lines.append(_check_line(
+                            f"pipeline ({col.name})", True,
+                            "no version stamp (index with --force to stamp)",
+                        ))
+                    elif stored != PIPELINE_VERSION:
+                        stale_count += 1
+                        lines.append(_check_line(
+                            f"pipeline ({col.name})", False,
+                            f"v{stored} (current: v{PIPELINE_VERSION})",
+                        ))
+                    else:
+                        lines.append(_check_line(
+                            f"pipeline ({col.name})", True, f"v{stored}",
+                        ))
+            except Exception as exc:
+                _log.debug("doctor_pipeline_check_failed", db=chroma_database, error=str(exc))
+                lines.append(_check_line(f"pipeline ({chroma_database})", False, "check failed"))
+            if stale_count:
+                failed = True
+                _fix(lines,
+                     "nx index repo <path> --force-stale  (re-index outdated collections)",
+                     "nx index repo <path> --force        (re-index all collections)")
 
     # ── ripgrep ───────────────────────────────────────────────────────────────
     rg_path = shutil.which("rg")
@@ -393,21 +445,28 @@ def doctor_cmd() -> None:
     # Non-fatal: integrity failure is logged but does not set failed=True.
     _check_t2_integrity(lines)
 
-    # ── ChromaDB pagination audit ─────────────────────────────────────────────
+    # ── ChromaDB pagination audit (cloud only) ──────────────────────────────
     # Spot-check one non-empty collection in the configured database (non-fatal).
-    if chroma_key and chroma_database:
-        try:
-            client = chromadb.CloudClient(
-                tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
-            )
-            _check_chroma_pagination(lines, client, chroma_database)
-        except Exception as exc:
-            _log.debug("doctor_pagination_check_client_failed", db=chroma_database, error=str(exc))
-            lines.append(_check_line(f"ChromaDB pagination ({chroma_database})", True,
-                                     "skipped (client unavailable)"))
+    if not _local:
+        chroma_key = get_credential("chroma_api_key")
+        chroma_database = get_credential("chroma_database")
+        chroma_tenant = get_credential("chroma_tenant")
+        if chroma_key and chroma_database:
+            try:
+                client = chromadb.CloudClient(
+                    tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
+                )
+                _check_chroma_pagination(lines, client, chroma_database)
+            except Exception as exc:
+                _log.debug("doctor_pagination_check_client_failed", db=chroma_database, error=str(exc))
+                lines.append(_check_line(f"ChromaDB pagination ({chroma_database})", True,
+                                         "skipped (client unavailable)"))
 
     click.echo("\n".join(lines))
 
     if failed:
-        click.echo("\nRun 'nx config init' to set up credentials and provision the database automatically.")
+        if _local:
+            click.echo("\nSome checks failed. Run 'nx doctor' again after fixing the issues above.")
+        else:
+            click.echo("\nRun 'nx config init' to set up credentials and provision the database automatically.")
         raise click.exceptions.Exit(1)

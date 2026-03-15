@@ -158,6 +158,7 @@ def test_doctor_reports_stale_collections():
 
     from nexus.cli import main
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
@@ -190,6 +191,7 @@ def test_doctor_handles_no_version_stamp():
 
     from nexus.cli import main
     with (
+        patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
         patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
