@@ -44,6 +44,7 @@ def test_store_put_missing_chroma_api_key(
 def test_store_put_missing_voyage_api_key(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
+    monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
     monkeypatch.setenv("CHROMA_API_KEY", "ck")
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.setenv("CHROMA_TENANT", "t")
