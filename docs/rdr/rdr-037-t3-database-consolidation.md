@@ -2,7 +2,9 @@
 title: "T3 Database Consolidation"
 id: RDR-037
 type: enhancement
-status: accepted
+status: closed
+closed_date: 2026-03-19
+close_reason: implemented
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
