@@ -2,8 +2,10 @@
 title: "MCP Server for Agent Storage Operations"
 id: RDR-034
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-03-11
+closed_date: 2026-03-19
+close_reason: implemented
 priority: P0
 author: Hal Hildebrand
 reviewed-by: self
