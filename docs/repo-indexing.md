@@ -32,6 +32,13 @@ respecting `.gitignore`, `.git/info/exclude`, and the global gitignore. Hidden d
 Classification is overridable via `.nexus.yml` (see [Per-Repo Configuration](#nexusyml-per-repo-configuration)).
 `prose_extensions` config takes priority over all built-in classifications including SKIP.
 
+> **Important**: Because `.yml`, `.yaml`, `.xml`, `.json`, and `.toml` are in the SKIP list,
+> **CI workflow files, Maven POMs, `package.json`, and similar config files are not searchable
+> via `nx search`**. Changes to these files are still tracked by git hooks (the indexer scans
+> them for staleness) but no embeddings are generated. Use `Grep` or `Glob` for config file
+> searches. To override this for a specific repo, add the extension to `prose_extensions` in
+> `.nexus.yml` — but note this captures *all* files with that extension, not just specific ones.
+
 ## Dual-Collection Architecture
 
 Each indexed repository produces two T3 (ChromaDB Cloud) collections:
