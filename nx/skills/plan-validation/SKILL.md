@@ -18,7 +18,7 @@ Delegates to the **plan-auditor** agent (sonnet). See [registry.yaml](../../regi
 
 ## Agent Invocation
 
-Use the Task tool to invoke **plan-auditor**:
+Use the Agent tool to invoke **plan-auditor**:
 
 ```markdown
 ## Relay: plan-auditor

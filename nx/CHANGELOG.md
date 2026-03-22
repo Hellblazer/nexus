@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `effort` frontmatter on all 15 agents and 28 skills (RDR-039 Phase 1)
+- `maxTurns` on 2 haiku agents (knowledge-tidier=20, pdf-chromadb-processor=30)
+- `HARD-CONSTRAINT` on pdf-chromadb-processor — must use `nx index pdf`, never manual extraction
+- `_rdr_dir()` in rdr_hook.py — reads `.nexus.yml` for RDR path instead of hardcoding `docs/rdr`
+- `closed` status to rdr_hook.py `_STATUS_ORDER` (was missing, caused wrong reconciliation)
+- Essential MCP Tools section in using-nx-skills (sequential thinking + storage tiers)
+
+### Changed
+- Orchestrator upgraded from haiku to sonnet (routing ambiguous requests needs reasoning)
+- plan-enricher version 1.0 → 2.0
+- plan-auditor routing: substantive-critic added as first successor option
+- using-nx-skills rewritten: routing decision tree replaces flat tables, Common Mistakes table
+- writing-nx-skills updated for effort field, Agent tool reference, using-nx-skills update reminder
+- pdf-process command simplified to delegate to skill (respects quick path for single PDFs)
+- rdr_hook.py: terminal conflicts warn instead of auto-reconciling, explicit log messages
+- subagent-start.sh: `python3` instead of `uv run python`
+- All hooks now have explicit timeouts
+
+### Removed
+- `/nx:orchestrate` command (routing tree in using-nx-skills replaces it)
+- `mcp_health_hook.sh` (redundant with `nx hook session-start`)
+- `setup.sh` (redundant, Setup event rarely fires)
+- `bead_context_hook.py` (broken output format)
+- `permission-request-stdin.sh` (dead code — wrong field names, settings bypass)
+- Setup, PostToolUse, PermissionRequest hook events from hooks.json
+- Duplicate T2 memory output from `session_start()` (session_start_hook.py is single source)
+
 ## [2.1.1] - 2026-03-15
 
 ### Fixed

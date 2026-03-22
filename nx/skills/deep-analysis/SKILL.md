@@ -19,7 +19,7 @@ Delegates to the **deep-analyst** agent (model: opus).
 
 ## Agent Invocation
 
-Use the Task tool to invoke **deep-analyst**:
+Use the Agent tool to invoke **deep-analyst**:
 
 ```markdown
 ## Relay: deep-analyst

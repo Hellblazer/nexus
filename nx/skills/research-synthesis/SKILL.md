@@ -18,7 +18,7 @@ Delegates to the **deep-research-synthesizer** agent. See [registry.yaml](../../
 
 ## Agent Invocation
 
-Use the Task tool to invoke **deep-research-synthesizer**:
+Use the Agent tool to invoke **deep-research-synthesizer**:
 
 ```markdown
 ## Relay: deep-research-synthesizer

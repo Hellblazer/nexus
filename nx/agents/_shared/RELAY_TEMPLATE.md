@@ -142,7 +142,7 @@ Skills should reference this template rather than inline it:
 ```markdown
 ## Agent Invocation
 
-Use the Task tool with standardized relay format.
+Use the Agent tool with standardized relay format.
 See [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md) for required fields.
 ```
 

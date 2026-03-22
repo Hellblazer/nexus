@@ -71,7 +71,7 @@ If assumed findings remain:
 
 ### Layer 3 — AI Critique (substantive-critic agent)
 
-Dispatch the `substantive-critic` agent via Task tool with this relay:
+Dispatch the `substantive-critic` agent via Agent tool with this relay:
 
 ```markdown
 ## Relay: substantive-critic
@@ -127,7 +127,7 @@ Status remains **Draft** until the author explicitly accepts via `/nx:rdr-accept
 
 ## Relay Template (Use This Format)
 
-When dispatching the substantive-critic agent via Task tool for Layer 3 critique, use this exact structure:
+When dispatching the substantive-critic agent via Agent tool for Layer 3 critique, use this exact structure:
 
 ```markdown
 ## Relay: substantive-critic

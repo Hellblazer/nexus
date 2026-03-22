@@ -149,7 +149,7 @@ Add `effort`, `maxTurns`, and `disallowedTools` to agent and skill frontmatter w
 
 | Agent | Model | Effort | maxTurns | disallowedTools |
 |-------|-------|--------|----------|-----------------|
-| orchestrator | haiku | medium | 25 (conservative — orchestrator manages multi-stage pipelines of 4-6 stages; tune after observation) | — |
+| orchestrator | sonnet (upgraded from haiku — routing ambiguous requests needs reasoning depth) | medium | — | — |
 | knowledge-tidier | haiku | medium | 20 (conservative starting point; tune after observation) | — |
 | pdf-chromadb-processor | haiku | low | 30 (conservative — PDF processing involves multiple chunk/embed cycles; tune after observation) | — |
 | code-review-expert | sonnet | high | — | — |
@@ -359,7 +359,7 @@ None. All changes use existing Claude Code plugin infrastructure.
 
 ## Test Plan
 
-- **Scenario**: Dispatch `orchestrator` (haiku, maxTurns: 25) with a multi-stage routing task → **Agent**: orchestrator → **Input**: "Route this to the appropriate agent: analyze the indexer module" → **Pass**: Agent completes within 25 turns; if it hits the limit, output shows truncation warning → **Fail**: Agent silently stops mid-pipeline with no indication
+- **Scenario**: Dispatch `orchestrator` (sonnet) with a multi-stage routing task → **Agent**: orchestrator → **Input**: "Route this to the appropriate agent: analyze the indexer module" → **Pass**: Agent correctly identifies and routes to codebase-deep-analyzer → **Fail**: Agent misroutes or fails to produce a relay
 - **Scenario**: Dispatch `plan-auditor` (sonnet, disallowedTools: Edit, Write) with a plan that has obvious issues → **Agent**: plan-auditor → **Input**: Plan text with a known gap → **Pass**: Agent produces critique using Read/Grep/Glob/MCP tools, cannot call Edit or Write; MCP write tools (memory_put, store_put) still work → **Fail**: Agent errors on MCP write tools, or successfully calls Edit/Write
 - **Scenario**: Dispatch `pdf-chromadb-processor` (haiku, effort: low) vs `architect-planner` (opus, effort: high) → **Agent**: both → **Input**: Simple PDF index task, complex architecture task → **Pass**: Haiku agent produces concise output (low effort), Opus agent produces deep reasoning (high effort); observable difference in thinking depth → **Fail**: No discernible difference in output quality/depth
 - **Scenario**: Run `/compact` in a session with active beads and PostCompact hook installed → **Agent**: main session → **Input**: `/compact` command → **Pass**: PostCompact hook fires, output contains `bd list` results showing active bead IDs + T1 session pointer in ≤20 lines → **Fail**: No hook output, or output exceeds 20 lines

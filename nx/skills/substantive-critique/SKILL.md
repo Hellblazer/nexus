@@ -20,7 +20,7 @@ Delegates to the **substantive-critic** agent. See [registry.yaml](../../registr
 
 ## Agent Invocation
 
-Use the Task tool to invoke **substantive-critic**:
+Use the Agent tool to invoke **substantive-critic**:
 
 ```markdown
 ## Relay: substantive-critic

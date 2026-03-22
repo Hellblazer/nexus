@@ -44,7 +44,7 @@ strategic-planner -> plan-auditor -> architect-planner -> developer
 
 ## Agent Invocation
 
-Use the Task tool to invoke **architect-planner**:
+Use the Agent tool to invoke **architect-planner**:
 
 ```markdown
 ## Relay: architect-planner

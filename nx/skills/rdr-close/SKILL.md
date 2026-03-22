@@ -116,7 +116,7 @@ The close operation performs multiple state mutations. If any step fails:
 
 ## Relay Template (Use This Format)
 
-When dispatching the knowledge-tidier agent via Task tool for post-mortem archival, use this exact structure:
+When dispatching the knowledge-tidier agent via Agent tool for post-mortem archival, use this exact structure:
 
 ```markdown
 ## Relay: knowledge-tidier

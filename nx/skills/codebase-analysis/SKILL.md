@@ -18,7 +18,7 @@ Delegates to the **codebase-deep-analyzer** agent (model: sonnet).
 
 ## Agent Invocation
 
-Use the Task tool to invoke **codebase-deep-analyzer**:
+Use the Agent tool to invoke **codebase-deep-analyzer**:
 
 ```markdown
 ## Relay: codebase-deep-analyzer

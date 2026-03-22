@@ -37,7 +37,7 @@ Delegates to the **debugger** agent (model: opus).
 
 ## Agent Invocation
 
-Use the Task tool to invoke **debugger**:
+Use the Agent tool to invoke **debugger**:
 
 ```markdown
 ## Relay: debugger

@@ -62,7 +62,7 @@ See [architecture.md](architecture.md) for the full module map.
 
 See `nx/README.md` for the plugin structure. Skills live in `nx/skills/<name>/SKILL.md`, agents in `nx/agents/<name>.md`, and both are registered in `nx/registry.yaml`.
 
-**MCP tools in agents**: Agents do NOT declare a `tools:` field in frontmatter — Claude Code has a confirmed bug where explicit `tools:` in plugin-defined agents filters out MCP tools (see RDR-035). Agents inherit all tools from the parent session; the PermissionRequest hook provides runtime enforcement. Agent body text references MCP tool syntax (not CLI commands) for storage tier operations. See `nx/README.md` § MCP Servers for tool names and parameters.
+**MCP tools in agents**: Agents do NOT declare a `tools:` or `disallowedTools:` field in frontmatter — Claude Code has confirmed bugs where these fields in plugin-defined agents filter out MCP tools or are silently ignored (see RDR-035, RDR-039). Agents inherit all tools from the parent session; the `settings.json` permissions list provides runtime enforcement. Agent body text references MCP tool syntax (not CLI commands) for storage tier operations. See `nx/README.md` § MCP Servers for tool names and parameters.
 
 ## Version Pinning
 

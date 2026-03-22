@@ -36,7 +36,7 @@ digraph review_flow {
 
 ## Agent Invocation
 
-Use the Task tool to invoke **code-review-expert**:
+Use the Agent tool to invoke **code-review-expert**:
 
 ```markdown
 ## Relay: code-review-expert

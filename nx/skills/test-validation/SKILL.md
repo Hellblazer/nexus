@@ -20,7 +20,7 @@ Delegates to the **test-validator** agent. See [registry.yaml](../../registry.ya
 
 ## Agent Invocation
 
-Use the Task tool to invoke **test-validator**:
+Use the Agent tool to invoke **test-validator**:
 
 ```markdown
 ## Relay: test-validator

@@ -18,7 +18,7 @@ Delegates to the **knowledge-tidier** agent (haiku). See [registry.yaml](../../r
 
 ## Agent Invocation
 
-Use the Task tool to invoke **knowledge-tidier**:
+Use the Agent tool to invoke **knowledge-tidier**:
 
 ```markdown
 ## Relay: knowledge-tidier

@@ -18,7 +18,7 @@ Delegates to the **strategic-planner** agent. See [registry.yaml](../../registry
 
 ## Agent Invocation
 
-Use the Task tool to invoke **strategic-planner**:
+Use the Agent tool to invoke **strategic-planner**:
 
 ```markdown
 ## Relay: strategic-planner

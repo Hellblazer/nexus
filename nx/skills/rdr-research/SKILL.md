@@ -71,7 +71,7 @@ When the user asks to *investigate* something (not just record a finding):
 
 ## Relay Template (Use This Format)
 
-When dispatching agents (deep-research-synthesizer or codebase-deep-analyzer) via Task tool, use this exact structure:
+When dispatching agents (deep-research-synthesizer or codebase-deep-analyzer) via Agent tool, use this exact structure:
 
 ```markdown
 ## Relay: deep-research-synthesizer

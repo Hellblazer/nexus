@@ -37,7 +37,7 @@ Delegates to the **developer** agent (sonnet). See [registry.yaml](../../registr
 
 ## Agent Invocation
 
-Use the Task tool to invoke **developer**:
+Use the Agent tool to invoke **developer**:
 
 ```markdown
 ## Relay: developer

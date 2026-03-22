@@ -17,7 +17,7 @@ Delegates to the **plan-enricher** agent (sonnet). See [registry.yaml](../../reg
 
 ## Agent Invocation
 
-Use the Task tool to invoke **plan-enricher**:
+Use the Agent tool to invoke **plan-enricher**:
 
 ```markdown
 ## Relay: plan-enricher
