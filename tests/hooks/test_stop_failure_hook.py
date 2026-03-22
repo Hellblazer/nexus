@@ -40,6 +40,7 @@ def _run_hook(
     env = {
         **os.environ,
         "PATH": os.environ.get("PATH", ""),
+        "CLAUDECODE": "",  # Prevent side effects (bd remember/create) in tests
         **(env_overrides or {}),
     }
     return subprocess.run(
