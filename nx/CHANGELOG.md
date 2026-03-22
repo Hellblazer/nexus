@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-03-22
+
+### Fixed
+- **rdr-accept**: PROHIBITION block prevents orchestrator from bypassing
+  planning chain. Chain mandatory for multi-phase RDRs. Subagent failure
+  clause blocks "let me finish this directly" compensation. Dead T2
+  idempotency code removed; self-healing uses live memory_get results.
+  Unbound placeholders fixed with `<ID>` notation.
+- **plan-enricher**: `bd update --description` replaced with Write tool →
+  `--body-file` pattern. Prevents silent content corruption from shell escaping.
+- **enrich-plan skill**: Standalone invocation path updated to match agent fix.
+
+### Added
+- **writing-nx-skills**: Known Pitfalls section for `--description` corruption.
+
 ## [2.3.1] - 2026-03-22
 
 ### Fixed

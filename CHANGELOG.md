@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-03-22
+
+### Fixed
+- **Planning chain bypass prevention** — agents can no longer skip the
+  strategic-planner → plan-auditor → plan-enricher chain by creating beads
+  directly or compensating when subagents fail. PROHIBITION block added to
+  rdr-accept, chain mandatory for multi-phase RDRs.
+- **Silent bead content corruption** — `bd update --description "..."` silently
+  destroys multi-line markdown (backticks, `$variables`, nested quotes). Replaced
+  with Write tool → `--body-file` pattern in plan-enricher agent and skill.
+- **Dead T2 idempotency code** — removed Python comparisons against always-None
+  `t2_status`; self-healing logic moved to Action section with live `memory_get`.
+- **Unbound placeholders** — fixed `{id}`, `{t2_status}`, `{repo_name}`, `{type}`
+  leaking from Python into agent instructions; standardized to `<ID>` notation.
+
+### Added
+- **Known Pitfalls** section in writing-nx-skills skill — documents the
+  `--description` corruption bug so future agent authors use `--body-file`.
+
 ## [2.3.1] - 2026-03-22
 
 ### Fixed
