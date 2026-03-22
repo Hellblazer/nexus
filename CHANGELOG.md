@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-03-21
+
+### Changed
+- **Plugin hooks cleanup** — removed 5 dead/redundant hook scripts
+  (`mcp_health_hook.sh`, `setup.sh`, `bead_context_hook.py`,
+  `permission-request-stdin.sh`, `readonly-agent-guard.sh`) and 3 hook events
+  (Setup, PostToolUse, PermissionRequest). Hooks reduced from 9 to 5.
+- **Orchestrator upgraded** from haiku to sonnet — routing ambiguous requests
+  needs reasoning depth.
+- **T2 memory dedup** — removed duplicate T2 output from `session_start()`;
+  `session_start_hook.py` via `t2_prefix_scan.py` is the single source.
+
+### Fixed
+- **rdr_hook.py** — added `closed` status to `_STATUS_ORDER` (was missing,
+  caused wrong reconciliation direction), terminal conflicts now warn instead
+  of auto-reconciling, fixed `_update_file_status` blank-line accumulation,
+  reads `.nexus.yml` for RDR path instead of hardcoding `docs/rdr`.
+- **"Task tool" → "Agent tool"** — corrected 19 stale references across skills,
+  commands, and relay template.
+
 ## [2.1.1] - 2026-03-15
 
 ### Fixed

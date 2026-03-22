@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-03-21
+
 ### Added
 - `effort` frontmatter on all 15 agents and 28 skills (RDR-039 Phase 1)
 - `maxTurns` on 2 haiku agents (knowledge-tidier=20, pdf-chromadb-processor=30)
