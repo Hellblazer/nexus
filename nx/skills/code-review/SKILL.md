@@ -1,6 +1,7 @@
 ---
 name: code-review
 description: Use when code changes are ready for quality, security, or best practices review, before committing or creating a pull request
+effort: high
 ---
 
 # Code Review Skill

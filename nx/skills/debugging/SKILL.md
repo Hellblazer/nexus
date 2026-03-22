@@ -1,6 +1,7 @@
 ---
 name: debugging
 description: Use when tests fail, exceptions occur, or behavior is non-deterministic, especially after 2+ failed manual fix attempts
+effort: medium
 ---
 
 # Debugging Skill

@@ -11,11 +11,6 @@
           },
           {
             "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/mcp_health_hook.sh",
-            "timeout": 8
-          },
-          {
-            "type": "command",
             "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/session_start_hook.py",
             "timeout": 10
           },
@@ -26,11 +21,13 @@
           },
           {
             "type": "command",
-            "command": "bd prime"
+            "command": "bd prime",
+            "timeout": 10
           },
           {
             "type": "command",
-            "command": "cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md"
+            "command": "cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md",
+            "timeout": 5
           }
         ]
       }
@@ -41,19 +38,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bd prime"
-          }
-        ]
-      }
-    ],
-    "Setup": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/setup.sh",
-            "timeout": 15
+            "command": "bd prime",
+            "timeout": 10
           }
         ]
       }
@@ -65,30 +51,6 @@
           {
             "type": "command",
             "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/permission-request-stdin.sh",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "bd create",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/bead_context_hook.py",
             "timeout": 10
           }
         ]

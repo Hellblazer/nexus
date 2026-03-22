@@ -1,6 +1,7 @@
 ---
 name: strategic-planning
 description: Use when facing multi-step development work that needs decomposition into tasks, before writing any implementation code
+effort: high
 ---
 
 # Strategic Planning Skill

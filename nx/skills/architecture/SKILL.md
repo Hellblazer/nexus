@@ -1,6 +1,7 @@
 ---
 name: architecture
 description: Use when complex features need architectural design before implementation, or when system design decisions span multiple modules
+effort: high
 ---
 
 # Architecture Skill

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SessionStart hook: detect docs/rdr/, reconcile file↔T2 status, report."""
+"""SessionStart hook: detect RDR dir, reconcile file↔T2 status, report."""
 import re
 import subprocess
 import sys
@@ -13,11 +13,12 @@ _STATUS_ORDER = {
     "draft": 0,
     "accepted": 1,
     "implemented": 2,
-    "reverted": 3,
-    "abandoned": 3,
-    "superseded": 3,
+    "closed": 3,
+    "reverted": 4,
+    "abandoned": 4,
+    "superseded": 4,
 }
-_TERMINAL = {"reverted", "abandoned", "superseded"}
+_TERMINAL = {"closed", "reverted", "abandoned", "superseded"}
 _EXCLUDE_FILES = {
     "readme.md", "template.md", "index.md", "overview.md",
     "workflow.md", "templates.md",
@@ -148,7 +149,7 @@ def _update_file_status(filepath: Path, new_status: str) -> bool:
                 new_fm.append(f"status: {new_status}")
             else:
                 new_fm.append(line)
-        new_text = "---" + "\n".join(new_fm) + "\n---" + parts[2]
+        new_text = "---\n" + "\n".join(new_fm).strip() + "\n---" + parts[2]
         filepath.write_text(new_text)
         return True
     except Exception:
@@ -175,18 +176,19 @@ def _reconcile(root: Path, repo_name: str, rdr_files: list[Path],
         file_rank = _STATUS_ORDER.get(file_status, -1)
         t2_rank = _STATUS_ORDER.get(t2_status, -1)
 
-        # Both terminal but different — favor file with warning
+        # Both terminal but different — warn, do NOT auto-reconcile
         if file_status in _TERMINAL and t2_status in _TERMINAL and file_status != t2_status:
-            print(f"     RDR {rdr_id}: terminal state conflict "
-                  f"(T2={t2_status}, file={file_status}) — using file.")
-            _update_t2_status(repo_name, rdr_id, file_status)
-            reconciled += 1
+            print(f"     WARNING: RDR {rdr_id} terminal conflict "
+                  f"(T2={t2_status}, file={file_status}) — manual resolution needed")
+            continue
         elif file_rank > t2_rank:
             # File is more advanced — update T2
+            print(f"     RDR {rdr_id}: {t2_status} → {file_status} (syncing T2 to file)")
             _update_t2_status(repo_name, rdr_id, file_status)
             reconciled += 1
         elif t2_rank > file_rank:
-            # T2 is more advanced — repair file
+            # T2 is more advanced — update file
+            print(f"     RDR {rdr_id}: {file_status} → {t2_status} (syncing file to T2)")
             _update_file_status(filepath, t2_status)
             reconciled += 1
 
@@ -199,12 +201,28 @@ def _rdr_status_counts(repo_name: str, preloaded: dict[str, str] | None = None) 
     return Counter(statuses.values())
 
 
+def _rdr_dir(root: Path) -> Path:
+    """Resolve RDR directory from .nexus.yml or fall back to docs/rdr."""
+    config_path = root / ".nexus.yml"
+    if config_path.exists():
+        try:
+            import yaml
+            with config_path.open() as fh:
+                data = yaml.safe_load(fh) or {}
+            paths = data.get("indexing", {}).get("rdr_paths", [])
+            if paths:
+                return root / paths[0]
+        except Exception:
+            pass
+    return root / "docs" / "rdr"
+
+
 def main() -> None:
     root = _repo_root()
     if root is None:
         sys.exit(0)
 
-    rdr_dir = root / "docs" / "rdr"
+    rdr_dir = _rdr_dir(root)
     if not rdr_dir.exists():
         sys.exit(0)
 
@@ -240,7 +258,7 @@ def main() -> None:
     if indexed:
         print(f"RDR: {status_info}, indexed in rdr__{repo_name}")
     else:
-        print(f"RDR: {status_info} in docs/rdr/ but NOT indexed.")
+        print(f"RDR: {status_info} in {rdr_dir.relative_to(root)} but NOT indexed.")
         print(f"     Run: nx index rdr {root}")
 
     sys.exit(0)

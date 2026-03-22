@@ -1,6 +1,7 @@
 ---
 name: writing-nx-skills
 description: Use when creating new nx plugin skills, editing existing skills, or verifying skill quality before committing
+effort: low
 ---
 
 # Writing nx Skills
@@ -15,33 +16,35 @@ Guide for authoring skills in the nx Claude Code plugin. Skills are reference gu
 
 ### Frontmatter
 
-Only two fields. Max 1024 characters total:
+Three fields. Max 1024 characters total:
 
 ```yaml
 ---
 name: skill-name-with-hyphens
 description: Use when [specific triggering conditions]
+effort: low|medium|high
 ---
 ```
 
 - `name`: Letters, numbers, hyphens only
 - `description`: MUST start with "Use when". Describe triggering conditions, NEVER summarize workflow.
+- `effort`: Reasoning depth hint — `low` (reference/lookup), `medium` (guided workflow), `high` (deep analysis/critique)
 
 ### Skill Types in nx
 
-**Agent-delegating skills** (majority): Invoke a specific agent via Task tool relay.
+**Agent-delegating skills** (majority): Invoke a specific agent via Agent tool relay.
 Required sections:
 - `## When This Skill Activates`
 - `## Agent Invocation` with cross-reference to RELAY_TEMPLATE.md
 - `## Success Criteria`
 - `## Agent-Specific PRODUCE` (T1/T2/T3 outputs)
 
-**Standalone skills** (nexus, cli-controller): Provide guidance directly without agent delegation.
+**Standalone skills** (nexus, serena-code-nav, cli-controller): Provide guidance directly without agent delegation.
 Required sections:
 - `## When This Skill Activates`
 - `## Success Criteria` (optional for pure reference)
 
-**Discipline skills** (brainstorming-gate, verification-before-completion): Enforce process rules.
+**Discipline skills** (brainstorming-gate): Enforce process rules.
 Required sections:
 - `<HARD-GATE>` or `<EXTREMELY-IMPORTANT>` blocks
 - Rationalization prevention table
@@ -61,7 +64,7 @@ Agent-delegating skills reference the canonical relay template:
 ```markdown
 ## Agent Invocation
 
-Use the Task tool with standardized relay format.
+Use the Agent tool with standardized relay format.
 See [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md) for required fields and examples.
 ```
 
@@ -76,21 +79,28 @@ Skills that produce outputs must document which tiers they use:
 
 ### Registry Integration
 
-After creating a skill, add it to `nx/registry.yaml`:
-- Agent-delegating: under `agents:` with model, skill, slash_command, triggers
+After creating a skill, update `nx/registry.yaml`:
+- Agent-delegating: under `agents:` — add model, skill, slash_command, triggers, and entry in `model_summary`
 - Standalone: under `standalone_skills:` with tools and triggers
 - RDR: under `rdr_skills:` with slash_command and triggers
+- If slash command differs from skill name: add to `naming_aliases`
+
+### Updating using-nx-skills
+
+When adding a new skill, also add it to `nx/skills/using-nx-skills/SKILL.md` routing tree. This file is injected every session — if your skill isn't listed there, it won't be discovered.
 
 ## Quality Checklist
 
-- [ ] Frontmatter has only `name` and `description`
+- [ ] Frontmatter has `name`, `description`, and `effort`
 - [ ] Description starts with "Use when"
 - [ ] Description has no workflow summary
+- [ ] `effort` matches skill type (low=reference, medium=workflow, high=analysis)
 - [ ] Agent-delegating: has Agent Invocation cross-reference
 - [ ] Agent-delegating: has Agent-Specific PRODUCE section
 - [ ] Agent-delegating: mentions nx scratch (T1)
 - [ ] Has Success Criteria section
-- [ ] Added to registry.yaml
+- [ ] Added to registry.yaml (including model_summary for agent skills)
+- [ ] Added to using-nx-skills routing tree
 - [ ] Tests pass: `pytest tests/test_plugin_structure.py -v`
 
 ## Testing Skills

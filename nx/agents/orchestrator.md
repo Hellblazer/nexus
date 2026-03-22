@@ -2,8 +2,9 @@
 name: orchestrator
 version: "2.0"
 description: Routes requests to appropriate specialized agents and manages multi-agent pipelines. Use when the task is ambiguous, when coordinating work across multiple agents, or when unsure which agent to invoke.
-model: haiku
+model: sonnet
 color: gold
+effort: medium
 ---
 
 ## Usage Examples

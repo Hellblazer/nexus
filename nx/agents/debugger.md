@@ -4,6 +4,7 @@ version: "2.0"
 description: Systematically investigates bugs, test failures, and performance issues using hypothesis-driven debugging. Use when encountering bugs after 2-3 failed fix attempts or facing non-deterministic failures.
 model: opus
 color: red
+effort: high
 ---
 
 ## Usage Examples

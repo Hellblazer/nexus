@@ -1,6 +1,7 @@
 ---
 name: research-synthesis
 description: Use when researching unfamiliar topics, comparing technology approaches, or building comprehensive understanding from multiple sources
+effort: medium
 ---
 
 # Research Synthesis Skill

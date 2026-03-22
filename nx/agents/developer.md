@@ -4,6 +4,7 @@ version: "2.0"
 description: Executes development tasks using test-first methodology including feature implementation and refactoring. Use proactively for implementing features from specifications or executing architectural plans.
 model: sonnet
 color: cyan
+effort: high
 ---
 
 ## Usage Examples

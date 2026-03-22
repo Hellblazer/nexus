@@ -1,6 +1,7 @@
 ---
 name: rdr-create
 description: Use when starting a new research-design-review document to think through a technical decision
+effort: medium
 ---
 
 # RDR Create Skill

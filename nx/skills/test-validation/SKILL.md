@@ -1,6 +1,7 @@
 ---
 name: test-validation
 description: Use when implementation is complete and test coverage needs verification, before merge or pull request
+effort: high
 ---
 
 # Test Validation Skill

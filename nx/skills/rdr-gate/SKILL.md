@@ -1,6 +1,7 @@
 ---
 name: rdr-gate
 description: Use when an RDR appears complete and needs finalization validation — structural, assumption, and AI critique checks
+effort: medium
 ---
 
 # RDR Gate Skill

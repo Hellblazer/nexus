@@ -1,6 +1,7 @@
 ---
 name: brainstorming-gate
 description: Use when about to implement any feature, build any component, or make any behavioral change — requires design exploration and user approval before implementation
+effort: high
 ---
 
 # Brainstorming Gate

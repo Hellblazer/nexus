@@ -1,6 +1,7 @@
 ---
 name: plan-validation
 description: Use when a plan has been created and needs validation before implementation begins, or when reviewing an existing plan for gaps
+effort: high
 ---
 
 # Plan Validation Skill

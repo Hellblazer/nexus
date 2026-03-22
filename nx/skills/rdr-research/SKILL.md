@@ -1,6 +1,7 @@
 ---
 name: rdr-research
 description: Use when adding, tracking, or verifying structured research findings for an active RDR
+effort: medium
 ---
 
 # RDR Research Skill

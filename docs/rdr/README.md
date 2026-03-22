@@ -60,6 +60,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-036](rdr-036-post-accept-planning-workflow.md) | Post-Accept Planning Workflow | Enhancement | Accepted | 2026-03-12 |
 | [RDR-037](rdr-037-t3-database-consolidation.md) | T3 Database Consolidation | Enhancement | Accepted | 2026-03-14 |
 | [RDR-038](rdr-038-local-t3-backend.md) | Local T3 Backend | Architecture | Accepted | 2026-03-14 |
+| [RDR-039](rdr-039-claude-code-framework-alignment.md) | Claude Code Framework Alignment (v2.1.72–v2.1.81) | Technical Debt | Accepted | 2026-03-21 |
 
 ---
 

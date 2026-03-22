@@ -1,6 +1,7 @@
 ---
 name: enrich-plan
 description: Use when beads need enrichment with audit findings, execution context, and codebase alignment after plan-audit validates
+effort: medium
 ---
 
 # Enrich Plan Skill

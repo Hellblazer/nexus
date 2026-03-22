@@ -1,11 +1,12 @@
 ---
 name: orchestration
 description: Use when unsure which agent to use for a task, or when coordinating work across multiple agents in a pipeline
+effort: low
 ---
 
 # Orchestration Skill
 
-Delegates to the **orchestrator** agent (haiku). See [registry.yaml](../../registry.yaml).
+Delegates to the **orchestrator** agent (sonnet). See [registry.yaml](../../registry.yaml).
 
 ## When This Skill Activates
 
@@ -71,7 +72,7 @@ digraph routing {
 
 ## Agent Invocation
 
-Use the Task tool to invoke **orchestrator**:
+Use the Agent tool to invoke **orchestrator**:
 
 ```markdown
 ## Relay: orchestrator

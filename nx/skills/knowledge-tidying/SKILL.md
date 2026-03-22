@@ -1,6 +1,7 @@
 ---
 name: knowledge-tidying
 description: Use when validated findings, decisions, or patterns need to be persisted to nx T3 knowledge store for cross-session reuse
+effort: medium
 ---
 
 # Knowledge Tidying Skill
