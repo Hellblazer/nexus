@@ -1,6 +1,7 @@
 ---
 name: nexus
 description: Use when running nx commands for search, memory, knowledge storage, or indexing — or when unsure which nx subcommand to use
+effort: low
 ---
 
 # Nexus Quick Reference

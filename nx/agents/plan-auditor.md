@@ -4,6 +4,7 @@ version: "2.0"
 description: Reviews and validates technical plans for accuracy, completeness, and codebase alignment. Use before implementing any plan — catches gaps and technical errors before they become bugs.
 model: sonnet
 color: orange
+effort: high
 ---
 
 ## Usage Examples
@@ -183,8 +184,9 @@ Your final output MUST include a clearly labeled next-step recommendation. Deter
 5. If tag absent or RDR ID mismatch → use standard routing below
 
 **Standard Routing (standalone audit or non-RDR context):**
+- Plan needs logic/structure critique → recommend `substantive-critic`
 - Architectural design needed → recommend `architect-planner`
-- Otherwise → recommend `developer`
+- Plan is validated and ready to execute → recommend `developer`
 
 **Rationale**: When invoked as part of the RDR accept → plan → audit → enrich chain, the plan-enricher receives audit findings and enriches beads (RDR-036 F-14). The RDR ID correlation prevents false positives.
 **Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:

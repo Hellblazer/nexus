@@ -68,11 +68,8 @@ def test_hook_and_cli_use_same_getsid_anchor(
     def _capture(session_id: str) -> None:
         written["session_id"] = session_id
 
-    _inner = MagicMock(get=lambda **kw: None, list_entries=lambda **kw: [])
-    _t2_cm = MagicMock(__enter__=MagicMock(return_value=_inner))
-    with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-        with patch("nexus.hooks.write_claude_session_id", side_effect=_capture):
-            session_start()
+    with patch("nexus.hooks.write_claude_session_id", side_effect=_capture):
+        session_start()
 
     assert "session_id" in written
     assert re.match(
@@ -83,21 +80,13 @@ def test_hook_and_cli_use_same_getsid_anchor(
 
 # ── AC3: SessionStart memory summary ─────────────────────────────────────────
 
-def test_session_start_outputs_memory_summary(
+def test_session_start_outputs_session_id(
     runner: CliRunner, fake_home: Path
 ) -> None:
-    """SessionStart outputs recent memory summary."""
-    mock_db = MagicMock()
-    mock_db.list_entries.return_value = [
-        {"id": 1, "title": "note.md", "agent": "coder", "timestamp": "2026-01-01T10:00:00Z"},
-    ]
+    """SessionStart outputs session ID (T2 memory surfaced by separate hook)."""
+    result = runner.invoke(main, ["hook", "session-start"])
 
-    _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_db))
-    with patch("nexus.hooks._infer_repo", return_value="myrepo"):
-        with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-            result = runner.invoke(main, ["hook", "session-start"])
-
-    assert "memory" in result.output.lower() or "note.md" in result.output
+    assert "Nexus ready" in result.output
 
 
 # ── AC5: SessionEnd flush + expire ────────────────────────────────────────────

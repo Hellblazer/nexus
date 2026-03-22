@@ -1,6 +1,7 @@
 ---
 name: rdr-accept
 description: Use when a gated RDR returned PASSED and you want to officially accept it for implementation
+effort: medium
 ---
 
 # RDR Accept Skill

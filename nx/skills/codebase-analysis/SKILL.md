@@ -1,6 +1,7 @@
 ---
 name: codebase-analysis
 description: Use when exploring an unfamiliar codebase, onboarding to a project, or needing to understand module structure before making changes
+effort: medium
 ---
 
 # Codebase Analysis Skill

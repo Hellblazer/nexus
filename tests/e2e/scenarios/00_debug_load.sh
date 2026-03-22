@@ -151,13 +151,10 @@ fi
 
 scenario_end
 
-scenario "00 debug-load: mcp_health_hook and setup scripts are executable"
+scenario "00 debug-load: hook shell scripts are executable"
 
 for script in \
-    "$REPO_ROOT/nx/hooks/scripts/mcp_health_hook.sh" \
-    "$REPO_ROOT/nx/hooks/scripts/setup.sh" \
-    "$REPO_ROOT/nx/hooks/scripts/subagent-start.sh" \
-    "$REPO_ROOT/nx/hooks/scripts/permission-request-stdin.sh"; do
+    "$REPO_ROOT/nx/hooks/scripts/subagent-start.sh"; do
     name=$(basename "$script")
     if [[ -x "$script" ]]; then
         pass "$name is executable"

@@ -1,6 +1,7 @@
 ---
 name: deep-analysis
 description: Use when surface-level analysis is insufficient and problems require hypothesis-driven investigation across multiple system components
+effort: high
 ---
 
 # Deep Analysis Skill

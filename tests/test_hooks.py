@@ -33,9 +33,8 @@ def _patch_session_start(tmp_path: Path, *, ancestor=None, server_raises=False):
 
 
 @patch("nexus.hooks.generate_session_id", return_value="test-uuid")
-@patch("nexus.hooks._infer_repo", return_value="myrepo")
-def test_session_start_no_entries(mock_repo, mock_sid, tmp_path: Path) -> None:
-    """Repo with no memory entries outputs fallback message."""
+def test_session_start_returns_session_id(mock_sid, tmp_path: Path) -> None:
+    """session_start returns the session ID line (T2 memory is surfaced by separate hook)."""
     with (
         patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
         patch("nexus.hooks.sweep_stale_sessions"),
@@ -47,50 +46,7 @@ def test_session_start_no_entries(mock_repo, mock_sid, tmp_path: Path) -> None:
         output = session_start()
 
     assert "test-uuid" in output
-    assert "No memory entries" in output
-
-
-@patch("nexus.hooks.generate_session_id", return_value="test-uuid")
-@patch("nexus.hooks._infer_repo", return_value="myrepo")
-def test_session_start_with_memory_entries(mock_repo, mock_sid, tmp_path: Path) -> None:
-    """Repo with memory entries lists them."""
-    from nexus.db.t2 import T2Database
-
-    db_path = tmp_path / "memory.db"
-    with T2Database(db_path) as db:
-        db.put(project="myrepo", title="findings.md", content="some content")
-
-    with (
-        patch("nexus.hooks._default_db_path", return_value=db_path),
-        patch("nexus.hooks.sweep_stale_sessions"),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
-        patch("nexus.hooks.write_claude_session_id"),
-        patch("nexus.hooks.start_t1_server", return_value=("127.0.0.1", 51823, 9900, "/tmp/x")),
-        patch("nexus.hooks.write_session_record"),
-    ):
-        output = session_start()
-
-    assert "findings.md" in output
-    assert "Recent memory" in output
-
-
-@patch("nexus.hooks.generate_session_id", return_value="test-uuid")
-@patch("nexus.hooks._infer_repo", return_value="myrepo")
-def test_session_start_db_unavailable(mock_repo, mock_sid) -> None:
-    """When T2 database raises, outputs graceful fallback."""
-    import sqlite3
-
-    with (
-        patch("nexus.hooks.sweep_stale_sessions"),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
-        patch("nexus.hooks.write_claude_session_id"),
-        patch("nexus.hooks.start_t1_server", return_value=("127.0.0.1", 51823, 9900, "/tmp/x")),
-        patch("nexus.hooks.write_session_record"),
-        patch("nexus.hooks._open_t2", side_effect=sqlite3.Error("disk I/O error")),
-    ):
-        output = session_start()
-
-    assert "memory unavailable" in output
+    assert "Nexus ready" in output
 
 
 def test_session_start_adopts_ancestor_session(tmp_path: Path) -> None:

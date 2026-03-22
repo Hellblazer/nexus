@@ -1,6 +1,7 @@
 ---
 name: rdr-list
 description: Use when needing to see all RDRs in the project with their status, type, and priority
+effort: low
 ---
 
 # RDR List Skill

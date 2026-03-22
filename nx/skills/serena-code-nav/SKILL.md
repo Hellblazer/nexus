@@ -1,6 +1,7 @@
 ---
 name: serena-code-nav
 description: Use when navigating code by symbol — finding definitions, all callers, type hierarchies, renaming safely, or editing a method body without reading the whole file. Use instead of Grep for any symbol-level task.
+effort: medium
 ---
 
 # Serena Code Navigation

@@ -1,6 +1,7 @@
 ---
 name: pdf-processing
 description: Use when PDF documents need to be indexed into nx store for semantic search
+effort: medium
 ---
 
 # PDF Processing Skill

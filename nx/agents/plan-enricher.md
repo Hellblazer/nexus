@@ -1,9 +1,10 @@
 ---
 name: plan-enricher
-version: "1.0"
+version: "2.0"
 description: Enriches beads with audit findings, execution context, and codebase alignment after plan-auditor validates. Use after plan-audit in RDR planning chain, or standalone for bead enrichment within the same session.
 model: sonnet
 color: emerald
+effort: medium
 ---
 
 ## Usage Examples

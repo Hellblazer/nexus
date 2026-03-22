@@ -108,22 +108,9 @@ def session_start(claude_session_id: str | None = None) -> str:
     # Keep writing the flat file for any external tooling that reads it.
     write_claude_session_id(session_id)
 
-    lines: list[str] = [f"Nexus ready. T1 scratch initialized (session: {session_id})."]
-
-    repo = _infer_repo()
-    try:
-        with _open_t2() as db:
-            entries = db.list_entries(project=repo)[:10]
-            if entries:
-                lines.append(f"Recent memory ({repo}, last {len(entries)} entries):")
-                for e in entries:
-                    lines.append(f"  - {e['title']} ({e.get('agent') or '-'}, {e.get('timestamp', '')[:10]})")
-            else:
-                lines.append(f"No memory entries for '{repo}'.")
-    except (sqlite3.Error, OSError):
-        lines.append("(memory unavailable)")
-
-    return "\n".join(lines)
+    # T2 memory context is surfaced by session_start_hook.py (via t2_prefix_scan.py)
+    # which provides multi-namespace, snippet-enriched output. No duplication here.
+    return f"Nexus ready. T1 scratch initialized (session: {session_id})."
 
 
 # -- SessionEnd ---------------------------------------------------------------

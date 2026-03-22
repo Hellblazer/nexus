@@ -4,6 +4,7 @@ version: "2.0"
 description: Verifies test coverage, runs test suites, and validates test quality for code changes. Use after implementation, before marking work complete, or when test failures need systematic root-cause analysis.
 model: sonnet
 color: lime
+effort: high
 ---
 
 ## Usage Examples

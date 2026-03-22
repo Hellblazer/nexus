@@ -21,4 +21,12 @@ tests/e2e/.claude-auth/
 .worktrees/
 tests/fixtures/*.pdf
 .beads/ephemeral.sqlite3
+.beads/*.pid
+.beads/*.pid.lock
+.beads/*.lock
+.beads/*.port
+.beads/*.activity
+.beads/.beads-credential-key
+.beads/backup/
+.claude/continuation-*
 .serena/

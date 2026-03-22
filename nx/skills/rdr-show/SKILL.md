@@ -1,6 +1,7 @@
 ---
 name: rdr-show
 description: Use when needing detailed information about a specific RDR including content, research findings, and linked beads
+effort: low
 ---
 
 # RDR Show Skill

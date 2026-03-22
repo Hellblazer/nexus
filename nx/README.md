@@ -52,7 +52,7 @@ Run `/nx-preflight` after installing to verify all dependencies are present.
 | Research an unfamiliar topic | `/nx:research` |
 | Document a technical decision | `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-accept` |
 | Index PDFs into semantic search | `/nx:pdf-process` |
-| Not sure which agent to use | `/nx:orchestrate` |
+| Not sure which agent to use | Check the skill directory in `using-nx-skills` |
 
 ## Directory Structure
 
@@ -71,14 +71,10 @@ nx/
 ├── hooks/
 │   ├── hooks.json           # Hook event → script wiring
 │   └── scripts/
-│       ├── bead_context_hook.py      # Bead context injection
-│       ├── mcp_health_hook.sh        # MCP/nx health checks at session start
-│       ├── permission-request-stdin.sh # Auto-approve safe read-only commands
-│       ├── rdr_hook.py               # Report RDR document count and status
-│       ├── session_start_hook.py     # Surface T2 memory, prime beads
-│       ├── setup.sh                  # One-time setup checks
+│       ├── rdr_hook.py               # RDR file↔T2 status reconciliation
+│       ├── session_start_hook.py     # Surface T2 memory, beads, scratch context
 │       ├── subagent-start.sh         # Context prep for spawned subagents
-│       └── t2_prefix_scan.py         # T2 multi-namespace prefix scan for session context
+│       └── t2_prefix_scan.py         # T2 multi-namespace prefix scan (shared)
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
 ├── CHANGELOG.md             # Version history (Keep a Changelog format)
@@ -154,7 +150,7 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | debugger | debugging | `/nx:debug` | opus | Hypothesis-driven debugging |
 | developer | development | `/nx:implement` | sonnet | TDD implementation, test-first methodology |
 | knowledge-tidier | knowledge-tidying | `/nx:knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
-| orchestrator | orchestration | `/nx:orchestrate` | haiku | Route requests to appropriate agents |
+| orchestrator | orchestration | *(no command)* | sonnet | Route requests to appropriate agents |
 | pdf-chromadb-processor | pdf-processing | `/nx:pdf-process` | haiku | Index PDFs into nx store for semantic search |
 | plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution |
 | plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with audit findings and execution context |
@@ -175,18 +171,13 @@ Defined in `registry.yaml`:
 
 | Event | Script | Purpose |
 |-------|--------|---------|
-| `Setup` | `setup.sh` | One-time dependency checks (bd, nx) |
-| `SessionStart` | `nx hook session-start` | Initialize nx session |
-| `SessionStart` | `mcp_health_hook.sh` | Verify nx and bd are healthy |
-| `SessionStart` | `session_start_hook.py` | Surface T2 memory, prime bead state |
-| `SessionStart` | `rdr_hook.py` | Report RDR document count and status |
+| `SessionStart` | `nx hook session-start` | Initialize T1 server, sweep stale sessions |
+| `SessionStart` | `session_start_hook.py` | Surface T2 memory, beads, scratch context |
+| `SessionStart` | `rdr_hook.py` | RDR file↔T2 status reconciliation |
 | `SessionStart` | `bd prime` | Load beads context into session |
 | `SessionStart` | `using-nx-skills/SKILL.md` | Inject skill invocation discipline |
-| `SessionEnd` | `nx hook session-end` | Flush nx session state |
-| `PreCompact` | `bd prime` | Re-prime bead context after compact |
+| `PreCompact` | `bd prime` | Re-prime bead context before compact |
 | `SubagentStart` | `subagent-start.sh` | Inject context for spawned subagents |
-| `PermissionRequest` | `permission-request-stdin.sh` | Auto-approve safe read-only commands |
-| `PostToolUse` | `bead_context_hook.py` | Remind to include context pointer in `bd create` |
 
 ## Slash Commands
 
@@ -200,7 +191,6 @@ Defined in `registry.yaml`:
 - `/nx:implement` → developer
 - `/nx:debug` → debugger
 - `/nx:architecture` → architect-planner
-- `/nx:orchestrate` → orchestrator
 - `/nx:knowledge-tidy` → knowledge-tidier
 - `/nx:pdf-process` → pdf-chromadb-processor
 - `/nx:deep-analysis` → deep-analyst

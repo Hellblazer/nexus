@@ -1,6 +1,7 @@
 ---
 name: development
 description: Use when a plan has been approved and implementation work is ready to begin, before writing production code
+effort: medium
 ---
 
 # Development Skill

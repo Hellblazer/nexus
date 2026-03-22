@@ -180,11 +180,10 @@ agents:
     successors: []
 
   orchestrator:
-    model: haiku
+    model: sonnet
     version: "2.0"
     color: gold
     skill: orchestration
-    slash_command: /orchestrate
     description: "Routes requests to appropriate specialized agents"
     triggers:
       - "unsure which agent to use after reading the skill directory"
@@ -238,7 +237,7 @@ agents:
 
   plan-enricher:
     model: sonnet
-    version: "1.0"
+    version: "2.0"
     color: emerald
     skill: enrich-plan
     slash_command: /enrich-plan
@@ -511,7 +510,6 @@ naming_aliases:
   /knowledge-tidy: knowledge-tidying   # Verb form preference
   /test-validate: test-validation      # Verb form preference
   /plan-audit: plan-validation         # Action-oriented
-  /orchestrate: orchestration          # Verb form preference
   /pdf-process: pdf-processing         # Verb form preference
   /analyze-code: codebase-analysis     # Different naming convention
 
@@ -532,12 +530,12 @@ model_summary:
     - substantive-critic
     - deep-research-synthesizer
     - developer
+    - orchestrator
     - plan-auditor
     - plan-enricher
     - test-validator
   haiku: # Fast, cheap - utility agents
     - knowledge-tidier
-    - orchestrator
     - pdf-chromadb-processor
 
 # =============================================================================

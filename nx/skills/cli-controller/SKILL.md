@@ -1,6 +1,7 @@
 ---
 name: cli-controller
 description: Use when controlling interactive CLI applications, debugging with pdb/gdb/jshell, spawning Claude Code instances, or working with REPLs and long-running processes
+effort: medium
 ---
 
 # CLI Controller Skill

@@ -1,6 +1,7 @@
 ---
 name: substantive-critique
 description: Use when architectural decisions, implementations, or documentation need deep constructive critique against specs or evidence
+effort: high
 ---
 
 # Deep Critique Skill

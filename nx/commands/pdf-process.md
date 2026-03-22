@@ -33,30 +33,8 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **pdf-processing** skill with the following relay. Fill in dynamic fields from the context above:
+Invoke the **pdf-processing** skill. It will determine the right approach:
+- **Single PDF**: Run `nx index pdf` directly (no agent needed)
+- **Multiple PDFs or complex scenarios**: Dispatch **pdf-chromadb-processor** agent
 
-```markdown
-## Relay: pdf-chromadb-processor
-
-**Task**: Index "$ARGUMENTS" into T3 store for semantic search
-**Bead**: [fill from active bead above or 'none']
-
-### Input Artifacts
-- Files: [fill from PDF file paths listed above]
-
-### PDFs to Index
-$ARGUMENTS
-
-### Deliverable
-All specified PDFs extracted, chunked, and indexed in T3 store with metadata preserved (title, author, date) and searchability verified via search tool sample queries.
-
-### Quality Criteria
-- [ ] All PDFs processed without errors
-- [ ] Text properly extracted with layout preserved
-- [ ] Content chunked appropriately for semantic search
-- [ ] Metadata (title, author, date) preserved in document records
-- [ ] Documents searchable -- verified with search tool sample queries
-- [ ] Collection name follows convention (docs__corpus-name)
-```
-
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
+Pass through the user's arguments: $ARGUMENTS

@@ -8,7 +8,7 @@ if command -v git &> /dev/null; then
   PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
   if [[ -n "$PROJECT" ]]; then
     SCAN_SCRIPT="$CLAUDE_PLUGIN_ROOT/hooks/scripts/t2_prefix_scan.py"
-    T2_OUT=$(uv run python "$SCAN_SCRIPT" "$PROJECT" 2>/dev/null)
+    T2_OUT=$(python3 "$SCAN_SCRIPT" "$PROJECT" 2>/dev/null)
     if [[ -n "$T2_OUT" ]]; then
       echo "## T2 Memory (Active Project)"
       echo "$T2_OUT"

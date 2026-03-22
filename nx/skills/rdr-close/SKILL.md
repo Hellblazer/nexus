@@ -1,6 +1,7 @@
 ---
 name: rdr-close
 description: Use when an RDR is done — close it with optional post-mortem, bead status advisory, and T3 archival
+effort: medium
 ---
 
 # RDR Close Skill

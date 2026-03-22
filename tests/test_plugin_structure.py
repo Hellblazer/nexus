@@ -550,11 +550,11 @@ class TestSkillDescriptionCSO:
         match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
         assert match, f"{skill_path.parent.name}/SKILL.md: no YAML frontmatter"
         fm = yaml.safe_load(match.group(1))
-        allowed = {"name", "description"}
+        allowed = {"name", "description", "effort"}
         extra = set(fm.keys()) - allowed
         assert not extra, (
             f"{skill_path.parent.name}/SKILL.md: non-standard frontmatter fields "
-            f"{extra}. Claude Code only reads 'name' and 'description'."
+            f"{extra}. Allowed: {allowed}."
         )
 
     @pytest.mark.parametrize("skill_path", [
