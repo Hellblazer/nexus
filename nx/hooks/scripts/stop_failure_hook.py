@@ -66,6 +66,12 @@ def main() -> None:
         _debug(f"unknown error type: {error_type}, treating as 'unknown'")
         error_type = "unknown"
 
+    # Only run side effects inside a real Claude Code session.
+    # Tests invoke us via subprocess but don't set CLAUDECODE=1.
+    if not os.environ.get("CLAUDECODE"):
+        _debug("not in Claude Code session (CLAUDECODE not set), skipping side effects")
+        return
+
     if not shutil.which("bd"):
         _debug("bd not on PATH, skipping")
         return

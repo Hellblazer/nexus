@@ -107,3 +107,13 @@ class TestStopFailureHook:
         })
         result = _run_hook(payload)
         assert result.returncode == 0
+
+    def test_skips_side_effects_without_claudecode_env(self) -> None:
+        """Without CLAUDECODE=1, script must not call bd (no junk beads)."""
+        # Ensure CLAUDECODE is NOT set
+        result = _run_hook(
+            _make_payload("rate_limit"),
+            env_overrides={"CLAUDECODE": "", "NX_HOOK_DEBUG": "1"},
+        )
+        assert result.returncode == 0
+        assert "skipping side effects" in result.stderr.lower()
