@@ -2,12 +2,14 @@
 title: "Claude Code Framework Alignment (v2.1.72–v2.1.81)"
 id: RDR-039
 type: Technical Debt
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-03-21
 accepted_date: 2026-03-21
+closed_date: 2026-03-22
+close_reason: implemented
 related_issues: []
 ---
 
