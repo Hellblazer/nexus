@@ -114,10 +114,13 @@ For each child bead, update its description with:
 
 ### Step 4: Update Beads
 
-For each enriched bead:
-```bash
-bd update <id> --description "enriched content"
-```
+For each enriched bead, two actions in sequence:
+
+**Step 4a** — Write enriched content to a temp file using the **Write tool** (file_path: `/tmp/bead-<id>.md`, content: the enriched markdown). Do NOT use echo, cat, or heredoc — use the Write tool.
+
+**Step 4b** — Update the bead from the file: `bd update <id> --body-file /tmp/bead-<id>.md`
+
+**IMPORTANT**: Do NOT use `--description "..."` for multi-line or markdown content — shell escaping silently corrupts backticks, `$variables`, and nested quotes without raising an error. Always use `--body-file`.
 
 ## T2 Persistence
 
@@ -154,7 +157,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 See [ERROR_HANDLING.md](./_shared/ERROR_HANDLING.md) for common error patterns and recovery.
 
 ### Agent-Specific PRODUCE
-- **Enriched Beads**: Updated via `bd update <id> --description "..."` with execution-ready context
+- **Enriched Beads**: Updated via Write tool → `bd update <id> --body-file /tmp/bead-<id>.md` with execution-ready context
 - **T2 memory**: Epic bead ID written via memory_put tool: project="{repo}_rdr", title="NNN"
 - **T1 scratch**: Enrichment summary via scratch tool: action="put", tags="enrichment-complete"
 - **Console output**: Enriched plan summary table
@@ -168,7 +171,7 @@ Store using these naming conventions:
 **CRITICAL**: Complete all data persistence BEFORE generating final response.
 
 **Sequence** (follow strictly):
-1. **Update All Beads**: Run `bd update` for every enriched bead
+1. **Update All Beads**: For each bead — Write content to `/tmp/bead-<id>.md` via Write tool, then `bd update <id> --body-file /tmp/bead-<id>.md` (never `--description`)
 2. **Write T2 Record**: Store epic bead ID and enrichment metadata via memory_put tool
 3. **Write T1 Summary**: Store enrichment summary to scratch
 4. **Verify Persistence**: Confirm beads updated (bd show <id> for sample), T2 written (memory_get)
