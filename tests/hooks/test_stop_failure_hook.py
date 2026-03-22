@@ -5,8 +5,6 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "nx" / "hooks" / "scripts" / "stop_failure_hook.py"
@@ -97,4 +95,15 @@ class TestStopFailureHook:
     def test_unknown_error_type_handled(self) -> None:
         """Completely unknown error values should still be handled."""
         result = _run_hook(_make_payload("some_future_error_type"))
+        assert result.returncode == 0
+
+    def test_null_error_details(self) -> None:
+        """error_details may be null in JSON — must not crash on None[:200]."""
+        payload = json.dumps({
+            "session_id": "s",
+            "hook_event_name": "StopFailure",
+            "error": "rate_limit",
+            "error_details": None,
+        })
+        result = _run_hook(payload)
         assert result.returncode == 0

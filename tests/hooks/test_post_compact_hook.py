@@ -4,10 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import textwrap
 from pathlib import Path
-
-import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "nx" / "hooks" / "scripts" / "post_compact_hook.sh"
 
@@ -60,22 +57,25 @@ class TestPostCompactHook:
             f"Output exceeds 20-line budget: {len(lines)} lines\n{result.stdout}"
         )
 
-    def test_contains_beads_section_header(self) -> None:
-        """Output should contain a beads section when bd is available."""
+    def test_contains_beads_section_when_active(self) -> None:
+        """Output should contain a beads section when bd has in-progress work."""
         result = _run_hook()
-        # If bd is on PATH, output should mention beads/work
         if subprocess.run(["which", "bd"], capture_output=True).returncode == 0:
-            assert any(
-                kw in result.stdout.lower()
-                for kw in ("bead", "in-progress", "in_progress", "work")
-            ), f"No beads section in output:\n{result.stdout}"
+            active = subprocess.run(
+                ["bd", "list", "--status=in_progress", "--limit=1"],
+                capture_output=True, text=True,
+            )
+            has_active = active.returncode == 0 and "in_progress" in (active.stdout or "")
+            if has_active:
+                assert any(
+                    kw in result.stdout.lower()
+                    for kw in ("bead", "in-progress", "in_progress", "work")
+                ), f"No beads section in output:\n{result.stdout}"
 
     def test_contains_scratch_section_when_entries_exist(self) -> None:
         """Output should contain a scratch section when nx has entries."""
         result = _run_hook()
         if subprocess.run(["which", "nx"], capture_output=True).returncode == 0:
-            # Script correctly omits section when scratch is empty or says
-            # "No scratch entries." — only assert if entries actually exist.
             scratch = subprocess.run(
                 ["nx", "scratch", "list"], capture_output=True, text=True,
             )
@@ -90,13 +90,8 @@ class TestPostCompactHook:
                     for kw in ("scratch", "t1")
                 ), f"No scratch section in output:\n{result.stdout}"
 
-    def test_graceful_without_bd(self) -> None:
-        """Script should not fail if bd is not on PATH."""
-        result = _run_hook(env_overrides={"PATH": "/usr/bin:/bin"})
-        assert result.returncode == 0
-
-    def test_graceful_without_nx(self) -> None:
-        """Script should not fail if nx is not on PATH."""
+    def test_graceful_without_bd_or_nx(self) -> None:
+        """Script should not fail if bd and nx are not on PATH."""
         result = _run_hook(env_overrides={"PATH": "/usr/bin:/bin"})
         assert result.returncode == 0
 

@@ -58,7 +58,7 @@ def main() -> None:
         return
 
     error_type = data.get("error", "unknown")
-    error_details = data.get("error_details", "")
+    error_details = str(data.get("error_details") or "")
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Normalize unknown error types
