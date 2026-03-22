@@ -17,8 +17,12 @@ def mock_chromadb():
     The side_effect function simulates the probe-first init:
     - database ending in ``_code`` raises NotFoundError (no old layout)
     - all other databases return the mock client (new single-DB layout)
+
+    Also patches ``get_credential`` so the real ``~/.config/nexus/config.yml``
+    (which may contain ``migrated: '1'``) doesn't leak into cloud-mode tests.
     """
-    with patch("nexus.db.t3.chromadb") as m:
+    with patch("nexus.db.t3.chromadb") as m, \
+         patch("nexus.db.t3.get_credential", return_value=""):
         mock_client = MagicMock()
 
         def _cloud_client_factory(*args, **kwargs):
@@ -73,7 +77,7 @@ def test_old_layout_detected(mock_chromadb: tuple) -> None:
 def test_migration_flag_skips_probe(mock_chromadb: tuple) -> None:
     """NX_MIGRATED=1 skips the probe and connects directly to {base}."""
     chromadb_m, _ = mock_chromadb
-    with patch.dict(os.environ, {"NX_MIGRATED": "1"}):
+    with patch("nexus.db.t3.get_credential", side_effect=lambda k: "1" if k == "migrated" else ""):
         db = T3Database(tenant="t", database="mydb", api_key="k")
 
     # Only one CloudClient call — no probe

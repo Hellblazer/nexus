@@ -36,7 +36,10 @@ def test_store_put_missing_chroma_api_key(
     src = tmp_path / "f.txt"
     src.write_text("content")
 
-    result = runner.invoke(main, ["store", "put", str(src)])
+    # Patch get_credential so ~/.config/nexus/config.yml doesn't leak in
+    creds = {"chroma_database": "d", "voyage_api_key": "vk", "chroma_api_key": ""}
+    with patch("nexus.config.get_credential", side_effect=lambda k: creds.get(k, "")):
+        result = runner.invoke(main, ["store", "put", str(src)])
 
     assert result.exit_code != 0
     assert "chroma_api_key" in result.output.lower()
