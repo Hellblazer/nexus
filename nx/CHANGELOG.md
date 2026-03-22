@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-03-22
+
+### Added
+- PostCompact hook (`post_compact_hook.sh`) — re-injects active beads and T1 scratch
+  after compaction. Buffers output and only emits header when content exists.
+- StopFailure hook (`stop_failure_hook.py`) — logs API failures to beads memory,
+  creates blocker bead on rate limits. Python 3.9+ compatible, null-safe.
+
+### Fixed
+- PostCompact scratch test adapted for empty-scratch environments (CI).
+
 ## [2.2.0] - 2026-03-21
 
 ### Added

@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-03-22
+
+### Added
+- **PostCompact hook** — re-injects in-progress bead state and T1 scratch entries
+  after conversation compaction. Only emits output when there is content to show.
+- **StopFailure hook** — logs API failure context to beads memory for observability.
+  Creates a blocker bead on rate limits. Handles null `error_details` gracefully.
+- **Integration tests in release checklist** — `uv run pytest -m integration` is now
+  a required pre-release step in `docs/contributing.md`.
+
+### Fixed
+- **Test isolation** — patched `get_credential` in T3/store tests to prevent
+  `~/.config/nexus/config.yml` from leaking real credentials into unit tests.
+- **PostCompact scratch test** — no longer false-fails on CI when `nx scratch list`
+  returns no entries.
+
+### Docs
+- RDR-039 closed: all 4 phases implemented.
+
 ## [2.2.0] - 2026-03-21
 
 ### Changed

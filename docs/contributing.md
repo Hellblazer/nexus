@@ -106,11 +106,13 @@ Every step below is **required**. Missing any one of them has caused problems in
 
 ### Step-by-step checklist
 
-1. **Verify the full test suite passes**
+1. **Verify the full test suite passes (unit + integration)**
    ```bash
-   uv run pytest tests/
+   uv run pytest tests/                    # unit tests (no API keys needed)
+   uv run pytest -m integration            # E2E tests (requires real API keys)
    ```
-   Do not proceed if any test fails.
+   Both must pass. Integration tests are excluded from CI — they are your last
+   line of defense before release. Do not skip them.
 
 2. **Audit docs against changes since last release**
    Run `git log --oneline v<prev>..HEAD` and check each feature/fix against the docs:
