@@ -46,7 +46,7 @@ T1 scratch is session-scoped. Standalone invocation only works within the same s
 
 ## Agent-Specific PRODUCE
 
-- **Enriched Beads**: Updated via `bd update <id> --description "..."` with execution-ready context
+- **Enriched Beads**: Updated via Write tool → `bd update <id> --body-file /tmp/bead-<id>.md` with execution-ready context
 - **T2 memory**: Epic bead ID written via memory_put tool: project="{repo}_rdr", title="NNN"
 - **T1 scratch**: Enrichment summary via scratch tool: action="put", tags="enrichment-complete"
 - **Console output**: Enriched plan summary table

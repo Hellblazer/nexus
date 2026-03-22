@@ -89,6 +89,23 @@ After creating a skill, update `nx/registry.yaml`:
 
 When adding a new skill, also add it to `nx/skills/using-nx-skills/SKILL.md` routing tree. This file is injected every session — if your skill isn't listed there, it won't be discovered.
 
+## Known Pitfalls
+
+### bd update --description silently corrupts multi-line content
+
+**Never** instruct agents to use `bd update <id> --description "..."` for multi-line or markdown content. Shell escaping silently destroys backticks (executed as command substitution), `$variables` (expanded to empty), and nested quotes (break argument boundaries). No error is raised — the command reports success with mangled data.
+
+**Correct pattern**: Write content to a temp file via the Write tool, then use `--body-file`:
+
+```
+Step 1 — Write enriched content using the Write tool (file_path: /tmp/bead-<id>.md)
+Step 2 — bd update <id> --body-file /tmp/bead-<id>.md
+```
+
+Short single-phrase values (e.g. `--design "revised scope"`) are safe. The bug only affects multi-line content with markdown formatting.
+
+This applies to `--description`, `--notes`, `--design`, and any flag that accepts free-text content longer than a simple phrase. Use `--body-file` or `--design-file` respectively.
+
 ## Quality Checklist
 
 - [ ] Frontmatter has `name`, `description`, and `effort`
