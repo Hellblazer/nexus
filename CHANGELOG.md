@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-03-22
+
+### Fixed
+- **StopFailure hook junk beads** — guarded side effects behind `CLAUDECODE` env var
+  so test runs no longer create junk beads and memories via `bd`.
+
 ## [2.3.0] - 2026-03-22
 
 ### Added

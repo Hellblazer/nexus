@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-03-22
+
+### Fixed
+- StopFailure hook guarded behind `CLAUDECODE` env var — no more junk beads from test runs.
+
 ## [2.3.0] - 2026-03-22
 
 ### Added
