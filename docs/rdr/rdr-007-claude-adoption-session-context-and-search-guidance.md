@@ -94,7 +94,7 @@ The following was tested in a single session against the arcaneum project:
 --show-toplevel` → `Path(toplevel).name`. For repo `arcaneum`, this produces
 `arcaneum`. The hook then calls `nx memory list --project arcaneum`.
 
-The RDR workflow (via `/rdr-create` and the `rdr_hook.py`) populates T2 under
+The RDR workflow (via `/nx:rdr-create` and the `rdr_hook.py`) populates T2 under
 `{repo_name}_rdr` (e.g., `arcaneum_rdr`). These are different keys in the T2
 store.
 
@@ -348,7 +348,7 @@ contradicts the actual namespace conventions in use (`{repo}_rdr`,
 **Project naming**: Use purpose-specific suffixes for different memory domains:
 
 - bare `{repo}` — general project memory and notes
-- `{repo}_rdr` — RDR documents and gate results (populated by `/rdr-create`)
+- `{repo}_rdr` — RDR documents and gate results (populated by `/nx:rdr-create`)
 - `{repo}_pm` — project management context (populated by `nx pm`)
 
 The session hook discovers all populated namespaces by prefix scan; content
