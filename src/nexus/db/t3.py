@@ -11,9 +11,13 @@ from typing import Literal
 import chromadb
 import chromadb.errors
 import httpx
-import voyageai
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 import structlog
+
+try:
+    import voyageai
+except Exception:  # Pydantic v1 crashes on Python ≥ 3.14
+    voyageai = None  # type: ignore[assignment]
 
 from nexus.config import get_credential
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
@@ -92,6 +96,12 @@ class T3Database:
             return
 
         # ── Cloud mode ───────────────────────────────────────────────────
+        if voyageai is None:
+            raise ImportError(
+                "voyageai is required for cloud mode but failed to import "
+                "(likely Pydantic v1 incompatibility with Python ≥ 3.14). "
+                "Use local mode (NX_LOCAL_MODE=1) or downgrade to Python ≤ 3.13."
+            )
         self._voyage_client: voyageai.Client | None = (
             voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=3)
             if voyage_api_key else None
