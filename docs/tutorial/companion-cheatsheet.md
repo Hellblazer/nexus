@@ -89,9 +89,7 @@ nx hooks status                        # check hook status
 ## Cloud Mode (optional)
 
 ```bash
-uv tool install conexus --with "conexus[cloud]" --force
-nx doctor                              # verify cloud extras installed
-nx config init                         # interactive credential setup
+nx config init                         # interactive credential setup (needs API keys)
 nx doctor                              # verify cloud connectivity
 nx index repo .                        # re-index with cloud models
 ```

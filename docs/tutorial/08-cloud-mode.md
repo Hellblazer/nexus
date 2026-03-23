@@ -35,27 +35,7 @@ Both options are free. Local has zero cost forever. Cloud uses free tiers from C
 
 ## TALK
 
-If you want to try it, here's the setup. First, install the cloud extra:
-
-## DO
-
-```bash
-uv tool install conexus --with "conexus[cloud]" --force
-```
-
-## TALK
-
-Let's verify the cloud extra installed correctly:
-
-## DO
-
-```bash
-nx doctor
-```
-
-## TALK
-
-If you still see X marks for Voyage AI after installing the cloud extra, run the install command again — sometimes the extras need a force reinstall. Now create accounts — both have generous free tiers:
+Cloud mode doesn't require installing anything extra — Voyage AI support is already included. You just need to create accounts and add your API keys.
 
 ## OVERLAY
 
