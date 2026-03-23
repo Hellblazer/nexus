@@ -122,7 +122,7 @@ T3 (knowledge)
 ### Promotion methods
 
 - **T1 -> T2**: `nx scratch promote ID --project NAME --title NAME`, or auto-flush of flagged items at session end.
-- **T2 -> T3**: `nx memory promote TITLE --collection NAME`.
+- **T2 -> T3**: `nx memory promote ID --collection NAME` (by numeric row ID from `nx memory list`).
 
 ### TTL translation on promote
 

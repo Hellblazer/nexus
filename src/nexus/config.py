@@ -151,7 +151,7 @@ def is_local_mode() -> bool:
     Decision logic:
       - ``NX_LOCAL=1`` → True  (explicit opt-in)
       - ``NX_LOCAL=0`` → False (explicit opt-out)
-      - Otherwise: True when **both** CHROMA_API_KEY and VOYAGE_API_KEY are absent
+      - Otherwise: True when **either** CHROMA_API_KEY or VOYAGE_API_KEY is absent
     """
     nx_local = os.environ.get("NX_LOCAL", "").strip()
     if nx_local == "1":

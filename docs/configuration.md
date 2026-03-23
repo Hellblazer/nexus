@@ -21,7 +21,7 @@ Nexus auto-detects local mode when cloud credentials are absent. No configuratio
 | `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Override local ChromaDB storage path |
 | `NX_LOCAL_EMBED_MODEL` | (auto) | Force a specific local embedding model name |
 
-**Auto-detection**: When both `CHROMA_API_KEY` and `VOYAGE_API_KEY` are absent, local mode activates. Set `NX_LOCAL=1` to force local mode even with cloud credentials.
+**Auto-detection**: When either `CHROMA_API_KEY` or `VOYAGE_API_KEY` is absent, local mode activates — both are required for cloud mode. Set `NX_LOCAL=1` to force local mode even with cloud credentials.
 
 **Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install with `uv tool install conexus --with "conexus[local]" --force` for tier 1 (bge-base-en-v1.5, 768d, better quality).
 
@@ -54,8 +54,9 @@ Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.co
 |---|---|---|---|
 | `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | Voyage reranker for multi-corpus merge |
 | `client.host` | `NX_CLIENT_HOST` | `localhost` | Override ChromaDB host URL |
+| `voyageai.read_timeout_seconds` | `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` | `120` | Request timeout (seconds) for Voyage AI API calls. Increase for large PDF indexing |
 
-Embedding models are selected automatically based on collection type (see [Storage Tiers](storage-tiers.md)): `voyage-code-3` for code, `voyage-context-3` for docs/knowledge at index time, `voyage-4` for all queries.
+Embedding models are selected automatically based on collection type (see [Storage Tiers](storage-tiers.md)): `voyage-code-3` for code, `voyage-context-3` (CCE) for docs/rdr/knowledge at both index and query time, `voyage-4` for code queries only.
 
 ## Per-Repo Overrides (.nexus.yml)
 
@@ -77,26 +78,30 @@ The `[tuning]` section in `~/.config/nexus/config.yml` controls search scoring, 
 
 ```yaml
 tuning:
-  vector_weight: 0.7              # weight for vector similarity in hybrid scoring
-  frecency_weight: 0.3            # weight for git frecency in hybrid scoring
-  file_size_threshold: 30         # chunks — files larger than this are down-ranked
-  decay_rate: 0.01                # frecency decay rate (higher = faster decay)
-  code_chunk_lines: 150           # target lines per code chunk (fallback splitter)
-  pdf_chunk_chars: 1500           # target chars per PDF chunk
-  git_log_timeout: 30             # seconds — timeout for git log subprocess
-  ripgrep_timeout: 10             # seconds — timeout for ripgrep subprocess in hybrid search
+  scoring:
+    vector_weight: 0.7            # weight for vector similarity in hybrid scoring
+    frecency_weight: 0.3          # weight for git frecency in hybrid scoring
+    file_size_threshold: 30       # chunks — files larger than this are down-ranked
+  frecency:
+    decay_rate: 0.01              # frecency decay rate (higher = faster decay)
+  chunking:
+    code_chunk_lines: 150         # target lines per code chunk (fallback splitter)
+    pdf_chunk_chars: 1500         # target chars per PDF chunk
+  timeouts:
+    git_log: 30                   # seconds — timeout for git log subprocess
+    ripgrep: 10                   # seconds — timeout for ripgrep subprocess in hybrid search
 ```
 
-| Key | Default | Description |
+| YAML path | Default | Description |
 |-----|---------|-------------|
-| `vector_weight` | `0.7` | Vector similarity weight in hybrid scoring formula |
-| `frecency_weight` | `0.3` | Git frecency weight in hybrid scoring formula |
-| `file_size_threshold` | `30` | Chunk count above which code files are down-ranked |
-| `decay_rate` | `0.01` | Exponential decay rate for frecency scoring |
-| `code_chunk_lines` | `150` | Target lines per code chunk (line-based fallback) |
-| `pdf_chunk_chars` | `1500` | Target characters per PDF chunk |
-| `git_log_timeout` | `30` | Timeout (seconds) for `git log` subprocess |
-| `ripgrep_timeout` | `10` | Timeout (seconds) for `rg` subprocess in hybrid search |
+| `tuning.scoring.vector_weight` | `0.7` | Vector similarity weight in hybrid scoring formula |
+| `tuning.scoring.frecency_weight` | `0.3` | Git frecency weight in hybrid scoring formula |
+| `tuning.scoring.file_size_threshold` | `30` | Chunk count above which code files are down-ranked |
+| `tuning.frecency.decay_rate` | `0.01` | Exponential decay rate for frecency scoring |
+| `tuning.chunking.code_chunk_lines` | `150` | Target lines per code chunk (line-based fallback) |
+| `tuning.chunking.pdf_chunk_chars` | `1500` | Target characters per PDF chunk |
+| `tuning.timeouts.git_log` | `30` | Timeout (seconds) for `git log` subprocess |
+| `tuning.timeouts.ripgrep` | `10` | Timeout (seconds) for `rg` subprocess in hybrid search |
 
 These values are exposed as a `TuningConfig` dataclass in `nexus.config`. The search command, indexer, and scoring modules all read from this config — changes take effect on the next invocation without restarting anything.
 

@@ -76,7 +76,7 @@ Do not bump these without testing the full chunking pipeline.
 ## Git Workflow
 
 - Branch naming: `feature/<bead-id>-<short-description>`
-- Never push directly to `main` — all changes via PR
+- Never push directly to `main` — all changes via PR (exception: version-bump release commits, see Release Process below)
 - Use `bd` (beads) for task tracking
 
 The `main` branch requires CI to pass before merging. Configure branch protection at

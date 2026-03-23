@@ -30,7 +30,7 @@ The `nx` CLI and plugin work independently, but the plugin's full agent and skil
 Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 
 **Also required:**
-- Python 3.12+ (for hook scripts)
+- Python 3.12–3.13 (for hook scripts)
 
 ## What You Get
 
