@@ -768,7 +768,7 @@ def _run_index(
         except Exception as exc:
             raise ImportError(
                 "voyageai is required for cloud indexing but is not installed. "
-                "Install with: pip install conexus[cloud]"
+                "Install with: uv tool install conexus --with 'conexus[cloud]' --force"
             ) from exc
         code_model = index_model_for_collection(code_collection)
         docs_model = index_model_for_collection(docs_collection)

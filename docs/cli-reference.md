@@ -17,7 +17,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `QUERY` (positional) | Search query text |
 | `PATH` (positional, optional) | Scope search to files under that directory |
 | `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
-| `--hybrid` | Merge semantic + ripgrep results for code (0.7*vector + 0.3*frecency) |
+| `--hybrid` | Augment semantic results with frecency-weighted ranking and ripgrep keyword matches (0.7*vector + 0.3*frecency). Requires ripgrep |
 | `--no-rerank` | Disable cross-corpus reranking (use round-robin instead) |
 | `--where KEY=VALUE` | Metadata filter (repeatable; multiple flags are ANDed) |
 | `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |
@@ -38,7 +38,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 
 ## nx index
 
-Index content into T3 cloud collections.
+Index content into T3 collections.
 
 ```
 nx index repo ./my-project
@@ -82,7 +82,7 @@ nx index repo ./my-project
 
 ## nx store
 
-Manage T3 cloud knowledge entries.
+Manage T3 knowledge entries.
 
 ```
 echo "# Cache Strategy" | nx store put - --collection knowledge --title "decision-cache" --tags "decision,arch"
@@ -220,7 +220,7 @@ nx scratch put "hypothesis: cache invalidation is stale"
 
 ## nx collection
 
-Manage T3 cloud collections.
+Manage T3 collections (local or cloud).
 
 ```
 nx collection list
@@ -228,7 +228,7 @@ nx collection list
 
 | Subcommand | Description |
 |------------|-------------|
-| `list` | All cloud collections with document counts |
+| `list` | All T3 collections with document counts |
 | `info NAME` | Details for one collection |
 | `verify NAME` | Existence check + document count |
 | `delete NAME` | Delete collection (irreversible) |

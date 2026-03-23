@@ -143,7 +143,7 @@ def _voyage_client():
             except Exception as exc:
                 raise ImportError(
                     "voyageai is required for reranking but is not installed. "
-                    "Install with: pip install conexus[cloud]"
+                    "Install with: uv tool install conexus --with 'conexus[cloud]' --force"
                 ) from exc
             from nexus.config import get_credential, load_config
             timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)

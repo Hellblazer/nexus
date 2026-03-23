@@ -22,7 +22,7 @@ active decisions, working state — and retrieve it by project and title.
 The plugin's SessionStart hooks automatically surface T2 memory context so
 agents know where a project stands without being told. Two hooks contribute:
 
-1. `nx hook session-start` lists recent T2 entries for the current repo.
+1. `nx hook session-start` (internal, invoked by plugin hooks) lists recent T2 entries for the current repo.
 
 2. The plugin's `session_start_hook.py` scans all T2 namespaces for the
    project (bare, `_rdr`, etc.) and injects a summary, along with ready beads.

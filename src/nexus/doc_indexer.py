@@ -117,7 +117,7 @@ def _embed_with_fallback(
     except Exception as exc:
         raise ImportError(
             "voyageai is required for cloud doc indexing but is not installed. "
-            "Install with: pip install conexus[cloud]"
+            "Install with: uv tool install conexus --with 'conexus[cloud]' --force"
         ) from exc
     client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=3)
     if model == "voyage-context-3":

@@ -8,7 +8,7 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 |------|---------|---------|------------|-----|
 | T1 -- scratch | ChromaDB HTTP server (per-session) | Localhost only | Session only | Working notes, hypotheses |
 | T2 -- memory | SQLite + FTS5 (WAL) | None | Survives restarts | Per-project notes, session context |
-| T3 -- knowledge | ChromaDB cloud + Voyage AI | Required | Permanent | Semantic search, indexed code/docs |
+| T3 -- knowledge | Local ChromaDB (default) or ChromaDB Cloud + Voyage AI | Local: none / Cloud: required | Permanent | Semantic search, indexed code/docs |
 
 ## T1 -- Session Scratch
 
@@ -44,12 +44,12 @@ T3 has two backends: **local** (zero-config) and **cloud** (higher quality).
 
 Backed by `chromadb.PersistentClient` with local ONNX embeddings. No API keys or network required. Data stored at `~/.local/share/nexus/chroma`.
 
-| | Tier 0 (bundled) | Tier 1 (`pip install conexus[local]`) |
+| | Tier 0 (bundled) | Tier 1 (`uv tool install conexus --with "conexus[local]" --force`) |
 |---|---|---|
 | Model | all-MiniLM-L6-v2 | bge-base-en-v1.5 |
 | Dimensions | 384 | 768 |
 | Quality | Basic semantic matching | Better code & prose retrieval |
-| Install | Included | `pip install conexus[local]` |
+| Install | Included | `uv tool install conexus --with "conexus[local]" --force` |
 
 All collection types use the same local model (no per-prefix splitting). Reranking is unavailable in local mode.
 
@@ -66,10 +66,12 @@ Collections are namespaced by corpus type using `__` (double underscore) as sepa
 | Pattern | Contents | Cloud index model | Cloud query model |
 |---------|----------|-------------------|-------------------|
 | `code__<repo>-<hash>` | Indexed source code | voyage-code-3 | voyage-4 |
-| `docs__<repo>-<hash>` | Indexed prose files | voyage-context-3 (CCE) | voyage-4 |
-| `rdr__<repo>-<hash>` | Indexed RDR documents | voyage-context-3 (CCE) | voyage-4 |
-| `docs__<corpus>` | Indexed PDFs and markdown | voyage-context-3 (CCE) | voyage-4 |
-| `knowledge__<topic>` | Stored agent outputs and notes | voyage-context-3 | voyage-4 |
+| `docs__<repo>-<hash>` | Indexed prose files | voyage-context-3 (CCE) | voyage-context-3 |
+| `rdr__<repo>-<hash>` | Indexed RDR documents | voyage-context-3 (CCE) | voyage-context-3 |
+| `docs__<corpus>` | Indexed PDFs and markdown | voyage-context-3 (CCE) | voyage-context-3 |
+| `knowledge__<topic>` | Stored agent outputs and notes | voyage-context-3 (CCE) | voyage-context-3 |
+
+CCE collections must be queried with `voyage-context-3` to stay in the same vector space — `voyage-4` is not compatible. Only `code__*` collections use `voyage-4` for queries.
 
 In local mode, all collections use the active local model for both index and query.
 

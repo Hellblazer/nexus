@@ -31,7 +31,7 @@ uv run pytest -m integration
 
 ## Code Conventions
 
-- **Python 3.12+**: use `match/case`, `tomllib`, `typing.Protocol`, walrus operator
+- **Python 3.12–3.13**: use `match/case`, `tomllib`, `typing.Protocol`, walrus operator
 - **Type hints everywhere**: all public functions, methods, module-level variables
 - **No ORM**: raw `sqlite3` for T2
 - **Logging**: `structlog` — never `print()` in library code

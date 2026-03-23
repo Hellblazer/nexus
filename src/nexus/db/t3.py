@@ -99,7 +99,7 @@ class T3Database:
         if voyageai is None:
             raise ImportError(
                 "voyageai is required for cloud mode but is not installed. "
-                "Install with: pip install conexus[cloud]"
+                "Install with: uv tool install conexus --with 'conexus[cloud]' --force"
             )
         self._voyage_client: voyageai.Client | None = (
             voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=3)

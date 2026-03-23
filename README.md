@@ -75,7 +75,7 @@ nx index pdf paper.pdf --collection knowledge__ml  # reference papers
 nx store put --collection knowledge__ops "Redis maxmemory-policy: allkeys-lru for cache, noeviction for queues"
 ```
 
-Repository indexing (`nx index repo`) is the most automated path. It classifies git-tracked files, chunks code into logical pieces via tree-sitter AST parsing across 31 languages, and embeds each chunk with purpose-matched Voyage AI models. Recently-touched files rank higher via git frecency scoring.
+Repository indexing (`nx index repo`) is the most automated path. It classifies git-tracked files, chunks code into logical pieces via tree-sitter AST parsing across 31 languages, and embeds each chunk using local ONNX models by default, or Voyage AI models in cloud mode. Recently-touched files rank higher via git frecency scoring.
 
 See [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) for details and `.nexus.yml` configuration.
 
@@ -141,7 +141,7 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 ## Prerequisites
 
 - Python 3.12–3.13, [`uv`](https://docs.astral.sh/uv/), `git`
-- For cloud embeddings (optional): `pip install conexus[cloud]` + [ChromaDB Cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) accounts (free tiers available)
+- For cloud embeddings (optional): `uv tool install conexus --with "conexus[cloud]" --force` + [ChromaDB Cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) accounts (free tiers available)
 - For hybrid search: [`ripgrep`](https://github.com/BurntSushi/ripgrep)
 
 ## License

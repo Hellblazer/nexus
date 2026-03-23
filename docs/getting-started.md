@@ -72,6 +72,8 @@ The `nx` plugin gives Claude Code agents access to all three storage tiers, 15 s
 /plugin install nx@nexus-plugins
 ```
 
+After installing, run `/nx:nx-preflight` to verify all plugin dependencies (nx CLI, beads, superpowers plugin) are present.
+
 See [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) for the full agent/skill reference. For local development from a repo checkout:
 
 ```bash
@@ -88,7 +90,7 @@ Local mode uses bundled ONNX embeddings (384d MiniLM). Cloud mode upgrades to Vo
 uv tool install conexus --with "conexus[cloud]" --force
 ```
 
-To update later: `uv tool install conexus --with "conexus[cloud]" --force`
+The same command works for both first install and updates.
 
 ### 2. Create accounts
 
