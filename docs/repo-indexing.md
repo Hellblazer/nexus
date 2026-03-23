@@ -107,10 +107,7 @@ line-based splitting: 150-line chunks with 15% overlap.
 
 ### Minified Code Handling
 
-The AST chunker detects minified files (average line length > 500 characters) and falls
-back to byte-based splitting instead of producing single oversized chunks. This prevents
-minified JavaScript, CSS, and similar files from consuming disproportionate storage and
-degrading search quality.
+Individual lines exceeding the byte limit (12 KB) are pre-split at natural code delimiters (`;`, `,`, `}`) before chunking. AST-produced chunks that individually exceed the byte limit are post-processed by the same line-level splitting. This prevents minified JavaScript, CSS, and similar files from producing single oversized chunks that consume disproportionate storage and degrade search quality.
 
 ### Context Prefix Injection (Embed-Only)
 
@@ -229,7 +226,7 @@ version is bumped. This enables targeted re-indexing:
   checks, so only changed files are re-embedded. This is the recommended flag after upgrading
   Nexus to a version with pipeline changes.
 
-`nx doctor` reports the pipeline version status of each collection:
+In cloud mode, `nx doctor` reports the pipeline version status of each collection. In local mode, pipeline version is not checked — run `nx index repo --force-stale` after an upgrade to refresh any outdated collections.
 
 ```
 ✓ pipeline (code__nexus-571b8edd): v4

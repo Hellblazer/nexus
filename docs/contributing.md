@@ -176,7 +176,7 @@ Every step below is **required**. Missing any one of them has caused problems in
     ```bash
     gh run watch   # watch CI until green
     gh release view vX.Y.Z
-    pip index versions conexus   # confirm new version appears on PyPI
+    uv pip compile --no-deps conexus==X.Y.Z  # confirm version resolves on PyPI
     ```
 
 11. **Yank pre-release versions** (if applicable)

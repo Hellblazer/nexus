@@ -56,7 +56,7 @@ Flag assumptions that your design depends on. Low-stakes assumptions need no ver
 
 RDRs are not waterfall documents written once before implementation. They're iterative — write one, build, learn from what you find, write the next one. Each RDR builds on what earlier ones established, and sometimes an implementation reveals that a prior decision needs revisiting.
 
-The Nexus project has produced 36 RDRs across its development. The corpus is searchable, so when starting a new design, prior decisions surface automatically — preventing contradictions and avoiding redundant investigation.
+The Nexus project has produced over 35 RDRs across its development. The corpus is searchable, so when starting a new design, prior decisions surface automatically — preventing contradictions and avoiding redundant investigation.
 
 ## Statuses and types
 

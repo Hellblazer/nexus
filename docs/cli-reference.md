@@ -64,6 +64,7 @@ nx index repo ./my-project
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
 | `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
+| `--on-locked {skip,wait}` | Behavior when another process holds the repo lock: `skip` exits immediately, `wait` blocks (default: `wait`) |
 
 **`pdf` and `md` flags:**
 

@@ -136,7 +136,7 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 2. [Workflow](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-workflow.md) — Create → Research → Gate → Accept → Close
 3. [Nexus Integration](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-nexus-integration.md) — How storage tiers and agents amplify RDRs
 4. [Templates](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-templates.md) — Minimal and full examples, post-mortem template
-5. [Project RDR Index](https://github.com/Hellblazer/nexus/blob/main/docs/rdr/README.md) — All 36 project RDRs with status
+5. [Project RDR Index](https://github.com/Hellblazer/nexus/blob/main/docs/rdr/README.md) — All project RDRs with status
 
 ## Prerequisites
 
