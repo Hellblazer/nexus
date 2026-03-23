@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.5] - 2026-03-23
+
+### Docs
+- **Streamlined getting-started guide** — linear flow from prerequisites through
+  install, verify, use, plugin, cloud. Added `nx doctor` verify step, Python 3.14
+  workaround, `uv tool update` instructions, and `conexus[cloud]`/`conexus[local]`
+  extras documentation.
+- **Three-pass substantive critique** — fixed query model docs (CCE collections use
+  voyage-context-3 for both index and query), removed "T3 cloud" mislabeling from
+  CLI reference, corrected tuning YAML structure (nested subsections, not flat keys),
+  fixed local-mode auto-detection docs (either key absent, not both), added missing
+  `--on-locked` flag and `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` env var, corrected
+  minified code detection description, and replaced all `pip install` with `uv` syntax.
+- **Unprefixed skill references** — corrected `/rdr-create` → `/nx:rdr-create` etc.
+  across all documentation and RDR files.
+
+### Fixed
+- **`is_local_mode()` docstring** — corrected to match implementation (either key
+  absent triggers local mode, not both).
+
 ## [2.3.4] - 2026-03-23
 
 ### Fixed

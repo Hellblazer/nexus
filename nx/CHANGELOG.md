@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.5] - 2026-03-23
+
+### Docs
+- **Unprefixed skill references** — all `/rdr-create` → `/nx:rdr-create` etc.
+  across documentation and RDR files.
+- **Python version** — updated to 3.12–3.13 in plugin README prerequisites.
+
 ## [2.3.4] - 2026-03-23
 
 ### Fixed
