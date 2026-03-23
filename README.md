@@ -31,24 +31,27 @@ nx store put --collection knowledge__myapp "API rate limit is 10k/min per the ve
 
 ## Quick Start
 
+Requires Python 3.12–3.13 and [uv](https://docs.astral.sh/uv/).
+
 ```bash
-uv tool install conexus          # install the nx CLI (requires Python 3.12–3.13)
-nx index repo .                  # index your repo (works immediately — no API keys needed)
+uv tool install conexus          # install the nx CLI
+nx doctor                        # verify installation
+nx index repo .                  # index your repo (no API keys needed)
 nx search "what does X do"       # semantic search, fully local
 ```
 
 Update: `uv tool update conexus`
 
-Local mode uses bundled ONNX embeddings — zero configuration required. For higher-quality cloud embeddings (Voyage AI), install with: `uv tool install conexus --with "conexus[cloud]"` then run `nx config init` to set up API keys. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
+Works immediately with local ONNX embeddings — no accounts, no API keys. For higher-quality cloud embeddings (Voyage AI), see the [cloud setup instructions](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md#cloud-mode-optional).
 
-For Claude Code, also install the plugin (see [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/nx/README.md)):
+For Claude Code, install the plugin:
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
 /plugin install nx@nexus-plugins
 ```
 
-All three tiers work with **zero API keys** — including semantic search, which uses local ONNX embeddings by default. For higher-quality embeddings, optionally configure [ChromaDB Cloud](https://www.trychroma.com/) and [Voyage AI](https://www.voyageai.com/) (free tiers available). See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
+See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
 
 ## Three tiers, one lifecycle
 
@@ -137,8 +140,8 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 
 ## Prerequisites
 
-- Python 3.12+, [`uv`](https://docs.astral.sh/uv/), `git`
-- For semantic search: [ChromaDB cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) (free tiers available)
+- Python 3.12–3.13, [`uv`](https://docs.astral.sh/uv/), `git`
+- For cloud embeddings (optional): `pip install conexus[cloud]` + [ChromaDB Cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) accounts (free tiers available)
 - For hybrid search: [`ripgrep`](https://github.com/BurntSushi/ripgrep)
 
 ## License
