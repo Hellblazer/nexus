@@ -11,21 +11,22 @@ A recorded video walkthrough for Claude Code users who want persistent memory an
 
 ## Runtime Estimate
 
-35–50 minutes total
+30–45 minutes total
 
 ## Sections
 
 | # | Section | Minutes | What happens |
 |---|---------|---------|-------------|
+| 0 | Cold Open | ~1 | Show the end state: Claude finding code, recalling decisions, answering from context |
 | 1 | Prerequisites | 3–5 | Install uv, verify Python and git |
-| 2 | Install Nexus | 3–4 | `uv tool install conexus`, `nx doctor`, quick tour of what got installed |
+| 2 | Install Nexus | 3–4 | `uv tool install conexus`, `nx doctor`, quick tour |
 | 3 | First Use — CLI | 5–7 | Memory, scratch, index a repo, search — all local, no keys |
-| 4 | Install the Plugin | 3–4 | Marketplace install, preflight check, what changed |
-| 5 | Nexus Inside Claude | 5–7 | Same operations but through Claude — agents use nx automatically |
-| 6 | Agents and Skills | 7–10 | What the 15 agents do, live demo of 2–3 (debug, review, plan) |
-| 7 | The RDR Process | 7–10 | What decisions look like, live create → research → accept → close |
-| 8 | Cloud Mode (Optional) | 3–5 | When you'd want it, how to set it up, free tiers |
-| 9 | Tips and Next Steps | 2–3 | Daily workflow, updating, where to get help |
+| 4 | Install the Plugin | 2–3 | Marketplace install, preflight check |
+| 5 | Nexus Inside Claude | 4–6 | Same operations through Claude — search, memory, auto-context |
+| 6 | Agents and Skills | 5–7 | Top 5 agents, live demo of debug + review |
+| 7 | The RDR Process | 5–7 | What decisions look like, live create → research |
+| 8 | Cloud Mode (Optional) | 2–3 | When you'd want it, how to set it up |
+| 9 | Tips and Next Steps | 2–3 | Daily workflow, hooks, updating, cheatsheet URL |
 
 ## Companion Materials
 
@@ -35,9 +36,12 @@ A recorded video walkthrough for Claude Code users who want persistent memory an
 ## Recording Notes
 
 - Use a clean terminal with a visible font size (14pt+)
-- Have a small test repo ready (doesn't matter what — something with 10–20 files)
-- Make a small uncommitted edit in the test repo before section 6 (code review needs changes to review)
-- Run `nx index repo .` on the test repo before recording section 3 — let it run on camera so viewers see the output
+- Have a small test repo ready (10–20 files, with at least one function that has poor error handling for the review demo)
+- Make a small uncommitted edit before section 6 (e.g., add a function that catches a broad exception and silently passes)
+- Run `nx index repo .` on the test repo during section 3 — show the output live
 - Clear nx state before recording (`rm -rf ~/.config/nexus ~/.local/share/nexus`)
 - Start Claude Code fresh (no plugins installed)
 - On Windows, use WSL or adapt the uv install command (PowerShell variant shown in section 1)
+- Script section 5 questions to match what's actually in the test repo
+- After RDR create in section 7, briefly show the created file in an editor
+- Say the cheatsheet URL on camera at the end of section 9

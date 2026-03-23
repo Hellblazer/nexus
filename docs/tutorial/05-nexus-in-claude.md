@@ -85,6 +85,13 @@ When Claude sends multiple agents to work on this, they write their findings to 
 
 ## TALK
 
-The key insight: you don't have to think about which tier to use. When you tell Claude to remember something, it goes to memory. When agents find things during work, they share through scratch. When you index a repo, it goes to the knowledge store. Claude's agents are trained to check these tiers before answering — but like any tool, it works best when you give it good input. Storing important decisions explicitly ("remember that we chose X because Y") is more reliable than hoping Claude infers them.
+You don't have to think about which tier to use. Tell Claude to remember something — it goes to memory. Agents share findings through scratch. You index a repo — it goes to the knowledge store.
 
-Over time, this compounds. The more you store and index, the more context Claude has about your project. After a few sessions, Claude knows your architecture, your decisions, your conventions — because you and the agents have been building that knowledge base together.
+One tip: storing decisions explicitly — "remember that we chose X because Y" — works better than hoping Claude infers them.
+
+## OVERLAY
+
+> **This compounds over time:**
+> - Session 1: Claude searches your code
+> - Session 10: Claude knows your decisions
+> - Session 50: Claude knows your project better than a new team member

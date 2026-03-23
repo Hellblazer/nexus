@@ -13,17 +13,8 @@ Everything we've done so far is completely local. No API keys, no accounts. The 
 
 ## OVERLAY
 
-> **Local mode** (what we've been using):
-> - Bundled MiniLM model, 384 dimensions
-> - Good for finding relevant files and functions
-> - Free, private, no network
->
-> **Cloud mode** (optional upgrade):
-> - Voyage AI models, 1024 dimensions
-> - Specialized models for code vs. prose
-> - Cross-chunk context for better document retrieval
-> - Reranking across collections
-> - Free tiers cover individual use
+> **Local (default):** good results, zero cost, no setup
+> **Cloud (optional):** better results on large codebases, free tier covers individual use
 
 ## TALK
 

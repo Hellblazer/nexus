@@ -53,19 +53,23 @@ The git hooks are nice — they re-index your repo automatically after every com
 nx hooks install
 ```
 
-### Where to Get Help
-
-## OVERLAY
-
-> **Resources:**
-> - `nx --help` and `nx <command> --help` — built-in reference
-> - [Getting Started guide](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md)
-> - [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md)
-> - [Plugin README](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) — agent and skill reference
-> - [GitHub Issues](https://github.com/Hellblazer/nexus/issues) — bug reports and feature requests
+### Cheatsheet and Help
 
 ## TALK
 
-That's nexus. Persistent memory, semantic search, and specialized agents — all working together so Claude Code gets smarter about your project over time. Install takes two minutes, local mode needs zero configuration, and everything compounds the more you use it.
+Everything we covered today is in a one-page cheatsheet. I'll put the link on screen — bookmark it.
+
+## OVERLAY
+
+> **Cheatsheet:** github.com/Hellblazer/nexus/blob/main/docs/tutorial/companion-cheatsheet.md
+>
+> **More help:**
+> - `nx --help` — built-in reference
+> - [Plugin README](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) — all 15 agents
+> - [GitHub Issues](https://github.com/Hellblazer/nexus/issues) — bugs and features
+
+## TALK
+
+That's nexus. Persistent memory, semantic search, and specialized agents — so Claude gets smarter about your project over time. Install takes two minutes, and everything compounds the more you use it.
 
 Thanks for watching.

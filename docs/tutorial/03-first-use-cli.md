@@ -71,9 +71,7 @@ nx index repo .
 
 ## TALK
 
-Nexus just analyzed every file in your repo. It figured out which ones are code, which are documentation, and which to skip. It broke each file into logical chunks — using the actual syntax tree for code, not just line counts — and created searchable embeddings for each chunk.
-
-All of that happened locally. No API calls, no cloud — it used a small neural network bundled right in the install.
+That just analyzed every file in your repo — code, docs, everything — and made it all searchable. Completely local, no API calls.
 
 Now let's search:
 
@@ -93,14 +91,21 @@ nx search "getting started" --corpus docs
 nx search "retry logic" -c
 ```
 
-## OVERLAY
+## TALK
 
-> **What's happening under the hood?**
-> Your query is converted to a vector (a list of numbers representing its meaning). Nexus finds the chunks whose vectors are closest to your query's vector. "Authentication" matches code about JWT, login handlers, and middleware — even if none contain the word "authentication."
+Notice how the results found relevant code even when the exact words didn't match. That's semantic search — it matches by meaning, not by exact words. You can find things by what they do, not just what they're called.
+
+Quick tip: if you want your repo re-indexed automatically after every commit:
+
+## DO
+
+```bash
+nx hooks install
+```
 
 ## TALK
 
-Notice how the results found relevant code even when the exact words didn't match. That's semantic search. You can now find things by what they do, not just what they're called.
+Now you never have to think about it. Every commit keeps your search index fresh.
 
 ## OVERLAY
 
