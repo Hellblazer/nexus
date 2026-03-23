@@ -84,15 +84,7 @@ claude --plugin-dir ./nx
 
 Local mode uses bundled ONNX embeddings (384d MiniLM). Cloud mode upgrades to Voyage AI (1024d), cross-chunk context (CCE), and reranking.
 
-### 1. Install the cloud extra
-
-```bash
-uv tool install conexus --with "conexus[cloud]" --force
-```
-
-The same command works for both first install and updates.
-
-### 2. Create accounts
+### 1. Create accounts
 
 | Service | Purpose | Free tier |
 |---------|---------|-----------|
@@ -101,7 +93,7 @@ The same command works for both first install and updates.
 
 Both free tiers cover typical usage at no cost.
 
-### 3. Configure credentials
+### 2. Configure credentials
 
 Interactive wizard:
 
@@ -117,7 +109,7 @@ nx config set chroma_database nexus
 nx config set voyage_api_key pa-...
 ```
 
-### 4. Verify
+### 3. Verify
 
 ```bash
 nx doctor
@@ -125,7 +117,7 @@ nx doctor
 
 All items should show `✓`. Fix anything marked `✗` before proceeding.
 
-### 5. Index and search
+### 4. Index and search
 
 ```bash
 nx index repo .
@@ -159,7 +151,7 @@ To force local mode even when cloud credentials exist: `NX_LOCAL=1`.
 
 **`nx index repo .` fails with "credentials not set"** — In cloud mode, indexing requires T3 credentials. Run `nx config init` first, or use local mode (no credentials needed).
 
-**`import voyageai` error when using cloud features** — Install the cloud extra: `uv tool install conexus --with "conexus[cloud]" --force`
+**`import voyageai` error** — Reinstall: `uv tool install conexus --force`. If on Python 3.14, downgrade to 3.13: `uv python install 3.13` then reinstall.
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running is safe — unchanged files are skipped.
 

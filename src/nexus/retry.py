@@ -80,14 +80,12 @@ def _chroma_with_retry(
 
 # ── Voyage AI transient-error retry ──────────────────────────────────────────
 
-try:
-    import voyageai.error as _voyageai_error
-    _VOYAGE_ERROR_TYPES: tuple[type, ...] | None = (
-        _voyageai_error.APIConnectionError,
-        _voyageai_error.TryAgain,
-    )
-except Exception:  # ImportError or Pydantic v1 ValueError on Python ≥ 3.14
-    _VOYAGE_ERROR_TYPES = None
+import voyageai.error as _voyageai_error
+
+_VOYAGE_ERROR_TYPES: tuple[type, ...] = (
+    _voyageai_error.APIConnectionError,
+    _voyageai_error.TryAgain,
+)
 
 
 def _is_retryable_voyage_error(exc: BaseException) -> bool:
@@ -98,7 +96,7 @@ def _is_retryable_voyage_error(exc: BaseException) -> bool:
     ``max_retries`` on ``voyageai.Client`` (tenacity-based).  The two error
     spaces are disjoint; do not add Voyage AI types to _is_retryable_chroma_error.
     """
-    return bool(_VOYAGE_ERROR_TYPES and isinstance(exc, _VOYAGE_ERROR_TYPES))
+    return isinstance(exc, _VOYAGE_ERROR_TYPES)
 
 
 def _voyage_with_retry(

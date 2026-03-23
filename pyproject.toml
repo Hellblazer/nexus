@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "2.3.5"
+version = "2.3.6"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -45,12 +45,12 @@ dependencies = [
     "structlog>=24.0",
     "tqdm>=4.65",
     "tree-sitter-language-pack==0.7.1",
+    "voyageai>=0.2",
     "docling>=2.76.0",
     "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
-cloud = ["voyageai>=0.2"]
 local = ["fastembed>=0.7.0"]
 
 [project.urls]
@@ -80,5 +80,4 @@ dev = [
     "pytest-cov>=7.0.0",
     "syrupy>=4.0",
     "twine>=6.2.0",
-    "voyageai>=0.2",
 ]

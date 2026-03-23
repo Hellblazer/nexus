@@ -141,7 +141,7 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 ## Prerequisites
 
 - Python 3.12–3.13, [`uv`](https://docs.astral.sh/uv/), `git`
-- For cloud embeddings (optional): `uv tool install conexus --with "conexus[cloud]" --force` + [ChromaDB Cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) accounts (free tiers available)
+- For cloud embeddings (optional): [ChromaDB Cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) accounts (free tiers available)
 - For hybrid search: [`ripgrep`](https://github.com/BurntSushi/ripgrep)
 
 ## License

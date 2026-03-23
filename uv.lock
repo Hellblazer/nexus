@@ -403,7 +403,7 @@ wheels = [
 
 [[package]]
 name = "conexus"
-version = "2.3.5"
+version = "2.3.6"
 source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
@@ -419,12 +419,10 @@ dependencies = [
     { name = "structlog" },
     { name = "tqdm" },
     { name = "tree-sitter-language-pack" },
+    { name = "voyageai" },
 ]
 
 [package.optional-dependencies]
-cloud = [
-    { name = "voyageai" },
-]
 local = [
     { name = "fastembed" },
 ]
@@ -436,7 +434,6 @@ dev = [
     { name = "pytest-cov" },
     { name = "syrupy" },
     { name = "twine" },
-    { name = "voyageai" },
 ]
 
 [package.metadata]
@@ -455,9 +452,9 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.0" },
     { name = "tqdm", specifier = ">=4.65" },
     { name = "tree-sitter-language-pack", specifier = "==0.7.1" },
-    { name = "voyageai", marker = "extra == 'cloud'", specifier = ">=0.2" },
+    { name = "voyageai", specifier = ">=0.2" },
 ]
-provides-extras = ["cloud", "local"]
+provides-extras = ["local"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -466,7 +463,6 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "syrupy", specifier = ">=4.0" },
     { name = "twine", specifier = ">=6.2.0" },
-    { name = "voyageai", specifier = ">=0.2" },
 ]
 
 [[package]]

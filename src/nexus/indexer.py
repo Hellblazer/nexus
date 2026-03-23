@@ -763,13 +763,7 @@ def _run_index(
         voyage_key = get_credential("voyage_api_key")
         chroma_key = get_credential("chroma_api_key")
         check_credentials(voyage_key, chroma_key)
-        try:
-            import voyageai
-        except Exception as exc:
-            raise ImportError(
-                "voyageai is required for cloud indexing but is not installed. "
-                "Install with: uv tool install conexus --with 'conexus[cloud]' --force"
-            ) from exc
+        import voyageai
         code_model = index_model_for_collection(code_collection)
         docs_model = index_model_for_collection(docs_collection)
         voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=3)

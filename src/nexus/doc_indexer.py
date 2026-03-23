@@ -112,13 +112,7 @@ def _embed_with_fallback(
             chunk_count=len(chunks),
             limit=_CCE_MAX_TOTAL_CHUNKS,
         )
-    try:
-        import voyageai
-    except Exception as exc:
-        raise ImportError(
-            "voyageai is required for cloud doc indexing but is not installed. "
-            "Install with: uv tool install conexus --with 'conexus[cloud]' --force"
-        ) from exc
+    import voyageai
     client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=3)
     if model == "voyage-context-3":
         if len(chunks) < 2:

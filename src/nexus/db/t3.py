@@ -14,10 +14,7 @@ import httpx
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 import structlog
 
-try:
-    import voyageai
-except Exception:  # Pydantic v1 crashes on Python ≥ 3.14
-    voyageai = None  # type: ignore[assignment]
+import voyageai
 
 from nexus.config import get_credential
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
@@ -96,11 +93,6 @@ class T3Database:
             return
 
         # ── Cloud mode ───────────────────────────────────────────────────
-        if voyageai is None:
-            raise ImportError(
-                "voyageai is required for cloud mode but is not installed. "
-                "Install with: uv tool install conexus --with 'conexus[cloud]' --force"
-            )
         self._voyage_client: voyageai.Client | None = (
             voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=3)
             if voyage_api_key else None

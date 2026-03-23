@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.6] - 2026-03-23
+
+### Fixed
+- **Restore voyageai as required dependency** — the `conexus[cloud]` optional extra
+  was an unnecessary workaround. Since `requires-python < 3.14` blocks the only
+  incompatible Python version, voyageai always works on supported Pythons. Reverted
+  to direct `import voyageai` with no guards. Removed the `cloud` extra.
+
 ## [2.3.5] - 2026-03-23
 
 ### Docs
