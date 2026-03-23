@@ -120,7 +120,7 @@ PR merged. But **no real PDFs were run through the extraction pipeline** before 
 The bug only appeared when processing a corpus sequentially in one process.
 
 **Process change**: Add "verified against real-world corpus" as a required step before
-`/rdr-close` for any extraction-tier RDR. For RDR-012 specifically, this would have
+`/nx:rdr-close` for any extraction-tier RDR. For RDR-012 specifically, this would have
 been: run all delos-papers through `extract()` in a single process, check each
 extraction_method and pipe count.
 
@@ -155,7 +155,7 @@ test suite does not equal correct real-world behavior.
 - Document the verification evidence in the close commit or post-mortem
 
 This does not need to be a formal gate (that would slow small RDRs). It should be
-a **checklist item in `/rdr-close`** that asks: "Has this been verified against
+a **checklist item in `/nx:rdr-close`** that asks: "Has this been verified against
 real-world inputs?"
 
 ### 4. Fixture PDFs Should Be Added During Research, Not After

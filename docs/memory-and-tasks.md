@@ -40,7 +40,7 @@ The plugin wires beads into the session lifecycle:
 - **SessionStart** also shows ready beads (unblocked work) via `bd ready`
 - **SubagentStart** injects the active bead so spawned agents know what
   task they're continuing
-- **RDR close** (`/rdr-close`) decomposes a decision into beads — one epic
+- **RDR close** (`/nx:rdr-close`) decomposes a decision into beads — one epic
   for the overall effort, plus task beads for each implementation step
 - **Branch naming** ties git branches to beads: `feature/<bead-id>-<description>`
 
@@ -55,7 +55,7 @@ the other.
 
 When you use both, the connections are automated:
 
-- `/rdr-close` creates beads (epic + task beads) for implementation tracking.
+- `/nx:rdr-close` creates beads (epic + task beads) for implementation tracking.
   The `epic_bead` field in each RDR's T2 metadata provides a machine-readable
   link from decision to work items.
 - RDR decisions surface as prior art during planning via `nx search "topic"` against the knowledge corpus.

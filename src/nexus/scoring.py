@@ -138,7 +138,13 @@ def _voyage_client():
         return _voyage_instance
     with _voyage_lock:
         if _voyage_instance is None:
-            import voyageai
+            try:
+                import voyageai
+            except Exception as exc:
+                raise ImportError(
+                    "voyageai is required for reranking but is not installed. "
+                    "Install with: pip install conexus[cloud]"
+                ) from exc
             from nexus.config import get_credential, load_config
             timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
             _voyage_instance = voyageai.Client(

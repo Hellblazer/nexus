@@ -94,7 +94,7 @@ between "Present design" and "Save design doc" steps. Uses passive detection
     request for the pattern `RDR-\d+`. For each match:
     - Run: `nx memory get --project {repo}_rdr --title NNN`
     - If status is not "accepted" or "closed": warn the user:
-      "RDR-NNN is still {status}. Run /rdr-gate NNN and /rdr-accept NNN
+      "RDR-NNN is still {status}. Run /nx:rdr-gate NNN and /nx:rdr-accept NNN
        before planning implementation."
     - If the lookup fails or returns no result, warn and proceed (fail-open).
     - If no RDR pattern is found, proceed normally.
@@ -110,7 +110,7 @@ relay validation step 6, after existing field checks:
    the pattern `RDR-\d+`. For each match:
    - Run: `nx memory get --project {repo}_rdr --title NNN`
    - If status is not "accepted" or "closed", warn: "RDR-NNN is {status}.
-     Consider running /rdr-gate NNN and /rdr-accept NNN first."
+     Consider running /nx:rdr-gate NNN and /nx:rdr-accept NNN first."
    - If the lookup fails, warn and proceed (fail-open).
    - If no RDR pattern found, proceed normally.
 ```
@@ -130,7 +130,7 @@ if rdr_refs:
     result = {
         "message": f"Bead references {rdr_list}. "
                    f"Verify RDR status before implementation: "
-                   f"/rdr-show {rdr_refs[0]}"
+                   f"/nx:rdr-show {rdr_refs[0]}"
     }
     print(json.dumps(result))
 ```
@@ -159,7 +159,7 @@ workflows.
 
 **T2 storage convention**: Guardrails 1 and 2 assume RDR status is stored in T2
 under `nx memory get --project {repo}_rdr --title NNN`. This is the convention
-used by `/rdr-gate` and `/rdr-accept`. If the T2 record doesn't exist, the
+used by `/nx:rdr-gate` and `/nx:rdr-accept`. If the T2 record doesn't exist, the
 guardrail falls back to "warn and proceed."
 
 ## Success Criteria

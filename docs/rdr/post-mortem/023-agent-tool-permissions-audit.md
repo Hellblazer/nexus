@@ -61,7 +61,7 @@ moved directly to execution.
    `strategic-planning`, the brainstorming-gate skill should check whether the
    work is tracked by an RDR. If so, it should verify the RDR is in `accepted`
    status before allowing the planning skill to proceed. If the RDR is still
-   `draft`, it should prompt: "RDR-NNN is still draft. Run `/rdr-gate NNN` before
+   `draft`, it should prompt: "RDR-NNN is still draft. Run `/nx:rdr-gate NNN` before
    planning implementation."
 
 2. **Strategic planner pre-check**: The strategic-planner agent could verify that

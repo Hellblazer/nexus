@@ -71,7 +71,7 @@ priority: high | medium | low
 author: Author Name
 reviewed-by: self | reviewer name(s)
 created: YYYY-MM-DD
-accepted_date: # YYYY-MM-DD, set by /rdr-accept
+accepted_date: # YYYY-MM-DD, set by /nx:rdr-accept
 related_issues: []
 related_tests: []
 implementation_notes: ""
@@ -124,7 +124,7 @@ Each load-bearing assumption is a checkbox with verification status:
 Location: `docs/rdr/post-mortem/TEMPLATE.md` (copied from
 `nx/resources/rdr/post-mortem/TEMPLATE.md`)
 
-Created automatically by `/rdr-close`. Fill it after implementation to analyze
+Created automatically by `/nx:rdr-close`. Fill it after implementation to analyze
 drift between what was decided and what was built.
 
 ### Sections

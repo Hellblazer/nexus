@@ -98,9 +98,8 @@ class T3Database:
         # ── Cloud mode ───────────────────────────────────────────────────
         if voyageai is None:
             raise ImportError(
-                "voyageai is required for cloud mode but failed to import "
-                "(likely Pydantic v1 incompatibility with Python ≥ 3.14). "
-                "Use local mode (NX_LOCAL_MODE=1) or downgrade to Python ≤ 3.13."
+                "voyageai is required for cloud mode but is not installed. "
+                "Install with: pip install conexus[cloud]"
             )
         self._voyage_client: voyageai.Client | None = (
             voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=3)

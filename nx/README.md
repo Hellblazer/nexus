@@ -27,7 +27,7 @@ The `nx` CLI and plugin work independently, but the plugin's full agent and skil
 | **`bd` (Beads)** | Task tracking in all agents | [github.com/BeadsProject/beads](https://github.com/BeadsProject/beads) |
 | **superpowers plugin** | Cross-referenced skills (brainstorming, TDD, verification, writing-plans) | `/plugin marketplace add anthropics/claude-plugins-official` |
 
-Run `/nx-preflight` after installing to verify all dependencies are present.
+Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 
 **Also required:**
 - Python 3.12+ (for hook scripts)

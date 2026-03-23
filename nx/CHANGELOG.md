@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.4] - 2026-03-23
+
+### Fixed
+- **Unprefixed skill references** — corrected `/rdr-create` → `/nx:rdr-create` etc.
+  across 11 documentation and RDR files.
+
 ## [2.3.3] - 2026-03-23
 
 Plugin version aligned with Nexus CLI 2.3.3. No plugin-level functional changes.
@@ -117,15 +123,15 @@ Plugin version aligned with Nexus CLI 1.12.0. No plugin-level functional changes
 ### Added
 - **plan-enricher agent** — enriches beads with audit findings, execution context, and
   codebase alignment after plan-auditor validates (sonnet, emerald)
-- **enrich-plan skill + `/enrich-plan` command** — invoke plan-enricher standalone or
+- **enrich-plan skill + `/nx:enrich-plan` command** — invoke plan-enricher standalone or
   via RDR planning chain
-- **Planning handoff in `/rdr-accept`** — Step 7 auto-detects multi-phase RDRs and
+- **Planning handoff in `/nx:rdr-accept`** — Step 7 auto-detects multi-phase RDRs and
   offers to dispatch strategic-planner → plan-auditor → plan-enricher chain
 - **Conditional successor routing in plan-auditor** — T1 `rdr-planning-context` tag
   with RDR ID correlation routes to plan-enricher only in RDR planning context
 
 ### Changed
-- **`/rdr-close` bead decomposition → bead status advisory** — close no longer creates
+- **`/nx:rdr-close` bead decomposition → bead status advisory** — close no longer creates
   beads; shows read-only status table, human decides which to close
 - **strategic-planner Phase 3** renamed "Audit Handoff"; removed "iterate" instruction
 - Registered plan-enricher in `registry.yaml` (agents, feature pipeline, model summary)
@@ -193,8 +199,8 @@ Plugin version aligned with Nexus CLI 1.10.3. No plugin-level functional changes
   Agents use CLAUDE.md delegation for language/build/test detection at runtime.
 - **Skill and command renames** — `java-development/` → `development/`,
   `java-debugging/` → `debugging/`, `java-architecture/` → `architecture/`.
-  Commands: `/java-implement` → `/implement`, `/java-debug` → `/debug`,
-  `/java-architecture` → `/architecture`.
+  Commands: `/java-implement` → `/nx:implement`, `/java-debug` → `/nx:debug`,
+  `/java-architecture` → `/nx:architecture`.
 - **Registry updated** — all pipelines, predecessor/successor chains, naming aliases,
   and model summary reflect new agent names.
 - **18 cross-reference files updated** — orchestrator, strategic-planner, test-validator,
@@ -202,7 +208,7 @@ Plugin version aligned with Nexus CLI 1.10.3. No plugin-level functional changes
   shared protocols, 6 skill files, and orchestrate command.
 
 ### Added
-- **CLAUDE.md preflight check** in `/nx-preflight` — validates language, build system,
+- **CLAUDE.md preflight check** in `/nx:nx-preflight` — validates language, build system,
   and test command presence. Warnings only, not errors.
 
 ## [1.7.1] - 2026-03-07

@@ -86,7 +86,7 @@ try:
         _voyageai_error.APIConnectionError,
         _voyageai_error.TryAgain,
     )
-except ImportError:  # pragma: no cover
+except Exception:  # ImportError or Pydantic v1 ValueError on Python ≥ 3.14
     _VOYAGE_ERROR_TYPES = None
 
 

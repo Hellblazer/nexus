@@ -39,7 +39,7 @@ In practice, the agent fails completely: it hits sandbox restrictions on CLI too
 ### Observed Failure (2026-03-08, Kramer project)
 
 1. User asked to ingest a research PDF into T3
-2. `/pdf-process` skill activated, which spawned `pdf-chromadb-processor` agent
+2. `/nx:pdf-process` skill activated, which spawned `pdf-chromadb-processor` agent
 3. Agent attempted to run `pdfinfo`, `pdftotext` — all denied by sandbox
 4. Agent produced zero output, asked for permission escalation
 5. Human operator fell back to manual `nx store put` chunking (wrong approach)
@@ -107,7 +107,7 @@ The agent's value-add should be at a higher level than raw extraction:
 
 The current skill → agent chain has multiple problems:
 
-1. **Skill invocation overhead**: `/pdf-process` skill spawns a haiku agent, which then tries to run bash commands that get sandboxed
+1. **Skill invocation overhead**: `/nx:pdf-process` skill spawns a haiku agent, which then tries to run bash commands that get sandboxed
 2. **No awareness of nx index pdf**: Neither the skill nor the agent mention `nx index pdf` as the primary tool (it's buried as an afterthought in step 13)
 3. **Redundant with CLI**: For single-PDF ingestion, the user could just run `nx index pdf` directly — the agent adds negative value by failing
 4. **Wrong model tier**: PDF indexing is a deterministic pipeline operation, not a reasoning task — haiku is appropriate but the task doesn't need an LLM at all for the common case
@@ -247,7 +247,7 @@ This RDR is scoped to the agent prompt and skill file — no changes to `nx inde
 
 - **Naming conventions**: The agent currently generates corpus names like `author-year-short-title` which is correct for the `--corpus` argument. The updated agent prompt must document that `--corpus` auto-prepends `docs__`, so the agent should not include the prefix.
 - **Skill PRODUCE section**: Currently references `nx store put`, which Phase 2 updates to reflect `nx index pdf` output. This is a documentation-only change but affects downstream agents that read the skill's PRODUCE contract.
-- **Backward compatibility**: The agent name (`pdf-chromadb-processor`) and skill invocation path (`/pdf-process`) remain unchanged. Existing workflows that reference these names continue to work.
+- **Backward compatibility**: The agent name (`pdf-chromadb-processor`) and skill invocation path (`/nx:pdf-process`) remain unchanged. Existing workflows that reference these names continue to work.
 
 ### Proportionality
 

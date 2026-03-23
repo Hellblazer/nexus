@@ -17,7 +17,7 @@ Nexus provides the data infrastructure (T2 memory, T3 semantic search, agent orc
 ### Separation of Concerns
 
 - **`nx`** = data infrastructure (store, search, index, memory)
-- **`/rdr-*`** = workflow orchestration as Claude Code slash command skills (live in the `nx/` plugin)
+- **`/nx:rdr-*`** = workflow orchestration as Claude Code slash command skills (live in the `nx/` plugin)
 - **`bd`** = execution tracking (beads for implementation work)
 
 RDR skills invoke `nx` under the hood for persistence but present a workflow-oriented interface to the user. This keeps `nx` focused on data and avoids coupling planning methodology into the CLI.
@@ -58,19 +58,19 @@ Active RDRs live in the filesystem (for collaboration) with structured metadata 
 
 **Why `docs__rdr__` not `knowledge__rdr__`:** The `docs__` namespace routes to `voyage-context-3` (Contextualized Contextual Embedding) which embeds each chunk with awareness of surrounding chunks — critical for RDRs where individual sections derive meaning from the broader document context. The `knowledge__` namespace uses the same model but `docs__` is semantically correct: RDRs are structured documents, not atomic knowledge entries.
 
-**T2 TTL policy:** All RDR records use `--ttl permanent`. RDRs can span months from creation to close. The default 30-day TTL would silently expire active RDR metadata, causing `/rdr-gate` to report zero assumptions and `/rdr-list` to omit active RDRs.
+**T2 TTL policy:** All RDR records use `--ttl permanent`. RDRs can span months from creation to close. The default 30-day TTL would silently expire active RDR metadata, causing `/nx:rdr-gate` to report zero assumptions and `/nx:rdr-list` to omit active RDRs.
 
 **T3 title uniqueness:** T3 document IDs are derived from `sha256(collection:title)`. The T3 title must include the project prefix (e.g., `NX-003 Semantic Search Pipeline`) to guarantee uniqueness across projects that share a `docs__rdr__` collection prefix.
 
 ### Lifecycle
 
 ```
-/rdr-create ──author──> /rdr-research ──refine──> /rdr-gate ──pass──> /rdr-close
+/nx:rdr-create ──author──> /nx:rdr-research ──refine──> /nx:rdr-gate ──pass──> /nx:rdr-close
                              ^                        |
                              └────fail, iterate────────┘
 
-/rdr-show    (inspect one)
-/rdr-list    (inspect all)
+/nx:rdr-show    (inspect one)
+/nx:rdr-list    (inspect all)
 ```
 
 Status transitions: `Draft → Final → Implemented | Reverted | Abandoned | Superseded`
@@ -104,9 +104,9 @@ Future enhancement: after `check_and_reindex()`, inspect `git diff --name-only` 
 
 ## Skill Specifications
 
-### `/rdr-create`
+### `/nx:rdr-create`
 
-**Trigger:** User says "create an RDR", "new RDR", or `/rdr-create`
+**Trigger:** User says "create an RDR", "new RDR", or `/nx:rdr-create`
 
 **Agent:** None — mechanical scaffolding.
 
@@ -131,9 +131,9 @@ Future enhancement: after `check_and_reindex()`, inspect `git diff --name-only` 
 
 ---
 
-### `/rdr-research`
+### `/nx:rdr-research`
 
-**Trigger:** User says "add research finding", "update RDR research", or `/rdr-research`
+**Trigger:** User says "add research finding", "update RDR research", or `/nx:rdr-research`
 
 **Agent:** `deep-research-synthesizer` for gathering evidence. `codebase-deep-analyzer` for code-specific questions.
 
@@ -165,9 +165,9 @@ Future enhancement: after `check_and_reindex()`, inspect `git diff --name-only` 
 
 ---
 
-### `/rdr-gate`
+### `/nx:rdr-gate`
 
-**Trigger:** User says "gate this RDR", "finalization check", or `/rdr-gate`
+**Trigger:** User says "gate this RDR", "finalization check", or `/nx:rdr-gate`
 
 **Agent:** `substantive-critic` for Layer 3 AI critique.
 
@@ -209,9 +209,9 @@ Future enhancement: after `check_and_reindex()`, inspect `git diff --name-only` 
 
 ---
 
-### `/rdr-close`
+### `/nx:rdr-close`
 
-**Trigger:** User says "close this RDR", "RDR done", or `/rdr-close`
+**Trigger:** User says "close this RDR", "RDR done", or `/nx:rdr-close`
 
 **Agents:**
 - `knowledge-tidier` (Haiku) — archives post-mortem to T3 (post-mortem only; bead creation done directly by skill)
@@ -239,7 +239,7 @@ Future enhancement: after `check_and_reindex()`, inspect `git diff --name-only` 
 - T2 tracks an `archived: false` flag that can be retried independently
 - Each step emits clear status so a failure is diagnosable
 - The skill reports which steps completed and which failed
-- Failed steps can be retried by re-running `/rdr-close` (idempotent: checks T2 state before repeating completed steps)
+- Failed steps can be retried by re-running `/nx:rdr-close` (idempotent: checks T2 state before repeating completed steps)
 
 **If Reverted or Abandoned:**
 1. Prompt for reason (free text)
@@ -261,9 +261,9 @@ Future enhancement: after `check_and_reindex()`, inspect `git diff --name-only` 
 
 ---
 
-### `/rdr-show`
+### `/nx:rdr-show`
 
-**Trigger:** User says "show RDR", or `/rdr-show`
+**Trigger:** User says "show RDR", or `/nx:rdr-show`
 
 **Agent:** None — read-only display.
 
@@ -279,9 +279,9 @@ Future enhancement: after `check_and_reindex()`, inspect `git diff --name-only` 
 
 ---
 
-### `/rdr-list`
+### `/nx:rdr-list`
 
-**Trigger:** User says "list RDRs", or `/rdr-list`
+**Trigger:** User says "list RDRs", or `/nx:rdr-list`
 
 **Agent:** None — read-only query.
 
@@ -297,16 +297,16 @@ Future enhancement: after `check_and_reindex()`, inspect `git diff --name-only` 
 
 | Skill | Agent | Role |
 |-------|-------|------|
-| `/rdr-create` | — | Mechanical scaffolding |
-| `/rdr-research add` | `deep-research-synthesizer` | Fan out across web, codebase, T3, DEVONthink to gather and classify evidence |
-| `/rdr-research add` (code) | `codebase-deep-analyzer` | Deep code exploration for code-specific research questions |
-| `/rdr-gate` (Layer 3) | `substantive-critic` | Structural flaws, contradictions, unvalidated assumptions, proportionality |
-| `/rdr-gate` (prior art) | `nx search --corpus docs__rdr` | Prefix fan-out across all repos' RDR collections |
-| `/rdr-close` (decompose) | — (direct) | Parse Implementation Plan into beads via `bd create` + `bd dep add` |
-| `/rdr-close` (archive) | `knowledge-tidier` | Archive post-mortem to `knowledge__rdr_postmortem__{repo}` |
-| `/rdr-close` (divergence) | `substantive-critic` | Classify divergence patterns if post-mortem created |
-| `/rdr-show` | — | Read-only display |
-| `/rdr-list` | — | Read-only query |
+| `/nx:rdr-create` | — | Mechanical scaffolding |
+| `/nx:rdr-research add` | `deep-research-synthesizer` | Fan out across web, codebase, T3, DEVONthink to gather and classify evidence |
+| `/nx:rdr-research add` (code) | `codebase-deep-analyzer` | Deep code exploration for code-specific research questions |
+| `/nx:rdr-gate` (Layer 3) | `substantive-critic` | Structural flaws, contradictions, unvalidated assumptions, proportionality |
+| `/nx:rdr-gate` (prior art) | `nx search --corpus docs__rdr` | Prefix fan-out across all repos' RDR collections |
+| `/nx:rdr-close` (decompose) | — (direct) | Parse Implementation Plan into beads via `bd create` + `bd dep add` |
+| `/nx:rdr-close` (archive) | `knowledge-tidier` | Archive post-mortem to `knowledge__rdr_postmortem__{repo}` |
+| `/nx:rdr-close` (divergence) | `substantive-critic` | Classify divergence patterns if post-mortem created |
+| `/nx:rdr-show` | — | Read-only display |
+| `/nx:rdr-list` | — | Read-only query |
 
 **Agent selection rationale:** The original design used `strategic-planner` (Opus) for bead decomposition. Rev 2 delegated to `knowledge-tidier` (Haiku). Rev 3 moved bead creation back into the skill itself — the Implementation Plan section has a defined structure (Phase N / Step N headings), the skill already has `Bash` access, and splitting bead creation from archival simplifies failure handling. `knowledge-tidier` is now only used for post-mortem archival to T3 (its core strength: knowledge organization).
 
@@ -326,7 +326,7 @@ docs/
         └── ...
 ```
 
-**Bootstrapping:** `/rdr-create` handles first-use initialization: creates `docs/rdr/` and `docs/rdr/post-mortem/` directories, copies templates, initializes the README index. No separate bootstrap command needed.
+**Bootstrapping:** `/nx:rdr-create` handles first-use initialization: creates `docs/rdr/` and `docs/rdr/post-mortem/` directories, copies templates, initializes the README index. No separate bootstrap command needed.
 
 **README index merge conflicts:** The auto-generated `docs/rdr/README.md` will conflict in multi-contributor workflows. This is acceptable — the file is trivially regenerable from T2 state and filesystem contents. Consider adding a `.gitattributes` entry marking it as auto-generated.
 
@@ -412,7 +412,7 @@ ttl_days: 0                                 # permanent
 **Cross-project search:** `resolve_corpus()` treats arguments containing `__` as exact collection names, not prefixes. Therefore `--corpus docs__rdr` does **not** fan out. The skills use collection enumeration for cross-project search:
 
 ```bash
-# In /rdr-gate Layer 3:
+# In /nx:rdr-gate Layer 3:
 collections=$(nx collection list | grep '^docs__rdr__')
 for col in $collections; do
   nx search "query" --corpus "$col" --n 5
@@ -421,7 +421,7 @@ done
 
 **Repo name length constraint:** ChromaDB enforces 63-character collection names. `docs__rdr__` is 11 characters, leaving 52 for the repo name. Repo names exceeding 52 characters are truncated, with the full name stored in document metadata.
 
-**Cold-start behavior:** On first use (no `docs__rdr__*` collections exist), `/rdr-gate` Layer 3 gracefully reports "No prior RDRs indexed. Cross-project prior-art search will improve as RDRs are indexed and closed." T3 search handles non-existent collections via `_ChromaNotFoundError` → `continue`.
+**Cold-start behavior:** On first use (no `docs__rdr__*` collections exist), `/nx:rdr-gate` Layer 3 gracefully reports "No prior RDRs indexed. Cross-project prior-art search will improve as RDRs are indexed and closed." T3 search handles non-existent collections via `_ChromaNotFoundError` → `continue`.
 
 ## Integration Points
 
@@ -429,17 +429,17 @@ done
 nx index rdr ──────────────────────> docs__rdr__{repo} (T3, semantic index)
                                      SemanticMarkdownChunker + voyage-context-3
 
-/rdr-create ─────────────────────> docs/rdr/NNN.md (filesystem)
+/nx:rdr-create ─────────────────────> docs/rdr/NNN.md (filesystem)
                                     nx memory put - ... --ttl permanent (T2)
 
-/rdr-research ──agent──> findings > docs/rdr/NNN.md (append to Research Findings)
+/nx:rdr-research ──agent──> findings > docs/rdr/NNN.md (append to Research Findings)
                                     nx memory put - ... --ttl permanent (T2, structured)
 
-/rdr-gate ──────agent──> critique > nx search --corpus docs__rdr (T3, prior art)
+/nx:rdr-gate ──────agent──> critique > nx search --corpus docs__rdr (T3, prior art)
              substantive-critic     nx memory put - ... (T2, status=Final)
                                     nx index rdr (T3, re-index updated content)
 
-/rdr-close ─────direct──> beads ──> bd create (epic + children)
+/nx:rdr-close ─────direct──> beads ──> bd create (epic + children)
                                     bd dep add (wiring)
                                     docs/rdr/post-mortem/NNN.md (if diverged)
            ─────direct──> state ──> nx memory put - ... (T2, status=closed)
@@ -456,22 +456,22 @@ For repos with existing RDRs (e.g., arcaneum with 19 RDRs) that predate this sys
 # Index existing RDRs for semantic search:
 nx index rdr /path/to/repo
 
-# Optionally seed T2 metadata for /rdr-list and /rdr-show:
-# A one-time /rdr-import skill could scan docs/rdr/*.md,
+# Optionally seed T2 metadata for /nx:rdr-list and /nx:rdr-show:
+# A one-time /nx:rdr-import skill could scan docs/rdr/*.md,
 # parse frontmatter, and create T2 records. Not in initial scope
 # but a natural follow-up.
 ```
 
-The `nx index rdr` command works immediately on any repo with `docs/rdr/*.md` — no migration needed for semantic search. T2 metadata is only needed for the structured query features (`/rdr-list --has-assumptions`, etc.) and can be populated incrementally.
+The `nx index rdr` command works immediately on any repo with `docs/rdr/*.md` — no migration needed for semantic search. T2 metadata is only needed for the structured query features (`/nx:rdr-list --has-assumptions`, etc.) and can be populated incrementally.
 
 ## What This Does NOT Cover
 
 - **RDR content authoring** — The skills manage lifecycle, not prose. The author writes the RDR.
-- **Automated research execution** — `/rdr-research add` records findings; the agent helps gather them but the human classifies.
+- **Automated research execution** — `/nx:rdr-research add` records findings; the agent helps gather them but the human classifies.
 - **PR integration** — RDR files are version-controlled and naturally participate in PRs, but there's no GitHub-specific automation.
 - **Cross-repo RDR dependencies** — T3 archive enables cross-project search, but there's no formal dependency graph between RDRs in different repos.
 - **Server auto-reindex of RDRs** — Deferred to v2. Currently requires manual `nx index rdr` after changes.
-- **Filesystem-T2 sync** — If a user edits an RDR's markdown metadata directly (e.g., changes status), T2 is not automatically updated. The skills are the intended interface; direct edits may cause T2/filesystem drift. A future `/rdr-sync` command could reconcile.
+- **Filesystem-T2 sync** — If a user edits an RDR's markdown metadata directly (e.g., changes status), T2 is not automatically updated. The skills are the intended interface; direct edits may cause T2/filesystem drift. A future `/nx:rdr-sync` command could reconcile.
 
 ## Revision History
 

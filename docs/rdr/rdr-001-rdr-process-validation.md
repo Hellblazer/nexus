@@ -22,7 +22,7 @@ Evaluates the RDR (Research Design Review) process as practiced across three des
 
 ## Motivation
 
-The nexus project provides RDR tooling (`/rdr-create`, `/rdr-gate`, `/rdr-research`, `/rdr-close`) but has never validated the process against real use. A pilot project ran three complete RDR lifecycles in a single session, providing the first empirical data on what the process catches, what it misses, and where the tooling falls short.
+The nexus project provides RDR tooling (`/nx:rdr-create`, `/nx:rdr-gate`, `/nx:rdr-research`, `/nx:rdr-close`) but has never validated the process against real use. A pilot project ran three complete RDR lifecycles in a single session, providing the first empirical data on what the process catches, what it misses, and where the tooling falls short.
 
 The question is not "does the process work?" — it clearly does. The question is: "what should be changed before recommending this process to other projects?"
 
@@ -55,15 +55,15 @@ Every critical issue was found by Layer 3 (AI critique via substantive-critic ag
 
 ### What Layer 2 Did Not Catch
 
-Layer 2 (assumption audit via T2 research findings) was **never invoked** across all three RDRs. `/rdr-research` was never called. When Layer 2 ran during gate review, it printed "No research findings recorded" and moved on.
+Layer 2 (assumption audit via T2 research findings) was **never invoked** across all three RDRs. `/nx:rdr-research` was never called. When Layer 2 ran during gate review, it printed "No research findings recorded" and moved on.
 
-**Root cause**: The author forgot `/rdr-research` existed. This is a discoverability problem, not a process design problem. The tool was not surfaced to the user at the right moment in the workflow. Layer 2 wasn't dead because it's useless — it was dead because the tool wasn't discoverable.
+**Root cause**: The author forgot `/nx:rdr-research` existed. This is a discoverability problem, not a process design problem. The tool was not surfaced to the user at the right moment in the workflow. Layer 2 wasn't dead because it's useless — it was dead because the tool wasn't discoverable.
 
 ### What Layer 1 Did Not Catch
 
 Layer 1 (structural validation) caught nothing substantive in any RDR. It verifies that section headings exist and are non-empty — a formatting check, not a correctness check.
 
-**Critical gap**: `workflow.md` line 84 specifies that Layer 1 should check "at least one research finding exists." If `/rdr-research` was never called, Layer 1 should have blocked the gate. It did not. Either the tooling does not enforce what `workflow.md` says it enforces, or the actual Layer 1 implementation diverges from the documented specification. This must be investigated before proposing Layer 2 changes.
+**Critical gap**: `workflow.md` line 84 specifies that Layer 1 should check "at least one research finding exists." If `/nx:rdr-research` was never called, Layer 1 should have blocked the gate. It did not. Either the tooling does not enforce what `workflow.md` says it enforces, or the actual Layer 1 implementation diverges from the documented specification. This must be investigated before proposing Layer 2 changes.
 
 ## Design: Process Improvements
 
@@ -77,13 +77,13 @@ Layer 1 (structural validation) caught nothing substantive in any RDR. It verifi
 
 ### P2. Fix Layer 1 enforcement, then decide on Layer 2 (Critical)
 
-**Problem**: Both Layer 1 and Layer 2 failed. Layer 1 should have blocked on absent research findings (per `workflow.md`) but didn't. Layer 2 was never invoked because the author didn't know `/rdr-research` existed.
+**Problem**: Both Layer 1 and Layer 2 failed. Layer 1 should have blocked on absent research findings (per `workflow.md`) but didn't. Layer 2 was never invoked because the author didn't know `/nx:rdr-research` existed.
 
 **Prerequisites**: Before deciding Layer 2's fate, fix Layer 1's enforcement gap. Determine whether the tooling implements the `workflow.md` specification. If not, fix the tooling.
 
 **Then, for Layer 2**:
 
-**Option A — Enforce with discoverability**: Require at least one `/rdr-research` finding before `/rdr-gate` can run. Make `rdr-gate` print a clear prompt: "No research findings recorded. Run `/rdr-research add <id>` to record findings, or `--skip-research` to override." This addresses the discoverability problem directly.
+**Option A — Enforce with discoverability**: Require at least one `/nx:rdr-research` finding before `/nx:rdr-gate` can run. Make `rdr-gate` print a clear prompt: "No research findings recorded. Run `/nx:rdr-research add <id>` to record findings, or `--skip-research` to override." This addresses the discoverability problem directly.
 
 **Option B — Merge into Layer 3**: Instruct the Layer 3 AI critic to explicitly enumerate each assumption in the design and state whether it is verified by evidence. Remove Layer 2 as a separate step.
 

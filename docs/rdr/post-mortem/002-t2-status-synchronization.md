@@ -13,20 +13,20 @@ Identified that the RDR lifecycle had no authoritative process store — file fr
 
 ## Implementation Status
 
-All components implemented: `/rdr-accept` command, gate result storage in T2, `/rdr-list` T2-primary read, and `SessionStart` reconciliation.
+All components implemented: `/nx:rdr-accept` command, gate result storage in T2, `/nx:rdr-list` T2-primary read, and `SessionStart` reconciliation.
 
 ## Implementation vs. Plan
 
 | Item | Planned | Delivered | Drift |
 |------|---------|-----------|-------|
-| `/rdr-accept` command | New skill that verifies T2 gate result before accepting | ✓ Implemented with idempotency and self-healing checks | None |
+| `/nx:rdr-accept` command | New skill that verifies T2 gate result before accepting | ✓ Implemented with idempotency and self-healing checks | None |
 | Gate result in T2 | `nx memory put ... --title {id}-gate-latest` after every gate | ✓ Stored on every gate run | None |
-| `/rdr-list` T2-primary | Read from T2 first, file fallback | ✓ T2 batch API used; file fallback retained | None |
+| `/nx:rdr-list` T2-primary | Read from T2 first, file fallback | ✓ T2 batch API used; file fallback retained | None |
 | SessionStart reconciliation | Compare T2 status vs file status; surface mismatches | ✓ Self-healing detection in `rdr-accept` | Reconciliation is opportunistic on accept, not a full scan |
 
 ## Drift Classification
 
-Minor: Full SessionStart scan across all RDRs was scoped down to opportunistic self-healing on `/rdr-accept`. Acceptable trade-off — full scans are expensive and the divergence window is narrow.
+Minor: Full SessionStart scan across all RDRs was scoped down to opportunistic self-healing on `/nx:rdr-accept`. Acceptable trade-off — full scans are expensive and the divergence window is narrow.
 
 ## RDR Quality Assessment
 

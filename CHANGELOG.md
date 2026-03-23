@@ -6,13 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.4] - 2026-03-23
+
+### Fixed
+- **Python 3.14 compatibility** — `voyageai` uses Pydantic v1 compat layer which
+  is broken on Python ≥ 3.14. Moved `voyageai` from required to optional dependency
+  (`pip install conexus[cloud]`). Capped `requires-python` to `<3.14` so uv/pip
+  auto-select Python 3.13. All `import voyageai` sites guarded with clear error
+  messages pointing to `conexus[cloud]`.
+- **Unprefixed skill references in docs** — all `/rdr-create`, `/rdr-close`, etc.
+  corrected to `/nx:rdr-create`, `/nx:rdr-close` across 11 documentation files.
+
 ## [2.3.3] - 2026-03-23
 
 ### Fixed
-- **Python 3.14 compatibility** — `import voyageai` at module level in `t3.py`
-  crashed on Python 3.14 due to Pydantic v1 incompatibility in the voyageai SDK.
-  Import is now guarded with `try/except`; cloud mode raises a clear error, local
-  mode works without voyageai.
+- **Python 3.14 compatibility** (partial) — guarded `import voyageai` in `t3.py`
+  but missed `retry.py` and other import sites. Superseded by 2.3.4.
 
 ## [2.3.2] - 2026-03-22
 

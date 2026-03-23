@@ -9,21 +9,21 @@ This document covers the operational details of each lifecycle step. For backgro
 ## Lifecycle
 
 ```
-/rdr-create
+/nx:rdr-create
      │
-  [Draft] ◄── /rdr-research (repeat as needed)
+  [Draft] ◄── /nx:rdr-research (repeat as needed)
      │
-     │ /rdr-gate (optional but recommended)
+     │ /nx:rdr-gate (optional but recommended)
      │ ├─ BLOCKED → fix and re-gate
      │ └─ PASSED
      ▼
-/rdr-accept
+/nx:rdr-accept
      │
   [Accepted]
      │
      │ optional: planning chain → implementation beads
      │
-     │ /rdr-close --reason implemented
+     │ /nx:rdr-close --reason implemented
      ▼
 [Implemented]
 
@@ -37,34 +37,34 @@ Only **Create** and **Research** are required. Gate, Accept, and Close add forma
 A bug fix RDR from create to close:
 
 ```
-/rdr-create
+/nx:rdr-create
   Title: "Fix: chunker emits full-file line range for every AST chunk"
   Type: Bug Fix   Priority: High
   → Creates docs/rdr/rdr-016-fix-chunker-line-range.md (status: draft)
 
-/rdr-research add 016
+/nx:rdr-research add 016
   Finding: CodeSplitter never populates line_start/line_end
   Classification: Verified — Source Search (chunker.py:210)
 
-/rdr-gate 016
+/nx:rdr-gate 016
   Structure ✓ · Assumptions ✓ · AI critique ✓ → PASSED
 
-/rdr-accept 016
+/nx:rdr-accept 016
   Verifies gate, updates status → accepted
 
-/rdr-close 016 --reason implemented
+/nx:rdr-close 016 --reason implemented
   Creates post-mortem template, indexes to T3
 ```
 
 The RDR is now searchable via `nx search --corpus rdr` and tracked in T2.
 
-## Create (`/rdr-create`)
+## Create (`/nx:rdr-create`)
 
 Prompts for title, type, and priority. Creates `docs/rdr/NNN-kebab-title.md` from the standard template with metadata prefilled, writes a T2 record, and regenerates the RDR index. Status: **Draft**.
 
-On first use in a repository, `/rdr-create` bootstraps the `docs/rdr/` directory and copies the template automatically.
+On first use in a repository, `/nx:rdr-create` bootstraps the `docs/rdr/` directory and copies the template automatically.
 
-## Research (`/rdr-research`)
+## Research (`/nx:rdr-research`)
 
 Adds structured findings to a Draft RDR. Each finding records a summary, evidence classification (Verified, Documented, or Assumed), verification method, and source reference.
 
@@ -74,9 +74,9 @@ Verification methods:
 - **Spike** — behavior verified by running code against a live service
 - **Docs Only** — documentation reading only; insufficient for load-bearing assumptions
 
-For complex investigations, `/rdr-research` can delegate to specialized agents (`deep-research-synthesizer` for web/document research, `codebase-deep-analyzer` for codebase exploration). Findings are written to both the markdown file and T2. The RDR stays Draft throughout.
+For complex investigations, `/nx:rdr-research` can delegate to specialized agents (`deep-research-synthesizer` for web/document research, `codebase-deep-analyzer` for codebase exploration). Findings are written to both the markdown file and T2. The RDR stays Draft throughout.
 
-## Gate (`/rdr-gate`)
+## Gate (`/nx:rdr-gate`)
 
 Three-layer validation. Optional but recommended before committing to irreversible decisions.
 
@@ -86,17 +86,17 @@ Three-layer validation. Optional but recommended before committing to irreversib
 
 **Layer 3 — AI critique**: Delegates to the `substantive-critic` agent, which evaluates logical coherence, missing alternatives, unstated assumptions, and evidence gaps. Findings are appended to the RDR.
 
-The gate either **BLOCKS** (critical issues — fix and re-gate) or **PASSES** (no critical issues, may have observations). No conditional outcomes. The result is stored in T2 for `/rdr-accept` to verify.
+The gate either **BLOCKS** (critical issues — fix and re-gate) or **PASSES** (no critical issues, may have observations). No conditional outcomes. The result is stored in T2 for `/nx:rdr-accept` to verify.
 
-## Accept (`/rdr-accept`)
+## Accept (`/nx:rdr-accept`)
 
 The decision point. The gate validates; acceptance is a deliberate human choice.
 
-Verifies that the gate passed, updates T2 status to Accepted, updates the file frontmatter to match, and regenerates the index. For multi-phase implementation plans, `/rdr-accept` optionally dispatches the planning chain (strategic-planner → plan-auditor → plan-enricher) to decompose the work into trackable beads.
+Verifies that the gate passed, updates T2 status to Accepted, updates the file frontmatter to match, and regenerates the index. For multi-phase implementation plans, `/nx:rdr-accept` optionally dispatches the planning chain (strategic-planner → plan-auditor → plan-enricher) to decompose the work into trackable beads.
 
-If T2 and the file disagree on status, `/rdr-accept` self-heals by repairing the file to match T2.
+If T2 and the file disagree on status, `/nx:rdr-accept` self-heals by repairing the file to match T2.
 
-## Close (`/rdr-close`)
+## Close (`/nx:rdr-close`)
 
 Finalizes an Accepted RDR. Requires status Accepted (use `--force` to override).
 
@@ -107,11 +107,11 @@ Closing creates a post-mortem template for drift analysis, indexes the RDR into 
 ## Querying RDRs
 
 ```bash
-/rdr-list                      # all RDRs
-/rdr-list --status Draft       # active research only
-/rdr-list --type "Bug Fix"     # bug fixes only
+/nx:rdr-list                      # all RDRs
+/nx:rdr-list --status Draft       # active research only
+/nx:rdr-list --type "Bug Fix"     # bug fixes only
 
-/rdr-show 007                  # full detail: metadata, findings, gate status, linked beads
+/nx:rdr-show 007                  # full detail: metadata, findings, gate status, linked beads
 ```
 
 Both commands read from T2 — no markdown parsing required.

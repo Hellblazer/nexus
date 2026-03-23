@@ -18,17 +18,17 @@ related_issues:
 
 ## Problem Statement
 
-The current RDR workflow places bead decomposition at close time (`/rdr-close` Step 3), after implementation is already complete. This is backwards — by then the beads serve only as retroactive bookkeeping rather than actionable work items. In practice, planning happens after accept, not after close.
+The current RDR workflow places bead decomposition at close time (`/nx:rdr-close` Step 3), after implementation is already complete. This is backwards — by then the beads serve only as retroactive bookkeeping rather than actionable work items. In practice, planning happens after accept, not after close.
 
 The actual workflow that has emerged through 35+ RDRs:
 
-1. Accept the RDR (`/rdr-accept`)
-2. Manually invoke `/create-plan` to build out implementation beads
-3. Manually invoke `/plan-audit` to validate
+1. Accept the RDR (`/nx:rdr-accept`)
+2. Manually invoke `/nx:create-plan` to build out implementation beads
+3. Manually invoke `/nx:plan-audit` to validate
 4. Execute the plan
-5. Close the RDR (`/rdr-close`)
+5. Close the RDR (`/nx:rdr-close`)
 
-Steps 2-3 should be an optional, integrated handoff from `/rdr-accept` rather than manual separate invocations. And the bead decomposition currently in `/rdr-close` should be removed since beads are already created during planning.
+Steps 2-3 should be an optional, integrated handoff from `/nx:rdr-accept` rather than manual separate invocations. And the bead decomposition currently in `/nx:rdr-close` should be removed since beads are already created during planning.
 
 ## Context
 
@@ -113,7 +113,7 @@ Not every RDR warrants full planning ceremony. RDR-035 (delete one frontmatter l
 ### F-14: Plan-auditor needs explicit routing discriminant for conditional successor
 - **Classification**: Verified — Architecture
 - **Method**: Analysis of plan-auditor successor enforcement and relay context
-- **Detail**: Plan-auditor's Successor Enforcement currently always relays to `architect-planner` or `developer`. Adding plan-enricher as a conditional successor requires a discriminant the auditor can check. The accept skill writes a T1 scratch entry tagged `rdr-planning-context` with the RDR ID and planning metadata. Plan-auditor searches T1 for this tag and checks that the RDR ID in the tag matches the RDR ID in the current relay context: if both match, relay to `plan-enricher`; if tag absent or RDR ID mismatch (standalone audit, or unrelated plan-audit in same session), relay to existing successors. The RDR ID correlation prevents false positives when a session runs `/rdr-accept` for one RDR followed by an unrelated `/plan-audit`.
+- **Detail**: Plan-auditor's Successor Enforcement currently always relays to `architect-planner` or `developer`. Adding plan-enricher as a conditional successor requires a discriminant the auditor can check. The accept skill writes a T1 scratch entry tagged `rdr-planning-context` with the RDR ID and planning metadata. Plan-auditor searches T1 for this tag and checks that the RDR ID in the tag matches the RDR ID in the current relay context: if both match, relay to `plan-enricher`; if tag absent or RDR ID mismatch (standalone audit, or unrelated plan-audit in same session), relay to existing successors. The RDR ID correlation prevents false positives when a session runs `/nx:rdr-accept` for one RDR followed by an unrelated `/nx:plan-audit`.
 
 ## Proposed Solution
 
@@ -137,7 +137,7 @@ strategic-planner → plan-auditor → plan-enricher → done
   - Full execution context (search keywords, memory pointers, prerequisite state)
 - Updates each bead via `bd update <id> --description` with enriched content
 - Writes epic bead ID directly to T2 (`memory_put` to `{repo}_rdr/NNN` with `epic_bead: <id>`) — the accept skill's execution context is gone by this point, so plan-enricher owns the T2 persistence (Gate S-2)
-- **Degraded mode (T1 miss):** If T1 scratch yields no audit findings (standalone invocation without prior `/plan-audit` in session, or semantic search miss): warn the user that audit findings are unavailable, proceed to enrich beads with execution context only (codebase alignment, search keywords, prerequisite state), and skip audit-finding injection. Do not abort.
+- **Degraded mode (T1 miss):** If T1 scratch yields no audit findings (standalone invocation without prior `/nx:plan-audit` in session, or semantic search miss): warn the user that audit findings are unavailable, proceed to enrich beads with execution context only (codebase alignment, search keywords, prerequisite state), and skip audit-finding injection. Do not abort.
 - Reports the final enriched plan to the user
 
 **T1 scratch as the shared context bus (F-13):**
@@ -151,16 +151,16 @@ Each agent in the chain writes its outputs to T1 and reads predecessors' context
 | Plan-auditor | Audit findings, gap analysis, severity classifications | Plan structure, bead IDs, `rdr-planning-context` tag (for successor routing) |
 | Plan-enricher | Epic bead ID, enrichment summary | All of the above |
 
-Within the same session, `/enrich-plan` can be invoked standalone — if T1 has audit findings from a same-session `/plan-audit`, the enricher finds them via T1 scratch search without being part of a relay chain.
+Within the same session, `/nx:enrich-plan` can be invoked standalone — if T1 has audit findings from a same-session `/nx:plan-audit`, the enricher finds them via T1 scratch search without being part of a relay chain.
 
 **Wiring (F-14):**
 - Accept skill writes a T1 scratch entry tagged `rdr-planning-context` with the RDR ID and planning metadata before dispatching strategic-planner
 - Update plan-auditor's Successor Enforcement: search T1 for `rdr-planning-context` tag and verify the RDR ID in the tag matches the RDR ID in the current relay — if both match, relay to `plan-enricher`; if tag absent or ID mismatch (standalone audit), relay to `developer`/`architect-planner` (existing behavior)
 - plan-enricher has no mandatory successor — it reports to the user
 
-**Skill and command:** `/enrich-plan` — can also be invoked standalone within the same session where `/plan-audit` was run (T1 scratch is session-scoped, so audit findings from the current session are available; cross-session standalone use requires the user to re-run `/plan-audit` first).
+**Skill and command:** `/nx:enrich-plan` — can also be invoked standalone within the same session where `/nx:plan-audit` was run (T1 scratch is session-scoped, so audit findings from the current session are available; cross-session standalone use requires the user to re-run `/nx:plan-audit` first).
 
-### Modified `/rdr-accept` flow
+### Modified `/nx:rdr-accept` flow
 
 After the existing accept steps (verify gate, update T2, update file, regenerate README), add:
 
@@ -185,7 +185,7 @@ Auto-detection heuristic for the prompt default (phase count only — F-10):
 **If no:**
 Continue as before — no beads created at accept time.
 
-### Modified `/rdr-close` flow
+### Modified `/nx:rdr-close` flow
 
 Remove Step 3 (bead decomposition) from the close skill. Close becomes purely a state transition + archival:
 
@@ -195,13 +195,13 @@ Remove Step 3 (bead decomposition) from the close skill. Close becomes purely a 
 4. Update state (T2, file, README)
 5. T3 archive (post-mortem only)
 
-**Bead status advisory:** If T2 has an `epic_bead` field (set at accept time), close reads it and runs `bd show <epic-id>` to report child bead statuses. The human decides what to close; `/rdr-close` does not automatically mark beads complete. If no `epic_bead` exists (user skipped planning), close skips the advisory.
+**Bead status advisory:** If T2 has an `epic_bead` field (set at accept time), close reads it and runs `bd show <epic-id>` to report child bead statuses. The human decides what to close; `/nx:rdr-close` does not automatically mark beads complete. If no `epic_bead` exists (user skipped planning), close skips the advisory.
 
 Update the close skill's frontmatter description to remove "bead decomposition" and its Success Criteria to remove the bead-creation checkbox and add the bead-status advisory checkbox.
 
 ## Alternatives Considered
 
-### A1: Move planning to a separate `/rdr-plan` command
+### A1: Move planning to a separate `/nx:rdr-plan` command
 - **Pro**: Clean separation of concerns
 - **Con**: Adds yet another command to the lifecycle; users already struggle to remember the sequence
 - **Rejected**: The natural moment is right after accept — making it a sub-step is more ergonomic
@@ -241,7 +241,7 @@ Update the close skill's frontmatter description to remove "bead decomposition" 
   - T1 write: epic bead ID and enrichment summary (for accept skill to persist to T2)
   - No mandatory successor — reports to user
   - Model: sonnet (structured enrichment, not deep reasoning)
-- Create `/enrich-plan` skill (`nx/skills/enrich-plan/SKILL.md`)
+- Create `/nx:enrich-plan` skill (`nx/skills/enrich-plan/SKILL.md`)
 - Register agent and skill in `nx/registry.yaml`
 
 ### Phase 2: Wire plan-auditor successor
@@ -250,7 +250,7 @@ Update the close skill's frontmatter description to remove "bead decomposition" 
   - If tag absent or RDR ID mismatch (standalone audit) → relay to `developer`/`architect-planner` (existing behavior)
 - Remove aspirational "iterate based on audit feedback" from strategic planner Phase 3
 
-### Phase 3: Update `/rdr-accept` skill
+### Phase 3: Update `/nx:rdr-accept` skill
 - Add planning handoff prompt after existing Step 5
 - Implement auto-detection heuristic (phase count only: ≥ 2 → yes, ≤ 1 → no)
 - Write T1 scratch entry tagged `rdr-planning-context` with RDR ID and planning metadata before dispatching strategic-planner (F-14)
@@ -258,7 +258,7 @@ Update the close skill's frontmatter description to remove "bead decomposition" 
 - Ensure T2 `status: accepted` write (Step 2) precedes planner dispatch (Step 6) for RDR-024 compatibility
 - Epic bead ID written to T2 by plan-enricher at chain end (Gate S-2)
 
-### Phase 4: Update `/rdr-close` skill
+### Phase 4: Update `/nx:rdr-close` skill
 - Remove Step 3 (bead decomposition)
 - Add bead status advisory: read `epic_bead` from T2, walk dependencies via `bd show`, report statuses
 - Update frontmatter description to remove "bead decomposition"
@@ -275,16 +275,16 @@ Update the close skill's frontmatter description to remove "bead decomposition" 
 ## Success Criteria
 
 - [ ] Plan-enricher agent created with relay reception and bead enrichment logic
-- [ ] `/enrich-plan` skill and command registered
+- [ ] `/nx:enrich-plan` skill and command registered
 - [ ] Plan-auditor relays to plan-enricher when T1 `rdr-planning-context` tag present
 - [ ] Strategic planner Phase 3 "iterate based on audit feedback" instruction removed
-- [ ] `/rdr-accept` prompts for planning after acceptance
+- [ ] `/nx:rdr-accept` prompts for planning after acceptance
 - [ ] Auto-detection heuristic defaults based on phase count (≥ 2 yes, ≤ 1 no)
 - [ ] T2 `status: accepted` precedes planner dispatch (RDR-024 compatibility)
 - [ ] Epic bead ID stored in T2 for close-time advisory
 - [ ] Plan-enricher enriches every bead with audit findings → execution-ready
-- [ ] `/rdr-close` reports bead status as advisory, does not auto-close beads
-- [ ] `/rdr-close` frontmatter and success criteria updated
+- [ ] `/nx:rdr-close` reports bead status as advisory, does not auto-close beads
+- [ ] `/nx:rdr-close` frontmatter and success criteria updated
 - [ ] Simple RDRs can skip planning with one keystroke
 - [ ] Workflow documentation reflects the new flow
 

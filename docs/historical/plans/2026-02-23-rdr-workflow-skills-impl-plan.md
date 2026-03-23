@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Implement the RDR workflow automation system: `nx index rdr` CLI command, SessionStart hook, and 6 Claude Code slash command skills (`/rdr-create`, `/rdr-list`, `/rdr-show`, `/rdr-research`, `/rdr-gate`, `/rdr-close`).
+**Goal:** Implement the RDR workflow automation system: `nx index rdr` CLI command, SessionStart hook, and 6 Claude Code slash command skills (`/nx:rdr-create`, `/nx:rdr-list`, `/nx:rdr-show`, `/nx:rdr-research`, `/nx:rdr-gate`, `/nx:rdr-close`).
 
 **Architecture:** Python CLI command + hook script for infrastructure; markdown skill files for workflow orchestration. Skills invoke `nx` CLI and `bd` for state management. Storage: filesystem (docs/rdr/*.md) + T2 (structured metadata) + T3 (semantic index via `docs__rdr__{repo}`).
 
@@ -331,9 +331,9 @@ git commit -m "feat: bundle RDR and post-mortem templates as plugin resources"
 
 ---
 
-## Phase 4: Skills — Read-Only First (`/rdr-list`, `/rdr-show`)
+## Phase 4: Skills — Read-Only First (`/nx:rdr-list`, `/nx:rdr-show`)
 
-### Task 5: Create `/rdr-list` skill
+### Task 5: Create `/nx:rdr-list` skill
 
 **Files:**
 - Create: `nx/skills/rdr-list/SKILL.md`
@@ -345,7 +345,7 @@ git commit -m "feat: bundle RDR and post-mortem templates as plugin resources"
 name: rdr-list
 description: >
   List all RDRs in the current project with status, type, and priority.
-  Triggers: user says "list RDRs", "show all RDRs", or /rdr-list
+  Triggers: user says "list RDRs", "show all RDRs", or /nx:rdr-list
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
@@ -354,7 +354,7 @@ allowed-tools: Read, Glob, Grep, Bash
 ## When This Skill Activates
 
 - User says "list RDRs", "show RDRs", "what RDRs exist"
-- User invokes `/rdr-list`
+- User invokes `/nx:rdr-list`
 - User asks about the state of planning documents
 
 ## Behavior
@@ -394,12 +394,12 @@ If the user specifies filters, apply them:
 ```bash
 cd /Users/hal.hildebrand/git/nexus
 git add nx/skills/rdr-list/SKILL.md
-git commit -m "feat: add /rdr-list skill for listing RDRs with status"
+git commit -m "feat: add /nx:rdr-list skill for listing RDRs with status"
 ```
 
 ---
 
-### Task 6: Create `/rdr-show` skill
+### Task 6: Create `/nx:rdr-show` skill
 
 **Files:**
 - Create: `nx/skills/rdr-show/SKILL.md`
@@ -411,7 +411,7 @@ git commit -m "feat: add /rdr-list skill for listing RDRs with status"
 name: rdr-show
 description: >
   Display detailed RDR information including content, status, research findings,
-  and linked beads. Triggers: user says "show RDR", "RDR details", or /rdr-show
+  and linked beads. Triggers: user says "show RDR", "RDR details", or /nx:rdr-show
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
@@ -420,7 +420,7 @@ allowed-tools: Read, Glob, Grep, Bash
 ## When This Skill Activates
 
 - User says "show RDR 003", "RDR details", "what's in RDR 5"
-- User invokes `/rdr-show`
+- User invokes `/nx:rdr-show`
 - User asks about a specific RDR's content or status
 
 ## Behavior
@@ -456,7 +456,7 @@ allowed-tools: Read, Glob, Grep, Bash
 (not closed yet)
 ```
 
-6. If the RDR ID is not found, list available RDRs (delegate to `/rdr-list` behavior).
+6. If the RDR ID is not found, list available RDRs (delegate to `/nx:rdr-list` behavior).
 
 ## Notes
 
@@ -470,14 +470,14 @@ allowed-tools: Read, Glob, Grep, Bash
 ```bash
 cd /Users/hal.hildebrand/git/nexus
 git add nx/skills/rdr-show/SKILL.md
-git commit -m "feat: add /rdr-show skill for detailed RDR inspection"
+git commit -m "feat: add /nx:rdr-show skill for detailed RDR inspection"
 ```
 
 ---
 
-## Phase 5: Skills — Lifecycle (`/rdr-create`, `/rdr-research`)
+## Phase 5: Skills — Lifecycle (`/nx:rdr-create`, `/nx:rdr-research`)
 
-### Task 7: Create `/rdr-create` skill
+### Task 7: Create `/nx:rdr-create` skill
 
 **Files:**
 - Create: `nx/skills/rdr-create/SKILL.md`
@@ -489,7 +489,7 @@ git commit -m "feat: add /rdr-show skill for detailed RDR inspection"
 name: rdr-create
 description: >
   Scaffold a new RDR from template, assign sequential ID, register in T2, add to index.
-  Triggers: user says "create an RDR", "new RDR", or /rdr-create
+  Triggers: user says "create an RDR", "new RDR", or /nx:rdr-create
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 ---
 
@@ -498,7 +498,7 @@ allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 ## When This Skill Activates
 
 - User says "create an RDR", "new RDR", "start an RDR"
-- User invokes `/rdr-create`
+- User invokes `/nx:rdr-create`
 - User wants to document a technical decision before implementation
 
 ## Inputs
@@ -583,13 +583,13 @@ Created RDR PREFIX-NNN: "Title"
 File: docs/rdr/NNN-kebab-title.md
 Status: Draft
 
-Next: Fill in Problem Statement and Context, then use /rdr-research to add findings.
+Next: Fill in Problem Statement and Context, then use /nx:rdr-research to add findings.
 ```
 
 ## Does NOT
 
-- Create beads (that happens at `/rdr-close`)
-- Run validation (that happens at `/rdr-gate`)
+- Create beads (that happens at `/nx:rdr-close`)
+- Run validation (that happens at `/nx:rdr-gate`)
 - Commit (user decides when to commit)
 - Run `nx index rdr` (user can do this manually or it happens at gate/close)
 ```
@@ -599,12 +599,12 @@ Next: Fill in Problem Statement and Context, then use /rdr-research to add findi
 ```bash
 cd /Users/hal.hildebrand/git/nexus
 git add nx/skills/rdr-create/SKILL.md
-git commit -m "feat: add /rdr-create skill for scaffolding new RDRs"
+git commit -m "feat: add /nx:rdr-create skill for scaffolding new RDRs"
 ```
 
 ---
 
-### Task 8: Create `/rdr-research` skill
+### Task 8: Create `/nx:rdr-research` skill
 
 **Files:**
 - Create: `nx/skills/rdr-research/SKILL.md`
@@ -616,7 +616,7 @@ git commit -m "feat: add /rdr-create skill for scaffolding new RDRs"
 name: rdr-research
 description: >
   Add, track, and verify structured research findings for an RDR.
-  Triggers: user says "add research finding", "RDR research", or /rdr-research
+  Triggers: user says "add research finding", "RDR research", or /nx:rdr-research
 allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
 ---
 
@@ -627,12 +627,12 @@ Optionally delegates to **deep-research-synthesizer** (sonnet) for evidence gath
 ## When This Skill Activates
 
 - User says "add research finding", "update RDR research", "verify assumption"
-- User invokes `/rdr-research`
+- User invokes `/nx:rdr-research`
 - User wants to record or classify a discovery during RDR planning
 
 ## Subcommands
 
-### `/rdr-research add <id>`
+### `/nx:rdr-research add <id>`
 
 **Inputs** (prompt the user):
 1. **Finding text**: What was discovered
@@ -667,7 +667,7 @@ Optionally delegates to **deep-research-synthesizer** (sonnet) for evidence gath
      *Source: source description*
    ```
 
-### `/rdr-research status <id>`
+### `/nx:rdr-research status <id>`
 
 1. List T2 entries: `nx memory list --project {repo}_rdr`
 2. Filter titles matching `NNN-research-*`
@@ -681,7 +681,7 @@ Optionally delegates to **deep-research-synthesizer** (sonnet) for evidence gath
      - [seq 6] "Latency under 100ms" (docs only)
    ```
 
-### `/rdr-research verify <id> <finding-seq>`
+### `/nx:rdr-research verify <id> <finding-seq>`
 
 1. Read T2 record: `nx memory get --project {repo}_rdr --title NNN-research-{seq}`
 2. Prompt for new classification (verified or documented) and updated verification method
@@ -707,14 +707,14 @@ When the user asks to *investigate* something (not just record a finding):
 ```bash
 cd /Users/hal.hildebrand/git/nexus
 git add nx/skills/rdr-research/SKILL.md
-git commit -m "feat: add /rdr-research skill for structured research tracking"
+git commit -m "feat: add /nx:rdr-research skill for structured research tracking"
 ```
 
 ---
 
-## Phase 6: Skills — Gate and Close (`/rdr-gate`, `/rdr-close`)
+## Phase 6: Skills — Gate and Close (`/nx:rdr-gate`, `/nx:rdr-close`)
 
-### Task 9: Create `/rdr-gate` skill
+### Task 9: Create `/nx:rdr-gate` skill
 
 **Files:**
 - Create: `nx/skills/rdr-gate/SKILL.md`
@@ -726,7 +726,7 @@ git commit -m "feat: add /rdr-research skill for structured research tracking"
 name: rdr-gate
 description: >
   Run the RDR finalization gate: structural validation, assumption audit, and AI critique.
-  Triggers: user says "gate this RDR", "finalization check", or /rdr-gate
+  Triggers: user says "gate this RDR", "finalization check", or /nx:rdr-gate
 allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
 ---
 
@@ -737,7 +737,7 @@ Delegates Layer 3 to the **substantive-critic** agent (sonnet). See [registry.ya
 ## When This Skill Activates
 
 - User says "gate this RDR", "finalization check", "is this RDR ready?"
-- User invokes `/rdr-gate`
+- User invokes `/nx:rdr-gate`
 - User wants to validate an RDR before locking it as Final
 
 ## Input
@@ -857,12 +857,12 @@ Display the critique with specific sections to address. Status remains Draft.
 ```bash
 cd /Users/hal.hildebrand/git/nexus
 git add nx/skills/rdr-gate/SKILL.md
-git commit -m "feat: add /rdr-gate skill with 3-layer validation"
+git commit -m "feat: add /nx:rdr-gate skill with 3-layer validation"
 ```
 
 ---
 
-### Task 10: Create `/rdr-close` skill
+### Task 10: Create `/nx:rdr-close` skill
 
 **Files:**
 - Create: `nx/skills/rdr-close/SKILL.md`
@@ -874,7 +874,7 @@ git commit -m "feat: add /rdr-gate skill with 3-layer validation"
 name: rdr-close
 description: >
   Close an RDR: capture divergence, create post-mortem, decompose into beads, archive to T3.
-  Triggers: user says "close this RDR", "RDR done", or /rdr-close
+  Triggers: user says "close this RDR", "RDR done", or /nx:rdr-close
 allowed-tools: Task, Read, Write, Edit, Glob, Grep, Bash
 ---
 
@@ -885,7 +885,7 @@ Delegates decomposition and archival to the **knowledge-tidier** agent (haiku). 
 ## When This Skill Activates
 
 - User says "close this RDR", "RDR done", "finish RDR"
-- User invokes `/rdr-close`
+- User invokes `/nx:rdr-close`
 - Implementation is complete and the RDR should be finalized
 
 ## Inputs
@@ -968,7 +968,7 @@ Display the bead tree for user confirmation before proceeding.
         close_reason: "Implemented", epic_bead: "{bead_id}", archived: true)
    EOF
    ```
-   If T3 archive fails, set `archived: false` — retryable by re-running `/rdr-close`
+   If T3 archive fails, set `archived: false` — retryable by re-running `/nx:rdr-close`
 
 2. Update status in RDR markdown metadata
 3. Regenerate `docs/rdr/README.md` index
@@ -1015,7 +1015,7 @@ nx store put docs/rdr/post-mortem/NNN-*.md --collection docs__rdr__{repo} \
 The close operation performs multiple state mutations. If any step fails:
 - Each step emits clear status (e.g., "T2 updated ✓", "Beads created ✓", "T3 archive ✗ FAILED")
 - T2 `archived` flag tracks whether T3 archival succeeded
-- Re-running `/rdr-close` is idempotent: checks T2 state and skips completed steps
+- Re-running `/nx:rdr-close` is idempotent: checks T2 state and skips completed steps
 - If bead creation partially fails, report which beads were created and which failed
 
 ## Does NOT
@@ -1030,7 +1030,7 @@ The close operation performs multiple state mutations. If any step fails:
 ```bash
 cd /Users/hal.hildebrand/git/nexus
 git add nx/skills/rdr-close/SKILL.md
-git commit -m "feat: add /rdr-close skill with post-mortem, bead decomposition, T3 archive"
+git commit -m "feat: add /nx:rdr-close skill with post-mortem, bead decomposition, T3 archive"
 ```
 
 ---
@@ -1053,7 +1053,7 @@ No new agents are needed — the RDR skills dispatch to existing agents (substan
 
 rdr_skills:
   rdr-create:
-    slash_command: /rdr-create
+    slash_command: /nx:rdr-create
     description: "Scaffold new RDR from template, assign ID, register in T2"
     triggers:
       - "create an RDR"
@@ -1061,7 +1061,7 @@ rdr_skills:
       - "start planning document"
 
   rdr-research:
-    slash_command: /rdr-research
+    slash_command: /nx:rdr-research
     description: "Add, track, and verify structured research findings"
     triggers:
       - "add research finding"
@@ -1070,7 +1070,7 @@ rdr_skills:
     dispatches_to: [deep-research-synthesizer, codebase-deep-analyzer]
 
   rdr-gate:
-    slash_command: /rdr-gate
+    slash_command: /nx:rdr-gate
     description: "Run finalization gate: structural + assumption + AI critique"
     triggers:
       - "gate this RDR"
@@ -1079,7 +1079,7 @@ rdr_skills:
     dispatches_to: [substantive-critic]
 
   rdr-close:
-    slash_command: /rdr-close
+    slash_command: /nx:rdr-close
     description: "Close RDR with post-mortem, bead decomposition, T3 archive"
     triggers:
       - "close this RDR"
@@ -1088,14 +1088,14 @@ rdr_skills:
     dispatches_to: [knowledge-tidier]
 
   rdr-list:
-    slash_command: /rdr-list
+    slash_command: /nx:rdr-list
     description: "List all RDRs with status, type, priority"
     triggers:
       - "list RDRs"
       - "show all RDRs"
 
   rdr-show:
-    slash_command: /rdr-show
+    slash_command: /nx:rdr-show
     description: "Display detailed RDR information"
     triggers:
       - "show RDR"
@@ -1208,10 +1208,10 @@ If any fixes were needed during smoke testing, commit them.
 1. `feat: add nx index rdr command for RDR document indexing`
 2. `feat: add SessionStart hook for RDR auto-detection`
 3. `feat: bundle RDR and post-mortem templates as plugin resources`
-4. `feat: add /rdr-list skill for listing RDRs with status`
-5. `feat: add /rdr-show skill for detailed RDR inspection`
-6. `feat: add /rdr-create skill for scaffolding new RDRs`
-7. `feat: add /rdr-research skill for structured research tracking`
-8. `feat: add /rdr-gate skill with 3-layer validation`
-9. `feat: add /rdr-close skill with post-mortem, bead decomposition, T3 archive`
+4. `feat: add /nx:rdr-list skill for listing RDRs with status`
+5. `feat: add /nx:rdr-show skill for detailed RDR inspection`
+6. `feat: add /nx:rdr-create skill for scaffolding new RDRs`
+7. `feat: add /nx:rdr-research skill for structured research tracking`
+8. `feat: add /nx:rdr-gate skill with 3-layer validation`
+9. `feat: add /nx:rdr-close skill with post-mortem, bead decomposition, T3 archive`
 10. `feat: register RDR skills in registry, add RDR awareness to analyzer`

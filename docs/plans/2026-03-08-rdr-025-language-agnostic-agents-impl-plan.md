@@ -430,17 +430,17 @@ This is the single source of truth. Every section needs updating:
 1. **Agent entries** (3 renames):
    - `java-architect-planner:` -> `architect-planner:`
      - `skill: java-architecture` -> `skill: architecture`
-     - `slash_command: /java-architecture` -> `slash_command: /architecture`
+     - `slash_command: /java-architecture` -> `slash_command: /nx:architecture`
      - `description`: remove "Java"
      - `successors: [java-developer]` -> `successors: [developer]`
    - `java-debugger:` -> `debugger:`
      - `skill: java-debugging` -> `skill: debugging`
-     - `slash_command: /java-debug` -> `slash_command: /debug`
+     - `slash_command: /java-debug` -> `slash_command: /nx:debug`
      - `description`: remove "Java"
      - `successors: [java-developer]` -> `successors: [developer]`
    - `java-developer:` -> `developer:`
      - `skill: java-development` -> `skill: development`
-     - `slash_command: /java-implement` -> `slash_command: /implement`
+     - `slash_command: /java-implement` -> `slash_command: /nx:implement`
      - `description`: remove "Java"
      - `predecessors: [plan-auditor, java-architect-planner]` -> `predecessors: [plan-auditor, architect-planner]`
 2. **Cross-references in other agents' entries**:
@@ -452,9 +452,9 @@ This is the single source of truth. Every section needs updating:
    - `bug`: `java-debugger` -> `debugger`, `java-developer` -> `developer`
    - `architecture`: `java-architect-planner` -> `architect-planner`
 4. **naming_aliases** (2 entries to update):
-   - `/java-implement: java-development` -> `/implement: development`
-   - `/java-debug: java-debugging` -> `/debug: debugging`
-   - No `/architecture` alias needed — the slash command maps directly to the `architecture/` skill directory by convention
+   - `/java-implement: java-development` -> `/nx:implement: development`
+   - `/java-debug: java-debugging` -> `/nx:debug: debugging`
+   - No `/nx:architecture` alias needed — the slash command maps directly to the `architecture/` skill directory by convention
 5. **model_summary**:
    - opus: `java-architect-planner` -> `architect-planner`, `java-debugger` -> `debugger`
    - sonnet: `java-developer` -> `developer`
@@ -471,11 +471,11 @@ This is the single source of truth. Every section needs updating:
 **Estimated**: 10 min
 
 **Changes**:
-1. **Entry points table**: "Debug a Java failure" -> "Debug a failure", `/java-debug` -> `/debug`
+1. **Entry points table**: "Debug a Java failure" -> "Debug a failure", `/java-debug` -> `/nx:debug`
 2. **Directory structure**: 3 skill dirs renamed
 3. **Agent table**: 3 rows updated (agent name, skill name, command name, descriptions)
 4. **Standard pipelines**: Remove "(Java)" annotations, update agent names in all 3 affected pipelines. Remove the "Non-Java workflows" note since all workflows are now language-agnostic.
-5. **Slash commands**: 3 entries updated (`/java-implement` -> `/implement`, etc.)
+5. **Slash commands**: 3 entries updated (`/java-implement` -> `/nx:implement`, etc.)
 
 **Success criteria**:
 - [ ] All 5 sections updated
@@ -593,13 +593,13 @@ This is the single source of truth. Every section needs updating:
 
 1. **Automated**: The verification grep in Phase 8 serves as the primary automated check
 2. **Manual**: After all changes, test with `claude --plugin-dir ./nx`:
-   - Run `/implement` — verify it routes to `developer` agent
-   - Run `/debug` — verify it routes to `debugger` agent
-   - Run `/architecture` — verify it routes to `architect-planner` agent
-   - Run `/nx-preflight` — verify CLAUDE.md check appears
+   - Run `/nx:implement` — verify it routes to `developer` agent
+   - Run `/nx:debug` — verify it routes to `debugger` agent
+   - Run `/nx:architecture` — verify it routes to `architect-planner` agent
+   - Run `/nx:nx-preflight` — verify CLAUDE.md check appears
 3. **Regression**: Verify existing commands that reference these agents still work:
-   - `/orchestrate` — verify routing table uses new names
-   - `/create-plan` — verify successor chain references new names
+   - `/nx:orchestrate` — verify routing table uses new names
+   - `/nx:create-plan` — verify successor chain references new names
 
 ---
 
