@@ -36,5 +36,8 @@ A recorded video walkthrough for Claude Code users who want persistent memory an
 
 - Use a clean terminal with a visible font size (14pt+)
 - Have a small test repo ready (doesn't matter what — something with 10–20 files)
+- Make a small uncommitted edit in the test repo before section 6 (code review needs changes to review)
+- Run `nx index repo .` on the test repo before recording section 3 — let it run on camera so viewers see the output
 - Clear nx state before recording (`rm -rf ~/.config/nexus ~/.local/share/nexus`)
 - Start Claude Code fresh (no plugins installed)
+- On Windows, use WSL or adapt the uv install command (PowerShell variant shown in section 1)

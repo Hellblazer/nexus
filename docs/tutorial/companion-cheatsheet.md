@@ -5,7 +5,7 @@ Quick reference for the [video tutorial](https://github.com/Hellblazer/nexus/tre
 ## Install
 
 ```bash
-uv tool install conexus                # install nx CLI
+uv tool install conexus                # install nx CLI (requires Python 3.12–3.13)
 uv tool update conexus                 # update to latest
 nx --version                           # verify
 nx doctor                              # health check
@@ -15,14 +15,15 @@ nx doctor                              # health check
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
-/plugin install nx@nexus-plugins
-/nx:nx-preflight                       # verify plugin
+/plugin install nx@nexus-plugins       # same command to install or update
+/nx:nx-preflight                       # verify plugin dependencies
 ```
 
 ## Memory (persistent project notes)
 
 ```bash
-nx memory put "text" -p PROJECT -t TITLE
+nx memory put "text" -p PROJECT -t TITLE               # expires in 30 days
+nx memory put "text" -p PROJECT -t TITLE --ttl permanent  # never expires
 nx memory get -p PROJECT -t TITLE
 nx memory search "query" -p PROJECT
 nx memory list -p PROJECT
@@ -40,9 +41,12 @@ nx scratch search "query"
 
 ```bash
 nx index repo .                        # index current repo (local, no keys needed)
+nx index repo . --monitor              # with per-file progress
+nx index rdr .                         # index RDR documents only
 nx search "query"                      # semantic search
 nx search "query" --corpus code        # code only
 nx search "query" --corpus docs        # docs only
+nx search "query" --corpus rdr         # RDR decisions only
 nx search "query" -c                   # show matching text
 nx search "query" --hybrid             # semantic + keyword blend
 ```
@@ -66,12 +70,15 @@ nx hooks status                        # check hook status
 | `/nx:analyze-code` | Understand unfamiliar code |
 | `/nx:research` | Investigate a topic |
 | `/nx:architecture` | Design a system |
+| `/nx:deep-analysis` | Complex problem investigation |
+| `/nx:substantive-critique` | Critique a plan or design |
+| `/nx:pdf-process` | Index a PDF into search |
 
 ## RDR (Decision Tracking)
 
 | Skill | Purpose |
 |-------|---------|
-| `/nx:rdr-create` | Start a new decision document |
+| `/nx:rdr-create TITLE` | Start a new decision document |
 | `/nx:rdr-research add ID` | Add a research finding |
 | `/nx:rdr-gate ID` | Validate before accepting |
 | `/nx:rdr-accept ID` | Lock the decision |
@@ -83,6 +90,7 @@ nx hooks status                        # check hook status
 
 ```bash
 uv tool install conexus --with "conexus[cloud]" --force
+nx doctor                              # verify cloud extras installed
 nx config init                         # interactive credential setup
 nx doctor                              # verify cloud connectivity
 nx index repo .                        # re-index with cloud models

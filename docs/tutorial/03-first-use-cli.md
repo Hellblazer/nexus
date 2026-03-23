@@ -13,13 +13,13 @@ Let's use nexus for real. Everything in this section runs locally — no account
 
 ## TALK
 
-Memory is nexus's notepad. You store things per project, and they survive across sessions. Think of it like sticky notes organized by project name.
+Memory is nexus's notepad. You store things per project, and they survive across sessions. Think of it like sticky notes organized by project name. One thing to know: notes expire after 30 days by default. For things you want to keep permanently, add `--ttl permanent`.
 
 ## DO
 
 ```bash
-# Store a note
-nx memory put "Auth uses JWT tokens with 24-hour expiry" --project myapp --title auth-notes
+# Store a note (permanent — won't expire)
+nx memory put "Auth uses JWT tokens with 24-hour expiry" --project myapp --title auth-notes --ttl permanent
 
 # List what we stored
 nx memory list --project myapp

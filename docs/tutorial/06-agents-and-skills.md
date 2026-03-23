@@ -29,10 +29,15 @@ Think of it like a team. You say what you need, and the right specialist picks i
 > | Validate tests | `/nx:test-validate` | test-validator (sonnet) |
 > | Critique a design | `/nx:substantive-critique` | substantive-critic (sonnet) |
 > | Audit a plan | `/nx:plan-audit` | plan-auditor (sonnet) |
+> | Deep problem analysis | `/nx:deep-analysis` | deep-analyst (opus) |
+> | Enrich plan with context | `/nx:enrich-plan` | plan-enricher (sonnet) |
+> | Index PDFs | `/nx:pdf-process` | pdf-chromadb-processor (haiku) |
+> | Organize knowledge | `/nx:knowledge-tidy` | knowledge-tidier (haiku) |
+> | Route to the right agent | *(automatic)* | orchestrator (sonnet) |
 
 ## TALK
 
-You don't need to memorize this. The skill `/nx:using-nx-skills` is automatically loaded into every session — it tells Claude which agent to use for what. Claude routes to the right one based on what you're doing.
+You don't need to memorize this. The skill system is loaded into every session — Claude knows which agent to use based on what you're doing. The agents at the top of this list are the ones you'll use most often.
 
 Let me show a few in action.
 
@@ -40,7 +45,18 @@ Let me show a few in action.
 
 ## TALK
 
-Let's say you just finished some work and want a review before committing.
+Let's say you just finished some work and want a review before committing. Let me make a quick edit first so there's something to review.
+
+## DO
+
+```bash
+# Make a small change to a file in the test repo
+# (edit something — add a function, change some logic)
+```
+
+## TALK
+
+Now let's ask for a review:
 
 ## DO
 
@@ -50,7 +66,7 @@ Let's say you just finished some work and want a review before committing.
 
 ## TALK
 
-The code-review-expert agent just analyzed your recent changes. It checks for bugs, security issues, style consistency, and architectural fit. It gives you findings ranked by priority — critical things first, minor observations last.
+The code-review-expert agent analyzed the changes we just made. It checks for bugs, security issues, style consistency, and architectural fit. It gives you findings ranked by priority — critical things first, minor observations last.
 
 This runs on Sonnet, so it's fast. If it finds something serious, you fix it now instead of discovering it in a PR review.
 
@@ -101,16 +117,19 @@ After you approve, it hands off to the strategic planner, which breaks the work 
 > **Common workflows (multi-agent):**
 >
 > **New feature:**
-> brainstorming-gate → strategic-planner → plan-auditor → developer → code-review-expert → test-validator
+> brainstorming → strategic-planner → plan-auditor → plan-enricher → architect-planner → developer → code-review → test-validator
 >
 > **Bug fix:**
-> debugger → developer → code-review-expert → test-validator
+> debugger → developer → code-review → test-validator
 >
 > **Research:**
 > deep-research-synthesizer → knowledge-tidier
 >
 > **Understanding a new codebase:**
 > codebase-deep-analyzer → strategic-planner
+>
+> **Architecture design:**
+> codebase-deep-analyzer → deep-analyst → strategic-planner → plan-auditor → architect-planner
 
 ## TALK
 

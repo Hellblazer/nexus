@@ -7,7 +7,7 @@
 
 ## TALK
 
-So far we've been using nx from the terminal. Now let's give Claude Code access to everything we just set up. The nx plugin connects Claude's agents to nexus's search, memory, and scratch — plus it adds 15 specialized agents and 28 workflow skills.
+So far we've been using nx from the terminal. Now let's give Claude Code access to everything we just set up. The nx plugin connects Claude's agents to nexus's search, memory, and scratch — plus it adds over a dozen specialized agents and 28 workflow skills.
 
 Two commands inside Claude Code:
 
@@ -19,12 +19,23 @@ claude
 
 # Inside Claude Code, run:
 /plugin marketplace add Hellblazer/nexus
+```
+
+## TALK
+
+That adds the nexus marketplace source. You should see a confirmation message. Now install the plugin:
+
+## DO
+
+```
 /plugin install nx@nexus-plugins
 ```
 
 ## TALK
 
-The first command adds the nexus marketplace to Claude's plugin sources. The second installs the nx plugin from it. Let's verify everything is wired up:
+You should see output listing the installed components — agents, skills, hooks. If you get a "not found" error, make sure Claude Code is up to date with `claude update` and try again.
+
+Now let's verify everything is wired up:
 
 ## DO
 
@@ -34,7 +45,16 @@ The first command adds the nexus marketplace to Claude's plugin sources. The sec
 
 ## TALK
 
-Preflight checks that the nx CLI is available, that the plugin's hooks are loaded, and that optional dependencies like beads are present. Green checkmarks mean everything is good. Warnings are fine — they just mean optional features aren't set up yet.
+Preflight checks that the nx CLI is available, that the plugin's hooks are loaded, and that optional dependencies are present. Green checkmarks mean everything is good. You'll likely see warnings for beads and superpowers — those are optional extras, not required. The important thing is that the nx CLI check passes.
+
+## OVERLAY
+
+> **Expected preflight output:**
+> - `nx CLI` — should be green (we installed this in section 2)
+> - `beads` — yellow warning is OK (optional task tracker)
+> - `superpowers plugin` — yellow warning is OK (optional workflow plugin)
+>
+> **If nx CLI shows red:** run `uv tool install conexus` in a separate terminal, then retry preflight.
 
 ## OVERLAY
 
@@ -64,7 +84,6 @@ See that context at the top? That's nexus surfacing what it knows about your pro
 ## OVERLAY
 
 > **Plugin lifecycle**
-> - **Install once**: `/plugin install nx@nexus-plugins`
-> - **Update**: reinstall from marketplace when a new version is released
+> - **Install or update**: `/plugin install nx@nexus-plugins` (same command for both)
 > - **Uninstall**: `/plugin uninstall nx`
 > - **Preflight**: `/nx:nx-preflight` — run after install or update

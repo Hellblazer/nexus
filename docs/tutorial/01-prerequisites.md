@@ -33,6 +33,10 @@ Don't worry about managing Python versions yourself — uv handles that for you.
 # macOS / Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
+# Windows (PowerShell)
+# powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# Or: winget install astral-sh.uv
+
 # Verify
 uv --version
 ```

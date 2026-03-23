@@ -45,7 +45,17 @@ uv tool install conexus --with "conexus[cloud]" --force
 
 ## TALK
 
-Then create accounts — both have generous free tiers:
+Let's verify the cloud extra installed correctly:
+
+## DO
+
+```bash
+nx doctor
+```
+
+## TALK
+
+If you still see X marks for Voyage AI after installing the cloud extra, run the install command again — sometimes the extras need a force reinstall. Now create accounts — both have generous free tiers:
 
 ## OVERLAY
 

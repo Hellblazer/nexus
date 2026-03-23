@@ -85,6 +85,6 @@ When Claude sends multiple agents to work on this, they write their findings to 
 
 ## TALK
 
-The key insight is: you don't have to manage this. Just use Claude normally. The plugin handles routing information to the right tier. When you tell Claude to remember something, it goes to memory. When agents find things during work, they go to scratch. When you index a repo, it goes to the knowledge store.
+The key insight: you don't have to think about which tier to use. When you tell Claude to remember something, it goes to memory. When agents find things during work, they share through scratch. When you index a repo, it goes to the knowledge store. Claude's agents are trained to check these tiers before answering — but like any tool, it works best when you give it good input. Storing important decisions explicitly ("remember that we chose X because Y") is more reliable than hoping Claude infers them.
 
-Over time, this compounds. The more you use it, the more context Claude has about your project. After a few sessions, Claude knows your architecture, your decisions, your conventions — without you re-explaining anything.
+Over time, this compounds. The more you store and index, the more context Claude has about your project. After a few sessions, Claude knows your architecture, your decisions, your conventions — because you and the agents have been building that knowledge base together.

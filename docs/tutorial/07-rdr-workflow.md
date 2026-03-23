@@ -35,43 +35,35 @@ Let's create one.
 
 ### Live Demo: Create an RDR
 
-## DO
-
-```
-/nx:rdr-create
-```
-
 ## TALK
 
-It asks for a title, a type, and a priority. Let's say we're deciding how to handle API rate limiting.
+The create command takes a title. Claude handles the rest — creating the file, filling in the template, registering it in memory.
 
 ## DO
 
 ```
-Title: "API Rate Limiting Strategy"
-Type: Feature
-Priority: medium
+/nx:rdr-create API Rate Limiting Strategy
 ```
 
 ## TALK
 
-That created a markdown file in `docs/rdr/` with a template — problem statement, research findings, proposed solution, alternatives considered. It also registered the RDR in nexus's memory so agents can find it.
+Claude created a markdown file in `docs/rdr/` with a template — problem statement, research findings, proposed solution, alternatives considered. It also stored metadata in nexus's memory so agents can find it. Notice it assigned an ID — we'll use that for the next steps.
 
-Now let's add some research:
+Now let's add a research finding. We just tell Claude what we found, in plain language:
 
 ## DO
 
 ```
 /nx:rdr-research add <id>
 
-Finding: Express middleware express-rate-limit supports sliding window
-with Redis backing. In-memory fallback available for single-process deployments.
-Classification: Verified — Source Search (package docs + source code)
+I checked the express-rate-limit package source code. It supports sliding window
+rate limiting with Redis backing for distributed deployments, and has an in-memory
+fallback for single-process setups. Verified by reading the source, not just the README.
 ```
 
 ## TALK
 
-Each research finding is tagged with how you verified it. "Verified — Source Search" means you checked the actual source code, not just the README. "Documented" means you read docs but didn't verify. "Assumed" means it's a guess. This matters because agents and future-you can see which findings are solid and which need more work.
+Claude recorded that finding and tagged it with evidence quality. There are three levels: "Verified" means you checked the actual code or ran a test. "Documented" means you read external docs. "Assumed" means it's your best guess. You write these labels into your finding naturally — the tool doesn't enforce them, but they're a convention that helps future readers know which conclusions are solid.
 
 ### The Lifecycle
 
@@ -103,17 +95,23 @@ You don't have to use every step. For a simple bug fix, create the RDR, write th
 
 ## TALK
 
-This shows all your RDRs with their status. You can filter by status or type. And because RDRs are indexed, you can search them semantically:
+This shows all your RDRs with their status. You can filter by status or type.
+
+To search RDRs semantically, you need to index them first. If you've run `nx index repo .` on a repo that has RDR files, they're already indexed. Let me show you:
 
 ## DO
 
 ```bash
+# Make sure RDRs are indexed (run from terminal)
+nx index repo .
+
+# Now search
 nx search "rate limiting" --corpus rdr
 ```
 
 ## TALK
 
-That found our new RDR by meaning. Six months from now, when someone asks "did we consider rate limiting?", the answer is one search away.
+That found our RDR by meaning. Six months from now, when someone asks "did we consider rate limiting?", the answer is one search away.
 
 ### Right-Sizing
 
