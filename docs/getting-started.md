@@ -9,7 +9,27 @@ uv tool install conexus
 nx --help
 ```
 
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and git. For source installation, see [Contributing](https://github.com/Hellblazer/nexus/blob/main/docs/contributing.md).
+Requires Python 3.12–3.13, [uv](https://docs.astral.sh/uv/), and git. Python 3.14 is not yet supported (upstream dependency incompatibility). For source installation, see [Contributing](https://github.com/Hellblazer/nexus/blob/main/docs/contributing.md).
+
+### Updating
+
+```bash
+uv tool update conexus
+```
+
+### Cloud embeddings (optional)
+
+For Voyage AI cloud embeddings instead of local ONNX:
+
+```bash
+uv tool install conexus --with "conexus[cloud]"
+```
+
+To update with the cloud extra:
+
+```bash
+uv tool install conexus --with "conexus[cloud]" --force
+```
 
 ## Start using it (no API keys needed)
 
@@ -66,7 +86,11 @@ To force local mode even when cloud credentials exist, set `NX_LOCAL=1`.
 
 ## Semantic search — cloud mode
 
-When you want higher-quality embeddings (1024d Voyage AI), cross-chunk context (CCE), and reranking, set up T3 cloud credentials.
+When you want higher-quality embeddings (1024d Voyage AI), cross-chunk context (CCE), and reranking, install the cloud extra and set up T3 cloud credentials.
+
+```bash
+uv tool install conexus --with "conexus[cloud]" --force
+```
 
 ### Accounts
 

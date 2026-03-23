@@ -32,12 +32,14 @@ nx store put --collection knowledge__myapp "API rate limit is 10k/min per the ve
 ## Quick Start
 
 ```bash
-uv tool install conexus          # install the nx CLI
+uv tool install conexus          # install the nx CLI (requires Python 3.12–3.13)
 nx index repo .                  # index your repo (works immediately — no API keys needed)
 nx search "what does X do"       # semantic search, fully local
 ```
 
-Local mode uses bundled ONNX embeddings — zero configuration required. For higher-quality cloud embeddings, run `nx config init` to set up API keys. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
+Update: `uv tool update conexus`
+
+Local mode uses bundled ONNX embeddings — zero configuration required. For higher-quality cloud embeddings (Voyage AI), install with: `uv tool install conexus --with "conexus[cloud]"` then run `nx config init` to set up API keys. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
 
 For Claude Code, also install the plugin (see [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/nx/README.md)):
 
