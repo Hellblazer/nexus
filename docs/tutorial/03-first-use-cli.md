@@ -15,16 +15,16 @@ Let's use nexus for real. Everything here runs locally. No accounts, no API keys
 
 Memory is nexus's notepad. Store things by project. They survive across sessions.
 
-One thing to know — notes expire after 30 days by default. Add "ttl permanent" to keep them forever.
+One thing to know — notes expire after 30 days by default. Add the permanent flag to keep them forever.
 
 ## SCREEN [12s]
 
 ```bash
-nx memory put "Auth uses JWT tokens with 24-hour expiry" --project myapp --title auth-notes --ttl permanent
+nx memory put "Auth uses JWT tokens with 24-hour expiry" --project demo-repo --title auth-notes --ttl permanent
 
-nx memory list --project myapp
+nx memory list --project demo-repo
 
-nx memory get --project myapp --title auth-notes
+nx memory get --project demo-repo --title auth-notes
 
 nx memory search "JWT"
 ```

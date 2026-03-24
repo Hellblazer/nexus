@@ -34,7 +34,7 @@ Let me show two.
 
 A test is failing intermittently. Instead of guessing:
 
-## SCREEN [20s]
+## SCREEN [pre-recorded — 60–120s, trim to highlights]
 
 ```
 /nx:debug
@@ -71,7 +71,7 @@ def process_file(path):
         pass
 ```
 
-## SCREEN [15s]
+## SCREEN [pre-recorded — 30–60s, trim to highlights]
 
 ```
 /nx:review-code

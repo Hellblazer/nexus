@@ -18,7 +18,7 @@ Everything so far has been completely local. The search quality is good. If you 
 
 Local mode finds the right neighborhood. Cloud mode finds the exact house. For most projects, local is plenty. Large codebases benefit from cloud.
 
-Both are free.
+Both have free tiers that cover typical individual use.
 
 [PAUSE 1s]
 
@@ -65,4 +65,10 @@ nx index repo .
 
 ## VOICE
 
-Same search commands. Better results. Switch back to local anytime with NX_LOCAL equals 1.
+Same search commands. Better results. To switch back to local mode, set one environment variable — shown on screen.
+
+## SCREEN [3s]
+
+```bash
+NX_LOCAL=1 nx search "query"
+```

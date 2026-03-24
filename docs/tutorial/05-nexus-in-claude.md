@@ -17,7 +17,7 @@ Let me show both.
 
 Watch what happens when we ask about the codebase.
 
-## SCREEN [15s]
+## SCREEN [pre-recorded — 30–60s, trim to highlights]
 
 ```
 How does the retry logic work in this project?
@@ -37,7 +37,7 @@ Before answering, Claude searched your indexed code. Found the relevant files. G
 
 You can also tell Claude to remember things.
 
-## SCREEN [8s]
+## SCREEN [pre-recorded — 15–30s, trim to highlights]
 
 ```
 Remember that we decided to use connection pooling with a max of 10 connections for the database layer.
@@ -51,7 +51,7 @@ That's now in persistent memory.
 
 Let's verify.
 
-## SCREEN [10s]
+## SCREEN [pre-recorded — 15–30s, trim to highlights]
 
 ```
 What do we know about the database configuration?
@@ -69,7 +69,7 @@ It found the note. Next session, next week — that decision is still there.
 
 When Claude spawns multiple agents — a debugger and a reviewer working in parallel — they share findings through scratch. Each agent sees what the others found.
 
-## SCREEN [10s]
+## SCREEN [pre-recorded — 30–60s, trim to highlights]
 
 ```
 Search the codebase for how errors are handled, and also check if there are any error-related tests.

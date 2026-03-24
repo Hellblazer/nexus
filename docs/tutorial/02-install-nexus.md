@@ -7,7 +7,7 @@
 
 ## VOICE
 
-The package is called "conexus" on PyPI. The command is "nx." One command to install.
+The package name is "conexus." The command is "nx." One command to install.
 
 ## SCREEN [8s]
 

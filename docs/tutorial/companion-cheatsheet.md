@@ -51,6 +51,16 @@ nx search "query" -c                   # show matching text
 nx search "query" --hybrid             # semantic + keyword blend
 ```
 
+## Collection Maintenance
+
+```bash
+nx collection list                     # all collections with counts
+nx collection verify NAME              # existence check
+nx collection verify NAME --deep       # known-document retrieval probe
+nx collection reindex NAME             # delete and re-index from source
+nx collection delete NAME              # remove collection (irreversible)
+```
+
 ## Git Hooks (auto-index on commit)
 
 ```bash

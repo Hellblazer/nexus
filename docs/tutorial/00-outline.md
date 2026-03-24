@@ -41,12 +41,13 @@ A recorded video walkthrough for Claude Code users who want persistent memory an
 ## Recording Notes
 
 - Use a clean terminal with a visible font size (14pt+)
-- Have a small test repo ready (10–20 files, with at least one function that has poor error handling for the review demo)
+- Have a small test repo named `demo-repo` (10–20 files, with at least one function that has poor error handling for the review demo). The repo name must match `--project demo-repo` used in section 3 memory commands, so the session hook surfaces this context in section 4.
 - Make a small uncommitted edit before section 6 (e.g., add a function that catches a broad exception and silently passes)
-- Run `nx index repo .` on the test repo during section 3 — show the output live
+- Run `nx index repo .` on the test repo during section 3 — show the output live. May take 10–20s on a small repo; trim in post if needed.
 - Clear nx state before recording (`rm -rf ~/.config/nexus ~/.local/share/nexus`)
 - Start Claude Code fresh (no plugins installed)
 - On Windows, use WSL or adapt the uv install command (PowerShell variant shown in section 1)
+- **Pre-record all Claude Code sessions** for sections 5, 6, and 7. Agent responses take 30–120s; trim to highlights in post-production. The SCREEN cues in those sections are marked `[pre-recorded]`.
 - Script section 5 questions to match what's actually in the test repo
 - After RDR create in section 7, briefly show the created file in an editor
 - Say the cheatsheet URL on camera at the end of section 9
