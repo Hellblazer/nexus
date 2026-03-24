@@ -173,10 +173,17 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
               help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
 def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
+    from nexus.corpus import t3_collection_name
     from nexus.doc_indexer import index_pdf
 
     if force and dry_run:
         raise click.UsageError("--force and --dry-run are mutually exclusive.")
+
+    # Normalize --collection through t3_collection_name() so bare names like
+    # "knowledge" become "knowledge__knowledge", matching search conventions.
+    # Without this, chunks end up in unsearchable bare collections.
+    if collection is not None:
+        collection = t3_collection_name(collection)
 
     path = path.resolve()
 
