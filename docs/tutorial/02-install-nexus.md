@@ -5,63 +5,67 @@
 
 ---
 
-## TALK
+## VOICE
 
-Nexus is published on PyPI as "conexus" — that's the package name. The CLI command is `nx`. One command to install:
+The package is called "conexus" on PyPI. The command is "nx." One command to install.
 
-## DO
+## SCREEN [8s]
 
 ```bash
 uv tool install conexus
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-uv just installed nx into its own isolated environment. It picked the right Python version automatically — you didn't have to create a virtualenv or worry about conflicts with other tools.
+uv creates an isolated environment and installs everything. No virtualenv to manage.
 
-Let's verify it worked:
+[PAUSE 2s]
 
-## DO
+Let's verify.
+
+## SCREEN [3s]
 
 ```bash
 nx --version
 ```
 
-## TALK
+## VOICE
 
-Now let's run the health check. This tells us what's working and what's not:
+Now the health check.
 
-## DO
+## SCREEN [5s]
 
 ```bash
 nx doctor
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-You'll see checkmarks for things that are ready and X marks for things that aren't configured. Right now, the cloud credentials show X — that's fine. We're going to use local mode, which needs zero API keys. Everything works out of the box.
+Checkmarks for things that are ready. X marks for things not configured. The cloud credentials show X — that's fine. We're using local mode. Zero API keys needed.
 
 ## OVERLAY
 
 > **What just happened?**
-> - `uv tool install` created an isolated Python environment
-> - Installed nexus and all its dependencies
-> - Made `nx` available as a command everywhere
-> - No virtualenv to activate, no PATH to manage
+> - Isolated Python environment created
+> - All dependencies installed
+> - `nx` available everywhere
+> - No virtualenv to activate
 
-## TALK
+[PAUSE 1s]
 
-Let me show you what nx can do. Here's the help:
+## VOICE
 
-## DO
+Here's what nx can do.
+
+## SCREEN [5s]
 
 ```bash
 nx --help
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-The main commands you'll use are `search`, `index`, `memory`, and `scratch`. We'll cover each one in the next section.
+The main commands: search, index, memory, and scratch. We'll cover each one next.
 
 ## OVERLAY
 
@@ -71,4 +75,3 @@ The main commands you'll use are `search`, `index`, `memory`, and `scratch`. We'
 > - `nx memory` — persistent project notes
 > - `nx scratch` — temporary session notes
 > - `nx doctor` — health check
-> - `nx config` — credentials and settings

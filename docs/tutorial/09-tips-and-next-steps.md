@@ -5,59 +5,48 @@
 
 ---
 
-## TALK
+## VOICE
 
-Let me leave you with a few practical tips for daily use.
+A few practical tips.
 
-### Keeping Nexus Updated
+### Updating
 
-## DO
+## SCREEN [5s]
 
 ```bash
-# Update the CLI
 uv tool update conexus
 
-# Inside Claude Code, update the plugin
+# Inside Claude Code:
 /plugin install nx@nexus-plugins
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-Run these periodically. The CLI and plugin are released together, so update both at the same time.
+Update both together. Same install command updates the plugin.
 
 ### Daily Workflow
 
 ## OVERLAY
 
 > **Start of day:**
-> 1. Start Claude Code — session hooks load your project context automatically
-> 2. Ask "what were we working on?" — Claude checks memory and beads
+> 1. Start Claude Code — context loads automatically
+> 2. Ask "what were we working on?"
 >
 > **During work:**
-> - Use `/nx:brainstorming-gate` before building anything new
-> - Use `/nx:debug` when a test fails (don't guess-and-retry)
-> - Use `/nx:review-code` before committing
-> - Store important decisions: "Remember that we chose X because Y"
+> - `/nx:debug` when tests fail
+> - `/nx:review-code` before committing
+> - "Remember that we chose X because Y"
 >
 > **End of day:**
-> - Re-index if you made significant changes: `nx index repo .`
-> - Or install git hooks to do it automatically: `nx hooks install`
+> - Git hooks auto-index on commit
 
-## TALK
+### Cheatsheet
 
-The git hooks are nice — they re-index your repo automatically after every commit. Set it up once and forget about it:
+[PAUSE 1s]
 
-## DO
+## VOICE
 
-```bash
-nx hooks install
-```
-
-### Cheatsheet and Help
-
-## TALK
-
-Everything we covered today is in a one-page cheatsheet. I'll put the link on screen — bookmark it.
+Everything we covered is in a one-page cheatsheet. Bookmark this link.
 
 ## OVERLAY
 
@@ -65,11 +54,15 @@ Everything we covered today is in a one-page cheatsheet. I'll put the link on sc
 >
 > **More help:**
 > - `nx --help` — built-in reference
-> - [Plugin README](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) — all 15 agents
-> - [GitHub Issues](https://github.com/Hellblazer/nexus/issues) — bugs and features
+> - Plugin README — all 15 agents
+> - GitHub Issues — bugs and features
 
-## TALK
+[PAUSE 2s]
 
-That's nexus. Persistent memory, semantic search, and specialized agents — so Claude gets smarter about your project over time. Install takes two minutes, and everything compounds the more you use it.
+## VOICE
+
+That's nexus. Persistent memory. Semantic search. Specialized agents. Claude gets smarter about your project over time.
+
+Install takes two minutes. Everything compounds the more you use it.
 
 Thanks for watching.

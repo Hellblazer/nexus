@@ -5,37 +5,34 @@
 
 ---
 
-## TALK
+## VOICE
 
-We need four things before we start: a package manager called uv, Python (the right version), git, and Claude Code itself. If you already have all of these, skip ahead to section 2.
+We need four things: uv, Python, git, and Claude Code. If you have all of these, skip to section two.
 
-Let's check what you have.
+Let's check.
 
-## DO
+## SCREEN [5s]
 
 ```bash
-# Check if git is installed
 git --version
-
-# Check Python version
 python3 --version
 ```
 
-## TALK
+## VOICE
 
-We need Python 3.12 or 3.13. If you're on 3.14 or newer, nexus won't install — some upstream dependencies haven't caught up yet. If you're on 3.11 or older, you'll need to upgrade.
+We need Python 3.12 or 3.13. If you're on 3.14 or newer, nexus won't install yet. If you're on 3.11 or older, you'll need to upgrade.
 
-Don't worry about managing Python versions yourself — uv handles that for you.
+Don't worry — uv handles Python versions for you.
 
-## DO — Install uv
+[PAUSE 1s]
+
+Now let's install uv.
+
+## SCREEN [8s]
 
 ```bash
 # macOS / Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows (PowerShell)
-# powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-# Or: winget install astral-sh.uv
 
 # Verify
 uv --version
@@ -43,39 +40,38 @@ uv --version
 
 ## OVERLAY
 
-> **What is uv?** A fast Python package manager from Astral. It replaces pip, virtualenv, and pyenv in one tool. Nexus uses it for clean, isolated installs.
+> **What is uv?** A fast Python package manager. Replaces pip, virtualenv, and pyenv in one tool.
 
-## TALK
+## OVERLAY (Windows)
 
-uv manages Python versions, virtual environments, and tool installations. You don't need to think about any of that — just use the commands and it handles the rest.
+> **Windows:** `winget install astral-sh.uv` or PowerShell: `irm https://astral.sh/uv/install.ps1 | iex`
 
-If you need a specific Python version, uv can install it:
+## VOICE
 
-## DO — Install Python (if needed)
+If you need a specific Python version, uv can install it.
+
+## SCREEN [5s]
 
 ```bash
-# Only if python3 --version shows 3.14+ or < 3.12
+# Only if needed
 uv python install 3.13
 ```
 
-## TALK
+## VOICE
 
-Last prerequisite: Claude Code. If you're watching this, you probably already have it. If not:
+Last thing — Claude Code. You probably already have it. If not:
 
-## DO — Install Claude Code (if needed)
+## SCREEN [5s]
 
 ```bash
-# Install Claude Code CLI
 npm install -g @anthropic-ai/claude-code
-
-# Verify
 claude --version
 ```
 
 ## OVERLAY
 
 > **Checklist**
-> - [ ] `uv --version` → 0.x or newer
-> - [ ] `python3 --version` → 3.12.x or 3.13.x
-> - [ ] `git --version` → any recent version
-> - [ ] `claude --version` → any recent version
+> - `uv --version` — any recent version
+> - `python3 --version` — 3.12.x or 3.13.x
+> - `git --version` — any recent version
+> - `claude --version` — any recent version

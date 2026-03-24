@@ -1,69 +1,77 @@
 # 7. The RDR Process
 
 > **Time**: 5–7 minutes
-> **Goal**: Viewer understands what RDRs are, why they matter, and sees one created live
+> **Goal**: Viewer understands what RDRs are and sees one created live
 
 ---
 
-## TALK
+## VOICE
 
-If you've ever come back to a codebase after a few weeks and asked "why did we do it this way?" — that's the problem RDR solves.
+Ever come back to a codebase and asked "why did we do it this way?" That's the problem RDR solves.
 
-RDR captures a technical decision: what the problem was, what you investigated, what you chose, and what you rejected. It lives in your repo and nexus indexes it so you can search it later.
-
-### Why Bother?
+RDR captures a technical decision. What the problem was. What you investigated. What you chose. What you rejected. It lives in your repo. Nexus indexes it.
 
 ## OVERLAY
 
 > **Without RDR:** nobody remembers why, Claude re-proposes rejected ideas
 > **With RDR:** decisions are searchable, Claude checks them automatically
 
-## TALK
+## VOICE
 
-The payoff is with Claude. After a few RDRs, agents check prior decisions before proposing new ones. Your project builds institutional memory that actually gets used.
+After a few RDRs, agents check prior decisions before proposing new ones. Your project builds institutional memory.
+
+[PAUSE 1s]
 
 Let's create one.
 
-### Live Demo
+### Create
 
-## DO
+## SCREEN [10s]
 
 ```
 /nx:rdr-create API Rate Limiting Strategy
 ```
 
-## TALK
+*(Claude creates file, assigns ID)*
 
-Claude created a markdown file in `docs/rdr/` with a template and assigned it an ID. Let me show the file briefly.
+## VOICE [OVER SCREEN]
 
-*(Open the created file in editor for ~5 seconds)*
+Claude created a markdown file with a template and assigned it an ID.
 
-Now let's add a research finding:
+## SCREEN [5s]
 
-## DO
+*(Open the created file briefly in editor)*
+
+### Add Research
+
+[PAUSE 1s]
+
+## VOICE
+
+Now we add a finding. Just describe what you found.
+
+## SCREEN [10s]
 
 ```
 /nx:rdr-research add <id>
 
-I checked the express-rate-limit package source code. It supports sliding window
-rate limiting with Redis backing, and has an in-memory fallback for single-process
-setups. Verified by reading the source.
+I checked the express-rate-limit package source code. It supports sliding window rate limiting with Redis backing, and has an in-memory fallback. Verified by reading the source.
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-Claude recorded the finding. Notice the "verified by reading the source" part — that's an evidence label.
+Claude recorded the finding. Notice "verified by reading the source" — that's an evidence label.
 
 ## OVERLAY
 
-> **Evidence quality (a convention, not enforced):**
+> **Evidence quality (convention, not enforced):**
 > - **Verified** — checked source code or ran a test
 > - **Documented** — read external docs only
 > - **Assumed** — best guess, needs validation
 
-## TALK
+## VOICE
 
-This helps future readers know which conclusions are solid. You write it naturally — the tool doesn't enforce it.
+This helps future readers know which conclusions are solid.
 
 ### The Lifecycle
 
@@ -75,30 +83,36 @@ This helps future readers know which conclusions are solid. You write it natural
 > 4. `/nx:rdr-accept` — lock the decision
 > 5. `/nx:rdr-close` — archive forever
 
-## TALK
+## VOICE
 
-You don't need every step. A bug fix might just be create, write the root cause, close. A major architecture decision — use the gate, which catches contradictions and unverified assumptions.
+You don't need every step. A bug fix? Create, write the root cause, close. A major architecture decision? Use the gate. It catches contradictions and unverified assumptions.
 
 ### Finding RDRs Later
 
-## DO
+[PAUSE 1s]
+
+## SCREEN [5s]
 
 ```
 /nx:rdr-list
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-That shows all your RDRs. You can also search them by meaning — just ask Claude:
+All your RDRs with status.
 
-## DO
+## SCREEN [8s]
 
 ```
 Search our previous decisions about rate limiting.
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-Six months from now, when someone asks "did we consider rate limiting?" — one search.
+Six months from now — one search.
 
-Don't overthink it. An RDR can be three paragraphs. If the rationale is obvious from the code, skip it.
+[PAUSE 1s]
+
+## VOICE
+
+An RDR can be three paragraphs. If the rationale is obvious from the code, skip it.

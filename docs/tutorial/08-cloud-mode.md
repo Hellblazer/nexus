@@ -1,68 +1,68 @@
 # 8. Cloud Mode (Optional)
 
-> **Time**: 3–5 minutes
+> **Time**: 2–3 minutes
 > **Goal**: Viewer knows when cloud mode is worth it and how to set it up
 
 ---
 
-## TALK
+## VOICE
 
-Everything we've done so far is completely local. No API keys, no accounts. The search quality is good — but if you want great, there's a cloud option.
-
-### When Would You Want Cloud Mode?
+Everything so far has been completely local. The search quality is good. If you want great, there's a cloud option.
 
 ## OVERLAY
 
 > **Local (default):** good results, zero cost, no setup
 > **Cloud (optional):** better results on large codebases, free tier covers individual use
 
-## TALK
+## VOICE
 
-The short version: local mode finds the right neighborhood, cloud mode finds the exact house. For most personal projects, local is plenty. If you're working with a large team or a huge codebase — hundreds of thousands of lines — cloud mode gives noticeably better results.
+Local mode finds the right neighborhood. Cloud mode finds the exact house. For most projects, local is plenty. Large codebases benefit from cloud.
 
-Both options are free. Local has zero cost forever. Cloud uses free tiers from ChromaDB and Voyage AI that cover typical individual usage.
+Both are free.
 
-### Setup
+[PAUSE 1s]
 
-## TALK
+## VOICE
 
-Cloud mode doesn't require installing anything extra — Voyage AI support is already included. You just need to create accounts and add your API keys.
+Cloud mode is already included. You just need API keys from two services.
 
 ## OVERLAY
 
-> 1. **ChromaDB Cloud** — [trychroma.com](https://trychroma.com) — vector storage
-> 2. **Voyage AI** — [voyageai.com](https://voyageai.com) — embeddings
+> 1. **ChromaDB Cloud** — trychroma.com — vector storage
+> 2. **Voyage AI** — voyageai.com — embeddings
 
-## TALK
+## VOICE
 
-Once you have API keys, the interactive wizard handles the rest:
+Once you have keys, the wizard handles the rest.
 
-## DO
+## SCREEN [8s]
 
 ```bash
 nx config init
 ```
 
-## TALK
+*(Wizard walks through credentials)*
 
-It walks you through each credential and provisions the cloud database automatically. When it's done:
+## VOICE [OVER SCREEN]
 
-## DO
+It provisions the cloud database automatically.
+
+## SCREEN [5s]
 
 ```bash
 nx doctor
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-Everything should be green now. Re-index your repo to use the cloud models:
+Everything green. Now re-index.
 
-## DO
+## SCREEN [5s]
 
 ```bash
 nx index repo .
 ```
 
-## TALK
+## VOICE
 
-That's it. Search works the same way — just better results. You can switch back to local anytime by setting `NX_LOCAL=1` in your environment.
+Same search commands. Better results. Switch back to local anytime with NX_LOCAL equals 1.

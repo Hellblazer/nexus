@@ -1,32 +1,38 @@
 # 0. Cold Open
 
 > **Time**: ~60 seconds
-> **Goal**: Show the payoff before the setup — viewer sees why this is worth installing
+> **Goal**: Show the payoff before the setup
 
 ---
 
-## TALK
+## VOICE
 
-Before we install anything, let me show you what this looks like when it's working.
+Before we install anything — here's what this looks like when it's working.
 
-## DO
+## SCREEN [15s]
 
-*(Pre-recorded clip of a working Claude Code session with nexus)*
+*(Pre-recorded Claude Code session with nexus)*
 
-```
-How does the authentication middleware work?
-```
+> How does the authentication middleware work?
 
-*(Claude searches the indexed codebase, finds the relevant files, answers from actual code)*
+*(Claude searches indexed code, finds relevant files, answers from actual code)*
 
-```
-What did we decide about connection pooling?
-```
+## VOICE [OVER SCREEN]
 
-*(Claude checks memory, finds the stored decision, cites it)*
+Claude searched the codebase and found the right files. Nobody told it where to look.
 
-## TALK
+## SCREEN [10s]
 
-Claude found the right code without being told where to look. It remembered a decision from a previous session. No copy-pasting context, no re-explaining your project.
+> What did we decide about connection pooling?
 
-That's nexus. Let's set it up.
+*(Claude checks memory, finds stored decision, cites it)*
+
+## VOICE [OVER SCREEN]
+
+It remembered a decision from a previous session.
+
+[PAUSE 2s]
+
+## VOICE
+
+No copy-pasting context. No re-explaining your project. That's nexus. Let's set it up.

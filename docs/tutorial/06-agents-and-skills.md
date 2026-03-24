@@ -5,9 +5,9 @@
 
 ---
 
-## TALK
+## VOICE
 
-The plugin added 15 specialized agents. You don't need to know all of them — here are the five you'll use most.
+The plugin added 15 specialized agents. Here are the five you'll use most.
 
 ## OVERLAY
 
@@ -18,19 +18,23 @@ The plugin added 15 specialized agents. You don't need to know all of them — h
 > - `/nx:implement` — build from a plan (Sonnet)
 > - `/nx:analyze-code` — understand unfamiliar code (Sonnet)
 >
-> 10 more in the [plugin README](https://github.com/Hellblazer/nexus/blob/main/nx/README.md)
+> 10 more in the plugin README
 
-## TALK
+## VOICE
 
-You call them with slash commands. Claude picks the right model — Opus for reasoning-heavy tasks like debugging, Sonnet for implementation. Let me show two of them.
+You call them with slash commands. Opus handles reasoning. Sonnet handles implementation.
 
-### Demo 1: Debugging
+Let me show two.
 
-## TALK
+### Debugging
 
-Let's say a test is failing and you've been going in circles. Instead of guessing:
+[PAUSE 1s]
 
-## DO
+## VOICE
+
+A test is failing intermittently. Instead of guessing:
+
+## SCREEN [20s]
 
 ```
 /nx:debug
@@ -38,19 +42,25 @@ Let's say a test is failing and you've been going in circles. Instead of guessin
 The test test_retry_on_timeout is failing intermittently. Sometimes it passes, sometimes it times out after 30 seconds.
 ```
 
-## TALK
+*(Debugger agent traces call chain, forms hypotheses)*
 
-The debugger doesn't just look at the test. It traces the call chain, checks for race conditions, examines configuration. It forms hypotheses and tells you which evidence supports each one. Systematic, not trial-and-error.
+## VOICE [OVER SCREEN]
 
-### Demo 2: Code Review
+The debugger traces the call chain. Checks for race conditions. Examines configuration. Forms hypotheses with evidence.
 
-## TALK
+Systematic. Not trial-and-error.
 
-Now let's review some code. I've made a change to this file — watch what the reviewer catches.
+### Code Review
 
-## DO
+[PAUSE 2s]
 
-*(Show the uncommitted change: a function with a broad except/pass, e.g.:)*
+## VOICE
+
+Now let's review some code. Here's a change with a problem — watch what the reviewer catches.
+
+## SCREEN [5s]
+
+*(Show the uncommitted change in editor:)*
 
 ```python
 def process_file(path):
@@ -61,18 +71,22 @@ def process_file(path):
         pass
 ```
 
-## DO
+## SCREEN [15s]
 
 ```
 /nx:review-code
 ```
 
-## TALK
+*(Code review agent flags the bare except/pass)*
 
-It flagged the bare `except: pass` — that silently swallows every error, including things you'd want to know about. It runs on Sonnet, so it's fast. Catch issues before they reach a PR review.
+## VOICE [OVER SCREEN]
 
-### When to use which
+It flagged the bare "except pass." That silently swallows every error. Runs on Sonnet, so it's fast. Catch issues before they reach a PR review.
 
-## TALK
+### Choosing an Agent
 
-You don't need to memorize the full list. If you're not sure which agent to use, just describe what you need — Claude routes to the right one. The cheatsheet at the end of this tutorial has the complete reference.
+[PAUSE 1s]
+
+## VOICE
+
+You don't need to memorize the list. Describe what you need — Claude routes to the right agent. The cheatsheet has the full reference.

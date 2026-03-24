@@ -31,7 +31,12 @@ A recorded video walkthrough for Claude Code users who want persistent memory an
 ## Companion Materials
 
 - `companion-cheatsheet.md` — one-page command reference viewers can bookmark
-- Each section file has **TALK** (what to say), **DO** (what to type/show), and **OVERLAY** (text for post-production)
+- Each section file has three tracks:
+  - **VOICE** — exact TTS script (short sentences, no filler)
+  - **SCREEN** — what's on screen, with `[Ns]` duration cues
+  - **OVERLAY** — text graphics for post-production
+- `[PAUSE Ns]` between voice and screen for breathing room
+- `[OVER SCREEN]` where voice narrates while output is visible
 
 ## Recording Notes
 

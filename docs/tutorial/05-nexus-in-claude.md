@@ -1,93 +1,97 @@
 # 5. Nexus Inside Claude
 
-> **Time**: 5–7 minutes
-> **Goal**: Viewer sees Claude using nexus tools naturally — search, memory, scratch
+> **Time**: 4–6 minutes
+> **Goal**: Viewer sees Claude using nexus tools naturally
 
 ---
 
-## TALK
+## VOICE
 
-Now that the plugin is installed, Claude can use nexus directly. You don't have to tell it to — the agents know when to search, when to check memory, and when to store findings. But you can also ask explicitly. Let me show both.
+Now that the plugin is installed, Claude uses nexus automatically. It searches before answering, checks memory for context, and stores findings. You can also ask explicitly.
 
-### Automatic: Claude Searches Before Answering
+Let me show both.
 
-## TALK
+### Automatic Search
 
-Let's ask Claude something about our codebase. Watch what happens:
+## VOICE
 
-## DO
+Watch what happens when we ask about the codebase.
+
+## SCREEN [15s]
 
 ```
 How does the retry logic work in this project?
 ```
 
-## TALK
+*(Claude searches indexed code, finds files, answers from actual code)*
 
-Notice what Claude did — before answering, it searched your indexed code. It found the relevant files, read the matching chunks, and gave you an answer grounded in your actual code. It's not guessing from training data — it's reading your repo.
+## VOICE [OVER SCREEN]
 
-That search happened through the MCP server that the plugin set up. Claude's agents talk directly to nexus without using bash commands.
+Before answering, Claude searched your indexed code. Found the relevant files. Gave an answer grounded in your actual repo — not training data.
 
-### Explicit: Storing and Retrieving Context
+### Storing Decisions
 
-## TALK
+[PAUSE 1s]
 
-You can also tell Claude to remember things:
+## VOICE
 
-## DO
+You can also tell Claude to remember things.
+
+## SCREEN [8s]
 
 ```
 Remember that we decided to use connection pooling with a max of 10 connections for the database layer.
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-Claude just stored that in T2 memory. Next session, when you or an agent asks about the database, that decision will be right there. Let's verify:
+That's now in persistent memory.
 
-## DO
+[PAUSE 1s]
+
+Let's verify.
+
+## SCREEN [10s]
 
 ```
 What do we know about the database configuration?
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-It found the note we just stored. This is how decisions persist across sessions — you don't have to re-explain context every time you start Claude Code.
+It found the note. Next session, next week — that decision is still there.
 
-### Scratch: Sharing Between Agents
+### Agent Coordination
 
-## TALK
+[PAUSE 1s]
 
-When Claude spawns sub-agents — say, a debugger and a code reviewer working in parallel — they need to share findings without stepping on each other. That's what scratch does.
+## VOICE
 
-## DO
+When Claude spawns multiple agents — a debugger and a reviewer working in parallel — they share findings through scratch. Each agent sees what the others found.
+
+## SCREEN [10s]
 
 ```
 Search the codebase for how errors are handled, and also check if there are any error-related tests.
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-When Claude sends multiple agents to work on this, they write their findings to scratch. Each agent can see what the others found. At the end of the session, scratch is cleaned up — it's working space, not permanent storage.
+Multiple agents working, sharing results through scratch. When the session ends, scratch is cleaned up.
 
-### The Three Tiers in Practice
+### The Three Tiers
 
 ## OVERLAY
 
-> **How the tiers work together in Claude Code:**
->
-> | Tier | What | When | Lasts |
-> |------|------|------|-------|
-> | **Scratch (T1)** | Agent working notes | During a session, auto-shared | Session only |
-> | **Memory (T2)** | Project decisions and context | Stored explicitly or by agents | Survives restarts |
-> | **Search (T3)** | Indexed code, docs, knowledge | After `nx index repo` | Permanent |
->
-> Claude's agents use all three automatically. You just work normally.
+> | Tier | What | Lasts |
+> |------|------|-------|
+> | **Scratch** | Agent working notes | Session only |
+> | **Memory** | Project decisions | Survives restarts |
+> | **Search** | Indexed code and docs | Permanent |
 
-## TALK
+## VOICE
 
-You don't have to think about which tier to use. Tell Claude to remember something — it goes to memory. Agents share findings through scratch. You index a repo — it goes to the knowledge store.
-
-One tip: storing decisions explicitly — "remember that we chose X because Y" — works better than hoping Claude infers them.
+You don't have to think about which tier to use. Claude handles routing. One tip — storing decisions explicitly works better than hoping Claude infers them.
 
 ## OVERLAY
 

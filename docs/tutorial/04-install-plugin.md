@@ -5,64 +5,72 @@
 
 ---
 
-## TALK
+## VOICE
 
-So far we've been using nx from the terminal. Now let's give Claude Code access to everything we just set up.
+So far we've used nx from the terminal. Now let's give Claude Code access to all of it.
 
-Two commands:
+Two commands.
 
-## DO
+## SCREEN [5s]
 
 ```bash
-# Start Claude Code
 claude
+```
 
-# Inside Claude Code, run:
+## SCREEN [5s]
+
+```
 /plugin marketplace add Hellblazer/nexus
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-That adds the nexus marketplace source. Now install:
+That adds the marketplace source.
 
-## DO
+## SCREEN [5s]
 
 ```
 /plugin install nx@nexus-plugins
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-If you get a "not found" error, run `claude update` first and try again. Let's verify it worked:
+If you see a "not found" error, run "claude update" first.
 
-## DO
+[PAUSE 2s]
+
+Let's verify.
+
+## SCREEN [5s]
 
 ```
 /nx:nx-preflight
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-Green means good. Warnings for "beads" and "superpowers" are fine — those are optional extras. The important one is the nx CLI check.
+Green means good. Warnings for "beads" and "superpowers" are fine — those are optional.
 
 ## OVERLAY
 
 > **If nx CLI shows red:** run `uv tool install conexus` in a separate terminal, then retry.
 
-## TALK
+[PAUSE 1s]
 
-Now restart Claude Code to see the new session hooks in action:
+## VOICE
 
-## DO
+Now restart Claude Code to see the session hooks.
+
+## SCREEN [5s]
 
 ```bash
 exit
 claude
 ```
 
-## TALK
+## VOICE [OVER SCREEN]
 
-See the context at the top? That's nexus automatically loading what it knows about your project — memory entries, active work items. Claude sees this before you type a word.
+See the context at the top? That's nexus loading what it knows about your project. Memory entries, active work. Claude sees this before you type a word.
 
 ## OVERLAY
 
