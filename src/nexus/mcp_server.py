@@ -24,6 +24,7 @@ from nexus.corpus import (
     resolve_corpus,
     t3_collection_name,
 )
+from nexus.db.t3 import verify_collection_deep
 from nexus.ttl import parse_ttl
 
 mcp = FastMCP("nexus")
@@ -458,6 +459,33 @@ def collection_info(name: str) -> str:
         meta = info.get("metadata", {})
         if meta:
             lines.append(f"Metadata:    {meta}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def collection_verify(name: str) -> str:
+    """Verify a collection's retrieval health via known-document probe.
+
+    Args:
+        name: Fully-qualified collection name (e.g. "knowledge__notes")
+    """
+    try:
+        db = _get_t3()
+        try:
+            result = verify_collection_deep(db, name)
+        except KeyError:
+            return f"Collection not found: {name!r}"
+        lines = [
+            f"Collection: {name}",
+            f"Status:     {result.status}",
+            f"Documents:  {result.doc_count}",
+        ]
+        if result.distance is not None:
+            lines.append(f"Probe distance: {result.distance:.4f} ({result.metric})")
+        if result.probe_doc_id:
+            lines.append(f"Probe doc: {result.probe_doc_id}")
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"

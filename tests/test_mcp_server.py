@@ -24,6 +24,7 @@ from nexus.mcp_server import (
     _reset_singletons,
     collection_info,
     collection_list,
+    collection_verify,
     memory_get,
     memory_put,
     memory_search,
@@ -470,6 +471,63 @@ def test_collection_info_with_metadata():
 
     result = collection_info("knowledge__test")
     assert "source" in result or "indexer" in result
+
+
+# ── B4: collection_verify ─────────────────────────────────────────────────────
+
+def test_collection_verify_healthy():
+    """collection_verify returns healthy status for a good collection."""
+    from unittest.mock import MagicMock, patch
+    from nexus.mcp_server import collection_verify
+    from nexus.db.t3 import VerifyResult
+
+    _reset_singletons()
+    mock_t3 = MagicMock()
+    _inject_t3(mock_t3)
+
+    with patch("nexus.mcp_server.verify_collection_deep") as mock_verify:
+        mock_verify.return_value = VerifyResult(
+            status="healthy", doc_count=42, probe_doc_id="abc123",
+            distance=0.15, metric="l2"
+        )
+        result = collection_verify("knowledge__test")
+
+    assert "healthy" in result.lower()
+    assert "42" in result
+    assert "0.15" in result
+
+
+def test_collection_verify_not_found():
+    """collection_verify returns error for missing collection."""
+    from unittest.mock import MagicMock, patch
+    from nexus.mcp_server import collection_verify
+
+    _reset_singletons()
+    mock_t3 = MagicMock()
+    _inject_t3(mock_t3)
+
+    with patch("nexus.mcp_server.verify_collection_deep") as mock_verify:
+        mock_verify.side_effect = KeyError("not found")
+        result = collection_verify("nonexistent")
+
+    assert "not found" in result.lower() or "error" in result.lower()
+
+
+def test_collection_verify_skipped():
+    """collection_verify reports skipped for tiny collections."""
+    from unittest.mock import MagicMock, patch
+    from nexus.mcp_server import collection_verify
+    from nexus.db.t3 import VerifyResult
+
+    _reset_singletons()
+    mock_t3 = MagicMock()
+    _inject_t3(mock_t3)
+
+    with patch("nexus.mcp_server.verify_collection_deep") as mock_verify:
+        mock_verify.return_value = VerifyResult(status="skipped", doc_count=1)
+        result = collection_verify("knowledge__tiny")
+
+    assert "skipped" in result.lower()
 
 
 # ── Collection cache thread-safety ────────────────────────────────────────────
