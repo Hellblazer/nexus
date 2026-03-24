@@ -38,7 +38,10 @@ def info_cmd(name: str) -> None:
     info = db.collection_info(name)
 
     col = db.get_or_create_collection(name)
-    result = col.get(include=["metadatas"])
+    # Sample first page (300 records max) — best-effort for last_indexed timestamp.
+    # ChromaDB Cloud caps col.get() at 300 records; full pagination is expensive
+    # and unnecessary for a display-only timestamp.
+    result = col.get(limit=300, include=["metadatas"])
     metadatas: list[dict] = result.get("metadatas") or []
     timestamps = [m["indexed_at"] for m in metadatas if m and "indexed_at" in m]
     last_indexed = max(timestamps) if timestamps else "unknown"
@@ -113,6 +116,10 @@ def reindex_cmd(name: str, force: bool) -> None:
     db.delete_collection(name)
 
     # 5. Re-index based on collection type
+    # Derive corpus from collection name so chunk metadata gets correct provenance.
+    # e.g. "rdr__nexus-abc123" → "nexus-abc123", "docs__manual" → "manual"
+    corpus = name.split("__", 1)[1] if "__" in name else ""
+
     indexed = 0
     missing: list[str] = []
 
@@ -127,9 +134,18 @@ def reindex_cmd(name: str, force: bool) -> None:
         missing = [sp for sp in source_paths if not Path(sp).exists()]
         if rdr_files:
             click.echo(f"Re-indexing {len(rdr_files)} RDR documents...")
-            batch_index_markdowns(
-                rdr_files, corpus="", collection_name=name, force=True
-            )
+            try:
+                batch_index_markdowns(
+                    rdr_files, corpus=corpus, collection_name=name, force=True
+                )
+            except Exception as exc:
+                click.echo(
+                    f"Re-indexing failed: {exc}\n"
+                    f"Collection '{name}' was deleted. Re-run 'nx collection reindex {name}' "
+                    f"after resolving the error, or re-index manually.",
+                    err=True,
+                )
+                raise click.exceptions.Exit(1)
             indexed = len(rdr_files)
 
     elif name.startswith("docs__") or name.startswith("knowledge__"):
@@ -140,9 +156,9 @@ def reindex_cmd(name: str, force: bool) -> None:
                 continue
             try:
                 if p.suffix.lower() == ".pdf":
-                    index_pdf(p, corpus="", collection_name=name, force=True)
+                    index_pdf(p, corpus=corpus, collection_name=name, force=True)
                 else:
-                    index_markdown(p, corpus="", collection_name=name, force=True)
+                    index_markdown(p, corpus=corpus, collection_name=name, force=True)
                 indexed += 1
             except Exception as exc:
                 click.echo(f"  Warning: failed to re-index {p.name}: {exc}", err=True)
