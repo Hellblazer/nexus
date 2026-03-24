@@ -22,6 +22,9 @@ from nexus.mcp_server import (
     _inject_t1,
     _inject_t3,
     _reset_singletons,
+    collection_info,
+    collection_list,
+    collection_verify,
     memory_get,
     memory_put,
     memory_search,
@@ -253,3 +256,310 @@ def test_t1_isolated_prefix(t1_isolated):
 
     result = scratch(action="list")
     assert "[T1 isolated]" in result
+
+
+# ── B1: Multi-corpus search ───────────────────────────────────────────────────
+
+def test_search_default_multi_corpus():
+    """Default corpus searches knowledge, code, and docs collections."""
+    from unittest.mock import MagicMock, patch
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__notes", "count": 5},
+        {"name": "code__repo", "count": 10},
+        {"name": "docs__manual", "count": 3},
+    ]
+    _inject_t3(mock_t3)
+
+    captured: list[list[str]] = []
+
+    def fake_search(query, collections, n_results, t3):
+        captured.append(list(collections))
+        return []
+
+    with patch("nexus.search_engine.search_cross_corpus", fake_search):
+        result = search("test query")  # no corpus= arg — uses default
+
+    assert len(captured) == 1
+    searched = captured[0]
+    assert "knowledge__notes" in searched
+    assert "code__repo" in searched
+    assert "docs__manual" in searched
+
+
+def test_search_single_corpus_backward_compat():
+    """corpus='knowledge' still works (backward compatibility)."""
+    from unittest.mock import MagicMock, patch
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__notes", "count": 5},
+        {"name": "code__repo", "count": 10},
+    ]
+    _inject_t3(mock_t3)
+
+    captured: list[list[str]] = []
+
+    def fake_search(query, collections, n_results, t3):
+        captured.append(list(collections))
+        return []
+
+    with patch("nexus.search_engine.search_cross_corpus", fake_search):
+        result = search("test query", corpus="knowledge")
+
+    assert len(captured) == 1
+    searched = captured[0]
+    assert "knowledge__notes" in searched
+    assert "code__repo" not in searched
+
+
+def test_search_all_alias():
+    """corpus='all' expands to knowledge,code,docs,rdr."""
+    from unittest.mock import MagicMock, patch
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__notes", "count": 5},
+        {"name": "code__repo", "count": 10},
+        {"name": "docs__manual", "count": 3},
+        {"name": "rdr__decisions", "count": 7},
+    ]
+    _inject_t3(mock_t3)
+
+    captured: list[list[str]] = []
+
+    def fake_search(query, collections, n_results, t3):
+        captured.append(list(collections))
+        return []
+
+    with patch("nexus.search_engine.search_cross_corpus", fake_search):
+        result = search("test query", corpus="all")
+
+    assert len(captured) == 1
+    searched = captured[0]
+    assert "knowledge__notes" in searched
+    assert "code__repo" in searched
+    assert "docs__manual" in searched
+    assert "rdr__decisions" in searched
+
+
+def test_search_fully_qualified_collection():
+    """corpus='knowledge__specific' targets that collection directly."""
+    from unittest.mock import MagicMock, patch
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__notes", "count": 5},
+        {"name": "knowledge__other", "count": 2},
+    ]
+    _inject_t3(mock_t3)
+
+    captured: list[list[str]] = []
+
+    def fake_search(query, collections, n_results, t3):
+        captured.append(list(collections))
+        return []
+
+    with patch("nexus.search_engine.search_cross_corpus", fake_search):
+        result = search("test query", corpus="knowledge__notes")
+
+    assert len(captured) == 1
+    assert captured[0] == ["knowledge__notes"]
+
+
+# ── B2: collection_list ───────────────────────────────────────────────────────
+
+def test_collection_list_returns_names_and_counts():
+    """collection_list shows all collections with counts and models."""
+    from unittest.mock import MagicMock
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__test", "count": 42},
+        {"name": "code__repo", "count": 100},
+    ]
+    _reset_singletons()
+    _inject_t3(mock_t3)
+
+    result = collection_list()
+    assert "knowledge__test" in result
+    assert "42" in result
+    assert "code__repo" in result
+    assert "100" in result
+    # Models should appear
+    assert "voyage-context-3" in result  # knowledge__ model
+    assert "voyage-4" in result  # code__ query model
+
+
+def test_collection_list_empty():
+    """collection_list handles no collections gracefully."""
+    from unittest.mock import MagicMock
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = []
+    _reset_singletons()
+    _inject_t3(mock_t3)
+
+    result = collection_list()
+    assert "no collections" in result.lower()
+
+
+def test_collection_list_sorted():
+    """collection_list returns collections in sorted order."""
+    from unittest.mock import MagicMock
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__zzz", "count": 1},
+        {"name": "code__aaa", "count": 2},
+    ]
+    _reset_singletons()
+    _inject_t3(mock_t3)
+
+    result = collection_list()
+    idx_aaa = result.index("code__aaa")
+    idx_zzz = result.index("knowledge__zzz")
+    assert idx_aaa < idx_zzz
+
+
+# ── B3: collection_info ───────────────────────────────────────────────────────
+
+def test_collection_info_returns_metadata():
+    """collection_info shows count and model info."""
+    from unittest.mock import MagicMock
+    mock_t3 = MagicMock()
+    mock_t3.collection_info.return_value = {"count": 42, "metadata": {}}
+    _reset_singletons()
+    _inject_t3(mock_t3)
+
+    result = collection_info("knowledge__test")
+    assert "knowledge__test" in result
+    assert "42" in result
+    assert "voyage-context-3" in result  # CCE model for knowledge__
+
+
+def test_collection_info_shows_both_models():
+    """collection_info shows both index and query models."""
+    from unittest.mock import MagicMock
+    mock_t3 = MagicMock()
+    mock_t3.collection_info.return_value = {"count": 10, "metadata": {}}
+    _reset_singletons()
+    _inject_t3(mock_t3)
+
+    result = collection_info("code__myrepo")
+    assert "voyage-code-3" in result   # index model
+    assert "voyage-4" in result        # query model
+
+
+def test_collection_info_not_found():
+    """collection_info returns error for missing collection."""
+    from unittest.mock import MagicMock
+    mock_t3 = MagicMock()
+    mock_t3.collection_info.side_effect = KeyError("not found")
+    _reset_singletons()
+    _inject_t3(mock_t3)
+
+    result = collection_info("nonexistent")
+    assert "not found" in result.lower() or "error" in result.lower()
+    assert not result.startswith("Error: ")  # Should be user-friendly, not raw exception
+
+
+def test_collection_info_with_metadata():
+    """collection_info includes non-empty metadata."""
+    from unittest.mock import MagicMock
+    mock_t3 = MagicMock()
+    mock_t3.collection_info.return_value = {
+        "count": 5,
+        "metadata": {"source": "indexer", "version": "2"},
+    }
+    _reset_singletons()
+    _inject_t3(mock_t3)
+
+    result = collection_info("knowledge__test")
+    assert "source" in result or "indexer" in result
+
+
+# ── B4: collection_verify ─────────────────────────────────────────────────────
+
+def test_collection_verify_healthy():
+    """collection_verify returns healthy status for a good collection."""
+    from unittest.mock import MagicMock, patch
+    from nexus.mcp_server import collection_verify
+    from nexus.db.t3 import VerifyResult
+
+    _reset_singletons()
+    mock_t3 = MagicMock()
+    _inject_t3(mock_t3)
+
+    with patch("nexus.mcp_server.verify_collection_deep") as mock_verify:
+        mock_verify.return_value = VerifyResult(
+            status="healthy", doc_count=42, probe_doc_id="abc123",
+            distance=0.15, metric="l2"
+        )
+        result = collection_verify("knowledge__test")
+
+    assert "healthy" in result.lower()
+    assert "42" in result
+    assert "0.15" in result
+
+
+def test_collection_verify_not_found():
+    """collection_verify returns error for missing collection."""
+    from unittest.mock import MagicMock, patch
+    from nexus.mcp_server import collection_verify
+
+    _reset_singletons()
+    mock_t3 = MagicMock()
+    _inject_t3(mock_t3)
+
+    with patch("nexus.mcp_server.verify_collection_deep") as mock_verify:
+        mock_verify.side_effect = KeyError("not found")
+        result = collection_verify("nonexistent")
+
+    assert "not found" in result.lower() or "error" in result.lower()
+
+
+def test_collection_verify_skipped():
+    """collection_verify reports skipped for tiny collections."""
+    from unittest.mock import MagicMock, patch
+    from nexus.mcp_server import collection_verify
+    from nexus.db.t3 import VerifyResult
+
+    _reset_singletons()
+    mock_t3 = MagicMock()
+    _inject_t3(mock_t3)
+
+    with patch("nexus.mcp_server.verify_collection_deep") as mock_verify:
+        mock_verify.return_value = VerifyResult(status="skipped", doc_count=1)
+        result = collection_verify("knowledge__tiny")
+
+    assert "skipped" in result.lower()
+
+
+# ── Collection cache thread-safety ────────────────────────────────────────────
+
+def test_collection_cache_thread_safe():
+    """Concurrent cache refreshes never return an empty list."""
+    import threading
+    from unittest.mock import MagicMock
+    from nexus.mcp_server import _get_collection_names
+
+    _reset_singletons()
+
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
+    _inject_t3(mock_t3)
+
+    results: list[list[str]] = []
+    errors: list[Exception] = []
+
+    def worker():
+        try:
+            names = _get_collection_names()
+            results.append(names)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    for r in results:
+        assert len(r) > 0, f"Cache race: thread saw empty collection list: {r!r}"

@@ -56,7 +56,7 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place) |
-| `--monitor` | Print per-file progress lines. Auto-enabled when stdout is not a TTY (piped, backgrounded, CI) |
+| `--monitor` | Print per-file progress lines. For `pdf` and `md`, also shows a per-chunk tqdm progress bar during embedding. Auto-enabled when stdout is not a TTY (piped, backgrounded, CI) |
 
 **`repo`-only flags:**
 
@@ -232,13 +232,22 @@ nx collection list
 | `list` | All T3 collections with document counts |
 | `info NAME` | Details for one collection |
 | `verify NAME` | Existence check + document count |
+| `reindex NAME` | Delete and re-index a collection from its source documents |
 | `delete NAME` | Delete collection (irreversible) |
 
 **`verify` flags:**
 
 | Flag | Description |
 |------|-------------|
-| `--deep` | Probe embeddings in addition to count |
+| `--deep` | Known-document probe: embeds a document already in the collection, queries it back, and reports the retrieval distance. Distance near 0 is healthy; high distance indicates model mismatch or index corruption |
+
+**`reindex` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Skip the pre-delete safety check (which verifies the source documents are still present before wiping the collection) |
+
+The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`code__`, `docs__`, `rdr__`, `knowledge__`) to the appropriate indexer.
 
 **`delete` flags:**
 

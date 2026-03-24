@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.7] - 2026-03-23
+
+### Bug Fixes (Track C)
+- **C1**: Single-chunk CCE documents now use `contextualized_embed()` instead of falling back to `voyage-4`, fixing a model mismatch for short documents
+- **C2/C3**: Paginated all unbounded `col.get()` calls in `indexer.py` to handle >300 chunks (ChromaDB Cloud hard cap)
+- **C4**: Partial CCE embedding failure now re-embeds entire document with voyage-4 for consistency, preventing mixed-model vectors
+- **C5**: MCP server collection cache uses atomic tuple assignment to eliminate race condition
+
+### Post-Mortem Gap Closure (Track A)
+- **A1**: Added retrieval quality unit tests that assert semantic rank ordering, not just `len(results) > 0`
+- **A2**: Enhanced `nx collection verify --deep` with known-document probe and distance reporting; shared `verify_collection_deep()` function in `db/t3.py`
+- **A3**: Added cross-model invariant regression test — fails if CCE index/query models diverge
+- **A4**: New `nx collection reindex <name>` command with pre-delete safety check, per-type dispatch, and post-reindex verification
+- **A5**: Per-chunk progress callback for pdf/md indexing — `--monitor` now shows tqdm bar during embedding
+
+### MCP Server Enhancement (Track B)
+- **B1**: `search` tool default changed from `corpus="knowledge"` to `corpus="knowledge,code,docs"` with `"all"` alias
+- **B2**: New `collection_list` tool — lists all collections with document counts and models
+- **B3**: New `collection_info` tool — detailed collection metadata
+- **B4**: New `collection_verify` tool — known-document retrieval health probe
+
+### Documentation (Track D)
+- Updated CLI reference, architecture docs, MCP tool reference, and CLAUDE.md for all changes above
+
+### References
+- RDR-040: CCE Post-Mortem Gap Closure & MCP Server Enhancement
+- Post-mortem: cce-query-model-mismatch
+
 ## [2.3.6] - 2026-03-23
 
 Plugin version aligned with Nexus CLI 2.3.6. No plugin-level functional changes.

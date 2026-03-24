@@ -56,6 +56,8 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 
 **Collection naming**: always `__` as separator — `code__myrepo`, `docs__corpus`, `knowledge__topic` (colons are invalid in ChromaDB collection names).
 
+**Single-chunk CCE**: Documents with only 1 chunk in CCE collections (`docs__*`, `knowledge__*`, `rdr__*`) are embedded via `contextualized_embed()` with `inputs=[[chunk]]`. The previous `voyage-4` fallback for single-chunk documents was removed — it caused a model mismatch between index and query vectors (see post-mortem: cce-query-model-mismatch).
+
 **Session propagation (T1)**: The `SessionStart` hook starts a per-session ChromaDB HTTP server, writes its address to `~/.config/nexus/sessions/{ppid}.session`. Child agents walk the OS PPID chain to find the nearest ancestor session file and share T1 scratch across the agent tree. Falls back to `EphemeralClient` when the server cannot start.
 
 **T3 expire guard**: always filter `ttl_days > 0 AND expires_at != "" AND expires_at < now` — the `expires_at != ""` guard is mandatory: permanent entries use `expires_at=""` which sorts before ISO timestamps and would be incorrectly deleted by a 2-condition guard.

@@ -1736,3 +1736,158 @@ def test_rdr_files_do_not_trigger_on_file(tmp_path: Path) -> None:
     # Only code.py should appear; rdr file was excluded from main loop
     assert len(on_file_calls) == 1, f"Expected 1 (only code.py), got {len(on_file_calls)}: {on_file_calls}"
     assert on_file_calls[0][0].name == "code.py"
+
+
+# ── Pagination tests (C2 / C3 fixes) ─────────────────────────────────────────
+
+
+def test_prune_deleted_files_paginates(tmp_path: Path) -> None:
+    """_prune_deleted_files handles >300 chunks by paginating col.get()."""
+    from nexus.indexer import _prune_deleted_files
+
+    # source_a: 200 chunks, source_b: 110 chunks (total 310 — exceeds 300 cap)
+    # source_b is deleted from disk; all 110 of its chunks must be pruned.
+    source_a = "/repo/file_a.py"
+    source_b = "/repo/file_b.py"
+    all_current = {source_a}
+
+    # Build the two pages the paginated loop will retrieve:
+    #   page 1 (offset=0, limit=300): 200 source_a + 100 source_b = 300
+    #   page 2 (offset=300, limit=300): 10 source_b = 10  → signals end (< 300)
+    page1_ids = [f"a-{i}" for i in range(200)] + [f"b-{i}" for i in range(100)]
+    page1_metas = [{"source_path": source_a}] * 200 + [{"source_path": source_b}] * 100
+
+    page2_ids = [f"b-{i}" for i in range(100, 110)]
+    page2_metas = [{"source_path": source_b}] * 10
+
+    # Each collection gets its own mock so side_effect is independent per collection.
+    def make_col():
+        col = MagicMock()
+        col.get.side_effect = [
+            {"ids": page1_ids, "metadatas": page1_metas},
+            {"ids": page2_ids, "metadatas": page2_metas},
+        ]
+        return col
+
+    mock_cols: list[MagicMock] = []
+
+    def get_or_create(name: str) -> MagicMock:
+        col = make_col()
+        mock_cols.append(col)
+        return col
+
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.side_effect = get_or_create
+
+    _prune_deleted_files("code__repo", "docs__repo", all_current, mock_db)
+
+    # Both collections must have pruned ALL 110 source_b chunks.
+    for col in mock_cols:
+        deleted_ids: set[str] = set()
+        for c in col.delete.call_args_list:
+            ids_arg = c.kwargs.get("ids") or (c.args[0] if c.args else [])
+            deleted_ids.update(ids_arg)
+
+        expected_b_ids = {f"b-{i}" for i in range(110)}
+        assert expected_b_ids.issubset(deleted_ids), (
+            f"Missing source_b chunks from delete: {expected_b_ids - deleted_ids}"
+        )
+        # source_a chunks must NOT be deleted
+        a_ids = {f"a-{i}" for i in range(200)}
+        assert not a_ids.intersection(deleted_ids), "source_a chunks incorrectly deleted"
+
+
+def test_frecency_update_paginates(tmp_path: Path) -> None:
+    """_run_index_frecency_only handles a source_path with >300 chunks."""
+    from nexus.indexer import _run_index_frecency_only
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src_file = repo / "big_generated.py"
+    src_file.write_text("# generated\n")
+
+    registry = MagicMock()
+    registry.get.return_value = {
+        "collection": "code__repo",
+        "code_collection": "code__repo",
+        "docs_collection": "docs__repo",
+    }
+
+    # 310 chunks for the single source_path, split across two pages
+    page1_ids = [f"chunk-{i}" for i in range(300)]
+    page1_metas = [{"frecency_score": 0.0, "source_path": str(src_file)} for _ in range(300)]
+
+    page2_ids = [f"chunk-{i}" for i in range(300, 310)]
+    page2_metas = [{"frecency_score": 0.0, "source_path": str(src_file)} for _ in range(10)]
+
+    # Give code__ collection two pages; docs__ collection has nothing for this file.
+    mock_code_col = MagicMock()
+    mock_code_col.get.side_effect = [
+        {"ids": page1_ids, "metadatas": page1_metas},
+        {"ids": page2_ids, "metadatas": page2_metas},
+    ]
+
+    mock_docs_col = MagicMock()
+    mock_docs_col.get.return_value = {"ids": [], "metadatas": []}
+
+    cols = {"code__repo": mock_code_col, "docs__repo": mock_docs_col}
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.side_effect = lambda name: cols[name]
+
+    with patch("nexus.frecency.batch_frecency", return_value={src_file: 0.9}):
+        with patch("nexus.config.get_credential", return_value="fake-key"):
+            with patch("nexus.db.make_t3", return_value=mock_db):
+                _run_index_frecency_only(repo, registry)
+
+    # All 310 chunks from code__ must appear in update_chunks calls
+    updated_ids: set[str] = set()
+    for c in mock_db.update_chunks.call_args_list:
+        updated_ids.update(c.kwargs.get("ids") or c.args[0])
+
+    assert len(updated_ids) == 310, f"Expected 310 updated IDs, got {len(updated_ids)}"
+    assert all(m["frecency_score"] == 0.9
+               for c in mock_db.update_chunks.call_args_list
+               for m in (c.kwargs.get("metadatas") or c.args[1]))
+
+
+def test_prune_misclassified_paginates(tmp_path: Path) -> None:
+    """_prune_misclassified handles a source_path with >300 chunks via pagination."""
+    from nexus.indexer import _prune_misclassified
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    # One large prose file that ended up in the code__ collection
+    big_prose = repo / "generated_docs.md"
+    big_prose.write_text("# big\n")
+
+    code_files: list[Path] = []
+    prose_files = [big_prose]
+    pdf_files: list[Path] = []
+
+    # 310 stale chunks for big_prose spread across two pages
+    page1_ids = [f"stale-{i}" for i in range(300)]
+    page2_ids = [f"stale-{i}" for i in range(300, 310)]
+
+    mock_code_col = MagicMock()
+    mock_code_col.get.side_effect = [
+        {"ids": page1_ids},
+        {"ids": page2_ids},
+    ]
+
+    mock_docs_col = MagicMock()
+    mock_docs_col.get.return_value = {"ids": []}  # nothing to prune in docs__
+
+    cols = {"code__repo": mock_code_col, "docs__repo": mock_docs_col}
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.side_effect = lambda name: cols[name]
+
+    _prune_misclassified(repo, "code__repo", "docs__repo", code_files, prose_files, pdf_files, mock_db)
+
+    deleted_ids: set[str] = set()
+    for c in mock_code_col.delete.call_args_list:
+        ids_arg = c.kwargs.get("ids") or (c.args[0] if c.args else [])
+        deleted_ids.update(ids_arg)
+
+    expected = {f"stale-{i}" for i in range(310)}
+    assert expected == deleted_ids, f"Not all stale chunks deleted: {expected - deleted_ids}"
