@@ -218,7 +218,7 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
     mock_t3.get_or_create_collection.return_value = mock_col
     mock_t3.upsert_chunks_with_embeddings.side_effect = capture_upsert
 
-    def fake_embed(chunks, model, api_key, input_type="document", timeout=120.0):
+    def fake_embed(chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None):
         return [[0.1] * 5] * len(chunks), "test-local"
 
     with patch("nexus.doc_indexer._embed_with_fallback", side_effect=fake_embed):
@@ -1874,3 +1874,178 @@ def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_m
     assert isinstance(result, dict), f"Expected dict sentinel on skip, got {type(result)}"
     assert result["chunks"] == 0
     assert result["sections"] == 0
+
+
+# ── A5: per-chunk progress callback ──────────────────────────────────────────
+
+
+def test_embed_progress_callback_fires():
+    """on_progress callback receives (count, total) after each batch."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    progress_calls: list[tuple[int, int]] = []
+
+    def on_progress(current: int, total: int) -> None:
+        progress_calls.append((current, total))
+
+    mock_client = MagicMock()
+    embed_result = MagicMock()
+    embed_result.embeddings = [[0.1] * 10, [0.2] * 10, [0.3] * 10]
+    mock_client.embed.return_value = embed_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        _embed_with_fallback(
+            ["chunk one", "chunk two", "chunk three"],
+            "voyage-4", "test-key",
+            on_progress=on_progress,
+        )
+
+    assert len(progress_calls) > 0
+    # Last call should show all chunks done
+    last_current, last_total = progress_calls[-1]
+    assert last_current == last_total == 3
+
+
+def test_embed_progress_callback_none_is_noop():
+    """on_progress=None (default) does not cause errors."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+    embed_result = MagicMock()
+    embed_result.embeddings = [[0.1] * 10]
+    mock_client.embed.return_value = embed_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        # Should not raise
+        _embed_with_fallback(
+            ["chunk one"], "voyage-4", "test-key",
+            on_progress=None,
+        )
+
+
+def test_embed_progress_callback_fires_for_cce():
+    """on_progress fires after each CCE batch when model is voyage-context-3."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    progress_calls: list[tuple[int, int]] = []
+
+    def on_progress(current: int, total: int) -> None:
+        progress_calls.append((current, total))
+
+    mock_client = MagicMock()
+    cce_result = MagicMock(spec=ContextualizedEmbeddingsObject)
+    inner = MagicMock(spec=ContextualizedEmbeddingsResult)
+    inner.embeddings = [[0.1] * 10, [0.2] * 10]
+    cce_result.results = [inner]
+    mock_client.contextualized_embed.return_value = cce_result
+
+    with patch("voyageai.Client", return_value=mock_client):
+        _embed_with_fallback(
+            ["chunk one", "chunk two"],
+            "voyage-context-3", "test-key",
+            on_progress=on_progress,
+        )
+
+    assert len(progress_calls) > 0
+    last_current, last_total = progress_calls[-1]
+    assert last_current == last_total == 2
+
+
+def test_index_pdf_threads_on_progress(sample_pdf, monkeypatch):
+    """on_progress passed to index_pdf fires during embedding."""
+    set_credentials(monkeypatch)
+
+    progress_calls: list[tuple[int, int]] = []
+
+    def on_progress(current: int, total: int) -> None:
+        progress_calls.append((current, total))
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_chunk = MagicMock()
+    mock_chunk.text = "chunk text content"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 18, "page_number": 1}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chunker_class:
+                with patch("voyageai.Client", return_value=mock_voyage_client):
+                    mock_extractor = MagicMock()
+                    mock_extractor_class.return_value = mock_extractor
+                    mock_extractor.extract.return_value = MagicMock(
+                        text="extracted text",
+                        metadata={
+                            "extraction_method": "docling",
+                            "page_count": 1,
+                            "format": "markdown",
+                            "page_boundaries": [],
+                        },
+                    )
+                    mock_chunker = MagicMock()
+                    mock_chunker_class.return_value = mock_chunker
+                    mock_chunker.chunk.return_value = [mock_chunk]
+
+                    result = index_pdf(
+                        sample_pdf, corpus="mybook",
+                        on_progress=on_progress,
+                    )
+
+    assert result == 1
+    assert len(progress_calls) > 0
+
+
+def test_index_markdown_threads_on_progress(sample_md, monkeypatch):
+    """on_progress passed to index_markdown fires during embedding."""
+    set_credentials(monkeypatch)
+
+    progress_calls: list[tuple[int, int]] = []
+
+    def on_progress(current: int, total: int) -> None:
+        progress_calls.append((current, total))
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_chunk = MagicMock()
+    mock_chunk.text = "chunk text"
+    mock_chunk.chunk_index = 0
+    mock_chunk.metadata = {
+        "chunk_start_char": 0,
+        "chunk_end_char": 10,
+        "page_number": 0,
+        "header_path": "Hello",
+    }
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
+    mock_voyage_result.embeddings = [[0.1, 0.2]]
+    mock_voyage_client.embed.return_value = mock_voyage_result
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
+            with patch("voyageai.Client", return_value=mock_voyage_client):
+                mock_chunker = MagicMock()
+                mock_chunker_class.return_value = mock_chunker
+                mock_chunker.chunk.return_value = [mock_chunk]
+
+                result = index_markdown(
+                    sample_md, corpus="docs",
+                    on_progress=on_progress,
+                )
+
+    assert isinstance(result, int)
+    assert result == 1
+    assert len(progress_calls) > 0

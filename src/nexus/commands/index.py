@@ -232,8 +232,16 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
     if monitor or not sys.stdout.isatty():
+        chunk_bar = tqdm(total=0, desc="Embedding", unit="chunk", disable=None)
+
+        def on_chunk_progress(current: int, total: int) -> None:
+            chunk_bar.total = total
+            chunk_bar.n = current
+            chunk_bar.refresh()
+
         meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
-                         return_metadata=True)
+                         return_metadata=True, on_progress=on_chunk_progress)
+        chunk_bar.close()
         n = meta["chunks"]  # type: ignore[index]
         pages = meta.get("pages", [])  # type: ignore[union-attr]
         page_range = f"{pages[0]}–{pages[-1]}" if len(pages) > 1 else str(pages[0]) if pages else "?"
@@ -270,7 +278,16 @@ def index_md_cmd(path: Path, corpus: str, force: bool, monitor: bool) -> None:
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
     if monitor or not sys.stdout.isatty():
-        meta = index_markdown(path, corpus=corpus, force=force, return_metadata=True)
+        chunk_bar = tqdm(total=0, desc="Embedding", unit="chunk", disable=None)
+
+        def on_chunk_progress(current: int, total: int) -> None:
+            chunk_bar.total = total
+            chunk_bar.n = current
+            chunk_bar.refresh()
+
+        meta = index_markdown(path, corpus=corpus, force=force, return_metadata=True,
+                              on_progress=on_chunk_progress)
+        chunk_bar.close()
         n = meta["chunks"]  # type: ignore[index]
         sections = meta.get("sections", 0)  # type: ignore[union-attr]
         click.echo(f"\n  Chunks: {n}  Sections: {sections}")

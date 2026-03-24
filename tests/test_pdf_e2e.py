@@ -22,7 +22,7 @@ from nexus.indexer import _git_metadata, _index_pdf_file
 _local_ef = DefaultEmbeddingFunction()
 
 
-def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0):
+def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None):
     """Local embed stub: wraps ONNX MiniLM-L6-v2 — no API keys needed.
 
     Returns (embeddings, model) to match _embed_with_fallback's
