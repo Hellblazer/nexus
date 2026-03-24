@@ -2,8 +2,10 @@
 title: "CCE Post-Mortem Gap Closure & MCP Server Enhancement"
 id: RDR-040
 type: Quality / Feature
-status: accepted
+status: closed
 accepted_date: 2026-03-23
+closed_date: 2026-03-24
+close_reason: implemented
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
