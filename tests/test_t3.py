@@ -538,6 +538,60 @@ def test_embedding_fn_cached_per_collection_name(mock_chromadb: tuple) -> None:
     assert mock_ef_cls.call_count == 1, "EmbeddingFunction should be constructed only once per name"
 
 
+# ── A1: Retrieval quality (local_t3, real ONNX embeddings) ───────────────────
+
+def test_search_returns_closest_document_first(local_t3: T3Database) -> None:
+    """Semantic ranking: most relevant doc is rank 1, not just 'results exist'.
+
+    Post-mortem gap: tests verified mechanism but never asserted ranking quality.
+    """
+    col = "knowledge__quality_test"
+    local_t3.put(collection=col, content="Python web framework for building REST APIs with Django and Flask", title="python-web")
+    local_t3.put(collection=col, content="Quantum physics experiments studying wave-particle duality and entanglement", title="quantum")
+    local_t3.put(collection=col, content="Italian cooking recipes for homemade pasta carbonara and risotto", title="cooking")
+
+    results = local_t3.search(query="Django REST API web development Python", collection_names=[col], n_results=3)
+    assert len(results) >= 3
+    # Most relevant document must be first
+    assert results[0]["title"] == "python-web", (
+        f"Expected python-web as top result, got {results[0].get('title')}"
+    )
+
+
+def test_search_unrelated_query_produces_higher_distance(local_t3: T3Database) -> None:
+    """Unrelated queries produce higher distances than related ones.
+
+    This is the failure mode of the original CCE bug: cross-space vectors
+    behave like noise, producing uniformly high distances.
+    """
+    col = "knowledge__distance_test"
+    local_t3.put(collection=col, content="Machine learning model training with PyTorch neural networks and gradient descent", title="ml")
+
+    relevant = local_t3.search(query="deep learning neural network training", collection_names=[col], n_results=1)
+    unrelated = local_t3.search(query="medieval castle architecture stone walls", collection_names=[col], n_results=1)
+
+    assert relevant and unrelated
+    assert unrelated[0]["distance"] > relevant[0]["distance"], (
+        f"Unrelated query distance ({unrelated[0]['distance']:.4f}) should be higher "
+        f"than relevant ({relevant[0]['distance']:.4f})"
+    )
+
+
+def test_search_single_chunk_document_retrievable(local_t3: T3Database) -> None:
+    """Single-document collections are retrievable after C1 fix.
+
+    Regression guard: before C1, single-chunk CCE docs were indexed with
+    voyage-4 but queried with voyage-context-3, making them unretrievable.
+    In local mode this uses the same EF for both, but the pattern is important.
+    """
+    col = "docs__single_chunk_test"
+    local_t3.put(collection=col, content="Authentication tokens use RS256 signing with rotating key schedules", title="auth-tokens")
+
+    results = local_t3.search(query="JWT RS256 authentication token signing", collection_names=[col], n_results=1)
+    assert results, "Single-document collection must return results"
+    assert "RS256" in results[0]["content"] or "authentication" in results[0]["content"].lower()
+
+
 def test_embedding_fn_different_names_not_confused(mock_chromadb: tuple) -> None:
     """Different collection names get different (separately cached) embedding functions."""
     _, mock_client = mock_chromadb

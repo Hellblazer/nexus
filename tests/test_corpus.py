@@ -250,3 +250,33 @@ def test_t3_collection_name_already_prefixed_knowledge() -> None:
 def test_t3_collection_name_other_prefix_passthrough() -> None:
     """Arg with code__ prefix is preserved as-is."""
     assert t3_collection_name("code__myrepo") == "code__myrepo"
+
+
+# ── A3: Cross-model invariant regression ─────────────────────────────────────
+
+def test_cce_index_query_model_invariant() -> None:
+    """Joint invariant: CCE index model requires CCE query model.
+
+    The original CCE bug (post-mortem: cce-query-model-mismatch) had
+    index_model_for_collection returning voyage-context-3 while
+    embedding_model_for_collection returned voyage-4. This test catches
+    that exact regression by checking both functions agree for CCE prefixes.
+    """
+    cce_prefixes = ("docs__papers", "knowledge__security", "rdr__myrepo-abcdef12")
+    for prefix in cce_prefixes:
+        idx = index_model_for_collection(prefix)
+        qry = embedding_model_for_collection(prefix)
+        if idx == "voyage-context-3":
+            assert qry == "voyage-context-3", (
+                f"{prefix}: CCE index model ({idx}) requires CCE query model, "
+                f"got query={qry}. See post-mortem: cce-query-model-mismatch"
+            )
+
+    # Non-CCE prefixes should NOT have this constraint
+    non_cce = ("code__repo", "scratch__temp")
+    for prefix in non_cce:
+        idx = index_model_for_collection(prefix)
+        qry = embedding_model_for_collection(prefix)
+        # code__ has different index/query models — that's expected
+        # Just verify they don't accidentally claim to be CCE
+        assert idx != "voyage-context-3" or qry == "voyage-context-3"
