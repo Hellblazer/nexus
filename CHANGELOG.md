@@ -6,6 +6,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-03-24
+
+### Added
+- **`nx collection reindex <name>`** — delete and re-index a collection from source files with pre-delete safety check, per-type dispatch (code/docs/rdr/knowledge), and post-reindex verification (A4)
+- **`collection_list` MCP tool** — list all T3 collections with document counts and models (B2)
+- **`collection_info` MCP tool** — detailed collection metadata including index/query models (B3)
+- **`collection_verify` MCP tool** — known-document retrieval health probe (B4)
+- **Per-chunk progress for pdf/md indexing** — `--monitor` now shows tqdm bar during embedding, not just post-hoc metadata (A5)
+- **Retrieval quality unit tests** — assert semantic rank ordering with real ONNX embeddings (A1)
+- **Cross-model invariant regression test** — fails if CCE index/query models diverge (A3)
+
+### Fixed
+- **Single-chunk CCE model mismatch** — documents with only 1 chunk in CCE collections now use `contextualized_embed()` instead of falling back to `voyage-4`, which produced vectors in an incompatible space (C1)
+- **Unpaginated `col.get()` in indexer** — `_prune_deleted_files`, `_prune_misclassified`, and `_run_index_frecency_only` now paginate at 300 records to handle ChromaDB Cloud's hard cap (C2/C3)
+- **Mixed-model CCE batches** — partial CCE failure now re-embeds the entire document with voyage-4 for consistency, preventing mixed-space vectors (C4)
+- **MCP collection cache race** — `_get_collection_names()` uses atomic tuple assignment to eliminate the window where concurrent threads could see an empty list (C5)
+- **`info_cmd` unbounded `col.get()`** — now uses `limit=300` for best-effort timestamp sampling
+- **`reindex_cmd` corpus metadata** — derives corpus from collection name instead of storing empty string
+
+### Changed
+- **MCP `search` default** — changed from `corpus="knowledge"` to `corpus="knowledge,code,docs"` matching CLI behavior; added `"all"` alias for all corpora including rdr (B1)
+- **`collection verify --deep`** — enhanced with known-document probe, distance reporting, and `VerifyResult` dataclass (A2)
+
+### Docs
+- Updated CLI reference, architecture docs, MCP tool reference, CLAUDE.md, and nx plugin CHANGELOG for all RDR-040 changes (D1–D6)
+
+### References
+- RDR-040: CCE Post-Mortem Gap Closure & MCP Server Enhancement
+- Post-mortem: `docs/rdr/post-mortem/cce-query-model-mismatch.md`
+- Epic: nexus-5rn1 (16 beads, all closed)
+- PR: #118
+
 ## [2.3.6] - 2026-03-23
 
 ### Fixed

@@ -6,7 +6,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.3.7] - 2026-03-23
+## [2.4.0] - 2026-03-24
 
 ### Bug Fixes (Track C)
 - **C1**: Single-chunk CCE documents now use `contextualized_embed()` instead of falling back to `voyage-4`, fixing a model mismatch for short documents
