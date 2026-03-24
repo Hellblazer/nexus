@@ -18,7 +18,12 @@ import warnings
 from mcp.server.fastmcp import FastMCP
 
 from nexus.commands._helpers import default_db_path
-from nexus.corpus import resolve_corpus, t3_collection_name
+from nexus.corpus import (
+    embedding_model_for_collection,
+    index_model_for_collection,
+    resolve_corpus,
+    t3_collection_name,
+)
 from nexus.ttl import parse_ttl
 
 mcp = FastMCP("nexus")
@@ -110,21 +115,33 @@ def _inject_t3(t3):
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def search(query: str, corpus: str = "knowledge", n: int = 10) -> str:
+def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10) -> str:
     """Semantic search across T3 knowledge collections.
 
     Args:
         query: Search query string
-        corpus: Corpus prefix or full collection name (e.g. "knowledge", "code", "code__myrepo")
+        corpus: Comma-separated corpus prefixes or full collection names (default: knowledge,code,docs).
+                Use "all" to search all corpora (knowledge, code, docs, rdr).
         n: Maximum results to return
     """
     try:
         from nexus.search_engine import search_cross_corpus
         t3 = _get_t3()
-        if "__" in corpus:
-            target = [corpus]  # fully qualified — skip enumeration
-        else:
-            target = resolve_corpus(corpus, _get_collection_names())
+
+        if corpus == "all":
+            corpus = "knowledge,code,docs,rdr"
+
+        target: list[str] = []
+        all_names = _get_collection_names()
+        for part in corpus.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "__" in part:
+                target.append(part)  # fully qualified — include directly
+            else:
+                target.extend(resolve_corpus(part, all_names))
+
         if not target:
             return f"No collections match corpus {corpus!r}"
         results = search_cross_corpus(query, target, n_results=n, t3=t3)
@@ -397,6 +414,51 @@ def scratch_manage(
 
         else:
             return f"Error: unknown action {action!r}. Use: flag, promote"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def collection_list() -> str:
+    """List all T3 collections with document counts and embedding models."""
+    try:
+        cols = _get_t3().list_collections()
+        if not cols:
+            return "No collections found."
+        lines: list[str] = []
+        for c in sorted(cols, key=lambda x: x["name"]):
+            model = embedding_model_for_collection(c["name"])
+            lines.append(f"{c['name']}  {c['count']:>6} docs  ({model})")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def collection_info(name: str) -> str:
+    """Get detailed information about a T3 collection.
+
+    Args:
+        name: Fully-qualified collection name (e.g. "knowledge__notes", "code__myrepo")
+    """
+    try:
+        db = _get_t3()
+        try:
+            info = db.collection_info(name)
+        except KeyError:
+            return f"Collection not found: {name!r}"
+        qry_model = embedding_model_for_collection(name)
+        idx_model = index_model_for_collection(name)
+        lines: list[str] = [
+            f"Collection:  {name}",
+            f"Documents:   {info.get('count', 0)}",
+            f"Index model: {idx_model}",
+            f"Query model: {qry_model}",
+        ]
+        meta = info.get("metadata", {})
+        if meta:
+            lines.append(f"Metadata:    {meta}")
+        return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
 
