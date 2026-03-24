@@ -1236,3 +1236,50 @@ def test_list_collections_skips_failed_count(mock_chromadb: tuple) -> None:
     names = [r["name"] for r in result]
     assert "knowledge__good" in names
     assert "knowledge__broken" not in names
+
+
+# ── A2: verify_collection_deep ────────────────────────────────────────────────
+
+
+def test_verify_deep_healthy_collection(local_t3: T3Database) -> None:
+    """verify_collection_deep finds the probe document in top-k."""
+    col = "knowledge__verify_test"
+    local_t3.put(collection=col, content="Semantic search uses vector embeddings for similarity matching", title="search-doc")
+    local_t3.put(collection=col, content="Database indexing improves query performance significantly", title="db-doc")
+
+    from nexus.db.t3 import verify_collection_deep
+    result = verify_collection_deep(local_t3, col)
+    assert result.status == "healthy"
+    assert result.doc_count == 2
+    assert result.probe_doc_id is not None
+    assert result.distance is not None
+
+
+def test_verify_deep_reports_distance(local_t3: T3Database) -> None:
+    """verify_collection_deep includes distance and metric."""
+    col = "knowledge__dist_test"
+    local_t3.put(collection=col, content="Test document for distance reporting", title="test")
+    local_t3.put(collection=col, content="Another document for the collection", title="test2")
+
+    from nexus.db.t3 import verify_collection_deep
+    result = verify_collection_deep(local_t3, col)
+    assert result.distance >= 0.0
+    assert result.metric in ("l2", "cosine", "ip", "unknown")
+
+
+def test_verify_deep_skips_tiny_collection(local_t3: T3Database) -> None:
+    """Collections with 0-1 docs get a skip status, not failure."""
+    col = "knowledge__tiny_test"
+    local_t3.get_or_create_collection(col)
+
+    from nexus.db.t3 import verify_collection_deep
+    result = verify_collection_deep(local_t3, col)
+    assert result.status == "skipped"
+    assert result.doc_count <= 1
+
+
+def test_verify_deep_nonexistent_collection(local_t3: T3Database) -> None:
+    """Nonexistent collection raises KeyError."""
+    from nexus.db.t3 import verify_collection_deep
+    with pytest.raises(KeyError):
+        verify_collection_deep(local_t3, "knowledge__does_not_exist")

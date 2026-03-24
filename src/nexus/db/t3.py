@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -762,3 +763,70 @@ class T3Database:
             "embedding_model": embedding_model_for_collection(collection_name),
             "index_model": index_model_for_collection(collection_name),
         }
+
+
+@dataclass
+class VerifyResult:
+    """Result of a collection health verification probe."""
+
+    status: str  # "healthy", "degraded", "broken", "skipped"
+    doc_count: int
+    probe_doc_id: str | None = None
+    distance: float | None = None
+    metric: str = "unknown"
+
+
+def verify_collection_deep(db: "T3Database", collection_name: str) -> VerifyResult:
+    """Verify retrieval health by probing with a known document.
+
+    Fetches the first stored document, extracts key terms, queries the
+    collection, and checks if the original document appears in results.
+
+    Raises KeyError if the collection does not exist.
+    """
+    info = db.collection_info(collection_name)
+    count = info["count"]
+
+    if count < 2:
+        return VerifyResult(status="skipped", doc_count=count)
+
+    client = db._client_for(collection_name)
+    col = client.get_collection(collection_name)
+    peek = col.peek(limit=1)
+
+    if not peek["ids"]:
+        return VerifyResult(status="skipped", doc_count=0)
+
+    probe_id = peek["ids"][0]
+    probe_content = peek["documents"][0] if peek.get("documents") else ""
+
+    words = probe_content.split()[:50]
+    query = " ".join(words)
+
+    if not query.strip():
+        return VerifyResult(status="skipped", doc_count=count, probe_doc_id=probe_id)
+
+    results = db.search(query=query, collection_names=[collection_name], n_results=10)
+
+    meta = col.metadata or {}
+    metric = meta.get("hnsw:space", "l2")
+
+    found = [r for r in results if r["id"] == probe_id]
+
+    if found:
+        distance = found[0]["distance"]
+        return VerifyResult(
+            status="healthy",
+            doc_count=count,
+            probe_doc_id=probe_id,
+            distance=distance,
+            metric=metric,
+        )
+    else:
+        return VerifyResult(
+            status="broken",
+            doc_count=count,
+            probe_doc_id=probe_id,
+            distance=None,
+            metric=metric,
+        )

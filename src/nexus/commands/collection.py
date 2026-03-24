@@ -66,6 +66,8 @@ def delete_cmd(name: str, yes: bool) -> None:
 @click.option("--deep", is_flag=True, help="Run embedding probe query to verify index health")
 def verify_cmd(name: str, deep: bool) -> None:
     """Verify a collection exists and report its document count."""
+    from nexus.db.t3 import verify_collection_deep
+
     db = _t3()
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
@@ -76,14 +78,33 @@ def verify_cmd(name: str, deep: bool) -> None:
         click.echo(f"Collection '{name}': {match['count']} documents — OK")
         return
 
-    count = match["count"]
-    if count == 0:
-        click.echo(f"Warning: collection '{name}' is empty (0 documents) — skipping embedding probe")
+    try:
+        result = verify_collection_deep(db, name)
+    except KeyError:
+        raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
+    except Exception as exc:
+        click.echo(
+            f"embedding probe failed for '{name}': {exc} — check voyage_api_key with: nx config get voyage_api_key",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    if result.status == "skipped":
+        click.echo(
+            f"Collection '{name}': {result.doc_count} documents — skipped (too few for probe)"
+        )
         return
 
-    try:
-        db.search(query="health check probe", collection_names=[name], n_results=1)
-        click.echo(f"Collection '{name}': {count} documents — embedding health OK")
-    except Exception as exc:
-        click.echo(f"embedding probe failed for '{name}': {exc} — check voyage_api_key with: nx config get voyage_api_key", err=True)
+    dist_str = (
+        f" (distance: {result.distance:.4f}, {result.metric})"
+        if result.distance is not None
+        else ""
+    )
+    if result.status == "healthy":
+        click.echo(f"Collection '{name}': {result.doc_count} documents — embedding health OK{dist_str}")
+    elif result.status == "broken":
+        click.echo(
+            f"Collection '{name}': {result.doc_count} documents — BROKEN: probe document not in top-10{dist_str}",
+            err=True,
+        )
         raise click.exceptions.Exit(1)
