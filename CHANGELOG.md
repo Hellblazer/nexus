@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-03-24
+
+### Fixed
+- **`--collection` flag bypass of `t3_collection_name()`** — `nx index pdf --collection knowledge` now correctly normalizes to `knowledge__knowledge`, matching search conventions. Previously created bare collections invisible to `nx search` with wrong embedding model.
+- **`memory promote --collection` same bug** — bare collection names in `nx memory promote` now normalized via `t3_collection_name()`.
+- **Updated `--collection` help text** — no longer says "Fully-qualified" since bare names are now accepted and auto-normalized.
+- **Updated CCE post-mortem** — linked RDR-040 resolution and documented the `--collection` naming variant.
+
 ## [2.4.0] - 2026-03-24
 
 ### Added
