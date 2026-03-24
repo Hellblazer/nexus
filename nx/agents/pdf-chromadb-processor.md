@@ -65,6 +65,7 @@ For each PDF in the input:
    ```
    - Add `--force` to re-index an already-indexed PDF
    - Add `--dry-run` first for large or unknown PDFs to preview extraction
+   - `--monitor` shows a per-chunk tqdm progress bar during embedding (not just post-hoc metadata)
 
 4. **Verify indexing**:
    Use search tool: query="representative query from the document", corpus="docs__{corpus-name}", n=3

@@ -11,6 +11,8 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 
 All nexus MCP tools are prefixed `mcp__plugin_nx_nexus__` in Claude Code.
 
+There are 12 tools in total: `search`, `store_put`, `store_list`, `memory_put`, `memory_get`, `memory_search`, `scratch`, `scratch_manage`, `collection_list`, `collection_info`, `collection_verify`.
+
 ### search
 
 Semantic search across T3 knowledge collections.
@@ -18,15 +20,17 @@ Semantic search across T3 knowledge collections.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `query` | str | required | Search query string |
-| `corpus` | str | `"knowledge"` | Corpus prefix or full collection name |
+| `corpus` | str | `"knowledge,code,docs"` | Corpus prefix, comma-separated list of prefixes, full collection name, or `"all"` to search every T3 collection |
 | `n` | int | `10` | Maximum results to return |
 
 ```
-Use search tool: query="query"                                  # all T3 knowledge
+Use search tool: query="query"                                  # knowledge + code + docs (default)
+Use search tool: query="query", corpus="all"                    # all T3 collections
 Use search tool: query="query", corpus="code"                   # code collections only
 Use search tool: query="query", corpus="docs"                   # docs collections only
 Use search tool: query="query", corpus="knowledge"              # knowledge collections only
 Use search tool: query="query", corpus="code__myrepo", n=15     # specific collection
+Use search tool: query="query", corpus="knowledge,rdr"          # multiple prefixes
 ```
 
 ### store_put
@@ -148,6 +152,43 @@ Use scratch_manage tool: action="promote", entry_id="<id>", project="{repo}", ti
 ```
 
 **Usage pattern**: Use T1 scratch for in-flight working notes. Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via store_put.
+
+### collection_list
+
+List all T3 collections with document counts.
+
+```
+Use collection_list tool
+```
+
+Returns collection names, document counts, and embedding models for every collection in the T3 database.
+
+### collection_info
+
+Get detailed information about a T3 collection (count, index/query models).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | str | required | Full collection name (e.g. `knowledge__notes`) |
+
+```
+Use collection_info tool: name="knowledge__notes"
+Use collection_info tool: name="code__myrepo"
+```
+
+### collection_verify
+
+Verify a collection's retrieval health via known-document probe.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | str | required | Full collection name to verify |
+
+Embeds a known document from the collection and queries it back, reporting the retrieval distance. A distance near 0 indicates healthy embedding round-trips; high distances indicate a model mismatch or corrupted index.
+
+```
+Use collection_verify tool: name="knowledge__notes"
+```
 
 ## Indexing (CLI only)
 
