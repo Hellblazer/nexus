@@ -278,10 +278,10 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     for collection_name in collection_names:
         col = db.get_or_create_collection(collection_name)
         for file, score in frecency_map.items():
-            existing = _chroma_with_retry(
-                col.get,
-                where={"source_path": str(file)},
+            existing = _paginated_get(
+                col,
                 include=["metadatas"],
+                where={"source_path": str(file)},
             )
             if not existing["ids"]:
                 continue  # not yet indexed — needs full nx index repo
@@ -540,6 +540,43 @@ def _discover_and_index_rdrs(
     return indexed, skipped, failed
 
 
+_CHROMA_PAGE_SIZE: int = 300
+"""ChromaDB Cloud hard cap per get() call — paginate above this."""
+
+
+def _paginated_get(col: object, include: list[str], where: dict | None = None) -> dict:
+    """Fetch all matching chunks from *col* by paginating in _CHROMA_PAGE_SIZE batches.
+
+    ChromaDB Cloud silently truncates unbounded col.get() calls at 300 records.
+    This helper accumulates pages until a short page signals the end.
+
+    Returns a dict with ``"ids"`` and, when ``"metadatas"`` is in *include*,
+    a ``"metadatas"`` key — matching the shape returned by col.get().
+    """
+    offset = 0
+    all_ids: list[str] = []
+    all_metas: list[dict] = []
+    has_metas = "metadatas" in include
+
+    while True:
+        kwargs: dict = {"include": include, "limit": _CHROMA_PAGE_SIZE, "offset": offset}
+        if where is not None:
+            kwargs["where"] = where
+        batch = _chroma_with_retry(col.get, **kwargs)
+        batch_ids: list[str] = batch["ids"] or []
+        all_ids.extend(batch_ids)
+        if has_metas:
+            all_metas.extend(batch.get("metadatas") or [])
+        if len(batch_ids) < _CHROMA_PAGE_SIZE:
+            break
+        offset += _CHROMA_PAGE_SIZE
+
+    result: dict = {"ids": all_ids}
+    if has_metas:
+        result["metadatas"] = all_metas
+    return result
+
+
 def _prune_misclassified(
     repo: Path,
     code_collection: str,
@@ -560,7 +597,7 @@ def _prune_misclassified(
     # Prose + PDF files should NOT have chunks in the code__ collection
     docs_paths = {str(f) for f in prose_files} | {str(f) for f in pdf_files}
     for source_path in docs_paths:
-        existing = _chroma_with_retry(code_col.get, where={"source_path": source_path}, include=[])
+        existing = _paginated_get(code_col, include=[], where={"source_path": source_path})
         if existing["ids"]:
             _chroma_with_retry(code_col.delete, ids=existing["ids"])
             _log.debug("pruned misclassified chunks from code collection",
@@ -569,7 +606,7 @@ def _prune_misclassified(
     # Code files should NOT have chunks in the docs__ collection
     code_paths = {str(f) for f in code_files}
     for source_path in code_paths:
-        existing = _chroma_with_retry(docs_col.get, where={"source_path": source_path}, include=[])
+        existing = _paginated_get(docs_col, include=[], where={"source_path": source_path})
         if existing["ids"]:
             _chroma_with_retry(docs_col.delete, ids=existing["ids"])
             _log.debug("pruned misclassified chunks from docs collection",
@@ -589,8 +626,8 @@ def _prune_deleted_files(
     """
     for collection_name in (code_collection, docs_collection):
         col = db.get_or_create_collection(collection_name)
-        # Get all chunks to find unique source_paths
-        all_chunks = _chroma_with_retry(col.get, include=["metadatas"])
+        # Get all chunks to find unique source_paths (paginated — Cloud cap is 300)
+        all_chunks = _paginated_get(col, include=["metadatas"])
         if not all_chunks["ids"]:
             continue
 
