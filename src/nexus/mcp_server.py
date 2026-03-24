@@ -32,8 +32,7 @@ _t1_lock = threading.Lock()
 _t3_instance = None
 _t3_lock = threading.Lock()
 
-_collections_cache: list[str] = []
-_collections_cache_ts: float = 0.0
+_collections_cache: tuple[list[str], float] = ([], 0.0)
 _COLLECTIONS_CACHE_TTL = 60.0  # seconds
 
 
@@ -63,13 +62,19 @@ def _get_t3():
 
 
 def _get_collection_names() -> list[str]:
-    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds."""
-    global _collections_cache, _collections_cache_ts
+    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds.
+
+    Uses atomic tuple assignment to avoid the two-write race where a concurrent
+    reader could see the updated list but the stale timestamp (or vice versa).
+    """
+    global _collections_cache
+    names, ts = _collections_cache
     now = time.monotonic()
-    if now - _collections_cache_ts > _COLLECTIONS_CACHE_TTL:
-        _collections_cache = [c["name"] for c in _get_t3().list_collections()]
-        _collections_cache_ts = now
-    return _collections_cache
+    if now - ts > _COLLECTIONS_CACHE_TTL:
+        new_names = [c["name"] for c in _get_t3().list_collections()]
+        _collections_cache = (new_names, now)  # atomic single-assignment
+        return new_names
+    return names
 
 
 def _t2_ctx():
@@ -82,13 +87,11 @@ def _t2_ctx():
 
 def _reset_singletons():
     """Reset lazy singletons (for tests only)."""
-    global _t1_instance, _t1_isolated, _t3_instance
-    global _collections_cache, _collections_cache_ts
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
-    _collections_cache = []
-    _collections_cache_ts = 0.0
+    _collections_cache = ([], 0.0)
 
 
 def _inject_t1(t1, *, isolated: bool = False):

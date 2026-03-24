@@ -253,3 +253,38 @@ def test_t1_isolated_prefix(t1_isolated):
 
     result = scratch(action="list")
     assert "[T1 isolated]" in result
+
+
+# ── Collection cache thread-safety ────────────────────────────────────────────
+
+def test_collection_cache_thread_safe():
+    """Concurrent cache refreshes never return an empty list."""
+    import threading
+    from unittest.mock import MagicMock
+    from nexus.mcp_server import _get_collection_names
+
+    _reset_singletons()
+
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
+    _inject_t3(mock_t3)
+
+    results: list[list[str]] = []
+    errors: list[Exception] = []
+
+    def worker():
+        try:
+            names = _get_collection_names()
+            results.append(names)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    for r in results:
+        assert len(r) > 0, f"Cache race: thread saw empty collection list: {r!r}"
