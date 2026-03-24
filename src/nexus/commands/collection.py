@@ -61,6 +61,125 @@ def delete_cmd(name: str, yes: bool) -> None:
     click.echo(f"Deleted: {name}")
 
 
+@collection.command("reindex")
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Force reindex even if sourceless entries exist")
+def reindex_cmd(name: str, force: bool) -> None:
+    """Delete and re-index a collection from its source files."""
+    from pathlib import Path
+
+    from nexus.db.t3 import verify_collection_deep
+    from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf
+
+    db = _t3()
+
+    # 1. Check collection exists
+    try:
+        info = db.collection_info(name)
+    except KeyError:
+        raise click.ClickException(f"collection not found: {name!r}")
+
+    before_count = info["count"]
+
+    # 2. Pre-delete safety: check for sourceless entries
+    col = db.get_or_create_collection(name)
+    sample = col.get(limit=100, include=["metadatas"])
+    sourceless = [
+        mid
+        for mid, meta in zip(sample["ids"], sample["metadatas"] or [])
+        if not (meta or {}).get("source_path")
+    ]
+    if sourceless and not force:
+        raise click.ClickException(
+            f"{len(sourceless)} entries lack source_path (manual entries). "
+            f"These cannot be re-indexed and will be LOST. Use --force to proceed."
+        )
+
+    # 3. Gather distinct source paths before deleting (paginate)
+    source_paths: set[str] = set()
+    offset = 0
+    while True:
+        batch = col.get(limit=300, offset=offset, include=["metadatas"])
+        for meta in batch["metadatas"] or []:
+            sp = (meta or {}).get("source_path", "")
+            if sp:
+                source_paths.add(sp)
+        if len(batch["ids"]) < 300:
+            break
+        offset += 300
+
+    # 4. Delete collection
+    click.echo(f"Deleting collection '{name}' ({before_count} documents)...")
+    db.delete_collection(name)
+
+    # 5. Re-index based on collection type
+    indexed = 0
+    missing: list[str] = []
+
+    if name.startswith("code__"):
+        click.echo(
+            f"Re-indexing code collection — use 'nx index repo <path>' for full re-index"
+        )
+        click.echo(f"Source paths: {len(source_paths)} files")
+
+    elif name.startswith("rdr__"):
+        rdr_files = [Path(sp) for sp in source_paths if Path(sp).exists()]
+        missing = [sp for sp in source_paths if not Path(sp).exists()]
+        if rdr_files:
+            click.echo(f"Re-indexing {len(rdr_files)} RDR documents...")
+            batch_index_markdowns(
+                rdr_files, corpus="", collection_name=name, force=True
+            )
+            indexed = len(rdr_files)
+
+    elif name.startswith("docs__") or name.startswith("knowledge__"):
+        for sp in source_paths:
+            p = Path(sp)
+            if not p.exists():
+                missing.append(sp)
+                continue
+            try:
+                if p.suffix.lower() == ".pdf":
+                    index_pdf(p, corpus="", collection_name=name, force=True)
+                else:
+                    index_markdown(p, corpus="", collection_name=name, force=True)
+                indexed += 1
+            except Exception as exc:
+                click.echo(f"  Warning: failed to re-index {p.name}: {exc}", err=True)
+
+    else:
+        click.echo(f"Unknown collection type for '{name}' — no re-index strategy available")
+
+    # 6. Warn about missing source files
+    if missing:
+        click.echo(f"Warning: {len(missing)} source files not found (moved or deleted)")
+        for m in missing[:5]:
+            click.echo(f"  - {m}")
+        if len(missing) > 5:
+            click.echo(f"  ... and {len(missing) - 5} more")
+
+    # 7. Report before/after counts and verify
+    try:
+        after_info = db.collection_info(name)
+        after_count = after_info["count"]
+    except KeyError:
+        after_count = 0
+
+    click.echo(
+        f"Re-indexed: {before_count} -> {after_count} documents ({indexed} sources processed)"
+    )
+
+    if after_count >= 2:
+        try:
+            result = verify_collection_deep(db, name)
+            dist_str = (
+                f" (distance: {result.distance:.4f})" if result.distance is not None else ""
+            )
+            click.echo(f"Verify: {result.status}{dist_str}")
+        except Exception as exc:
+            click.echo(f"Verify failed: {exc}", err=True)
+
+
 @collection.command("verify")
 @click.argument("name")
 @click.option("--deep", is_flag=True, help="Run embedding probe query to verify index health")
