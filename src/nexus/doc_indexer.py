@@ -115,33 +115,36 @@ def _embed_with_fallback(
     import voyageai
     client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=3)
     if model == "voyage-context-3":
-        if len(chunks) < 2:
-            # CCE requires 2+ chunks; fall back to voyage-4 (the query-time model)
-            # so stored vectors are in the same embedding space as query vectors.
-            model = "voyage-4"
-        else:
-            batches = _batch_chunks_for_cce(chunks)
-            all_embeddings: list[list[float]] = []
-            any_fallback = False
-            for batch in batches:
-                try:
-                    result = _voyage_with_retry(
-                        client.contextualized_embed,
-                        inputs=[batch], model=model, input_type=input_type,
-                    )
-                    all_embeddings.extend(result.results[0].embeddings)
-                except Exception as exc:
-                    any_fallback = True
-                    _log.warning("CCE failed for batch, falling back to voyage-4",
-                                 error=str(exc), batch_size=len(batch))
-                    for j in range(0, len(batch), _EMBED_BATCH_SIZE):
-                        sub = batch[j:j + _EMBED_BATCH_SIZE]
-                        fb = _voyage_with_retry(client.embed, texts=sub, model="voyage-4", input_type=input_type)
-                        all_embeddings.extend(fb.embeddings)
-            if all_embeddings:
-                # Report voyage-4 if any batch fell back — forces re-index on next run
-                return all_embeddings, "voyage-4" if any_fallback else model
-            model = "voyage-4"
+        # CCE API accepts single-element inputs — use it for all chunk counts.
+        # The old >=2 requirement was our incorrect assumption; removing it ensures
+        # single-chunk docs are indexed in the same embedding space as CCE queries.
+        batches = _batch_chunks_for_cce(chunks) if len(chunks) >= 2 else [[chunks[0]]]
+        all_embeddings: list[list[float]] = []
+        any_fallback = False
+        for batch in batches:
+            try:
+                result = _voyage_with_retry(
+                    client.contextualized_embed,
+                    inputs=[batch], model=model, input_type=input_type,
+                )
+                all_embeddings.extend(result.results[0].embeddings)
+            except Exception as exc:
+                any_fallback = True
+                _log.warning("CCE failed for batch, falling back to voyage-4",
+                             error=str(exc), batch_size=len(batch))
+        if any_fallback:
+            # Discard any partial CCE embeddings and re-embed the entire document
+            # with voyage-4 so all stored vectors come from a single model.
+            _log.warning("partial_cce_failure_reembed", chunks=len(chunks))
+            all_embeddings = []
+            for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
+                batch = chunks[i:i + _EMBED_BATCH_SIZE]
+                result = _voyage_with_retry(client.embed, texts=batch, model="voyage-4", input_type=input_type)
+                all_embeddings.extend(result.embeddings)
+            return all_embeddings, "voyage-4"
+        if all_embeddings:
+            return all_embeddings, model
+        model = "voyage-4"
     # Standard embedding path (voyage-4 or any non-CCE model)
     all_emb: list[list[float]] = []
     for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
