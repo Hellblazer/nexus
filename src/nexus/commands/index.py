@@ -150,7 +150,8 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     "--collection",
     default=None,
     help=(
-        "Fully-qualified T3 collection name (e.g. knowledge__delos). "
+        "T3 collection name. Bare names (e.g. 'knowledge') are auto-normalized "
+        "to knowledge__<name>; qualified names (e.g. knowledge__delos) pass through. "
         "Overrides --corpus when set."
     ),
 )

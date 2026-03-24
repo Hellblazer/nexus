@@ -152,11 +152,15 @@ def expire_cmd() -> None:
 
 @memory.command("promote")
 @click.argument("entry_id", metavar="ID", type=int)
-@click.option("--collection", required=True, help="Target T3 collection name (e.g. knowledge__myproject)")
+@click.option("--collection", required=True, help="T3 collection name (e.g. 'knowledge' or 'knowledge__myproject')")
 @click.option("--tags", default="", help="Comma-separated tags (overrides T2 tags when provided)")
 @click.option("--remove", is_flag=True, default=False, help="Delete the entry from T2 after promoting.")
 def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None:
     """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
+    from nexus.corpus import t3_collection_name
+
+    collection = t3_collection_name(collection)
+
     with T2Database(_default_db_path()) as db:
         entry = db.get(id=entry_id)
         if entry is None:
