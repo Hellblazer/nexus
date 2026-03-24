@@ -468,3 +468,51 @@ def test_md_monitor_return_metadata(runner: CliRunner, index_home: Path) -> None
     assert kwargs.get("return_metadata") is True
     assert "Chunks: 2" in result.output
     assert "Sections: 1" in result.output
+
+
+# ── --collection flag normalization ───────────────────────────────────────────
+
+def test_pdf_collection_flag_normalized_via_t3_collection_name(
+    runner: CliRunner, index_home: Path
+) -> None:
+    """--collection knowledge becomes knowledge__knowledge via t3_collection_name().
+
+    Regression guard: bare collection names like "knowledge" must be normalized
+    to "knowledge__knowledge" so search (which uses resolve_corpus with __
+    prefix matching) can find the indexed chunks.
+    See postmortem: docs/postmortem/2026-03-23-pdf-index-collection-mismatch.md
+    """
+    pdf = index_home / "doc.pdf"
+    pdf.write_bytes(b"fake pdf")
+
+    # Return a dict (monitor path) since CliRunner stdout is non-TTY
+    mock_result = {"chunks": 5, "pages": [1], "title": "T", "author": "A"}
+    with patch("nexus.doc_indexer.index_pdf", return_value=mock_result) as mock_index:
+        result = runner.invoke(
+            main, ["index", "pdf", str(pdf), "--collection", "knowledge"]
+        )
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_index.call_args
+    # Must be normalized: "knowledge" → "knowledge__knowledge"
+    assert kwargs["collection_name"] == "knowledge__knowledge", (
+        f"--collection flag not normalized: got {kwargs['collection_name']!r}"
+    )
+
+
+def test_pdf_collection_flag_already_qualified_unchanged(
+    runner: CliRunner, index_home: Path
+) -> None:
+    """--collection knowledge__delos passes through unchanged."""
+    pdf = index_home / "doc.pdf"
+    pdf.write_bytes(b"fake pdf")
+
+    mock_result = {"chunks": 3, "pages": [1], "title": "T", "author": "A"}
+    with patch("nexus.doc_indexer.index_pdf", return_value=mock_result) as mock_index:
+        result = runner.invoke(
+            main, ["index", "pdf", str(pdf), "--collection", "knowledge__delos"]
+        )
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_index.call_args
+    assert kwargs["collection_name"] == "knowledge__delos"

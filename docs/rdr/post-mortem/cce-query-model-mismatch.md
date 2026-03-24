@@ -140,28 +140,50 @@ correct; they were mixed with noise from the other corpora.
 
 ---
 
-## Fix (Pending)
+## Fix (Resolved)
 
-Two coordinated changes to `src/nexus/`:
+The original CCE query path fix was deployed in PR #33. RDR-040 (v2.4.0, PR #118)
+then closed the systemic gaps that allowed the bug to ship undetected:
 
-**`corpus.py`** — `embedding_model_for_collection()` returns `"voyage-context-3"`
-for `docs__`, `knowledge__`, and `rdr__` collections.  `index_model_for_collection()`
-likewise corrected for the same three prefixes.
+**Original fix (PR #33):**
 
-**`db/t3.py`** — Two changes:
+- `corpus.py` — `embedding_model_for_collection()` returns `"voyage-context-3"` for CCE collections
+- `db/t3.py` — `search()` and `put()` bypass VoyageAIEmbeddingFunction, call `contextualized_embed()` directly
 
-1. `T3Database.search()` detects CCE collections by checking
-   `index_model_for_collection()` and bypasses `VoyageAIEmbeddingFunction`, calling
-   `vo.contextualized_embed([[query]], model="voyage-context-3", input_type="query")`
-   directly before calling `col.query(query_embeddings=[...])`.
+**RDR-040 gap closure (PR #118, v2.4.0):**
 
-2. `T3Database.put()` also bypasses the voyage-4 EF for CCE collections when
-   `voyage_api_key` is set, calling `_cce_embed(content)` and passing
-   `embeddings=[vec]` to `col.upsert()`.  This ensures single-entry knowledge
-   entries stored via `nx store put` are in the same CCE vector space as
-   multi-chunk doc_indexer entries and are findable by search.
+- **C1**: Single-chunk CCE documents now use `contextualized_embed()` — the `len(chunks) < 2` fallback to voyage-4 was a recurrence of this exact bug class
+- **C4**: Partial CCE batch failure re-embeds entire document consistently — prevents mixed-model vectors
+- **C2/C3**: Paginated all unbounded `col.get()` calls (ChromaDB 300-record hard cap)
+- **C5**: MCP collection cache race eliminated
+- **A1**: Retrieval quality tests assert semantic rank ordering, not just row count
+- **A2**: `verify --deep` uses known-document probe with distance reporting
+- **A3**: Cross-model invariant regression test — fails if CCE index/query models diverge
+- **A4**: `nx collection reindex` command for recovery
+- **B1–B4**: MCP server enhanced with multi-corpus search + collection management tools
 
-All CCE-indexed collections will need re-indexing after the fix is deployed, as the
-existing embeddings are correct — only the query path needs repair.
+## Additional Bug Discovered During Validation
 
-See fix PR (pending).
+A round-trip test of the v2.4.0 release reproduced the *collection naming* variant of
+this failure:
+
+`nx index pdf --collection knowledge` passed the bare name `"knowledge"` directly to
+ChromaDB (bypassing `t3_collection_name()`), creating a collection that `nx search`
+could not find (search uses `resolve_corpus()` which matches `knowledge__*`). Worse,
+`index_model_for_collection("knowledge")` returns `voyage-4` (not CCE), so all chunks
+were embedded with the wrong model — the same cascading failure as the original bug.
+
+**Fix**: PR #119 normalizes `--collection` through `t3_collection_name()` so bare names
+like `"knowledge"` become `"knowledge__knowledge"`.
+
+**Cascading failure chain** (identical pattern to the original):
+```
+--collection knowledge (user input)
+  → Missing t3_collection_name() call
+    → Collection "knowledge" created (wrong name)
+      → index_model_for_collection("knowledge") = voyage-4 (wrong model)
+        → Chunks embedded with voyage-4 (wrong space)
+          → Chunks invisible to search (wrong collection name)
+```
+
+See: `docs/postmortem/2026-03-23-pdf-index-collection-mismatch.md`
