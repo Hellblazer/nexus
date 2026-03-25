@@ -143,7 +143,14 @@ To force local mode even when cloud credentials exist: `NX_LOCAL=1`.
 
 **`nx` command not found** — Make sure `~/.local/bin` is on your PATH. Run `uv tool install conexus` again and check the output for the install location.
 
-**Crash on startup (Python 3.14)** — Nexus requires Python 3.12–3.13. If `python3 --version` shows 3.14, install 3.13: `uv python install 3.13`, then reinstall: `uv tool install conexus --force`.
+**Crash on startup (Python 3.14)** — Nexus requires Python 3.12–3.13. Check your nx install's Python with: `head -1 $(which nx)`. If it shows `python3.14`, the tool was installed under the wrong Python. Fix:
+
+```bash
+uv python install 3.13
+uv tool install conexus --force --python 3.13
+```
+
+Note: `uv tool update` reuses the existing environment's Python — it won't switch from 3.14 to 3.13 automatically. You must use `--force --python 3.13` to rebuild the environment.
 
 **`nx doctor` reports credentials not set** — Expected for local mode. Only needed if you want cloud embeddings — run `nx config init`.
 
@@ -151,7 +158,7 @@ To force local mode even when cloud credentials exist: `NX_LOCAL=1`.
 
 **`nx index repo .` fails with "credentials not set"** — In cloud mode, indexing requires T3 credentials. Run `nx config init` first, or use local mode (no credentials needed).
 
-**`import voyageai` error** — Reinstall: `uv tool install conexus --force`. If on Python 3.14, downgrade to 3.13: `uv python install 3.13` then reinstall.
+**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14. Fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed).
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running is safe — unchanged files are skipped.
 
