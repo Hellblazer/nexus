@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.2] - 2026-03-25
+
+### Docs
+- **Python 3.14 troubleshooting** — `uv tool update` reuses the existing
+  environment's Python, so upgrading under 3.14 doesn't auto-switch to 3.13
+  despite the `requires-python` cap. Documented `--force --python 3.13` as
+  the fix. Added `head -1 $(which nx)` diagnostic.
+
 ## [2.4.1] - 2026-03-24
 
 ### Fixed
