@@ -48,7 +48,7 @@ The test test_retry_on_timeout is failing intermittently. Sometimes it passes, s
 
 The debugger traces the call chain. Checks for race conditions. Examines configuration. Forms hypotheses with evidence.
 
-Systematic. Not trial-and-error.
+Systematic. Not trial-and-error. And there's a safety net — if the developer agent gets stuck on test failures, it automatically stops after two attempts and escalates to the debugger with a structured report.
 
 ### Code Review
 
@@ -81,7 +81,7 @@ def process_file(path):
 
 ## VOICE [OVER SCREEN]
 
-It flagged the bare "except pass." That silently swallows every error. Runs on Sonnet, so it's fast. Catch issues before they reach a PR review.
+It flagged the bare "except pass." That silently swallows every error. Runs on Sonnet, so it's fast. And the reviewer checks what the developer struggled with during the session — if the developer had a hard time with a section, the reviewer focuses extra attention there.
 
 ### Choosing an Agent
 

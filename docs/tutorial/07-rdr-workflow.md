@@ -7,14 +7,14 @@
 
 ## VOICE
 
-Ever come back to a codebase and asked "why did we do it this way?" That's the problem RDR solves.
+Complex features are bigger than what fits in working memory. Yours or an agent's. Without a locked specification, you drift — new problems emerge mid-implementation, side-quests derail the original vision.
 
-RDR captures a technical decision. What the problem was. What you investigated. What you chose. What you rejected. It lives in your repo. Nexus indexes it.
+An RDR is a specification you write before coding. Problem, research, competing options, chosen approach. You lock it, then build against it. If the design is wrong, abandon the code and iterate the RDR.
 
 ## OVERLAY
 
-> **Without RDR:** nobody remembers why, Claude re-proposes rejected ideas
-> **With RDR:** decisions are searchable, Claude checks them automatically
+> **Without RDR:** purpose drift, Claude re-proposes rejected ideas
+> **With RDR:** locked spec to build against, decisions searchable forever
 
 ## VOICE
 

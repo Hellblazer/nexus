@@ -67,7 +67,7 @@ It found the note. Next session, next week — that decision is still there.
 
 ## VOICE
 
-When Claude spawns multiple agents — a debugger and a reviewer working in parallel — they share findings through scratch. Each agent sees what the others found.
+When Claude spawns multiple agents, they share findings through scratch. A developer records what it tried and what didn't work. A reviewer reads those notes and focuses on the tricky areas. A debugger checks what was already ruled out before forming hypotheses.
 
 ## SCREEN [pre-recorded — 30–60s, trim to highlights]
 
@@ -77,7 +77,7 @@ Search the codebase for how errors are handled, and also check if there are any 
 
 ## VOICE [OVER SCREEN]
 
-Multiple agents working, sharing results through scratch. When the session ends, scratch is cleaned up.
+Agents tag their scratch entries — failed approaches, checkpoints, discoveries — so successors can find what's relevant. When the session ends, scratch is cleaned up.
 
 ### The Three Tiers
 
