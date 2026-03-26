@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-03-26
+
+### Added
+- **T1 scratch inter-agent context sharing** (RDR-041) — standardized scratch
+  tag vocabulary (`impl`, `checkpoint`, `failed-approach`, `hypothesis`,
+  `discovery`, `decision`), sibling context SHOULD for relay-reliant agents
+  with relay-over-scratch precedence rule, developer writes failed approaches
+  to scratch, code reviewer checks scratch for developer struggles before
+  reviewing, debugger checks scratch for predecessor findings.
+- **Debugger escalation relay** includes `nx scratch` field for pre-escalation
+  failed-approach entries.
+- **Re-dispatch developer relay template** with structured nx store/memory
+  artifact references from debugger output.
+- **Escalation guard** — if developer circuit breaker fires twice for the same
+  bead, escalate to human instead of infinite developer→debugger loop.
+
 ## [2.5.0] - 2026-03-25
 
 ### Added

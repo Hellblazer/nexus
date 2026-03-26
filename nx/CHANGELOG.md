@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-03-26
+
+### Added
+- **T1 scratch inter-agent context sharing** — tag vocabulary in CONTEXT_PROTOCOL,
+  sibling context for relay-reliant agents, developer writes failed approaches,
+  reviewer and debugger search scratch for predecessor findings.
+- **Escalation relay improvements** — debugger relay includes `nx scratch` field,
+  re-dispatch developer relay template with structured artifacts.
+- **Escalation guard** — prevents infinite developer→debugger loop.
+
 ## [2.5.0] - 2026-03-25
 
 ### Added
