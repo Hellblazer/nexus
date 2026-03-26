@@ -54,6 +54,8 @@ digraph routing {
 
     "Implement code" -> "developer";
     "developer" -> "code-review-expert" [label="then"];
+    "developer" -> "debugger" [label="on escalation"];
+    "debugger" -> "developer" [label="fix applied, resume"];
     "code-review-expert" -> "test-validator" [label="then"];
 
     "Debug issue" -> "debugger";
@@ -100,6 +102,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 |-------------|---------------|----------|
 | Plan a feature | strategic-planner | -> plan-auditor -> architect-planner |
 | Implement code | developer | -> code-review-expert -> test-validator |
+| Implement code (escalation) | debugger | developer circuit breaker -> debugger -> developer resumes |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
 | Review code | code-review-expert | -> (if critical) substantive-critic |
 | Research topic | deep-research-synthesizer | -> knowledge-tidier |

@@ -184,11 +184,43 @@ When facing complexity:
 - Write code that is easy to understand and maintain
 - Use patterns appropriately - never overengineer
 
+## Circuit Breaker (MANDATORY — overrides all other behavior including Completion Protocol)
+
+**Track consecutive test failures.** Every time you run the test command and one or more tests fail, increment your failure counter. A partial pass (some tests pass, some fail) counts as a failure.
+
+**Counter resets to 0 when:**
+- Any test run ends with ALL tests green
+- You are dispatched as a new agent invocation (fresh start)
+
+Do not try to classify "same issue" vs "different issue." Count test runs, not root causes.
+
+**After 2 consecutive failures (counter reaches 2):**
+
+1. **STOP immediately.** Do not read more source code. Do not try another fix.
+2. **Output ONLY the escalation report below.** Do NOT output the normal `## Next Step: code-review-expert` block — the circuit breaker supersedes the Completion Protocol.
+3. **End your turn.**
+
+<!-- ESCALATION -->
+```
+## ESCALATION: Debugger Required
+
+**Failing test(s)**: [test name(s)]
+**Error**: [exact error message or assertion failure]
+**What I tried**:
+1. [first attempt and result]
+2. [second attempt and result]
+**Hypothesis**: [your best guess at the root cause]
+**Diagnostic suggestion**: [what a debugger should investigate first, or "none" if truly lost]
+```
+
+**This is not optional.** The debugger agent solves these problems in minutes. Continuing past 2 failures wastes time.
+
 ## Automatic Escalation Triggers
 
+For conditions NOT covered by the Circuit Breaker (which handles test failures), recommend via Next Step output:
+
 Recommend **debugger** (via Next Step output) if ANY of:
-- Test failures after 2 fix attempts
-- Non-deterministic test failures (intermittent, timing-dependent)
+- Non-deterministic test failures (intermittent, timing-dependent) — Circuit Breaker also catches these after 2 runs
 - Exception with unclear cause (stack trace doesn't reveal issue)
 - Performance degradation >20% from baseline
 - Memory leaks or resource exhaustion
@@ -213,6 +245,8 @@ Before marking any work complete:
 4. Address Critical and Important issues from review
 5. Update bead status via bd close <id>
 6. Commit beads file with code changes
+
+**Exception**: If the Circuit Breaker fires, do not output `## Next Step: code-review-expert` — the escalation block is your sole terminal output.
 
 ## Workflow Position
 

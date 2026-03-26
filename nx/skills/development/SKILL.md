@@ -59,6 +59,37 @@ Working implementation with tests
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
 
+## Debugger Escalation
+
+If the developer agent returns with an `## ESCALATION: Debugger Required` block (detected by the `<!-- ESCALATION -->` sentinel or the H2 header):
+
+1. **Do not re-dispatch the developer.** The circuit breaker fired for a reason.
+2. **Dispatch the debugger immediately** using this relay:
+
+```markdown
+## Relay: debugger
+
+**Task**: Diagnose test failure that developer could not resolve: [Failing test(s) from escalation]
+**Bead**: [same bead as developer]
+
+### Input Artifacts
+- Error: [Error field from escalation report]
+- Hypothesis: [Hypothesis field from escalation report]
+- What was tried: [What I tried field — both attempts]
+- Diagnostic suggestion: [Diagnostic suggestion field]
+- Files: [files from original developer relay]
+
+### Deliverable
+Root cause analysis and fix with all tests passing
+
+### Quality Criteria
+- [ ] Root cause identified with evidence
+- [ ] Fix implemented
+- [ ] All failing tests now pass
+```
+
+3. After the debugger resolves the issue, re-dispatch the developer to continue the remaining plan steps.
+
 ## TDD Methodology
 
 The developer agent follows test-driven development:
