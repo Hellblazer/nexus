@@ -64,7 +64,11 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 If the developer agent returns with `## ESCALATION: Debugger Required` in its output (detect by scanning for `<!-- ESCALATION -->` or the literal string `ESCALATION: Debugger Required`):
 
 1. **Do not re-dispatch the developer.** The circuit breaker fired for a reason.
-2. **Dispatch the debugger immediately** using this relay:
+2. **Escalation guard — check before dispatching:**
+   Search scratch for a prior escalation: `scratch search "circuit-breaker-fired-for-[bead-id]"`
+   - **If found**: do NOT dispatch the debugger. Report to the user: "Developer circuit breaker has fired twice for bead [ID]. The debugger's fix did not resolve the issue. Human investigation recommended." **Stop here.**
+   - **If not found**: write the guard entry NOW: `scratch put "circuit-breaker-fired-for-[bead-id]" tags="escalation-guard"`. Then proceed to step 3.
+3. **Dispatch the debugger** using this relay:
 
 ```markdown
 ## Relay: debugger
@@ -89,7 +93,7 @@ Root cause analysis and fix with all tests passing
 - [ ] All failing tests now pass
 ```
 
-3. After the debugger resolves the issue, re-dispatch the developer using this relay:
+4. After the debugger resolves the issue, re-dispatch the developer using this relay:
 
 ```markdown
 ## Relay: developer (resumed after debugger)
@@ -110,8 +114,6 @@ Do not retry approaches listed in scratch under tag "failed-approach".
 - [ ] All tests pass (including the previously failing ones)
 - [ ] Remaining plan steps completed
 ```
-
-4. **Escalation guard**: If the developer escalates a second time for the same bead, do NOT re-dispatch the debugger. Instead, report to the user: "Developer circuit breaker has fired twice for bead [ID]. The debugger's fix did not resolve the issue. Human investigation recommended." Track this via a scratch entry: after the first escalation, write `scratch put "circuit-breaker-fired-for-[bead-id]" tags="escalation-guard"`. Before dispatching the debugger, search scratch for `"circuit-breaker-fired-for-[bead-id]"` — if found, escalate to human instead.
 
 ## TDD Methodology
 
