@@ -81,9 +81,9 @@ See [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-inde
 
 ## RDR: Research-Design-Review
 
-Technical decisions made during rapid development lose their reasoning quickly. An RDR captures the problem, investigation, chosen approach, and rejected alternatives in a structured document. Each research finding is tagged with its evidence quality — verified against source code, supported by documentation only, or assumed — so readers know which conclusions are load-bearing and which need further validation.
+Complex features are bigger than what fits in working memory — yours or an LLM's. Without a locked specification, purpose drift sets in during implementation. An RDR is a specification document written *before* coding: it captures the problem, the research journey, competing options, and the chosen approach. Once accepted, the RDR is the stable target that implementation builds against. If the design proves wrong, abandon the code and iterate the RDR.
 
-RDRs are iterative: write, build, learn, revise. The growing corpus remains searchable, so prior decisions surface automatically when starting new design work — preventing contradictions and avoiding redundant investigation across the team.
+Each research finding is tagged with its evidence quality — verified against source code, supported by documentation only, or assumed — so readers know which conclusions are load-bearing and which need validation. The growing corpus is searchable, so prior decisions surface automatically when starting new design work.
 
 RDR is fully optional. See [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md) for the full process.
 

@@ -4,7 +4,11 @@
 
 # RDR: Research-Design-Review
 
-An RDR records a technical decision: problem, evidence, chosen solution, rejected alternatives. It exists so decisions can be reproduced, searched, and fed directly to agents as context.
+An RDR is a specification document written *before* implementation. It captures the problem, the research journey, competing options, and the chosen approach — then locks that decision so implementation has a stable target.
+
+The core insight: complex features are bigger than what fits in working memory — yours or an LLM's. Without a locked specification, purpose drift sets in as new problems emerge during coding, side-quests derail the original vision, and you end up coding your way out of corners instead of designing your way around them. An RDR front-loads the thinking so implementation can focus on execution.
+
+**The rule:** revise the RDR during planning; lock it at acceptance. If implementation proves the design wrong, abandon the code and iterate the RDR — not the other way around.
 
 ## Quick start
 
@@ -18,16 +22,16 @@ Steps 3–5 add rigor for high-stakes decisions. For a straightforward bug fix, 
 
 ## When to write one
 
-Write an RDR when the "why" behind a decision won't be obvious from the code or commit history alone:
+Write an RDR *before implementing* when any of these apply:
 
-- A design choice has non-obvious trade-offs or you evaluated multiple options
-- A bug required root-cause analysis, not just a patch
-- External constraints (API limits, vendor behavior) shaped the solution
-- A previous decision turned out to be wrong and you're correcting it
-- You're refactoring something others depend on
-- Something discovered during implementation changes the original plan
+- The problem has multiple viable solutions and you need to choose
+- External constraints (API limits, vendor behavior, library quirks) will shape the design
+- You're about to make a change that others depend on
+- A bug requires root-cause analysis, not just a patch
+- A previous decision turned out to be wrong and you're correcting course
+- The feature is complex enough that you'd lose track of why you're making specific choices mid-implementation
 
-Not every decision needs an RDR. If the rationale is self-evident from the code, skip it.
+Not every decision needs an RDR. If the rationale is self-evident from the code, skip it. But if you find yourself three hours into implementation wondering "why did I go this way?" — that's the RDR you should have written first.
 
 ## Right-sizing
 
@@ -54,7 +58,9 @@ Flag assumptions that your design depends on. Low-stakes assumptions need no ver
 
 ## The iterative pattern
 
-RDRs are not waterfall documents written once before implementation. They're iterative — write one, build, learn from what you find, write the next one. Each RDR builds on what earlier ones established, and sometimes an implementation reveals that a prior decision needs revisiting.
+RDRs are iterative across a project, not within a single document. Write one, lock it, build against it, learn from what you find. If the design was wrong, don't patch the code — abandon it and write a new RDR with what you learned. Each RDR builds on what earlier ones established, and the corpus grows into institutional memory.
+
+Research may reveal that one RDR needs to split into several — that's normal. Cross-reference related RDRs to maintain conceptual integrity. Stack them by dependency so implementation order is clear.
 
 The Nexus project has produced over 35 RDRs across its development. The corpus is searchable, so when starting a new design, prior decisions surface automatically — preventing contradictions and avoiding redundant investigation.
 
