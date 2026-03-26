@@ -9,7 +9,7 @@
 #
 # Prerequisites:
 #   - container-setup.sh has been run
-#   - tmux session "tutorial" is running with Claude Code logged in
+#   - tmux session "tutorial" running with Claude Code logged in
 #   - Demo repo indexed and memory populated
 #
 # Usage:
@@ -22,29 +22,30 @@ section_header "Section 5: Nexus Inside Claude"
 
 # --- 5.1: Automatic search ---
 echo "→ Automatic search demo"
-wait_for_prompt
+wait_idle
 pause 2
 
-send "How does the retry logic work in this project?"
-wait_for_prompt
+# First command — use send_first to handle splash screen
+send_first "How does the retry logic work in this project?"
+wait_idle
 pause 3
 
 # --- 5.2: Store a decision ---
 echo "→ Store a decision"
 send "Remember that we decided to use connection pooling with a max of 10 connections for the database layer."
-wait_for_prompt
+wait_idle
 pause 2
 
 # --- 5.3: Retrieve the decision ---
 echo "→ Retrieve the decision"
 send "What do we know about the database configuration?"
-wait_for_prompt
+wait_idle
 pause 3
 
 # --- 5.4: Multi-agent coordination ---
 echo "→ Multi-agent coordination"
 send "Search the codebase for how errors are handled, and also check if there are any error-related tests."
-wait_for_prompt
+wait_idle
 pause 3
 
 section_header "Section 5 Complete"

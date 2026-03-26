@@ -36,12 +36,12 @@ Sleep 2s
 # --- PAUSE for voice: "If you need a specific Python version..." ---
 Sleep 2s
 
-# Install Python (conditional — shown for completeness)
-Type "# Only if python3 --version shows 3.14+ or < 3.12"
+# Show Python management (don't actually install — just show the command)
+Type "# If you need Python 3.13:"
 Enter
-Type "uv python install 3.13"
+Type "# uv python install 3.13"
 Enter
-Sleep 5s
+Sleep 3s
 
 # --- PAUSE for voice: "Last thing — Claude Code..." ---
 Sleep 2s

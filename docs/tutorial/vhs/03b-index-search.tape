@@ -19,7 +19,7 @@ Sleep 1s
 # Index the repo (this will take a few seconds on a small repo)
 Type "nx index repo ."
 Enter
-Sleep 15s
+Sleep 35s
 
 # --- PAUSE for voice: "That analyzed every file..." ---
 Sleep 3s

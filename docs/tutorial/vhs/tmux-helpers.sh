@@ -1,46 +1,59 @@
 #!/usr/bin/env bash
 # Shared helper functions for tutorial recording scripts.
 # Source this file: source ./tmux-helpers.sh
+#
+# Uses hash-based idle detection from nx cli-controller skill.
+# Claude Code's persistent footer line confuses prompt-char detection,
+# so we poll until the pane output stops changing instead.
 
-TMUX_SESSION="tutorial"
-TMUX_PANE="0"
-PROMPT_CHAR="❯"
+TMUX_TARGET="tutorial:0.0"
 
-# How often to poll for prompt (seconds)
-POLL_INTERVAL=2
+# How long output must be stable before we consider Claude "done" (seconds)
+IDLE_SECONDS=4
 # Max wait before giving up (seconds)
 MAX_WAIT=300
 
-send() {
-    # Send text to the Claude Code pane
-    tmux send-keys -t "${TMUX_SESSION}:${TMUX_PANE}" "$1" Enter
-}
+wait_idle() {
+    # Wait until tmux pane output stops changing for IDLE_SECONDS.
+    # This is the correct way to detect Claude Code idle state —
+    # prompt-char detection fails because the footer always has ❯.
+    local idle_secs="${1:-$IDLE_SECONDS}"
+    local timeout="${2:-$MAX_WAIT}"
+    local last_hash="" hash=""
+    local start=$(date +%s) last_change=$(date +%s)
 
-send_raw() {
-    # Send text without pressing Enter (for multi-line input)
-    tmux send-keys -t "${TMUX_SESSION}:${TMUX_PANE}" "$1"
-}
-
-wait_for_prompt() {
-    # Wait until the Claude Code prompt appears (❯ at end of last line)
-    # This indicates Claude has finished responding.
-    local elapsed=0
-    echo "  ⏳ Waiting for prompt..."
+    echo "  ⏳ Waiting for idle (${idle_secs}s stability)..."
     while true; do
-        local last_line
-        last_line=$(tmux capture-pane -t "${TMUX_SESSION}:${TMUX_PANE}" -p | \
-                    grep -v '^$' | tail -1)
-        if echo "$last_line" | grep -q "${PROMPT_CHAR}"; then
-            echo "  ✓ Prompt detected (${elapsed}s)"
-            return 0
-        fi
-        sleep "$POLL_INTERVAL"
-        elapsed=$((elapsed + POLL_INTERVAL))
-        if [ "$elapsed" -ge "$MAX_WAIT" ]; then
-            echo "  ⚠ Timeout after ${MAX_WAIT}s — continuing anyway"
+        local now=$(date +%s)
+        if (( now - start > timeout )); then
+            echo "  ⚠ Timeout after ${timeout}s — continuing"
             return 1
         fi
+        hash=$(tmux capture-pane -t "$TMUX_TARGET" -p | md5sum | cut -d' ' -f1)
+        if [[ "$hash" != "$last_hash" ]]; then
+            last_hash="$hash"
+            last_change=$now
+        elif (( now - last_change >= idle_secs )); then
+            local elapsed=$((now - start))
+            echo "  ✓ Idle detected (${elapsed}s)"
+            return 0
+        fi
+        sleep 0.5
     done
+}
+
+send() {
+    # Send text to Claude Code pane and press Enter.
+    tmux send-keys -t "$TMUX_TARGET" "$1" Enter
+}
+
+send_first() {
+    # Send the FIRST command to Claude Code after splash screen.
+    # Claude Code's splash screen swallows the first Enter.
+    # Pattern: type text (no Enter), pause, then send bare Enter.
+    tmux send-keys -t "$TMUX_TARGET" "$1"
+    sleep 1
+    tmux send-keys -t "$TMUX_TARGET" Enter
 }
 
 pause() {
@@ -51,29 +64,9 @@ pause() {
 }
 
 section_header() {
-    # Print a section header to the control terminal
     echo ""
     echo "══════════════════════════════════════"
     echo "  $1"
     echo "══════════════════════════════════════"
     echo ""
-}
-
-start_recording() {
-    # Start asciinema recording of the Claude Code pane
-    local output_file="${1:-recording.cast}"
-    echo "🔴 Starting recording: ${output_file}"
-    # Record the tmux pane by piping its output
-    asciinema rec --command "tmux attach-session -t ${TMUX_SESSION}" \
-        "$output_file" &
-    ASCIINEMA_PID=$!
-    sleep 2
-}
-
-stop_recording() {
-    # Stop asciinema recording
-    if [ -n "${ASCIINEMA_PID:-}" ]; then
-        kill "$ASCIINEMA_PID" 2>/dev/null || true
-        echo "⏹ Recording stopped"
-    fi
 }

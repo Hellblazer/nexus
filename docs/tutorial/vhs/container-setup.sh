@@ -2,8 +2,7 @@
 # Container Setup for Tutorial Recording
 #
 # Run this INSIDE the Claude Box container before recording sections 5-7.
-# It stages the demo repo, installs nexus, indexes, and populates memory
-# so the Claude Code sessions have real data to work with.
+# Idempotent — safe to re-run (resets T2 memory and demo repo).
 #
 # Prerequisites:
 #   - Claude Box container running
@@ -13,25 +12,35 @@
 #   ./container-setup.sh
 #
 # After this script completes:
-#   1. Start tmux: tmux new-session -s tutorial
-#   2. Run: claude    (and log in — the ONE manual step)
-#   3. In a second terminal: ./05-nexus-in-claude.sh
+#   1. cd ~/demo-repo
+#   2. tmux new-session -s tutorial
+#   3. Run: claude    (and log in — the ONE manual step)
+#   4. In a second terminal: ./05-nexus-in-claude.sh
+#
+# NOTE: bd (beads) is not installed. RDR commands will show
+# "Beads not available" — this is expected and handled gracefully.
 
 set -euo pipefail
 
 echo "=== Tutorial Container Setup ==="
 
 # --- Step 1: Install nexus ---
-echo "[1/5] Installing nexus..."
-uv tool install conexus
+echo "[1/6] Installing nexus..."
+uv tool install conexus --force
 nx --version
 
-# --- Step 2: Create demo repo ---
-echo "[2/5] Creating demo repo..."
-mkdir -p ~/demo-repo && cd ~/demo-repo
+# --- Step 2: Reset T2 state (idempotent for re-runs) ---
+echo "[2/6] Resetting T2 memory..."
+nx memory delete --project demo-repo --all -y 2>/dev/null || true
+
+# --- Step 3: Create demo repo ---
+echo "[3/6] Creating demo repo..."
+rm -rf ~/demo-repo
+mkdir -p ~/demo-repo
+(
+cd ~/demo-repo
 git init
 
-# Create some realistic files for search demos
 cat > auth.py << 'PYEOF'
 """Authentication middleware using JWT tokens."""
 
@@ -110,6 +119,63 @@ class ConnectionPool:
         return {"dsn": self.dsn, "active": True}
 PYEOF
 
+# error_handler.py — deliberately left with bare except/pass for review demo
+# Committed separately so git diff shows it as a change in section 6
+cat > error_handler.py << 'PYEOF'
+"""Centralized error handling."""
+
+def parse(data):
+    """Parse data from file content."""
+    return {"raw": data, "parsed": True}
+PYEOF
+
+cat > docs/getting-started.md << 'MDEOF'
+# Getting Started
+
+Install dependencies and run the project.
+
+## Quick Start
+
+1. Clone the repo
+2. Install dependencies
+3. Run the tests
+MDEOF
+
+mkdir -p docs
+cat > docs/architecture.md << 'MDEOF'
+# Architecture
+
+## Components
+
+- **auth.py** — JWT authentication middleware
+- **retry.py** — Retry logic with exponential backoff
+- **database.py** — Connection pool management
+- **error_handler.py** — Centralized error handling
+MDEOF
+
+cat > README.md << 'MDEOF'
+# Demo Repo
+
+A small demo project for the nexus tutorial.
+
+## Architecture
+
+- `auth.py` — JWT authentication middleware
+- `retry.py` — Retry logic with exponential backoff
+- `database.py` — Connection pool management
+- `error_handler.py` — Centralized error handling
+MDEOF
+
+# Commit the clean files first
+git add auth.py retry.py database.py README.md docs/
+git commit -m "Initial demo repo for tutorial"
+
+# Now add the bad error_handler.py as an uncommitted change
+# (section 6 review demo will find it via git diff)
+git add error_handler.py
+git commit -m "Add error handler"
+
+# Add the bare except/pass version as an uncommitted change
 cat > error_handler.py << 'PYEOF'
 """Centralized error handling."""
 
@@ -125,48 +191,35 @@ def parse(data):
     return {"raw": data, "parsed": True}
 PYEOF
 
-cat > README.md << 'MDEOF'
-# Demo Repo
+# Create docs/rdr/ directory stub for section 7
+mkdir -p docs/rdr
 
-A small demo project for the nexus tutorial.
+) # end subshell
 
-## Getting Started
-
-Install dependencies and run the project.
-
-## Architecture
-
-- `auth.py` — JWT authentication middleware
-- `retry.py` — Retry logic with exponential backoff
-- `database.py` — Connection pool management
-- `error_handler.py` — Centralized error handling
-MDEOF
-
-git add -A
-git commit -m "Initial demo repo for tutorial"
-
-# --- Step 3: Index the repo ---
-echo "[3/5] Indexing demo repo..."
+# --- Step 4: Index the repo ---
+echo "[4/6] Indexing demo repo..."
+cd ~/demo-repo
 nx index repo .
 
-# --- Step 4: Populate memory ---
-echo "[4/5] Populating memory..."
+# --- Step 5: Populate memory ---
+echo "[5/6] Populating memory..."
 nx memory put "Auth uses JWT tokens with 24-hour expiry" \
     --project demo-repo --title auth-notes --ttl permanent
 
 nx memory put "Connection pooling with max 10 connections for database layer" \
     --project demo-repo --title db-config --ttl permanent
 
-# --- Step 5: Install asciinema ---
-echo "[5/5] Setting up recording tools..."
-if ! command -v asciinema &> /dev/null; then
-    uv tool install asciinema 2>/dev/null || echo "asciinema not available — use screen capture instead"
-fi
-
+# --- Step 6: Verify ---
+echo "[6/6] Verifying..."
+nx doctor
 echo ""
+
 echo "=== Setup Complete ==="
 echo ""
 echo "Demo repo: ~/demo-repo (indexed, memory populated)"
+echo "  - error_handler.py has uncommitted bare except/pass (for review demo)"
+echo "  - docs/rdr/ directory exists (for RDR demo)"
+echo "  - bd is NOT installed (RDR commands show 'Beads not available' — expected)"
 echo "nx version: $(nx --version)"
 echo ""
 echo "Next steps:"
