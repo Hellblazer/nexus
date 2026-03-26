@@ -1,7 +1,7 @@
 # Section 3a: Memory and Scratch
 # nx memory put/list/get/search, nx scratch put/list/search
 
-Output 03a-memory-scratch.mp4
+Output "03a-memory-scratch.mp4"
 
 Set FontSize 16
 Set Width 1200
@@ -11,7 +11,7 @@ Set TypingSpeed 40ms
 Set Shell "zsh"
 
 # Store a permanent note
-Type@100ms "nx memory put \"Auth uses JWT tokens with 24-hour expiry\" --project demo-repo --title auth-notes --ttl permanent"
+Type@100ms 'nx memory put "Auth uses JWT tokens with 24-hour expiry" --project demo-repo --title auth-notes --ttl permanent'
 Enter
 Sleep 3s
 
@@ -26,7 +26,7 @@ Enter
 Sleep 3s
 
 # Search
-Type "nx memory search \"JWT\""
+Type 'nx memory search "JWT"'
 Enter
 Sleep 3s
 
@@ -34,7 +34,7 @@ Sleep 3s
 Sleep 2s
 
 # Scratch
-Type@100ms "nx scratch put \"hypothesis: the bug is in the retry logic\""
+Type@100ms 'nx scratch put "hypothesis: the bug is in the retry logic"'
 Enter
 Sleep 2s
 
@@ -42,7 +42,7 @@ Type "nx scratch list"
 Enter
 Sleep 2s
 
-Type "nx scratch search \"retry\""
+Type 'nx scratch search "retry"'
 Enter
 Sleep 3s
 

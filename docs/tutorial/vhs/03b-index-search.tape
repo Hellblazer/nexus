@@ -2,7 +2,7 @@
 # nx index repo, nx search (various), nx hooks install
 # NOTE: Run this in a real git repo (demo-repo) for meaningful output
 
-Output 03b-index-search.mp4
+Output "03b-index-search.mp4"
 
 Set FontSize 16
 Set Width 1200
@@ -25,22 +25,22 @@ Sleep 35s
 Sleep 3s
 
 # Search by meaning
-Type@80ms "nx search \"how does authentication work\""
+Type@80ms 'nx search "how does authentication work"'
 Enter
 Sleep 5s
 
 # Search code only
-Type@80ms "nx search \"error handling\" --corpus code"
+Type@80ms 'nx search "error handling" --corpus code'
 Enter
 Sleep 5s
 
 # Search docs only
-Type@80ms "nx search \"getting started\" --corpus docs"
+Type@80ms 'nx search "getting started" --corpus docs'
 Enter
 Sleep 5s
 
 # Show matching text
-Type "nx search \"retry logic\" -c"
+Type 'nx search "retry logic" -c'
 Enter
 Sleep 5s
 

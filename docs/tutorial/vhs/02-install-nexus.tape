@@ -1,7 +1,7 @@
 # Section 2: Install Nexus
 # uv tool install, nx doctor, nx help
 
-Output 02-install-nexus.mp4
+Output "02-install-nexus.mp4"
 
 Set FontSize 16
 Set Width 1200

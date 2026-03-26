@@ -1,7 +1,7 @@
 # Section 1: Prerequisites
 # Checks git, python, installs uv
 
-Output 01-prerequisites.mp4
+Output "01-prerequisites.mp4"
 
 Set FontSize 16
 Set Width 1200
