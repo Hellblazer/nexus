@@ -38,6 +38,14 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
+### Sibling Context (check scratch for predecessor findings)
+
+Before forming hypotheses, check if the developer or other agents left context in scratch:
+
+Use scratch tool: action="search", query="failed approach what was tried didn't work", n=5
+
+If `failed-approach` entries exist, incorporate them — these are approaches already ruled out. Do not re-investigate what a predecessor already disproved.
+
 ### Prior Debug Traces Search (required before hypothesis generation)
 
 Search T3 for prior root-cause analyses before forming hypotheses — a prior trace for this
