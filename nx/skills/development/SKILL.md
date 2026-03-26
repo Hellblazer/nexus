@@ -61,7 +61,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Debugger Escalation
 
-If the developer agent returns with an `## ESCALATION: Debugger Required` block (detected by the `<!-- ESCALATION -->` sentinel or the H2 header):
+If the developer agent returns with `## ESCALATION: Debugger Required` in its output (detect by scanning for `<!-- ESCALATION -->` or the literal string `ESCALATION: Debugger Required`):
 
 1. **Do not re-dispatch the developer.** The circuit breaker fired for a reason.
 2. **Dispatch the debugger immediately** using this relay:
@@ -88,7 +88,7 @@ Root cause analysis and fix with all tests passing
 - [ ] All failing tests now pass
 ```
 
-3. After the debugger resolves the issue, re-dispatch the developer to continue the remaining plan steps.
+3. After the debugger resolves the issue, re-dispatch the developer to continue the remaining plan steps. Include the debugger's fix as context: "Circuit breaker previously fired; debugger resolved [summary of fix]. Continue from [remaining plan step]."
 
 ## TDD Methodology
 

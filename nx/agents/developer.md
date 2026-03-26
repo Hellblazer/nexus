@@ -198,10 +198,11 @@ Do not try to classify "same issue" vs "different issue." Count test runs, not r
 
 1. **STOP immediately.** Do not read more source code. Do not try another fix.
 2. **Output ONLY the escalation report below.** Do NOT output the normal `## Next Step: code-review-expert` block — the circuit breaker supersedes the Completion Protocol.
-3. **End your turn.**
+3. **End your turn.** Your failure counter starts at 0 when you are dispatched.
+
+Output this exactly (fill in the bracketed fields):
 
 <!-- ESCALATION -->
-```
 ## ESCALATION: Debugger Required
 
 **Failing test(s)**: [test name(s)]
@@ -211,7 +212,6 @@ Do not try to classify "same issue" vs "different issue." Count test runs, not r
 2. [second attempt and result]
 **Hypothesis**: [your best guess at the root cause]
 **Diagnostic suggestion**: [what a debugger should investigate first, or "none" if truly lost]
-```
 
 **This is not optional.** The debugger agent solves these problems in minutes. Continuing past 2 failures wastes time.
 
@@ -220,7 +220,7 @@ Do not try to classify "same issue" vs "different issue." Count test runs, not r
 For conditions NOT covered by the Circuit Breaker (which handles test failures), recommend via Next Step output:
 
 Recommend **debugger** (via Next Step output) if ANY of:
-- Non-deterministic test failures (intermittent, timing-dependent) — Circuit Breaker also catches these after 2 runs
+- Non-deterministic test failures (intermittent, timing-dependent) — escalate immediately via Next Step if intermittency is confirmed; Circuit Breaker only catches consecutive failures
 - Exception with unclear cause (stack trace doesn't reveal issue)
 - Performance degradation >20% from baseline
 - Memory leaks or resource exhaustion
