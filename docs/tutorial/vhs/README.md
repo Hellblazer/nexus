@@ -1,36 +1,69 @@
-# VHS Tape Files
+# Tutorial Recording Scripts
 
-Terminal recording scripts for the nexus tutorial video. Each `.tape` file
-produces one MP4 clip via [VHS](https://github.com/charmbracelet/vhs).
+Automated terminal recordings for the nexus tutorial video.
 
-## Usage
+## Two Recording Methods
+
+### Sections 1-4: VHS (fully automated)
+
+[VHS](https://github.com/charmbracelet/vhs) scripts terminal interactions
+and renders to MP4. No human input needed.
 
 ```bash
-# Install VHS
 brew install charmbracelet/tap/vhs   # macOS
-# or: go install github.com/charmbracelet/vhs@latest
-
-# Record a single section
-vhs 01-prerequisites.tape
-
-# Record all sections
-for f in *.tape; do vhs "$f"; done
+vhs 01-prerequisites.tape            # renders to MP4
 ```
 
-## Sections
+### Sections 5-7: tmux + Claude Code (one manual step)
 
-| File | Tutorial Section | Notes |
-|------|-----------------|-------|
-| `01-prerequisites.tape` | 1. Prerequisites | Checks git, python, installs uv |
-| `02-install-nexus.tape` | 2. Install Nexus | uv tool install, nx doctor, nx help |
-| `03a-memory-scratch.tape` | 3. First Use (memory + scratch) | nx memory, nx scratch |
-| `03b-index-search.tape` | 3. First Use (index + search) | nx index repo, nx search |
-| `04-install-plugin.tape` | 4. Install Plugin | Claude Code plugin install |
+Shell scripts drive Claude Code via tmux `send-keys`. The only manual
+step is logging into Claude Code.
 
-Sections 5-7 require pre-recorded Claude Code sessions (LLM responses
-are non-deterministic). Use screen capture (OBS or macOS) for those.
+```bash
+# 1. Set up the container
+./container-setup.sh
+
+# 2. Start tmux and Claude Code
+cd ~/demo-repo
+tmux new-session -s tutorial
+claude                          # LOG IN (the one manual step)
+
+# 3. From a second terminal, run the demo scripts
+./05-nexus-in-claude.sh
+./06-agents-demo.sh
+./07-rdr-demo.sh
+```
+
+Record the tmux session with asciinema or screen capture.
+
+## File Index
+
+| File | Section | Method |
+|------|---------|--------|
+| `container-setup.sh` | — | Sets up demo repo, installs nx, populates memory |
+| `tmux-helpers.sh` | — | Shared functions: send, wait_for_prompt, pause |
+| `01-prerequisites.tape` | 1. Prerequisites | VHS |
+| `02-install-nexus.tape` | 2. Install Nexus | VHS |
+| `03a-memory-scratch.tape` | 3. First Use (memory + scratch) | VHS |
+| `03b-index-search.tape` | 3. First Use (index + search) | VHS |
+| `04-install-plugin.tape` | 4. Install Plugin | VHS |
+| `05-nexus-in-claude.sh` | 5. Nexus Inside Claude | tmux driver |
+| `06-agents-demo.sh` | 6. Agents and Skills | tmux driver |
+| `07-rdr-demo.sh` | 7. The RDR Process | tmux driver |
+
+## How It Works
+
+The tmux driver scripts use `tmux send-keys` to type commands into a
+Claude Code session and `tmux capture-pane` to detect when the prompt
+returns (Claude finished responding). This is the same pattern as the
+`/nx:cli-controller` skill.
+
+The `wait_for_prompt` function polls for the `❯` prompt character. The
+`MAX_WAIT` timeout (300s) prevents infinite loops if Claude hangs.
 
 ## Customization
 
-Edit the `Set` directives at the top of each tape file to match your
-terminal preferences (font size, dimensions, theme).
+- **VHS theme**: Edit `Set Theme` in `.tape` files (default: Catppuccin Mocha)
+- **Font size**: Edit `Set FontSize` (default: 16)
+- **Timing**: Adjust `Sleep` durations in `.tape` files and `pause` calls in `.sh` scripts
+- **Prompt character**: Edit `PROMPT_CHAR` in `tmux-helpers.sh` if your prompt differs
