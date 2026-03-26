@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-03-25
+
+### Added
+- **Developer agent circuit breaker** (RDR-040) — after 2 consecutive test
+  failures, the developer agent stops and outputs a structured ESCALATION
+  report. The parent dispatches the debugger with the failure context. Counter
+  tracks test runs (not root causes), resets on green or new invocation.
+  Supersedes the advisory "Recommend debugger" escalation trigger.
+- **Debugger escalation relay template** in development skill — parent-side
+  dispatch instructions with field mapping from escalation report to debugger
+  relay.
+- **Developer → debugger routing** in orchestration skill — escalation edge
+  in routing diagram and quick reference table.
+
 ## [2.4.2] - 2026-03-25
 
 ### Docs

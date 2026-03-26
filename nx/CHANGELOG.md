@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-03-25
+
+### Added
+- **Developer agent circuit breaker** — hard stop after 2 consecutive test
+  failures with structured ESCALATION report for debugger dispatch.
+- **Debugger escalation section** in development skill with relay template.
+- **Developer → debugger escalation edge** in orchestration routing.
+
 ## [2.4.2] - 2026-03-25
 
 Plugin version aligned with Nexus CLI 2.4.2. No plugin-level functional changes.
