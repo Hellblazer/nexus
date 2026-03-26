@@ -32,6 +32,14 @@ These agents **rely on relays** for context (do not proactively search):
 - **test-validator**: Expects code/test paths in relay
 - **debugger**: Expects failure description in relay
 
+**Sibling context (SHOULD, not MUST):** Before starting work, relay-reliant agents SHOULD search scratch for predecessor findings:
+
+Use scratch tool: action="search", query="[task topic]", n=5
+
+If results exist, incorporate them as supplementary context. If scratch is empty, proceed normally. This adds one MCP call (~100ms) and provides context that relays may omit.
+
+**Precedence rule:** Relay context takes precedence over scratch context. Scratch entries are hints, not authoritative. If a scratch `decision` entry conflicts with the relay, proceed per the relay and note the discrepancy.
+
 **If relay is incomplete**, use RECOVER protocol (search as fallback).
 
 ### Relay Validation (All Agents)
@@ -51,6 +59,21 @@ T1 is session-scoped: all entries are wiped at SessionEnd unless flagged.
 - Intermediate analysis results before validation
 - Step-by-step debug traces that may not be worth persisting
 - Routing or coordination notes within a pipeline run
+
+### Standard Scratch Tags
+
+All agents SHOULD use these tags when writing to scratch:
+
+| Tag | Meaning | Written by | Useful for |
+|-----|---------|-----------|------------|
+| `impl` | General implementation work (combine with others) | developer | any successor |
+| `checkpoint` | Implementation step completed | developer | reviewer, test-validator |
+| `failed-approach` | Attempted fix/approach that didn't work | developer, debugger | reviewer, debugger |
+| `hypothesis` | Working theory about a problem | debugger, analyst | developer |
+| `discovery` | Unexpected finding during work | any agent | any successor |
+| `decision` | Design/approach choice made during work | planner, architect | developer |
+
+Tags are comma-separated. Combine with domain tags: `failed-approach,auth,retry`.
 
 **T1 MCP Tools:**
 ```

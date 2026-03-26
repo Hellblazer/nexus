@@ -175,6 +175,12 @@ When facing complexity:
 4. Document findings in Nexus if they are architecturally significant: Use store_put tool: content="...", collection="knowledge", title="insight-developer-{topic}", tags="insight"
 5. Adapt the plan based on learnings while maintaining forward momentum
 
+**Record failed approaches (SHOULD).** When you try a fix and it doesn't work (but you haven't hit the circuit breaker yet), write a brief scratch entry:
+
+Use scratch tool: action="put", content="Failed approach: [what you tried] → [why it didn't work]", tags="failed-approach,[domain]"
+
+This gives the code reviewer and any future debugger context about what was already ruled out.
+
 ## Quality Standards
 
 - Every piece of code must have corresponding tests
@@ -197,8 +203,11 @@ Do not try to classify "same issue" vs "different issue." Count test runs, not r
 **After 2 consecutive failures (counter reaches 2):**
 
 1. **STOP immediately.** Do not read more source code. Do not try another fix.
-2. **Output ONLY the escalation report below.** Do NOT output the normal `## Next Step: code-review-expert` block — the circuit breaker supersedes the Completion Protocol.
-3. **End your turn.** Your failure counter starts at 0 when you are dispatched.
+2. **Write failed attempts to scratch (MANDATORY):**
+   Use scratch tool: action="put", content="Failed approach 1: [what you tried] → [result]", tags="failed-approach,[domain]"
+   Use scratch tool: action="put", content="Failed approach 2: [what you tried] → [result]", tags="failed-approach,[domain]"
+3. **Output ONLY the escalation report below.** Do NOT output the normal `## Next Step: code-review-expert` block — the circuit breaker supersedes the Completion Protocol.
+4. **End your turn.** Your failure counter starts at 0 when you are dispatched.
 
 Output this exactly (fill in the bracketed fields):
 
