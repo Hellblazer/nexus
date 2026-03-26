@@ -77,6 +77,7 @@ If the developer agent returns with `## ESCALATION: Debugger Required` in its ou
 - Hypothesis: [Hypothesis field from escalation report]
 - What was tried: [What I tried field — both attempts]
 - Diagnostic suggestion: [Diagnostic suggestion field]
+- nx scratch: [search scratch for tag "failed-approach" — include any pre-escalation entries the developer wrote during earlier attempts]
 - Files: [files from original developer relay]
 
 ### Deliverable
@@ -88,7 +89,29 @@ Root cause analysis and fix with all tests passing
 - [ ] All failing tests now pass
 ```
 
-3. After the debugger resolves the issue, re-dispatch the developer to continue the remaining plan steps. Include the debugger's fix as context: "Circuit breaker previously fired; debugger resolved [summary of fix]. Continue from [remaining plan step]."
+3. After the debugger resolves the issue, re-dispatch the developer using this relay:
+
+```markdown
+## Relay: developer (resumed after debugger)
+
+**Task**: Resume implementation. Debugger resolved: [one-sentence summary of fix]. Continue from [remaining plan step].
+**Bead**: [same bead]
+
+### Input Artifacts
+- nx store: [debugger's debug-finding title, if stored]
+- nx memory: [{project}/debug-journal.md, if stored]
+- Files: [originally affected files + any files the debugger modified]
+
+### Context Notes
+Circuit breaker previously fired. Debugger root cause: [one sentence].
+Do not retry approaches listed in scratch under tag "failed-approach".
+
+### Quality Criteria
+- [ ] All tests pass (including the previously failing ones)
+- [ ] Remaining plan steps completed
+```
+
+4. **Escalation guard**: If the developer escalates a second time for the same bead, do NOT re-dispatch the debugger. Instead, report to the user: "Developer circuit breaker has fired twice for bead [ID]. The debugger's fix did not resolve the issue. Human investigation recommended." Track this via a scratch entry: after the first escalation, write `scratch put "circuit-breaker-fired-for-[bead-id]" tags="escalation-guard"`. Before dispatching the debugger, search scratch for `"circuit-breaker-fired-for-[bead-id]"` — if found, escalate to human instead.
 
 ## TDD Methodology
 
