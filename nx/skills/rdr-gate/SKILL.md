@@ -36,7 +36,7 @@ Read the RDR markdown file. Check that these sections are present AND non-empty 
 - Proposed Solution (with Approach and Technical Design subsections)
 - Alternatives Considered (at least one alternative with Pros/Cons/Rejection reason)
 - Trade-offs (with Consequences and Risks subsections)
-- Implementation Plan (with at least one numbered Phase/Step)
+- Implementation Plan / Approach / Steps (with at least one numbered Phase/Step/Stage)
 - Finalization Gate (must have written responses, not just template placeholders)
 
 **If any section is missing or contains only placeholder text** (e.g., `[What is the specific challenge]`):

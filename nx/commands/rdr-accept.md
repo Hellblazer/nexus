@@ -156,28 +156,44 @@ print()
 print(f"**RDR file path:** `{rdr_file}`")
 print()
 
-# Phase count auto-detection for planning handoff
-ip_match = re.search(
-    r'^## Implementation Plan\s*\n(.*?)(?=^## |\Z)',
-    text, re.MULTILINE | re.DOTALL)
-phase_count = 0
-has_impl_plan = ip_match is not None
-if has_impl_plan:
-    phase_count = len(re.findall(r'^### Phase', ip_match.group(1), re.MULTILINE))
+# Step count auto-detection for planning handoff
+# Look for any planning-like section, not just "## Implementation Plan"
+plan_headers = [
+    r'^## Implementation Plan',
+    r'^## Approach',
+    r'^## Plan',
+    r'^## Design',
+    r'^## Steps',
+    r'^## Execution',
+]
+plan_section = None
+for hdr in plan_headers:
+    m = re.search(hdr + r'\s*\n(.*?)(?=^## |\Z)', text, re.MULTILINE | re.DOTALL)
+    if m:
+        plan_section = m.group(1)
+        break
+
+step_count = 0
+has_plan = plan_section is not None
+if has_plan:
+    # Count any numbered sub-headings: Phase, Step, Stage, Part
+    step_count = len(re.findall(
+        r'^### (?:Phase|Step|Stage|Part)\s', plan_section, re.MULTILINE))
+    # Also count ### with leading numbers: ### 1., ### 2.
+    if step_count == 0:
+        step_count = len(re.findall(r'^### \d', plan_section, re.MULTILINE))
 
 print("### Planning Handoff")
-print(f"**Phase count detected:** {phase_count}")
-print(f"**Has Implementation Plan section:** {'yes' if has_impl_plan else 'no'}")
-if phase_count >= 2:
-    print("**Recommendation:** Invoke strategic planner (multi-phase RDR)")
+print(f"**Step count detected:** {step_count}")
+print(f"**Has plan section:** {'yes' if has_plan else 'no'}")
+if step_count >= 2:
+    print("**Recommendation:** Invoke strategic planner (multi-step RDR)")
     print("**Default:** yes")
-elif not has_impl_plan:
-    print("**Warning:** No Implementation Plan section detected — this RDR may not be ready for planning.")
-    print("**Recommendation:** Skip planning")
-    print("**Default:** no")
 else:
-    print("**Recommendation:** Skip planning (single-phase)")
-    print("**Default:** no")
+    # Default to YES — false positives (unnecessary planning) are cheap,
+    # false negatives (skipping planning on complex work) are expensive
+    print("**Recommendation:** Invoke strategic planner")
+    print("**Default:** yes")
 print()
 PYEOF
 }
@@ -221,9 +237,9 @@ All RDR metadata is pre-loaded above. Step 8 requires additional tool calls for 
 - **Step 5 — Update `reviewed-by`**: If `reviewed-by` is empty or placeholder, set to `self` (solo review).
 - **Step 6 — Regenerate README**: Update `<rdr-dir>/README.md` (the RDR directory from the script output header) index to reflect the new status.
 - **Step 7 — Stage files**: `git add` the modified RDR file and README.
-- **Step 8 — Planning handoff**: Use the phase count and recommendation from the script output above.
-  - **If phase_count >= 2**: The planning chain is **MANDATORY**. Do not ask — print `> Multi-phase RDR — dispatching planning chain (mandatory).` and proceed to the Planning Chain below.
-  - **If phase_count < 2**: Ask: "Invoke strategic planner to build execution beads? (y/n) [default: no]"
+- **Step 8 — Planning handoff**: Use the step count and recommendation from the script output above.
+  - **If step_count >= 2**: The planning chain is **MANDATORY**. Do not ask — print `> Multi-step RDR — dispatching planning chain (mandatory).` and proceed to the Planning Chain below.
+  - **If step_count < 2**: Ask: "Invoke strategic planner to build execution beads? (y/n) [default: yes]"
     - **If no:** Accept is complete. Print: `> RDR <ID> accepted. Ready for implementation.`
     - **If yes:** Proceed to the Planning Chain below.
 
