@@ -4,9 +4,12 @@
 set timeout 300
 set prompt {\$ $}
 
-spawn -noecho docker exec -it nexus-tutorial-bare bash
-
+# Suppress the "spawn docker exec" line
+log_user 0
+spawn docker exec -it nexus-tutorial-bare bash
 expect -re $prompt
+log_user 1
+
 sleep 1
 
 send "curl -LsSf https://astral.sh/uv/install.sh | sh\r"

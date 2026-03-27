@@ -4,9 +4,12 @@
 set timeout 120
 set prompt {\$ $}
 
-spawn -noecho docker exec -it nexus-tutorial-ready bash
-
+# Suppress the "spawn docker exec" line
+log_user 0
+spawn docker exec -it nexus-tutorial-ready bash
 expect -re $prompt
+log_user 1
+
 sleep 1
 
 send "nx doctor\r"

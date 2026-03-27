@@ -40,6 +40,8 @@ AGG_THEME    := monokai
 AGG_COLS     := 120
 AGG_ROWS     := 35
 AGG_FONT     := 16
+AGG_IDLE     := 1
+AGG_SPEED    := 1
 
 .PHONY: all record post images containers clean nuke check-deps
 
@@ -101,10 +103,10 @@ $(USAGE_CAST): usage-demo.expect .container-ready
 # --- Render cast → gif → mp4 ---
 
 $(INSTALL_GIF): $(INSTALL_CAST)
-	agg --theme $(AGG_THEME) --font-size $(AGG_FONT) $< $@
+	agg --theme $(AGG_THEME) --font-size $(AGG_FONT) --idle-time-limit $(AGG_IDLE) --speed $(AGG_SPEED) $< $@
 
 $(USAGE_GIF): $(USAGE_CAST)
-	agg --theme $(AGG_THEME) --font-size $(AGG_FONT) $< $@
+	agg --theme $(AGG_THEME) --font-size $(AGG_FONT) --idle-time-limit $(AGG_IDLE) --speed $(AGG_SPEED) $< $@
 
 $(INSTALL_RAW): $(INSTALL_GIF)
 	ffmpeg -y -i $< -movflags faststart -pix_fmt yuv420p \
