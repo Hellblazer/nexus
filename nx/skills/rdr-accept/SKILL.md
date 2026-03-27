@@ -26,10 +26,11 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 4. **Update reviewed-by** — set to `self` if empty.
 5. **Regenerate README** — update `{rdr_dir}/README.md` index.
 6. **Stage files** — `git add` modified files.
-7. **Planning handoff** (optional) — Auto-detect complexity:
-   - Count `### Phase` headings in the RDR's Implementation Plan section
-   - If 2+ phases → default yes; if 0-1 phases or no Implementation Plan → default no
-   - Ask: "Invoke strategic planner to build execution beads? (y/n) [default]"
+7. **Planning handoff** (default: yes) — Auto-detect complexity:
+   - Scan for any plan section (Implementation Plan, Approach, Steps, etc.)
+   - Count step-like subheadings (Phase, Step, Stage, Part, or numbered ###)
+   - If 2+ steps → mandatory; otherwise → default yes (opt-out, not opt-in)
+   - Ask: "Invoke strategic planner to build execution beads? (y/n) [default: yes]"
    - **If no:** Continue — no beads created
    - **If yes — execute the full chain (3 sequential dispatches, orchestrated by this skill):**
      1. Write T1 scratch entry tagged `rdr-planning-context`: Use scratch tool: action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file}", tags="rdr-planning-context,rdr-{id}"

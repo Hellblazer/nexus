@@ -1,0 +1,36 @@
+# Speed map for poc-usage.mp4
+# Light touch — already well-paced, just add short fades between sections
+fade_duration = 0.3
+
+[[segment]]
+start = 0.0
+end = 9.0
+speed = 1.0
+fade = true
+label = "nx doctor"
+
+[[segment]]
+start = 9.0
+end = 15.0
+speed = 1.0
+fade = true
+label = "memory put + search"
+
+[[segment]]
+start = 15.0
+end = 17.0
+speed = 1.0
+label = "type index command"
+
+[[segment]]
+start = 17.0
+end = 28.0
+speed = 4.0
+fade = true
+label = "indexing + ONNX download (fast)"
+
+[[segment]]
+start = 28.0
+end = 37.0
+speed = 1.0
+label = "search results + help"
