@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-03-27
+
+### Fixed
+- **rdr-accept planning detection** — broadened section and heading matching,
+  flipped default from "no" to "yes". RDRs with `## Approach` / `### Step`
+  headings now correctly trigger planning handoff.
+- **rdr-gate** — accepts Approach/Steps as valid plan sections (not just
+  Implementation Plan).
+
 ## [2.6.0] - 2026-03-26
 
 ### Added

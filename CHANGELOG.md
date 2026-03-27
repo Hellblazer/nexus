@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-03-27
+
+### Fixed
+- **rdr-accept planning detection** — was matching only `## Implementation Plan`
+  with `### Phase` subheadings. Now scans 6 section names (Implementation Plan,
+  Approach, Plan, Design, Steps, Execution) and 4 subheading types (Phase, Step,
+  Stage, Part, plus numbered `###`). Default flipped from "no" to "yes" — false
+  positives are cheap, false negatives skip planning on complex work.
+
+### Docs
+- Tutorial video scripts (sections 0-9), companion cheatsheet
+- Automated recording pipeline: expect + asciinema + agg + ffmpeg + speed-mapping
+- `make` in `docs/tutorial/vhs/` reproduces the full demo video from scratch
+
 ## [2.6.0] - 2026-03-26
 
 ### Added
