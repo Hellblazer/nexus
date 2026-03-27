@@ -1,0 +1,37 @@
+# Speed map for poc-install.mp4 (170s raw)
+
+[[segment]]
+start = 0.0
+end = 5.0
+speed = 1.0
+label = "enter container"
+
+[[segment]]
+start = 5.0
+end = 15.0
+speed = 1.0
+label = "curl uv install"
+
+[[segment]]
+start = 15.0
+end = 25.0
+speed = 1.5
+label = "uv install output + source"
+
+[[segment]]
+start = 25.0
+end = 30.0
+speed = 1.0
+label = "uv version + type install cmd"
+
+[[segment]]
+start = 30.0
+end = 160.0
+speed = 20.0
+label = "package install (fast-forward)"
+
+[[segment]]
+start = 160.0
+end = 170.0
+speed = 1.0
+label = "nx version"

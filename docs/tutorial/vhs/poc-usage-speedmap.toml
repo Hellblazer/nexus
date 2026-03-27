@@ -1,0 +1,49 @@
+# Speed map for poc-usage.mp4 (103s raw)
+
+[[segment]]
+start = 0.0
+end = 4.0
+speed = 1.0
+label = "enter container"
+
+[[segment]]
+start = 4.0
+end = 14.0
+speed = 1.0
+label = "nx doctor output"
+
+[[segment]]
+start = 14.0
+end = 20.0
+speed = 1.0
+label = "memory put"
+
+[[segment]]
+start = 20.0
+end = 30.0
+speed = 1.0
+label = "memory search"
+
+[[segment]]
+start = 30.0
+end = 35.0
+speed = 1.0
+label = "type index command"
+
+[[segment]]
+start = 35.0
+end = 75.0
+speed = 6.0
+label = "indexing + ONNX load (fast-forward)"
+
+[[segment]]
+start = 75.0
+end = 95.0
+speed = 1.0
+label = "search results"
+
+[[segment]]
+start = 95.0
+end = 103.0
+speed = 1.0
+label = "nx help"
