@@ -1,14 +1,14 @@
-# Intermediate files — regenerate with: make
-*.cast
-*.gif
-poc-install.mp4
-poc-install-speedmapped.mp4
-poc-usage.mp4
-poc-usage-speedmapped.mp4
-poc-usage-final.mp4
-poc-container.mp4
-poc-container-speedmapped.mp4
-poc-full-demo.mp4
+# Intermediate files — regenerate with: make / generate-assets.py
+poc-*.mp4
+poc-*.cast
+poc-*.gif
+*.fcpxml
+
+# Generated asset directories
+assets/
+clips/
+segments/
+tts/
 
 # Make sentinel files
 .image-*
