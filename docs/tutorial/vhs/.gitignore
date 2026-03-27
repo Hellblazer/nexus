@@ -1,5 +1,4 @@
-# Intermediate recordings — regenerate with VHS + speed-map pipeline
-# Only commit final composited outputs
+# Intermediate recordings — regenerate with: make
 poc-install.mp4
 poc-install-speedmapped.mp4
 poc-usage.mp4
@@ -7,3 +6,7 @@ poc-usage-speedmapped.mp4
 poc-container.mp4
 poc-container-speedmapped.mp4
 poc-full-demo.mp4
+
+# Make sentinel files
+.image-*
+.container-*
