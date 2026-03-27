@@ -3,19 +3,16 @@
 # Usage:
 #   make          # full pipeline: build → record → speed-map → splice → composite
 #   make record   # just re-record (containers must exist)
-#   make post     # just re-process (raw MP4s must exist)
+#   make post     # just re-process (cast/gif/mp4 must exist)
 #   make clean    # remove all generated files and containers
 #
 # Prerequisites:
-#   brew install charmbracelet/tap/vhs ffmpeg
+#   brew install asciinema agg ffmpeg
 #   Docker running
+#   expect (ships with macOS)
 
 SHELL := /bin/bash
 .ONESHELL:
-
-# Chrome path for VHS (macOS)
-CHROMIUM ?= /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
-export CHROMIUM
 
 # Speed-map runner
 SPEEDMAP := uv run python poc-speedmap.py
@@ -26,13 +23,23 @@ READY_CONTAINER  := nexus-tutorial-ready
 BARE_IMAGE       := nexus-tutorial-bare
 READY_IMAGE      := nexus-tutorial-ready
 
-# Outputs
+# Intermediate files
+INSTALL_CAST     := poc-install.cast
+USAGE_CAST       := poc-usage.cast
+INSTALL_GIF      := poc-install.gif
+USAGE_GIF        := poc-usage.gif
 INSTALL_RAW      := poc-install.mp4
 USAGE_RAW        := poc-usage.mp4
 INSTALL_FAST     := poc-install-speedmapped.mp4
 USAGE_FAST       := poc-usage-speedmapped.mp4
 SPLICED          := poc-full-demo.mp4
 FINAL            := poc-full-demo-composited.mp4
+
+# agg settings (match VHS look)
+AGG_THEME    := monokai
+AGG_COLS     := 120
+AGG_ROWS     := 35
+AGG_FONT     := 16
 
 .PHONY: all record post images containers clean nuke check-deps
 
@@ -50,10 +57,12 @@ post: $(FINAL)
 # --- Dependency check ---
 
 check-deps:
-	@command -v vhs    >/dev/null || { echo "Missing: vhs (brew install charmbracelet/tap/vhs)"; exit 1; }
-	@command -v ffmpeg >/dev/null || { echo "Missing: ffmpeg (brew install ffmpeg)"; exit 1; }
-	@command -v docker >/dev/null || { echo "Missing: docker"; exit 1; }
-	@docker info >/dev/null 2>&1  || { echo "Docker not running"; exit 1; }
+	@command -v expect    >/dev/null || { echo "Missing: expect"; exit 1; }
+	@command -v asciinema >/dev/null || { echo "Missing: asciinema (brew install asciinema)"; exit 1; }
+	@command -v agg       >/dev/null || { echo "Missing: agg (brew install agg)"; exit 1; }
+	@command -v ffmpeg    >/dev/null || { echo "Missing: ffmpeg (brew install ffmpeg)"; exit 1; }
+	@command -v docker    >/dev/null || { echo "Missing: docker"; exit 1; }
+	@docker info >/dev/null 2>&1    || { echo "Docker not running"; exit 1; }
 
 # --- Docker images ---
 
@@ -81,13 +90,29 @@ containers: .container-bare .container-ready
 	docker run -d --name $(READY_CONTAINER) $(READY_IMAGE) sleep 3600
 	@touch $@
 
-# --- Record tapes ---
+# --- Record with expect + asciinema ---
 
-$(INSTALL_RAW): poc-install.tape .container-bare
-	vhs poc-install.tape
+$(INSTALL_CAST): install-demo.expect .container-bare
+	asciinema rec --command="./install-demo.expect" --cols=$(AGG_COLS) --rows=$(AGG_ROWS) $@
 
-$(USAGE_RAW): poc-usage.tape .container-ready
-	vhs poc-usage.tape
+$(USAGE_CAST): usage-demo.expect .container-ready
+	asciinema rec --command="./usage-demo.expect" --cols=$(AGG_COLS) --rows=$(AGG_ROWS) $@
+
+# --- Render cast → gif → mp4 ---
+
+$(INSTALL_GIF): $(INSTALL_CAST)
+	agg --theme $(AGG_THEME) --font-size $(AGG_FONT) $< $@
+
+$(USAGE_GIF): $(USAGE_CAST)
+	agg --theme $(AGG_THEME) --font-size $(AGG_FONT) $< $@
+
+$(INSTALL_RAW): $(INSTALL_GIF)
+	ffmpeg -y -i $< -movflags faststart -pix_fmt yuv420p \
+	  -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" $@
+
+$(USAGE_RAW): $(USAGE_GIF)
+	ffmpeg -y -i $< -movflags faststart -pix_fmt yuv420p \
+	  -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" $@
 
 # --- Speed-map ---
 
@@ -117,6 +142,8 @@ $(FINAL): $(SPLICED) poc-composite.py
 clean:
 	-docker rm -f $(BARE_CONTAINER) $(READY_CONTAINER) 2>/dev/null
 	rm -f .image-bare .image-ready .container-bare .container-ready
+	rm -f $(INSTALL_CAST) $(USAGE_CAST)
+	rm -f $(INSTALL_GIF) $(USAGE_GIF)
 	rm -f $(INSTALL_RAW) $(USAGE_RAW)
 	rm -f $(INSTALL_FAST) $(USAGE_FAST)
 	rm -f $(SPLICED) $(FINAL)

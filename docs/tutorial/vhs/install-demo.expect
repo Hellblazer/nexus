@@ -1,0 +1,39 @@
+#!/usr/bin/expect -f
+# Drive the install demo inside a container, waiting for prompts
+
+set timeout 300
+set prompt {\$ $}
+
+# Spawn bash in the container
+spawn docker exec -it nexus-tutorial-bare bash
+
+expect -re $prompt
+sleep 1
+
+# Install uv
+send "curl -LsSf https://astral.sh/uv/install.sh | sh\r"
+expect -re $prompt
+sleep 1
+
+# Source path
+send "source \$HOME/.local/bin/env\r"
+expect -re $prompt
+sleep 1
+
+# Show version
+send "uv --version\r"
+expect -re $prompt
+sleep 2
+
+# Install conexus
+send "uv tool install conexus\r"
+expect -re $prompt
+sleep 2
+
+# Verify
+send "nx --version\r"
+expect -re $prompt
+sleep 2
+
+send "exit\r"
+expect eof
