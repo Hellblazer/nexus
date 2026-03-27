@@ -1,37 +1,45 @@
-# Speed map for poc-install.mp4 (170s raw)
+# Speed map for poc-install.mp4
+# Install duration varies (20s cached, 300s uncached).
+# Use end=9999 as "to the end" — speedmap.py clamps to actual duration.
+fade_duration = 0.3
 
 [[segment]]
 start = 0.0
-end = 5.0
-speed = 1.0
-label = "enter container"
-
-[[segment]]
-start = 5.0
-end = 15.0
+end = 3.0
 speed = 1.0
 label = "curl uv install"
 
 [[segment]]
-start = 15.0
-end = 25.0
-speed = 1.5
-label = "uv install output + source"
-
-[[segment]]
-start = 25.0
-end = 30.0
+start = 3.0
+end = 5.0
 speed = 1.0
-label = "uv version + type install cmd"
+fade = true
+label = "uv installed"
 
 [[segment]]
-start = 30.0
-end = 160.0
-speed = 20.0
+start = 5.0
+end = 8.0
+speed = 1.0
+label = "source + uv version"
+
+[[segment]]
+start = 8.0
+end = 10.0
+speed = 1.0
+fade = true
+label = "type uv tool install"
+
+# Everything from install start to 15s before end: fast-forward
+# The last 15s has nx --version + exit
+[[segment]]
+start = 10.0
+end = -15.0
+speed = 40.0
+fade = true
 label = "package install (fast-forward)"
 
 [[segment]]
-start = 160.0
-end = 170.0
+start = -15.0
+end = -0.1
 speed = 1.0
 label = "nx version"

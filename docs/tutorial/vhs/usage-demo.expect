@@ -4,41 +4,35 @@
 set timeout 120
 set prompt {\$ $}
 
-spawn docker exec -it nexus-tutorial-ready bash
+spawn -noecho docker exec -it nexus-tutorial-ready bash
 
 expect -re $prompt
 sleep 1
 
-# Doctor
-send "NX_LOCAL=1 nx doctor\r"
+send "nx doctor\r"
 expect -re $prompt
 sleep 1
 
-# Memory put
 send "nx memory put \"Auth uses JWT tokens with 24h expiry\" --project demo --title auth-notes --ttl permanent\r"
 expect -re $prompt
 sleep 1
 
-# Memory search
 send "nx memory search \"JWT\"\r"
 expect -re $prompt
 sleep 2
 
-# Index
-send "NX_LOCAL=1 nx index repo .\r"
+send "nx index repo .\r"
 expect -re $prompt
 sleep 1
 
-# Search
-send "NX_LOCAL=1 nx search \"how does authentication work\"\r"
+send "nx search \"how does authentication work\"\r"
 expect -re $prompt
 sleep 2
 
-send "NX_LOCAL=1 nx search \"error handling\" --corpus code\r"
+send "nx search \"error handling\" --corpus code\r"
 expect -re $prompt
 sleep 2
 
-# Help
 send "nx --help\r"
 expect -re $prompt
 sleep 2

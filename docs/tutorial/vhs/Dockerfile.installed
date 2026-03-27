@@ -20,9 +20,10 @@ RUN git config --global user.email "demo@example.com" && \
     printf '# Error Handling\n\nAll errors use structured logging via structlog.\nRetry logic uses exponential backoff.\n' > docs/error-handling.md && \
     git add -A && git commit -m "initial commit"
 
-# Clean prompt
+# Clean prompt + hide NX_LOCAL noise
 RUN echo 'export PS1="$ "' >> /root/.bashrc && \
-    echo 'export PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
+    echo 'export PATH="/root/.local/bin:$PATH"' >> /root/.bashrc && \
+    echo 'export NX_LOCAL=1' >> /root/.bashrc
 
 WORKDIR /demo-repo
 CMD ["bash"]

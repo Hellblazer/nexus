@@ -1,14 +1,8 @@
 FROM python:3.12-slim
 
-# Minimal deps — intentionally no uv, no nx
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-# Clean prompt, no noise
-ENV PS1="$ " \
-    TERM=xterm-256color \
-    PYTHONDONTWRITEBYTECODE=1
 
 # Demo repo for indexing
 RUN git config --global user.email "demo@example.com" && \
@@ -21,7 +15,7 @@ RUN git config --global user.email "demo@example.com" && \
     printf '# Error Handling\n\nAll errors use structured logging via structlog.\nRetry logic uses exponential backoff.\n' > docs/error-handling.md && \
     git add -A && git commit -m "initial commit"
 
-# Clean prompt — must be in .bashrc, ENV PS1 gets overwritten by login shell
+# Clean prompt
 RUN echo 'export PS1="$ "' >> /root/.bashrc
 
 WORKDIR /demo-repo
