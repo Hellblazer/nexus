@@ -35,6 +35,80 @@ if [[ -f "$RELAY_TEMPLATE" ]]; then
   awk '/^## Optional Fields/{exit} {print}' "$RELAY_TEMPLATE"
 fi
 
+# nx MCP Tools — inject usage guidance so ALL agents can use the three-tier storage
+cat <<'NXTOOLS'
+
+## nx MCP Tools — Three-Tier Storage (injected by nx plugin)
+
+All agents in this session have access to nx storage tiers via MCP tools. Use these to share findings, read project context, and query knowledge.
+
+### T1 Scratch (session-scoped, shared across all agents)
+
+Inter-agent communication within this session. Siblings and parent see the same entries.
+
+```
+# Write a finding for other agents to see
+mcp__plugin_nx_nexus__scratch(action="put", content="<your finding>", tags="hypothesis,auth")
+
+# Search for what siblings/parent already found
+mcp__plugin_nx_nexus__scratch(action="search", query="<topic>", n=5)
+
+# List all entries
+mcp__plugin_nx_nexus__scratch(action="list")
+
+# Read a specific entry
+mcp__plugin_nx_nexus__scratch(action="get", entry_id="<id>")
+```
+
+**Tags**: `impl`, `checkpoint`, `failed-approach`, `hypothesis`, `discovery`, `decision`
+
+**Flag for persistence** (survives session end → promoted to T2):
+```
+mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>", project="<project>", title="<name>.md")
+```
+
+### T2 Memory (project-scoped, persistent across sessions)
+
+Read project decisions, session state, active work context.
+
+```
+# Read a specific memory entry
+mcp__plugin_nx_nexus__memory_get(project="<project>", title="<name>.md")
+
+# List all entries for a project
+mcp__plugin_nx_nexus__memory_get(project="<project>", title="")
+
+# Search memory
+mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<project>")
+
+# Write to memory (30d default TTL)
+mcp__plugin_nx_nexus__memory_put(content="<content>", project="<project>", title="<name>.md")
+```
+
+### T3 Knowledge Store (permanent, cross-session)
+
+Search indexed code, docs, and knowledge. Store validated findings.
+
+```
+# Search (default: knowledge,code,docs corpora)
+mcp__plugin_nx_nexus__search(query="<topic>", corpus="knowledge", n=5)
+
+# Store a finding
+mcp__plugin_nx_nexus__store_put(content="<content>", collection="knowledge", title="<title>", tags="<tags>")
+```
+
+### When to Use Which Tier
+
+| Need | Tier | Tool |
+|------|------|------|
+| Share finding with sibling agents this session | T1 | `scratch(action="put")` |
+| Check what other agents already found | T1 | `scratch(action="search")` |
+| Read project context/decisions | T2 | `memory_get` |
+| Persist finding across sessions | T2 | `memory_put` |
+| Search indexed codebase or knowledge | T3 | `search` |
+| Store validated architectural insight | T3 | `store_put` |
+NXTOOLS
+
 # Sequential Thinking MCP — inject usage guidance for hypothesis-driven work
 cat <<'SEQTHINK'
 
