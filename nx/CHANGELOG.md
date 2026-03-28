@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-03-28
+
 ### Added
 - **nx MCP tool guidance injection** — SubagentStart hook now injects three-tier
   storage tool signatures (T1 scratch, T2 memory, T3 search/store) into ALL
