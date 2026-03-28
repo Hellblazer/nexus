@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-03-28
+
 ### Added
 - **sn plugin** — new lightweight Claude Code plugin that bundles Serena and
   Context7 MCP servers with a SubagentStart hook that injects tool usage

@@ -403,7 +403,7 @@ wheels = [
 
 [[package]]
 name = "conexus"
-version = "2.6.1"
+version = "2.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
