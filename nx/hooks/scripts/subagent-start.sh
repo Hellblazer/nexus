@@ -35,6 +35,24 @@ if [[ -f "$RELAY_TEMPLATE" ]]; then
   awk '/^## Optional Fields/{exit} {print}' "$RELAY_TEMPLATE"
 fi
 
+# Sequential Thinking MCP — inject usage guidance for hypothesis-driven work
+cat <<'SEQTHINK'
+
+## Sequential Thinking MCP (injected by nx plugin)
+
+Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for any non-trivial decision:
+debugging hypotheses, design choices, plan evaluation, risk assessment.
+
+**Pattern**: State hypothesis → identify evidence → gather → evaluate → branch or proceed.
+- Set `needsMoreThoughts: true` to continue reasoning
+- Set `isRevision: true` + `revisesThought: N` to correct earlier thinking
+- Set `branchFromThought: N` + `branchId: "alt"` to explore alternatives
+- Adjust `totalThoughts` up/down as complexity becomes clearer
+
+**When to use**: debugging, analysis, design, exploration, any multi-step reasoning.
+**When NOT to use**: simple lookups, straightforward file edits, routine operations.
+SEQTHINK
+
 # T1 scratch: SHARED across all agents in this session via PPID chain (RDR-010).
 # All agents spawned from the same root Claude Code process see the same entries.
 # Inject current entries so this agent knows what siblings/parent already found.
