@@ -103,6 +103,12 @@ class TestSnMarketplace:
         sn_entry = next(p for p in marketplace["plugins"] if p["name"] == "sn")
         assert "version" in sn_entry
 
+    def test_sn_version_matches_plugin_json(self, marketplace: dict) -> None:
+        """Marketplace and plugin.json versions must agree."""
+        sn_entry = next(p for p in marketplace["plugins"] if p["name"] == "sn")
+        plugin_json = json.loads((SN_DIR / ".claude-plugin" / "plugin.json").read_text())
+        assert sn_entry["version"] == plugin_json["version"]
+
 
 # ── Hook output ──────────────────────────────────────────────────────────────
 

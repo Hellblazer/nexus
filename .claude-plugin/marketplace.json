@@ -15,7 +15,7 @@
       "name": "sn",
       "source": "./sn",
       "description": "Injects Serena and Context7 MCP tool usage guidance into subagents via SubagentStart hook.",
-      "version": "0.1.0"
+      "version": "2.6.1"
     }
   ]
 }

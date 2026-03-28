@@ -761,16 +761,13 @@ class TestMarketplaceVersion:
             pyproject = tomllib.load(f)
 
         pyproject_version = pyproject["project"]["version"]
-        # Only check the nx plugin — other plugins (e.g. sn) are independently versioned
-        nx_plugin = next(
-            (p for p in marketplace.get("plugins", []) if p["name"] == "nx"), None
-        )
-        assert nx_plugin is not None, "nx plugin not found in marketplace.json"
-        assert nx_plugin["version"] == pyproject_version, (
-            f"marketplace.json nx version {nx_plugin['version']!r} "
-            f"!= pyproject.toml {pyproject_version!r}. "
-            f"Update .claude-plugin/marketplace.json when bumping version."
-        )
+        for plugin in marketplace.get("plugins", []):
+            plugin_version = plugin.get("version", "")
+            assert plugin_version == pyproject_version, (
+                f"marketplace.json plugin '{plugin['name']}' version "
+                f"{plugin_version!r} != pyproject.toml {pyproject_version!r}. "
+                f"Update .claude-plugin/marketplace.json when bumping version."
+            )
 
     def test_uv_lock_version_matches_pyproject(self) -> None:
         """conexus version in uv.lock should match pyproject.toml version."""
