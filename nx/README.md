@@ -29,6 +29,9 @@ The `nx` CLI and plugin work independently, but the plugin's full agent and skil
 
 Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 
+**Companion plugin:**
+- **[sn](../sn/README.md)** — Serena (LSP code intelligence) + Context7 (library docs) with SubagentStart guidance injection. Install separately: `/plugin install sn@nexus-plugins`.
+
 **Also required:**
 - Python 3.12–3.13 (for hook scripts)
 

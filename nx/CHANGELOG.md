@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Sequential thinking MCP injection** — SubagentStart hook now injects usage
+  guidance for `sequentialthinking` MCP tool (when to use, parameter patterns
+  for `needsMoreThoughts`, `isRevision`, branching).
+
 ## [2.6.1] - 2026-03-27
 
 ### Fixed

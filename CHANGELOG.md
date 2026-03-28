@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **sn plugin** — new lightweight Claude Code plugin that bundles Serena and
+  Context7 MCP servers with a SubagentStart hook that injects tool usage
+  guidance into all subagents. Serena configured with `--context claude-code`
+  (minimal tool surface) and `--project-from-cwd` (auto-detect project).
+  Install independently: `/plugin install sn@nexus-plugins`.
+- **nx: sequential thinking injection** — SubagentStart hook injects usage
+  guidance for the sequential thinking MCP tool.
+
 ## [2.6.1] - 2026-03-27
 
 ### Fixed

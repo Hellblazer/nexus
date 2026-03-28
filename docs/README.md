@@ -23,9 +23,10 @@ Structured decision tracking for human-AI collaboration. Read in order:
 4. [Templates](rdr-templates.md) — Minimal and full examples, post-mortem template
 5. [RDR Index](rdr/README.md) — All project RDRs with status
 
-## Claude Code Plugin
+## Claude Code Plugins
 
 - [nx Plugin](../nx/README.md) — Agents, skills, session hooks, MCP servers, slash commands
+- [sn Plugin](../sn/README.md) — Serena + Context7 MCP servers with subagent guidance injection
 
 ## Reference
 
