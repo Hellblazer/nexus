@@ -9,6 +9,7 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 SN_DIR = REPO_ROOT / "sn"
 MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
+PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
 
 # ── Plugin structure ─────────────────────────────────────────────────────────
@@ -109,6 +110,18 @@ class TestSnMarketplace:
         plugin_json = json.loads((SN_DIR / ".claude-plugin" / "plugin.json").read_text())
         assert sn_entry["version"] == plugin_json["version"]
 
+    def test_sn_version_matches_pyproject(self) -> None:
+        """sn plugin.json version must match pyproject.toml — shared release version."""
+        import tomllib
+        plugin_json = json.loads((SN_DIR / ".claude-plugin" / "plugin.json").read_text())
+        with PYPROJECT_PATH.open("rb") as f:
+            pyproject = tomllib.load(f)
+        assert plugin_json["version"] == pyproject["project"]["version"], (
+            f"sn plugin.json version {plugin_json['version']!r} "
+            f"!= pyproject.toml {pyproject['project']['version']!r}. "
+            f"Update sn/.claude-plugin/plugin.json when bumping version."
+        )
+
 
 # ── Hook output ──────────────────────────────────────────────────────────────
 
@@ -141,6 +154,11 @@ class TestSnHookOutput:
         assert "name_path_pattern" in hook_output
         assert "relative_path" in hook_output
         assert "include_body" in hook_output
+        assert "substring_pattern" in hook_output
+
+    def test_search_for_pattern_in_routing(self, hook_output: str) -> None:
+        """search_for_pattern is available in claude-code context and must be documented."""
+        assert "search_for_pattern" in hook_output
 
     def test_context7_workflow(self, hook_output: str) -> None:
         assert "resolve-library-id" in hook_output
@@ -151,7 +169,13 @@ class TestSnHookOutput:
         assert "activate_project(project=" not in hook_output
 
     def test_excluded_tools_not_in_routing(self, hook_output: str) -> None:
-        """Tools excluded by claude-code context should not appear in routing table."""
-        assert "replace_content" not in hook_output
-        assert "create_text_file" not in hook_output
-        assert "read_file" not in hook_output
+        """Tools excluded by Serena's claude-code context should not be in the routing table.
+
+        Assumes the claude-code context (serena/resources/config/contexts/claude-code.yml)
+        excludes: create_text_file, read_file, execute_shell_command, prepare_for_new_conversation,
+        replace_content. Verify on Serena version bumps — if the exclusion list changes upstream,
+        update the inject script and this test accordingly.
+        """
+        assert "| `replace_content`" not in hook_output
+        assert "| `create_text_file`" not in hook_output
+        assert "| `read_file`" not in hook_output

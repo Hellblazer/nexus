@@ -3,13 +3,14 @@
 # sn SubagentStart hook — inject Serena + Context7 MCP tool guidance
 # These tools are available to subagents but subagents don't know
 # they should use them or how to call them correctly.
+# Timeout: 5s (hooks.json) — static heredocs only, no I/O. Increase if dynamic content added.
 
 cat <<'SERENA'
 ## Serena MCP — Symbol Navigation (injected by sn plugin)
 
 Serena provides LSP-backed code intelligence. **Use Serena for symbol tasks; Grep for text tasks.**
 
-The project is auto-activated from the working directory (`--project-from-cwd`). No `activate_project` call needed.
+The project is auto-activated from the working directory (`--project-from-cwd`) if `.serena/project.yml` exists in the git root. No `activate_project` call needed. If Serena tools return empty results, the project may not be configured — run `serena project create /path/to/project`.
 
 SERENA
 
@@ -26,6 +27,7 @@ cat <<'ROUTING'
 | Replace function body | `replace_symbol_body` |
 | Insert code | `insert_before_symbol` / `insert_after_symbol` |
 | Rename safely | `rename_symbol` |
+| Text search in code | `search_for_pattern` |
 
 **Use standard tools for:** file search (Glob), text/config search (Grep), reading known files (Read).
 
@@ -47,6 +49,9 @@ jet_brains_find_referencing_symbols(
 
 # get_symbols_overview — takes relative_path to a FILE
 jet_brains_get_symbols_overview(relative_path="path/to/File.java")
+
+# search_for_pattern — uses substring_pattern (not pattern)
+search_for_pattern(substring_pattern="searchText", relative_path="optional/dir")
 ```
 
 ### Rules
