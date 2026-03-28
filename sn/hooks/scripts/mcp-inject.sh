@@ -9,22 +9,9 @@ cat <<'SERENA'
 
 Serena provides LSP-backed code intelligence. **Use Serena for symbol tasks; Grep for text tasks.**
 
-### First Step: Activate Project
+The project is auto-activated from the working directory (`--project-from-cwd`). No `activate_project` call needed.
 
-Before any Serena tool call, activate the project:
 SERENA
-
-# Detect project from git
-if command -v git &> /dev/null; then
-  PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
-  if [[ -n "$PROJECT" ]]; then
-    echo "\`activate_project(project=\"$PROJECT\")\`"
-  else
-    echo "\`activate_project(project=\"<repo-name>\")\`"
-  fi
-else
-  echo "\`activate_project(project=\"<repo-name>\")\`"
-fi
 
 cat <<'ROUTING'
 
@@ -39,7 +26,6 @@ cat <<'ROUTING'
 | Replace function body | `replace_symbol_body` |
 | Insert code | `insert_before_symbol` / `insert_after_symbol` |
 | Rename safely | `rename_symbol` |
-| Edit lines within method | `replace_content` (regex) |
 
 **Use standard tools for:** file search (Glob), text/config search (Grep), reading known files (Read).
 
@@ -61,9 +47,6 @@ jet_brains_find_referencing_symbols(
 
 # get_symbols_overview — takes relative_path to a FILE
 jet_brains_get_symbols_overview(relative_path="path/to/File.java")
-
-# search_for_pattern — uses substring_pattern (not pattern)
-search_for_pattern(substring_pattern="searchText", relative_path="optional/dir")
 ```
 
 ### Rules

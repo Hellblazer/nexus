@@ -21,7 +21,11 @@ Subagents spawned by Claude Code don't see your CLAUDE.md instructions. They hav
 
 - **Serena**: requires `uvx` ([uv](https://docs.astral.sh/uv/) must be installed)
 - **Context7**: requires `npx` ([Node.js](https://nodejs.org/) must be installed)
-- **Serena project config**: Serena needs a project configuration to know which codebase to index. See [Serena docs](https://github.com/oraios/serena) for setup.
+- **Serena project config**: each project needs a `.serena/project.yml`. Auto-generate one with:
+  ```bash
+  uvx --from git+https://github.com/oraios/serena serena project create /path/to/project
+  ```
+  This auto-detects languages and registers the project in `~/.serena/serena_config.yml`.
 
 ## What Gets Injected
 
@@ -42,10 +46,19 @@ Every subagent receives a `system-reminder` block containing:
 
 ## MCP Servers Included
 
-| Server | Command | Purpose |
-|--------|---------|---------|
-| `serena` | `uvx --from git+https://github.com/oraios/serena serena start-mcp-server` | LSP-backed code intelligence (symbol navigation, refactoring, type hierarchy) |
-| `context7` | `npx -y @upstash/context7-mcp` | Live documentation lookup for libraries and frameworks |
+| Server | Purpose |
+|--------|---------|
+| `serena` | LSP-backed code intelligence (symbol navigation, refactoring, type hierarchy) |
+| `context7` | Live documentation lookup for libraries and frameworks |
+
+### Serena Configuration
+
+Serena is started with `--context claude-code --project-from-cwd`:
+
+- **`--context claude-code`** — optimized for Claude Code. Excludes tools that overlap with Claude's built-in capabilities (`create_text_file`, `read_file`, `execute_shell_command`, `replace_content`). Enables `single_project: true` mode for a minimal tool surface.
+- **`--project-from-cwd`** — auto-detects the project from the current working directory by searching for `.serena/project.yml` or `.git`. No manual `activate_project` call needed at session start.
+
+Other built-in contexts: `desktop-app` (default, full toolset), `agent`, `codex`, `chatgpt`, `ide`.
 
 ## Plugin Structure
 
