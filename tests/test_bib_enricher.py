@@ -150,3 +150,18 @@ def test_enrich_authors_truncated():
     assert len(names) == 5
     assert names[0] == "Author 0"
     assert names[4] == "Author 4"
+
+
+def test_enrich_malformed_json():
+    """Non-JSON response body (e.g., HTML error page) returns {}."""
+    from nexus.bib_enricher import enrich
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.side_effect = ValueError("No JSON object could be decoded")
+
+    with patch("httpx.get", return_value=mock_resp):
+        result = enrich("Some Paper Title")
+
+    assert result == {}

@@ -81,9 +81,9 @@ Relay format: `{operation, inputs, params}`.
 
 ### Component 2: Structured Table Extraction
 
-Modify `_extract_with_docling()` to detect Docling `TableItem` nodes, preserve HTML via `export_to_html()`. Tag chunks overlapping table regions with `chunk_type=table` metadata; all others get `chunk_type=text`. Enables `--where chunk_type=table` filtering.
+Modify `_extract_with_docling()` to detect Docling `TableItem` nodes, preserve HTML via `export_to_html()`. Tag chunks overlapping table regions with `chunk_type=table_page` metadata; all others get `chunk_type=text`. Enables `--where chunk_type=table_page` filtering.
 
-**Granularity**: Page-level matching. A chunk is tagged `chunk_type=table` if it falls on a page that contains a table. This is coarse but reliable — character-offset mapping between Docling items and exported markdown is fragile. Documented as page-level granularity; future refinement to character-level is possible but not in scope.
+**Granularity**: Page-level matching. A chunk is tagged `chunk_type=table_page` if it falls on a page that contains a table. This is coarse but reliable — character-offset mapping between Docling items and exported markdown is fragile. Documented as page-level granularity; future refinement to character-level is possible but not in scope.
 
 ### Component 3: Bibliographic Metadata Enrichment
 
@@ -135,7 +135,7 @@ Auto-saving every successful pipeline pollutes the library. Explicit save ensure
 ## Success Criteria
 
 - [ ] Analytical operator agent handles all 5 operations with structured input/output
-- [ ] PDF table chunks tagged with `chunk_type=table` (page-level granularity, documented), filterable via `--where`
+- [ ] PDF table chunks tagged with `chunk_type=table_page` (page-level granularity, documented), filterable via `--where`
 - [ ] Bibliographic metadata (year, venue, authors, citation_count) attached to PDF chunks
 - [ ] `nx enrich <collection>` backfills metadata with configurable `--delay` (default 0.5s)
 - [ ] `nx enrich` skips chunks with existing `bib_semantic_scholar_id` (idempotent backfill)

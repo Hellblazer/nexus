@@ -110,7 +110,7 @@ mcp__plugin_nx_nexus__store_put(content="<content>", collection="knowledge", tit
 | Persist finding across sessions | T2 | `memory_put` |
 | Search indexed codebase or knowledge | T3 | `search` |
 | Store validated architectural insight | T3 | `store_put` |
-| Search saved query plans | T2 | `memory_search(query="plan", project="{repo}")` |
+| Search saved query plans | T2 | `plan_search(query="...", project="{repo}")` |
 
 ### T2 Plan Library
 

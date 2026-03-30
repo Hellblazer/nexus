@@ -250,4 +250,4 @@ Store using these naming conventions:
 
 This skill follows the [Shared Context Protocol](../../agents/_shared/CONTEXT_PROTOCOL.md).
 
-T2 memory context is auto-injected by SessionStart and SubagentStart hooks. Use `memory_search` to find similar prior plans before dispatching the planner.
+T2 memory context is auto-injected by SessionStart and SubagentStart hooks. Use the `plan_search` MCP tool to find similar prior plans when opted in.
