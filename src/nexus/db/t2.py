@@ -86,6 +86,37 @@ CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
         VALUES ('delete', old.id, old.title, old.content, old.tags);
     INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
 END;
+
+CREATE TABLE IF NOT EXISTS plans (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    query      TEXT NOT NULL,
+    plan_json  TEXT NOT NULL,
+    outcome    TEXT DEFAULT 'success',
+    tags       TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
+    query,
+    tags,
+    content=plans,
+    content_rowid=id
+);
+
+CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
+    INSERT INTO plans_fts(rowid, query, tags) VALUES (new.id, new.query, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS plans_ad AFTER DELETE ON plans BEGIN
+    INSERT INTO plans_fts(plans_fts, rowid, query, tags)
+        VALUES ('delete', old.id, old.query, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
+    INSERT INTO plans_fts(plans_fts, rowid, query, tags)
+        VALUES ('delete', old.id, old.query, old.tags);
+    INSERT INTO plans_fts(rowid, query, tags) VALUES (new.id, new.query, new.tags);
+END;
 """
 
 _COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl")
@@ -404,6 +435,60 @@ class T2Database:
             cursor = self.conn.execute(sql, params)
             self.conn.commit()
         return cursor.rowcount > 0
+
+    # ── Plan Library ──────────────────────────────────────────────────────────
+
+    def save_plan(
+        self,
+        query: str,
+        plan_json: str,
+        outcome: str = "success",
+        tags: str = "",
+    ) -> int:
+        """Insert a plan record. Returns the new row ID."""
+        created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO plans (query, plan_json, outcome, tags, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (query, plan_json, outcome, tags, created_at),
+            )
+            self.conn.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+
+    def search_plans(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """FTS5 search over plans (query + tags). Returns plans ordered by rank."""
+        safe = _sanitize_fts5(query)
+        sql = """
+            SELECT p.id, p.query, p.plan_json, p.outcome, p.tags, p.created_at
+            FROM plans p
+            JOIN plans_fts ON plans_fts.rowid = p.id
+            WHERE plans_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+        """
+        with self._lock:
+            try:
+                rows = self.conn.execute(sql, (safe, limit)).fetchall()
+            except sqlite3.OperationalError as exc:
+                raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
+        _plan_cols = ("id", "query", "plan_json", "outcome", "tags", "created_at")
+        return [dict(zip(_plan_cols, row)) for row in rows]
+
+    def list_plans(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return most recent plans ordered by created_at DESC."""
+        sql = """
+            SELECT id, query, plan_json, outcome, tags, created_at
+            FROM plans
+            ORDER BY created_at DESC
+            LIMIT ?
+        """
+        with self._lock:
+            rows = self.conn.execute(sql, (limit,)).fetchall()
+        _plan_cols = ("id", "query", "plan_json", "outcome", "tags", "created_at")
+        return [dict(zip(_plan_cols, row)) for row in rows]
 
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
