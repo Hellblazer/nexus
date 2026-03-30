@@ -25,9 +25,12 @@ Before starting, validate the relay contains:
 2. [ ] Optional **few_shot_plans** — examples from the T2 plan library (may be empty or absent)
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Check T1 scratch for the question: Use scratch tool: action="search", query="query question"
-2. Check T2 memory for session context: Use memory_search tool: query="query plan", project="{project}"
-3. Flag missing relay fields and proceed with documented assumptions
+1. Search Nexus for missing context: Use search tool: query="[topic]", corpus="knowledge", n=5
+2. Check Nexus memory for session state: Use memory_search tool: query="query plan", project="{project}"
+3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="query question"
+4. Query `bd list --status=in_progress`
+5. Flag incomplete relay to user
+6. Proceed with available context, documenting assumptions
 
 ### Relay Format
 

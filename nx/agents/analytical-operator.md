@@ -27,9 +27,12 @@ Before starting, validate the relay contains all required fields:
 3. [ ] **params** object present (may be empty `{}` for default behavior)
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Check T1 scratch for prior step outputs: Use scratch tool: action="search", query="query-step"
-2. Check T2 memory for session context: Use memory_search tool: query="[topic]", project="{project}"
-3. Flag missing relay fields in response and proceed with documented assumptions
+1. Search Nexus for missing context: Use search tool: query="[topic]", corpus="knowledge", n=5
+2. Check Nexus memory for session state: Use memory_search tool: query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="query-step"
+4. Query `bd list --status=in_progress`
+5. Flag incomplete relay to user
+6. Proceed with available context, documenting assumptions
 
 ### Relay Format
 

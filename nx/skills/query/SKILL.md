@@ -1,6 +1,6 @@
 ---
 name: query
-description: Execute multi-step analytical queries over nx knowledge collections with plan decomposition and reuse. Use when questions require retrieval + analysis (extract, summarize, rank, compare, generate).
+description: Use when questions require multi-step retrieval and analysis (extract, summarize, rank, compare, generate) over nx knowledge collections with plan decomposition and reuse.
 effort: medium
 ---
 
@@ -44,6 +44,8 @@ If matches are found, collect up to 3 plans with `outcome="success"` as few-shot
 If no matches are found, proceed with an empty `few_shot_plans` list.
 
 ### Step 2: Dispatch query-planner
+
+## Agent Invocation
 
 Use the Agent tool to invoke **query-planner** with:
 
@@ -235,6 +237,15 @@ Store using these naming conventions:
 - **T2 memory title**: `plan-{slug}.md` (e.g., `plan-caching_strategy_compare.md`)
 - **T1 scratch tags**: `query-step,step-N,{operation}` (e.g., `query-step,step-2,summarize`)
 
+
+## Success Criteria
+
+- [ ] Query-planner agent returns valid JSON plan with at least one step
+- [ ] All search steps executed via search MCP tool with results written to T1 scratch
+- [ ] All operator steps dispatched to analytical-operator with $step_N references resolved from T1 scratch
+- [ ] Final output presented to user with source citations
+- [ ] Plan library prompted for save after successful execution
+- [ ] Partial failures handled gracefully (outcome="partial" on save)
 
 ## Context Protocol
 
