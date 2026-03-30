@@ -35,6 +35,35 @@ if [[ -f "$RELAY_TEMPLATE" ]]; then
   awk '/^## Optional Fields/{exit} {print}' "$RELAY_TEMPLATE"
 fi
 
+# Serena MCP — inject symbol navigation guidance so agents use LSP instead of grep
+cat <<'SERENA'
+
+## Serena Code Navigation (injected by nx plugin)
+
+Use Serena MCP tools for **symbol-level** tasks. Use Grep only for **text search** (strings, comments, config values).
+
+| Task | Tool |
+|------|------|
+| Symbol definition | `mcp__plugin_sn_serena__jet_brains_find_symbol(name_path_pattern="ClassName", include_body=false)` |
+| All callers/references | `mcp__plugin_sn_serena__jet_brains_find_referencing_symbols(name_path="ClassName", relative_path="path/to/File.py")` |
+| File structure overview | `mcp__plugin_sn_serena__jet_brains_get_symbols_overview(relative_path="path/to/File.py")` |
+| Class/type hierarchy | `mcp__plugin_sn_serena__jet_brains_type_hierarchy(name_path="ClassName", relative_path="path/to/File.py")` |
+| Replace function body | `mcp__plugin_sn_serena__replace_symbol_body(name_path="Class/method", relative_path="path/to/File.py", new_body="...")` |
+| Rename symbol safely | `mcp__plugin_sn_serena__rename_symbol(name_path="oldName", relative_path="path/to/File.py", new_name="newName")` |
+| Text/pattern search | `mcp__plugin_sn_serena__search_for_pattern(substring_pattern="text", relative_path="optional/dir")` |
+
+**Critical parameter signatures** (common source of errors):
+- `find_symbol`: uses `name_path_pattern` (NOT `name_path`)
+- `find_referencing_symbols`: uses `name_path` + `relative_path` (NO `include_body`, NO `name_path_pattern`)
+- `get_symbols_overview`: `relative_path` must be a FILE, not a directory
+- `search_for_pattern`: uses `substring_pattern` (NOT `pattern`)
+
+**Rules**:
+- `get_symbols_overview` BEFORE reading whole files
+- `find_referencing_symbols` BEFORE any signature change (impact analysis)
+- `find_symbol(include_body=false)` first, `include_body=true` only when needed
+SERENA
+
 # nx MCP Tools — inject usage guidance so ALL agents can use the three-tier storage
 cat <<'NXTOOLS'
 
