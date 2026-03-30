@@ -110,7 +110,7 @@ Return a single JSON object with this structure:
       "operation": "compare",
       "inputs": ["$step_2", "$step_3"],
       "params": {
-        "check": "consistency"
+        "criterion": "consistency"
       }
     }
   ]

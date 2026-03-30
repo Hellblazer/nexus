@@ -576,6 +576,26 @@ def test_parse_where_equality_plus_operator_uses_and() -> None:
     ]}
 
 
+def test_parse_where_value_containing_gt_not_mismatched() -> None:
+    """Value containing > is not misinterpreted as an operator."""
+    result = _parse_where(("source_path=a>b/file.py",))
+    assert result == {"source_path": "a>b/file.py"}
+
+
+def test_parse_where_numeric_field_non_numeric_value_raises() -> None:
+    """Known numeric field with non-numeric value raises BadParameter."""
+    from click import BadParameter
+    with pytest.raises(BadParameter, match="requires a numeric value"):
+        _parse_where(("bib_year>=notanumber",))
+
+
+def test_parse_where_numeric_field_equality_non_numeric_raises() -> None:
+    """Known numeric field with = and non-numeric value also raises."""
+    from click import BadParameter
+    with pytest.raises(BadParameter, match="requires a numeric value"):
+        _parse_where(("bib_year=notanumber",))
+
+
 # ── --max-file-chunks ─────────────────────────────────────────────────────────
 
 

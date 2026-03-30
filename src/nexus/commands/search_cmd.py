@@ -23,24 +23,34 @@ from nexus.search_engine import search_cross_corpus
 from nexus.types import SearchResult
 
 
+import re
+
 _NUMERIC_FIELDS = frozenset({
     "bib_year", "bib_citation_count", "page_count", "page_number",
     "chunk_index", "chunk_count", "chunk_start_char", "chunk_end_char",
 })
 
-# Operators in match order — longest first to avoid '>=' matching as '>'+'='.
-_OPERATORS = [
-    (">=", "$gte"),
-    ("<=", "$lte"),
-    ("!=", "$ne"),
-    (">", "$gt"),
-    ("<", "$lt"),
-    ("=", None),  # equality — no ChromaDB operator wrapper needed
-]
+# Regex: KEY OPERATOR VALUE — operator is one of >=, <=, !=, >, <, =
+# Key must be a valid metadata field name (alphanumeric + underscores).
+# This avoids matching operators inside values (e.g., source_path=a>b).
+_WHERE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(>=|<=|!=|>|<|=)(.*)$")
+
+_OP_MAP: dict[str, str | None] = {
+    ">=": "$gte",
+    "<=": "$lte",
+    "!=": "$ne",
+    ">": "$gt",
+    "<": "$lt",
+    "=": None,  # equality — no ChromaDB operator wrapper needed
+}
 
 
 def _coerce_value(key: str, value: str) -> str | int | float:
-    """Coerce *value* to int/float for known numeric metadata fields."""
+    """Coerce *value* to int/float for known numeric metadata fields.
+
+    Raises ``click.BadParameter`` if a known numeric field has a
+    non-numeric value (e.g. ``bib_year>=notanumber``).
+    """
     if key in _NUMERIC_FIELDS:
         try:
             return int(value)
@@ -48,7 +58,10 @@ def _coerce_value(key: str, value: str) -> str | int | float:
             try:
                 return float(value)
             except ValueError:
-                pass
+                raise click.BadParameter(
+                    f"field {key!r} requires a numeric value, got {value!r}",
+                    param_hint="'--where'",
+                )
     return value
 
 
@@ -67,23 +80,19 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
         return None
     parts: list[dict] = []
     for pair in where_pairs:
-        matched = False
-        for op_str, chroma_op in _OPERATORS:
-            idx = pair.find(op_str)
-            if idx > 0:
-                key = pair[:idx]
-                value = _coerce_value(key, pair[idx + len(op_str):])
-                if chroma_op is None:
-                    parts.append({key: value})
-                else:
-                    parts.append({key: {chroma_op: value}})
-                matched = True
-                break
-        if not matched:
+        m = _WHERE_RE.match(pair)
+        if not m:
             raise click.BadParameter(
                 f"--where value {pair!r} must be in KEY=VALUE or KEY>=VALUE format",
                 param_hint="'--where'",
             )
+        key, op_str, raw_value = m.group(1), m.group(2), m.group(3)
+        value = _coerce_value(key, raw_value)
+        chroma_op = _OP_MAP[op_str]
+        if chroma_op is None:
+            parts.append({key: value})
+        else:
+            parts.append({key: {chroma_op: value}})
     if len(parts) == 1:
         return parts[0]
     # Merge into flat dict when all parts are simple key=value (no operator nesting).
