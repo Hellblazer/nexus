@@ -102,6 +102,24 @@ def main() -> None:
         output_lines.append("Flag important scratch entries before session ends: `nx scratch flag <id>`")
         output_lines.append("")
 
+    # --- Capabilities summary (compact, for main conversation awareness) ---
+    output_lines.append("## nx Capabilities")
+    output_lines.append("")
+    output_lines.append("**Search**: `nx search QUERY` — semantic search across T3 collections")
+    output_lines.append("  - `--where KEY>=VALUE` operators: `=`, `>=`, `<=`, `>`, `<`, `!=` (numeric fields auto-coerced)")
+    output_lines.append("  - `--where chunk_type=table_page` for PDF pages containing tables")
+    output_lines.append("  - `--where bib_year>=2024` for bibliographic metadata filtering")
+    output_lines.append("")
+    output_lines.append("**Analytical queries**: `/nx:query` — multi-step retrieval + analysis")
+    output_lines.append("  - Dispatches `query-planner` → `analytical-operator` (extract/summarize/rank/compare/generate)")
+    output_lines.append("  - Best for: cross-corpus consistency checks, structured extraction, multi-source synthesis")
+    output_lines.append("  - For simple summarize/rank: dispatch `analytical-operator` directly")
+    output_lines.append("")
+    output_lines.append("**Enrichment**: `nx enrich COLLECTION` — backfill Semantic Scholar metadata (year, venue, authors, citations)")
+    output_lines.append("")
+    output_lines.append("**Plan library**: `plan_save`/`plan_search` MCP tools — save and reuse query execution plans (T2, project-scoped)")
+    output_lines.append("")
+
     if output_lines:
         print("\n".join(output_lines))
 
