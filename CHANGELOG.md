@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.8.2] - 2026-03-30
+
+### Added
+- **SessionStart capabilities summary** — main conversation now gets a
+  compact overview of `--where` operators, `/nx:query` pipeline, `nx enrich`,
+  and plan library MCP tools on every session start.
+
 ## [2.8.1] - 2026-03-30
 
 ### Fixed
