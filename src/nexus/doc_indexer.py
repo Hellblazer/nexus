@@ -280,6 +280,7 @@ def _pdf_chunks(
     the PDFChunker default is used.  Pass ``tuning.pdf_chunk_chars`` from
     TuningConfig to honour per-repo configuration.
     """
+    from nexus.bib_enricher import enrich as bib_enrich
     result = PDFExtractor().extract(pdf_path)
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
     chunks = chunker.chunk(result.text, result.metadata)
@@ -291,16 +292,20 @@ def _pdf_chunks(
     _page_count = result.metadata.get("page_count", 1) or 1
     is_image_pdf = (len(result.text) / _page_count) < 20
 
+    # Compute source_title once before the loop so bib lookup uses the same value.
+    source_title = (
+        result.metadata.get("docling_title", "")
+        or result.metadata.get("pdf_title", "")
+        or pdf_path.stem.replace("_", " ").replace("-", " ")
+    )
+    bib = bib_enrich(source_title)
+
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
             "source_path": str(pdf_path),
-            "source_title": (
-                result.metadata.get("docling_title", "")
-                or result.metadata.get("pdf_title", "")
-                or pdf_path.stem.replace("_", " ").replace("-", " ")
-            ),
+            "source_title": source_title,
             "source_author": result.metadata.get("pdf_author", ""),
             "source_date": result.metadata.get("pdf_creation_date", ""),
             "corpus": corpus,
@@ -321,6 +326,11 @@ def _pdf_chunks(
             "pdf_subject": result.metadata.get("pdf_subject", ""),
             "pdf_keywords": result.metadata.get("pdf_keywords", ""),
             "is_image_pdf": is_image_pdf,
+            "bib_year": bib.get("year", 0),
+            "bib_venue": bib.get("venue", ""),
+            "bib_authors": bib.get("authors", ""),
+            "bib_citation_count": bib.get("citation_count", 0),
+            "bib_semantic_scholar_id": bib.get("semantic_scholar_id", ""),
         }
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
