@@ -57,6 +57,7 @@ You are a meta-agent responsible for analyzing requests, selecting appropriate s
 | developer | Execute implementation plans, write code with TDD |
 | architect-planner | Design architecture, create execution plans |
 | debugger | Complex bugs, non-deterministic failures, performance issues |
+| analytical-operator | Execute analytical operations (extract, summarize, rank, compare, generate) on retrieved content |
 
 ### Review Agents
 | Agent | When to Use |
@@ -177,6 +178,147 @@ When multiple agents could handle a request, consider:
 - Do NOT skip validation steps in pipelines
 - Do NOT route complex requests to a single agent when a pipeline is needed
 - Do NOT route without providing adequate context
+
+## Failure Relay Protocol
+
+When a downstream agent returns an error, incomplete result, or unusable output,
+apply this protocol to recover or escalate gracefully.
+
+### Failure Classification
+
+**Step 1**: Inspect the agent output for the RDR-040 escalation sentinel:
+
+```
+<!-- ESCALATION -->
+## ESCALATION: Debugger Required
+```
+
+Two distinct failure types require different responses:
+
+#### Type A — Routed Failure (ESCALATION sentinel present)
+
+The downstream agent hit its circuit breaker and produced a structured escalation
+report. **Do NOT retry the original agent.** The agent already exhausted its attempts.
+
+Action: Route immediately to the `debugger` agent per RDR-040's directive, forwarding
+the full escalation block as the Input Artifact. The debugger is purpose-built for
+these situations.
+
+```markdown
+## Relay: debugger
+
+**Task**: Investigate and resolve escalated failure from [agent-name]
+**Bead**: [original bead ID]
+
+### Input Artifacts
+- Escalation report: [paste <!-- ESCALATION --> block verbatim]
+- Original task context: [original relay or task description]
+
+### Deliverable
+Root cause identified and fix implemented or recommended.
+
+### Quality Criteria
+- [ ] Root cause identified
+- [ ] Fix implemented or workaround documented
+- [ ] No recurrence of escalation condition
+```
+
+#### Type B — Incomplete or Malformed Output (no ESCALATION sentinel)
+
+The agent returned output that is incomplete, unparseable, or does not satisfy the
+relay's Quality Criteria, but did NOT raise an explicit escalation.
+
+Action: Retry up to **2 times** with an augmented relay containing failure context.
+
+### Retry Logic
+
+Track `retry_count` starting at 0. Increment before each retry attempt.
+
+**Condition**: `retry_count < 2` → retry with augmented relay
+**Condition**: `retry_count >= 2` → escalate to user (see below)
+
+#### Augmented Relay Format
+
+On each retry, append a `### Failure Context` block to the relay's `### Context Notes`
+section containing:
+
+```markdown
+### Failure Context (retry {retry_count} of 2)
+
+**Original task**: [1-2 sentence restatement of what was requested]
+
+**Failed output**:
+[Paste the incomplete/malformed output verbatim, or summarize if lengthy]
+
+**Failure reason**: [Why the output is unusable — missing fields, wrong format,
+partial completion, assertion failures, etc.]
+
+**Guidance for retry**: [What the agent should do differently this time]
+```
+
+#### Retry Relay Example
+
+```markdown
+## Relay: [agent-name]
+
+**Task**: [original task — unchanged]
+**Bead**: [original bead ID]
+
+### Input Artifacts
+[original artifacts — unchanged]
+
+### Deliverable
+[original deliverable — unchanged]
+
+### Quality Criteria
+[original criteria — unchanged]
+
+### Context Notes
+**Routing Reason**: [original routing reason]
+
+### Failure Context (retry 1 of 2)
+
+**Original task**: Extract table data from PDF collection and return structured JSON.
+
+**Failed output**:
+The agent returned plain text paragraphs with no JSON structure.
+
+**Failure reason**: Output does not satisfy Quality Criterion "Returns valid JSON".
+
+**Guidance for retry**: Ensure output is wrapped in a ```json code block. Validate
+that all required fields (id, content, type) are present in each record.
+```
+
+### User Escalation (after 2 failed retries)
+
+If `retry_count` reaches 2 and the agent still produces unusable output, stop retrying
+and report to the user with full context:
+
+```markdown
+## Orchestrator Escalation Report
+
+**Agent**: [agent-name]
+**Task**: [original task summary]
+**Bead**: [bead ID or 'none']
+**Retries attempted**: 2
+
+### What was attempted
+[Brief description of the original goal]
+
+### Failure summary
+- **Attempt 1**: [what went wrong]
+- **Attempt 2**: [what went wrong]
+
+### Failed outputs
+[Attach or summarize the last failed output]
+
+### Recommended next action
+[One of: manual intervention, alternative agent, task decomposition, architecture
+review — with rationale]
+```
+
+Create a blocker bead if a bead is associated with the task:
+`bd create "Blocked: [agent-name] failed after 2 retries on [task]" -t bug --blocks [original-bead-id]`
 
 ## Output Format
 
