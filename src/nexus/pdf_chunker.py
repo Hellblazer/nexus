@@ -45,7 +45,7 @@ class PDFChunker:
         """
         page_boundaries = extraction_metadata.get("page_boundaries", [])
         table_regions = extraction_metadata.get("table_regions", [])
-        table_pages: set[int] = {r["page"] for r in table_regions}
+        table_pages: set[int] = {r["page"] for r in table_regions} if table_regions else set()
         chunks: list[TextChunk] = []
         start = 0
         chunk_index = 0

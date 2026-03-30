@@ -39,6 +39,6 @@ def enrich(title: str) -> dict:
             "citation_count": paper.get("citationCount", 0) or 0,
             "semantic_scholar_id": paper.get("paperId", "") or "",
         }
-    except Exception as exc:
+    except (httpx.HTTPError, httpx.TimeoutException, httpx.ConnectError) as exc:
         _log.debug("bib_enricher_lookup_failed", title=title, error=str(exc))
         return {}

@@ -23,6 +23,7 @@ agents:
     model: sonnet
     version: "1.0"
     color: cyan
+    skill: query
     description: "Executes analytical operations (extract, summarize, rank, compare, generate) on retrieved content"
     triggers:
       - "dispatched by /nx:query skill for structured data processing"

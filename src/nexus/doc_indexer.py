@@ -273,14 +273,18 @@ def _pdf_chunks(
     corpus: str,
     *,
     chunk_chars: int | None = None,
+    bib_enrich_enabled: bool = True,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
 
     *chunk_chars* overrides the default chunk size (1500 chars).  When None
     the PDFChunker default is used.  Pass ``tuning.pdf_chunk_chars`` from
     TuningConfig to honour per-repo configuration.
+
+    *bib_enrich_enabled* controls whether Semantic Scholar is queried for
+    bibliographic metadata (year, venue, authors, citation count).  Disable
+    for offline/air-gapped environments or bulk indexing.
     """
-    from nexus.bib_enricher import enrich as bib_enrich
     result = PDFExtractor().extract(pdf_path)
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
     chunks = chunker.chunk(result.text, result.metadata)
@@ -298,7 +302,10 @@ def _pdf_chunks(
         or result.metadata.get("pdf_title", "")
         or pdf_path.stem.replace("_", " ").replace("-", " ")
     )
-    bib = bib_enrich(source_title)
+    bib: dict = {}
+    if bib_enrich_enabled:
+        from nexus.bib_enricher import enrich as bib_enrich
+        bib = bib_enrich(source_title)
 
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
@@ -393,6 +400,7 @@ def index_pdf(
     force: bool = False,
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
+    enrich: bool = True,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -414,9 +422,14 @@ def index_pdf(
 
     Metadata is derived from chunk metadatas produced during extraction
     (no additional T3 query).  Default False preserves existing int behavior.
+
+    Pass *enrich=False* to skip Semantic Scholar bibliographic metadata
+    lookup (useful for offline/air-gapped environments or bulk indexing).
     """
+    from functools import partial
+    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich)
     raw = _index_document(
-        pdf_path, corpus, _pdf_chunks, t3=t3,
+        pdf_path, corpus, chunk_fn, t3=t3,
         collection_name=collection_name, embed_fn=embed_fn,
         force=force, return_metadata=return_metadata, on_progress=on_progress,
     )

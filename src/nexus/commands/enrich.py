@@ -19,7 +19,13 @@ _log = structlog.get_logger(__name__)
     show_default=True,
     help="Delay in seconds between Semantic Scholar API calls.",
 )
-def enrich(collection: str, delay: float) -> None:
+@click.option(
+    "--limit",
+    default=0,
+    type=int,
+    help="Maximum number of titles to enrich (0 = unlimited).",
+)
+def enrich(collection: str, delay: float, limit: int) -> None:
     """Backfill bibliographic metadata for chunks in COLLECTION.
 
     Queries Semantic Scholar for each unique source title found in the
@@ -36,9 +42,10 @@ def enrich(collection: str, delay: float) -> None:
     db = make_t3()
     col = db.get_or_create_collection(collection)
 
-    # Retrieve all chunks with their metadata (paginated).
-    all_ids: list[str] = []
-    all_metadatas: list[dict] = []
+    # Process incrementally: one batch at a time to bound memory usage.
+    title_to_ids: dict[str, list[str]] = {}
+    already_enriched = 0
+    total_chunks = 0
     offset = 0
     while True:
         batch = _chroma_with_retry(
@@ -49,39 +56,40 @@ def enrich(collection: str, delay: float) -> None:
         )
         batch_ids = batch.get("ids", [])
         batch_meta = batch.get("metadatas", [])
-        all_ids.extend(batch_ids)
-        all_metadatas.extend(batch_meta)
+        total_chunks += len(batch_ids)
+        for chunk_id, meta in zip(batch_ids, batch_meta):
+            if meta.get("bib_semantic_scholar_id", ""):
+                already_enriched += 1
+                continue
+            title = meta.get("source_title", "") or ""
+            if not title:
+                continue
+            title_to_ids.setdefault(title, []).append(chunk_id)
         if len(batch_ids) < 300:
             break
         offset += 300
 
-    if not all_ids:
+    if not total_chunks:
         click.echo(f"Collection '{collection}' is empty — nothing to enrich.")
         return
 
-    # Group chunk ids by source_title; skip already-enriched chunks.
-    title_to_ids: dict[str, list[str]] = {}
-    already_enriched = 0
-    for chunk_id, meta in zip(all_ids, all_metadatas):
-        if meta.get("bib_semantic_scholar_id", ""):
-            already_enriched += 1
-            continue
-        title = meta.get("source_title", "") or ""
-        if not title:
-            continue
-        title_to_ids.setdefault(title, []).append(chunk_id)
+    titles_to_process = list(title_to_ids.items())
+    if limit > 0:
+        titles_to_process = titles_to_process[:limit]
 
     click.echo(
-        f"Collection '{collection}': {len(all_ids)} total chunks, "
+        f"Collection '{collection}': {total_chunks} total chunks, "
         f"{already_enriched} already enriched, "
-        f"{len(title_to_ids)} unique titles to look up."
+        f"{len(titles_to_process)} titles to look up"
+        + (f" (capped at {limit})" if limit > 0 else "")
+        + "."
     )
 
     enriched_titles = 0
     enriched_chunks = 0
     skipped_titles = 0
 
-    for i, (title, chunk_ids) in enumerate(title_to_ids.items()):
+    for i, (title, chunk_ids) in enumerate(titles_to_process):
         if i > 0:
             time.sleep(delay)
 
