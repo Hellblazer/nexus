@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-03-30
+
+### Fixed
+- **T2 plans table migration** — existing `memory.db` files created during
+  v2.8.0 before the `project` column was added now auto-migrate on open.
+  `ALTER TABLE plans ADD COLUMN project` + FTS5 rebuild runs transparently.
+
 ## [2.8.0] - 2026-03-30
 
 ### Added
