@@ -37,8 +37,15 @@ class PDFChunker:
 
         *extraction_metadata* is used to extract page boundaries for assigning
         page numbers to each chunk; it is not forwarded wholesale into chunk metadata.
+
+        Chunks are tagged with ``chunk_type``: ``"table"`` when the chunk's page
+        appears in ``extraction_metadata["table_regions"]``, else ``"text"``.
+        This is page-level granularity — all chunks on a table page are tagged
+        as ``"table"`` regardless of their exact content.
         """
         page_boundaries = extraction_metadata.get("page_boundaries", [])
+        table_regions = extraction_metadata.get("table_regions", [])
+        table_pages: set[int] = {r["page"] for r in table_regions}
         chunks: list[TextChunk] = []
         start = 0
         chunk_index = 0
@@ -55,6 +62,8 @@ class PDFChunker:
 
             chunk_text = text[start:end].strip()
             if chunk_text:
+                page_number = self._page_for(start, page_boundaries)
+                chunk_type = "table" if page_number in table_pages else "text"
                 chunks.append(
                     TextChunk(
                         text=chunk_text,
@@ -63,7 +72,8 @@ class PDFChunker:
                             "chunk_index": chunk_index,
                             "chunk_start_char": start,
                             "chunk_end_char": end,
-                            "page_number": self._page_for(start, page_boundaries),
+                            "page_number": page_number,
+                            "chunk_type": chunk_type,
                         },
                     )
                 )

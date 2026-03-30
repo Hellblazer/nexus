@@ -106,6 +106,21 @@ class PDFExtractor:
         if not text.strip():
             raise RuntimeError("docling produced empty output")
 
+        # Second pass: collect TableItem regions (duck-typed, import-path safe)
+        table_regions: list[dict] = []
+        for item, _ in doc.iterate_items():
+            if type(item).__name__ != "TableItem":
+                continue
+            prov = getattr(item, "prov", [])
+            page_no = prov[0].page_no if prov else 0
+            html = ""
+            if callable(getattr(item, "export_to_html", None)):
+                try:
+                    html = item.export_to_html()
+                except Exception:
+                    html = ""
+            table_regions.append({"page": page_no, "html": html})
+
         return ExtractionResult(
             text=text,
             metadata={
@@ -113,6 +128,7 @@ class PDFExtractor:
                 "page_count": page_count,
                 "format": "markdown",
                 "page_boundaries": page_boundaries,
+                "table_regions": table_regions,
                 "docling_title": self._extract_title(doc),
                 "pdf_title": "",  # XMP metadata not exposed by Docling
                 "pdf_author": "",

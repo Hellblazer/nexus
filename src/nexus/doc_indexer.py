@@ -310,6 +310,7 @@ def _pdf_chunks(
             "section_title": "",
             "format": result.metadata.get("format", ""),
             "extraction_method": result.metadata.get("extraction_method", ""),
+            "chunk_type": chunk.metadata.get("chunk_type", "text"),
             "chunk_index": chunk.chunk_index,
             "chunk_count": len(chunks),
             "chunk_start_char": chunk.metadata.get("chunk_start_char", 0),
