@@ -18,6 +18,9 @@ from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
 _BENCHMARK_DIR = Path(__file__).parent
 
+# Mark the retrieval benchmark as slow — exclude from fast CI with: pytest -m "not slow"
+slow = pytest.mark.slow
+
 
 def dcg_at_k(relevances: list[int], k: int) -> float:
     """Discounted Cumulative Gain at position k."""
@@ -124,6 +127,7 @@ def benchmark_collection():
     return collection
 
 
+@slow
 def test_retrieval_ndcg_at_5(benchmark_collection) -> None:
     """Benchmark: mean NDCG@5 across all synthetic queries.
 

@@ -3,6 +3,8 @@
 """Bibliographic metadata enrichment via Semantic Scholar public API."""
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import structlog
 
@@ -12,7 +14,7 @@ _FIELDS = "year,venue,authors,citationCount,externalIds"
 _TIMEOUT = 3.0  # fast-fail for inline use during indexing
 
 
-def enrich(title: str) -> dict:
+def enrich(title: str) -> dict[str, Any]:
     """Query Semantic Scholar for bibliographic metadata.
 
     Returns a dict with keys: year, venue, authors, citation_count,

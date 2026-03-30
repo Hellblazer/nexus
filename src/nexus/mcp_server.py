@@ -495,6 +495,7 @@ def collection_verify(name: str) -> str:
 def plan_save(
     query: str,
     plan_json: str,
+    project: str = "",
     outcome: str = "success",
     tags: str = "",
 ) -> str:
@@ -503,6 +504,7 @@ def plan_save(
     Args:
         query: The original natural-language question
         plan_json: JSON string of the execution plan
+        project: Project namespace for scoping (e.g. "nexus")
         outcome: Plan outcome — "success" or "partial"
         tags: Comma-separated tags (e.g. operation types used)
     """
@@ -515,6 +517,7 @@ def plan_save(
                 plan_json=plan_json,
                 outcome=outcome,
                 tags=tags,
+                project=project,
             )
         return f"Saved plan: [{row_id}] {query[:80]}"
     except Exception as e:
@@ -522,16 +525,17 @@ def plan_save(
 
 
 @mcp.tool()
-def plan_search(query: str, limit: int = 5) -> str:
+def plan_search(query: str, project: str = "", limit: int = 5) -> str:
     """Search the T2 plan library for similar query plans.
 
     Args:
         query: Search query (matched against plan query text and tags)
+        project: Optional project filter (e.g. "nexus")
         limit: Maximum results to return
     """
     try:
         with _t2_ctx() as db:
-            results = db.search_plans(query, limit=limit)
+            results = db.search_plans(query, limit=limit, project=project)
         if not results:
             return "No matching plans."
         lines: list[str] = []

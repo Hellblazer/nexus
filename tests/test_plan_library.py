@@ -105,3 +105,39 @@ def test_list_plans_limit(plan_db: T2Database) -> None:
 
     results = plan_db.list_plans(limit=3)
     assert len(results) == 3
+
+
+def test_save_plan_with_project(plan_db: T2Database) -> None:
+    """save_plan() stores the project field correctly."""
+    row_id = plan_db.save_plan(
+        query="find error patterns",
+        plan_json='{"steps":[]}',
+        project="nexus",
+    )
+    row = plan_db.conn.execute("SELECT project FROM plans WHERE id = ?", (row_id,)).fetchone()
+    assert row[0] == "nexus"
+
+
+def test_search_plans_project_filter(plan_db: T2Database) -> None:
+    """search_plans() with project filter returns only matching project plans."""
+    plan_db.save_plan(query="search code patterns", plan_json='{}', project="nexus")
+    plan_db.save_plan(query="search code patterns", plan_json='{}', project="other")
+
+    results = plan_db.search_plans("search", project="nexus")
+    assert len(results) == 1
+    assert results[0]["project"] == "nexus"
+
+    # Without project filter, both returned
+    all_results = plan_db.search_plans("search")
+    assert len(all_results) == 2
+
+
+def test_list_plans_project_filter(plan_db: T2Database) -> None:
+    """list_plans() with project filter returns only matching project plans."""
+    plan_db.save_plan(query="plan a", plan_json='{}', project="nexus")
+    plan_db.save_plan(query="plan b", plan_json='{}', project="other")
+    plan_db.save_plan(query="plan c", plan_json='{}', project="nexus")
+
+    results = plan_db.list_plans(project="nexus")
+    assert len(results) == 2
+    assert all(r["project"] == "nexus" for r in results)

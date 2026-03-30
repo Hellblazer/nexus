@@ -72,6 +72,7 @@ testpaths = ["tests"]
 log_level = "WARNING"
 markers = [
     "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
+    "slow: expensive benchmarks (deselect with '-m not slow')",
 ]
 
 [dependency-groups]
