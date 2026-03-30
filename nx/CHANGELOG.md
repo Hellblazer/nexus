@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **analytical-operator agent** — executes 5 analytical operations (extract,
+  summarize, rank, compare, generate) over retrieved content. Dispatched by
+  the `/nx:query` skill. (RDR-042)
+- **query-planner agent** — decomposes complex analytical questions into
+  step-by-step JSON execution plans with `$step_N` references. (RDR-042)
+- **`/nx:query` skill** — multi-step analytical query execution driver.
+  Orchestrates query-planner → analytical-operator dispatch loop with T1
+  scratch for step persistence and T2 plan library for reuse. (RDR-042)
+- **`plan_save` / `plan_search` MCP tools** — expose T2 plan library to
+  agents. Project-scoped FTS5 search over saved query plans. (RDR-042)
+- **Orchestrator failure relay protocol** — distinguishes ESCALATION
+  sentinels (circuit breaker, route to debugger) from incomplete output
+  (retry up to 2x). (RDR-042)
+- **SubagentStart hook** — now injects plan library and analytical operator
+  guidance so all subagents know about the query pipeline. (RDR-042)
+
+### Fixed
+- **Serena hook tool names** — sn plugin SubagentStart hook now uses full
+  MCP-prefixed names (`mcp__plugin_sn_serena__*`). Short names were invisible
+  to subagents.
+
 ## [2.7.1] - 2026-03-28
 
 ### Added

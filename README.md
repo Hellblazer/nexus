@@ -27,6 +27,16 @@ nx memory put --project myapp --title "DB choice"  "Chose Postgres over SQLite f
 nx store put --collection knowledge__myapp "API rate limit is 10k/min per the vendor docs"
 ```
 
+**Analytical queries.** Go beyond simple search with multi-step retrieval and analysis. The `/nx:query` skill decomposes complex questions into plans that search across corpora, extract structured data, compare findings, and generate evidence-grounded summaries.
+
+```bash
+# Filter indexed PDFs by bibliographic metadata
+nx search "consensus protocols" --where bib_year>=2024 --where chunk_type=table_page
+
+# Backfill bibliographic metadata on an existing collection
+nx enrich knowledge__papers --delay 0.5
+```
+
 **Decision tracking.** RDR documents record the reasoning behind technical choices and are searchable alongside code, so prior decisions surface automatically during new design work.
 
 ## Quick Start
@@ -96,7 +106,7 @@ The `nx/` directory is a Claude Code plugin that gives agents access to everythi
 /plugin install nx@nexus-plugins
 ```
 
-The plugin provides 15 specialized agents, 28 skills covering the RDR lifecycle and development workflows, session hooks for automatic context initialization, and MCP servers for structured storage access. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
+The plugin provides 17 specialized agents (including analytical operators for structured extraction, summarization, ranking, and comparison), 29 skills covering the RDR lifecycle, analytical query pipelines, and development workflows, session hooks for automatic context initialization, and MCP servers for structured storage access. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
 
 The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task tracking. See [nx/README.md](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) for the full plugin documentation.
 
@@ -106,8 +116,9 @@ The `nx` command provides direct access to all storage tiers, indexing, and sear
 
 | Command | What it does |
 |---------|-------------|
-| `nx search` | Semantic and hybrid search across indexed code, docs, and knowledge |
+| `nx search` | Semantic and hybrid search across indexed code, docs, and knowledge. Supports `--where` with `=`, `>=`, `<=`, `>`, `<`, `!=` operators for metadata filtering |
 | `nx index` | Index git repos, PDFs, and markdown into searchable collections |
+| `nx enrich` | Backfill bibliographic metadata (year, venue, authors, citations) from Semantic Scholar |
 | `nx store` | Store, retrieve, export, and import knowledge entries |
 | `nx memory` | Per-project persistent notes (local, no API keys) |
 | `nx scratch` | Inter-agent session context (in-memory, no API keys) |

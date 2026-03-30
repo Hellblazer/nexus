@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Analytical query pipeline** — `/nx:query` skill decomposes complex questions
+  into multi-step plans (search → extract → summarize → compare → generate),
+  dispatched via new `query-planner` and `analytical-operator` agents. Step
+  outputs persist in T1 scratch for cross-dispatch reference. (RDR-042)
+- **Bibliographic metadata enrichment** — `nx index pdf` queries Semantic Scholar
+  for year, venue, authors, and citation count. Opt-out with `--no-enrich`.
+  Backfill existing collections with `nx enrich <collection>`. (RDR-042)
+- **Structured table detection** — PDF chunks on pages containing tables are
+  tagged `chunk_type=table_page`. Filter with `--where chunk_type=table_page`.
+  Page-level granularity via Docling `TableItem` detection. (RDR-042)
+- **`--where` comparison operators** — `nx search --where` now supports `>=`,
+  `<=`, `>`, `<`, `!=` in addition to `=`. Known numeric fields (`bib_year`,
+  `bib_citation_count`, `page_count`, etc.) are auto-coerced to int. (RDR-042)
+- **T2 plan library** — `plans` table with FTS5 search, project scoping, and
+  MCP tools (`plan_save`, `plan_search`). Saves successful query execution
+  plans for future reuse. (RDR-042)
+- **Orchestrator self-correction** — failure relay protocol distinguishes
+  ESCALATION sentinels (route to debugger) from incomplete output (retry up
+  to 2x with augmented context). (RDR-042)
+- **NDCG retrieval smoke test** — synthetic corpus + ground-truth queries in
+  `tests/benchmarks/` verify the search pipeline runs end-to-end with ONNX
+  MiniLM. (RDR-042)
+
+### Fixed
+- **sn plugin Serena hook** — SubagentStart hook now uses full MCP-prefixed
+  tool names (`mcp__plugin_sn_serena__*`) so subagents can actually resolve
+  and call Serena tools. Previously used short names that subagents couldn't
+  find.
+
 ## [2.7.1] - 2026-03-28
 
 ### Added

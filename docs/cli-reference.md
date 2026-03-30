@@ -19,7 +19,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
 | `--hybrid` | Augment semantic results with frecency-weighted ranking and ripgrep keyword matches (0.7*vector + 0.3*frecency). Requires ripgrep |
 | `--no-rerank` | Disable cross-corpus reranking (use round-robin instead) |
-| `--where KEY=VALUE` | Metadata filter (repeatable; multiple flags are ANDed) |
+| `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`) are auto-coerced to int. Example: `--where bib_year>=2024 --where chunk_type=table_page` |
 | `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |
 | `-m` / `--n` / `--max-results NUM` | Max results (default 10) |
 | `-A N` | Show N lines of context after each matching line (within chunk) |
@@ -77,7 +77,28 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
+| `--no-enrich` | Skip Semantic Scholar bibliographic metadata lookup (useful for offline/bulk indexing) |
 | `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
+
+---
+
+## nx enrich
+
+Backfill bibliographic metadata from Semantic Scholar for an existing T3 collection.
+
+```
+nx enrich knowledge__papers --delay 0.5 --limit 50
+```
+
+Queries Semantic Scholar for each unique `source_title` in the collection and writes `bib_year`, `bib_venue`, `bib_authors`, `bib_citation_count`, and `bib_semantic_scholar_id` back to every chunk with that title. Already-enriched chunks (non-empty `bib_semantic_scholar_id`) are skipped — the command is idempotent.
+
+| Flag | Description |
+|------|-------------|
+| `COLLECTION` (positional) | Fully-qualified T3 collection name (e.g. `knowledge__papers`) |
+| `--delay SECONDS` | Delay between API calls (default: 0.5s). Increase to avoid rate limiting |
+| `--limit N` | Maximum number of titles to enrich (default: 0 = unlimited) |
+
+**Note**: Semantic Scholar's public API allows 100 requests per 5 minutes without an API key. For large collections, increase `--delay` or use `--limit` to process in batches.
 
 ---
 
