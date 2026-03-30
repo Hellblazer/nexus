@@ -491,6 +491,66 @@ def collection_verify(name: str) -> str:
         return f"Error: {e}"
 
 
+@mcp.tool()
+def plan_save(
+    query: str,
+    plan_json: str,
+    project: str = "",
+    outcome: str = "success",
+    tags: str = "",
+) -> str:
+    """Save a query execution plan to the T2 plan library.
+
+    Args:
+        query: The original natural-language question
+        plan_json: JSON string of the execution plan
+        project: Project namespace for scoping (e.g. "nexus")
+        outcome: Plan outcome — "success" or "partial"
+        tags: Comma-separated tags (e.g. operation types used)
+    """
+    try:
+        if not query or not plan_json:
+            return "Error: query and plan_json are required"
+        with _t2_ctx() as db:
+            row_id = db.save_plan(
+                query=query,
+                plan_json=plan_json,
+                outcome=outcome,
+                tags=tags,
+                project=project,
+            )
+        return f"Saved plan: [{row_id}] {query[:80]}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def plan_search(query: str, project: str = "", limit: int = 5) -> str:
+    """Search the T2 plan library for similar query plans.
+
+    Args:
+        query: Search query (matched against plan query text and tags)
+        project: Optional project filter (e.g. "nexus")
+        limit: Maximum results to return
+    """
+    try:
+        with _t2_ctx() as db:
+            results = db.search_plans(query, limit=limit, project=project)
+        if not results:
+            return "No matching plans."
+        lines: list[str] = []
+        for r in results:
+            plan_preview = r["plan_json"][:100].replace("\n", " ")
+            lines.append(
+                f"[{r['id']}] {r['query'][:60]}\n"
+                f"  outcome={r['outcome']}  tags={r['tags']}\n"
+                f"  plan: {plan_preview}..."
+            )
+        return "\n\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():

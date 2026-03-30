@@ -14,6 +14,12 @@ from nexus.doc_indexer import index_markdown, index_pdf
 from tests.conftest import set_credentials
 
 
+@pytest.fixture(autouse=True)
+def _no_bib_enrich(monkeypatch):
+    """Prevent bib_enricher from making real HTTP calls in all tests."""
+    monkeypatch.setattr("nexus.bib_enricher.enrich", lambda title: {})
+
+
 @pytest.fixture
 def sample_pdf(tmp_path: Path) -> Path:
     p = tmp_path / "sample.pdf"

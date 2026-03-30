@@ -498,10 +498,11 @@ def test_parse_where_empty_value() -> None:
     assert result == {"key": ""}
 
 
-def test_parse_where_empty_key() -> None:
-    """'=value' → ''='value' (empty key accepted by parser)."""
-    result = _parse_where(("=value",))
-    assert result == {"": "value"}
+def test_parse_where_empty_key_raises() -> None:
+    """'=value' → rejected (empty key is not valid)."""
+    from click import BadParameter
+    with pytest.raises(BadParameter):
+        _parse_where(("=value",))
 
 
 def test_parse_where_missing_equals_raises() -> None:
@@ -514,6 +515,85 @@ def test_parse_where_multiple_pairs_merged() -> None:
     result = _parse_where(("lang=python", "type=code"))
     assert result == {"lang": "python", "type": "code"}
 
+
+# ── _parse_where operator tests ──────────────────────────────────────────────
+
+
+def test_parse_where_gte_operator() -> None:
+    result = _parse_where(("bib_year>=2024",))
+    assert result == {"bib_year": {"$gte": 2024}}
+
+
+def test_parse_where_lte_operator() -> None:
+    result = _parse_where(("bib_citation_count<=100",))
+    assert result == {"bib_citation_count": {"$lte": 100}}
+
+
+def test_parse_where_gt_operator() -> None:
+    result = _parse_where(("page_count>10",))
+    assert result == {"page_count": {"$gt": 10}}
+
+
+def test_parse_where_lt_operator() -> None:
+    result = _parse_where(("chunk_index<5",))
+    assert result == {"chunk_index": {"$lt": 5}}
+
+
+def test_parse_where_ne_operator() -> None:
+    result = _parse_where(("chunk_type!=text",))
+    assert result == {"chunk_type": {"$ne": "text"}}
+
+
+def test_parse_where_numeric_coercion_int() -> None:
+    """Known numeric fields are coerced to int."""
+    result = _parse_where(("bib_year=2024",))
+    assert result == {"bib_year": 2024}
+    assert isinstance(result["bib_year"], int)
+
+
+def test_parse_where_numeric_coercion_non_numeric_field() -> None:
+    """Unknown fields stay as strings even if value looks numeric."""
+    result = _parse_where(("corpus=42",))
+    assert result == {"corpus": "42"}
+    assert isinstance(result["corpus"], str)
+
+
+def test_parse_where_mixed_operators_uses_and() -> None:
+    """Multiple operator filters produce $and."""
+    result = _parse_where(("bib_year>=2020", "bib_year<=2024"))
+    assert result == {"$and": [
+        {"bib_year": {"$gte": 2020}},
+        {"bib_year": {"$lte": 2024}},
+    ]}
+
+
+def test_parse_where_equality_plus_operator_uses_and() -> None:
+    """Mix of equality and operator filters produces $and."""
+    result = _parse_where(("corpus=knowledge", "bib_year>=2020"))
+    assert result == {"$and": [
+        {"corpus": "knowledge"},
+        {"bib_year": {"$gte": 2020}},
+    ]}
+
+
+def test_parse_where_value_containing_gt_not_mismatched() -> None:
+    """Value containing > is not misinterpreted as an operator."""
+    result = _parse_where(("source_path=a>b/file.py",))
+    assert result == {"source_path": "a>b/file.py"}
+
+
+def test_parse_where_numeric_field_non_numeric_value_raises() -> None:
+    """Known numeric field with non-numeric value raises BadParameter."""
+    from click import BadParameter
+    with pytest.raises(BadParameter, match="requires a numeric value"):
+        _parse_where(("bib_year>=notanumber",))
+
+
+def test_parse_where_numeric_field_equality_non_numeric_raises() -> None:
+    """Known numeric field with = and non-numeric value also raises."""
+    from click import BadParameter
+    with pytest.raises(BadParameter, match="requires a numeric value"):
+        _parse_where(("bib_year=notanumber",))
 
 
 # ── --max-file-chunks ─────────────────────────────────────────────────────────

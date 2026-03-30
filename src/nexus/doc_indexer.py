@@ -273,12 +273,17 @@ def _pdf_chunks(
     corpus: str,
     *,
     chunk_chars: int | None = None,
+    bib_enrich_enabled: bool = True,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
 
     *chunk_chars* overrides the default chunk size (1500 chars).  When None
     the PDFChunker default is used.  Pass ``tuning.pdf_chunk_chars`` from
     TuningConfig to honour per-repo configuration.
+
+    *bib_enrich_enabled* controls whether Semantic Scholar is queried for
+    bibliographic metadata (year, venue, authors, citation count).  Disable
+    for offline/air-gapped environments or bulk indexing.
     """
     result = PDFExtractor().extract(pdf_path)
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
@@ -291,16 +296,23 @@ def _pdf_chunks(
     _page_count = result.metadata.get("page_count", 1) or 1
     is_image_pdf = (len(result.text) / _page_count) < 20
 
+    # Compute source_title once before the loop so bib lookup uses the same value.
+    source_title = (
+        result.metadata.get("docling_title", "")
+        or result.metadata.get("pdf_title", "")
+        or pdf_path.stem.replace("_", " ").replace("-", " ")
+    )
+    bib: dict = {}
+    if bib_enrich_enabled:
+        from nexus.bib_enricher import enrich as bib_enrich
+        bib = bib_enrich(source_title)
+
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
             "source_path": str(pdf_path),
-            "source_title": (
-                result.metadata.get("docling_title", "")
-                or result.metadata.get("pdf_title", "")
-                or pdf_path.stem.replace("_", " ").replace("-", " ")
-            ),
+            "source_title": source_title,
             "source_author": result.metadata.get("pdf_author", ""),
             "source_date": result.metadata.get("pdf_creation_date", ""),
             "corpus": corpus,
@@ -310,6 +322,7 @@ def _pdf_chunks(
             "section_title": "",
             "format": result.metadata.get("format", ""),
             "extraction_method": result.metadata.get("extraction_method", ""),
+            "chunk_type": chunk.metadata.get("chunk_type", "text"),
             "chunk_index": chunk.chunk_index,
             "chunk_count": len(chunks),
             "chunk_start_char": chunk.metadata.get("chunk_start_char", 0),
@@ -320,6 +333,11 @@ def _pdf_chunks(
             "pdf_subject": result.metadata.get("pdf_subject", ""),
             "pdf_keywords": result.metadata.get("pdf_keywords", ""),
             "is_image_pdf": is_image_pdf,
+            "bib_year": bib.get("year", 0),
+            "bib_venue": bib.get("venue", ""),
+            "bib_authors": bib.get("authors", ""),
+            "bib_citation_count": bib.get("citation_count", 0),
+            "bib_semantic_scholar_id": bib.get("semantic_scholar_id", ""),
         }
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -382,6 +400,7 @@ def index_pdf(
     force: bool = False,
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
+    enrich: bool = True,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -403,9 +422,14 @@ def index_pdf(
 
     Metadata is derived from chunk metadatas produced during extraction
     (no additional T3 query).  Default False preserves existing int behavior.
+
+    Pass *enrich=False* to skip Semantic Scholar bibliographic metadata
+    lookup (useful for offline/air-gapped environments or bulk indexing).
     """
+    from functools import partial
+    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich)
     raw = _index_document(
-        pdf_path, corpus, _pdf_chunks, t3=t3,
+        pdf_path, corpus, chunk_fn, t3=t3,
         collection_name=collection_name, embed_fn=embed_fn,
         force=force, return_metadata=return_metadata, on_progress=on_progress,
     )

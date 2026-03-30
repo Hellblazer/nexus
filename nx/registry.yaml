@@ -19,6 +19,23 @@ generated_docs:
 # Agents output "Recommended Next Step" blocks; the caller orchestrates dispatch.
 
 agents:
+  analytical-operator:
+    model: sonnet
+    version: "1.0"
+    color: cyan
+    skill: query
+    description: "Executes analytical operations (extract, summarize, rank, compare, generate) on retrieved content"
+    triggers:
+      - "dispatched by /nx:query skill for structured data processing"
+      - "multi-step query operator execution"
+    strengths:
+      - "Structured extraction"
+      - "Evidence-grounded summarization"
+      - "Comparative analysis"
+    typical_runtime: "15-30 seconds"
+    predecessors: []
+    successors: []
+
   code-review-expert:
     model: sonnet
     version: "2.0"
@@ -215,6 +232,24 @@ agents:
     typical_runtime: "30-60 seconds per PDF"
     predecessors: []
     successors: []
+
+  query-planner:
+    model: sonnet
+    version: "1.0"
+    color: blue
+    skill: query
+    slash_command: /query
+    description: "Decomposes analytical questions into step-by-step execution plans with operator references"
+    triggers:
+      - "dispatched by /nx:query skill for plan generation"
+      - "complex analytical question decomposition"
+    strengths:
+      - "Query decomposition"
+      - "Operator selection"
+      - "Plan optimization"
+    typical_runtime: "15-30 seconds"
+    predecessors: []
+    successors: [analytical-operator]
 
   plan-auditor:
     model: sonnet
@@ -525,6 +560,7 @@ model_summary:
     - debugger
     - deep-analyst
   sonnet: # Balanced - most common agents
+    - analytical-operator
     - code-review-expert
     - codebase-deep-analyzer
     - substantive-critic
@@ -533,6 +569,7 @@ model_summary:
     - orchestrator
     - plan-auditor
     - plan-enricher
+    - query-planner
     - test-validator
   haiku: # Fast, cheap - utility agents
     - knowledge-tidier

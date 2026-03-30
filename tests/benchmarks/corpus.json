@@ -1,0 +1,127 @@
+[
+  {
+    "id": "doc_01",
+    "content": "Authentication tokens should be stored securely using bcrypt hashing with a minimum cost factor of 12. JWT tokens require HMAC-SHA256 signatures and should expire within 15 minutes for access tokens.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_02",
+    "content": "OAuth2 authorization code flow involves redirecting the user to an authorization endpoint, exchanging an authorization code for an access token, and using refresh tokens to maintain sessions without re-authentication.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_03",
+    "content": "Password hashing with bcrypt: import bcrypt; hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)); bcrypt.checkpw(plain.encode(), hashed). Never store plaintext passwords.",
+    "type": "code"
+  },
+  {
+    "id": "doc_04",
+    "content": "Redis provides an LRU cache eviction policy that automatically removes least recently used keys when memory limit is reached. Configure maxmemory-policy to allkeys-lru for general caching workloads.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_05",
+    "content": "Cache-aside pattern: check cache first, on miss fetch from database and populate cache with a TTL. TTL selection balances freshness vs. database load. Typical TTLs range from 60s to 3600s for read-heavy data.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_06",
+    "content": "Memoization in Python using functools.lru_cache: @functools.lru_cache(maxsize=256) def expensive_computation(n): return n * n. Cache is bounded; LRU eviction prevents unbounded memory growth.",
+    "type": "code"
+  },
+  {
+    "id": "doc_07",
+    "content": "Inverted index construction: tokenize documents into terms, build a term-to-document-list mapping, apply TF-IDF weighting. Query execution intersects posting lists. BM25 outperforms raw TF-IDF for most retrieval tasks.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_08",
+    "content": "Semantic search uses dense vector embeddings to represent documents and queries. Cosine similarity measures the angle between vectors. HNSW graph index enables approximate nearest neighbor search in O(log n) expected time.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_09",
+    "content": "ChromaDB collection query: results = collection.query(query_texts=['find relevant documents'], n_results=10, where={'type': 'prose'}). Returns documents, distances, and metadata for each result.",
+    "type": "code"
+  },
+  {
+    "id": "doc_10",
+    "content": "Database indexing strategies: B-tree indexes for range queries, hash indexes for equality, partial indexes for filtered subsets. Covering indexes include all columns needed by a query to avoid heap fetches.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_11",
+    "content": "PostgreSQL EXPLAIN ANALYZE output shows actual vs. estimated row counts, buffer hits, and loop counts. High row count misestimates indicate stale statistics. Run ANALYZE to refresh planner statistics.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_12",
+    "content": "SQLite WAL mode enables concurrent readers and a single writer without blocking. Enable with: conn.execute('PRAGMA journal_mode=WAL'). WAL is ideal for read-heavy workloads with infrequent writes.",
+    "type": "code"
+  },
+  {
+    "id": "doc_13",
+    "content": "REST API design principles: use nouns for resource paths (/users, /orders), HTTP verbs for operations (GET/POST/PUT/DELETE), return 201 Created with Location header on resource creation, 204 No Content for successful deletions.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_14",
+    "content": "API rate limiting with token bucket algorithm: tokens refill at fixed rate, each request consumes one token, requests are rejected when bucket is empty. Redis INCR with EXPIRE provides a simple sliding window counter.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_15",
+    "content": "GraphQL query with variables: query GetUser($id: ID!) { user(id: $id) { name email roles { name } } }. Fragments enable reusable field selections. Persisted queries improve cache efficiency.",
+    "type": "code"
+  },
+  {
+    "id": "doc_16",
+    "content": "Test-driven development cycle: write a failing test, write minimal code to pass, refactor while keeping tests green. Red-green-refactor discipline prevents over-engineering and ensures every code path is exercised.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_17",
+    "content": "Property-based testing with Hypothesis generates random inputs satisfying stated invariants. Example: @given(st.lists(st.integers())) def test_sort_idempotent(lst): assert sorted(sorted(lst)) == sorted(lst).",
+    "type": "code"
+  },
+  {
+    "id": "doc_18",
+    "content": "Integration tests should use real databases and real network connections rather than mocks. Test containers spin up ephemeral Docker services. Port 0 allocation avoids port conflicts in parallel test runs.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_19",
+    "content": "Error handling strategy: fail fast on programming errors (assert, raise), recover gracefully from transient errors (retry with exponential backoff), surface user errors with actionable messages. Never swallow exceptions silently.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_20",
+    "content": "Circuit breaker pattern prevents cascading failures: after N consecutive errors the breaker trips OPEN, rejecting requests without attempting them. After a timeout it enters HALF_OPEN to probe recovery.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_21",
+    "content": "Python retry decorator with exponential backoff: import time; def retry(max_attempts=3, base_delay=1.0): decorator that catches specified exceptions and sleeps base_delay * 2**attempt before retrying.",
+    "type": "code"
+  },
+  {
+    "id": "doc_22",
+    "content": "Concurrent programming with asyncio: use async/await for I/O-bound tasks, asyncio.gather for concurrent coroutines, asyncio.Queue for producer-consumer patterns. CPU-bound tasks require multiprocessing or thread pools.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_23",
+    "content": "Thread safety with locks: threading.Lock for mutual exclusion, threading.RLock for reentrant locking, threading.Semaphore for bounded concurrency. Prefer immutable data structures to avoid shared mutable state.",
+    "type": "code"
+  },
+  {
+    "id": "doc_24",
+    "content": "Structured logging with key-value pairs enables machine-readable log analysis. Use context variables (request_id, user_id) to correlate log lines across a request lifecycle. Log at WARN+ in production, DEBUG in development.",
+    "type": "prose"
+  },
+  {
+    "id": "doc_25",
+    "content": "Configuration management: load defaults from code, override with config files (YAML/TOML), then environment variables, then CLI flags. Environment variables are the twelve-factor app standard for deployment-time configuration.",
+    "type": "prose"
+  }
+]
