@@ -1,0 +1,364 @@
+[
+  {
+    "query": "how to securely store authentication tokens",
+    "expected": [
+      {"doc_id": "doc_01", "relevance": 3},
+      {"doc_id": "doc_03", "relevance": 2},
+      {"doc_id": "doc_02", "relevance": 1}
+    ]
+  },
+  {
+    "query": "bcrypt password hashing implementation",
+    "expected": [
+      {"doc_id": "doc_03", "relevance": 3},
+      {"doc_id": "doc_01", "relevance": 2}
+    ]
+  },
+  {
+    "query": "JWT token expiration and signing",
+    "expected": [
+      {"doc_id": "doc_01", "relevance": 3},
+      {"doc_id": "doc_02", "relevance": 1}
+    ]
+  },
+  {
+    "query": "OAuth2 access token refresh flow",
+    "expected": [
+      {"doc_id": "doc_02", "relevance": 3},
+      {"doc_id": "doc_01", "relevance": 1}
+    ]
+  },
+  {
+    "query": "Redis LRU cache eviction policy configuration",
+    "expected": [
+      {"doc_id": "doc_04", "relevance": 3},
+      {"doc_id": "doc_05", "relevance": 1}
+    ]
+  },
+  {
+    "query": "cache TTL and cache-aside pattern",
+    "expected": [
+      {"doc_id": "doc_05", "relevance": 3},
+      {"doc_id": "doc_04", "relevance": 2},
+      {"doc_id": "doc_06", "relevance": 1}
+    ]
+  },
+  {
+    "query": "Python memoization with lru_cache",
+    "expected": [
+      {"doc_id": "doc_06", "relevance": 3},
+      {"doc_id": "doc_05", "relevance": 1}
+    ]
+  },
+  {
+    "query": "in-memory caching strategies for read-heavy workloads",
+    "expected": [
+      {"doc_id": "doc_04", "relevance": 3},
+      {"doc_id": "doc_05", "relevance": 3},
+      {"doc_id": "doc_06", "relevance": 2}
+    ]
+  },
+  {
+    "query": "inverted index BM25 full text search",
+    "expected": [
+      {"doc_id": "doc_07", "relevance": 3},
+      {"doc_id": "doc_08", "relevance": 1}
+    ]
+  },
+  {
+    "query": "vector embeddings cosine similarity approximate nearest neighbor",
+    "expected": [
+      {"doc_id": "doc_08", "relevance": 3},
+      {"doc_id": "doc_07", "relevance": 1},
+      {"doc_id": "doc_09", "relevance": 1}
+    ]
+  },
+  {
+    "query": "ChromaDB query with metadata filter",
+    "expected": [
+      {"doc_id": "doc_09", "relevance": 3},
+      {"doc_id": "doc_08", "relevance": 1}
+    ]
+  },
+  {
+    "query": "semantic search dense retrieval embeddings",
+    "expected": [
+      {"doc_id": "doc_08", "relevance": 3},
+      {"doc_id": "doc_07", "relevance": 2},
+      {"doc_id": "doc_09", "relevance": 2}
+    ]
+  },
+  {
+    "query": "database index B-tree hash covering index",
+    "expected": [
+      {"doc_id": "doc_10", "relevance": 3},
+      {"doc_id": "doc_11", "relevance": 1}
+    ]
+  },
+  {
+    "query": "PostgreSQL query planner EXPLAIN ANALYZE",
+    "expected": [
+      {"doc_id": "doc_11", "relevance": 3},
+      {"doc_id": "doc_10", "relevance": 1}
+    ]
+  },
+  {
+    "query": "SQLite WAL mode concurrent readers writers",
+    "expected": [
+      {"doc_id": "doc_12", "relevance": 3},
+      {"doc_id": "doc_10", "relevance": 1}
+    ]
+  },
+  {
+    "query": "relational database query optimization",
+    "expected": [
+      {"doc_id": "doc_10", "relevance": 3},
+      {"doc_id": "doc_11", "relevance": 3},
+      {"doc_id": "doc_12", "relevance": 1}
+    ]
+  },
+  {
+    "query": "REST API resource naming and HTTP verbs",
+    "expected": [
+      {"doc_id": "doc_13", "relevance": 3},
+      {"doc_id": "doc_14", "relevance": 1},
+      {"doc_id": "doc_15", "relevance": 1}
+    ]
+  },
+  {
+    "query": "API rate limiting token bucket algorithm",
+    "expected": [
+      {"doc_id": "doc_14", "relevance": 3},
+      {"doc_id": "doc_13", "relevance": 1}
+    ]
+  },
+  {
+    "query": "GraphQL query fragments persisted queries",
+    "expected": [
+      {"doc_id": "doc_15", "relevance": 3},
+      {"doc_id": "doc_13", "relevance": 1}
+    ]
+  },
+  {
+    "query": "HTTP API design best practices",
+    "expected": [
+      {"doc_id": "doc_13", "relevance": 3},
+      {"doc_id": "doc_14", "relevance": 2},
+      {"doc_id": "doc_15", "relevance": 2}
+    ]
+  },
+  {
+    "query": "test driven development red green refactor",
+    "expected": [
+      {"doc_id": "doc_16", "relevance": 3},
+      {"doc_id": "doc_18", "relevance": 1}
+    ]
+  },
+  {
+    "query": "property based testing hypothesis python",
+    "expected": [
+      {"doc_id": "doc_17", "relevance": 3},
+      {"doc_id": "doc_16", "relevance": 1}
+    ]
+  },
+  {
+    "query": "integration tests with real database and containers",
+    "expected": [
+      {"doc_id": "doc_18", "relevance": 3},
+      {"doc_id": "doc_16", "relevance": 1}
+    ]
+  },
+  {
+    "query": "testing strategies unit integration end-to-end",
+    "expected": [
+      {"doc_id": "doc_16", "relevance": 3},
+      {"doc_id": "doc_18", "relevance": 3},
+      {"doc_id": "doc_17", "relevance": 2}
+    ]
+  },
+  {
+    "query": "exception handling fail fast vs graceful recovery",
+    "expected": [
+      {"doc_id": "doc_19", "relevance": 3},
+      {"doc_id": "doc_20", "relevance": 2},
+      {"doc_id": "doc_21", "relevance": 1}
+    ]
+  },
+  {
+    "query": "circuit breaker pattern cascading failure prevention",
+    "expected": [
+      {"doc_id": "doc_20", "relevance": 3},
+      {"doc_id": "doc_19", "relevance": 1}
+    ]
+  },
+  {
+    "query": "retry exponential backoff transient errors",
+    "expected": [
+      {"doc_id": "doc_21", "relevance": 3},
+      {"doc_id": "doc_19", "relevance": 2},
+      {"doc_id": "doc_20", "relevance": 1}
+    ]
+  },
+  {
+    "query": "resilience patterns error handling in distributed systems",
+    "expected": [
+      {"doc_id": "doc_20", "relevance": 3},
+      {"doc_id": "doc_19", "relevance": 3},
+      {"doc_id": "doc_21", "relevance": 2}
+    ]
+  },
+  {
+    "query": "asyncio concurrency async await Python",
+    "expected": [
+      {"doc_id": "doc_22", "relevance": 3},
+      {"doc_id": "doc_23", "relevance": 1}
+    ]
+  },
+  {
+    "query": "thread safety locks mutual exclusion",
+    "expected": [
+      {"doc_id": "doc_23", "relevance": 3},
+      {"doc_id": "doc_22", "relevance": 1}
+    ]
+  },
+  {
+    "query": "producer consumer queue concurrency pattern",
+    "expected": [
+      {"doc_id": "doc_22", "relevance": 3},
+      {"doc_id": "doc_23", "relevance": 1}
+    ]
+  },
+  {
+    "query": "concurrent programming CPU-bound vs IO-bound tasks",
+    "expected": [
+      {"doc_id": "doc_22", "relevance": 3},
+      {"doc_id": "doc_23", "relevance": 2}
+    ]
+  },
+  {
+    "query": "structured logging request correlation context",
+    "expected": [
+      {"doc_id": "doc_24", "relevance": 3}
+    ]
+  },
+  {
+    "query": "log levels production versus development",
+    "expected": [
+      {"doc_id": "doc_24", "relevance": 3}
+    ]
+  },
+  {
+    "query": "twelve factor app environment variable configuration",
+    "expected": [
+      {"doc_id": "doc_25", "relevance": 3},
+      {"doc_id": "doc_24", "relevance": 1}
+    ]
+  },
+  {
+    "query": "layered configuration defaults files environment CLI",
+    "expected": [
+      {"doc_id": "doc_25", "relevance": 3}
+    ]
+  },
+  {
+    "query": "YAML TOML configuration file management",
+    "expected": [
+      {"doc_id": "doc_25", "relevance": 3}
+    ]
+  },
+  {
+    "query": "security best practices for web applications",
+    "expected": [
+      {"doc_id": "doc_01", "relevance": 3},
+      {"doc_id": "doc_03", "relevance": 2},
+      {"doc_id": "doc_02", "relevance": 2},
+      {"doc_id": "doc_14", "relevance": 1}
+    ]
+  },
+  {
+    "query": "caching layer design for high throughput systems",
+    "expected": [
+      {"doc_id": "doc_04", "relevance": 3},
+      {"doc_id": "doc_05", "relevance": 3},
+      {"doc_id": "doc_06", "relevance": 2}
+    ]
+  },
+  {
+    "query": "search engine indexing and retrieval pipeline",
+    "expected": [
+      {"doc_id": "doc_07", "relevance": 3},
+      {"doc_id": "doc_08", "relevance": 3},
+      {"doc_id": "doc_09", "relevance": 2}
+    ]
+  },
+  {
+    "query": "database schema design and query performance",
+    "expected": [
+      {"doc_id": "doc_10", "relevance": 3},
+      {"doc_id": "doc_11", "relevance": 3},
+      {"doc_id": "doc_12", "relevance": 2}
+    ]
+  },
+  {
+    "query": "microservice API design and communication",
+    "expected": [
+      {"doc_id": "doc_13", "relevance": 3},
+      {"doc_id": "doc_14", "relevance": 2},
+      {"doc_id": "doc_15", "relevance": 2}
+    ]
+  },
+  {
+    "query": "software testing methodologies and best practices",
+    "expected": [
+      {"doc_id": "doc_16", "relevance": 3},
+      {"doc_id": "doc_17", "relevance": 2},
+      {"doc_id": "doc_18", "relevance": 3}
+    ]
+  },
+  {
+    "query": "fault tolerance and system reliability patterns",
+    "expected": [
+      {"doc_id": "doc_19", "relevance": 2},
+      {"doc_id": "doc_20", "relevance": 3},
+      {"doc_id": "doc_21", "relevance": 2}
+    ]
+  },
+  {
+    "query": "Python concurrency models and thread safety",
+    "expected": [
+      {"doc_id": "doc_22", "relevance": 3},
+      {"doc_id": "doc_23", "relevance": 3}
+    ]
+  },
+  {
+    "query": "observability logging and configuration management",
+    "expected": [
+      {"doc_id": "doc_24", "relevance": 3},
+      {"doc_id": "doc_25", "relevance": 2}
+    ]
+  },
+  {
+    "query": "HNSW graph approximate nearest neighbor index",
+    "expected": [
+      {"doc_id": "doc_08", "relevance": 3}
+    ]
+  },
+  {
+    "query": "Redis INCR EXPIRE sliding window rate limit",
+    "expected": [
+      {"doc_id": "doc_14", "relevance": 3}
+    ]
+  },
+  {
+    "query": "pragma journal_mode WAL SQLite",
+    "expected": [
+      {"doc_id": "doc_12", "relevance": 3}
+    ]
+  },
+  {
+    "query": "asyncio.gather producer consumer asyncio.Queue",
+    "expected": [
+      {"doc_id": "doc_22", "relevance": 3}
+    ]
+  }
+]
