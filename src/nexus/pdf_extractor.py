@@ -117,7 +117,8 @@ class PDFExtractor:
             if callable(getattr(item, "export_to_html", None)):
                 try:
                     html = item.export_to_html()
-                except Exception:
+                except Exception as exc:
+                    _log.debug("table_html_export_failed", page=page_no, error=str(exc))
                     html = ""
             table_regions.append({"page": page_no, "html": html})
 

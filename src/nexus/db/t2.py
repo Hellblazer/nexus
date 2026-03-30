@@ -88,7 +88,7 @@ CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS plans (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         INTEGER PRIMARY KEY,
     query      TEXT NOT NULL,
     plan_json  TEXT NOT NULL,
     outcome    TEXT DEFAULT 'success',
@@ -100,7 +100,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
     query,
     tags,
     content=plans,
-    content_rowid=id
+    content_rowid='id'
 );
 
 CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
@@ -120,6 +120,7 @@ END;
 """
 
 _COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl")
+_PLAN_COLUMNS = ("id", "query", "plan_json", "outcome", "tags", "created_at")
 
 # ── FTS5 rebuild SQL (used for migration from old schema lacking 'title') ─────
 # These statements recreate only the FTS5 virtual table and its triggers after
@@ -474,8 +475,7 @@ class T2Database:
                 rows = self.conn.execute(sql, (safe, limit)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-        _plan_cols = ("id", "query", "plan_json", "outcome", "tags", "created_at")
-        return [dict(zip(_plan_cols, row)) for row in rows]
+        return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
 
     def list_plans(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return most recent plans ordered by created_at DESC."""
@@ -487,8 +487,7 @@ class T2Database:
         """
         with self._lock:
             rows = self.conn.execute(sql, (limit,)).fetchall()
-        _plan_cols = ("id", "query", "plan_json", "outcome", "tags", "created_at")
-        return [dict(zip(_plan_cols, row)) for row in rows]
+        return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
 
     # ── Housekeeping ──────────────────────────────────────────────────────────
 

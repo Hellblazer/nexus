@@ -31,13 +31,13 @@ Capture the user's natural-language analytical question. This is the `query` tha
 
 ### Step 1: Search T2 Plan Library for Similar Queries
 
-Before planning, check whether a similar query has been executed before. Use the memory_search MCP tool:
+Before planning, check whether a similar query has been executed before. Use the `plan_search` MCP tool:
 
 ```
-Use memory_search tool: query="{user question}", project="{project}"
+mcp__plugin_nx_nexus__plan_search(query="{user question}", limit=3)
 ```
 
-Alternatively, use `nx memory search "{user question}" --project {project}` via Bash if MCP is unavailable (degraded mode per CONTEXT_PROTOCOL.md).
+Alternatively, use `memory_search` as a fallback if `plan_search` is unavailable (degraded mode per CONTEXT_PROTOCOL.md).
 
 If matches are found, collect up to 3 plans with `outcome="success"` as few-shot examples. Include them in the planner relay.
 
@@ -184,21 +184,19 @@ After presenting results, ask:
 
 If the user confirms:
 - Serialize the plan JSON as a string.
-- Save via memory_put MCP tool (T2 plan library):
+- Save via the `plan_save` MCP tool (T2 plan library):
 
 ```
-Use memory_put tool: content="{plan_json}", project="{project}", title="plan-{slug}.md", ttl=90
-```
-
-Where `{slug}` is a short snake_case version of the first 5 words of the question.
-
-Additionally, if the T2 database has `save_plan` available via the CLI:
-
-```bash
-nx memory put "{plan_json}" --project {project} --title "plan-{slug}.md" --ttl 90
+mcp__plugin_nx_nexus__plan_save(
+    query="the original question",
+    plan_json="{serialized plan JSON}",
+    outcome="success",
+    tags="extract,summarize"
+)
 ```
 
 Set `outcome="partial"` if any step failed; `outcome="success"` otherwise.
+Include operation types used as comma-separated `tags` for searchability.
 
 If the user declines or does not respond, skip saving.
 
