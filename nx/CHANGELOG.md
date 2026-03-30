@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-03-30
+
 ### Added
 - **analytical-operator agent** — executes 5 analytical operations (extract,
   summarize, rank, compare, generate) over retrieved content. Dispatched by

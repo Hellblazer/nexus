@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-03-30
+
 ### Added
 - **Analytical query pipeline** — `/nx:query` skill decomposes complex questions
   into multi-step plans (search → extract → summarize → compare → generate),
