@@ -179,6 +179,49 @@ class T2Database:
             if result and result[0].lower() != "wal":
                 _log.warning("WAL mode not available", actual_mode=result[0])
             self._migrate_fts_if_needed()
+            self._migrate_plans_if_needed()
+
+    def _migrate_plans_if_needed(self) -> None:
+        """Add 'project' column to plans table if missing (v2.8.0 schema change).
+
+        Safe to call multiple times — no-op when 'project' is already present
+        or when the plans table doesn't exist yet.
+        """
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='plans'"
+        ).fetchone()
+        if row is None or "project" in row[0]:
+            return
+
+        _log.info("Migrating plans table to add project column")
+        self.conn.execute("ALTER TABLE plans ADD COLUMN project TEXT NOT NULL DEFAULT ''")
+        # Recreate FTS + triggers with project column
+        self.conn.executescript("""\
+            DROP TRIGGER IF EXISTS plans_ai;
+            DROP TRIGGER IF EXISTS plans_ad;
+            DROP TRIGGER IF EXISTS plans_au;
+            DROP TABLE  IF EXISTS plans_fts;
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
+                query, tags, project, content=plans, content_rowid='id'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
+                INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
+            END;
+            CREATE TRIGGER IF NOT EXISTS plans_ad AFTER DELETE ON plans BEGIN
+                INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
+                    VALUES ('delete', old.id, old.query, old.tags, old.project);
+            END;
+            CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
+                INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
+                    VALUES ('delete', old.id, old.query, old.tags, old.project);
+                INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
+            END;
+        """)
+        self.conn.execute("INSERT INTO plans_fts(plans_fts) VALUES('rebuild')")
+        self.conn.commit()
+        _log.info("plans migration complete (added project column)")
 
     def _migrate_fts_if_needed(self) -> None:
         """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.
