@@ -23,24 +23,77 @@ from nexus.search_engine import search_cross_corpus
 from nexus.types import SearchResult
 
 
-def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
-    """Parse ``KEY=VALUE`` strings into a ChromaDB where dict.
+_NUMERIC_FIELDS = frozenset({
+    "bib_year", "bib_citation_count", "page_count", "page_number",
+    "chunk_index", "chunk_count", "chunk_start_char", "chunk_end_char",
+})
 
-    Multiple pairs are ANDed by merging into a single dict.
+# Operators in match order — longest first to avoid '>=' matching as '>'+'='.
+_OPERATORS = [
+    (">=", "$gte"),
+    ("<=", "$lte"),
+    ("!=", "$ne"),
+    (">", "$gt"),
+    ("<", "$lt"),
+    ("=", None),  # equality — no ChromaDB operator wrapper needed
+]
+
+
+def _coerce_value(key: str, value: str) -> str | int | float:
+    """Coerce *value* to int/float for known numeric metadata fields."""
+    if key in _NUMERIC_FIELDS:
+        try:
+            return int(value)
+        except ValueError:
+            try:
+                return float(value)
+            except ValueError:
+                pass
+    return value
+
+
+def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
+    """Parse ``KEY{op}VALUE`` strings into a ChromaDB where dict.
+
+    Supported operators: ``=``, ``>=``, ``<=``, ``>``, ``<``, ``!=``.
+    Known numeric fields (bib_year, bib_citation_count, etc.) are
+    auto-coerced to int/float for correct ChromaDB range filtering.
+
+    Multiple pairs are ANDed via ``$and`` when they target different
+    operators on the same key, or merged into a single dict otherwise.
     Returns ``None`` when *where_pairs* is empty.
     """
     if not where_pairs:
         return None
-    result: dict = {}
+    parts: list[dict] = []
     for pair in where_pairs:
-        if "=" not in pair:
+        matched = False
+        for op_str, chroma_op in _OPERATORS:
+            idx = pair.find(op_str)
+            if idx > 0:
+                key = pair[:idx]
+                value = _coerce_value(key, pair[idx + len(op_str):])
+                if chroma_op is None:
+                    parts.append({key: value})
+                else:
+                    parts.append({key: {chroma_op: value}})
+                matched = True
+                break
+        if not matched:
             raise click.BadParameter(
-                f"--where value {pair!r} must be in KEY=VALUE format",
+                f"--where value {pair!r} must be in KEY=VALUE or KEY>=VALUE format",
                 param_hint="'--where'",
             )
-        key, _, value = pair.partition("=")
-        result[key] = value
-    return result
+    if len(parts) == 1:
+        return parts[0]
+    # Merge into flat dict when all parts are simple key=value (no operator nesting).
+    # Use $and when any part has nested operator dicts (e.g., {"bib_year": {"$gte": 2024}}).
+    if all(not isinstance(v, dict) for p in parts for v in p.values()):
+        merged: dict = {}
+        for p in parts:
+            merged.update(p)
+        return merged
+    return {"$and": parts}
 
 _CONTENT_MAX_CHARS: int = 200
 EXACT_MATCH_BOOST: float = 0.15

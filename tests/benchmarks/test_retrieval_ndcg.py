@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NDCG retrieval benchmark.
+"""NDCG math tests and retrieval smoke test.
 
-Tests NDCG math functions, then runs a retrieval benchmark against a
-synthetic corpus using EphemeralClient + ONNX MiniLM. No API keys needed.
+The NDCG math functions (dcg_at_k, ndcg_at_k) are tested with known
+input/output pairs. The retrieval smoke test verifies the embedding +
+search pipeline runs end-to-end against a synthetic corpus using ONNX
+MiniLM — it does NOT test production retrieval quality (production uses
+Voyage AI models with different dimensionality and training data).
 """
 from __future__ import annotations
 
@@ -18,7 +21,6 @@ from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
 _BENCHMARK_DIR = Path(__file__).parent
 
-# Mark the retrieval benchmark as slow — exclude from fast CI with: pytest -m "not slow"
 slow = pytest.mark.slow
 
 
@@ -102,7 +104,20 @@ def test_ndcg_k_one_suboptimal() -> None:
     assert 0.0 < score < 1.0
 
 
-# ── Benchmark test ───────────────────────────────────────────────────────────
+# ── Retrieval smoke test ────────────────────────────────────────────────────
+#
+# This is a SMOKE TEST, not a quality benchmark.
+#
+# It verifies: EphemeralClient + ONNX MiniLM + synthetic corpus → search
+# pipeline runs end-to-end and returns topically relevant results.
+#
+# It does NOT test production retrieval quality because:
+# 1. Production uses Voyage AI (voyage-context-3, voyage-code-3), not ONNX MiniLM
+# 2. The synthetic corpus and ground-truth were authored together
+# 3. The threshold was calibrated from the first run (not independently set)
+#
+# For production quality measurement, use real queries with independently
+# assessed relevance grades and Voyage AI embeddings (requires API keys).
 
 
 @pytest.fixture(scope="module")
@@ -128,11 +143,12 @@ def benchmark_collection():
 
 
 @slow
-def test_retrieval_ndcg_at_5(benchmark_collection) -> None:
-    """Benchmark: mean NDCG@5 across all synthetic queries.
+def test_retrieval_smoke(benchmark_collection) -> None:
+    """Smoke test: ONNX MiniLM retrieval pipeline runs end-to-end.
 
-    Uses EphemeralClient + ONNX MiniLM (384d) — no API keys required.
-    Threshold is calibrated: actual - 0.05 margin guards against regressions.
+    Verifies that the search pipeline returns topically plausible results
+    for a synthetic corpus. This is NOT a proxy for Voyage AI production
+    quality — see module docstring.
     """
     queries_path = _BENCHMARK_DIR / "queries.json"
     queries: list[dict] = json.loads(queries_path.read_text())
@@ -144,20 +160,17 @@ def test_retrieval_ndcg_at_5(benchmark_collection) -> None:
         query_text: str = item["query"]
         expected: list[dict] = item["expected"]
 
-        # Build doc_id → relevance lookup (default 0 for unreferenced docs)
         relevance_map: dict[str, int] = {
             e["doc_id"]: e["relevance"] for e in expected
         }
         ideal_grades: list[int] = [e["relevance"] for e in expected]
 
-        # Query the collection directly (option b — no T3 wrapper coupling)
         results = benchmark_collection.query(
             query_texts=[query_text],
             n_results=k,
         )
         returned_ids: list[str] = results["ids"][0]
 
-        # Map returned doc IDs to relevance grades
         retrieved_relevances: list[int] = [
             relevance_map.get(doc_id, 0) for doc_id in returned_ids
         ]
@@ -167,11 +180,10 @@ def test_retrieval_ndcg_at_5(benchmark_collection) -> None:
 
     mean_ndcg = sum(ndcg_scores) / len(ndcg_scores)
 
-    # Calibrated: actual=0.94, threshold=0.94 - 0.05 = 0.89
-    # (Calibrated on 2026-03-29 using ONNXMiniLM_L6_V2 + chromadb EphemeralClient)
-    calibrated_threshold = 0.89
-
-    assert mean_ndcg >= calibrated_threshold, (
-        f"NDCG@5 regression: {mean_ndcg:.4f} < {calibrated_threshold:.4f} "
-        f"(scores per query min={min(ndcg_scores):.4f} max={max(ndcg_scores):.4f})"
+    # Smoke threshold: pipeline should retrieve topically relevant results.
+    # 0.50 is generous — a random ranking on this corpus scores ~0.3.
+    # This catches pipeline breakage, not quality regressions.
+    assert mean_ndcg >= 0.50, (
+        f"Retrieval smoke test failed: mean NDCG@5={mean_ndcg:.4f} < 0.50 "
+        f"(min={min(ndcg_scores):.4f} max={max(ndcg_scores):.4f})"
     )

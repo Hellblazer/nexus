@@ -122,7 +122,7 @@ def test_table_regions_contain_required_fields(tmp_path):
 # ── PDFChunker: chunk_type tagging ───────────────────────────────────────────
 
 def test_chunker_tags_table_chunks():
-    """Chunks on a table page get chunk_type='table'."""
+    """Chunks on a table page get chunk_type='table_page'."""
     # Page 2 is a table page; build text that fills pages 1 and 2
     page1_text = "A" * 500
     page2_text = "B" * 500
@@ -140,8 +140,8 @@ def test_chunker_tags_table_chunks():
     chunks = chunker.chunk(text, extraction_metadata)
 
     # Some chunks should be on page 2 → tagged as table
-    table_chunks = [c for c in chunks if c.metadata.get("chunk_type") == "table"]
-    assert len(table_chunks) > 0, "Expected at least one chunk tagged as table"
+    table_chunks = [c for c in chunks if c.metadata.get("chunk_type") == "table_page"]
+    assert len(table_chunks) > 0, "Expected at least one chunk tagged as table_page"
     for c in table_chunks:
         assert c.metadata["page_number"] == 2
 
@@ -209,9 +209,9 @@ def test_mixed_document():
         ct = c.metadata["chunk_type"]
         page_types.setdefault(pg, set()).add(ct)
 
-    # Pages 1 and 3 must only have text chunks; page 2 must only have table chunks
+    # Pages 1 and 3 must only have text chunks; page 2 must only have table_page chunks
     assert page_types.get(1) == {"text"}, f"Page 1: expected {{'text'}}, got {page_types.get(1)}"
-    assert page_types.get(2) == {"table"}, f"Page 2: expected {{'table'}}, got {page_types.get(2)}"
+    assert page_types.get(2) == {"table_page"}, f"Page 2: expected {{'table_page'}}, got {page_types.get(2)}"
     assert page_types.get(3) == {"text"}, f"Page 3: expected {{'text'}}, got {page_types.get(3)}"
 
 

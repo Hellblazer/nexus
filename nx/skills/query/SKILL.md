@@ -10,12 +10,15 @@ Drives multi-step analytical queries by orchestrating the **query-planner** and 
 
 ## When This Skill Activates
 
-- Complex analytical questions that require both retrieval and reasoning
-- Questions like "summarize", "compare", "extract structured data from", "rank by relevance", "explain using evidence from"
-- Any question where a single `nx search` call is insufficient and the result needs further analysis
-- Repeated analytical workflows that benefit from plan reuse
+- **Cross-corpus consistency checks**: "do the docs and code agree on error handling?"
+- **Structured extraction with comparison**: "extract API patterns from these papers and compare them"
+- **Multi-source synthesis**: "search code, docs, and RDRs for authentication patterns, then rank by recency"
+- **Evidence-grounded generation**: "generate a summary of distributed consensus approaches with citations"
 
-**Do not use** for simple lookups — if `nx search` alone answers the question, use it directly.
+**Do not use** for:
+- Simple lookups — `nx search` alone answers the question
+- Single-corpus summarization — dispatch `analytical-operator` directly with `operation=summarize`
+- Questions that map to a trivial search+summarize — the planning overhead isn't justified
 
 
 ## Key Constraint
@@ -29,19 +32,17 @@ Drives multi-step analytical queries by orchestrating the **query-planner** and 
 
 Capture the user's natural-language analytical question. This is the `query` that drives the entire flow.
 
-### Step 1: Search T2 Plan Library for Similar Queries
+### Step 1: Plan Library Lookup (opt-in)
 
-Before planning, check whether a similar query has been executed before. Use the `plan_search` MCP tool:
+**Skip by default.** Only search the plan library when the user explicitly requests plan reuse (e.g., "reuse a similar plan", "check if we've done this before") or when the query closely matches a known analytical pattern.
+
+When opted in, use the `plan_search` MCP tool:
 
 ```
-mcp__plugin_nx_nexus__plan_search(query="{user question}", limit=3)
+mcp__plugin_nx_nexus__plan_search(query="{user question}", project="{project}", limit=3)
 ```
 
-Alternatively, use `memory_search` as a fallback if `plan_search` is unavailable (degraded mode per CONTEXT_PROTOCOL.md).
-
-If matches are found, collect up to 3 plans with `outcome="success"` as few-shot examples. Include them in the planner relay.
-
-If no matches are found, proceed with an empty `few_shot_plans` list.
+If matches are found, collect up to 3 plans with `outcome="success"` as few-shot examples. Include them in the planner relay. If no matches, proceed with an empty `few_shot_plans` list.
 
 ### Step 2: Dispatch query-planner
 
