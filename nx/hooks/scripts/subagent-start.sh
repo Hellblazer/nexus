@@ -110,6 +110,27 @@ mcp__plugin_nx_nexus__store_put(content="<content>", collection="knowledge", tit
 | Persist finding across sessions | T2 | `memory_put` |
 | Search indexed codebase or knowledge | T3 | `search` |
 | Store validated architectural insight | T3 | `store_put` |
+| Search saved query plans | T2 | `memory_search(query="plan", project="{repo}")` |
+
+### T2 Plan Library
+
+Query execution plans can be saved and reused. The `/nx:query` skill manages this automatically, but agents can search for prior plans:
+
+```
+# Search for similar query plans
+mcp__plugin_nx_nexus__memory_search(query="compare error handling", project="nexus")
+```
+
+### Analytical Operators
+
+The `analytical-operator` agent provides 5 operations over retrieved content:
+- **extract**: structured JSON extraction using a template
+- **summarize**: short/detailed/evidence-backed summary
+- **rank**: LLM-scored ordering by criterion
+- **compare**: consistency/contradiction check
+- **generate**: evidence-grounded text with citations
+
+These are dispatched by the `/nx:query` skill. Step outputs persist in T1 scratch with tag `query-step,step-N`.
 NXTOOLS
 
 # Sequential Thinking MCP — inject usage guidance for hypothesis-driven work
