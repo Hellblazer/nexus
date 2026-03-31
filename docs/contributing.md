@@ -78,6 +78,7 @@ Do not bump these without testing the full chunking pipeline.
 - Branch naming: `feature/<bead-id>-<short-description>`
 - Never push directly to `main` — all changes via PR (exception: version-bump release commits, see Release Process below)
 - Use `bd` (beads) for task tracking
+- **Code review**: Plans include review tasks after implementation phases. Use `/nx:review-code` or dispatch `code-review-expert` at the designated plan steps
 
 The `main` branch requires CI to pass before merging. Configure branch protection at
 https://github.com/Hellblazer/nexus/settings/branches:

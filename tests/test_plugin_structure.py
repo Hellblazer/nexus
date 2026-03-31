@@ -175,6 +175,41 @@ class TestAgentStructure:
             )
 
 
+# ── Strategic planner review gates ────────────────────────────────────────────
+
+
+class TestPlannerReviewGates:
+    """Strategic planner must include review gate instructions."""
+
+    def test_planner_has_review_gates_section(self) -> None:
+        planner = AGENTS_DIR / "strategic-planner.md"
+        text = planner.read_text()
+        assert "### Review Gates" in text, (
+            "strategic-planner.md: missing '### Review Gates' section"
+        )
+
+    def test_planner_review_gates_mention_code_review_expert(self) -> None:
+        planner = AGENTS_DIR / "strategic-planner.md"
+        text = planner.read_text()
+        # Extract the Review Gates section
+        start = text.index("### Review Gates")
+        end = text.index("###", start + 1)
+        section = text[start:end]
+        assert "code-review-expert" in section, (
+            "strategic-planner.md: Review Gates section must reference code-review-expert"
+        )
+
+    def test_planner_execution_instructions_include_review(self) -> None:
+        planner = AGENTS_DIR / "strategic-planner.md"
+        text = planner.read_text()
+        start = text.index("**Execution Instructions**")
+        end = text.index("**Parallelization", start)
+        section = text[start:end]
+        assert "Code review" in section or "code-review" in section, (
+            "strategic-planner.md: Execution Instructions must include a code review step"
+        )
+
+
 # ── RECOVER protocol completeness ─────────────────────────────────────────────
 
 
