@@ -21,7 +21,8 @@ Semantic search across T3 knowledge collections.
 |-----------|------|---------|-------------|
 | `query` | str | required | Search query string |
 | `corpus` | str | `"knowledge,code,docs"` | Corpus prefix, comma-separated list of prefixes, full collection name, or `"all"` to search every T3 collection |
-| `n` | int | `10` | Maximum results to return |
+| `n` | int | `10` | Page size (results per page) |
+| `offset` | int | `0` | Skip this many results. Footer shows `next: offset=N` for next page |
 
 ```
 Use search tool: query="query"                                  # knowledge + code + docs (default)
@@ -59,7 +60,8 @@ List entries in a T3 knowledge collection.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `collection` | str | `"knowledge"` | Collection name or prefix |
-| `limit` | int | `200` | Maximum entries to return |
+| `limit` | int | `20` | Page size |
+| `offset` | int | `0` | Skip this many entries. Footer shows `next: offset=N` for next page |
 
 ```
 Use store_list tool: collection="knowledge"
@@ -109,6 +111,8 @@ Full-text search across T2 memory entries.
 |-----------|------|---------|-------------|
 | `query` | str | required | Search query (FTS5 syntax) |
 | `project` | str | `""` | Optional project filter |
+| `limit` | int | `20` | Page size |
+| `offset` | int | `0` | Skip this many results. Footer shows `next: offset=N` for next page |
 
 ```
 Use memory_search tool: query="query"

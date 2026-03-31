@@ -124,6 +124,11 @@ def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10, offset:
 
     Results are paged. Use offset to retrieve subsequent pages.
 
+    Results are paged. Response footer shows ``offset=N`` for next page.
+    Semantic search cannot report a true total — when results equal
+    the fetch limit, the footer says "may have more". Stop paginating
+    when you receive "No results at offset N".
+
     Args:
         query: Search query string
         corpus: Comma-separated corpus prefixes or full collection names (default: knowledge,code,docs).
@@ -173,17 +178,14 @@ def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10, offset:
             snippet = r.content[:200].replace("\n", " ")
             lines.append(f"[{dist}] {label}\n  {snippet}")
 
-        # Pagination footer
+        # Pagination footer (standardized format across all paged tools)
         shown_end = offset + len(page)
         if shown_end < total:
-            lines.append(f"\n--- Showing {offset + 1}-{shown_end} of {total}+. "
-                         f"Next page: offset={shown_end}")
+            lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
         elif total >= fetch_n:
-            # Fetched exactly fetch_n — there may be more results
-            lines.append(f"\n--- Showing {offset + 1}-{shown_end}. "
-                         f"May have more: offset={shown_end}")
+            lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
         else:
-            lines.append(f"\n--- Showing {offset + 1}-{shown_end} of {total} (last page)")
+            lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
 
         return "\n\n".join(lines)
     except Exception as e:
@@ -245,7 +247,7 @@ def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) 
             info = t3.collection_info(col_name)
             total = info["count"]
         except KeyError:
-            return f"No entries in {col_name}."
+            return f"Collection not found: {col_name}"
         if total == 0:
             return f"No entries in {col_name}."
         entries = t3.list_store(col_name, limit=offset + limit)
@@ -268,7 +270,9 @@ def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) 
             lines.append(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
         shown_end = offset + len(page)
         if shown_end < total:
-            lines.append(f"--- Next page: offset={shown_end}")
+            lines.append(f"--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
+        else:
+            lines.append(f"--- showing {offset + 1}-{shown_end} of {total} (end)")
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
@@ -366,10 +370,9 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
             lines.append(f"[{r['id']}] {r['project']}/{r['title']}\n  {snippet}")
         shown_end = offset + len(page)
         if shown_end < total:
-            lines.append(f"\n--- Page {offset // limit + 1}: showing {offset + 1}-{shown_end} of {total}. "
-                         f"Next page: offset={shown_end}")
+            lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
         else:
-            lines.append(f"\n--- Showing {offset + 1}-{shown_end} of {total} (last page)")
+            lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
         return "\n\n".join(lines)
     except Exception as e:
         return f"Error: {e}"

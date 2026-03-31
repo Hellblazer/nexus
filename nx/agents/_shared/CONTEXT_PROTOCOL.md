@@ -100,6 +100,10 @@ The SessionEnd hook runs automatically at session close and auto-promotes flagge
 | T2 | memory | Per-project, persistent | `memory_put`, `memory_get`, `memory_search` | Session state, project context, agent relay, active work | 30d default; `permanent` available |
 | T3 | store / search | Permanent, cross-session | `search`, `store_put`, `store_list` | Research findings, architectural decisions, validated patterns | `permanent` or explicit TTL |
 
+## Pagination
+
+`search`, `store_list`, and `memory_search` return paged results. Response footer format: `--- showing X-Y of Z. next: offset=N`. Re-call with `offset=N` for the next page. Stop when you see `(end)` or `No results at offset N`.
+
 ## Choosing Search Options
 
 Use the right search form for the task:

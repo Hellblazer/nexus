@@ -570,55 +570,84 @@ def test_collection_cache_thread_safe():
 # ── Pagination tests ─────────────────────────────────────────────────────────
 
 
-def test_search_pagination_default_page(t3):
-    """search returns first page by default (offset=0)."""
+def test_search_pagination_first_page(t3):
+    """search offset=0 returns first page with next offset."""
     for i in range(5):
-        t3.put(collection="knowledge__test", content=f"document about topic {i}", title=f"doc{i}")
-    result = search(query="topic", corpus="knowledge__test", n=2, offset=0)
-    assert "Showing 1-2" in result
+        t3.put(collection="knowledge__pag", content=f"document about topic {i}", title=f"doc{i}")
+    result = search(query="topic", corpus="knowledge__pag", n=2, offset=0)
+    assert "showing 1-2" in result
     assert "offset=2" in result
 
 
-def test_search_pagination_offset(t3):
-    """search with offset returns subsequent page."""
-    for i in range(5):
-        t3.put(collection="knowledge__test", content=f"document about search topic {i}", title=f"doc{i}")
-    page1 = search(query="search topic", corpus="knowledge__test", n=2, offset=0)
-    assert "offset=2" in page1
-
-    page2 = search(query="search topic", corpus="knowledge__test", n=2, offset=2)
+def test_search_pagination_pages_differ(t3):
+    """Page 2 content differs from page 1."""
+    for i in range(6):
+        t3.put(collection="knowledge__pag2", content=f"unique searchable content number {i}", title=f"doc{i}")
+    page1 = search(query="searchable content", corpus="knowledge__pag2", n=2, offset=0)
+    page2 = search(query="searchable content", corpus="knowledge__pag2", n=2, offset=2)
     assert not page2.startswith("Error:")
-    assert "No results" not in page2
+    # Extract doc IDs from both pages — they should not overlap
+    page1_ids = {line.split("]")[0] for line in page1.split("\n") if line.startswith("[")}
+    page2_ids = {line.split("]")[0] for line in page2.split("\n") if line.startswith("[")}
+    assert page1_ids.isdisjoint(page2_ids), f"Pages overlap: {page1_ids & page2_ids}"
 
 
 def test_search_pagination_last_page(t3):
-    """Last page shows 'last page' indicator."""
-    t3.put(collection="knowledge__test", content="only document about pagination", title="solo")
-    result = search(query="pagination", corpus="knowledge__test", n=10, offset=0)
-    assert "last page" in result
+    """Single-result search shows (end) indicator."""
+    t3.put(collection="knowledge__pag3", content="only document about finality", title="solo")
+    result = search(query="finality", corpus="knowledge__pag3", n=10, offset=0)
+    assert "(end)" in result
+
+
+def test_search_pagination_offset_beyond_end(t3):
+    """Offset past all results returns 'No results at offset'."""
+    t3.put(collection="knowledge__pag4", content="small collection", title="one")
+    result = search(query="small", corpus="knowledge__pag4", n=10, offset=100)
+    assert "No results at offset 100" in result
 
 
 def test_store_list_pagination(t3):
-    """store_list supports offset pagination."""
-    # Use a dedicated collection to avoid cross-test pollution
+    """store_list pages with true total from collection count."""
     for i in range(5):
         store_put(content=f"entry {i}", collection="knowledge__pagtest", title=f"page-test-{i}")
     page1 = store_list(collection="knowledge__pagtest", limit=2, offset=0)
-    assert "showing 1-2" in page1
-    assert "Next page: offset=2" in page1
+    assert "showing 1-2 of 5" in page1
+    assert "next: offset=2" in page1
 
     page2 = store_list(collection="knowledge__pagtest", limit=2, offset=2)
-    assert not page2.startswith("Error:")
+    assert "showing 3-4 of 5" in page2
+
+
+def test_store_list_pagination_offset_beyond_end(t3):
+    """store_list offset past total returns 'No entries at offset'."""
+    store_put(content="solo entry", collection="knowledge__pagend", title="one")
+    result = store_list(collection="knowledge__pagend", limit=10, offset=100)
+    assert "No entries at offset 100" in result
+
+
+def test_store_list_collection_not_found(t3):
+    """store_list returns 'Collection not found' for missing collection."""
+    result = store_list(collection="knowledge__doesnotexist", limit=10)
+    assert "Collection not found" in result
 
 
 def test_memory_search_pagination(t2_path):
-    """memory_search supports offset pagination."""
+    """memory_search pages with offset."""
     for i in range(5):
         memory_put(content=f"finding about pagination topic {i}", project="testproj", title=f"page{i}.md")
     page1 = memory_search(query="pagination", limit=2, offset=0)
-    assert not page1.startswith("Error:")
-    # Should contain results (FTS5 matches "pagination")
-    assert "testproj" in page1
+    assert "showing 1-2 of 5" in page1
+    assert "next: offset=2" in page1
+
+    page2 = memory_search(query="pagination", limit=2, offset=2)
+    assert "showing 3-4 of 5" in page2
+
+
+def test_memory_search_pagination_offset_beyond_end(t2_path):
+    """memory_search offset past results returns 'No results at offset'."""
+    memory_put(content="solitary finding about offsets", project="testproj", title="solo.md")
+    result = memory_search(query="offsets", limit=10, offset=100)
+    assert "No results at offset 100" in result
 
 
 def test_plan_save_and_search(t2_path):
