@@ -9,10 +9,11 @@ Extraction strategy (two tiers):
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-import logging
 import re
 
-_log = logging.getLogger(__name__)
+import structlog
+
+_log = structlog.get_logger(__name__)
 
 
 def _normalize_whitespace_edge_cases(text: str) -> str:
@@ -45,7 +46,8 @@ class PDFExtractor:
     """
 
     def __init__(self) -> None:
-        self._converter = None  # lazy init — avoid 3.5s cost for non-PDF operations
+        self._converter = None  # lazy init — fast mode (no formula enrichment)
+        self._converter_enriched = None  # lazy init — enriched mode (formula enrichment)
 
     def extract(self, pdf_path: Path) -> ExtractionResult:
         """Extract text from *pdf_path*. Returns ExtractionResult."""
@@ -60,9 +62,16 @@ class PDFExtractor:
 
     # ── internal extraction methods ───────────────────────────────────────────
 
-    def _get_converter(self):
-        """Lazily initialise the Docling DocumentConverter."""
-        if self._converter is None:
+    def _get_converter(self, enriched: bool = False):
+        """Lazily initialise the Docling DocumentConverter.
+
+        *enriched* enables ``do_formula_enrichment`` for LaTeX extraction.
+        Two converters are cached independently so callers can switch modes
+        without re-creating the converter each time.
+        """
+        attr = "_converter_enriched" if enriched else "_converter"
+        converter = getattr(self, attr)
+        if converter is None:
             from docling.document_converter import DocumentConverter, PdfFormatOption
             from docling.datamodel.pipeline_options import PdfPipelineOptions
 
@@ -71,14 +80,16 @@ class PDFExtractor:
             opts.do_table_structure = True      # TableFormer for table detection
             opts.generate_page_images = False
             opts.generate_picture_images = False
-            self._converter = DocumentConverter(
+            opts.do_formula_enrichment = enriched
+            converter = DocumentConverter(
                 format_options={"pdf": PdfFormatOption(pipeline_options=opts)}
             )
-        return self._converter
+            setattr(self, attr, converter)
+        return converter
 
     def _extract_with_docling(self, pdf_path: Path) -> ExtractionResult:
         """Extract per-page markdown via Docling."""
-        result = self._get_converter().convert(str(pdf_path))
+        result = self._get_converter(enriched=True).convert(str(pdf_path))
         doc = result.document
         page_count = doc.num_pages()
 
@@ -106,21 +117,27 @@ class PDFExtractor:
         if not text.strip():
             raise RuntimeError("docling produced empty output")
 
-        # Second pass: collect TableItem regions (duck-typed, import-path safe)
+        # Second pass: collect TableItem regions and count FormulaItem (duck-typed)
         table_regions: list[dict] = []
+        formula_count = 0
         for item, _ in doc.iterate_items():
-            if type(item).__name__ != "TableItem":
-                continue
-            prov = getattr(item, "prov", [])
-            page_no = prov[0].page_no if prov else 0
-            html = ""
-            if callable(getattr(item, "export_to_html", None)):
-                try:
-                    html = item.export_to_html(doc=doc)
-                except Exception as exc:
-                    _log.debug("table_html_export_failed", page=page_no, error=str(exc))
-                    html = ""
-            table_regions.append({"page": page_no, "html": html})
+            item_type = type(item).__name__
+            if item_type == "FormulaItem":
+                formula_count += 1
+            elif item_type == "TableItem":
+                prov = getattr(item, "prov", [])
+                page_no = prov[0].page_no if prov else 0
+                html = ""
+                if callable(getattr(item, "export_to_html", None)):
+                    try:
+                        html = item.export_to_html(doc=doc)
+                    except Exception as exc:
+                        _log.debug("table_html_export_failed", page=page_no, error=str(exc))
+                        html = ""
+                table_regions.append({"page": page_no, "html": html})
+
+        if formula_count > 0:
+            _log.warning("formula_content_detected", formula_count=formula_count, path=str(pdf_path))
 
         return ExtractionResult(
             text=text,
@@ -130,6 +147,7 @@ class PDFExtractor:
                 "format": "markdown",
                 "page_boundaries": page_boundaries,
                 "table_regions": table_regions,
+                "formula_count": formula_count,
                 "docling_title": self._extract_title(doc),
                 "pdf_title": "",  # XMP metadata not exposed by Docling
                 "pdf_author": "",

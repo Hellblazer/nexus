@@ -71,7 +71,7 @@ def test_extract_falls_back_on_docling_exception(extractor, dummy_pdf):
 def test_extract_with_docling_page_boundaries(extractor, dummy_pdf):
     """Per-page boundaries are recorded for non-empty pages only."""
     mock_converter, mock_doc = _make_mock_docling(["# Page 1", "", "## Page 3"])
-    extractor._converter = mock_converter
+    extractor._converter_enriched = mock_converter
 
     with patch.object(extractor, "_extract_title", return_value="Test Title"):
         result = extractor._extract_with_docling(dummy_pdf)
@@ -88,7 +88,7 @@ def test_extract_with_docling_boundary_positions(extractor, dummy_pdf):
     page1 = "# Title\n\nBody text."   # 20 chars
     page2 = "## Section\n\nMore."     # 18 chars
     mock_converter, mock_doc = _make_mock_docling([page1, page2])
-    extractor._converter = mock_converter
+    extractor._converter_enriched = mock_converter
 
     with patch.object(extractor, "_extract_title", return_value=""):
         result = extractor._extract_with_docling(dummy_pdf)
@@ -101,7 +101,7 @@ def test_extract_with_docling_boundary_positions(extractor, dummy_pdf):
 def test_extract_with_docling_raises_on_empty_output(extractor, dummy_pdf):
     """RuntimeError raised when Docling produces no text (triggers fallback in extract())."""
     mock_converter, mock_doc = _make_mock_docling(["", "", ""])
-    extractor._converter = mock_converter
+    extractor._converter_enriched = mock_converter
 
     with pytest.raises(RuntimeError, match="empty output"):
         extractor._extract_with_docling(dummy_pdf)
@@ -110,7 +110,7 @@ def test_extract_with_docling_raises_on_empty_output(extractor, dummy_pdf):
 def test_extract_with_docling_stores_title(extractor, dummy_pdf):
     """docling_title is stored in metadata from _extract_title()."""
     mock_converter, mock_doc = _make_mock_docling(["# Content"])
-    extractor._converter = mock_converter
+    extractor._converter_enriched = mock_converter
 
     with patch.object(extractor, "_extract_title", return_value="My Paper"):
         result = extractor._extract_with_docling(dummy_pdf)
@@ -289,3 +289,275 @@ def test_normalize_whitespace_excess_newlines():
     assert _normalize_whitespace_edge_cases("a\n\n\n\n\nb") == "a\n\n\nb"
     # Three newlines are preserved as-is.
     assert _normalize_whitespace_edge_cases("a\n\n\nb") == "a\n\n\nb"
+
+
+# ── RDR-044 Phase 0: formula detection + enrichment ─────────────────────────
+
+class TestGetConverterFormulaEnrichment:
+    """_get_converter(enriched=...) controls do_formula_enrichment on PdfPipelineOptions."""
+
+    def test_enriched_true_enables_formula_enrichment(self, extractor):
+        """_get_converter(enriched=True) sets opts.do_formula_enrichment = True."""
+        mock_opts = MagicMock()
+        mock_pipeline = MagicMock()
+        mock_pipeline.PdfPipelineOptions.return_value = mock_opts
+
+        mock_docling = MagicMock()
+        mock_docling.PdfFormatOption = MagicMock()
+
+        with patch.dict("sys.modules", {
+            "docling": MagicMock(),
+            "docling.document_converter": mock_docling,
+            "docling.datamodel": MagicMock(),
+            "docling.datamodel.pipeline_options": mock_pipeline,
+        }):
+            extractor._get_converter(enriched=True)
+
+        assert mock_opts.do_formula_enrichment is True
+
+    def test_enriched_false_disables_formula_enrichment(self, extractor):
+        """_get_converter(enriched=False) — default fast mode — sets do_formula_enrichment = False."""
+        mock_opts = MagicMock()
+        mock_pipeline = MagicMock()
+        mock_pipeline.PdfPipelineOptions.return_value = mock_opts
+
+        mock_docling = MagicMock()
+        mock_docling.PdfFormatOption = MagicMock()
+
+        with patch.dict("sys.modules", {
+            "docling": MagicMock(),
+            "docling.document_converter": mock_docling,
+            "docling.datamodel": MagicMock(),
+            "docling.datamodel.pipeline_options": mock_pipeline,
+        }):
+            extractor._get_converter(enriched=False)
+
+        assert mock_opts.do_formula_enrichment is False
+
+    def test_default_enriched_is_false(self, extractor):
+        """_get_converter() without argument defaults to enriched=False."""
+        mock_opts = MagicMock()
+        mock_pipeline = MagicMock()
+        mock_pipeline.PdfPipelineOptions.return_value = mock_opts
+
+        mock_docling = MagicMock()
+        mock_docling.PdfFormatOption = MagicMock()
+
+        with patch.dict("sys.modules", {
+            "docling": MagicMock(),
+            "docling.document_converter": mock_docling,
+            "docling.datamodel": MagicMock(),
+            "docling.datamodel.pipeline_options": mock_pipeline,
+        }):
+            extractor._get_converter()
+
+        assert mock_opts.do_formula_enrichment is False
+
+
+class TestFormulaItemCounting:
+    """_extract_with_docling counts FormulaItem objects in the iterate_items loop."""
+
+    def _make_formula_item(self, page_no: int = 1) -> MagicMock:
+        """Build a mock FormulaItem (duck-typed by __name__)."""
+        item = MagicMock()
+        type(item).__name__ = "FormulaItem"
+        prov = MagicMock()
+        prov.page_no = page_no
+        item.prov = [prov]
+        return item
+
+    def _make_text_item(self, page_no: int = 1) -> MagicMock:
+        """Build a mock TextItem (not a FormulaItem)."""
+        item = MagicMock()
+        type(item).__name__ = "TextItem"
+        prov = MagicMock()
+        prov.page_no = page_no
+        item.prov = [prov]
+        return item
+
+    def test_formula_count_in_metadata(self, extractor, dummy_pdf):
+        """formula_count in metadata reflects FormulaItem objects found during iteration."""
+        formula1 = self._make_formula_item(page_no=1)
+        formula2 = self._make_formula_item(page_no=2)
+        text_item = self._make_text_item(page_no=1)
+
+        mock_converter, mock_doc = _make_mock_docling(["# Page 1", "## Page 2"])
+        mock_doc.iterate_items.return_value = iter([
+            (formula1, None),
+            (text_item, None),
+            (formula2, None),
+        ])
+        extractor._converter_enriched = mock_converter
+
+        with patch.object(extractor, "_extract_title", return_value=""):
+            result = extractor._extract_with_docling(dummy_pdf)
+
+        assert result.metadata["formula_count"] == 2
+
+    def test_zero_formula_count_when_none_present(self, extractor, dummy_pdf):
+        """formula_count is 0 when no FormulaItem objects exist."""
+        text_item = self._make_text_item(page_no=1)
+
+        mock_converter, mock_doc = _make_mock_docling(["# Content"])
+        mock_doc.iterate_items.return_value = iter([
+            (text_item, None),
+        ])
+        extractor._converter_enriched = mock_converter
+
+        with patch.object(extractor, "_extract_title", return_value=""):
+            result = extractor._extract_with_docling(dummy_pdf)
+
+        assert result.metadata["formula_count"] == 0
+
+
+class TestFormulaStructlogWarning:
+    """structlog warning emitted when formulas are detected."""
+
+    def test_warning_emitted_when_formulas_detected(self, extractor, dummy_pdf):
+        """'formula_content_detected' warning logged when formula_count > 0."""
+        formula = MagicMock()
+        type(formula).__name__ = "FormulaItem"
+        formula.prov = [MagicMock(page_no=1)]
+
+        mock_converter, mock_doc = _make_mock_docling(["# Content"])
+        mock_doc.iterate_items.return_value = iter([(formula, None)])
+        extractor._converter_enriched = mock_converter
+
+        with patch.object(extractor, "_extract_title", return_value=""):
+            with patch("nexus.pdf_extractor._log") as mock_log:
+                extractor._extract_with_docling(dummy_pdf)
+
+        mock_log.warning.assert_any_call(
+            "formula_content_detected",
+            formula_count=1,
+            path=str(dummy_pdf),
+        )
+
+    def test_no_warning_when_zero_formulas(self, extractor, dummy_pdf):
+        """No warning logged when formula_count == 0."""
+        text_item = MagicMock()
+        type(text_item).__name__ = "TextItem"
+        text_item.prov = [MagicMock(page_no=1)]
+
+        mock_converter, mock_doc = _make_mock_docling(["# Content"])
+        mock_doc.iterate_items.return_value = iter([(text_item, None)])
+        extractor._converter_enriched = mock_converter
+
+        with patch.object(extractor, "_extract_title", return_value=""):
+            with patch("nexus.pdf_extractor._log") as mock_log:
+                extractor._extract_with_docling(dummy_pdf)
+
+        # No call with "formula_content_detected"
+        for call in mock_log.warning.call_args_list:
+            assert call[0][0] != "formula_content_detected"
+
+
+class TestPdfChunksHasFormulas:
+    """_pdf_chunks propagates has_formulas to chunk metadata."""
+
+    def test_has_formulas_true_when_formula_count_positive(self):
+        """Chunk metadata includes has_formulas=True when result has formula_count > 0."""
+        from nexus.doc_indexer import _pdf_chunks
+
+        result = ExtractionResult(
+            text="Some math content here that is long enough to chunk.",
+            metadata={
+                "extraction_method": "docling",
+                "page_count": 1,
+                "format": "markdown",
+                "page_boundaries": [{"page_number": 1, "start_char": 0, "page_text_length": 52}],
+                "table_regions": [],
+                "docling_title": "Math Paper",
+                "pdf_title": "",
+                "pdf_author": "",
+                "pdf_subject": "",
+                "pdf_keywords": "",
+                "pdf_creator": "",
+                "pdf_producer": "",
+                "pdf_creation_date": "",
+                "pdf_mod_date": "",
+                "formula_count": 3,
+            },
+        )
+
+        with patch("nexus.doc_indexer.PDFExtractor") as MockExtractor:
+            MockExtractor.return_value.extract.return_value = result
+            chunks = _pdf_chunks(
+                Path("/fake/math.pdf"), "abc123", "voyage-context-3",
+                "2026-01-01T00:00:00", "test",
+            )
+
+        assert len(chunks) > 0
+        for _id, _text, meta in chunks:
+            assert meta["has_formulas"] is True
+
+    def test_has_formulas_false_when_formula_count_zero(self):
+        """Chunk metadata includes has_formulas=False when formula_count == 0."""
+        from nexus.doc_indexer import _pdf_chunks
+
+        result = ExtractionResult(
+            text="Plain text content that is long enough to produce at least one chunk.",
+            metadata={
+                "extraction_method": "docling",
+                "page_count": 1,
+                "format": "markdown",
+                "page_boundaries": [{"page_number": 1, "start_char": 0, "page_text_length": 70}],
+                "table_regions": [],
+                "docling_title": "Plain Paper",
+                "pdf_title": "",
+                "pdf_author": "",
+                "pdf_subject": "",
+                "pdf_keywords": "",
+                "pdf_creator": "",
+                "pdf_producer": "",
+                "pdf_creation_date": "",
+                "pdf_mod_date": "",
+                "formula_count": 0,
+            },
+        )
+
+        with patch("nexus.doc_indexer.PDFExtractor") as MockExtractor:
+            MockExtractor.return_value.extract.return_value = result
+            chunks = _pdf_chunks(
+                Path("/fake/plain.pdf"), "def456", "voyage-context-3",
+                "2026-01-01T00:00:00", "test",
+            )
+
+        assert len(chunks) > 0
+        for _id, _text, meta in chunks:
+            assert meta["has_formulas"] is False
+
+    def test_has_formulas_false_when_key_missing(self):
+        """Chunk metadata defaults has_formulas=False when formula_count not in metadata."""
+        from nexus.doc_indexer import _pdf_chunks
+
+        result = ExtractionResult(
+            text="Legacy content without formula detection metadata in the result.",
+            metadata={
+                "extraction_method": "pymupdf_normalized",
+                "page_count": 1,
+                "format": "normalized",
+                "page_boundaries": [{"page_number": 1, "start_char": 0, "page_text_length": 63}],
+                "table_regions": [],
+                "docling_title": "",
+                "pdf_title": "",
+                "pdf_author": "",
+                "pdf_subject": "",
+                "pdf_keywords": "",
+                "pdf_creator": "",
+                "pdf_producer": "",
+                "pdf_creation_date": "",
+                "pdf_mod_date": "",
+            },
+        )
+
+        with patch("nexus.doc_indexer.PDFExtractor") as MockExtractor:
+            MockExtractor.return_value.extract.return_value = result
+            chunks = _pdf_chunks(
+                Path("/fake/old.pdf"), "ghi789", "voyage-context-3",
+                "2026-01-01T00:00:00", "test",
+            )
+
+        assert len(chunks) > 0
+        for _id, _text, meta in chunks:
+            assert meta["has_formulas"] is False

@@ -295,6 +295,7 @@ def _pdf_chunks(
     # Per-page normalisation avoids false positives on short-but-real documents.
     _page_count = result.metadata.get("page_count", 1) or 1
     is_image_pdf = (len(result.text) / _page_count) < 20
+    has_formulas = result.metadata.get("formula_count", 0) > 0
 
     # Compute source_title once before the loop so bib lookup uses the same value.
     source_title = (
@@ -333,6 +334,7 @@ def _pdf_chunks(
             "pdf_subject": result.metadata.get("pdf_subject", ""),
             "pdf_keywords": result.metadata.get("pdf_keywords", ""),
             "is_image_pdf": is_image_pdf,
+            "has_formulas": has_formulas,
             "bib_year": bib.get("year", 0),
             "bib_venue": bib.get("venue", ""),
             "bib_authors": bib.get("authors", ""),
