@@ -53,6 +53,10 @@ dependencies = [
 
 [project.optional-dependencies]
 local = ["fastembed>=0.7.0"]
+# mineru[all] includes formula + table models (~2-3 GB on first run)
+# Models are downloaded on first use, not at install time
+# PyPI package "mineru" (v2.0+); import namespace is "mineru"
+mineru = ["mineru[all]"]
 
 [project.urls]
 Homepage = "https://github.com/Hellblazer/nexus"
