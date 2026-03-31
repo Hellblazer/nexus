@@ -117,7 +117,7 @@ class PDFExtractor:
         if not text.strip():
             raise RuntimeError("docling produced empty output")
 
-        # Second pass: collect TableItem regions and count FormulaItem (duck-typed)
+        # Collect TableItem regions and count FormulaItem (duck-typed, single pass)
         table_regions: list[dict] = []
         formula_count = 0
         for item, _ in doc.iterate_items():
@@ -248,5 +248,6 @@ class PDFExtractor:
                 "pdf_producer": doc_meta.get("producer", ""),
                 "pdf_creation_date": doc_meta.get("creationDate", ""),
                 "pdf_mod_date": doc_meta.get("modDate", ""),
+                "formula_count": 0,
             },
         )

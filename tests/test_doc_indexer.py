@@ -191,11 +191,11 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch):
 # ── PDF metadata schema ───────────────────────────────────────────────────────
 
 def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
-    """PDF chunk metadata contains all 21 required fields (18 base + 3 PDF-only).
+    """PDF chunk metadata contains all 22 required fields (18 base + 4 PDF-only).
 
     Uses a real PDF fixture so the production metadata mapping is exercised.
     The markdown schema test (test_docs_metadata_schema_complete) remains unchanged;
-    pdf_subject, pdf_keywords, and is_image_pdf are PDF-only fields.
+    pdf_subject, pdf_keywords, is_image_pdf, and has_formulas are PDF-only fields.
     """
     from nexus.doc_indexer import index_pdf
 
@@ -208,8 +208,8 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
         "format", "extraction_method", "chunk_index", "chunk_count",
         "chunk_start_char", "chunk_end_char", "embedding_model",
         "indexed_at", "content_hash",
-        # 3 PDF-only fields added in Phase 0
-        "pdf_subject", "pdf_keywords", "is_image_pdf",
+        # 4 PDF-only fields
+        "pdf_subject", "pdf_keywords", "is_image_pdf", "has_formulas",
     }
 
     mock_col = MagicMock()

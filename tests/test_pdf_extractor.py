@@ -269,6 +269,49 @@ def test_get_converter_caches_instance(extractor):
     assert c1 is c2
 
 
+def test_get_converter_enriched_caches_instance(extractor):
+    """_get_converter(enriched=True) returns the same instance on repeated calls."""
+    mock_converter = MagicMock()
+    mock_docling = MagicMock()
+    mock_docling.DocumentConverter.return_value = mock_converter
+    mock_docling.PdfFormatOption = MagicMock()
+
+    mock_pipeline = MagicMock()
+    mock_pipeline.PdfPipelineOptions.return_value = MagicMock()
+
+    with patch.dict("sys.modules", {
+        "docling": MagicMock(),
+        "docling.document_converter": mock_docling,
+        "docling.datamodel": MagicMock(),
+        "docling.datamodel.pipeline_options": mock_pipeline,
+    }):
+        c1 = extractor._get_converter(enriched=True)
+        c2 = extractor._get_converter(enriched=True)
+
+    assert c1 is c2
+
+
+def test_get_converter_enriched_and_fast_are_separate(extractor):
+    """_get_converter(enriched=True) and _get_converter(enriched=False) return different instances."""
+    mock_docling = MagicMock()
+    mock_docling.PdfFormatOption = MagicMock()
+    mock_docling.DocumentConverter.side_effect = [MagicMock(name="fast"), MagicMock(name="enriched")]
+
+    mock_pipeline = MagicMock()
+    mock_pipeline.PdfPipelineOptions.return_value = MagicMock()
+
+    with patch.dict("sys.modules", {
+        "docling": MagicMock(),
+        "docling.document_converter": mock_docling,
+        "docling.datamodel": MagicMock(),
+        "docling.datamodel.pipeline_options": mock_pipeline,
+    }):
+        fast = extractor._get_converter(enriched=False)
+        enriched = extractor._get_converter(enriched=True)
+
+    assert fast is not enriched
+
+
 # ── _normalize_whitespace_edge_cases ──────────────────────────────────────────
 
 def test_normalize_whitespace_tab():
