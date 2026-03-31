@@ -116,7 +116,7 @@ class PDFExtractor:
             html = ""
             if callable(getattr(item, "export_to_html", None)):
                 try:
-                    html = item.export_to_html()
+                    html = item.export_to_html(doc=doc)
                 except Exception as exc:
                     _log.debug("table_html_export_failed", page=page_no, error=str(exc))
                     html = ""
