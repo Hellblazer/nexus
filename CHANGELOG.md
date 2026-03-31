@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.8.4] - 2026-03-30
+
+### Added
+- **Review gates in plans** — strategic planner now includes mandatory
+  code-review-expert tasks after implementation phases in every plan.
+- **Bib enrichment opt-in** — `nx index pdf --enrich` flag wired through
+  CLI (was documented but not implemented). Default is off.
+
+### Fixed
+- **Pagination correctness** — `store_list` uses true collection count,
+  `search` footer distinguishes "may have more" from "end". Standardized
+  footer format across all paged tools. 11 pagination tests added.
+- **Empty `--where` values rejected** — `key=` and `key>=` raise clear
+  CLI errors instead of passing empty strings to ChromaDB.
+
 ## [2.8.3] - 2026-03-30
 
 ### Changed
