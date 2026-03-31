@@ -33,6 +33,7 @@ from nexus.mcp_server import (
     scratch,
     scratch_manage,
     search,
+    store_get,
     store_list,
     store_put,
 )
@@ -121,6 +122,62 @@ def test_store_list(t3):
     result = store_list(collection="knowledge")
     assert not result.startswith("Error:"), f"store_list returned error: {result}"
     assert "entries" in result.lower() or "list-test" in result
+
+
+def test_store_get_returns_full_content(t3):
+    """store_get retrieves full document content and metadata."""
+    put_result = store_put(content="full document text here", collection="knowledge", title="get-test")
+    # Extract the doc ID from "Stored: <id> -> knowledge__knowledge"
+    doc_id = put_result.split("Stored:")[1].strip().split(" ->")[0].strip()
+
+    result = store_get(doc_id=doc_id, collection="knowledge")
+    assert not result.startswith("Error:"), f"store_get returned error: {result}"
+    assert "full document text here" in result
+    assert doc_id in result
+
+
+def test_store_get_shows_metadata(t3):
+    """store_get output includes title, collection, and indexed date."""
+    put_result = store_put(content="metadata content", collection="knowledge", title="metadata-test-doc")
+    doc_id = put_result.split("Stored:")[1].strip().split(" ->")[0].strip()
+
+    result = store_get(doc_id=doc_id, collection="knowledge")
+    assert "metadata-test-doc" in result
+    assert "knowledge__knowledge" in result
+
+
+def test_store_get_not_found(t3):
+    """store_get returns descriptive not-found message for missing ID."""
+    result = store_get(doc_id="nonexistent-id-12345", collection="knowledge")
+    assert not result.startswith("Error:"), "should be user-friendly, not raw exception"
+    assert "not found" in result.lower() or "nonexistent" in result.lower()
+
+
+def test_store_get_fully_qualified_collection(t3):
+    """store_get accepts fully-qualified collection name."""
+    put_result = store_put(content="qualified collection content", collection="knowledge__knowledge", title="qualified-test")
+    doc_id = put_result.split("Stored:")[1].strip().split(" ->")[0].strip()
+
+    result = store_get(doc_id=doc_id, collection="knowledge__knowledge")
+    assert not result.startswith("Error:"), f"store_get returned error: {result}"
+    assert "qualified collection content" in result
+
+
+def test_store_get_empty_doc_id(t3):
+    """store_get rejects empty doc_id."""
+    result = store_get(doc_id="", collection="knowledge")
+    assert result.startswith("Error:")
+    assert "doc_id" in result.lower() or "required" in result.lower()
+
+
+def test_store_get_no_ansi(t3):
+    """store_get output contains no ANSI escape codes."""
+    import re
+    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+    put_result = store_put(content="ansi check content", collection="knowledge", title="ansi-get-test")
+    doc_id = put_result.split("Stored:")[1].strip().split(" ->")[0].strip()
+    result = store_get(doc_id=doc_id, collection="knowledge")
+    assert not ansi_re.search(result), f"ANSI codes found in: {result[:100]}"
 
 
 # ── Memory tests ──────────────────────────────────────────────────────────────

@@ -229,6 +229,42 @@ def store_put(
 
 
 @mcp.tool()
+def store_get(doc_id: str, collection: str = "knowledge") -> str:
+    """Retrieve the full content and metadata of a T3 knowledge entry by its document ID.
+
+    Use this after store_list or search to read a complete document beyond the 200-char
+    search snippet. The doc_id is the 16-char hex ID shown by store_list or store_put.
+
+    Args:
+        doc_id: Exact document ID (from store_list or store_put output)
+        collection: Collection name or prefix (default: knowledge)
+    """
+    try:
+        if not doc_id:
+            return "Error: doc_id is required"
+        col_name = t3_collection_name(collection)
+        t3 = _get_t3()
+        entry = t3.get_by_id(col_name, doc_id)
+        if entry is None:
+            return f"Not found: {doc_id!r} in {col_name}"
+        title = entry.get("title", "")
+        tags = entry.get("tags", "")
+        indexed_at = (entry.get("indexed_at") or "")[:10]
+        lines: list[str] = [f"ID:         {entry['id']}", f"Collection: {col_name}"]
+        if title:
+            lines.append(f"Title:      {title}")
+        if tags:
+            lines.append(f"Tags:       {tags}")
+        if indexed_at:
+            lines.append(f"Indexed:    {indexed_at}")
+        lines.append("")
+        lines.append(entry.get("content", ""))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) -> str:
     """List entries in a T3 knowledge collection.
 
