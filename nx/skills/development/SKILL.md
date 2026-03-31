@@ -118,6 +118,13 @@ Do not retry approaches listed in scratch under tag "failed-approach".
 - [ ] Remaining plan steps completed
 ```
 
+## Post-Implementation Review
+
+Code review steps are baked into plans by the strategic planner. When
+executing a plan, follow the review tasks at the designated points.
+For ad-hoc implementation outside a plan, use `/nx:review-code` when
+the scope warrants it.
+
 ## TDD Methodology
 
 The developer agent follows test-driven development:

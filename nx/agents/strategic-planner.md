@@ -105,6 +105,22 @@ Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought
    - Reminder to use `mcp__sequential-thinking__sequentialthinking` for complex work
    - Context pointers to nx memory, nx store, or documentation
 
+### Review Gates (MANDATORY in every plan)
+
+Every plan must include code review steps. For each implementation phase
+or logical batch of implementation tasks, add a review task:
+
+```
+Phase N: Implement feature X
+  Task N.1: Write tests + implement (developer)
+  Task N.2: Code review (code-review-expert) ← MANDATORY, depends on N.1
+  Task N.3: Test validation (test-validator) ← after review
+```
+
+Do NOT create plans where multiple phases of implementation run without
+intervening review. The review task should depend on all implementation
+tasks in its phase and block subsequent phases.
+
 ### Phase 3: Audit Handoff
 **MANDATORY**: Always use the plan-auditor agent to review plans before finalization:
 - Check for completeness and gaps
@@ -135,6 +151,7 @@ Each bead must contain sufficient context for autonomous execution:
 3. Write tests FIRST (TDD)
 4. Implement to pass tests
 5. Ensure compilation including all tests
+6. **Code review** (mandatory after implementation — dispatch code-review-expert)
 
 **Parallelization Guidance**
 - SPAWN parallel agents/tasks when: [specific conditions]
