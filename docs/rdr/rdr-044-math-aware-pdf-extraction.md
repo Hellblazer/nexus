@@ -54,40 +54,49 @@ PDF → Docling (primary) → markdown with <!-- formula-not-decoded --> → chu
 
 ## Proposed Solution
 
-Evaluate and integrate a math-aware extraction backend. Three candidates:
+### Recommended: MinerU as math-aware extraction backend
 
-### Option A: Nougat (Meta AI)
+Based on three-way comparison (RF-7), MinerU is the recommended replacement for Docling on math-heavy PDFs:
+- **2.9x faster** than Docling+Formula enrichment
+- **Strong inline math** (457 vs Docling's 29 on same paper)
+- **Structured equation blocks** with bbox, page index, LaTeX text
+- **`formula_enable=True`** flag — math extraction is opt-in per call
 
-Neural OCR model specifically trained on academic papers. Outputs LaTeX for equations.
-- Pros: Open source, specifically designed for academic PDFs, handles complex equations
-- Cons: GPU-intensive, slow (~1 page/sec on CPU), large model download (~2GB)
-- Integration: Replace Docling for math-heavy PDFs, or use as post-processing for formula regions
+### Integration approach: auto-detect + backend selection
 
-### Option B: Marker
+```
+nx index pdf paper.pdf
+  → Pass 1: Docling without formula enrichment (~4s)
+  → Count FormulaItem objects (RF-2: detected even without enrichment)
+  → If 0 formulas: done (Docling output is fine for non-math papers)
+  → If >0 formulas: re-extract with MinerU (formula_enable=True)
+```
 
-Open-source PDF-to-markdown converter with equation support via Texify model.
-- Pros: Fast, produces clean markdown with LaTeX math blocks, active development
-- Cons: Requires surya + texify model downloads, less battle-tested than Docling for layout
-- Integration: Could replace entire Docling pipeline or serve as equation-only supplement
+This preserves Docling as the fast default for non-math content while using MinerU's superior math extraction when needed. Zero overhead for non-math papers.
 
-### Option C: Docling equation pipeline
+### Alternative: MinerU as primary for all PDFs
 
-Docling may have configurable equation handling that we're not enabling.
-- Pros: No new dependency, stays within current architecture
-- Cons: May not exist or may be insufficient — needs investigation
-- Integration: Configuration change in `_get_converter()` if available
+MinerU handles layout, tables, and text as well. If testing confirms its non-math quality matches Docling, it could replace Docling entirely — simplifying the pipeline to one extractor.
 
-### Option D: Hybrid approach
+### CLI interface
 
-Use Docling for layout/tables + Nougat or Marker for equations only.
-- Pros: Best of both worlds — Docling's layout intelligence + dedicated math extraction
-- Cons: Complex pipeline, two models to manage, alignment between outputs
+- `nx index pdf paper.pdf` — auto-detect, use MinerU when formulas found
+- `nx index pdf paper.pdf --extractor mineru` — force MinerU
+- `nx index pdf paper.pdf --extractor docling` — force Docling (current behavior)
 
-### Immediate mitigation (regardless of which option)
+### Rejected options
 
-1. **Detection**: Count `formula-not-decoded` placeholders during `nx index pdf` and warn the user
-2. **Metadata flag**: Add `has_formula_gaps: true` to chunk metadata when placeholders detected
-3. **PyMuPDF math fallback**: When Docling produces formula placeholders, try PyMuPDF for those pages — it extracts Unicode math symbols which, while imperfect, are better than nothing
+**Nougat**: GPU-intensive, slow on CPU, trained specifically on arXiv (narrow). Not tested but benchmarks show it's slower than both Marker and MinerU.
+
+**Marker**: Produces cleanest LaTeX but 2.5x slower than MinerU. Strong option if LaTeX quality is paramount, but speed matters for batch processing ~300 papers.
+
+**Docling formula enrichment only**: Works (RF-1) but 2.9x slower than MinerU, misses most inline math (29 vs 457), and produces lower-quality LaTeX.
+
+### Immediate mitigation (before full implementation)
+
+1. **Enable `do_formula_enrichment=True`** in `_get_converter()` — one-line fix, catches display equations now
+2. **Count FormulaItems** during indexing and warn user when formulas detected
+3. **Add `has_formulas: true`** to chunk metadata when FormulaItems present
 
 ## Research Findings
 
@@ -139,6 +148,61 @@ Pass 1: Docling without formula enrichment (~4s) → count FormulaItems
 Post-hoc enrichment on existing DoclingDocument is NOT supported — requires full re-conversion. But the two-pass cost is acceptable: ~8s base + 2.6s/formula for math papers.
 
 ### RF-5: Zero-placeholder papers may genuinely have no formulas (2026-03-31)
+
+**Classification**: Verified — Cross-validation
+**Confidence**: HIGH
+
+`grossberg-2021-canonical-laminar-circuit.pdf` had 0 Docling placeholders AND 0 Marker equations. The paper genuinely has no math. The FormulaItem count from RF-2 is the authoritative signal.
+
+### RF-6: Web research — community consensus and benchmarks (2026-03-31)
+
+**Classification**: Verified — Web Search
+**Confidence**: HIGH
+
+**Dedicated benchmark paper**: "Benchmarking Document Parsers on Mathematical Formula Extraction from PDFs" (arXiv 2512.09874) — VLMs (Qwen3-VL, Mathpix) score >9.6, rule-based parsers much lower.
+
+**Docling community awareness**: Active GitHub discussions on formula-not-decoded (#1254, #925, #212). Known limitation, formula enrichment is the documented fix.
+
+**Head-to-head from others**: Marker extracted 13 formulas where Docling got 5. Marker 4.5x faster overall.
+
+**MinerU** (opendatalab) is a strong contender we haven't tested — best GPU perf (0.21 sec/page), strong formula handling, high benchmark scores.
+
+**SmolDocling** (256M params, IBM) — lightweight model for document understanding including formulas. Worth investigating.
+
+**Consensus**: For math-heavy academic papers, Marker or MinerU recommended over Docling. Docling's strength is structured output for enterprise NLP, not math.
+
+Sources:
+- https://jimmysong.io/blog/pdf-to-markdown-open-source-deep-dive/
+- https://procycons.com/en/blogs/pdf-data-extraction-benchmark/
+- https://arxiv.org/html/2512.09874v1
+- https://github.com/docling-project/docling/discussions/1254
+- https://github.com/docling-project/docling/discussions/925
+- https://www.soup.io/which-pdf-parser-should-you-use-comparing-docling-marker-netmind-parsepro-mineru-olmocr
+
+### RF-7: Three-way comparison on cohen-grossberg-1983 (98 baseline placeholders) (2026-03-31)
+
+**Classification**: Verified — Live test
+**Confidence**: HIGH
+
+| | Docling+Formula | Marker | MinerU |
+|---|---|---|---|
+| Time | 447s | 389s | **154s** |
+| Display equations ($$) | 190 | 108 | 102 |
+| Inline math ($) | 29 | **469** | 457 |
+| Total math content | 219 | 577 | **559** |
+| LaTeX quality | `x _ { k + 1 }` (spaced) | `\frac{dx_i}{dt}` (compact) | `\frac { d x_i } { d t }` (spaced) |
+| Dependency weight | already installed | surya + texify models | unimernet + albumentations |
+
+**MinerU is the clear winner**: 2.9x faster than Docling+Formula, 2.5x faster than Marker, strong inline math capture (457 vs Docling's 29), structured `equation` block types in JSON output.
+
+Marker has the cleanest LaTeX notation but MinerU's speed advantage is decisive for batch processing ~300 papers.
+
+### RF-8: MinerU provides structured equation blocks (2026-03-31)
+
+**Classification**: Verified — Output inspection
+**Confidence**: HIGH
+
+MinerU's `content_list.json` output has explicit `{"type": "equation", "text": "$$...$$", "text_format": "latex", "bbox": [...], "page_idx": N}` blocks. This is richer than both Docling (FormulaItem with empty text unless enriched) and Marker (equations inline in markdown, no separate block metadata). The structured output could enable equation-specific embeddings or filtering.
 
 **Classification**: Verified — Cross-validation
 **Confidence**: HIGH
