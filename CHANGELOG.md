@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.8.5] - 2026-03-30
+
+### Changed
+- **Plan-enricher widened scope (RDR-043)** — reframed from audit-findings
+  delivery to general bead enrichment. Execution context (file paths, code
+  patterns, constraints, test commands) is now the primary purpose. Audit
+  findings incorporated when available, no longer required. "Degraded mode"
+  removed.
+- **Review gates in plans** — strategic planner includes mandatory
+  code-review-expert tasks after implementation phases.
+
 ## [2.8.4] - 2026-03-30
 
 ### Added
