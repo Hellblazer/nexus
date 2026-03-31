@@ -95,33 +95,15 @@ def main() -> None:
     else:
         debug("bd command not found")
 
-    # T1 scratch reminder (only when other nx context was surfaced)
-    if which('nx') and output_lines:
-        output_lines.append("## Session Scratch (T1)")
-        output_lines.append("Session-scoped ephemeral scratch available: `nx scratch put/get/list/search`")
-        output_lines.append("Flag important scratch entries before session ends: `nx scratch flag <id>`")
-        output_lines.append("")
-
-    # --- Capabilities summary (compact, for main conversation awareness) ---
+    # --- Capabilities summary (AI-optimized, minimal tokens) ---
     output_lines.append("## nx Capabilities")
     output_lines.append("")
-    output_lines.append("**Search**: `nx search QUERY` — semantic search across T3 collections")
-    output_lines.append("  - `--where KEY>=VALUE` operators: `=`, `>=`, `<=`, `>`, `<`, `!=` (numeric fields auto-coerced)")
-    output_lines.append("  - `--where chunk_type=table_page` for PDF pages containing tables")
-    output_lines.append("  - `--where bib_year>=2024` for bibliographic metadata filtering")
-    output_lines.append("")
-    output_lines.append("**Analytical queries**: `/nx:query` — multi-step retrieval + analysis")
-    output_lines.append("  - Dispatches `query-planner` → `analytical-operator` (extract/summarize/rank/compare/generate)")
-    output_lines.append("  - Best for: cross-corpus consistency checks, structured extraction, multi-source synthesis")
-    output_lines.append("  - For simple summarize/rank: dispatch `analytical-operator` directly")
-    output_lines.append("")
-    output_lines.append("**Enrichment**: `nx enrich COLLECTION` — backfill Semantic Scholar metadata (year, venue, authors, citations)")
-    output_lines.append("")
-    output_lines.append("**Plan library**: `plan_save`/`plan_search` MCP tools — save and reuse query execution plans (T2, project-scoped)")
-    output_lines.append("")
-    output_lines.append("**Pagination**: MCP `search`, `store_list`, `memory_search` return paged results.")
-    output_lines.append("  - Default page size 10-20. Response footer shows `Next page: offset=N`.")
-    output_lines.append("  - Re-call with `offset=N` to get the next page. Never truncates — all data accessible.")
+    output_lines.append("Search: `nx search QUERY` — `--where KEY>=VALUE` (operators: = >= <= > < !=, numeric auto-coerced)")
+    output_lines.append("Analytical queries: `/nx:query` — cross-corpus consistency, structured extraction, multi-source synthesis")
+    output_lines.append("Enrichment: `nx enrich COLLECTION` — Semantic Scholar metadata backfill")
+    output_lines.append("Plan library: `plan_save`/`plan_search` MCP tools (T2, project-scoped)")
+    output_lines.append("Scratch: `nx scratch put/search/list/flag` — session-scoped, shared across agents")
+    output_lines.append("Pagination: search/store_list/memory_search return paged results. Footer shows `offset=N` for next page.")
     output_lines.append("")
 
     if output_lines:
