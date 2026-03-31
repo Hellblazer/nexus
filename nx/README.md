@@ -156,7 +156,7 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | orchestrator | orchestration | *(no command)* | sonnet | Route requests to appropriate agents |
 | pdf-chromadb-processor | pdf-processing | `/nx:pdf-process` | haiku | Index PDFs into nx store for semantic search |
 | plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution |
-| plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with audit findings and execution context |
+| plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context — file paths, patterns, constraints, test commands |
 | strategic-planner | strategic-planning | `/nx:create-plan` | opus | Implementation planning, task decomposition |
 | test-validator | test-validation | `/nx:test-validate` | sonnet | Test coverage and quality validation |
 

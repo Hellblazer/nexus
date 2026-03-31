@@ -276,11 +276,11 @@ agents:
     color: emerald
     skill: enrich-plan
     slash_command: /enrich-plan
-    description: "Enriches beads with audit findings and execution context"
+    description: "Enriches beads with execution context — file paths, code patterns, constraints, test commands, and audit findings when available"
     triggers:
       - "plan-auditor completes in RDR planning chain"
       - "user says enrich beads or groom plan"
-      - "beads need audit findings folded in"
+      - "beads need execution context before implementation"
     strengths:
       - "Bead enrichment"
       - "Audit finding integration"

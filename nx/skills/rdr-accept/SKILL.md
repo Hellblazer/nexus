@@ -36,7 +36,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
      1. Write T1 scratch entry tagged `rdr-planning-context`: Use scratch tool: action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file}", tags="rdr-planning-context,rdr-{id}"
      2. **Dispatch strategic-planner** (Agent tool) — create phased plan with beads. **Wait for completion.**
      3. **Dispatch plan-auditor** (Agent tool) — audit the plan against codebase. T1 scratch has rdr-planning-context tag. **Wait for completion.**
-     4. **Dispatch plan-enricher** (Agent tool) — enrich beads with audit findings, write epic bead ID to T2. **Wait for completion.**
+     4. **Dispatch plan-enricher** (Agent tool) — enrich beads with execution context (+ audit findings from T1), write epic bead ID to T2. **Wait for completion.**
      5. Report chain completion to user.
    - **Important:** Each dispatch is sequential — do NOT dispatch the next agent until the previous one completes. Do NOT rely on agent-to-agent relay for this chain; this skill orchestrates all three dispatches directly.
 
@@ -45,7 +45,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 Steps 1-6 execute directly — no agent delegation. Step 7 (planning handoff) optionally dispatches three agents **sequentially, orchestrated by this skill** (not by agent-to-agent relay):
 1. `strategic-planner` — creates plan and beads
 2. `plan-auditor` — validates plan against codebase
-3. `plan-enricher` — enriches beads with audit findings, writes epic bead ID to T2
+3. `plan-enricher` — enriches beads with execution context (+ audit findings), writes epic bead ID to T2
 
 Each dispatch waits for the previous agent to complete before proceeding. The accept skill writes a T1 scratch entry tagged `rdr-planning-context` before the first dispatch.
 

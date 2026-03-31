@@ -268,7 +268,7 @@ After the planner completes, dispatch `nx:plan-auditor` agent (via Agent tool, s
 
 **Step 8d — Dispatch plan-enricher (MANDATORY — do NOT skip):**
 After the auditor completes, dispatch `nx:plan-enricher` agent (via Agent tool, subagent_type="nx:plan-enricher") with prompt:
-> Enrich all beads for RDR-<ID>: <title> with audit findings from T1 scratch. Write epic bead ID to T2.
+> Enrich all beads for RDR-<ID>: <title> with execution context. Incorporate audit findings from T1 scratch if present. Write epic bead ID to T2.
 
 **Wait for the enricher to complete. Do NOT skip this step.**
 

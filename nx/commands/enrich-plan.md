@@ -1,5 +1,5 @@
 ---
-description: Enrich beads with audit findings using plan-enricher agent
+description: Enrich beads with execution context using plan-enricher agent
 ---
 
 # Enrich Plan
@@ -32,18 +32,18 @@ Invoke the **enrich-plan** skill with the following relay. Fill in dynamic field
 ```markdown
 ## Relay: plan-enricher
 
-**Task**: Enrich all beads with audit findings, execution context, and codebase alignment
+**Task**: Enrich all beads with execution context and codebase alignment
 **Bead**: [fill from epic bead above or 'none']
 
 ### Input Artifacts
-- nx scratch: audit findings, plan structure, bead IDs (from same-session /nx:plan-audit)
+- nx scratch: plan structure, bead IDs, audit findings (if present from same-session /nx:plan-audit)
 - Files: [fill from key files referenced in plan]
 
 ### Deliverable
-All beads enriched with audit-identified gaps, test strategies, dependency refinements, and full execution context. Epic bead ID persisted to T2.
+All beads enriched with file paths, code patterns, test commands, constraints, and (when available) audit gap mitigations. Epic bead ID persisted to T2.
 
 ### Quality Criteria
-- [ ] Every bead enriched with audit findings (or context-only if T1 miss)
+- [ ] Every bead enriched with execution context
 - [ ] Epic bead ID written to T2 for close-time advisory
 - [ ] Enrichment summary reported to user
 ```

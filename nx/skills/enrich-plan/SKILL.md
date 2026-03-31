@@ -1,6 +1,6 @@
 ---
 name: enrich-plan
-description: Use when beads need enrichment with audit findings, execution context, and codebase alignment after plan-audit validates
+description: Use when beads need enrichment with execution context, file paths, code patterns, constraints, and test commands. Audit findings incorporated when available.
 effort: medium
 ---
 
@@ -13,7 +13,7 @@ Delegates to the **plan-enricher** agent (sonnet). See [registry.yaml](../../reg
 - After plan-auditor completes in RDR planning chain (automatic relay)
 - User says "enrich beads", "groom plan", "enrich plan"
 - User invokes `/nx:enrich-plan`
-- After `/nx:plan-audit` when beads need audit findings folded in
+- Beads need execution context before implementation begins
 
 ## Agent Invocation
 
@@ -22,18 +22,18 @@ Use the Agent tool to invoke **plan-enricher**:
 ```markdown
 ## Relay: plan-enricher
 
-**Task**: Enrich all beads with audit findings, execution context, and codebase alignment
+**Task**: Enrich all beads with execution context and codebase alignment
 **Bead**: [epic bead ID] or 'none'
 
 ### Input Artifacts
-- nx scratch: audit findings, plan structure, bead IDs (from same-session /nx:plan-audit)
+- nx scratch: plan structure, bead IDs, audit findings (if present from same-session /nx:plan-audit)
 - Files: [RDR file path if known]
 
 ### Deliverable
-All beads enriched with audit-identified gaps, test strategies, dependency refinements, and full execution context. Epic bead ID persisted to T2.
+All beads enriched with file paths, code patterns, test commands, dependency constraints, and (when available) audit gap mitigations. Epic bead ID persisted to T2.
 
 ### Quality Criteria
-- [ ] Every bead enriched with audit findings (or context-only if T1 miss)
+- [ ] Every bead enriched with execution context
 - [ ] Epic bead ID written to T2 for close-time advisory
 - [ ] Enrichment summary reported to user
 ```
@@ -42,7 +42,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Session Scope Note
 
-T1 scratch is session-scoped. Standalone invocation only works within the same session where `/nx:plan-audit` ran. Cross-session use requires re-running `/nx:plan-audit` first to populate T1 with audit findings.
+T1 scratch is session-scoped. When invoked after `/nx:plan-audit` in the same session, audit findings from T1 are automatically incorporated. Standalone invocation works without audit findings — codebase-derived context is the primary enrichment value.
 
 ## Agent-Specific PRODUCE
 
