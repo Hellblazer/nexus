@@ -89,14 +89,61 @@ Use Docling for layout/tables + Nougat or Marker for equations only.
 2. **Metadata flag**: Add `has_formula_gaps: true` to chunk metadata when placeholders detected
 3. **PyMuPDF math fallback**: When Docling produces formula placeholders, try PyMuPDF for those pages — it extracts Unicode math symbols which, while imperfect, are better than nothing
 
-## Research Needed
+## Research Findings
 
-- [ ] What does Docling's current equation pipeline offer? Check `PdfPipelineOptions` for math-related flags
-- [ ] Nougat: install, run on sample papers, measure quality + latency
-- [ ] Marker: install, run on same samples, compare
-- [ ] Can Nougat/Marker be scoped to formula regions only (not full-page re-extraction)?
-- [ ] What LaTeX representation works best for embedding models? Raw LaTeX vs Unicode vs description?
-- [ ] How does PyMuPDF handle the same equations? Is it a viable interim fallback?
+### RF-1: Docling has `do_formula_enrichment=True` — one-line fix (2026-03-31)
+
+**Classification**: Verified — Context7 docs + live test
+**Confidence**: HIGH
+
+Docling's `PdfPipelineOptions.do_formula_enrichment = True` enables the CodeFormula model (CodeFormulaV2) which extracts LaTeX from equation regions. We never enabled it.
+
+Test results on `carpenter-grossberg-1987-art1.pdf` (174 baseline placeholders):
+- **0 remaining placeholders** — all 174 equations extracted
+- **190 display equations**, 29 inline math markers
+- **447s total** (2.6s per formula on CPU, MPS not supported)
+- LaTeX quality: readable but spaced (`x _ { k + 1 }` not `x_{k+1}`)
+
+### RF-2: Docling detects formula regions WITHOUT enrichment (2026-03-31)
+
+**Classification**: Verified — Live test
+**Confidence**: HIGH
+
+First-pass Docling (without formula enrichment, ~4s) produces `FormulaItem` objects with `label=formula` and page/position provenance. The `text` field is empty, but the count is accurate. On `cohen-grossberg-1983` (98 baseline placeholders), first pass found 100 `FormulaItem` objects.
+
+This enables auto-detection: count FormulaItems in fast first pass, re-run with enrichment only if > 0.
+
+### RF-3: Marker comparison — cleaner LaTeX but much slower (2026-03-31)
+
+**Classification**: Verified — Live test
+**Confidence**: HIGH
+
+Marker (datalab-to/marker) on `deep-artmap-2503.07641.pdf`:
+- **Cleaner LaTeX**: `\mathbf{x}_{k+1}` vs Docling's `x _ { k + 1 }`
+- **Catches inline math**: 11 inline vs Docling's 0
+- **153s vs 4s** (Docling + CodeFormula) — 38x slower on small paper
+- **786s** on 21-page paper (grossberg-2021, zero formulas — all time spent on OCR)
+- Requires `__main__` guard (multiprocessing spawn), heavier dependency chain
+
+### RF-4: Auto-detect architecture is viable (2026-03-31)
+
+**Classification**: Verified — Analysis
+**Confidence**: HIGH
+
+```
+Pass 1: Docling without formula enrichment (~4s) → count FormulaItems
+  If 0: done (most papers, zero overhead)
+  If >0: re-run with do_formula_enrichment=True (~2.6s/formula)
+```
+
+Post-hoc enrichment on existing DoclingDocument is NOT supported — requires full re-conversion. But the two-pass cost is acceptable: ~8s base + 2.6s/formula for math papers.
+
+### RF-5: Zero-placeholder papers may genuinely have no formulas (2026-03-31)
+
+**Classification**: Verified — Cross-validation
+**Confidence**: HIGH
+
+`grossberg-2021-canonical-laminar-circuit.pdf` had 0 Docling placeholders AND 0 Marker equations. The paper genuinely has no math. The FormulaItem count from RF-2 is the authoritative signal — it catches formulas Docling can detect but not decode.
 
 ## Success Criteria
 
