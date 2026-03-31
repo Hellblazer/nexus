@@ -2,11 +2,12 @@
 title: "Widen Plan-Enricher Scope"
 id: RDR-043
 type: Enhancement
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
-reviewed-by: ""
+reviewed-by: self
 created: 2026-03-30
+accepted_date: 2026-03-30
 related_issues:
   - "RDR-036 - Post-Accept Planning Workflow (accepted)"
   - "RDR-042 - AgenticScholar-Inspired Enhancements (accepted)"

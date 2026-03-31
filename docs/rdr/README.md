@@ -64,7 +64,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-040](rdr-040-developer-agent-circuit-breaker.md) | Developer Agent Circuit Breaker for Test Failure Escalation | Architecture | Closed | 2026-03-25 |
 | [RDR-041](rdr-041-t1-scratch-inter-agent-context.md) | T1 Scratch Inter-Agent Context Sharing | Architecture | Closed | 2026-03-26 |
 | [RDR-042](rdr-042-agenticscholar-enhancements.md) | AgenticScholar-Inspired Enhancements | Architecture | Accepted | 2026-03-29 |
-| [RDR-043](rdr-043-plan-enricher-scope.md) | Widen Plan-Enricher Scope | Enhancement | Draft | 2026-03-30 |
+| [RDR-043](rdr-043-plan-enricher-scope.md) | Widen Plan-Enricher Scope | Enhancement | Accepted | 2026-03-30 |
 
 ---
 
