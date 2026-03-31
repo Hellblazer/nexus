@@ -21,29 +21,13 @@
           },
           {
             "type": "command",
-            "command": "bd prime",
-            "timeout": 10
-          },
-          {
-            "type": "command",
             "command": "cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md",
             "timeout": 5
           }
         ]
       }
     ],
-    "PreCompact": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bd prime",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
+    "PreCompact": [],
     "PostCompact": [
       {
         "matcher": "",

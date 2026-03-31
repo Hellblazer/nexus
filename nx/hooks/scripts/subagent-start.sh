@@ -1,9 +1,39 @@
 #!/bin/bash
 
 # SubagentStart Hook — injects storage context + active state for spawned agents.
+# Selectively skips sections based on agent task to save tokens.
+
+# --- Agent-type detection via stdin ---
+STDIN=$(cat)
+TASK_TEXT=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    text = ' '.join([
+        str(data.get('task', '')),
+        str(data.get('prompt', '')),
+    ]).lower()
+    print(text)
+except: print('')
+" "$STDIN" 2>/dev/null)
+
+# Classify agent purpose
+SKIP_STORAGE_DOCS=0
+SKIP_T2_SCAN=0
+SKIP_OPERATORS=0
+
+if echo "$TASK_TEXT" | grep -qiE "refactor|rename.*symbol|find.*method|type.hierarch|navigate.code"; then
+    # Code-nav agents don't need storage docs or operators
+    SKIP_STORAGE_DOCS=1
+    SKIP_OPERATORS=1
+elif echo "$TASK_TEXT" | grep -qiE "code.review|review.code|lint|style.check"; then
+    # Code review agents don't need storage docs or operators
+    SKIP_STORAGE_DOCS=1
+    SKIP_OPERATORS=1
+fi
 
 # T2 memory for active project
-if command -v git &> /dev/null; then
+if [[ $SKIP_T2_SCAN -eq 0 ]] && command -v git &> /dev/null; then
   PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
   if [[ -n "$PROJECT" ]]; then
     SCAN_SCRIPT="$CLAUDE_PLUGIN_ROOT/hooks/scripts/t2_prefix_scan.py"
@@ -35,6 +65,7 @@ fi
 
 # Serena + Context7 guidance injected by sn plugin (sn/hooks/scripts/mcp-inject.sh).
 
+if [[ $SKIP_STORAGE_DOCS -eq 0 ]]; then
 cat <<'NXTOOLS'
 
 ## nx Storage Tools
@@ -67,6 +98,7 @@ Tool prefix: mcp__plugin_nx_nexus__
 
 Routing: T1 for sibling sharing → T2 for project persistence → T3 for semantic knowledge.
 NXTOOLS
+fi
 
 cat <<'SEQTHINK'
 
@@ -77,6 +109,7 @@ Use for: debugging hypotheses, design choices, plan evaluation, risk assessment.
 Params: needsMoreThoughts=true (continue), isRevision=true+revisesThought=N (correct), branchFromThought=N+branchId="alt" (explore).
 SEQTHINK
 
+if [[ $SKIP_OPERATORS -eq 0 ]]; then
 cat <<'OPERATORS'
 
 ## Analytical Operators
@@ -85,6 +118,7 @@ Agent `analytical-operator` — dispatch via Agent tool with relay containing op
 Operations: extract (JSON template), summarize (short|detailed|evidence), rank (criterion), compare (criterion), generate (cited text).
 Step outputs: T1 scratch tag `query-step,step-N`.
 OPERATORS
+fi
 
 # Inject current T1 scratch entries
 if command -v nx &> /dev/null; then
