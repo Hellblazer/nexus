@@ -1,12 +1,40 @@
 #!/bin/bash
 
 # sn SubagentStart hook — inject Serena + Context7 MCP tool guidance
-# These tools are available to subagents but subagents don't know
-# they should use them or how to call them correctly.
-# IMPORTANT: Use full MCP-prefixed tool names (mcp__plugin_sn_serena__*)
-# because subagents see the prefixed names, not the short names.
-# Timeout: 5s (hooks.json) — static heredocs only, no I/O. Increase if dynamic content added.
+# Selectively injects based on agent task text to save tokens.
+# Default: inject both (safe fallback on parse failure).
+# Timeout: 5s (hooks.json) — stdin read + python3 ~50ms, well within budget.
 
+# --- Agent-type detection via stdin JSON ---
+STDIN=$(cat)
+TASK_TEXT=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    text = ' '.join([
+        str(data.get('task', '')),
+        str(data.get('prompt', '')),
+    ]).lower()
+    print(text)
+except: print('')
+" "$STDIN" 2>/dev/null)
+
+SKIP_SERENA=0
+SKIP_CONTEXT7=0
+
+if echo "$TASK_TEXT" | grep -qiE "research|synthesize|audit|survey|deep.anal|investigate|knowledge.tid"; then
+    # Pure research agents don't need code nav or library docs
+    SKIP_SERENA=1
+    SKIP_CONTEXT7=1
+elif echo "$TASK_TEXT" | grep -qiE "library|framework|api.doc|context7|package|dependency|migrate"; then
+    # Library-focused agents don't need code nav
+    SKIP_SERENA=1
+elif echo "$TASK_TEXT" | grep -qiE "refactor|rename.*symbol|find.*method|find.*class|type.hierarch|navigate.code"; then
+    # Code-nav agents don't need library docs
+    SKIP_CONTEXT7=1
+fi
+
+if [[ $SKIP_SERENA -eq 0 ]]; then
 cat <<'SERENA'
 ## Serena MCP — LSP Code Intelligence (injected by sn plugin)
 
@@ -80,7 +108,9 @@ mcp__plugin_sn_serena__list_memories(topic="auth")
 
 Use "/" in names to organize by topic. Prefer nx T2 memory for project decisions; use Serena memories for code structure notes that help future symbol navigation.
 ROUTING
+fi
 
+if [[ $SKIP_CONTEXT7 -eq 0 ]]; then
 cat <<'CONTEXT7'
 
 ## Context7 MCP — Library Documentation (injected by sn plugin)
@@ -107,3 +137,4 @@ When working with libraries, frameworks, or APIs — use Context7 to fetch curre
 - Business logic, code review
 - Writing scripts from scratch with no library dependency
 CONTEXT7
+fi
