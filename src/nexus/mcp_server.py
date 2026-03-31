@@ -176,8 +176,12 @@ def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10, offset:
         # Pagination footer
         shown_end = offset + len(page)
         if shown_end < total:
-            lines.append(f"\n--- Page {offset // n + 1}: showing {offset + 1}-{shown_end} of {total}. "
+            lines.append(f"\n--- Showing {offset + 1}-{shown_end} of {total}+. "
                          f"Next page: offset={shown_end}")
+        elif total >= fetch_n:
+            # Fetched exactly fetch_n — there may be more results
+            lines.append(f"\n--- Showing {offset + 1}-{shown_end}. "
+                         f"May have more: offset={shown_end}")
         else:
             lines.append(f"\n--- Showing {offset + 1}-{shown_end} of {total} (last page)")
 
@@ -235,14 +239,19 @@ def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) 
     """
     try:
         col_name = t3_collection_name(collection)
-        fetch_limit = offset + limit
-        entries = _get_t3().list_store(col_name, limit=fetch_limit)
-        if not entries:
+        t3 = _get_t3()
+        # Get true total from collection count
+        try:
+            info = t3.collection_info(col_name)
+            total = info["count"]
+        except KeyError:
             return f"No entries in {col_name}."
-        total = len(entries)
+        if total == 0:
+            return f"No entries in {col_name}."
+        entries = t3.list_store(col_name, limit=offset + limit)
         page = entries[offset:offset + limit]
         if not page:
-            return f"No entries at offset {offset} (total {total} fetched)."
+            return f"No entries at offset {offset} (total {total})."
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
         for e in page:
             doc_id = e.get("id", "")[:16]

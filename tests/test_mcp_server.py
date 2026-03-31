@@ -28,6 +28,8 @@ from nexus.mcp_server import (
     memory_get,
     memory_put,
     memory_search,
+    plan_save,
+    plan_search,
     scratch,
     scratch_manage,
     search,
@@ -563,3 +565,77 @@ def test_collection_cache_thread_safe():
     assert not errors
     for r in results:
         assert len(r) > 0, f"Cache race: thread saw empty collection list: {r!r}"
+
+
+# ── Pagination tests ─────────────────────────────────────────────────────────
+
+
+def test_search_pagination_default_page(t3):
+    """search returns first page by default (offset=0)."""
+    for i in range(5):
+        t3.put(collection="knowledge__test", content=f"document about topic {i}", title=f"doc{i}")
+    result = search(query="topic", corpus="knowledge__test", n=2, offset=0)
+    assert "Showing 1-2" in result
+    assert "offset=2" in result
+
+
+def test_search_pagination_offset(t3):
+    """search with offset returns subsequent page."""
+    for i in range(5):
+        t3.put(collection="knowledge__test", content=f"document about search topic {i}", title=f"doc{i}")
+    page1 = search(query="search topic", corpus="knowledge__test", n=2, offset=0)
+    assert "offset=2" in page1
+
+    page2 = search(query="search topic", corpus="knowledge__test", n=2, offset=2)
+    assert not page2.startswith("Error:")
+    assert "No results" not in page2
+
+
+def test_search_pagination_last_page(t3):
+    """Last page shows 'last page' indicator."""
+    t3.put(collection="knowledge__test", content="only document about pagination", title="solo")
+    result = search(query="pagination", corpus="knowledge__test", n=10, offset=0)
+    assert "last page" in result
+
+
+def test_store_list_pagination(t3):
+    """store_list supports offset pagination."""
+    # Use a dedicated collection to avoid cross-test pollution
+    for i in range(5):
+        store_put(content=f"entry {i}", collection="knowledge__pagtest", title=f"page-test-{i}")
+    page1 = store_list(collection="knowledge__pagtest", limit=2, offset=0)
+    assert "showing 1-2" in page1
+    assert "Next page: offset=2" in page1
+
+    page2 = store_list(collection="knowledge__pagtest", limit=2, offset=2)
+    assert not page2.startswith("Error:")
+
+
+def test_memory_search_pagination(t2_path):
+    """memory_search supports offset pagination."""
+    for i in range(5):
+        memory_put(content=f"finding about pagination topic {i}", project="testproj", title=f"page{i}.md")
+    page1 = memory_search(query="pagination", limit=2, offset=0)
+    assert not page1.startswith("Error:")
+    # Should contain results (FTS5 matches "pagination")
+    assert "testproj" in page1
+
+
+def test_plan_save_and_search(t2_path):
+    """plan_save stores a plan, plan_search retrieves it."""
+    result = plan_save(
+        query="compare error handling",
+        plan_json='{"steps": [{"step": 1, "operation": "search"}]}',
+        project="testproj",
+        tags="search,compare",
+    )
+    assert "Saved plan:" in result
+
+    found = plan_search(query="error handling", project="testproj")
+    assert "compare error handling" in found
+
+
+def test_plan_search_empty(t2_path):
+    """plan_search returns 'No matching plans.' when library is empty."""
+    result = plan_search(query="nonexistent")
+    assert "No matching plans" in result
