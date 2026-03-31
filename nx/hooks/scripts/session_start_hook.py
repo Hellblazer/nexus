@@ -119,6 +119,10 @@ def main() -> None:
     output_lines.append("")
     output_lines.append("**Plan library**: `plan_save`/`plan_search` MCP tools — save and reuse query execution plans (T2, project-scoped)")
     output_lines.append("")
+    output_lines.append("**Pagination**: MCP `search`, `store_list`, `memory_search` return paged results.")
+    output_lines.append("  - Default page size 10-20. Response footer shows `Next page: offset=N`.")
+    output_lines.append("  - Re-call with `offset=N` to get the next page. Never truncates — all data accessible.")
+    output_lines.append("")
 
     if output_lines:
         print("\n".join(output_lines))

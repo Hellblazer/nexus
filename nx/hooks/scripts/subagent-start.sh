@@ -81,8 +81,8 @@ mcp__plugin_nx_nexus__memory_get(project="<project>", title="<name>.md")
 # List all entries for a project
 mcp__plugin_nx_nexus__memory_get(project="<project>", title="")
 
-# Search memory
-mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<project>")
+# Search memory (paged — use offset for next page)
+mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<project>", limit=20, offset=0)
 
 # Write to memory (30d default TTL)
 mcp__plugin_nx_nexus__memory_put(content="<content>", project="<project>", title="<name>.md")
@@ -93,12 +93,30 @@ mcp__plugin_nx_nexus__memory_put(content="<content>", project="<project>", title
 Search indexed code, docs, and knowledge. Store validated findings.
 
 ```
-# Search (default: knowledge,code,docs corpora)
-mcp__plugin_nx_nexus__search(query="<topic>", corpus="knowledge", n=5)
+# Search (paged — use offset for next page)
+mcp__plugin_nx_nexus__search(query="<topic>", corpus="knowledge", n=10, offset=0)
+
+# List entries (paged)
+mcp__plugin_nx_nexus__store_list(collection="knowledge", limit=20, offset=0)
 
 # Store a finding
 mcp__plugin_nx_nexus__store_put(content="<content>", collection="knowledge", title="<title>", tags="<tags>")
 ```
+
+### Pagination
+
+All list/search tools return paged results. The response footer shows the current page and `offset=N` for the next page. To get more results, re-call with `offset=N`:
+
+```
+# First page (default)
+mcp__plugin_nx_nexus__search(query="auth", n=10, offset=0)
+# → "--- Page 1: showing 1-10 of 25. Next page: offset=10"
+
+# Second page
+mcp__plugin_nx_nexus__search(query="auth", n=10, offset=10)
+```
+
+This applies to: `search`, `store_list`, `memory_search`.
 
 ### When to Use Which Tier
 

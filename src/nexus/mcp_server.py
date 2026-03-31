@@ -115,25 +115,25 @@ def _inject_t3(t3):
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
-_SEARCH_MAX_RESULTS = 25  # hard cap — prevents agents from requesting n=100
-_SEARCH_MAX_CHARS = 16_000  # truncate response to fit comfortably in agent context
+_DEFAULT_PAGE_SIZE = 10
 
 
 @mcp.tool()
-def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10) -> str:
+def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10, offset: int = 0) -> str:
     """Semantic search across T3 knowledge collections.
+
+    Results are paged. Use offset to retrieve subsequent pages.
 
     Args:
         query: Search query string
         corpus: Comma-separated corpus prefixes or full collection names (default: knowledge,code,docs).
                 Use "all" to search all corpora (knowledge, code, docs, rdr).
-        n: Maximum results to return (capped at 25)
+        n: Page size — results per page (default 10)
+        offset: Skip this many results (default 0). Use for pagination.
     """
     try:
         from nexus.search_engine import search_cross_corpus
         t3 = _get_t3()
-
-        n = min(n, _SEARCH_MAX_RESULTS)
 
         if corpus == "all":
             corpus = "knowledge,code,docs,rdr"
@@ -151,27 +151,36 @@ def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10) -> str:
 
         if not target:
             return f"No collections match corpus {corpus!r}"
-        results = search_cross_corpus(query, target, n_results=n, t3=t3)
+        # Fetch enough to fill the requested page
+        fetch_n = offset + n
+        results = search_cross_corpus(query, target, n_results=fetch_n, t3=t3)
         results.sort(key=lambda r: r.distance)
         if not results:
             return "No results."
+
+        # Apply pagination
+        total = len(results)
+        page = results[offset:offset + n]
+        if not page:
+            return f"No results at offset {offset} (total {total})."
+
         lines: list[str] = []
-        total_chars = 0
-        included = 0
-        for r in results:
+        for r in page:
             title = r.metadata.get("title", "")
             source = r.metadata.get("source_path", "")
             dist = f"{r.distance:.4f}"
             label = title or source or r.id
             snippet = r.content[:200].replace("\n", " ")
-            entry = f"[{dist}] {label}\n  {snippet}"
-            if total_chars + len(entry) > _SEARCH_MAX_CHARS:
-                omitted = len(results) - included
-                lines.append(f"\n... {omitted} more results truncated (total {len(results)})")
-                break
-            lines.append(entry)
-            total_chars += len(entry) + 2  # +2 for "\n\n" separator
-            included += 1
+            lines.append(f"[{dist}] {label}\n  {snippet}")
+
+        # Pagination footer
+        shown_end = offset + len(page)
+        if shown_end < total:
+            lines.append(f"\n--- Page {offset // n + 1}: showing {offset + 1}-{shown_end} of {total}. "
+                         f"Next page: offset={shown_end}")
+        else:
+            lines.append(f"\n--- Showing {offset + 1}-{shown_end} of {total} (last page)")
+
         return "\n\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
@@ -214,20 +223,28 @@ def store_put(
 
 
 @mcp.tool()
-def store_list(collection: str = "knowledge", limit: int = 50) -> str:
+def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) -> str:
     """List entries in a T3 knowledge collection.
+
+    Results are paged. Use offset to retrieve subsequent pages.
 
     Args:
         collection: Collection name or prefix (default: knowledge)
-        limit: Maximum entries to return (default 50)
+        limit: Page size (default 20)
+        offset: Skip this many entries (default 0). Use for pagination.
     """
     try:
         col_name = t3_collection_name(collection)
-        entries = _get_t3().list_store(col_name, limit=limit)
+        fetch_limit = offset + limit
+        entries = _get_t3().list_store(col_name, limit=fetch_limit)
         if not entries:
             return f"No entries in {col_name}."
-        lines: list[str] = [f"{col_name}  ({len(entries)} entries)"]
-        for e in entries:
+        total = len(entries)
+        page = entries[offset:offset + limit]
+        if not page:
+            return f"No entries at offset {offset} (total {total} fetched)."
+        lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
+        for e in page:
             doc_id = e.get("id", "")[:16]
             title = (e.get("title") or "")[:40]
             tags = e.get("tags") or ""
@@ -240,6 +257,9 @@ def store_list(collection: str = "knowledge", limit: int = 50) -> str:
                 ttl_str = "permanent"
             tag_str = f"  [{tags}]" if tags else ""
             lines.append(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
+        shown_end = offset + len(page)
+        if shown_end < total:
+            lines.append(f"--- Next page: offset={shown_end}")
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
@@ -292,16 +312,11 @@ def memory_get(project: str, title: str = "") -> str:
                 entry = db.get(project=project, title=title)
                 if entry is None:
                     return f"Not found: {project}/{title}"
-                content = entry['content']
-                truncated = ""
-                if len(content) > _SEARCH_MAX_CHARS:
-                    content = content[:_SEARCH_MAX_CHARS]
-                    truncated = f"\n\n... truncated ({len(entry['content'])} chars total)"
                 return (
                     f"[{entry['id']}] {entry['project']}/{entry['title']}\n"
                     f"Tags: {entry.get('tags', '')}\n"
                     f"Updated: {entry.get('timestamp', '')}\n\n"
-                    f"{content}{truncated}"
+                    f"{entry['content']}"
                 )
             else:
                 entries = db.list_entries(project=project)
@@ -316,28 +331,36 @@ def memory_get(project: str, title: str = "") -> str:
 
 
 @mcp.tool()
-def memory_search(query: str, project: str = "") -> str:
+def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 0) -> str:
     """Full-text search across T2 memory entries.
+
+    Results are paged. Use offset to retrieve subsequent pages.
 
     Args:
         query: Search query (FTS5 syntax)
         project: Optional project filter
+        limit: Page size (default 20)
+        offset: Skip this many results (default 0). Use for pagination.
     """
     try:
         with _t2_ctx() as db:
             results = db.search(query, project=project or None)
         if not results:
             return "No results."
+        total = len(results)
+        page = results[offset:offset + limit]
+        if not page:
+            return f"No results at offset {offset} (total {total})."
         lines: list[str] = []
-        total_chars = 0
-        for r in results:
+        for r in page:
             snippet = r["content"][:200].replace("\n", " ")
-            entry = f"[{r['id']}] {r['project']}/{r['title']}\n  {snippet}"
-            if total_chars + len(entry) > _SEARCH_MAX_CHARS:
-                lines.append(f"\n... {len(results) - len(lines)} more results truncated")
-                break
-            lines.append(entry)
-            total_chars += len(entry) + 2
+            lines.append(f"[{r['id']}] {r['project']}/{r['title']}\n  {snippet}")
+        shown_end = offset + len(page)
+        if shown_end < total:
+            lines.append(f"\n--- Page {offset // limit + 1}: showing {offset + 1}-{shown_end} of {total}. "
+                         f"Next page: offset={shown_end}")
+        else:
+            lines.append(f"\n--- Showing {offset + 1}-{shown_end} of {total} (last page)")
         return "\n\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
