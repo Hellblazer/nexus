@@ -80,6 +80,45 @@ The enricher works. But "degraded mode" for the common case is confusing, and th
 ### Split into two agents (rejected)
 One for audit-findings integration, one for general enrichment. Rejected: same logic, same bead update pattern. Two agents would duplicate work.
 
+## Research Findings
+
+### RF-1: Audit-centric language inventory (2026-03-30)
+
+**Classification**: Verified — Codebase Search
+**Method**: `grep -rn "audit.finding\|degraded.mode"` across `nx/`
+**Confidence**: HIGH
+
+27 references to "audit findings" across 8 files:
+
+| File | References | Key phrases |
+|------|-----------|-------------|
+| `nx/agents/plan-enricher.md` | 11 | "degraded mode", "context-only enrichment", "audit-identified gaps" |
+| `nx/skills/enrich-plan/SKILL.md` | 6 | "audit findings folded in", "context-only if T1 miss" |
+| `nx/commands/enrich-plan.md` | 4 | "audit findings using plan-enricher" |
+| `nx/commands/rdr-accept.md` | 1 | "enrich beads with audit findings from T1 scratch" |
+| `nx/skills/rdr-accept/SKILL.md` | 2 | "enriches beads with audit findings" |
+| `nx/registry.yaml` | 2 | description + triggers |
+| `nx/README.md` | 1 | agent table description |
+
+### RF-2: Enricher already handles no-audit case (2026-03-30)
+
+**Classification**: Verified — Code Inspection
+**Method**: Read `plan-enricher.md` lines 60-67
+**Confidence**: HIGH
+
+The enricher already does context-only enrichment when audit findings are absent — it searches T1 for `audit-findings` tag, and if empty, proceeds with codebase search, file paths, and line numbers. The "degraded mode" label is the only problem; the behavior is correct.
+
+### RF-3: No behavioral change needed (2026-03-30)
+
+**Classification**: Verified — Analysis
+**Confidence**: HIGH
+
+This is purely a framing/documentation change:
+- Remove "degraded mode" language and warning
+- Promote context enrichment (file paths, symbols, test commands) to primary purpose
+- Demote audit findings from "purpose" to "optional input when available"
+- No Python code changes — all agent/skill/command markdown files
+
 ## Success Criteria
 
 - [ ] "audit findings" is no longer the primary framing in any agent/skill description
