@@ -2,7 +2,7 @@
 
 Nexus organizes data across three tiers with increasing durability. Data flows upward (T1 → T2 → T3).
 
-**Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_nx_nexus__*`) which call the same Python APIs directly — no Bash dependency. See [nx/README.md](../nx/README.md#mcp-servers) for MCP tool details.
+**Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_nx_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [nx/README.md](../nx/README.md#mcp-servers) for MCP tool details.
 
 | Tier | Storage | Network | Durability | Use |
 |------|---------|---------|------------|-----|

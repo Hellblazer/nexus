@@ -106,7 +106,7 @@ The `nx/` directory is a Claude Code plugin that gives agents access to everythi
 /plugin install nx@nexus-plugins
 ```
 
-The plugin provides 17 specialized agents (including analytical operators for structured extraction, summarization, ranking, and comparison), 29 skills covering the RDR lifecycle, analytical query pipelines, and development workflows, session hooks for automatic context initialization, and MCP servers for structured storage access. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
+The plugin provides 17 specialized agents (including analytical operators for structured extraction, summarization, ranking, and comparison), 29 skills covering the RDR lifecycle, analytical query pipelines, and development workflows, session hooks for automatic context initialization, and 14 MCP tools for structured storage access with automatic pagination. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
 
 The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task tracking. See [nx/README.md](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) for the full plugin documentation.
 

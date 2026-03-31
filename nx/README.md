@@ -209,12 +209,14 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | T1/T2/T3 storage tier access for agents (RDR-034) | `search`, `store_put`, `store_list`, `memory_put`, `memory_get`, `memory_search`, `scratch`, `scratch_manage` |
+| `nexus` | T1/T2/T3 storage tier access for agents (RDR-034) | `search`, `store_put`, `store_list`, `memory_put`, `memory_get`, `memory_search`, `scratch`, `scratch_manage`, `collection_list`, `collection_info`, `collection_verify`, `plan_save`, `plan_search` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
 ### Nexus MCP Server (`nx-mcp`)
 
-The nexus server exposes 8 structured MCP tools that give agents direct access to all three storage tiers without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus server exposes 14 structured MCP tools that give agents direct access to all three storage tiers without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+
+**Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 
 **Tool names** follow Claude Code's naming convention: `mcp__plugin_nx_nexus__<tool_name>` (e.g., `mcp__plugin_nx_nexus__search`).
 
