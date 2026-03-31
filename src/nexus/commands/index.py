@@ -172,7 +172,10 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
-def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool) -> None:
+@click.option("--enrich", is_flag=True, default=False,
+              help="Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). "
+                   "Off by default. Use 'nx enrich <collection>' for bulk backfill.")
+def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     from nexus.corpus import t3_collection_name
     from nexus.doc_indexer import index_pdf
@@ -202,7 +205,7 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
             return [v.tolist() for v in ef(texts)], model
 
         click.echo(f"Indexing {path}…")
-        n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed)
+        n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed, enrich=enrich)
 
         if n == 0:
             click.echo("No chunks produced (file may already be indexed or extraction failed).")
@@ -248,7 +251,7 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
             chunk_bar.refresh()
 
         meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
-                         return_metadata=True, on_progress=on_chunk_progress)
+                         return_metadata=True, on_progress=on_chunk_progress, enrich=enrich)
         chunk_bar.close()
         n = meta["chunks"]  # type: ignore[index]
         pages = meta.get("pages", [])  # type: ignore[union-attr]
@@ -262,7 +265,7 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
             parts.append(f'Author: "{author}"')
         click.echo(f"\n  {'  '.join(parts)}")
     else:
-        n = index_pdf(path, corpus=corpus, collection_name=collection, force=force)
+        n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich)
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {n} chunk(s).")
 

@@ -273,7 +273,7 @@ def _pdf_chunks(
     corpus: str,
     *,
     chunk_chars: int | None = None,
-    bib_enrich_enabled: bool = True,
+    bib_enrich_enabled: bool = False,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
 
@@ -400,7 +400,7 @@ def index_pdf(
     force: bool = False,
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
-    enrich: bool = True,
+    enrich: bool = False,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -423,8 +423,10 @@ def index_pdf(
     Metadata is derived from chunk metadatas produced during extraction
     (no additional T3 query).  Default False preserves existing int behavior.
 
-    Pass *enrich=False* to skip Semantic Scholar bibliographic metadata
-    lookup (useful for offline/air-gapped environments or bulk indexing).
+    Pass *enrich=True* to enable Semantic Scholar bibliographic metadata
+    lookup (year, venue, authors, citations).  Default is False (opt-in)
+    to avoid network calls in offline/air-gapped environments.  Use
+    ``nx enrich <collection>`` for deliberate backfill.
     """
     from functools import partial
     chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich)

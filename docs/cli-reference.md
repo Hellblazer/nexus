@@ -77,7 +77,7 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
-| `--no-enrich` | Skip Semantic Scholar bibliographic metadata lookup (useful for offline/bulk indexing) |
+| `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich <collection>` for bulk backfill |
 | `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
 
 ---

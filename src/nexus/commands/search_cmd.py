@@ -87,6 +87,11 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
                 param_hint="'--where'",
             )
         key, op_str, raw_value = m.group(1), m.group(2), m.group(3)
+        if not raw_value:
+            raise click.BadParameter(
+                f"--where value {pair!r} has empty value after operator",
+                param_hint="'--where'",
+            )
         value = _coerce_value(key, raw_value)
         chroma_op = _OP_MAP[op_str]
         if chroma_op is None:

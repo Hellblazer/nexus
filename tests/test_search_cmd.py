@@ -492,10 +492,11 @@ def test_parse_where_multiple_equals_uses_first_partition() -> None:
     assert result == {"key": "a=b=c"}
 
 
-def test_parse_where_empty_value() -> None:
-    """'key=' → key='' (empty value)."""
-    result = _parse_where(("key=",))
-    assert result == {"key": ""}
+def test_parse_where_empty_value_raises() -> None:
+    """'key=' → rejected (empty value is not valid)."""
+    from click import BadParameter
+    with pytest.raises(BadParameter, match="empty value"):
+        _parse_where(("key=",))
 
 
 def test_parse_where_empty_key_raises() -> None:
@@ -594,6 +595,13 @@ def test_parse_where_numeric_field_equality_non_numeric_raises() -> None:
     from click import BadParameter
     with pytest.raises(BadParameter, match="requires a numeric value"):
         _parse_where(("bib_year=notanumber",))
+
+
+def test_parse_where_empty_value_with_operator_raises() -> None:
+    """'bib_year>=' → rejected (empty value after operator)."""
+    from click import BadParameter
+    with pytest.raises(BadParameter, match="empty value"):
+        _parse_where(("bib_year>=",))
 
 
 # ── --max-file-chunks ─────────────────────────────────────────────────────────

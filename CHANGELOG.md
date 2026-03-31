@@ -6,13 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.8.4] - 2026-03-30
+
+### Fixed
+- **MCP tool pagination** — `search`, `store_list`, and `memory_search` now
+  return paged results with `offset` parameter instead of truncating. Response
+  footer shows `Next page: offset=N` for subsequent pages. No data is lost —
+  agents page through results as needed.
+
 ## [2.8.3] - 2026-03-30
 
 ### Fixed
-- **MCP tool response size caps** — `search` results auto-truncate at 16K chars
-  with count of omitted results. `store_list` default reduced 200→50. `memory_get`
-  and `memory_search` responses capped at 16K. Prevents agent context window
-  overflow on large collections. Hard cap of 25 results on `search`.
 - **sn plugin Serena hook** — clarified `jet_brains_*` tools work with any LSP
   backend (not IntelliJ-specific). Added `find_file`, `list_dir` to routing table.
   Added Serena memories section. Fixed Context7 tool name prefixes.
@@ -39,7 +43,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dispatched via new `query-planner` and `analytical-operator` agents. Step
   outputs persist in T1 scratch for cross-dispatch reference. (RDR-042)
 - **Bibliographic metadata enrichment** — `nx index pdf` queries Semantic Scholar
-  for year, venue, authors, and citation count. Opt-out with `--no-enrich`.
+  for year, venue, authors, and citation count. Opt-in with `--enrich`.
   Backfill existing collections with `nx enrich <collection>`. (RDR-042)
 - **Structured table detection** — PDF chunks on pages containing tables are
   tagged `chunk_type=table_page`. Filter with `--where chunk_type=table_page`.
