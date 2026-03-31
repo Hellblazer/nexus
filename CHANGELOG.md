@@ -6,20 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.8.4] - 2026-03-30
-
-### Fixed
-- **MCP tool pagination** — `search`, `store_list`, and `memory_search` now
-  return paged results with `offset` parameter instead of truncating. Response
-  footer shows `Next page: offset=N` for subsequent pages. No data is lost —
-  agents page through results as needed.
-
 ## [2.8.3] - 2026-03-30
 
+### Changed
+- **Bib enrichment default flipped to opt-in** — `nx index pdf` no longer
+  queries Semantic Scholar by default. Pass `--enrich` to enable inline
+  metadata lookup. Use `nx enrich <collection>` for deliberate backfill.
+- **MCP tool pagination** — `search`, `store_list`, and `memory_search`
+  return paged results with `offset` parameter. Standardized footer:
+  `--- showing X-Y of Z. next: offset=N` / `(end)`. `store_list` uses
+  true collection count. No data lost — agents page through all results.
+- **Hook output optimized for AI** — SubagentStart reduced 43% (6.3K→3.6K
+  chars), SessionStart reduced 55%. Same information, structured for LLM
+  parsing.
+
 ### Fixed
-- **sn plugin Serena hook** — clarified `jet_brains_*` tools work with any LSP
-  backend (not IntelliJ-specific). Added `find_file`, `list_dir` to routing table.
-  Added Serena memories section. Fixed Context7 tool name prefixes.
+- **sn plugin Serena hook** — clarified `jet_brains_*` tools work with any
+  LSP backend (not IntelliJ-specific). Added `find_file`, `list_dir`,
+  Serena memories. Full MCP-prefixed tool names. Context7 prefixes fixed.
+- **`--where` empty values rejected** — `key=` and `key>=` now raise
+  `BadParameter` instead of silently passing empty strings to ChromaDB.
+- **`store_list` missing collection** — returns "Collection not found"
+  instead of misleading "No entries".
 
 ## [2.8.2] - 2026-03-30
 
