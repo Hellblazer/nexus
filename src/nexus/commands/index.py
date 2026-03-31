@@ -175,7 +175,18 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
 @click.option("--enrich", is_flag=True, default=False,
               help="Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). "
                    "Off by default. Use 'nx enrich <collection>' for bulk backfill.")
-def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool) -> None:
+@click.option(
+    "--extractor",
+    type=click.Choice(["auto", "docling", "mineru"]),
+    default="auto",
+    show_default=True,
+    help=(
+        "PDF extraction backend. 'auto' detects formulas via Docling and switches to "
+        "MinerU when found. 'docling' forces Docling. 'mineru' forces MinerU "
+        "(requires: uv pip install 'conexus[mineru]')."
+    ),
+)
+def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     from nexus.corpus import t3_collection_name
     from nexus.doc_indexer import index_pdf
@@ -205,7 +216,10 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
             return [v.tolist() for v in ef(texts)], model
 
         click.echo(f"Indexing {path}…")
-        n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed, enrich=enrich)
+        try:
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed, enrich=enrich, extractor=extractor)
+        except ImportError as e:
+            raise click.ClickException(str(e)) from e
 
         if n == 0:
             click.echo("No chunks produced (file may already be indexed or extraction failed).")
@@ -250,8 +264,11 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
             chunk_bar.n = current
             chunk_bar.refresh()
 
-        meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
-                         return_metadata=True, on_progress=on_chunk_progress, enrich=enrich)
+        try:
+            meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
+                             return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor)
+        except ImportError as e:
+            raise click.ClickException(str(e)) from e
         chunk_bar.close()
         n = meta["chunks"]  # type: ignore[index]
         pages = meta.get("pages", [])  # type: ignore[union-attr]
@@ -265,7 +282,10 @@ def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool
             parts.append(f'Author: "{author}"')
         click.echo(f"\n  {'  '.join(parts)}")
     else:
-        n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich)
+        try:
+            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor)
+        except ImportError as e:
+            raise click.ClickException(str(e)) from e
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {n} chunk(s).")
 

@@ -1,17 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""PDF text extraction: Docling primary, PyMuPDF normalized fallback.
+"""PDF text extraction with auto-detect math routing.
 
-Extraction strategy (two tiers):
-1. Docling — neural layout model handles multi-column academic PDFs, Type3 fonts,
-   and complex tables. Extracts title from document content.
-2. PyMuPDF normalized — final fallback for Docling failures or empty output.
+Extraction backends (three tiers, selected by ``extractor`` param):
+1. Docling — neural layout model for multi-column academic PDFs, Type3 fonts,
+   and complex tables.  Enriched mode enables formula detection via FormulaItem.
+2. MinerU — math-aware extraction (optional ``mineru`` extra).  Used when auto
+   mode detects formulas in the Docling pass.
+3. PyMuPDF normalized — final fallback for all extraction failures.
+
+Auto mode (default): Docling pass → if formulas detected → try MinerU → fallback
+to Docling → fallback to PyMuPDF normalized.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import json
 import re
+import tempfile
 
 import structlog
+
+try:
+    from mineru.cli.common import do_parse
+except ImportError:
+    do_parse = None  # type: ignore[assignment]
 
 _log = structlog.get_logger(__name__)
 
@@ -49,16 +61,63 @@ class PDFExtractor:
         self._converter = None  # lazy init — fast mode (no formula enrichment)
         self._converter_enriched = None  # lazy init — enriched mode (formula enrichment)
 
-    def extract(self, pdf_path: Path) -> ExtractionResult:
-        """Extract text from *pdf_path*. Returns ExtractionResult."""
+    def extract(self, pdf_path: Path, *, extractor: str = "auto") -> ExtractionResult:
+        """Extract text from *pdf_path*. Returns ExtractionResult.
+
+        *extractor* selects the backend:
+        - ``"auto"`` — Docling pass (enriched, to detect formulas); if
+          formulas found, try MinerU then fall back to PyMuPDF normalized.
+        - ``"docling"`` — Docling with PyMuPDF normalized fallback.
+        - ``"mineru"`` — MinerU directly (no fallback).
+        """
+        if extractor not in ("auto", "docling", "mineru"):
+            raise ValueError(
+                f"extractor must be 'auto', 'docling', or 'mineru'; got {extractor!r}"
+            )
+
+        if extractor == "docling":
+            try:
+                return self._extract_with_docling(pdf_path)
+            except Exception:
+                _log.warning(
+                    "docling extraction failed; falling back to pymupdf_normalized",
+                    exc_info=True,
+                )
+                return self._extract_normalized(pdf_path)
+
+        if extractor == "mineru":
+            return self._extract_with_mineru(pdf_path)
+
+        # extractor == "auto"
         try:
-            return self._extract_with_docling(pdf_path)
+            fast_result = self._extract_with_docling(pdf_path)
         except Exception:
             _log.warning(
-                "docling extraction failed; falling back to pymupdf_normalized",
+                "docling fast pass failed; falling back to pymupdf_normalized",
                 exc_info=True,
             )
             return self._extract_normalized(pdf_path)
+
+        formula_count = fast_result.metadata.get("formula_count", 0)
+        if formula_count == 0:
+            return fast_result
+
+        # Math paper detected — try MinerU
+        try:
+            return self._extract_with_mineru(pdf_path)
+        except Exception:
+            _log.warning(
+                "mineru_extraction_failed; falling back to docling_enriched",
+                exc_info=True,
+            )
+            try:
+                return self._extract_with_docling(pdf_path)
+            except Exception:
+                _log.warning(
+                    "docling enriched fallback failed; falling back to pymupdf_normalized",
+                    exc_info=True,
+                )
+                return self._extract_normalized(pdf_path)
 
     # ── internal extraction methods ───────────────────────────────────────────
 
@@ -150,6 +209,95 @@ class PDFExtractor:
                 "formula_count": formula_count,
                 "docling_title": self._extract_title(doc),
                 "pdf_title": "",  # XMP metadata not exposed by Docling
+                "pdf_author": "",
+                "pdf_subject": "",
+                "pdf_keywords": "",
+                "pdf_creator": "",
+                "pdf_producer": "",
+                "pdf_creation_date": "",
+                "pdf_mod_date": "",
+            },
+        )
+
+    def _extract_with_mineru(self, pdf_path: Path) -> ExtractionResult:
+        """Extract text via MinerU (math-aware, optional dependency).
+
+        NOTE: Page boundaries are approximated by dividing total text length
+        evenly across pages.  MinerU writes a single markdown file (not
+        per-page), so exact character-level boundaries are unavailable.
+        A future phase may refine this using ``middle.json`` paragraph page_idx.
+        """
+        if do_parse is None:
+            raise ImportError(
+                "MinerU is not installed. Install with: uv pip install 'conexus[mineru]'"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            output_dir = Path(tmp_str)
+            do_parse(
+                input_file_names=[str(pdf_path)],
+                output_dir=str(output_dir),
+                formula_enable=True,
+                table_enable=True,
+            )
+
+            pdf_stem = pdf_path.stem
+            base = output_dir / pdf_stem / "auto"
+            md_text = (base / f"{pdf_stem}.md").read_text(encoding="utf-8")
+            content_list_data: list[dict] = json.loads(
+                (base / f"{pdf_stem}_content_list.json").read_text(encoding="utf-8")
+            )
+            middle_data: dict = json.loads(
+                (base / f"{pdf_stem}_middle.json").read_text(encoding="utf-8")
+            )
+
+        # Display equations from content_list.json
+        display_count = sum(1 for e in content_list_data if e.get("type") == "equation")
+
+        # Inline equations from middle.json spans
+        inline_count = 0
+        for page in middle_data.get("pdf_info", []):
+            for block in page.get("para_blocks", []):
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        if span.get("type") == "inline_equation":
+                            inline_count += 1
+
+        formula_count = display_count + inline_count
+
+        # Page boundaries — approximate from text length fraction
+        page_count = len(middle_data.get("pdf_info", []))
+        total_len = len(md_text)
+        page_boundaries: list[dict] = []
+        if page_count > 0 and total_len > 0:
+            chars_per_page = total_len / page_count
+            for i in range(page_count):
+                start = int(i * chars_per_page)
+                length = int(chars_per_page) + (1 if i < page_count - 1 else 0)
+                page_boundaries.append({
+                    "page_number": i + 1,
+                    "start_char": start,
+                    "page_text_length": length,
+                })
+
+        if formula_count > 0:
+            _log.info(
+                "mineru_formulas_extracted",
+                formula_count=formula_count,
+                path=str(pdf_path),
+            )
+
+        return ExtractionResult(
+            text=md_text,
+            metadata={
+                "extraction_method": "mineru",
+                "page_count": page_count,
+                "format": "markdown",
+                "formula_count": formula_count,
+                "page_boundaries": page_boundaries,
+                "table_regions": [],
+                "docling_title": "",
+                "pdf_title": "",
                 "pdf_author": "",
                 "pdf_subject": "",
                 "pdf_keywords": "",

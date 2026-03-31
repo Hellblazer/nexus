@@ -274,6 +274,7 @@ def _pdf_chunks(
     *,
     chunk_chars: int | None = None,
     bib_enrich_enabled: bool = False,
+    extractor: str = "auto",
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
 
@@ -284,8 +285,11 @@ def _pdf_chunks(
     *bib_enrich_enabled* controls whether Semantic Scholar is queried for
     bibliographic metadata (year, venue, authors, citation count).  Disable
     for offline/air-gapped environments or bulk indexing.
+
+    *extractor* selects the PDF extraction backend (``"auto"``, ``"docling"``,
+    or ``"mineru"``).
     """
-    result = PDFExtractor().extract(pdf_path)
+    result = PDFExtractor().extract(pdf_path, extractor=extractor)
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
     chunks = chunker.chunk(result.text, result.metadata)
     if not chunks:
@@ -403,6 +407,7 @@ def index_pdf(
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     enrich: bool = False,
+    extractor: str = "auto",
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -431,7 +436,7 @@ def index_pdf(
     ``nx enrich <collection>`` for deliberate backfill.
     """
     from functools import partial
-    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich)
+    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor)
     raw = _index_document(
         pdf_path, corpus, chunk_fn, t3=t3,
         collection_name=collection_name, embed_fn=embed_fn,
@@ -505,6 +510,7 @@ def batch_index_pdfs(
     *,
     force: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
+    extractor: str = "auto",
 ) -> dict[str, str]:
     """Index multiple PDFs sequentially, returning per-file status.
 
@@ -522,7 +528,7 @@ def batch_index_pdfs(
         count: int = 0
         t0 = time.monotonic()
         try:
-            raw = index_pdf(path, corpus, t3=t3, force=force)
+            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:

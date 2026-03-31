@@ -78,6 +78,7 @@ nx index repo ./my-project
 |------|-------------|
 | `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich <collection>` for bulk backfill |
+| `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). `auto` detects formulas via Docling and switches to MinerU when found. `docling` forces Docling. `mineru` forces MinerU (requires `uv pip install 'conexus[mineru]'`) |
 | `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
 
 ---

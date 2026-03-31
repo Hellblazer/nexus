@@ -516,3 +516,65 @@ def test_pdf_collection_flag_already_qualified_unchanged(
     assert result.exit_code == 0, result.output
     _, kwargs = mock_index.call_args
     assert kwargs["collection_name"] == "knowledge__delos"
+
+
+# ── RDR-044 Phase 3: --extractor CLI flag ──────────────────────────────────
+
+
+class TestIndexPdfExtractorFlag:
+    """--extractor option on nx index pdf."""
+
+    def test_default_extractor_passes_auto(self, runner: CliRunner, index_home: Path) -> None:
+        """Without --extractor, index_pdf receives extractor='auto'."""
+        pdf = index_home / "doc.pdf"
+        pdf.write_bytes(b"dummy")
+
+        with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
+            result = runner.invoke(main, ["index", "pdf", str(pdf)])
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_index.call_args
+        assert kwargs["extractor"] == "auto"
+
+    def test_extractor_mineru(self, runner: CliRunner, index_home: Path) -> None:
+        """--extractor mineru passes extractor='mineru' to index_pdf."""
+        pdf = index_home / "doc.pdf"
+        pdf.write_bytes(b"dummy")
+
+        with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
+            result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "mineru"])
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_index.call_args
+        assert kwargs["extractor"] == "mineru"
+
+    def test_extractor_docling(self, runner: CliRunner, index_home: Path) -> None:
+        """--extractor docling passes extractor='docling' to index_pdf."""
+        pdf = index_home / "doc.pdf"
+        pdf.write_bytes(b"dummy")
+
+        with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
+            result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "docling"])
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_index.call_args
+        assert kwargs["extractor"] == "docling"
+
+    def test_invalid_extractor_rejected(self, runner: CliRunner, index_home: Path) -> None:
+        """Invalid --extractor value is rejected by Click choice validation."""
+        pdf = index_home / "doc.pdf"
+        pdf.write_bytes(b"dummy")
+
+        result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "magic"])
+        assert result.exit_code != 0
+
+    def test_mineru_not_installed_gives_helpful_error(self, runner: CliRunner, index_home: Path) -> None:
+        """ImportError from MinerU produces a user-visible error message."""
+        pdf = index_home / "doc.pdf"
+        pdf.write_bytes(b"dummy")
+
+        with patch("nexus.doc_indexer.index_pdf", side_effect=ImportError("MinerU is not installed. Install with: uv pip install 'conexus[mineru]'")):
+            result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "mineru"])
+
+        assert result.exit_code != 0
+        assert "MinerU" in result.output

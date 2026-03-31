@@ -1,4 +1,4 @@
-"""RDR-021: PDFExtractor — Docling primary extraction, pymupdf_normalized fallback."""
+"""RDR-021 + RDR-044: PDFExtractor — extraction backends and auto-detect routing."""
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -604,3 +604,140 @@ class TestPdfChunksHasFormulas:
         assert len(chunks) > 0
         for _id, _text, meta in chunks:
             assert meta["has_formulas"] is False
+
+
+# ── RDR-044 Phase 2: auto-detect routing ────────────────────────────────────
+
+
+def _make_docling_result(formula_count: int = 0) -> ExtractionResult:
+    """Build a mock Docling ExtractionResult with configurable formula_count."""
+    return ExtractionResult(
+        text="Docling extracted text.",
+        metadata={
+            "extraction_method": "docling",
+            "page_count": 1,
+            "format": "markdown",
+            "formula_count": formula_count,
+            "page_boundaries": [{"page_number": 1, "start_char": 0, "page_text_length": 23}],
+            "table_regions": [],
+            "docling_title": "",
+            "pdf_title": "",
+            "pdf_author": "",
+            "pdf_subject": "",
+            "pdf_keywords": "",
+            "pdf_creator": "",
+            "pdf_producer": "",
+            "pdf_creation_date": "",
+            "pdf_mod_date": "",
+        },
+    )
+
+
+def _make_mineru_result() -> ExtractionResult:
+    """Build a mock MinerU ExtractionResult."""
+    return ExtractionResult(
+        text="MinerU extracted text with math.",
+        metadata={
+            "extraction_method": "mineru",
+            "page_count": 1,
+            "format": "markdown",
+            "formula_count": 5,
+            "page_boundaries": [{"page_number": 1, "start_char": 0, "page_text_length": 31}],
+            "table_regions": [],
+            "docling_title": "",
+            "pdf_title": "",
+            "pdf_author": "",
+            "pdf_subject": "",
+            "pdf_keywords": "",
+            "pdf_creator": "",
+            "pdf_producer": "",
+            "pdf_creation_date": "",
+            "pdf_mod_date": "",
+        },
+    )
+
+
+class TestAutoDetectRouting:
+    """RDR-044 Phase 2: extract(extractor=...) routing logic.
+
+    Tests the new extract(pdf_path, *, extractor="auto") signature.
+    These tests will FAIL until nexus-gl4q implements the routing.
+    """
+
+    def test_auto_uses_docling_when_no_formulas(self, extractor, dummy_pdf):
+        """extractor='auto' returns Docling result directly when formula_count==0."""
+        docling_result = _make_docling_result(formula_count=0)
+
+        with (
+            patch.object(extractor, "_extract_with_docling", return_value=docling_result) as mock_docling,
+            patch.object(extractor, "_extract_with_mineru") as mock_mineru,
+        ):
+            result = extractor.extract(dummy_pdf, extractor="auto")
+
+        assert result.metadata["extraction_method"] == "docling"
+        mock_mineru.assert_not_called()
+
+    def test_auto_uses_mineru_when_formulas_detected(self, extractor, dummy_pdf):
+        """extractor='auto' routes to MinerU when fast Docling pass finds formulas."""
+        docling_result = _make_docling_result(formula_count=5)
+        mineru_result = _make_mineru_result()
+
+        with (
+            patch.object(extractor, "_extract_with_docling", return_value=docling_result),
+            patch.object(extractor, "_extract_with_mineru", return_value=mineru_result) as mock_mineru,
+        ):
+            result = extractor.extract(dummy_pdf, extractor="auto")
+
+        assert result.metadata["extraction_method"] == "mineru"
+        mock_mineru.assert_called_once_with(dummy_pdf)
+
+    def test_auto_falls_back_to_docling_enriched_when_mineru_fails(self, extractor, dummy_pdf):
+        """extractor='auto' falls back to enriched Docling when MinerU raises."""
+        fast_result = _make_docling_result(formula_count=3)
+        enriched_result = _make_docling_result(formula_count=3)
+
+        with patch("nexus.pdf_extractor._log") as mock_log:
+            extractor._extract_with_docling = MagicMock(
+                side_effect=[fast_result, enriched_result]
+            )
+            extractor._extract_with_mineru = MagicMock(
+                side_effect=RuntimeError("MinerU model download failed"),
+            )
+            result = extractor.extract(dummy_pdf, extractor="auto")
+
+        assert result.metadata["extraction_method"] == "docling"
+        mock_log.warning.assert_any_call(
+            "mineru_extraction_failed; falling back to docling_enriched",
+            exc_info=True,
+        )
+
+    def test_forced_docling_skips_mineru(self, extractor, dummy_pdf):
+        """extractor='docling' always uses Docling, never calls MinerU."""
+        docling_result = _make_docling_result(formula_count=10)
+
+        with (
+            patch.object(extractor, "_extract_with_docling", return_value=docling_result),
+            patch.object(extractor, "_extract_with_mineru") as mock_mineru,
+        ):
+            result = extractor.extract(dummy_pdf, extractor="docling")
+
+        assert result.metadata["extraction_method"] == "docling"
+        mock_mineru.assert_not_called()
+
+    def test_forced_mineru_skips_docling(self, extractor, dummy_pdf):
+        """extractor='mineru' calls MinerU directly, no Docling fast pass."""
+        mineru_result = _make_mineru_result()
+
+        with (
+            patch.object(extractor, "_extract_with_docling") as mock_docling,
+            patch.object(extractor, "_extract_with_mineru", return_value=mineru_result),
+        ):
+            result = extractor.extract(dummy_pdf, extractor="mineru")
+
+        assert result.metadata["extraction_method"] == "mineru"
+        mock_docling.assert_not_called()
+
+    def test_invalid_extractor_raises_value_error(self, extractor, dummy_pdf):
+        """Unknown extractor value raises ValueError."""
+        with pytest.raises(ValueError, match="extractor"):
+            extractor.extract(dummy_pdf, extractor="invalid")

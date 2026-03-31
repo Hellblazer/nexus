@@ -345,3 +345,29 @@ class TestMineruTempdirLifecycle:
 
         mock_tmpdir.__enter__.assert_called_once()
         mock_tmpdir.__exit__.assert_called_once()
+
+
+# ── Error handling ──────────────────────────────────────────────────────────
+
+
+class TestMineruErrorHandling:
+    """Error paths: missing dependency, do_parse failure."""
+
+    def test_raises_import_error_when_mineru_not_installed(self, extractor, dummy_pdf):
+        """ImportError with install instructions when do_parse is None."""
+        with patch("nexus.pdf_extractor.do_parse", None):
+            with pytest.raises(ImportError, match="MinerU is not installed"):
+                extractor._extract_with_mineru(dummy_pdf)
+
+    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
+    def test_do_parse_failure_propagates(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
+        """Exceptions from do_parse propagate to caller (for fallback handling)."""
+        work_dir = str(tmp_path / "mineru_work")
+        mock_tmpdir = MagicMock()
+        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
+        mock_tmpdir.__exit__ = MagicMock(return_value=False)
+        mock_tmpdir_cls.return_value = mock_tmpdir
+
+        with patch("nexus.pdf_extractor.do_parse", side_effect=RuntimeError("model download failed")):
+            with pytest.raises(RuntimeError, match="model download failed"):
+                extractor._extract_with_mineru(dummy_pdf)

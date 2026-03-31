@@ -20,7 +20,7 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     code: classify(SKIP|CODE|PROSE|PDF) → tree-sitter AST → context prefix → voyage-code-3 → code__<repo>
     │     prose: SemanticMarkdownChunker (md) or line-split → voyage-context-3 → docs__<repo>
     │     rdr:   SemanticMarkdownChunker → voyage-context-3 → rdr__<repo>
-    │     pdf:   Docling (PyMuPDF fallback) → table detection → bib enrichment → voyage-context-3 → docs__<corpus>
+    │     pdf:   auto-detect routing (Docling → MinerU → PyMuPDF) → table/formula detection → bib enrichment → voyage-context-3 → docs__<corpus>
     │     skip:  .xml/.json/.yml/.html/.css/.lock/etc → silently ignored
     │
     ├── Search: query → retrieve → rerank → format
@@ -47,7 +47,7 @@ Data flows upward (T1 → T2 → T3).
 |------|-------|-------------|
 | **Entry** | `cli.py`, `commands/` | Click CLI, one file per command group |
 | **Storage** | `db/t1.py`, `db/t2.py`, `db/t3.py` | Tier implementations |
-| **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py` | Repo indexing pipeline (decomposed per RDR-032). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` detects table regions via Docling TableItem |
+| **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py` | Repo indexing pipeline (decomposed per RDR-032). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` auto-detects math-heavy PDFs via FormulaItem counting and routes to MinerU (optional `conexus[mineru]` extra) for superior LaTeX extraction, falling back through enriched Docling to PyMuPDF normalized. Chunk metadata includes `has_formulas` boolean |
 | **Export** | `exporter.py` | Collection export/import for T3 backup and migration (.nxexp format) |
 | **Search** | `search_engine.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py` | Query, rank, rerank |
 | **Hooks** | `commands/hooks.py` | Git hook install/uninstall/status, sentinel-bounded stanza management |
