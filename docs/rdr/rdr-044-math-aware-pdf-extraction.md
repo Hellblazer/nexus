@@ -2,11 +2,12 @@
 title: "Math-Aware PDF Extraction"
 id: RDR-044
 type: Bug
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
-reviewed-by: ""
+reviewed-by: self
 created: 2026-03-31
+accepted_date: 2026-03-31
 related_issues:
   - "RDR-021 - Docling PDF Extraction (closed)"
   - "RDR-042 - AgenticScholar-Inspired Enhancements (accepted)"
