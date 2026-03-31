@@ -115,6 +115,10 @@ def _inject_t3(t3):
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
+_SEARCH_MAX_RESULTS = 25  # hard cap — prevents agents from requesting n=100
+_SEARCH_MAX_CHARS = 16_000  # truncate response to fit comfortably in agent context
+
+
 @mcp.tool()
 def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10) -> str:
     """Semantic search across T3 knowledge collections.
@@ -123,11 +127,13 @@ def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10) -> str:
         query: Search query string
         corpus: Comma-separated corpus prefixes or full collection names (default: knowledge,code,docs).
                 Use "all" to search all corpora (knowledge, code, docs, rdr).
-        n: Maximum results to return
+        n: Maximum results to return (capped at 25)
     """
     try:
         from nexus.search_engine import search_cross_corpus
         t3 = _get_t3()
+
+        n = min(n, _SEARCH_MAX_RESULTS)
 
         if corpus == "all":
             corpus = "knowledge,code,docs,rdr"
@@ -150,13 +156,22 @@ def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10) -> str:
         if not results:
             return "No results."
         lines: list[str] = []
+        total_chars = 0
+        included = 0
         for r in results:
             title = r.metadata.get("title", "")
             source = r.metadata.get("source_path", "")
             dist = f"{r.distance:.4f}"
             label = title or source or r.id
             snippet = r.content[:200].replace("\n", " ")
-            lines.append(f"[{dist}] {label}\n  {snippet}")
+            entry = f"[{dist}] {label}\n  {snippet}"
+            if total_chars + len(entry) > _SEARCH_MAX_CHARS:
+                omitted = len(results) - included
+                lines.append(f"\n... {omitted} more results truncated (total {len(results)})")
+                break
+            lines.append(entry)
+            total_chars += len(entry) + 2  # +2 for "\n\n" separator
+            included += 1
         return "\n\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
@@ -199,12 +214,12 @@ def store_put(
 
 
 @mcp.tool()
-def store_list(collection: str = "knowledge", limit: int = 200) -> str:
+def store_list(collection: str = "knowledge", limit: int = 50) -> str:
     """List entries in a T3 knowledge collection.
 
     Args:
         collection: Collection name or prefix (default: knowledge)
-        limit: Maximum entries to return
+        limit: Maximum entries to return (default 50)
     """
     try:
         col_name = t3_collection_name(collection)
@@ -277,11 +292,16 @@ def memory_get(project: str, title: str = "") -> str:
                 entry = db.get(project=project, title=title)
                 if entry is None:
                     return f"Not found: {project}/{title}"
+                content = entry['content']
+                truncated = ""
+                if len(content) > _SEARCH_MAX_CHARS:
+                    content = content[:_SEARCH_MAX_CHARS]
+                    truncated = f"\n\n... truncated ({len(entry['content'])} chars total)"
                 return (
                     f"[{entry['id']}] {entry['project']}/{entry['title']}\n"
                     f"Tags: {entry.get('tags', '')}\n"
                     f"Updated: {entry.get('timestamp', '')}\n\n"
-                    f"{entry['content']}"
+                    f"{content}{truncated}"
                 )
             else:
                 entries = db.list_entries(project=project)
@@ -309,9 +329,15 @@ def memory_search(query: str, project: str = "") -> str:
         if not results:
             return "No results."
         lines: list[str] = []
+        total_chars = 0
         for r in results:
             snippet = r["content"][:200].replace("\n", " ")
-            lines.append(f"[{r['id']}] {r['project']}/{r['title']}\n  {snippet}")
+            entry = f"[{r['id']}] {r['project']}/{r['title']}\n  {snippet}"
+            if total_chars + len(entry) > _SEARCH_MAX_CHARS:
+                lines.append(f"\n... {len(results) - len(lines)} more results truncated")
+                break
+            lines.append(entry)
+            total_chars += len(entry) + 2
         return "\n\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
