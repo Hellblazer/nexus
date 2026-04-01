@@ -6,7 +6,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.9.0] - 2026-03-31
+## [2.9.1] - 2026-03-31
 
 ### Added
 - **Math-aware PDF extraction (RDR-044)** — three-backend auto-detect
