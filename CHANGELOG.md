@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-03-31
+
+### Added
+- **Math-aware PDF extraction (RDR-044)** — three-backend auto-detect
+  routing: Docling detects formula regions, MinerU re-extracts math-heavy
+  papers with superior LaTeX output, PyMuPDF normalized as terminal fallback.
+  - `nx index pdf --extractor [auto|docling|mineru]` CLI option
+  - `has_formulas` boolean on all PDF chunks for downstream filtering
+  - `formula_count` in extraction metadata
+- **Sticky PDF extractor config** — `nx config set pdf.extractor=mineru`
+  sets the default globally (`~/.config/nexus/config.yml`) or per-repo
+  (`.nexus.yml`). CLI `--extractor` flag overrides config when passed.
+- **`nx config set` dotted keys** — `nx config set pdf.extractor=mineru`
+  now writes nested YAML config, not just credentials.
+- **MinerU optional dependency** — `uv pip install 'conexus[mineru]'`
+  installs `mineru[all]` for math-aware extraction. ~2-3 GB model download
+  on first run.
+
+### Fixed
+- **Missing Docling transitive deps** — added `python-pptx` and
+  `opencv-python-headless` to fix Docling import failures on some platforms.
+
 ## [2.8.5] - 2026-03-30
 
 ### Changed

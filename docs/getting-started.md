@@ -65,14 +65,14 @@ nx memory get -p myproject -t auth-notes
 
 ## Claude Code plugin (optional)
 
-The `nx` plugin gives Claude Code agents access to all three storage tiers, 15 specialized agents, and 28 development workflow skills.
+The `nx` plugin gives Claude Code agents access to all three storage tiers, 17 specialized agents, and 32 development workflow skills.
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
 /plugin install nx@nexus-plugins
 ```
 
-After installing, run `/nx:nx-preflight` to verify all plugin dependencies (nx CLI, beads, superpowers plugin) are present.
+After installing, run `/nx:nx-preflight` to verify all plugin dependencies are present.
 
 See [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) for the full agent/skill reference. For local development from a repo checkout:
 

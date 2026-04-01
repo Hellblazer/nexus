@@ -87,6 +87,8 @@ nx store put --collection knowledge__ops "Redis maxmemory-policy: allkeys-lru fo
 
 Repository indexing (`nx index repo`) is the most automated path. It classifies git-tracked files, chunks code into logical pieces via tree-sitter AST parsing across 31 languages, and embeds each chunk using local ONNX models by default, or Voyage AI models in cloud mode. Recently-touched files rank higher via git frecency scoring.
 
+PDF indexing auto-detects math-heavy papers and routes them through the best available extractor. Install `uv pip install 'conexus[mineru]'` for superior LaTeX extraction of equations. Without MinerU, Docling extracts all PDFs normally and flags formula regions in chunk metadata. See [PDF Extraction Backends](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md#pdf-extraction-backends) for details.
+
 See [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) for details and `.nexus.yml` configuration.
 
 ## RDR: Research-Design-Review

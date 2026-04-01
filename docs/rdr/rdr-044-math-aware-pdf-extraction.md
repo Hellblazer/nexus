@@ -2,7 +2,7 @@
 title: "Math-Aware PDF Extraction"
 id: RDR-044
 type: Bug
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -212,9 +212,29 @@ MinerU's `content_list.json` output has explicit `{"type": "equation", "text": "
 
 ## Success Criteria
 
-- [ ] Mathematical equations extracted as LaTeX or Unicode (not placeholder markers)
-- [ ] `nx index pdf` warns when formula placeholders are detected
-- [ ] Chunk metadata includes `has_formula_gaps` flag for affected content
-- [ ] Re-indexed math papers show equation content in search results
-- [ ] Existing non-math PDFs are unaffected (no regression)
-- [ ] Solution works on CPU (GPU optional for speed)
+- [x] Mathematical equations extracted as LaTeX or Unicode (not placeholder markers) — MinerU `do_parse` with `formula_enable=True`
+- [x] `nx index pdf` warns when formula placeholders are detected — structlog warning on formula_count > 0
+- [x] Chunk metadata includes `has_formulas` flag for affected content — boolean on all chunks
+- [x] Re-indexed math papers show equation content in search results — when MinerU installed
+- [x] Existing non-math PDFs are unaffected (no regression) — auto mode returns Docling result directly when formula_count==0
+- [x] Solution works on CPU (GPU optional for speed) — MinerU uses unimernet on CPU
+
+## Implementation Summary (2026-03-31)
+
+**Shipped in v2.9.0.** Four phases, 11 beads, 152 tests.
+
+### Architecture
+```
+PDF → Docling (enriched) → FormulaItem count
+  0 formulas → return Docling result (zero overhead for non-math PDFs)
+  >0 formulas → try MinerU → if fails → return Docling result
+```
+
+### Key decisions
+- **Enriched Docling for detection**: `do_formula_enrichment=True` is required to produce FormulaItem objects. No "fast" unenriched pass — formula detection needs the enrichment pipeline.
+- **MinerU is optional**: `conexus[mineru]` extra, ~2-3 GB model download. Without it, auto mode detects formulas and flags them but doesn't re-extract.
+- **Sticky config**: `nx config set pdf.extractor=mineru` sets the default globally. CLI `--extractor` overrides.
+- **Fallback reuses fast_result**: When MinerU fails in auto mode, the already-computed Docling result is returned (no re-conversion).
+
+### Validated on
+- `carpenter-grossberg-1987-art1.pdf` (62 pages) — 190 formulas detected by Docling

@@ -54,6 +54,7 @@ Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.co
 |---|---|---|---|
 | `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | Voyage reranker for multi-corpus merge |
 | `client.host` | `NX_CLIENT_HOST` | `localhost` | Override ChromaDB host URL |
+| `pdf.extractor` | — | `auto` | PDF extraction backend: `auto`, `docling`, or `mineru`. Set globally with `nx config set pdf.extractor=mineru` |
 | `voyageai.read_timeout_seconds` | `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` | `120` | Request timeout (seconds) for Voyage AI API calls. Increase for large PDF indexing |
 
 Embedding models are selected automatically based on collection type (see [Storage Tiers](storage-tiers.md)): `voyage-code-3` for code, `voyage-context-3` (CCE) for docs/rdr/knowledge at both index and query time, `voyage-4` for code queries only.
@@ -69,6 +70,13 @@ indexing:
   rdr_paths: ["docs/rdr", "decisions"]      # directories indexed into rdr__ collection
   include_untracked: true                   # also index untracked (but not .gitignored) files
 ```
+
+```yaml
+pdf:
+  extractor: mineru   # auto | docling | mineru (default: auto)
+```
+
+Or set via CLI: `nx config set pdf.extractor=mineru` (writes to global config). See [PDF Extraction Backends](cli-reference.md#pdf-extraction-backends) for details.
 
 Merge behavior: nested dict keys are **additive** (both global and per-repo keys are retained). Scalar values and lists are **replacement** (the per-repo value wins entirely between config levels). However, `code_extensions` is additive to the **built-in** extension set — it extends the defaults, it does not replace them. `prose_extensions` wins over everything: if an extension appears in both lists, it is classified as prose. See [Repo Indexing](repo-indexing.md) for the full extension list and override semantics.
 
