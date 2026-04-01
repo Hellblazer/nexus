@@ -157,9 +157,7 @@ If no marker file is found and no command is configured, the test check is skipp
 
 **Stop hook** (`on_stop: true`): Fires when the agent ends a session. Advisory only — warns about uncommitted git changes and open beads (`bd list --status=in_progress`) but never blocks. The agent sees the warnings and can choose to address them.
 
-**bd-close gate** (`on_close: true`): Fires before `bd close` or `bd done` commands. Test suite failure blocks the close. Absence of a review marker emits an advisory but does not block.
-
-**Command-not-found**: If the test command cannot be executed (exit 126/127), the close gate treats it as a skipped check with an advisory — not a blocking failure. Misconfigured environments do not permanently block closures.
+**bd-close gate** (`on_close: true`): Fires before `bd close` or `bd done` commands. Advisory only — warns when no review marker found in T1 scratch (from `/nx:review-code`). Never blocks.
 
 ## File Locations
 

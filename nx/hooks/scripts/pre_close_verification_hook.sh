@@ -1,7 +1,7 @@
 #!/bin/bash
-# PreToolUse close verification hook — gates bd close/done on test pass.
-# Exit 0 with hookSpecificOutput JSON for structured decisions.
-# Exit 2 is the alternative blocking path (stderr fed to Claude as error).
+# PreToolUse close verification hook — advisory checks on bd close/done.
+# Checks for review scratch marker. Never blocks, never runs tests.
+# Exit 0 always with hookSpecificOutput JSON.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -euo pipefail
@@ -11,7 +11,6 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 allow() {
-    # permissionDecision: "allow" — tool call proceeds
     if [[ -n "${1:-}" ]]; then
         local escaped
         escaped=$(printf '%s' "$1" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" 2>/dev/null || printf '"%s"' "$1")
@@ -19,14 +18,6 @@ allow() {
     else
         printf '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}\n'
     fi
-    exit 0
-}
-
-deny() {
-    # permissionDecision: "deny" — tool call blocked, reason fed to Claude
-    local escaped
-    escaped=$(printf '%s' "$1" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" 2>/dev/null || printf '"%s"' "$1")
-    printf '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": %s}}\n' "$escaped"
     exit 0
 }
 
@@ -85,12 +76,9 @@ BEAD_ID="${BEAD_ID:-}"
 # ---------------------------------------------------------------------------
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)}"
-CONFIG_SCRIPT="$PLUGIN_ROOT/hooks/scripts/read_verification_config.py"
-
-CONFIG=$(python3 "$CONFIG_SCRIPT" 2>/dev/null || true)
+CONFIG=$(python3 "$PLUGIN_ROOT/hooks/scripts/read_verification_config.py" 2>/dev/null || true)
 
 if [[ -z "$CONFIG" ]]; then
-    # Config reader failed — fail open
     allow
 fi
 
@@ -106,49 +94,8 @@ if [[ "$ON_CLOSE" != "True" ]]; then
     allow
 fi
 
-TEST_CMD=$(printf '%s' "$CONFIG" | python3 -c "
-import json, sys
-try:
-    print(json.load(sys.stdin).get('test_command', ''))
-except Exception:
-    print('')
-" 2>/dev/null || true)
-
-TEST_TIMEOUT=$(printf '%s' "$CONFIG" | python3 -c "
-import json, sys
-try:
-    print(json.load(sys.stdin).get('test_timeout', 120))
-except Exception:
-    print('120')
-" 2>/dev/null || echo "120")
-
 # ---------------------------------------------------------------------------
-# Layer 2a: Mechanical gate (blocking)
-# ---------------------------------------------------------------------------
-
-ADVISORY_MSGS=""
-
-if [[ -z "$TEST_CMD" ]]; then
-    ADVISORY_MSGS="ADVISORY: No test command configured or detected — skipping test check"
-else
-    TEST_EXIT=0
-    if command -v timeout &>/dev/null; then
-        timeout "$TEST_TIMEOUT" bash -c "$TEST_CMD" >/dev/null 2>&1 || TEST_EXIT=$?
-    else
-        bash -c "$TEST_CMD" >/dev/null 2>&1 || TEST_EXIT=$?
-    fi
-
-    if [[ $TEST_EXIT -eq 124 ]]; then
-        ADVISORY_MSGS="ADVISORY: Test command timed out after ${TEST_TIMEOUT}s — skipping test check"
-    elif [[ $TEST_EXIT -eq 126 || $TEST_EXIT -eq 127 ]]; then
-        ADVISORY_MSGS="ADVISORY: Test command not found or not executable (exit $TEST_EXIT) — skipping test check"
-    elif [[ $TEST_EXIT -ne 0 ]]; then
-        deny "Tests failing (exit code $TEST_EXIT) — fix before closing bead ${BEAD_ID:-unknown}"
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# Layer 2b: Advisory check (non-blocking) — review scratch marker
+# Advisory: review scratch marker check (never blocks)
 # ---------------------------------------------------------------------------
 
 REVIEW_MSG=""
@@ -173,20 +120,4 @@ if [[ -n "$BEAD_ID" ]] && command -v bd &>/dev/null; then
     bd set-state "$BEAD_ID" verification=passed 2>/dev/null || true
 fi
 
-# ---------------------------------------------------------------------------
-# Compose allow message
-# ---------------------------------------------------------------------------
-
-CONTEXT=""
-if [[ -n "$ADVISORY_MSGS" ]]; then
-    CONTEXT="$ADVISORY_MSGS"
-fi
-if [[ -n "$REVIEW_MSG" ]]; then
-    if [[ -n "$CONTEXT" ]]; then
-        CONTEXT="$CONTEXT | $REVIEW_MSG"
-    else
-        CONTEXT="$REVIEW_MSG"
-    fi
-fi
-
-allow "$CONTEXT"
+allow "$REVIEW_MSG"

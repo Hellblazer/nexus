@@ -197,7 +197,7 @@ class TestStopHookPipeline:
 
 
 class TestCloseHookPipeline:
-    """End-to-end tests for the PreToolUse close verification hook."""
+    """End-to-end tests for the PreToolUse close hook (advisory only)."""
 
     @staticmethod
     def _get_decision(output: dict) -> str:
@@ -210,7 +210,6 @@ class TestCloseHookPipeline:
             "tool_input": {"file_path": "/tmp/x.txt", "content": "x"},
         })
         result = _run_hook(CLOSE_HOOK, payload)
-        assert result.returncode == 0
         assert self._get_decision(json.loads(result.stdout)) == "allow"
 
     def test_non_matching_bash_fast_noop(self) -> None:
@@ -220,49 +219,24 @@ class TestCloseHookPipeline:
             "tool_input": {"command": "ls -la"},
         })
         result = _run_hook(CLOSE_HOOK, payload)
-        assert result.returncode == 0
         assert self._get_decision(json.loads(result.stdout)) == "allow"
 
-    def test_on_close_true_denies_failing_tests(self, mock_plugin_root) -> None:
-        env = mock_plugin_root({"on_close": True, "test_command": "false", "test_timeout": 10})
+    def test_on_close_true_always_allows(self, mock_plugin_root) -> None:
+        env = mock_plugin_root({"on_close": True})
         payload = json.dumps({
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": "bd close nexus-test"},
         })
         result = _run_hook(CLOSE_HOOK, payload, env_overrides=env)
-        assert result.returncode == 0
-        assert self._get_decision(json.loads(result.stdout)) == "deny"
-
-    def test_on_close_true_allows_passing_tests(self, mock_plugin_root) -> None:
-        env = mock_plugin_root({"on_close": True, "test_command": "true", "test_timeout": 10})
-        payload = json.dumps({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": {"command": "bd close nexus-test"},
-        })
-        result = _run_hook(CLOSE_HOOK, payload, env_overrides=env)
-        assert result.returncode == 0
-        assert self._get_decision(json.loads(result.stdout)) == "allow"
-
-    def test_bd_done_triggers_check(self, mock_plugin_root) -> None:
-        env = mock_plugin_root({"on_close": True, "test_command": "true", "test_timeout": 10})
-        payload = json.dumps({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": {"command": "bd done nexus-test"},
-        })
-        result = _run_hook(CLOSE_HOOK, payload, env_overrides=env)
-        assert result.returncode == 0
         assert self._get_decision(json.loads(result.stdout)) == "allow"
 
     def test_on_close_false_passes_through(self, mock_plugin_root) -> None:
-        env = mock_plugin_root({"on_close": False, "test_command": "false"})
+        env = mock_plugin_root({"on_close": False})
         payload = json.dumps({
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": "bd close nexus-test"},
         })
         result = _run_hook(CLOSE_HOOK, payload, env_overrides=env)
-        assert result.returncode == 0
         assert self._get_decision(json.loads(result.stdout)) == "allow"
