@@ -78,8 +78,43 @@ nx index repo ./my-project
 |------|-------------|
 | `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich <collection>` for bulk backfill |
-| `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). `auto` detects formulas via Docling and switches to MinerU when found. `docling` forces Docling. `mineru` forces MinerU (requires `uv pip install 'conexus[mineru]'`) |
+| `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
 | `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
+
+### PDF Extraction Backends
+
+Most PDFs work fine with the default (`auto`). You only need to think about this if you're indexing **math-heavy academic papers** with equations.
+
+**How `auto` works:**
+
+1. Docling extracts the PDF and counts formula regions
+2. If **no formulas found** → done (uses Docling output as-is, zero overhead)
+3. If **formulas found** → tries MinerU for better LaTeX extraction
+4. If MinerU isn't installed → returns the Docling result anyway
+
+**What you get without MinerU installed:**
+- All PDFs extract normally via Docling
+- Math-heavy PDFs get a `has_formulas: true` flag on their chunks (useful for filtering)
+- Formula regions are detected but not re-extracted with MinerU
+
+**What MinerU adds (optional):**
+- Superior LaTeX extraction for display and inline equations
+- ~2.9x faster than Docling's formula enrichment mode on equation-heavy papers
+
+**Installing MinerU:**
+
+```bash
+uv pip install 'conexus[mineru]'
+```
+
+First run downloads the unimernet model (~2-3 GB). After that, `auto` mode automatically routes math-heavy PDFs through MinerU.
+
+**Forcing a specific backend:**
+
+```bash
+nx index pdf paper.pdf --extractor docling   # Always Docling (no MinerU attempt)
+nx index pdf paper.pdf --extractor mineru    # Always MinerU (fails if not installed)
+```
 
 ---
 

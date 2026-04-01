@@ -117,10 +117,10 @@ docs/                # Documentation (architecture.md is the module map)
 
 ## Task Tracking
 
-Use beads (`bd`) for task tracking and T2 memory (`nx memory`) for project context.
+Use beads (`/beads:*` skills) for task tracking and T2 memory (`nx memory`) for project context.
 
-- Find ready work: `bd ready`
-- Bead tracking: `bd list` / `bd show <id>`
+- Find ready work: `/beads:ready`
+- Bead tracking: `/beads:list` / `/beads:show <id>`
 - Store project context: `nx memory put ... --project {repo}`
 
 ## Git

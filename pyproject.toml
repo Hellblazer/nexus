@@ -47,6 +47,8 @@ dependencies = [
     "tree-sitter-language-pack==0.7.1",
     "voyageai>=0.2",
     "docling>=2.76.0",
+    "python-pptx>=1.0.0",
+    "opencv-python-headless>=4.0.0",
     "httpx>=0.27",
     "mcp>=1.0",
 ]
