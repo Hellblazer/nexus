@@ -80,6 +80,136 @@ def test_config_set_accepts_space_separated_key_value(runner: CliRunner, fake_ho
     assert data["credentials"]["voyage_api_key"] == "vk-space"
 
 
+# ── nx config set — dotted keys ──────────────────────────────────────────────
+
+
+def test_config_set_dotted_key_writes_nested_yaml(runner: CliRunner, fake_home: Path) -> None:
+    """nx config set pdf.extractor=mineru writes nested YAML."""
+    result = runner.invoke(main, ["config", "set", "pdf.extractor=mineru"])
+    assert result.exit_code == 0, result.output
+
+    config_path = fake_home / ".config" / "nexus" / "config.yml"
+    data = yaml.safe_load(config_path.read_text())
+    assert data["pdf"]["extractor"] == "mineru"
+
+
+def test_config_set_dotted_key_preserves_existing(runner: CliRunner, fake_home: Path) -> None:
+    """Dotted key set preserves existing config."""
+    runner.invoke(main, ["config", "set", "chroma_api_key=abc"])
+    runner.invoke(main, ["config", "set", "pdf.extractor=docling"])
+
+    config_path = fake_home / ".config" / "nexus" / "config.yml"
+    data = yaml.safe_load(config_path.read_text())
+    assert data["credentials"]["chroma_api_key"] == "abc"
+    assert data["pdf"]["extractor"] == "docling"
+
+
+def test_config_set_dotted_key_overwrites(runner: CliRunner, fake_home: Path) -> None:
+    """Dotted key set overwrites existing value."""
+    runner.invoke(main, ["config", "set", "pdf.extractor=mineru"])
+    runner.invoke(main, ["config", "set", "pdf.extractor=auto"])
+
+    config_path = fake_home / ".config" / "nexus" / "config.yml"
+    data = yaml.safe_load(config_path.read_text())
+    assert data["pdf"]["extractor"] == "auto"
+
+
+def test_config_set_dotted_key_space_separated(runner: CliRunner, fake_home: Path) -> None:
+    """nx config set pdf.extractor mineru (space-separated) works."""
+    result = runner.invoke(main, ["config", "set", "pdf.extractor", "mineru"])
+    assert result.exit_code == 0, result.output
+
+    config_path = fake_home / ".config" / "nexus" / "config.yml"
+    data = yaml.safe_load(config_path.read_text())
+    assert data["pdf"]["extractor"] == "mineru"
+
+
+# ── get_pdf_extractor ────────────────────────────────────────────────────────
+
+
+def test_get_pdf_extractor_default(fake_home: Path) -> None:
+    """get_pdf_extractor returns 'auto' when no config exists."""
+    from nexus.config import get_pdf_extractor
+    assert get_pdf_extractor() == "auto"
+
+
+def test_get_pdf_extractor_from_global_config(fake_home: Path) -> None:
+    """get_pdf_extractor reads from global config.yml."""
+    from nexus.config import get_pdf_extractor
+
+    config_path = fake_home / ".config" / "nexus" / "config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump({"pdf": {"extractor": "mineru"}}))
+
+    assert get_pdf_extractor() == "mineru"
+
+
+def test_get_pdf_extractor_invalid_falls_back_to_auto(fake_home: Path) -> None:
+    """get_pdf_extractor returns 'auto' for invalid config values."""
+    from nexus.config import get_pdf_extractor
+
+    config_path = fake_home / ".config" / "nexus" / "config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump({"pdf": {"extractor": "bogus"}}))
+
+    assert get_pdf_extractor() == "auto"
+
+
+def test_get_pdf_extractor_repo_overrides_global(fake_home: Path, tmp_path: Path) -> None:
+    """Per-repo .nexus.yml overrides global config."""
+    from nexus.config import get_pdf_extractor
+
+    global_path = fake_home / ".config" / "nexus" / "config.yml"
+    global_path.parent.mkdir(parents=True, exist_ok=True)
+    global_path.write_text(yaml.dump({"pdf": {"extractor": "auto"}}))
+
+    repo_config = tmp_path / ".nexus.yml"
+    repo_config.write_text(yaml.dump({"pdf": {"extractor": "mineru"}}))
+
+    assert get_pdf_extractor(repo_root=tmp_path) == "mineru"
+
+
+# ── CLI --extractor reads config default ─────────────────────────────────────
+
+
+def test_index_pdf_extractor_from_config(runner: CliRunner, fake_home: Path) -> None:
+    """nx index pdf uses pdf.extractor from config when --extractor not passed."""
+    from unittest.mock import patch
+
+    config_path = fake_home / ".config" / "nexus" / "config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump({"pdf": {"extractor": "docling"}}))
+
+    pdf = fake_home / "test.pdf"
+    pdf.write_bytes(b"dummy")
+
+    with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
+        result = runner.invoke(main, ["index", "pdf", str(pdf)])
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_index.call_args
+    assert kwargs["extractor"] == "docling"
+
+
+def test_index_pdf_flag_overrides_config(runner: CliRunner, fake_home: Path) -> None:
+    """--extractor flag overrides pdf.extractor config."""
+    from unittest.mock import patch
+
+    config_path = fake_home / ".config" / "nexus" / "config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump({"pdf": {"extractor": "docling"}}))
+
+    pdf = fake_home / "test.pdf"
+    pdf.write_bytes(b"dummy")
+
+    with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
+        result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "mineru"])
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_index.call_args
+    assert kwargs["extractor"] == "mineru"
+
+
 # ── nx config get ─────────────────────────────────────────────────────────────
 
 def test_config_get_returns_value_from_file(runner: CliRunner, fake_home: Path) -> None:
