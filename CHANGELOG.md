@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.1] - 2026-04-01
+
+### Fixed
+- **Verification hooks now advisory-only** — removed test suite
+  execution from both Stop and PreToolUse hooks. Running tests inside
+  hooks caused multi-minute delays on routine operations. Both hooks
+  now perform fast checks only (uncommitted changes, open beads,
+  review markers) and never block.
+- **PreToolUse output format** — corrected to use `hookSpecificOutput`
+  with `permissionDecision` (PreToolUse protocol), not `decision`/`reason`
+  (Stop protocol).
+- **Bead ID extraction** — fixed BSD sed compatibility on macOS (`sed -E`
+  instead of GNU-only `\+`/`\b`/`\|`).
+
 ## [2.10.0] - 2026-04-01
 
 ### Added
