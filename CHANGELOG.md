@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.9.2] - 2026-03-31
+
+### Changed
+- **Eradicate superpowers references** — removed all live superpowers
+  delegation from nx README, preflight check, and 4 skill files.
+  nx is now fully self-contained with no superpowers dependency.
+- **Move WIP tutorial to branch** — `docs/tutorial/` moved to
+  `wip/tutorial` branch, off main.
+
 ## [2.9.1] - 2026-03-31
 
 ### Added
