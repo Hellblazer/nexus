@@ -103,6 +103,20 @@ def _tuning_from_dict(raw: dict[str, Any]) -> TuningConfig:
     )
 
 
+def get_pdf_extractor(repo_root: Path | None = None) -> str:
+    """Return the configured PDF extractor backend.
+
+    Reads ``pdf.extractor`` from the merged config.  Defaults to ``"auto"``.
+    Valid values: ``"auto"``, ``"docling"``, ``"mineru"``.
+    """
+    cfg = load_config(repo_root=repo_root)
+    value = cfg.get("pdf", {}).get("extractor", "auto")
+    if value not in ("auto", "docling", "mineru"):
+        _log.warning("invalid pdf.extractor config", value=value)
+        return "auto"
+    return value
+
+
 def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:
     """Return a TuningConfig loaded from the merged configuration.
 
@@ -181,6 +195,9 @@ _DEFAULTS: dict[str, Any] = {
         "prose_extensions": [],
         "rdr_paths": ["docs/rdr"],
         "include_untracked": False,
+    },
+    "pdf": {
+        "extractor": "auto",
     },
     "search": {
         "hybrid_default": False,

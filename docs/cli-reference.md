@@ -109,7 +109,18 @@ uv pip install 'conexus[mineru]'
 
 First run downloads the unimernet model (~2-3 GB). After that, `auto` mode automatically routes math-heavy PDFs through MinerU.
 
-**Forcing a specific backend:**
+**Setting a default backend (sticky config):**
+
+Add to `.nexus.yml` (per-repo) or `~/.config/nexus/config.yml` (global):
+
+```yaml
+pdf:
+  extractor: mineru   # auto | docling | mineru
+```
+
+The `--extractor` flag overrides the config when passed explicitly.
+
+**Forcing a specific backend (one-off):**
 
 ```bash
 nx index pdf paper.pdf --extractor docling   # Always Docling (no MinerU attempt)

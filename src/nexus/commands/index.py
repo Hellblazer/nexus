@@ -178,18 +178,22 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
 @click.option(
     "--extractor",
     type=click.Choice(["auto", "docling", "mineru"]),
-    default="auto",
-    show_default=True,
+    default=None,
     help=(
-        "PDF extraction backend. 'auto' detects formulas via Docling and switches to "
-        "MinerU when found. 'docling' forces Docling. 'mineru' forces MinerU "
+        "PDF extraction backend (default: from .nexus.yml pdf.extractor, or 'auto'). "
+        "'auto' detects formulas via Docling and switches to MinerU when found. "
+        "'docling' forces Docling. 'mineru' forces MinerU "
         "(requires: uv pip install 'conexus[mineru]')."
     ),
 )
-def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str) -> None:
+def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
+    from nexus.config import get_pdf_extractor
     from nexus.corpus import t3_collection_name
     from nexus.doc_indexer import index_pdf
+
+    if extractor is None:
+        extractor = get_pdf_extractor()
 
     if force and dry_run:
         raise click.UsageError("--force and --dry-run are mutually exclusive.")
