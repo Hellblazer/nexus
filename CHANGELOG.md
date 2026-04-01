@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-04-01
+
+### Added
+- **Verification config** (RDR-045) — `_DEFAULTS["verification"]` section
+  in `.nexus.yml` with `on_stop`, `on_close`, `test_command`, `lint_command`,
+  `test_timeout` keys. New `get_verification_config()` and
+  `detect_test_command()` in `config.py` with auto-detection for 7 project
+  types (Maven, Gradle, Python, Node, Rust, Make, Go).
+
 ## [2.9.2] - 2026-03-31
 
 ### Changed

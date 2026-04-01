@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from nexus.config import _DEFAULTS, load_config
+from nexus.config import _DEFAULTS, detect_test_command, get_verification_config, load_config
 
 
 def test_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,3 +197,135 @@ def test_nexus_yml_indexing_overrides(
     assert cfg["indexing"]["rdr_paths"] == ["docs/rdr", "design/decisions"]
     # prose_extensions not set in override → stays default
     assert cfg["indexing"]["prose_extensions"] == []
+
+
+# ── Verification config section ───────────────────────────────────────────────
+
+
+def test_defaults_include_verification_section() -> None:
+    """_DEFAULTS contains the verification section with all 5 keys and correct types."""
+    assert "verification" in _DEFAULTS
+    v = _DEFAULTS["verification"]
+    assert v["on_stop"] is False
+    assert v["on_close"] is False
+    assert v["test_command"] == ""
+    assert v["lint_command"] == ""
+    assert v["test_timeout"] == 120
+    assert isinstance(v["test_timeout"], int)
+
+
+def test_get_verification_config_returns_defaults_when_no_nexus_yml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """get_verification_config returns all defaults when no .nexus.yml exists."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = get_verification_config(repo_root=tmp_path)
+    assert cfg["on_stop"] is False
+    assert cfg["on_close"] is False
+    assert cfg["test_command"] == ""
+    assert cfg["lint_command"] == ""
+    assert cfg["test_timeout"] == 120
+
+
+def test_get_verification_config_merges_partial_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Partial verification section in .nexus.yml; rest comes from defaults."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".nexus.yml").write_text("verification:\n  on_stop: true\n")
+    cfg = get_verification_config(repo_root=tmp_path)
+    assert cfg["on_stop"] is True
+    # remaining keys stay at defaults
+    assert cfg["on_close"] is False
+    assert cfg["test_command"] == ""
+    assert cfg["lint_command"] == ""
+    assert cfg["test_timeout"] == 120
+
+
+def test_get_verification_config_all_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All verification fields in .nexus.yml override defaults."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".nexus.yml").write_text(
+        "verification:\n"
+        "  on_stop: true\n"
+        "  on_close: true\n"
+        "  test_command: uv run pytest\n"
+        "  lint_command: ruff check .\n"
+        "  test_timeout: 60\n"
+    )
+    cfg = get_verification_config(repo_root=tmp_path)
+    assert cfg["on_stop"] is True
+    assert cfg["on_close"] is True
+    assert cfg["test_command"] == "uv run pytest"
+    assert cfg["lint_command"] == "ruff check ."
+    assert cfg["test_timeout"] == 60
+
+
+# ── detect_test_command ───────────────────────────────────────────────────────
+
+
+def test_detect_test_command_pyproject(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[build-system]\n")
+    assert detect_test_command(repo_root=tmp_path) == "uv run pytest"
+
+
+def test_detect_test_command_pom(tmp_path: Path) -> None:
+    (tmp_path / "pom.xml").write_text("<project/>\n")
+    assert detect_test_command(repo_root=tmp_path) == "mvn test"
+
+
+def test_detect_test_command_gradle(tmp_path: Path) -> None:
+    (tmp_path / "build.gradle").write_text("// gradle\n")
+    assert detect_test_command(repo_root=tmp_path) == "./gradlew test"
+
+
+def test_detect_test_command_package_json(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}\n')
+    assert detect_test_command(repo_root=tmp_path) == "npm test"
+
+
+def test_detect_test_command_cargo(tmp_path: Path) -> None:
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "foo"\n')
+    assert detect_test_command(repo_root=tmp_path) == "cargo test"
+
+
+def test_detect_test_command_makefile(tmp_path: Path) -> None:
+    (tmp_path / "Makefile").write_text("test:\n\tpython -m pytest\n")
+    assert detect_test_command(repo_root=tmp_path) == "make test"
+
+
+def test_detect_test_command_go_mod(tmp_path: Path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/foo\n")
+    assert detect_test_command(repo_root=tmp_path) == "go test ./..."
+
+
+def test_detect_test_command_none(tmp_path: Path) -> None:
+    assert detect_test_command(repo_root=tmp_path) == ""
+
+
+def test_detect_test_command_priority(tmp_path: Path) -> None:
+    """When both pyproject.toml and Makefile exist, pyproject.toml wins (first match)."""
+    (tmp_path / "pyproject.toml").write_text("[build-system]\n")
+    (tmp_path / "Makefile").write_text("test:\n\tpython -m pytest\n")
+    assert detect_test_command(repo_root=tmp_path) == "uv run pytest"
+
+
+def test_detect_test_command_gradle_kts(tmp_path: Path) -> None:
+    """build.gradle.kts (Kotlin DSL) is detected as Gradle."""
+    (tmp_path / "build.gradle.kts").write_text("// kotlin gradle\n")
+    assert detect_test_command(repo_root=tmp_path) == "./gradlew test"
+
+
+def test_detect_table_matches_reader_script() -> None:
+    """config.py _DETECT_TABLE and reader script DETECT_TABLE must be identical."""
+    import importlib.util
+
+    from nexus.config import _DETECT_TABLE
+
+    script = Path(__file__).parents[1] / "nx" / "hooks" / "scripts" / "read_verification_config.py"
+    spec = importlib.util.spec_from_file_location("reader", script)
+    reader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reader)
+    assert _DETECT_TABLE == reader.DETECT_TABLE

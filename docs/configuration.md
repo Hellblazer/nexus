@@ -113,6 +113,54 @@ tuning:
 
 These values are exposed as a `TuningConfig` dataclass in `nexus.config`. The search command, indexer, and scoring modules all read from this config — changes take effect on the next invocation without restarting anything.
 
+## Verification
+
+Opt-in mechanical enforcement hooks that catch common agent failure modes: premature session closure and premature bead closure.
+
+```yaml
+# .nexus.yml
+verification:
+  on_stop: false          # Enable Stop hook — checks on session end (default: false)
+  on_close: false         # Enable bd-close gate — checks before closing a bead (default: false)
+  test_command: ""        # Auto-detected if omitted (see table below)
+  lint_command: ""        # Optional linter (currently advisory only)
+  test_timeout: 120       # Seconds; 0 = no timeout (default: 120)
+```
+
+### Activation
+
+**Both `on_stop` and `on_close` default to `false`.** A `verification:` section without either flag set does nothing. Projects opt in explicitly:
+
+```yaml
+verification:
+  on_stop: true    # Enable session-end checks
+  on_close: true   # Enable bead-close gate
+```
+
+### Auto-Detection
+
+If `test_command` is omitted but `on_stop` or `on_close` is `true`, the hook auto-detects from project marker files (first match wins):
+
+| Marker file | Test command |
+|---|---|
+| `pom.xml` | `mvn test` |
+| `build.gradle` / `build.gradle.kts` | `./gradlew test` |
+| `pyproject.toml` | `uv run pytest` |
+| `package.json` | `npm test` |
+| `Cargo.toml` | `cargo test` |
+| `Makefile` | `make test` |
+| `go.mod` | `go test ./...` |
+
+If no marker file is found and no command is configured, the test check is skipped with an advisory: "No test command configured or detected."
+
+### Behavior Reference
+
+**Stop hook** (`on_stop: true`): Fires when the agent ends a session. Checks: uncommitted git changes, open beads (`bd list --status=in_progress`), test suite result. If any check fails, blocks the session end and shows the reason. On retry, test failures are let through with a warning — mechanical issues (uncommitted changes, open beads) continue to block.
+
+**bd-close gate** (`on_close: true`): Fires before `bd close` or `bd done` commands. Test suite failure blocks the close. Absence of a review marker emits an advisory but does not block.
+
+**Command-not-found**: If the test command cannot be executed (exit 126/127), both hooks treat it as a skipped check with an advisory — not a blocking failure. Misconfigured environments do not permanently block all closures.
+
 ## File Locations
 
 | File | Purpose |

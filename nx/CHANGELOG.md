@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-04-01
+
+### Added
+- **Post-implementation verification hooks** (RDR-045) — two opt-in
+  mechanical enforcement hooks that catch premature session closure and
+  premature bead closure.
+  - **Stop hook** (`on_stop: true`) — blocks session end on uncommitted
+    git changes, open beads, or test failures. On retry, test failures
+    are let through with a warning; mechanical issues continue to block.
+  - **PreToolUse close gate** (`on_close: true`) — intercepts `bd close`
+    and `bd done`, blocks on test failure, emits advisory when no
+    review marker found in T1 scratch.
+  - Standalone `read_verification_config.py` config reader for hooks
+    (no nexus package imports).
+  - hooks.json: `Stop` (timeout 180s) and `PreToolUse` (matcher `Bash`,
+    timeout 300s) entries registered.
+
+### Changed
+- **code-review skill** — writes T1 scratch marker
+  (`review-completed bead=<id>`) on successful completion, enabling the
+  PreToolUse hook to verify review happened before bead closure.
+
 ## [2.9.1] - 2026-03-31
 
 ### Added
