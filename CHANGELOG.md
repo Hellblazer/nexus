@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.3] - 2026-04-01
+
+### Added
+- **PostToolUse prompt hook** for debugger enforcement — detects
+  repeated test failures and enforces `/nx:debug` invocation instead
+  of manual retry loops.
+
 ## [2.10.2] - 2026-04-01
 
 ### Fixed
