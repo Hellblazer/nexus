@@ -167,54 +167,33 @@ class TestScriptPermissions:
 
 
 class TestStopHookPipeline:
-    """End-to-end tests for the Stop verification hook."""
+    """End-to-end tests for the Stop verification hook (advisory only)."""
 
     def test_on_stop_false_passes_through(self, mock_plugin_root) -> None:
         env = mock_plugin_root({"on_stop": False})
         payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": False})
         result = _run_hook(STOP_HOOK, payload, env_overrides=env)
         assert result.returncode == 0
-        output = json.loads(result.stdout)
-        assert output["decision"] == "approve"
+        assert json.loads(result.stdout)["decision"] == "approve"
 
-    def test_on_stop_true_with_passing_tests(self, tmp_path, mock_plugin_root) -> None:
+    def test_on_stop_true_clean_repo(self, tmp_path, mock_plugin_root) -> None:
         _init_git_repo(tmp_path)
-        env = mock_plugin_root({"on_stop": True, "test_command": "true", "test_timeout": 10})
+        env = mock_plugin_root({"on_stop": True})
         payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": False})
         result = _run_hook(STOP_HOOK, payload, env_overrides=env, cwd=tmp_path)
         assert result.returncode == 0
-        output = json.loads(result.stdout)
-        assert output["decision"] == "approve"
+        assert json.loads(result.stdout)["decision"] == "approve"
 
-    def test_blocks_uncommitted_changes(self, tmp_path, mock_plugin_root) -> None:
+    def test_warns_on_uncommitted_changes(self, tmp_path, mock_plugin_root) -> None:
         _init_git_repo(tmp_path)
         (tmp_path / "README.md").write_text("modified\n")
-        env = mock_plugin_root({"on_stop": True, "test_command": "true", "test_timeout": 10})
+        env = mock_plugin_root({"on_stop": True})
         payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": False})
-        result = _run_hook(STOP_HOOK, payload, env_overrides=env, cwd=tmp_path)
-        assert result.returncode == 0
-        output = json.loads(result.stdout)
-        assert output["decision"] == "block"
-        assert "Uncommitted" in output.get("reason", "")
-
-    def test_blocks_test_failure_first_pass(self, tmp_path, mock_plugin_root) -> None:
-        _init_git_repo(tmp_path)
-        env = mock_plugin_root({"on_stop": True, "test_command": "false", "test_timeout": 10})
-        payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": False})
-        result = _run_hook(STOP_HOOK, payload, env_overrides=env, cwd=tmp_path)
-        assert result.returncode == 0
-        output = json.loads(result.stdout)
-        assert output["decision"] == "block"
-
-    def test_retry_lets_test_failures_through(self, tmp_path, mock_plugin_root) -> None:
-        _init_git_repo(tmp_path)
-        env = mock_plugin_root({"on_stop": True, "test_command": "false", "test_timeout": 10})
-        payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": True})
         result = _run_hook(STOP_HOOK, payload, env_overrides=env, cwd=tmp_path)
         assert result.returncode == 0
         output = json.loads(result.stdout)
         assert output["decision"] == "approve"
-        assert "WARNING" in output.get("reason", "")
+        assert "uncommitted" in output.get("reason", "").lower()
 
 
 class TestCloseHookPipeline:
