@@ -52,11 +52,17 @@ This is not negotiable. This is not optional. You cannot rationalize your way ou
 **RDR lifecycle:** `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-gate` → `/nx:rdr-accept` → `/nx:rdr-close`
 - List: `/nx:rdr-list` | Show: `/nx:rdr-show NNN`
 
+**Git workflow:**
+- Need workspace isolation? → `/nx:git-worktrees`
+- Implementation done, ready to merge/PR? → `/nx:finishing-branch`
+- Receiving review feedback? → `/nx:receiving-review` (verify before implementing)
+
 **Reference skills (invoke when relevant, no agent dispatch):**
 - Symbol navigation (definitions, callers, renames) → `/nx:serena-code-nav`
 - nx CLI usage → `/nx:nexus`
 - Interactive CLI/REPL control → `/nx:cli-controller`
 - Creating/editing nx skills → `/nx:writing-nx-skills`
+
 
 ## Essential MCP Tools
 
@@ -89,6 +95,9 @@ When multiple skills could apply:
 | grep for symbol callers | Symbol navigation → `/nx:serena-code-nav` |
 | Read whole file to find a method | Symbol lookup → `/nx:serena-code-nav` |
 | Skip review, it's a small change | Any change → `/nx:review-code` before commit |
+| Implement review feedback blindly | Receiving feedback → `/nx:receiving-review` first |
+| Merge without verifying tests | Branch done → `/nx:finishing-branch` |
+| Manual worktree setup | Need isolation → `/nx:git-worktrees` or `isolation: "worktree"` on Agent tool |
 
 ## Skill Types
 

@@ -484,6 +484,30 @@ standalone_skills:
       - "plugin authorship"
     tools: [Read, Write, Edit, Bash]
 
+  receiving-review:
+    description: "Technical evaluation of code review feedback — verify before implementing"
+    triggers:
+      - "receiving code review feedback"
+      - "PR review comments to address"
+      - "reviewer suggests changes"
+    tools: [Read, Grep, Bash]
+
+  git-worktrees:
+    description: "Isolated workspace setup via git worktrees with safety verification"
+    triggers:
+      - "need workspace isolation"
+      - "parallel feature work"
+      - "before executing implementation plan in isolated branch"
+    tools: [Bash, Read]
+
+  finishing-branch:
+    description: "Guide branch completion — verify tests, present merge/PR/keep/discard options, cleanup"
+    triggers:
+      - "implementation complete, ready to merge"
+      - "branch done, create PR"
+      - "finished feature work"
+    tools: [Bash, Read]
+
 # =============================================================================
 # PIPELINES
 # =============================================================================
@@ -584,7 +608,7 @@ model_summary:
 utility_commands:
   nx-preflight:
     slash_command: /nx-preflight
-    description: "Verify nx plugin dependencies: nx CLI, nx doctor, bd (beads), superpowers plugin"
+    description: "Verify nx plugin dependencies: nx CLI, nx doctor, bd (beads)"
     disable_model_invocation: false
 
 

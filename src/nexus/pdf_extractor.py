@@ -107,17 +107,10 @@ class PDFExtractor:
             return self._extract_with_mineru(pdf_path)
         except Exception:
             _log.warning(
-                "mineru_extraction_failed; falling back to docling_enriched",
+                "mineru_extraction_failed; returning docling result",
                 exc_info=True,
             )
-            try:
-                return self._extract_with_docling(pdf_path)
-            except Exception:
-                _log.warning(
-                    "docling enriched fallback failed; falling back to pymupdf_normalized",
-                    exc_info=True,
-                )
-                return self._extract_normalized(pdf_path)
+            return fast_result
 
     # ── internal extraction methods ───────────────────────────────────────────
 

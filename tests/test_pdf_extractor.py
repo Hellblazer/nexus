@@ -691,23 +691,23 @@ class TestAutoDetectRouting:
         assert result.metadata["extraction_method"] == "mineru"
         mock_mineru.assert_called_once_with(dummy_pdf)
 
-    def test_auto_falls_back_to_docling_enriched_when_mineru_fails(self, extractor, dummy_pdf):
-        """extractor='auto' falls back to enriched Docling when MinerU raises."""
+    def test_auto_falls_back_to_fast_result_when_mineru_fails(self, extractor, dummy_pdf):
+        """extractor='auto' returns the initial Docling result when MinerU raises."""
         fast_result = _make_docling_result(formula_count=3)
-        enriched_result = _make_docling_result(formula_count=3)
 
-        with patch("nexus.pdf_extractor._log") as mock_log:
-            extractor._extract_with_docling = MagicMock(
-                side_effect=[fast_result, enriched_result]
-            )
-            extractor._extract_with_mineru = MagicMock(
+        with (
+            patch.object(extractor, "_extract_with_docling", return_value=fast_result),
+            patch.object(
+                extractor, "_extract_with_mineru",
                 side_effect=RuntimeError("MinerU model download failed"),
-            )
+            ),
+            patch("nexus.pdf_extractor._log") as mock_log,
+        ):
             result = extractor.extract(dummy_pdf, extractor="auto")
 
-        assert result.metadata["extraction_method"] == "docling"
+        assert result is fast_result
         mock_log.warning.assert_any_call(
-            "mineru_extraction_failed; falling back to docling_enriched",
+            "mineru_extraction_failed; returning docling result",
             exc_info=True,
         )
 
