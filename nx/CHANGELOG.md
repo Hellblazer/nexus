@@ -6,6 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-03-31
+
+### Added
+- **receiving-review skill** — technical evaluation of code review feedback
+  with 6-step pattern (READ→UNDERSTAND→VERIFY→EVALUATE→RESPOND→IMPLEMENT),
+  YAGNI check via serena-code-nav, pushback correction guidance.
+- **git-worktrees skill** — isolated workspace setup with directory selection
+  priority, safety verification, auto-detect setup (uv/pip/npm/cargo/go),
+  Agent tool `isolation: "worktree"` guidance.
+- **finishing-branch skill** — branch completion workflow: verify tests,
+  present merge/PR/keep/discard options, typed "discard" confirmation,
+  worktree detection, beads close + dolt push integration.
+- **using-nx-skills routing** — git workflow section and common mistakes
+  table updated for new skills.
+
+### Changed
+- **All agents and skills** — migrated `bd` CLI references to `/beads:`
+  skill invocations. Skills are native to the Skill tool — more reliable
+  for subagents, no shell escaping needed. Only `bd dolt push` retained
+  (no skill equivalent). 29 files, 117 replacements.
+- **registry.yaml** — 3 new standalone skills registered; removed
+  superpowers reference from nx-preflight description.
+
+### Fixed
+- **Auto-detect MinerU fallback** — reuses already-computed fast_result
+  instead of re-converting PDF through Docling (review finding).
+- **test_plugin_structure.py** — consolidated STANDALONE_SKILLS into
+  single module-level constant; added 3 new skills to exclusion set.
+
 ## [2.8.0] - 2026-03-30
 
 ### Added
