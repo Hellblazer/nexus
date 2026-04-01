@@ -10,7 +10,7 @@ effort: low
 
 Guide for authoring skills in the nx Claude Code plugin. Skills are reference guides for proven techniques, patterns, or tools that help future Claude instances find and apply effective approaches.
 
-**REQUIRED BACKGROUND:** Understand superpowers:writing-skills for the foundational TDD-for-documentation methodology. This skill adds nx-specific conventions on top.
+**Methodology:** TDD-for-documentation — write pressure scenarios (test cases), verify baseline behavior without the skill, then write the skill and verify compliance.
 
 ## nx Skill Conventions
 
@@ -127,4 +127,4 @@ Run structural validation:
 pytest tests/test_plugin_structure.py -v -k "skill_name"
 ```
 
-For behavioral testing, follow the TDD-for-documentation approach from superpowers:writing-skills — create pressure scenarios, test baseline without skill, verify compliance with skill.
+For behavioral testing, follow TDD-for-documentation — create pressure scenarios, test baseline without skill, verify compliance with skill.

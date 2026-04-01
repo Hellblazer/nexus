@@ -52,7 +52,7 @@ The agent will:
 5. Check test quality (assertions, edge cases, error paths)
 6. Recommend additional tests if needed
 
-**REQUIRED SUB-SKILL:** Use superpowers:verification-before-completion — run all tests before claiming coverage is adequate.
+**REQUIRED:** Run all tests and verify output before claiming coverage is adequate.
 
 ## Agent-Specific PRODUCE
 

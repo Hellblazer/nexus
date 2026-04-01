@@ -25,7 +25,6 @@ The `nx` CLI and plugin work independently, but the plugin's full agent and skil
 |-----------|-------------|---------|
 | **`nx` CLI** | Hook scripts, indexing, and CLI-only operations (agents use MCP tools) | See [Getting Started](../docs/getting-started.md) |
 | **`bd` (Beads)** | Task tracking in all agents | [github.com/BeadsProject/beads](https://github.com/BeadsProject/beads) |
-| **superpowers plugin** | Cross-referenced skills (brainstorming, TDD, verification, writing-plans) | `/plugin marketplace add anthropics/claude-plugins-official` |
 
 Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 
@@ -112,20 +111,7 @@ nx/
     └── rdr-show/            # RDR workflow: show RDR details
 ```
 
-## Superpowers Delegation
-
-The nx plugin delegates workflow discipline to the [superpowers](https://github.com/anthropics/claude-plugins-official/tree/main/superpowers) plugin rather than reimplementing it:
-
-| Capability | Provided by |
-|-----------|-------------|
-| Verification before completion | `superpowers:verification-before-completion` |
-| Receiving code review feedback | `superpowers:receiving-code-review` |
-| Parallel agent dispatch | `superpowers:dispatching-parallel-agents` |
-| TDD methodology | `superpowers:test-driven-development` |
-| Git worktrees | `superpowers:using-git-worktrees` |
-| Writing plans | `superpowers:writing-plans` |
-
-## Standalone Skills (6)
+## Standalone Skills (9)
 
 Skills that provide guidance directly without delegating to an agent.
 

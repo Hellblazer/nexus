@@ -54,23 +54,8 @@ disable-model-invocation: false
   fi
   echo ""
 
-  # ── 4. superpowers plugin ────────────────────────────────────────────────────
-  echo "### 4. superpowers plugin"
-  echo ""
-  PLUGINS_CACHE="${HOME}/.claude/plugins/cache"
-  SUPERPOWERS_DIR=$(find "$PLUGINS_CACHE" -maxdepth 3 -type d -name "superpowers" 2>/dev/null | head -1)
-  if [ -n "$SUPERPOWERS_DIR" ]; then
-    echo "Status: PASS"
-    echo "superpowers found: $SUPERPOWERS_DIR"
-  else
-    echo "Status: FAIL"
-    echo "superpowers plugin not found under $PLUGINS_CACHE"
-    echo "Install: /plugin marketplace add anthropics/claude-plugins-official"
-  fi
-  echo ""
-
-  # ── 5. uv (package manager) ──────────────────────────────────────────────────
-  echo "### 5. uv (package manager)"
+  # ── 4. uv (package manager) ──────────────────────────────────────────────────
+  echo "### 4. uv (package manager)"
   echo ""
   if command -v uv &>/dev/null; then
     UV_VERSION=$(uv --version 2>&1)
@@ -83,7 +68,7 @@ disable-model-invocation: false
   fi
   echo ""
 
-  # ── 6. CLAUDE.md Agent Readiness ────────────────────────────────────────────
+  # ── 5. CLAUDE.md Agent Readiness ────────────────────────────────────────────
   echo "### 6. CLAUDE.md Agent Readiness"
   echo ""
   if [ -f "CLAUDE.md" ]; then
@@ -130,7 +115,6 @@ Based on the preflight output above, produce a summary table:
 | nx CLI | — | — |
 | nx doctor | — | — |
 | bd (beads) | — | — |
-| superpowers | — | — |
 | uv | — | — |
 | CLAUDE.md | — | — |
 

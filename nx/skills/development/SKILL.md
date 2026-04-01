@@ -134,8 +134,8 @@ The developer agent follows test-driven development:
 4. Repeat for each requirement
 5. Ensure all existing tests still pass
 
-**REQUIRED SUB-SKILL:** Use superpowers:verification-before-completion before claiming any task is done.
-**REQUIRED SUB-SKILL:** Use nx:code-review after implementation for quality review.
+**REQUIRED:** Run verification (tests pass, no regressions) before claiming any task is done.
+**REQUIRED SUB-SKILL:** Use `/nx:review-code` after implementation for quality review.
 
 ## Success Criteria
 

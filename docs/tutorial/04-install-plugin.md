@@ -49,7 +49,7 @@ Let's verify.
 
 ## VOICE [OVER SCREEN]
 
-Green means good. Warnings for "beads" and "superpowers" are fine — those are optional.
+Green means good. Warnings for "beads" are fine — it's optional.
 
 ## OVERLAY
 
