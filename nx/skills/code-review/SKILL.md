@@ -85,3 +85,20 @@ The code-review-expert agent uses hypothesis-driven review:
 - [ ] T2 memory updated with session findings (if multi-session work)
 
 **Session Scratch (T1)**: Agent uses scratch tool for ephemeral working notes during the session. Flagged items auto-promote to T2 at session end.
+
+## On Completion (Mandatory)
+
+On successful review completion, write a T1 scratch marker so the PreToolUse verification hook can confirm review happened this session:
+
+```bash
+nx scratch put "review-completed bead={bead-id} at={ISO-timestamp}" --tags "review,{bead-id}"
+```
+
+Replace `{bead-id}` with the bead ID from the relay (e.g., `nexus-4yit`). Replace `{ISO-timestamp}` with the current UTC time in ISO 8601 format (e.g., `2026-04-01T16:00:00Z`).
+
+**No bead context**: If invoked without a bead ID (ad-hoc review), write the marker with `bead=none`:
+```bash
+nx scratch put "review-completed bead=none at={ISO-timestamp}" --tags "review"
+```
+
+The `--tags` flag format is a comma-separated string: `--tags "review,{bead-id}"` (not `--tags review --tags {bead-id}`).

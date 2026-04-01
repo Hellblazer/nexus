@@ -128,6 +128,54 @@ def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:
     return _tuning_from_dict(cfg.get("tuning", {}))
 
 
+def get_verification_config(repo_root: Path | None = None) -> dict[str, Any]:
+    """Return the merged verification config section.
+
+    Does not perform auto-detection of ``test_command``; call
+    :func:`detect_test_command` separately when ``test_command`` is empty.
+    """
+    cfg = load_config(repo_root=repo_root)
+    defaults = _DEFAULTS["verification"]
+    section = cfg.get("verification", {})
+    return {**defaults, **section}
+
+
+# Detection table shared with nx/hooks/scripts/read_verification_config.py.
+# Keep both tables identical — a cross-validation test enforces this.
+_DETECT_TABLE: list[tuple[str, str]] = [
+    ("pom.xml",          "mvn test"),
+    ("build.gradle",     "./gradlew test"),
+    ("build.gradle.kts", "./gradlew test"),
+    ("pyproject.toml",   "uv run pytest"),
+    ("package.json",     "npm test"),
+    ("Cargo.toml",       "cargo test"),
+    ("Makefile",         "make test"),
+    ("go.mod",           "go test ./..."),
+]
+
+
+def detect_test_command(repo_root: Path | None = None) -> str:
+    """Auto-detect test command from project marker files.
+
+    Detection order (first match wins):
+      pom.xml            → "mvn test"
+      build.gradle /
+      build.gradle.kts   → "./gradlew test"
+      pyproject.toml     → "uv run pytest"
+      package.json       → "npm test"
+      Cargo.toml         → "cargo test"
+      Makefile           → "make test"
+      go.mod             → "go test ./..."
+
+    Returns "" if no marker file found.
+    """
+    base = Path(repo_root or Path.cwd())
+    for marker, command in _DETECT_TABLE:
+        if (base / marker).exists():
+            return command
+    return ""
+
+
 # ── Credential registry ───────────────────────────────────────────────────────
 # Maps config-file key → environment variable name
 CREDENTIALS: dict[str, str] = {
@@ -204,6 +252,13 @@ _DEFAULTS: dict[str, Any] = {
     },
     "voyageai": {
         "read_timeout_seconds": 120,
+    },
+    "verification": {
+        "on_stop": False,
+        "on_close": False,
+        "test_command": "",
+        "lint_command": "",
+        "test_timeout": 120,
     },
     # Derived from TuningConfig() at module load — single source of truth.
     # Do not edit values here; change TuningConfig field defaults instead.
