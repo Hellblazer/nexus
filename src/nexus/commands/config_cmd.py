@@ -52,7 +52,11 @@ def config_set(key_value: str, value: str | None) -> None:
         key = key_value
 
     key = key.strip().lower().replace("-", "_")
-    set_credential(key, value.strip())
+    if "." in key:
+        from nexus.config import set_config_value
+        set_config_value(key, value.strip())
+    else:
+        set_credential(key, value.strip())
     click.echo(f"Set {key}  →  {_global_config_path()}")
 
 

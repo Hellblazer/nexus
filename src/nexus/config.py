@@ -285,6 +285,41 @@ def get_credential(name: str) -> str:
     return ""
 
 
+def set_config_value(dotted_key: str, value: str) -> None:
+    """Persist a dotted config key in ``~/.config/nexus/config.yml``.
+
+    Example: ``set_config_value("pdf.extractor", "mineru")`` writes::
+
+        pdf:
+          extractor: mineru
+    """
+    path = _global_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parts = dotted_key.split(".")
+    with _config_lock:
+        data: dict[str, Any] = {}
+        if path.exists():
+            data = yaml.safe_load(path.read_text()) or {}
+        # Build nested dict from dotted path
+        node = data
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+        content = yaml.dump(data, default_flow_style=False)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
+        try:
+            with os.fdopen(tmp_fd, "w") as fh:
+                fh.write(content)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+
 def set_credential(name: str, value: str) -> None:
     """Persist *name*=*value* under ``credentials`` in ``~/.config/nexus/config.yml``."""
     if name not in CREDENTIALS:

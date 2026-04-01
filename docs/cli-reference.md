@@ -111,7 +111,11 @@ First run downloads the unimernet model (~2-3 GB). After that, `auto` mode autom
 
 **Setting a default backend (sticky config):**
 
-Add to `.nexus.yml` (per-repo) or `~/.config/nexus/config.yml` (global):
+```bash
+nx config set pdf.extractor=mineru    # global, applies to all repos
+```
+
+Or add to `.nexus.yml` (per-repo) or `~/.config/nexus/config.yml` (global) directly:
 
 ```yaml
 pdf:
