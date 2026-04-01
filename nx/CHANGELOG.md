@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.2] - 2026-04-01
+
+### Fixed
+- **Restore skill routing guardrails** — Skill Directory, Process Flow,
+  Storage Tier Protocol, and Red Flags table restored to SessionStart
+  injection. Agents were not invoking debugger, architect, and other
+  specialized skills after these were trimmed for compactness.
+
 ## [2.10.1] - 2026-04-01
 
 ### Fixed

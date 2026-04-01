@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.2] - 2026-04-01
+
+### Fixed
+- **Restore skill routing guardrails** — re-added the Skill Directory
+  tables, Process Flow graph, Storage Tier Protocol, and Red Flags
+  anti-rationalization table to the `using-nx-skills` SessionStart
+  injection. These were trimmed in RDR-039 for compactness but their
+  removal caused agents to stop invoking specialized skills (debugger,
+  architect, etc.).
+
 ## [2.10.1] - 2026-04-01
 
 ### Fixed
