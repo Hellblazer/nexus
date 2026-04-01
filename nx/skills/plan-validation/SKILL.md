@@ -62,7 +62,7 @@ The plan-auditor agent uses `mcp__sequential-thinking__sequentialthinking`:
 
 - **Session Scratch (T1)**: scratch tool: action="put", content="<notes>", tags="audit" — audit working notes during session; flagged items auto-promote to T2 at session end
 - **nx store**: store_put tool: content="...", collection="knowledge", title="validation-plan-{plan-id}", tags="validation,audit" — audit results for the validated plan
-- **Beads**: creates gap/risk beads (`bd create "..." -t task`) for major issues found during validation
+- **Beads**: creates gap/risk beads (`/beads:create "..." -t task`) for major issues found during validation
 
 ## Success Criteria
 

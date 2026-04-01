@@ -31,7 +31,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -191,8 +191,8 @@ This agent is typically triggered by:
 
 ## Beads Integration
 
-- Check bd ready for any knowledge-tidying tasks
-- Create beads for major cleanup efforts: bd create "Knowledge cleanup: X" -t chore
+- Check /beads:ready for any knowledge-tidying tasks
+- Create beads for major cleanup efforts: /beads:create "Knowledge cleanup: X" -t chore
 - Update bead status during multi-session cleanup work
 - Close beads when cleanup complete with summary of changes
 

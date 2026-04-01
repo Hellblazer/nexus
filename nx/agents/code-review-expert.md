@@ -30,7 +30,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search Nexus for missing context: Use search tool: query="query", corpus="knowledge", n=5
 2. Check Nexus memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -119,11 +119,11 @@ Set `needsMoreThoughts: true` to continue analysis, `isRevision: true` to revise
 
 ## Beads Integration
 
-- Check if code change is associated with a bead: `bd show <id>` or ask user
+- Check if code change is associated with a bead: `/beads:show <id>` or ask user
 - Reference bead ID in review if applicable
 - Flag if implementation deviates from bead description/design
-- Suggest bead updates if scope changed: `bd update <id> --design "revised scope"`
-- Create bead for review findings if significant: `bd create "Review findings: scope" -t task`
+- Suggest bead updates if scope changed: `/beads:update <id> --design "revised scope"`
+- Create bead for review findings if significant: `/beads:create "Review findings: scope" -t task`
 
 ## Step 0: Developer Context + Pattern Baseline (required before reading code)
 

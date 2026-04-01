@@ -91,7 +91,7 @@ git worktree remove <path>
 
 If beads are active, close related beads before or after merge:
 ```bash
-bd close <bead-id> --reason="Merged to <base-branch>"
+/beads:close <bead-id> --reason="Merged to <base-branch>"
 ```
 
 ## Sync Beads

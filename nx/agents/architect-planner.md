@@ -30,7 +30,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -106,10 +106,10 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 
 ## Beads Integration
 
-- Check bd ready for existing work before creating new plans
-- Create epic for major features: bd create "Epic Title" -t epic -p 1
-- Create tasks for each phase: bd create "Phase Task" -t task
-- Add dependencies: bd dep add <task-id> <blocker-id>
+- Check /beads:ready for existing work before creating new plans
+- Create epic for major features: /beads:create "Epic Title" -t epic -p 1
+- Create tasks for each phase: /beads:create "Phase Task" -t task
+- Add dependencies: /beads:dep add <task-id> <blocker-id>
 - Include bead IDs in all plan documentation
 - Never use markdown TODO lists - always use beads
 

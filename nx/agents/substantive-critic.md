@@ -31,7 +31,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -108,11 +108,11 @@ Set `needsMoreThoughts: true` to continue analysis, use `isRevision: true, revis
 
 ## Beads Integration
 
-- Check if critique is associated with a bead: `bd show <id>`
+- Check if critique is associated with a bead: `/beads:show <id>`
 - Reference bead ID in critique findings
 - Flag if implementation deviates from bead description/design
-- Suggest bead updates if scope or design needs revision: `bd update <id> --design "revised"`
-- Create bead for significant critique findings: `bd create "Critique: topic" -t task`
+- Suggest bead updates if scope or design needs revision: `/beads:update <id> --design "revised"`
+- Create bead for significant critique findings: `/beads:create "Critique: topic" -t task`
 
 
 ## Recommended Next Step (conditional output)
@@ -164,7 +164,7 @@ Store using these naming conventions:
 **Verification Checklist**:
 - [ ] nx memory written if applicable (verify with: memory_get tool: project="...")
 - [ ] nx store documents created (verify with: search tool: query="topic", corpus="knowledge")
-- [ ] Beads created for critical issues (use bd list when flagging must-fix items)
+- [ ] Beads created for critical issues (use /beads:list when flagging must-fix items)
 - [ ] All data persisted before composing final response
 
 **If Verification Fails** (partial persistence):

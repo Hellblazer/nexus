@@ -17,7 +17,7 @@ These agents **MUST proactively search** for context before starting:
 - **codebase-deep-analyzer**: Search nx T3 store for codebase knowledge, architecture notes
 
 **Search Sources in Order**:
-1. **Bead**: `bd show <id>` for task context, design field, dependencies
+1. **Bead**: `/beads:show <id>` for task context, design field, dependencies
 2. **Project Infrastructure**: T2 memory and beads context is auto-injected by SessionStart and SubagentStart hooks
 3. **nx T3 store**: Use search tool: `query="[topic]", corpus="knowledge", n=5`
 4. **nx T2 memory**: Use memory_get tool: `project="{project}", title="ACTIVE_INDEX.md"`
@@ -182,17 +182,17 @@ If expected context not received:
 1. Search nx T3 store for related prior work: Use search tool: `query="[topic]", corpus="knowledge", n=5`
 2. Check nx T2 memory for session state: Use memory_search tool: `query="[topic]", project="{project}"`
 3. Check T1 scratch for in-session notes: Use scratch tool: `action="search", query="[topic]"`
-4. Query `bd list --status=in_progress` for active work
+4. Query active work via `/beads:list` with status=in_progress
 5. Document assumption in bead notes
 6. Flag incomplete context in downstream relay
 
 ## Beads Integration
 
 All agents should:
-- Check `bd ready` for available work before starting
-- Update bead status when starting: `bd update <id> --status=in_progress`
-- Close beads when complete: `bd close <id>`
-- Create new beads for discovered work: `bd create "Title" -t <type>`
+- Check `/beads:ready` for available work before starting
+- Update bead status when starting: `/beads:update <id>` with status=in_progress
+- Close beads when complete: `/beads:close <id>`
+- Create new beads for discovered work: `/beads:create`
 - Always commit `.beads/issues.jsonl` with code changes
 
 ## nx Store Patterns

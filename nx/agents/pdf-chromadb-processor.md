@@ -31,7 +31,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -83,8 +83,8 @@ For batch jobs (multiple PDFs), repeat steps 1-5 for each file and track via bea
 
 ## Beads Integration
 
-- Check if PDF processing is part of tracked work: `bd ready`
-- Create bead for batch processing jobs: `bd create --title="PDF processing: description" --type=task`
+- Check if PDF processing is part of tracked work: `/beads:ready`
+- Create bead for batch processing jobs: `/beads:create "PDF processing: description" -t task`
 - Close bead with processing summary after completion
 
 ## Context Protocol

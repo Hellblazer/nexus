@@ -333,19 +333,20 @@ class TestCliSyntax:
 
 # ── Skill structure ───────────────────────────────────────────────────────────
 
+# Standalone skills don't delegate to agents — exclude from agent-specific tests
+_STANDALONE_SKILLS = {
+    "cli-controller", "nexus",
+    "brainstorming-gate", "using-nx-skills",
+    "writing-nx-skills",
+    "rdr-list", "rdr-show", "rdr-create",
+    "sequential-thinking",
+    "serena-code-nav",
+    "receiving-review", "git-worktrees", "finishing-branch",
+}
+
 
 class TestSkillStructure:
     """All SKILL.md files must have required content."""
-
-    # Standalone skills don't delegate to agents — exclude from agent-specific tests
-    STANDALONE_SKILLS = {
-        "cli-controller", "nexus",
-        "brainstorming-gate", "using-nx-skills",
-        "writing-nx-skills",
-        "rdr-list", "rdr-show", "rdr-create",
-        "sequential-thinking",
-        "serena-code-nav",  # direct tool instructions, no agent dispatch
-    }
 
     REQUIRED_SKILL_SECTIONS = [
         ("## Relay Template", "## Agent Invocation"),
@@ -355,14 +356,7 @@ class TestSkillStructure:
     @pytest.mark.parametrize("skill_path", [
         pytest.param(p, id=p.parent.name)
         for p in skill_skill_mds()
-        if p.parent.name not in {
-            "cli-controller", "nexus",
-            "brainstorming-gate", "using-nx-skills",
-            "writing-nx-skills",
-            "rdr-list", "rdr-show", "rdr-create",
-            "sequential-thinking",
-            "serena-code-nav",
-        }
+        if p.parent.name not in _STANDALONE_SKILLS
     ])
     def test_skill_has_relay_template(self, skill_path: Path) -> None:
         text = skill_path.read_text()
@@ -379,14 +373,7 @@ class TestSkillStructure:
     @pytest.mark.parametrize("skill_path", [
         pytest.param(p, id=p.parent.name)
         for p in skill_skill_mds()
-        if p.parent.name not in {
-            "cli-controller", "nexus",
-            "brainstorming-gate", "using-nx-skills",
-            "writing-nx-skills",
-            "rdr-list", "rdr-show", "rdr-create",
-            "sequential-thinking",
-            "serena-code-nav",
-        }
+        if p.parent.name not in _STANDALONE_SKILLS
     ])
     def test_agent_skill_has_produce_section(self, skill_path: Path) -> None:
         """Agent-delegating skills must have an Agent-Specific PRODUCE section."""
@@ -398,14 +385,7 @@ class TestSkillStructure:
     @pytest.mark.parametrize("skill_path", [
         pytest.param(p, id=p.parent.name)
         for p in skill_skill_mds()
-        if p.parent.name not in {
-            "cli-controller", "nexus",
-            "brainstorming-gate", "using-nx-skills",
-            "writing-nx-skills",
-            "rdr-list", "rdr-show", "rdr-create",
-            "sequential-thinking",
-            "serena-code-nav",
-        }
+        if p.parent.name not in _STANDALONE_SKILLS
     ])
     def test_skill_mentions_t1_scratch(self, skill_path: Path) -> None:
         """Agent-delegating skills should acknowledge T1 scratch usage."""

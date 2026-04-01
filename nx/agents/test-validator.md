@@ -31,7 +31,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -138,8 +138,8 @@ Set `needsMoreThoughts: true` to continue analysis, use `isRevision: true, revis
 
 ## Beads Integration
 
-- Check if validation is part of tracked work: bd show <id>
-- Create bead for significant validation work: bd create "Test validation: scope" -t task
+- Check if validation is part of tracked work: /beads:show <id>
+- Create bead for significant validation work: /beads:create "Test validation: scope" -t task
 - Update bead with coverage findings
 - Flag if tests do not meet quality gates
 

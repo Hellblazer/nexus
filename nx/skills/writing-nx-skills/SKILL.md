@@ -91,15 +91,15 @@ When adding a new skill, also add it to `nx/skills/using-nx-skills/SKILL.md` rou
 
 ## Known Pitfalls
 
-### bd update --description silently corrupts multi-line content
+### /beads:update --description silently corrupts multi-line content
 
-**Never** instruct agents to use `bd update <id> --description "..."` for multi-line or markdown content. Shell escaping silently destroys backticks (executed as command substitution), `$variables` (expanded to empty), and nested quotes (break argument boundaries). No error is raised — the command reports success with mangled data.
+**Never** instruct agents to use `/beads:update <id> --description "..."` for multi-line or markdown content. Shell escaping silently destroys backticks (executed as command substitution), `$variables` (expanded to empty), and nested quotes (break argument boundaries). No error is raised — the command reports success with mangled data.
 
 **Correct pattern**: Write content to a temp file via the Write tool, then use `--body-file`:
 
 ```
 Step 1 — Write enriched content using the Write tool (file_path: /tmp/bead-<id>.md)
-Step 2 — bd update <id> --body-file /tmp/bead-<id>.md
+Step 2 — /beads:update <id> --body-file /tmp/bead-<id>.md
 ```
 
 Short single-phrase values (e.g. `--design "revised scope"`) are safe. The bug only affects multi-line content with markdown formatting.

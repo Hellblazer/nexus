@@ -30,7 +30,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -165,7 +165,7 @@ You will leverage Nexus to:
 ## Beads Integration
 
 - Verify that plans reference valid bead IDs
-- Check bead dependencies match plan dependencies: bd show <id>
+- Check bead dependencies match plan dependencies: /beads:show <id>
 - Validate that all plan tasks have corresponding beads
 - Flag any orphan beads or missing bead references
 - Ensure bead types match task nature (feature/bug/task/epic)
@@ -232,7 +232,7 @@ Store using these naming conventions:
 **Verification Checklist**:
 - [ ] Nexus memory audit file written: Use memory_get tool: project="{project}", title="audit-{date}.md" to verify
 - [ ] Nexus knowledge validation document created: Use search tool: query="validation plan {plan-id}", corpus="knowledge", n=1 to verify
-- [ ] Bead design field updated with recommendations (use bd show <id> when updating plan beads)
+- [ ] Bead design field updated with recommendations (use /beads:show <id> when updating plan beads)
 - [ ] All data persisted before composing final response
 
 **If Verification Fails** (partial persistence):
@@ -241,7 +241,7 @@ Store using these naming conventions:
 3. **Persist recovery notes**: Write failure details: Use memory_put tool: content="failure details", project="{project}", title="persistence-failure-{date}.md"
 4. **Continue with response**: Partial data is better than no data - include what succeeded
 
-Example: If bead update fails but Nexus memory succeeds, note in response: "Audit persisted to Nexus memory under project {project} title audit-{date}.md. Bead update failed - manual update needed with: bd update {id} --design 'recommendations'"
+Example: If bead update fails but Nexus memory succeeds, note in response: "Audit persisted to Nexus memory under project {project} title audit-{date}.md. Bead update failed - manual update needed with: /beads:update {id} --design 'recommendations'"
 
 **Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.
 

@@ -31,13 +31,13 @@ effort: medium
 1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
 ### Project Context
 
-T2 memory context is auto-injected by SessionStart and SubagentStart hooks. Check `bd ready` for unblocked tasks.
+T2 memory context is auto-injected by SessionStart and SubagentStart hooks. Check `/beads:ready` for unblocked tasks.
 
 You are a meta-agent responsible for analyzing requests, selecting appropriate specialized agents, and orchestrating multi-agent workflows. You understand the capabilities, strengths, and appropriate use cases for every agent in the ecosystem.
 
@@ -134,10 +134,10 @@ If the task requires multiple stages:
 
 ## Beads Integration
 
-- Check bd ready to understand current work context
+- Check /beads:ready to understand current work context
 - Ensure routed agents receive relevant bead IDs
 - Verify agents update bead status appropriately
-- Create orchestration beads for complex pipelines: bd create "Orchestrate: task" -t task
+- Create orchestration beads for complex pipelines: /beads:create "Orchestrate: task" -t task
 
 
 ## Context Protocol
@@ -318,7 +318,7 @@ review — with rationale]
 ```
 
 Create a blocker bead if a bead is associated with the task:
-`bd create "Blocked: [agent-name] failed after 2 retries on [task]" -t bug --blocks [original-bead-id]`
+`/beads:create "Blocked: [agent-name] failed after 2 retries on [task]" -t bug --blocks [original-bead-id]`
 
 ## Output Format
 

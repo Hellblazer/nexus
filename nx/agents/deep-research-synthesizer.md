@@ -30,7 +30,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -97,7 +97,7 @@ If your project uses beads for task tracking, consider linking research findings
 - Knowledge gaps identified during research
 
 **Creating Tasks for Follow-Up**:
-- bd create "Implement: finding" -t task
+- /beads:create "Implement: finding" -t task
 - Reference research nx store titles in the design field
 
 **Consult CLAUDE.md**: Check if your project mandates beads integration for research tracking.

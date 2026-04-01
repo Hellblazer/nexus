@@ -30,7 +30,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search Nexus for missing context: Use search tool: query="query", corpus="knowledge", n=5
 2. Check Nexus memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -41,7 +41,7 @@ T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 Also check T2 memory for project context:
 Use memory_get tool: project="{project}", title="" to list project files.
 
-Check `bd ready` for unblocked tasks.
+Check `/beads:ready` for unblocked tasks.
 
 ### Prior Implementation Search (if relay has no nx artifacts)
 
@@ -92,10 +92,10 @@ You are an expert software developer who adapts to any language and build system
 
 ## Beads Integration
 
-- Check bd ready for available work before starting
-- Update bead status when starting: bd update <id> --status=in_progress
-- Close beads when complete: bd close <id>
-- Create new beads for discovered work: bd create
+- Check /beads:ready for available work before starting
+- Update bead status when starting: /beads:update <id> --status=in_progress
+- Close beads when complete: /beads:close <id>
+- Create new beads for discovered work: /beads:create
 - Always commit .beads/issues.jsonl with code changes
 
 
@@ -252,7 +252,7 @@ Before marking any work complete:
 2. Code compiles cleanly including test code
 3. Include `## Next Step: code-review-expert` in output (ALWAYS, not "if significant")
 4. Address Critical and Important issues from review
-5. Update bead status via bd close <id>
+5. Update bead status via /beads:close <id>
 6. Commit beads file with code changes
 
 **Exception**: If the Circuit Breaker fires, do not output `## Next Step: code-review-expert` — the escalation block is your sole terminal output.

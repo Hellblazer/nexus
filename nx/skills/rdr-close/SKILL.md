@@ -62,7 +62,7 @@ Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. 
 
 If T2 record has an `epic_bead` field (set during accept-time planning):
 1. Read epic bead ID from T2: Use memory_get tool: project="{repo}_rdr", title="NNN"
-2. Run `bd show <epic-id>` to get child bead statuses
+2. Run `/beads:show <epic-id>` to get child bead statuses
 3. Display bead status table to user:
    - Bead ID, title, status (open/in_progress/closed)
    - Highlight any unclosed beads

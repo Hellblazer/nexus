@@ -163,7 +163,7 @@ Before starting, validate relay contains:
 If validation fails:
 1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
 2. Check nx T2 memory: Use memory_get tool: project="{project}", title="ACTIVE_INDEX.md"
-3. Query active beads: bd list --status=in_progress
+3. Query active beads: /beads:list --status=in_progress
 4. Flag incomplete relay in response to user
 5. Proceed with available context, documenting assumptions
 

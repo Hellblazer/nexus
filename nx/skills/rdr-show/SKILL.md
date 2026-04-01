@@ -70,4 +70,4 @@ This skill produces outputs directly (no agent delegation). It is read-only and 
 
 - This is a read-only skill. It does NOT modify any files or state.
 - Research findings show both classification and verification method.
-- Bead information comes from `bd show` for the linked epic bead (if `epic_bead` is set in T2).
+- Bead information comes from `/beads:show` for the linked epic bead (if `epic_bead` is set in T2).

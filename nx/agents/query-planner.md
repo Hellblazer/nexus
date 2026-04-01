@@ -28,7 +28,7 @@ Before starting, validate the relay contains:
 1. Search Nexus for missing context: Use search tool: query="[topic]", corpus="knowledge", n=5
 2. Check Nexus memory for session state: Use memory_search tool: query="query plan", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="query question"
-4. Query `bd list --status=in_progress`
+4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 

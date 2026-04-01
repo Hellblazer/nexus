@@ -46,7 +46,7 @@ T1 scratch is session-scoped. When invoked after `/nx:plan-audit` in the same se
 
 ## Agent-Specific PRODUCE
 
-- **Enriched Beads**: Updated via Write tool → `bd update <id> --body-file /tmp/bead-<id>.md` with execution-ready context
+- **Enriched Beads**: Updated via Write tool → `/beads:update <id> --body-file /tmp/bead-<id>.md` with execution-ready context
 - **T2 memory**: Epic bead ID written via memory_put tool: project="{repo}_rdr", title="NNN"
 - **T1 scratch**: Enrichment summary via scratch tool: action="put", tags="enrichment-complete"
 - **Console output**: Enriched plan summary table
