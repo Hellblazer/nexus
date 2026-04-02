@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.4] - 2026-04-01
+
+### Removed
+- **PostToolUse prompt hook** — `type: "prompt"` is not valid for
+  PostToolUse hooks (only `command` and `http` are supported), causing
+  `PostToolUse:Bash hook error` on every Bash tool call. Removed
+  entirely; `/nx:debug` remains available on demand.
+
 ## [2.10.3] - 2026-04-01
 
 ### Added

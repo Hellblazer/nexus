@@ -88,16 +88,6 @@
         ]
       }
     ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "prompt",
-            "prompt": "If the Bash command was a test run (pytest, mvn test, cargo test, npm test, go test, make test, or similar) and it FAILED (non-zero exit): Check the conversation — is this the 2nd or later test failure in this session without invoking /nx:debug? If yes, you MUST invoke /nx:debug NOW. Do not attempt another manual fix. One retry is acceptable; two means you need the debugger agent."
-          }
-        ]
-      }
-    ]
+    "PostToolUse": []
   }
 }
