@@ -137,7 +137,7 @@ class TestMineruRunViaServer:
         assert data["return_middle_json"] == "true"
         assert data["return_content_list"] == "true"
         assert data["parse_method"] == "auto"
-        assert data["lang_list"] == '["en"]'
+        assert data["lang_list"] == "en"
         assert data["start_page_id"] == 0
         assert data["end_page_id"] == 5
 

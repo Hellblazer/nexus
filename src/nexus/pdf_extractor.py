@@ -356,15 +356,15 @@ class PDFExtractor:
                 files=[("files", (pdf_path.name, f, "application/pdf"))],
                 data={
                     "backend": "pipeline",
-                    "start_page_id": start,
-                    "end_page_id": end if end is not None else 99999,
+                    "start_page_id": str(start),
+                    "end_page_id": str(end if end is not None else 99999),
                     "formula_enable": "true",
                     "table_enable": str(get_mineru_table_enable()).lower(),
                     "return_md": "true",
                     "return_middle_json": "true",
                     "return_content_list": "true",
                     "parse_method": "auto",
-                    "lang_list": '["en"]',
+                    "lang_list": "en",
                 },
                 timeout=300,
             )
