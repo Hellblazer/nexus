@@ -1,12 +1,12 @@
 ---
 name: rdr-close
-description: Use when an RDR is done — close it with optional post-mortem, bead status advisory, and T3 archival
+description: Use when an RDR is done — close it with optional post-mortem, bead status gate, and T3 archival
 effort: medium
 ---
 
 # RDR Close Skill
 
-Reports bead status as advisory. Optionally delegates post-mortem archival to the **knowledge-tidier** agent (haiku). See [registry.yaml](../../registry.yaml).
+Gates on open bead status before closing. Optionally delegates post-mortem archival to the **knowledge-tidier** agent (haiku). See [registry.yaml](../../registry.yaml).
 
 ## When This Skill Activates
 
@@ -58,7 +58,7 @@ Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. 
   - Internal contradiction
   - Missing cross-cutting concern
 
-### Step 3: Bead Status Advisory
+### Step 3: Bead Status Gate
 
 If T2 record has an `epic_bead` field (set during accept-time planning):
 1. Read epic bead ID from T2: Use memory_get tool: project="{repo}_rdr", title="NNN"
@@ -66,10 +66,16 @@ If T2 record has an `epic_bead` field (set during accept-time planning):
 3. Display bead status table to user:
    - Bead ID, title, status (open/in_progress/closed)
    - Highlight any unclosed beads
-4. **Advisory only** — the human decides which beads to close. Do NOT automatically mark beads complete.
+4. Do NOT automatically mark beads complete — the human decides which beads to close.
 
 If T2 record has no `epic_bead` field (user skipped planning at accept time):
-- Skip this step entirely. Print: "No planning beads found for this RDR."
+- Check the command output for open beads listed by the pre-check script.
+
+**HARD GATE — if ANY open or in-progress beads exist:**
+- Display the open beads to the user
+- Ask explicitly: "These beads are still open. Close this RDR anyway?"
+- **Do NOT proceed until the user confirms.** This is not advisory — it is a gate.
+- If the user says no, stop and let them resolve the beads first.
 
 ### Step 4: Update State
 
@@ -110,7 +116,7 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 ## Failure Handling
 
 The close operation performs multiple state mutations. If any step fails:
-- Each step emits clear status (e.g., "T2 updated ✓", "Bead advisory ✓", "T3 archive ✗ FAILED")
+- Each step emits clear status (e.g., "T2 updated ✓", "Bead gate ✓", "T3 archive ✗ FAILED")
 - T2 `archived` flag tracks whether T3 archival succeeded
 - Re-running `/nx:rdr-close` is idempotent: checks T2 state and skips completed steps
 
@@ -149,7 +155,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 - [ ] Pre-check completed (status verified, warnings issued for non-Final RDRs)
 - [ ] Divergence notes captured from user (if implementation diverged)
 - [ ] Post-mortem created with drift classification (if diverged or reverted/abandoned)
-- [ ] Bead status advisory displayed (if epic_bead exists in T2)
+- [ ] Open beads displayed and user asked for explicit confirmation before proceeding
 - [ ] Beads NOT auto-closed — human decides
 - [ ] T2 record updated with close reason, date, epic bead ID, and archived flag
 - [ ] T3 semantic index updated via `nx index rdr`
@@ -161,7 +167,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 
 Outputs produced by this skill directly:
 
-- **Console output**: Bead status advisory table (if epic_bead in T2)
+- **Console output**: Bead status gate table (if epic_bead in T2)
 - **T2 memory**: Close metadata via memory_put tool: project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
 - **T3 semantic index**: Updated via `nx index rdr` (CCE embeddings, section-level chunks)
 - **Filesystem**: Post-mortem at `$RDR_DIR/post-mortem/NNN-kebab-title.md`, updated README

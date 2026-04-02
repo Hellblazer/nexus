@@ -1,5 +1,5 @@
 ---
-description: Close an RDR with optional post-mortem, bead status advisory, and T3 archival
+description: Close an RDR with optional post-mortem, bead status gate, and T3 archival
 ---
 
 # RDR Close
@@ -165,23 +165,36 @@ print("### T2 Metadata (current status)")
 print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\" to retrieve T2 metadata.")
 print()
 
-# Bead status advisory
+# Bead status gate
 print("### Bead Status Advisory")
 print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\" to check for `epic_bead` field.")
 print(f"If `epic_bead` exists, run `bd show <epic-id>` to display child bead statuses.")
-print(f"If no `epic_bead`, skip advisory (user skipped planning at accept time).")
+print(f"If no `epic_bead`, check command output for open beads listed below.")
 print()
 
-# Active beads
+# Active beads — check for open beads linked to this RDR's epic
+has_open_beads = False
 print("### Active Beads")
 try:
+    # Check epic bead children first
     result = subprocess.run(
-        ['bd', 'list', '--status=in_progress', '--limit=5'],
+        ['bd', 'list', '--status=open,in_progress', '--limit=20'],
         capture_output=True, text=True, timeout=10)
     bd_out = (result.stdout or '').strip()
-    print(bd_out if bd_out else "No in-progress beads")
+    if bd_out and bd_out != "No issues found.":
+        has_open_beads = True
+        print(bd_out)
+    else:
+        print("No open or in-progress beads.")
 except Exception as exc:
     print(f"Beads not available: {exc}")
+
+if has_open_beads:
+    print()
+    print("> **⚠ WARNING: Open beads exist.** You MUST ask the user for explicit")
+    print("> confirmation before closing this RDR. Do NOT proceed without their approval.")
+    print("> Show them the open beads above and ask: \"Close RDR with these beads still open?\"")
+    print()
 PYEOF
 }
 
@@ -196,7 +209,7 @@ All data is pre-loaded above — no additional tool calls needed.
 - RDR directory is shown above (from `.nexus.yml` `indexing.rdr_paths[0]`).
 - Parse RDR ID and close reason from `$ARGUMENTS` (e.g. `003 --reason implemented`).
 - Pre-check warning is shown above if status is not Final when reason is Implemented.
-- **Implemented**: review for divergences, optionally create post-mortem, display bead status advisory.
+- **Implemented**: review for divergences, optionally create post-mortem, gate on open bead status.
 - **Reverted / Abandoned**: offer post-mortem.
 - **Superseded**: prompt for superseding RDR ID, cross-link both files.
 - Post-mortem archive location: `{rdr_dir}/post-mortem/NNN-kebab-title.md`.

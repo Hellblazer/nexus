@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.6] - 2026-04-02
+
+### Fixed
+- **RDR close bead gate** — replaced "advisory only" bead status check
+  with a hard gate that requires explicit user confirmation before closing
+  an RDR with open or in-progress beads. Previously agents would see open
+  beads and proceed to close anyway.
+
 ## [2.10.5] - 2026-04-02
 
 ### Fixed

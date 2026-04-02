@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.6] - 2026-04-02
+
+### Fixed
+- **RDR close bead gate** — `rdr-close` skill and command now hard-gate
+  on open beads instead of treating them as advisory. Agent must display
+  open beads and get explicit user confirmation before closing.
+
 ## [2.10.5] - 2026-04-02
 
 Plugin version aligned with Nexus CLI 2.10.5. No plugin-level functional changes.

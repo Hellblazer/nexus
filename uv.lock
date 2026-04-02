@@ -673,7 +673,7 @@ wheels = [
 
 [[package]]
 name = "conexus"
-version = "2.10.5"
+version = "2.10.6"
 source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
