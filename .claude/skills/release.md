@@ -23,7 +23,7 @@ Follow every step in order. Do not skip or reorder.
 4. **Regenerate lock and reinstall local tool**
    ```bash
    uv sync
-   uv tool install --reinstall .
+   scripts/reinstall-tool.sh   # preserves [mineru] and other extras
    nx --version
    ```
    Verify the printed version matches what you set in step 3. Do not proceed otherwise.
@@ -68,7 +68,7 @@ Follow every step in order. Do not skip or reorder.
 ## Common Mistakes
 
 - Using `gh release create` instead of `git tag` + `git push origin vX.Y.Z` (creates duplicate release)
-- Forgetting `uv tool install --reinstall .` (local nx stays on old version)
+- Forgetting `scripts/reinstall-tool.sh` (local nx stays on old version)
 - Forgetting `uv sync` (uv.lock not updated)
 - Pushing tag before version-bump commit (tag points to wrong commit)
 - Running `uv publish` manually (CI handles this via OIDC trusted publisher)

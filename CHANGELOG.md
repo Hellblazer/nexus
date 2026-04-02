@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.7] - 2026-04-02
+
+### Fixed
+- **Preserve optional extras during reinstall** — added
+  `scripts/reinstall-tool.sh` that reads `uv-receipt.toml` and preserves
+  extras like `[mineru]` and `[local]` when reinstalling the CLI tool.
+  Previously `uv tool install --reinstall .` silently dropped extras,
+  breaking MinerU mid-session. Fixes #122.
+
 ## [2.10.6] - 2026-04-02
 
 ### Fixed

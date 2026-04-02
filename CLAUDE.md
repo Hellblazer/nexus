@@ -23,7 +23,7 @@ Add a copyright line below for substantial new modules (not boilerplate):
 ```bash
 # Setup
 uv sync                           # install deps
-uv tool install .                 # install nx CLI locally
+scripts/reinstall-tool.sh         # install nx CLI locally (preserves extras)
 
 # Tests
 uv run pytest                     # full unit suite (no API keys needed)
@@ -33,7 +33,7 @@ uv run pytest --cov=nexus             # with coverage
 uv run pytest -m integration          # E2E (requires real API keys: copy .env.example → .env)
 
 # After changes, reinstall CLI
-uv sync && uv tool install --reinstall .
+uv sync && scripts/reinstall-tool.sh
 nx --version
 ```
 
