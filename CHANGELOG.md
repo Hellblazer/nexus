@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.5] - 2026-04-02
+
+### Fixed
+- **MinerU extraction output paths** — updated `_extract_with_mineru` to
+  match MinerU v2 `do_parse` API (positional output_dir, `pdf_bytes_list`,
+  `p_lang_list`). Output directory now uses `pdf_path.name` (with extension)
+  instead of `pdf_path.stem`. Tests updated to match.
+
 ## [2.10.4] - 2026-04-01
 
 ### Removed

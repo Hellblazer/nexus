@@ -35,8 +35,8 @@ def _setup_mineru_output(
 ) -> None:
     """Write mock MinerU output files to the expected directory structure.
 
-    MinerU writes to: output_dir/{stem}/auto/{stem}.md,
-    {stem}_content_list.json, {stem}_middle.json
+    MinerU writes to: output_dir/{name}/auto/{name}.md,
+    {name}_content_list.json, {name}_middle.json (name includes .pdf extension)
     """
     auto_dir = Path(output_dir) / stem / "auto"
     auto_dir.mkdir(parents=True, exist_ok=True)
@@ -71,7 +71,7 @@ class TestMineruExtractionResult:
         mock_tmpdir.__exit__ = MagicMock(return_value=False)
         mock_tmpdir_cls.return_value = mock_tmpdir
 
-        _setup_mineru_output(work_dir, "paper")
+        _setup_mineru_output(work_dir, "paper.pdf")
 
         with patch("nexus.pdf_extractor.do_parse"):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -89,7 +89,7 @@ class TestMineruExtractionResult:
         mock_tmpdir_cls.return_value = mock_tmpdir
 
         md_text = "# My Paper\n\nThis is the body text."
-        _setup_mineru_output(work_dir, "paper", md_text=md_text)
+        _setup_mineru_output(work_dir, "paper.pdf", md_text=md_text)
 
         with patch("nexus.pdf_extractor.do_parse"):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -105,7 +105,7 @@ class TestMineruExtractionResult:
         mock_tmpdir.__exit__ = MagicMock(return_value=False)
         mock_tmpdir_cls.return_value = mock_tmpdir
 
-        _setup_mineru_output(work_dir, "paper")
+        _setup_mineru_output(work_dir, "paper.pdf")
 
         with patch("nexus.pdf_extractor.do_parse"):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -141,7 +141,7 @@ class TestMineruDisplayEquations:
             {"type": "equation", "text": "$$E = mc^2$$", "page_idx": 0, "bbox": [0, 100, 100, 150]},
             {"type": "equation", "text": "$$F = ma$$", "page_idx": 1, "bbox": [0, 0, 100, 50]},
         ]
-        _setup_mineru_output(work_dir, "paper", content_list=content_list)
+        _setup_mineru_output(work_dir, "paper.pdf", content_list=content_list)
 
         with patch("nexus.pdf_extractor.do_parse"):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -186,7 +186,7 @@ class TestMineruInlineEquations:
                 }
             ]
         }
-        _setup_mineru_output(work_dir, "paper", middle=middle)
+        _setup_mineru_output(work_dir, "paper.pdf", middle=middle)
 
         with patch("nexus.pdf_extractor.do_parse"):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -225,7 +225,7 @@ class TestMineruInlineEquations:
                 }
             ]
         }
-        _setup_mineru_output(work_dir, "paper", content_list=content_list, middle=middle)
+        _setup_mineru_output(work_dir, "paper.pdf", content_list=content_list, middle=middle)
 
         with patch("nexus.pdf_extractor.do_parse"):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -258,7 +258,7 @@ class TestMineruInlineEquations:
                 }
             ]
         }
-        _setup_mineru_output(work_dir, "paper", content_list=content_list, middle=middle)
+        _setup_mineru_output(work_dir, "paper.pdf", content_list=content_list, middle=middle)
 
         with patch("nexus.pdf_extractor.do_parse"):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -288,7 +288,7 @@ class TestMineruPageBoundaries:
                 {"page_idx": 2, "para_blocks": []},
             ]
         }
-        _setup_mineru_output(work_dir, "paper", middle=middle)
+        _setup_mineru_output(work_dir, "paper.pdf", middle=middle)
 
         with patch("nexus.pdf_extractor.do_parse"):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -310,7 +310,7 @@ class TestMineruPageBoundaries:
                 {"page_idx": 1, "para_blocks": []},
             ]
         }
-        _setup_mineru_output(work_dir, "paper", middle=middle)
+        _setup_mineru_output(work_dir, "paper.pdf", middle=middle)
 
         with patch("nexus.pdf_extractor.do_parse"):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -338,7 +338,7 @@ class TestMineruTempdirLifecycle:
         mock_tmpdir.__exit__ = MagicMock(return_value=False)
         mock_tmpdir_cls.return_value = mock_tmpdir
 
-        _setup_mineru_output(work_dir, "paper")
+        _setup_mineru_output(work_dir, "paper.pdf")
 
         with patch("nexus.pdf_extractor.do_parse"):
             extractor._extract_with_mineru(dummy_pdf)

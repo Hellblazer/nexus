@@ -227,21 +227,24 @@ class PDFExtractor:
 
         with tempfile.TemporaryDirectory() as tmp_str:
             output_dir = Path(tmp_str)
+            pdf_bytes = pdf_path.read_bytes()
             do_parse(
-                input_file_names=[str(pdf_path)],
-                output_dir=str(output_dir),
+                str(output_dir),
+                pdf_file_names=[pdf_path.name],
+                pdf_bytes_list=[pdf_bytes],
+                p_lang_list=["en"],
                 formula_enable=True,
                 table_enable=True,
             )
 
-            pdf_stem = pdf_path.stem
-            base = output_dir / pdf_stem / "auto"
-            md_text = (base / f"{pdf_stem}.md").read_text(encoding="utf-8")
+            pdf_name = pdf_path.name
+            base = output_dir / pdf_name / "auto"
+            md_text = (base / f"{pdf_name}.md").read_text(encoding="utf-8")
             content_list_data: list[dict] = json.loads(
-                (base / f"{pdf_stem}_content_list.json").read_text(encoding="utf-8")
+                (base / f"{pdf_name}_content_list.json").read_text(encoding="utf-8")
             )
             middle_data: dict = json.loads(
-                (base / f"{pdf_stem}_middle.json").read_text(encoding="utf-8")
+                (base / f"{pdf_name}_middle.json").read_text(encoding="utf-8")
             )
 
         # Display equations from content_list.json
