@@ -169,7 +169,7 @@ class TestMineruOrchestration:
         pdf_info = [{"page_idx": 0, "para_blocks": []}]
         isolated_return = ("# Title", [], pdf_info)
 
-        with self._mock_pymupdf(3), self._mock_do_parse(), \
+        with self._mock_pymupdf(1), self._mock_do_parse(), \
              patch.object(extractor, "_mineru_run_isolated", return_value=isolated_return) as mock_iso:
             result = extractor._extract_with_mineru(dummy_pdf)
 
