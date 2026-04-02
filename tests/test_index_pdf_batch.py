@@ -38,7 +38,7 @@ def empty_dir(tmp_path: Path) -> Path:
     return d
 
 
-def _mock_index_pdf(**kwargs):
+def _mock_index_pdf(path, **kwargs):
     """Default mock: returns chunk count of 5."""
     return 5
 
@@ -126,7 +126,7 @@ class TestBatchIndexProgress:
             result = runner.invoke(main, ["index", "pdf", "--dir", str(pdf_dir)])
 
         # Summary should mention totals
-        assert "3 papers" in result.output.lower() or "3 pdf" in result.output.lower()
+        assert "3 pdfs" in result.output.lower()
 
 
 # ── Error handling ───────────────────────────────────────────────────────────
@@ -184,3 +184,13 @@ class TestBatchIndexErrors:
         ])
         assert result.exit_code != 0
         assert "mutually exclusive" in result.output.lower() or "usage" in result.output.lower()
+
+    def test_dry_run_with_dir_rejected(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        """--dry-run + --dir → UsageError."""
+        result = runner.invoke(main, [
+            "index", "pdf", "--dir", str(pdf_dir), "--dry-run",
+        ])
+        assert result.exit_code != 0
+        assert "dry-run" in result.output.lower()

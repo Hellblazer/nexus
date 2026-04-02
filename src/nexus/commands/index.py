@@ -210,10 +210,15 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     if force and dry_run:
         raise click.UsageError("--force and --dry-run are mutually exclusive.")
+    if dry_run and dir_path is not None:
+        raise click.UsageError("--dry-run is not supported with --dir.")
 
     # ── Batch mode (--dir) ──────────────────────────────────────────────
     if dir_path is not None:
-        pdfs = sorted(dir_path.glob("*.pdf"))
+        pdfs = sorted(
+            p for p in dir_path.iterdir()
+            if p.is_file() and p.suffix.lower() == ".pdf"
+        )
         if not pdfs:
             click.echo(f"No PDF files found in {dir_path}")
             return
@@ -245,7 +250,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         batch_elapsed = _time.monotonic() - batch_start
         click.echo(
-            f"\nSummary: {total} papers, {total_chunks} chunks, "
+            f"\nSummary: {total} PDFs, {total_chunks} chunks, "
             f"{batch_elapsed:.1f}s total"
         )
         if failures:
