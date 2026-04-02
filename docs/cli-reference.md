@@ -100,6 +100,8 @@ Most PDFs work fine with the default (`auto`). You only need to think about this
 **What MinerU adds (optional):**
 - Superior LaTeX extraction for display and inline equations
 - ~2.9x faster than Docling's formula enrichment mode on equation-heavy papers
+- Large PDFs are automatically split into 5-page batches, each processed in
+  an isolated subprocess to prevent OOM on formula-dense documents
 
 **Installing MinerU:**
 

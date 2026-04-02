@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.8] - 2026-04-02
+
+Plugin version aligned with Nexus CLI 2.10.8. No plugin-level functional changes.
+
 ## [2.10.7] - 2026-04-02
 
 Plugin version aligned with Nexus CLI 2.10.7. No plugin-level functional changes.

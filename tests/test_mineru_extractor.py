@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-044 Phase 1: MinerU extraction backend tests (fully mocked).
+"""MinerU extraction backend tests (fully mocked).
 
-MinerU (mineru package) is an optional dependency — every test mocks at
-the import boundary.  No real PDF processing occurs.
+Tests are structured around the new batched-subprocess architecture:
+- _mineru_build_result: static method, tested directly (no mocking)
+- _mineru_run_isolated: subprocess call, mocked at method level
+- _extract_with_mineru: orchestrator, mocked at pymupdf + _mineru_run_isolated
 """
-import json
-import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,90 +26,30 @@ def dummy_pdf(tmp_path: Path) -> Path:
     return p
 
 
-def _setup_mineru_output(
-    output_dir: str,
-    stem: str,
-    md_text: str = "# Title\n\nSome content.",
-    content_list: list | None = None,
-    middle: dict | None = None,
-) -> None:
-    """Write mock MinerU output files to the expected directory structure.
-
-    MinerU writes to: output_dir/{name}/auto/{name}.md,
-    {name}_content_list.json, {name}_middle.json (name includes .pdf extension)
-    """
-    auto_dir = Path(output_dir) / stem / "auto"
-    auto_dir.mkdir(parents=True, exist_ok=True)
-
-    (auto_dir / f"{stem}.md").write_text(md_text, encoding="utf-8")
-
-    if content_list is None:
-        content_list = []
-    (auto_dir / f"{stem}_content_list.json").write_text(
-        json.dumps(content_list), encoding="utf-8"
-    )
-
-    if middle is None:
-        middle = {"pdf_info": [{"page_idx": 0, "para_blocks": []}]}
-    (auto_dir / f"{stem}_middle.json").write_text(
-        json.dumps(middle), encoding="utf-8"
-    )
+# ── _mineru_build_result (static, no mocking needed) ───────────────────────
 
 
-# ── ExtractionResult contract ────────────────────────────────────────────────
+class TestMineruBuildResult:
+    """_mineru_build_result assembles ExtractionResult from raw MinerU outputs."""
 
-
-class TestMineruExtractionResult:
-    """_extract_with_mineru returns well-formed ExtractionResult."""
-
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_returns_extraction_method_mineru(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """extraction_method is 'mineru' in metadata."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
-
-        _setup_mineru_output(work_dir, "paper.pdf")
-
-        with patch("nexus.pdf_extractor.do_parse"):
-            result = extractor._extract_with_mineru(dummy_pdf)
-
+    def test_extraction_method_is_mineru(self, dummy_pdf):
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "# Title", [], [{"page_idx": 0, "para_blocks": []}],
+        )
         assert isinstance(result, ExtractionResult)
         assert result.metadata["extraction_method"] == "mineru"
 
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_text_from_markdown_output(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """Extracted text comes from the .md output file."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
+    def test_text_passed_through(self, dummy_pdf):
+        md = "# My Paper\n\nBody text."
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, md, [], [{"page_idx": 0, "para_blocks": []}],
+        )
+        assert result.text == md
 
-        md_text = "# My Paper\n\nThis is the body text."
-        _setup_mineru_output(work_dir, "paper.pdf", md_text=md_text)
-
-        with patch("nexus.pdf_extractor.do_parse"):
-            result = extractor._extract_with_mineru(dummy_pdf)
-
-        assert result.text == md_text
-
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_metadata_has_standard_keys(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """Metadata includes all standard keys matching the Docling extraction path."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
-
-        _setup_mineru_output(work_dir, "paper.pdf")
-
-        with patch("nexus.pdf_extractor.do_parse"):
-            result = extractor._extract_with_mineru(dummy_pdf)
-
+    def test_metadata_has_standard_keys(self, dummy_pdf):
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "text", [], [{"page_idx": 0, "para_blocks": []}],
+        )
         required_keys = {
             "extraction_method", "page_count", "formula_count",
             "page_boundaries", "format",
@@ -120,201 +60,82 @@ class TestMineruExtractionResult:
         missing = required_keys - result.metadata.keys()
         assert not missing, f"Missing metadata keys: {missing}"
 
-
-# ── Display equations (content_list.json) ─────────────────────────────────────
-
-
-class TestMineruDisplayEquations:
-    """Display equations from content_list.json are counted."""
-
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_display_equations_counted(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """Entries with type='equation' in content_list.json are counted as formulas."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
-
+    def test_display_equations_counted(self, dummy_pdf):
         content_list = [
-            {"type": "text", "text": "Body text", "page_idx": 0, "bbox": [0, 0, 100, 100]},
-            {"type": "equation", "text": "$$E = mc^2$$", "page_idx": 0, "bbox": [0, 100, 100, 150]},
-            {"type": "equation", "text": "$$F = ma$$", "page_idx": 1, "bbox": [0, 0, 100, 50]},
+            {"type": "text", "text": "Body"},
+            {"type": "equation", "text": "$$E = mc^2$$"},
+            {"type": "equation", "text": "$$F = ma$$"},
         ]
-        _setup_mineru_output(work_dir, "paper.pdf", content_list=content_list)
-
-        with patch("nexus.pdf_extractor.do_parse"):
-            result = extractor._extract_with_mineru(dummy_pdf)
-
-        # Display equations contribute to formula_count
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "text", content_list, [{"page_idx": 0, "para_blocks": []}],
+        )
         assert result.metadata["formula_count"] >= 2
 
-
-# ── Inline equations (middle.json) ────────────────────────────────────────────
-
-
-class TestMineruInlineEquations:
-    """Inline equations from middle.json spans are counted."""
-
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_inline_equations_counted(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """Spans with type='inline_equation' in middle.json are counted as formulas."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
-
-        middle = {
-            "pdf_info": [
-                {
-                    "page_idx": 0,
-                    "para_blocks": [
-                        {
-                            "type": "text",
-                            "lines": [
-                                {
-                                    "spans": [
-                                        {"type": "text", "content": "where "},
-                                        {"type": "inline_equation", "content": "\\frac{dx}{dt}"},
-                                        {"type": "text", "content": " is the derivative"},
-                                    ]
-                                }
-                            ],
-                        }
-                    ],
-                }
-            ]
-        }
-        _setup_mineru_output(work_dir, "paper.pdf", middle=middle)
-
-        with patch("nexus.pdf_extractor.do_parse"):
-            result = extractor._extract_with_mineru(dummy_pdf)
-
+    def test_inline_equations_counted(self, dummy_pdf):
+        pdf_info = [{
+            "page_idx": 0,
+            "para_blocks": [{
+                "type": "text",
+                "lines": [{"spans": [
+                    {"type": "text", "content": "where "},
+                    {"type": "inline_equation", "content": "\\frac{dx}{dt}"},
+                ]}],
+            }],
+        }]
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "text", [], pdf_info,
+        )
         assert result.metadata["formula_count"] >= 1
 
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_combined_display_and_inline_count(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """formula_count equals total of display + inline equations."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
-
-        content_list = [
-            {"type": "equation", "text": "$$E = mc^2$$", "page_idx": 0, "bbox": [0, 0, 100, 50]},
-        ]
-        middle = {
-            "pdf_info": [
-                {
-                    "page_idx": 0,
-                    "para_blocks": [
-                        {
-                            "type": "text",
-                            "lines": [
-                                {
-                                    "spans": [
-                                        {"type": "inline_equation", "content": "x^2"},
-                                        {"type": "inline_equation", "content": "y^2"},
-                                    ]
-                                }
-                            ],
-                        }
-                    ],
-                }
-            ]
-        }
-        _setup_mineru_output(work_dir, "paper.pdf", content_list=content_list, middle=middle)
-
-        with patch("nexus.pdf_extractor.do_parse"):
-            result = extractor._extract_with_mineru(dummy_pdf)
-
-        # 1 display + 2 inline = 3
+    def test_combined_display_and_inline(self, dummy_pdf):
+        content_list = [{"type": "equation", "text": "$$E = mc^2$$"}]
+        pdf_info = [{
+            "page_idx": 0,
+            "para_blocks": [{
+                "type": "text",
+                "lines": [{"spans": [
+                    {"type": "inline_equation", "content": "x^2"},
+                    {"type": "inline_equation", "content": "y^2"},
+                ]}],
+            }],
+        }]
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "text", content_list, pdf_info,
+        )
         assert result.metadata["formula_count"] == 3
 
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_zero_formulas_when_none_present(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """formula_count is 0 when no equations found in either file."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
-
-        content_list = [
-            {"type": "text", "text": "Just text", "page_idx": 0, "bbox": [0, 0, 100, 100]},
-        ]
-        middle = {
-            "pdf_info": [
-                {
-                    "page_idx": 0,
-                    "para_blocks": [
-                        {
-                            "type": "text",
-                            "lines": [{"spans": [{"type": "text", "content": "plain text"}]}],
-                        }
-                    ],
-                }
-            ]
-        }
-        _setup_mineru_output(work_dir, "paper.pdf", content_list=content_list, middle=middle)
-
-        with patch("nexus.pdf_extractor.do_parse"):
-            result = extractor._extract_with_mineru(dummy_pdf)
-
+    def test_zero_formulas(self, dummy_pdf):
+        pdf_info = [{
+            "page_idx": 0,
+            "para_blocks": [{
+                "type": "text",
+                "lines": [{"spans": [{"type": "text", "content": "plain"}]}],
+            }],
+        }]
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "text", [{"type": "text", "text": "x"}], pdf_info,
+        )
         assert result.metadata["formula_count"] == 0
 
-
-# ── Page boundaries ──────────────────────────────────────────────────────────
-
-
-class TestMineruPageBoundaries:
-    """page_boundaries derived from page_idx fields in middle.json."""
-
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_page_count_from_middle_json(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """page_count reflects the number of pages in middle.json pdf_info."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
-
-        middle = {
-            "pdf_info": [
-                {"page_idx": 0, "para_blocks": []},
-                {"page_idx": 1, "para_blocks": []},
-                {"page_idx": 2, "para_blocks": []},
-            ]
-        }
-        _setup_mineru_output(work_dir, "paper.pdf", middle=middle)
-
-        with patch("nexus.pdf_extractor.do_parse"):
-            result = extractor._extract_with_mineru(dummy_pdf)
-
+    def test_page_count_from_pdf_info(self, dummy_pdf):
+        pdf_info = [
+            {"page_idx": 0, "para_blocks": []},
+            {"page_idx": 1, "para_blocks": []},
+            {"page_idx": 2, "para_blocks": []},
+        ]
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "some text", [], pdf_info,
+        )
         assert result.metadata["page_count"] == 3
 
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_page_boundaries_have_page_numbers(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """Each page boundary has page_number, start_char, page_text_length."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
-
-        middle = {
-            "pdf_info": [
-                {"page_idx": 0, "para_blocks": []},
-                {"page_idx": 1, "para_blocks": []},
-            ]
-        }
-        _setup_mineru_output(work_dir, "paper.pdf", middle=middle)
-
-        with patch("nexus.pdf_extractor.do_parse"):
-            result = extractor._extract_with_mineru(dummy_pdf)
-
+    def test_page_boundaries_structure(self, dummy_pdf):
+        pdf_info = [
+            {"page_idx": 0, "para_blocks": []},
+            {"page_idx": 1, "para_blocks": []},
+        ]
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "some text here", [], pdf_info,
+        )
         boundaries = result.metadata["page_boundaries"]
         assert len(boundaries) >= 1
         for b in boundaries:
@@ -323,51 +144,99 @@ class TestMineruPageBoundaries:
             assert "page_text_length" in b
 
 
-# ── Tempdir lifecycle ────────────────────────────────────────────────────────
+# ── _extract_with_mineru orchestration ──────────────────────────────────────
 
 
-class TestMineruTempdirLifecycle:
-    """Temporary directory is created and cleaned up via context manager."""
+class TestMineruOrchestration:
+    """_extract_with_mineru batches pages and delegates to _mineru_run_isolated."""
 
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_tempdir_used_as_context_manager(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """TemporaryDirectory is used as a context manager (enter + exit)."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
+    def _mock_pymupdf(self, page_count: int):
+        """Return a patch context for pymupdf.open that reports page_count."""
+        mock_doc = MagicMock()
+        mock_doc.__len__ = MagicMock(return_value=page_count)
+        mock_doc.__enter__ = MagicMock(return_value=mock_doc)
+        mock_doc.__exit__ = MagicMock(return_value=False)
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open = MagicMock(return_value=mock_doc)
+        return patch.dict("sys.modules", {"pymupdf": mock_pymupdf})
 
-        _setup_mineru_output(work_dir, "paper.pdf")
+    def _mock_do_parse(self):
+        """Patch do_parse to non-None so the import guard passes."""
+        return patch("nexus.pdf_extractor.do_parse", MagicMock())
 
-        with patch("nexus.pdf_extractor.do_parse"):
-            extractor._extract_with_mineru(dummy_pdf)
+    def test_small_pdf_single_batch(self, extractor, dummy_pdf):
+        """PDF with <= MINERU_PAGE_BATCH pages runs one batch with end=None."""
+        pdf_info = [{"page_idx": 0, "para_blocks": []}]
+        isolated_return = ("# Title", [], pdf_info)
 
-        mock_tmpdir.__enter__.assert_called_once()
-        mock_tmpdir.__exit__.assert_called_once()
+        with self._mock_pymupdf(3), self._mock_do_parse(), \
+             patch.object(extractor, "_mineru_run_isolated", return_value=isolated_return) as mock_iso:
+            result = extractor._extract_with_mineru(dummy_pdf)
+
+        mock_iso.assert_called_once_with(dummy_pdf, 0, None)
+        assert result.metadata["extraction_method"] == "mineru"
+
+    def test_large_pdf_splits_into_batches(self, extractor, dummy_pdf):
+        """PDF with > MINERU_PAGE_BATCH pages splits into multiple batches."""
+        extractor.MINERU_PAGE_BATCH = 5
+        pdf_info = [{"page_idx": 0, "para_blocks": []}]
+        isolated_return = ("batch text", [], pdf_info)
+
+        with self._mock_pymupdf(12), self._mock_do_parse(), \
+             patch.object(extractor, "_mineru_run_isolated", return_value=isolated_return) as mock_iso:
+            result = extractor._extract_with_mineru(dummy_pdf)
+
+        # 12 pages / 5 per batch = 3 batches: (0,5), (5,10), (10,12)
+        assert mock_iso.call_count == 3
+        calls = [c.args for c in mock_iso.call_args_list]
+        assert calls[0] == (dummy_pdf, 0, 5)
+        assert calls[1] == (dummy_pdf, 5, 10)
+        assert calls[2] == (dummy_pdf, 10, 12)
+
+    def test_batch_results_merged(self, extractor, dummy_pdf):
+        """Markdown from batches is joined; content_list and pdf_info are concatenated."""
+        extractor.MINERU_PAGE_BATCH = 2
+        batch1 = ("# Page 1", [{"type": "equation", "text": "E=mc2"}],
+                   [{"page_idx": 0, "para_blocks": []}])
+        batch2 = ("# Page 2", [{"type": "text", "text": "plain"}],
+                   [{"page_idx": 1, "para_blocks": []}])
+
+        with self._mock_pymupdf(4), self._mock_do_parse(), \
+             patch.object(extractor, "_mineru_run_isolated", side_effect=[batch1, batch2]):
+            result = extractor._extract_with_mineru(dummy_pdf)
+
+        assert "# Page 1" in result.text
+        assert "# Page 2" in result.text
+        assert result.metadata["page_count"] == 2
+        assert result.metadata["formula_count"] == 1
+
+
+# ── _mineru_run_isolated subprocess handling ────────────────────────────────
+
+
+class TestMineruRunIsolated:
+    """_mineru_run_isolated shells out to a subprocess and reads results."""
+
+    @patch("nexus.pdf_extractor.subprocess.run")
+    @patch("nexus.pdf_extractor.tempfile.mkdtemp")
+    def test_subprocess_failure_raises(self, mock_mkdtemp, mock_run, extractor, dummy_pdf, tmp_path):
+        """Non-zero exit code raises RuntimeError."""
+        mock_mkdtemp.return_value = str(tmp_path / "work")
+        (tmp_path / "work").mkdir()
+        mock_run.return_value = MagicMock(returncode=1)
+
+        with pytest.raises(RuntimeError, match="MinerU subprocess exited with code 1"):
+            extractor._mineru_run_isolated(dummy_pdf, 0, None)
 
 
 # ── Error handling ──────────────────────────────────────────────────────────
 
 
 class TestMineruErrorHandling:
-    """Error paths: missing dependency, do_parse failure."""
+    """Error paths: missing dependency."""
 
     def test_raises_import_error_when_mineru_not_installed(self, extractor, dummy_pdf):
         """ImportError with install instructions when do_parse is None."""
         with patch("nexus.pdf_extractor.do_parse", None):
             with pytest.raises(ImportError, match="MinerU is not installed"):
-                extractor._extract_with_mineru(dummy_pdf)
-
-    @patch("nexus.pdf_extractor.tempfile.TemporaryDirectory")
-    def test_do_parse_failure_propagates(self, mock_tmpdir_cls, extractor, dummy_pdf, tmp_path):
-        """Exceptions from do_parse propagate to caller (for fallback handling)."""
-        work_dir = str(tmp_path / "mineru_work")
-        mock_tmpdir = MagicMock()
-        mock_tmpdir.__enter__ = MagicMock(return_value=work_dir)
-        mock_tmpdir.__exit__ = MagicMock(return_value=False)
-        mock_tmpdir_cls.return_value = mock_tmpdir
-
-        with patch("nexus.pdf_extractor.do_parse", side_effect=RuntimeError("model download failed")):
-            with pytest.raises(RuntimeError, match="model download failed"):
                 extractor._extract_with_mineru(dummy_pdf)

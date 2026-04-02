@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.10.8] - 2026-04-02
+
+### Changed
+- **MinerU batched subprocess extraction** — large PDFs are now split
+  into 5-page batches, each processed in an isolated subprocess. Prevents
+  OOM on formula-dense documents (e.g. 108-page Grossberg 1986). GPU/model
+  memory is fully reclaimed between batches.
+
+### Docs
+- Updated `cli-reference.md` and `architecture.md` with MinerU batching behavior.
+
 ## [2.10.7] - 2026-04-02
 
 ### Fixed

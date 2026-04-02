@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 import json
 import re
+import subprocess
+import sys
 import tempfile
 
 import structlog
@@ -24,6 +26,27 @@ try:
     from mineru.cli.common import do_parse
 except ImportError:
     do_parse = None  # type: ignore[assignment]
+
+
+# Inline script executed in a child Python process for memory isolation.
+_MINERU_WORKER_SCRIPT = '''
+import json, sys
+from pathlib import Path
+from mineru.cli.common import do_parse
+
+pdf_path, result_dir, start, end_str = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+end = None if end_str == "none" else int(end_str)
+do_parse(
+    result_dir,
+    pdf_file_names=[Path(pdf_path).name],
+    pdf_bytes_list=[Path(pdf_path).read_bytes()],
+    p_lang_list=["en"],
+    formula_enable=True,
+    table_enable=True,
+    start_page_id=start,
+    end_page_id=end,
+)
+'''
 
 _log = structlog.get_logger(__name__)
 
@@ -212,47 +235,115 @@ class PDFExtractor:
             },
         )
 
+    # Maximum pages per MinerU batch.  Large formula-dense PDFs (e.g. 108-page
+    # Grossberg 1986) OOM during MFR prediction when processed as a single pass.
+    # Splitting into page ranges keeps peak memory bounded.  Small batches add
+    # only ~5s model-init overhead each — negligible vs. the cost of an OOM kill.
+    MINERU_PAGE_BATCH = 5
+
     def _extract_with_mineru(self, pdf_path: Path) -> ExtractionResult:
         """Extract text via MinerU (math-aware, optional dependency).
 
-        NOTE: Page boundaries are approximated by dividing total text length
-        evenly across pages.  MinerU writes a single markdown file (not
-        per-page), so exact character-level boundaries are unavailable.
-        A future phase may refine this using ``middle.json`` paragraph page_idx.
+        Each page-range batch runs in a **subprocess** so that MinerU's
+        GPU/model memory is fully reclaimed between batches.  Without this,
+        memory accumulates across in-process ``do_parse`` calls and large
+        formula-dense PDFs get OOM-killed.
         """
         if do_parse is None:
             raise ImportError(
                 "MinerU is not installed. Install with: uv pip install 'conexus[mineru]'"
             )
 
-        with tempfile.TemporaryDirectory() as tmp_str:
-            output_dir = Path(tmp_str)
-            pdf_bytes = pdf_path.read_bytes()
-            do_parse(
-                str(output_dir),
-                pdf_file_names=[pdf_path.name],
-                pdf_bytes_list=[pdf_bytes],
-                p_lang_list=["en"],
-                formula_enable=True,
-                table_enable=True,
+        import pymupdf  # lightweight — only used for page count
+
+        with pymupdf.open(pdf_path) as doc:
+            total_pages = len(doc)
+
+        batches: list[tuple[int, int | None]] = []
+        if total_pages <= self.MINERU_PAGE_BATCH:
+            batches.append((0, None))
+        else:
+            _log.info(
+                "mineru_splitting_large_pdf",
+                total_pages=total_pages,
+                batch_size=self.MINERU_PAGE_BATCH,
+                path=str(pdf_path),
             )
+            for start in range(0, total_pages, self.MINERU_PAGE_BATCH):
+                batches.append((start, min(start + self.MINERU_PAGE_BATCH, total_pages)))
+
+        md_parts: list[str] = []
+        all_content_list: list[dict] = []
+        all_pdf_info: list[dict] = []
+
+        for start, end in batches:
+            label = f"{start + 1}–{end}" if end is not None else f"{start + 1}–{total_pages}"
+            _log.info("mineru_batch", pages=label, path=str(pdf_path))
+            md, content_list, pdf_info = self._mineru_run_isolated(pdf_path, start, end)
+            md_parts.append(md)
+            all_content_list.extend(content_list)
+            all_pdf_info.extend(pdf_info)
+
+        md_text = "\n".join(md_parts)
+        return self._mineru_build_result(
+            pdf_path, md_text, all_content_list, all_pdf_info,
+        )
+
+    def _mineru_run_isolated(
+        self, pdf_path: Path, start: int, end: int | None,
+    ) -> tuple[str, list[dict], list[dict]]:
+        """Run MinerU in a fresh OS process for full memory isolation.
+
+        Uses ``subprocess.run`` with an inline Python script so the child
+        loads MinerU models independently.  When the child exits, all
+        GPU/model memory is reclaimed by the OS — no leaks across batches.
+        """
+        result_dir = tempfile.mkdtemp()
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable, "-c", _MINERU_WORKER_SCRIPT,
+                    str(pdf_path), result_dir,
+                    str(start), "none" if end is None else str(end),
+                ],
+                stdin=subprocess.DEVNULL,
+            )
+            if result.returncode != 0:
+                _log.error(
+                    "mineru_subprocess_failed",
+                    returncode=result.returncode,
+                    pages=f"{start}–{end}",
+                    path=str(pdf_path),
+                )
+                raise RuntimeError(
+                    f"MinerU subprocess exited with code {result.returncode} "
+                    f"(pages {start}–{end}, path={pdf_path})"
+                )
 
             pdf_name = pdf_path.name
-            base = output_dir / pdf_name / "auto"
-            md_text = (base / f"{pdf_name}.md").read_text(encoding="utf-8")
-            content_list_data: list[dict] = json.loads(
+            base = Path(result_dir) / pdf_name / "auto"
+            md = (base / f"{pdf_name}.md").read_text(encoding="utf-8")
+            content_list: list[dict] = json.loads(
                 (base / f"{pdf_name}_content_list.json").read_text(encoding="utf-8")
             )
-            middle_data: dict = json.loads(
+            middle: dict = json.loads(
                 (base / f"{pdf_name}_middle.json").read_text(encoding="utf-8")
             )
+            return md, content_list, middle.get("pdf_info", [])
+        finally:
+            import shutil
+            shutil.rmtree(result_dir, ignore_errors=True)
 
-        # Display equations from content_list.json
-        display_count = sum(1 for e in content_list_data if e.get("type") == "equation")
+    @staticmethod
+    def _mineru_build_result(
+        pdf_path: Path, md_text: str,
+        content_list: list[dict], pdf_info: list[dict],
+    ) -> ExtractionResult:
+        """Assemble an ExtractionResult from (merged) MinerU outputs."""
+        display_count = sum(1 for e in content_list if e.get("type") == "equation")
 
-        # Inline equations from middle.json spans
         inline_count = 0
-        for page in middle_data.get("pdf_info", []):
+        for page in pdf_info:
             for block in page.get("para_blocks", []):
                 for line in block.get("lines", []):
                     for span in line.get("spans", []):
@@ -260,10 +351,9 @@ class PDFExtractor:
                             inline_count += 1
 
         formula_count = display_count + inline_count
-
-        # Page boundaries — approximate from text length fraction
-        page_count = len(middle_data.get("pdf_info", []))
+        page_count = len(pdf_info)
         total_len = len(md_text)
+
         page_boundaries: list[dict] = []
         if page_count > 0 and total_len > 0:
             chars_per_page = total_len / page_count
