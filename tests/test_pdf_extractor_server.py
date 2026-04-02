@@ -138,8 +138,8 @@ class TestMineruRunViaServer:
         assert data["return_content_list"] == "true"
         assert data["parse_method"] == "auto"
         assert data["lang_list"] == "en"
-        assert data["start_page_id"] == 0
-        assert data["end_page_id"] == 5
+        assert data["start_page_id"] == "0"
+        assert data["end_page_id"] == "5"
 
     def test_table_enable_true_sent_as_string(
         self, extractor: PDFExtractor, dummy_pdf: Path,
@@ -183,7 +183,7 @@ class TestMineruRunViaServer:
 
         call_kwargs = mock_post.call_args
         data = call_kwargs.kwargs.get("data") or call_kwargs[1].get("data", {})
-        assert data["end_page_id"] == 99999
+        assert data["end_page_id"] == "99999"
 
     def test_key_miss_falls_back_to_single_result(
         self, extractor: PDFExtractor, dummy_pdf: Path,
@@ -385,6 +385,93 @@ class TestMineruRunIsolatedFallback:
 
         mock_sub.assert_called_once_with(dummy_pdf, 0, None)
         assert result == sub_result
+
+    def test_server_crash_invalidates_cache(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """ConnectError invalidates the server cache so subsequent calls
+        go directly to subprocess without trying the dead server."""
+        sub_result = ("# Subprocess", [], [])
+
+        # First: mark server as available
+        extractor._mineru_server_checked = True
+        extractor._mineru_server_up = True
+
+        with (
+            patch.object(extractor, "_mineru_run_via_server",
+                         side_effect=httpx.ConnectError("refused")),
+            patch.object(extractor, "_restart_mineru_server", return_value=False),
+            patch.object(extractor, "_mineru_run_subprocess",
+                         return_value=sub_result),
+        ):
+            extractor._mineru_run_isolated(dummy_pdf, 0, None)
+
+        # Cache should now be False
+        assert extractor._mineru_server_up is False
+
+        # Second call should skip server entirely
+        with (
+            patch.object(extractor, "_mineru_run_via_server") as mock_server,
+            patch.object(extractor, "_mineru_run_subprocess",
+                         return_value=sub_result),
+        ):
+            extractor._mineru_run_isolated(dummy_pdf, 1, 2)
+
+        mock_server.assert_not_called()
+
+    def test_server_crash_triggers_restart(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """ConnectError triggers a restart attempt. If restart succeeds,
+        the page is retried on the new server."""
+        server_result = ("# Server recovered", [], [])
+
+        extractor._mineru_server_checked = True
+        extractor._mineru_server_up = True
+
+        call_count = 0
+
+        def via_server_side_effect(path, start, end):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("refused")
+            return server_result
+
+        with (
+            patch.object(extractor, "_mineru_run_via_server",
+                         side_effect=via_server_side_effect),
+            patch.object(extractor, "_restart_mineru_server", return_value=True),
+            patch.object(extractor, "_mineru_run_subprocess") as mock_sub,
+        ):
+            result = extractor._mineru_run_isolated(dummy_pdf, 0, None)
+
+        assert result == server_result
+        mock_sub.assert_not_called()
+        assert extractor._mineru_server_restarts == 0  # restart mock, counter not incremented
+
+    def test_restart_budget_exhausted(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """After max restarts, falls back to subprocess without trying restart."""
+        sub_result = ("# Subprocess", [], [])
+
+        extractor._mineru_server_checked = True
+        extractor._mineru_server_up = True
+        extractor._mineru_server_restarts = 2  # budget exhausted
+
+        with (
+            patch.object(extractor, "_mineru_run_via_server",
+                         side_effect=httpx.ConnectError("refused")),
+            patch.object(extractor, "_restart_mineru_server",
+                         return_value=False) as mock_restart,
+            patch.object(extractor, "_mineru_run_subprocess",
+                         return_value=sub_result),
+        ):
+            result = extractor._mineru_run_isolated(dummy_pdf, 0, None)
+
+        assert result == sub_result
+        mock_restart.assert_called_once()
 
 
 # ── Adaptive page ranges + OOM retry (Phase 3) ──────────────────────────────

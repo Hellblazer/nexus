@@ -89,6 +89,7 @@ class PDFExtractor:
         self._converter_enriched = None  # lazy init — enriched mode (formula enrichment)
         self._mineru_server_checked: bool = False
         self._mineru_server_up: bool = False
+        self._mineru_server_restarts: int = 0
 
     def extract(self, pdf_path: Path, *, extractor: str = "auto") -> ExtractionResult:
         """Extract text from *pdf_path*. Returns ExtractionResult.
@@ -397,6 +398,92 @@ class PDFExtractor:
         middle = json.loads(raw_mj) if raw_mj else {}
         return md, content_list, middle.get("pdf_info", [])
 
+    _mineru_server_restarts: int = 0
+    _MINERU_MAX_RESTARTS: int = 2
+
+    def _restart_mineru_server(self) -> bool:
+        """Attempt to restart the MinerU server after a crash.
+
+        Returns True if the server was restarted and is healthy.
+        Limited to _MINERU_MAX_RESTARTS per PDFExtractor instance.
+        """
+        if self._mineru_server_restarts >= self._MINERU_MAX_RESTARTS:
+            _log.warning("mineru_restart_budget_exhausted",
+                         restarts=self._mineru_server_restarts)
+            return False
+
+        self._mineru_server_restarts += 1
+        _log.info("mineru_server_restarting",
+                  attempt=self._mineru_server_restarts)
+
+        from nexus.commands.mineru import (
+            _is_process_alive,
+            _pid_file_path,
+            _read_pid_file,
+        )
+
+        # Clean up stale PID file if the server is dead
+        info = _read_pid_file()
+        if info is not None and not _is_process_alive(info["pid"]):
+            _pid_file_path().unlink(missing_ok=True)
+
+        # Start a new server via the same logic as `nx mineru start`
+        import subprocess as _sp
+        import time as _time
+        from nexus.commands.mineru import (
+            _HEALTH_POLL_INTERVAL,
+            _find_free_port,
+            _server_env,
+        )
+        from nexus.config import set_config_value
+
+        port = _find_free_port()
+        cmd = ["mineru-api", "--host", "127.0.0.1", "--port", str(port)]
+        try:
+            proc = _sp.Popen(
+                cmd, env=_server_env(),
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            _log.warning("mineru_restart_failed", reason="mineru-api not found")
+            return False
+
+        # Poll health for up to 60s (models already cached in memory by OS)
+        url = f"http://127.0.0.1:{port}/health"
+        deadline = _time.monotonic() + 60
+        while _time.monotonic() < deadline:
+            if proc.poll() is not None:
+                _log.warning("mineru_restart_failed", reason="process exited")
+                return False
+            try:
+                resp = httpx.get(url, timeout=2)
+                if resp.status_code == 200:
+                    break
+            except (httpx.ConnectError, httpx.TimeoutException):
+                pass
+            _time.sleep(_HEALTH_POLL_INTERVAL)
+        else:
+            _log.warning("mineru_restart_failed", reason="health timeout")
+            return False
+
+        # Write PID file and update config
+        import json as _json
+        from datetime import datetime, timezone
+        pid_path = _pid_file_path()
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(_json.dumps({
+            "pid": proc.pid, "port": port,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }))
+        set_config_value("pdf.mineru_server_url", f"http://127.0.0.1:{port}")
+
+        # Reset availability cache
+        self._mineru_server_checked = True
+        self._mineru_server_up = True
+        _log.info("mineru_server_restarted", pid=proc.pid, port=port)
+        return True
+
     def _mineru_run_isolated(
         self, pdf_path: Path, start: int, end: int | None,
     ) -> tuple[str, list[dict], list[dict]]:
@@ -404,7 +491,20 @@ class PDFExtractor:
         if self._mineru_server_available():
             try:
                 return self._mineru_run_via_server(pdf_path, start, end)
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                # Server crashed — invalidate cache, try restart
+                self._mineru_server_checked = True
+                self._mineru_server_up = False
+                _log.warning("mineru_server_lost", path=str(pdf_path),
+                             pages=f"{start}–{end}", error=str(exc))
+                if self._restart_mineru_server():
+                    # Retry this page on the new server
+                    try:
+                        return self._mineru_run_via_server(pdf_path, start, end)
+                    except Exception:
+                        pass  # fall through to subprocess
+                return self._mineru_run_subprocess(pdf_path, start, end)
+            except httpx.HTTPStatusError as exc:
                 _log.warning("mineru_server_error", path=str(pdf_path),
                              pages=f"{start}–{end}", error=str(exc))
                 return self._mineru_run_subprocess(pdf_path, start, end)
