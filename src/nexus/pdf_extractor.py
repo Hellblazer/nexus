@@ -491,7 +491,8 @@ class PDFExtractor:
         if self._mineru_server_available():
             try:
                 return self._mineru_run_via_server(pdf_path, start, end)
-            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            except (httpx.ConnectError, httpx.TimeoutException,
+                    httpx.RemoteProtocolError) as exc:
                 # Server crashed — invalidate cache, try restart
                 self._mineru_server_checked = True
                 self._mineru_server_up = False
