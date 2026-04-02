@@ -385,3 +385,163 @@ class TestMineruRunIsolatedFallback:
 
         mock_sub.assert_called_once_with(dummy_pdf, 0, None)
         assert result == sub_result
+
+
+# ── Adaptive page ranges + OOM retry (Phase 3) ──────────────────────────────
+
+
+def _mock_pymupdf(page_count: int):
+    """Return a patch context for pymupdf.open that reports page_count."""
+    mock_doc = MagicMock()
+    mock_doc.__len__ = MagicMock(return_value=page_count)
+    mock_doc.__enter__ = MagicMock(return_value=mock_doc)
+    mock_doc.__exit__ = MagicMock(return_value=False)
+    mock_pymupdf = MagicMock()
+    mock_pymupdf.open = MagicMock(return_value=mock_doc)
+    return patch.dict("sys.modules", {"pymupdf": mock_pymupdf})
+
+
+def _mock_do_parse():
+    return patch("nexus.pdf_extractor.do_parse", MagicMock())
+
+
+class TestAdaptivePageRanges:
+    """Adaptive page-range sizing and OOM retry in _extract_with_mineru."""
+
+    def test_default_1page_ranges(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """Default mineru_page_batch=1: 5-page PDF → 5 single-page calls."""
+        isolated_return = ("text", [], [{"page_idx": 0}])
+
+        with (
+            _mock_pymupdf(5), _mock_do_parse(),
+            patch("nexus.config.get_mineru_page_batch", return_value=1),
+            patch.object(extractor, "_mineru_run_isolated",
+                         return_value=isolated_return) as mock_iso,
+        ):
+            extractor._extract_with_mineru(dummy_pdf)
+
+        assert mock_iso.call_count == 5
+        calls = [c.args[1:] for c in mock_iso.call_args_list]
+        assert calls == [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]
+
+    def test_configurable_batch_size(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """pdf.mineru_page_batch=5 with 10 pages → 2 calls: (0,5), (5,10)."""
+        isolated_return = ("text", [], [])
+
+        with (
+            _mock_pymupdf(10), _mock_do_parse(),
+            patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch.object(extractor, "_mineru_run_isolated",
+                         return_value=isolated_return) as mock_iso,
+        ):
+            extractor._extract_with_mineru(dummy_pdf)
+
+        assert mock_iso.call_count == 2
+        calls = [c.args[1:] for c in mock_iso.call_args_list]
+        assert calls == [(0, 5), (5, 10)]
+
+    def test_oom_retry_splits_to_single_pages(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """OOM on a multi-page batch → retry at 1-page granularity for that range."""
+        ok_return = ("text", [], [])
+
+        # First call (0,5) raises RuntimeError (OOM), then per-page retries succeed
+        call_count = 0
+
+        def mock_isolated(path, start, end):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First batch (0,5) fails with OOM
+                raise RuntimeError("MinerU subprocess exited with code -9")
+            return ok_return
+
+        with (
+            _mock_pymupdf(5), _mock_do_parse(),
+            patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch.object(extractor, "_mineru_run_isolated",
+                         side_effect=mock_isolated) as mock_iso,
+        ):
+            result = extractor._extract_with_mineru(dummy_pdf)
+
+        # 1 failed batch + 5 per-page retries = 6 calls total
+        assert mock_iso.call_count == 6
+        assert result.metadata["extraction_method"] == "mineru"
+
+    def test_oom_retry_single_page_propagates(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """Already at batch_size=1 and fails → RuntimeError propagates (no infinite loop)."""
+        def mock_isolated(path, start, end):
+            raise RuntimeError("MinerU subprocess exited with code -9")
+
+        with (
+            _mock_pymupdf(3), _mock_do_parse(),
+            patch("nexus.config.get_mineru_page_batch", return_value=1),
+            patch.object(extractor, "_mineru_run_isolated",
+                         side_effect=mock_isolated),
+        ):
+            with pytest.raises(RuntimeError, match="code -9"):
+                extractor._extract_with_mineru(dummy_pdf)
+
+    def test_oom_retry_structlog_event(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """OOM retry logs mineru_oom_retry event with batch range."""
+        ok_return = ("text", [], [])
+        call_count = 0
+
+        def mock_isolated(path, start, end):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("OOM")
+            return ok_return
+
+        with (
+            _mock_pymupdf(5), _mock_do_parse(),
+            patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch.object(extractor, "_mineru_run_isolated",
+                         side_effect=mock_isolated),
+            patch("nexus.pdf_extractor._log") as mock_log,
+        ):
+            extractor._extract_with_mineru(dummy_pdf)
+
+        # Find the mineru_oom_retry log call
+        warning_calls = [
+            c for c in mock_log.warning.call_args_list
+            if c.args and c.args[0] == "mineru_oom_retry"
+        ]
+        assert len(warning_calls) == 1
+
+    def test_oom_multi_batch_only_retries_failed_range(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """With 10 pages at batch=5: first batch (0,5) fails, retried as 5 singles.
+        Second batch (5,10) succeeds normally."""
+        ok_return = ("text", [], [])
+        call_count = 0
+
+        def mock_isolated(path, start, end):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1 and start == 0 and end == 5:
+                raise RuntimeError("OOM")
+            return ok_return
+
+        with (
+            _mock_pymupdf(10), _mock_do_parse(),
+            patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch.object(extractor, "_mineru_run_isolated",
+                         side_effect=mock_isolated) as mock_iso,
+        ):
+            result = extractor._extract_with_mineru(dummy_pdf)
+
+        # 1 failed (0,5) + 5 retries (0,1)..(4,5) + 1 success (5,10) = 7 calls
+        assert mock_iso.call_count == 7
+        assert result.metadata["extraction_method"] == "mineru"

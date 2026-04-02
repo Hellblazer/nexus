@@ -133,7 +133,7 @@ class PDFExtractor:
 
         # Math paper detected — try MinerU
         try:
-            return self._extract_with_mineru(pdf_path)
+            return self._extract_with_mineru(pdf_path, formula_count=formula_count)
         except Exception:
             _log.warning(
                 "mineru_extraction_failed; returning docling result",
@@ -247,13 +247,18 @@ class PDFExtractor:
     # only ~5s model-init overhead each — negligible vs. the cost of an OOM kill.
     MINERU_PAGE_BATCH = 1
 
-    def _extract_with_mineru(self, pdf_path: Path) -> ExtractionResult:
+    def _extract_with_mineru(
+        self, pdf_path: Path, *, formula_count: int = 0,
+    ) -> ExtractionResult:
         """Extract text via MinerU (math-aware, optional dependency).
 
         Each page-range batch runs in a **subprocess** so that MinerU's
         GPU/model memory is fully reclaimed between batches.  Without this,
         memory accumulates across in-process ``do_parse`` calls and large
         formula-dense PDFs get OOM-killed.
+
+        OOM retry: if a multi-page batch fails, retries at 1-page granularity.
+        Single-page failures propagate immediately (no infinite retry).
         """
         if do_parse is None:
             raise ImportError(
@@ -265,18 +270,21 @@ class PDFExtractor:
         with pymupdf.open(pdf_path) as doc:
             total_pages = len(doc)
 
+        from nexus.config import get_mineru_page_batch
+        batch_size = get_mineru_page_batch()
+
         batches: list[tuple[int, int | None]] = []
-        if total_pages <= self.MINERU_PAGE_BATCH:
+        if total_pages <= batch_size:
             batches.append((0, None))
         else:
             _log.info(
                 "mineru_splitting_large_pdf",
                 total_pages=total_pages,
-                batch_size=self.MINERU_PAGE_BATCH,
+                batch_size=batch_size,
                 path=str(pdf_path),
             )
-            for start in range(0, total_pages, self.MINERU_PAGE_BATCH):
-                batches.append((start, min(start + self.MINERU_PAGE_BATCH, total_pages)))
+            for start in range(0, total_pages, batch_size):
+                batches.append((start, min(start + batch_size, total_pages)))
 
         md_parts: list[str] = []
         all_content_list: list[dict] = []
@@ -285,7 +293,27 @@ class PDFExtractor:
         for start, end in batches:
             label = f"{start + 1}–{end}" if end is not None else f"{start + 1}–{total_pages}"
             _log.info("mineru_batch", pages=label, path=str(pdf_path))
-            md, content_list, pdf_info = self._mineru_run_isolated(pdf_path, start, end)
+            try:
+                md, content_list, pdf_info = self._mineru_run_isolated(pdf_path, start, end)
+            except RuntimeError:
+                # OOM or subprocess failure — retry at 1-page granularity
+                span = (end or total_pages) - start
+                if span <= 1:
+                    raise  # already single-page, no retry possible
+                _log.warning(
+                    "mineru_oom_retry",
+                    pages=label,
+                    path=str(pdf_path),
+                    original_batch=span,
+                )
+                for page in range(start, end or total_pages):
+                    md, content_list, pdf_info = self._mineru_run_isolated(
+                        pdf_path, page, page + 1,
+                    )
+                    md_parts.append(md)
+                    all_content_list.extend(content_list)
+                    all_pdf_info.extend(pdf_info)
+                continue
             md_parts.append(md)
             all_content_list.extend(content_list)
             all_pdf_info.extend(pdf_info)

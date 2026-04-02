@@ -129,6 +129,12 @@ def get_mineru_table_enable(repo_root: Path | None = None) -> bool:
     return bool(cfg.get("pdf", {}).get("mineru_table_enable", False))
 
 
+def get_mineru_page_batch(repo_root: Path | None = None) -> int:
+    """Return the configured MinerU page batch size (default 1)."""
+    cfg = load_config(repo_root=repo_root)
+    return max(1, int(cfg.get("pdf", {}).get("mineru_page_batch", 1)))
+
+
 def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:
     """Return a TuningConfig loaded from the merged configuration.
 
@@ -260,6 +266,7 @@ _DEFAULTS: dict[str, Any] = {
         "extractor": "auto",
         "mineru_server_url": "http://127.0.0.1:8010",
         "mineru_table_enable": False,
+        "mineru_page_batch": 1,
     },
     "search": {
         "hybrid_default": False,
