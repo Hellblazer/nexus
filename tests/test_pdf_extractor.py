@@ -689,7 +689,7 @@ class TestAutoDetectRouting:
             result = extractor.extract(dummy_pdf, extractor="auto")
 
         assert result.metadata["extraction_method"] == "mineru"
-        mock_mineru.assert_called_once_with(dummy_pdf)
+        mock_mineru.assert_called_once_with(dummy_pdf, formula_count=5)
 
     def test_auto_falls_back_to_fast_result_when_mineru_fails(self, extractor, dummy_pdf):
         """extractor='auto' returns the initial Docling result when MinerU raises."""
