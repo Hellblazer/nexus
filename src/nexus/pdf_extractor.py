@@ -60,6 +60,52 @@ def _progress(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
+_FORMULA_PATTERN = re.compile(
+    r"\$\$.+?\$\$"           # display math $$...$$
+    r"|\\\(.+?\\\)"          # inline \(...\)
+    r"|\\\[.+?\\\]"          # display \[...\]
+    r"|\\begin\{equation\}"  # LaTeX equation env
+    r"|\\begin\{align"       # align/align*
+    r"|\\frac\{"             # fraction
+    r"|\\sum[_^{\s]"         # summation
+    r"|\\int[_^{\s]"         # integral
+    r"|\\prod[_^{\s]"        # product
+    r"|\\partial"            # partial derivative
+    r"|\\nabla"              # nabla/gradient
+    r"|\\mathbb\{"           # blackboard bold
+    r"|\\mathcal\{"          # calligraphic
+, re.DOTALL)
+
+# Unicode math symbols that indicate formula content in raw PDF text.
+# These are present in the PDF's embedded text even without enrichment.
+_MATH_UNICODE = frozenset("∑∫∏∀∃∈∉∪∩⊆⊇⊂⊃→←↔∧∨¬⇒⇔⇐∂∇≤≥≠±×÷√∞≈≡∝∅⊕⊗⊥∥")
+
+
+def _count_formula_markers(text: str) -> int:
+    """Count LaTeX formula markers in text. Fast heuristic for formula detection."""
+    return len(_FORMULA_PATTERN.findall(text))
+
+
+def _has_formulas_quick(pdf_path: Path) -> int:
+    """Quick formula detection via raw PDF text Unicode math symbols.
+
+    Uses pymupdf to extract raw text (~0.1s) and counts Unicode math symbols.
+    Returns the count. A threshold of >=5 indicates a formula-containing paper.
+    """
+    try:
+        import pymupdf
+        with pymupdf.open(pdf_path) as doc:
+            count = 0
+            for page in doc:
+                text = page.get_text()
+                count += sum(1 for c in text if c in _MATH_UNICODE)
+                if count >= 5:
+                    return count  # early exit
+            return count
+    except Exception:
+        return 0
+
+
 def _normalize_whitespace_edge_cases(text: str) -> str:
     """Normalize whitespace variants not covered by basic normalization.
 
@@ -124,23 +170,24 @@ class PDFExtractor:
             return self._extract_with_mineru(pdf_path)
 
         # extractor == "auto"
-        # Get page count upfront so user knows the scale of the wait
+        # Step 1: Quick formula pre-screen via raw PDF text (~0.1s)
+        formula_count = _has_formulas_quick(pdf_path)
+
+        # Step 2: Extract with non-enriched Docling (12s, not 20min enriched)
+        _progress(f"  Docling: extracting {pdf_path.name}…")
         try:
-            import pymupdf
-            with pymupdf.open(pdf_path) as doc:
-                _page_count = len(doc)
-            _progress(f"  Docling: extracting {pdf_path.name} ({_page_count} pages, formula detection — may take a few minutes)…")
-        except Exception:
-            _progress(f"  Docling: extracting {pdf_path.name} (formula detection)…")
-        try:
-            fast_result = self._extract_with_docling(pdf_path)
+            fast_result = self._extract_with_docling(pdf_path, enriched=False)
         except Exception as exc:
             _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
             _log.debug("docling_auto_pass_failed", error=str(exc), path=str(pdf_path))
             return self._extract_normalized(pdf_path)
 
-        formula_count = fast_result.metadata.get("formula_count", 0)
-        if formula_count == 0:
+        # Also check the Docling markdown for LaTeX markers (catches formulas
+        # that Docling renders as LaTeX even without enrichment)
+        text_markers = _count_formula_markers(fast_result.text)
+        formula_count = max(formula_count, text_markers)
+
+        if formula_count < 5:
             return fast_result
 
         # Math paper detected — switch to MinerU for formula-aware extraction
@@ -179,9 +226,11 @@ class PDFExtractor:
             setattr(self, attr, converter)
         return converter
 
-    def _extract_with_docling(self, pdf_path: Path) -> ExtractionResult:
+    def _extract_with_docling(
+        self, pdf_path: Path, *, enriched: bool = True,
+    ) -> ExtractionResult:
         """Extract per-page markdown via Docling."""
-        result = self._get_converter(enriched=True).convert(str(pdf_path))
+        result = self._get_converter(enriched=enriched).convert(str(pdf_path))
         doc = result.document
         page_count = doc.num_pages()
 
@@ -209,24 +258,42 @@ class PDFExtractor:
         if not text.strip():
             raise RuntimeError("docling produced empty output")
 
-        # Collect TableItem regions and count FormulaItem (duck-typed, single pass)
+        # Collect TableItem regions and count formulas
         table_regions: list[dict] = []
         formula_count = 0
-        for item, _ in doc.iterate_items():
-            item_type = type(item).__name__
-            if item_type == "FormulaItem":
-                formula_count += 1
-            elif item_type == "TableItem":
-                prov = getattr(item, "prov", [])
-                page_no = prov[0].page_no if prov else 0
-                html = ""
-                if callable(getattr(item, "export_to_html", None)):
-                    try:
-                        html = item.export_to_html(doc=doc)
-                    except Exception as exc:
-                        _log.debug("table_html_export_failed", page=page_no, error=str(exc))
-                        html = ""
-                table_regions.append({"page": page_no, "html": html})
+        if enriched:
+            # Enriched mode: count FormulaItem objects (duck-typed, single pass)
+            for item, _ in doc.iterate_items():
+                item_type = type(item).__name__
+                if item_type == "FormulaItem":
+                    formula_count += 1
+                elif item_type == "TableItem":
+                    prov = getattr(item, "prov", [])
+                    page_no = prov[0].page_no if prov else 0
+                    html = ""
+                    if callable(getattr(item, "export_to_html", None)):
+                        try:
+                            html = item.export_to_html(doc=doc)
+                        except Exception as exc:
+                            _log.debug("table_html_export_failed", page=page_no, error=str(exc))
+                            html = ""
+                    table_regions.append({"page": page_no, "html": html})
+        else:
+            # Non-enriched mode: scan text for LaTeX formula patterns
+            # This is 100x faster than running the enrichment pipeline
+            formula_count = _count_formula_markers(text)
+            for item, _ in doc.iterate_items():
+                if type(item).__name__ == "TableItem":
+                    prov = getattr(item, "prov", [])
+                    page_no = prov[0].page_no if prov else 0
+                    html = ""
+                    if callable(getattr(item, "export_to_html", None)):
+                        try:
+                            html = item.export_to_html(doc=doc)
+                        except Exception as exc:
+                            _log.debug("table_html_export_failed", page=page_no, error=str(exc))
+                            html = ""
+                    table_regions.append({"page": page_no, "html": html})
 
         if formula_count > 0:
             _log.warning("formula_content_detected", formula_count=formula_count, path=str(pdf_path))

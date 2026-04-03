@@ -52,7 +52,7 @@ def test_extract_uses_docling_by_default(extractor, dummy_pdf):
     expected = _make_result("docling")
     with patch.object(extractor, "_extract_with_docling", return_value=expected) as mock_docling:
         result = extractor.extract(dummy_pdf)
-    mock_docling.assert_called_once_with(dummy_pdf)
+    mock_docling.assert_called_once_with(dummy_pdf, enriched=False)
     assert result.metadata["extraction_method"] == "docling"
 
 
@@ -678,24 +678,26 @@ class TestAutoDetectRouting:
         mock_mineru.assert_not_called()
 
     def test_auto_uses_mineru_when_formulas_detected(self, extractor, dummy_pdf):
-        """extractor='auto' routes to MinerU when fast Docling pass finds formulas."""
-        docling_result = _make_docling_result(formula_count=5)
+        """extractor='auto' routes to MinerU when quick scan finds formulas."""
+        docling_result = _make_docling_result(formula_count=10)
         mineru_result = _make_mineru_result()
 
         with (
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
             patch.object(extractor, "_extract_with_docling", return_value=docling_result),
             patch.object(extractor, "_extract_with_mineru", return_value=mineru_result) as mock_mineru,
         ):
             result = extractor.extract(dummy_pdf, extractor="auto")
 
         assert result.metadata["extraction_method"] == "mineru"
-        mock_mineru.assert_called_once_with(dummy_pdf, formula_count=5)
+        mock_mineru.assert_called_once_with(dummy_pdf, formula_count=10)
 
     def test_auto_falls_back_to_fast_result_when_mineru_fails(self, extractor, dummy_pdf):
         """extractor='auto' returns the initial Docling result when MinerU raises."""
-        fast_result = _make_docling_result(formula_count=3)
+        fast_result = _make_docling_result(formula_count=10)
 
         with (
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
             patch.object(extractor, "_extract_with_docling", return_value=fast_result),
             patch.object(
                 extractor, "_extract_with_mineru",
