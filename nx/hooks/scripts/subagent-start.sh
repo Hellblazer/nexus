@@ -74,25 +74,30 @@ All results from search/list tools are **paged**. Response footer shows `Next pa
 
 T1 scratch — session-scoped, shared across all sibling agents:
   scratch(action="put", content="...", tags="hypothesis,failed-approach,decision")
-  scratch(action="search", query="...", n=5)
+  scratch(action="search", query="...", limit=5)
   scratch(action="list")
   scratch(action="get", entry_id="...")
+  scratch(action="delete", entry_id="...")
   scratch_manage(action="flag", entry_id="...", project="...", title="...")  → promotes to T2
 
 T2 memory — project-scoped, persistent:
   memory_get(project="...", title="...")       read one entry
-  memory_get(project="...", title="")          list all entries
+  memory_get(project="...", title="")          list titles only (second call for content)
   memory_search(query="...", project="...", limit=20, offset=0)
   memory_put(content="...", project="...", title="...", ttl=30)
+  memory_delete(project="...", title="...")
 
 T3 knowledge — permanent, semantic search:
-  search(query="...", corpus="knowledge", n=10, offset=0)
+  search(query="...", corpus="knowledge", limit=10, offset=0, where="bib_year>=2023")
   store_list(collection="knowledge", limit=20, offset=0)
+  store_list(collection="knowledge__art", docs=true)   → document-level view
+  store_get(doc_id="...", collection="knowledge")
   store_put(content="...", collection="knowledge", title="...", tags="...")
+  store_delete(doc_id="...", collection="knowledge")
 
 Plan library — saved query execution plans (T2):
   plan_search(query="...", project="...", limit=5)
-  plan_save(query="...", plan_json="...", project="...", tags="...")
+  plan_save(query="...", plan_json='{"steps":[...],"tools_used":[...],"outcome_notes":"..."}', project="...", tags="...")
 
 Tool prefix: mcp__plugin_nx_nexus__
 

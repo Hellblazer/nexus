@@ -97,8 +97,8 @@ The SessionEnd hook runs automatically at session close and auto-promotes flagge
 | Tier | Name | Scope | MCP Tools | Use Cases | TTL |
 |------|------|-------|-----------|-----------|-----|
 | T1 | scratch | Session (ephemeral) | `scratch`, `scratch_manage` | Working notes, hypotheses, debug traces | Wiped on SessionEnd (flag to survive) |
-| T2 | memory | Per-project, persistent | `memory_put`, `memory_get`, `memory_search` | Session state, project context, agent relay, active work | 30d default; `permanent` available |
-| T3 | store / search | Permanent, cross-session | `search`, `store_put`, `store_list` | Research findings, architectural decisions, validated patterns | `permanent` or explicit TTL |
+| T2 | memory | Per-project, persistent | `memory_put`, `memory_get`, `memory_delete`, `memory_search` | Session state, project context, agent relay, active work | 30d default; `permanent` available |
+| T3 | store / search | Permanent, cross-session | `search`, `store_put`, `store_get`, `store_list`, `store_delete` | Research findings, architectural decisions, validated patterns | `permanent` or explicit TTL |
 
 ## Pagination
 
