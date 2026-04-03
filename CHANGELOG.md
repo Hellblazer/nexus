@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.11.2] - 2026-04-03
+
+### Fixed
+- **Visible progress during PDF extraction** — Docling and MinerU passes now print status to stderr via tqdm-safe `_progress()` helper that clears/refreshes active tqdm bars. Shows "Docling: extracting paper.pdf (formula detection)…" before the minutes-long enriched pass, "Formulas detected (N) — switching to MinerU", and per-page "MinerU: page N/M" during extraction.
+
 ## [2.11.1] - 2026-04-03
 
 ### Fixed
