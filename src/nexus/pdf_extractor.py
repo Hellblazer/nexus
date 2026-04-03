@@ -125,6 +125,7 @@ class PDFExtractor:
             )
 
         if extractor == "docling":
+            _progress(f"  Docling: extracting {pdf_path.name}…")
             try:
                 return self._extract_with_docling(pdf_path)
             except Exception:
@@ -135,9 +136,11 @@ class PDFExtractor:
                 return self._extract_normalized(pdf_path)
 
         if extractor == "mineru":
+            _progress(f"  MinerU: extracting {pdf_path.name}…")
             return self._extract_with_mineru(pdf_path)
 
         # extractor == "auto"
+        _progress(f"  Docling: extracting {pdf_path.name} (formula detection)…")
         try:
             fast_result = self._extract_with_docling(pdf_path)
         except Exception:
