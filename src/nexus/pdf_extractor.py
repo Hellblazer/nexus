@@ -473,9 +473,9 @@ class PDFExtractor:
 
         md = results.get("md_content", "")
         if not md:
-            raise RuntimeError(
-                f"Server returned empty md_content for {pdf_path.name}"
-            )
+            # Empty page (image-only, blank, or figure plate) — not an error
+            _log.debug("mineru_empty_page", path=str(pdf_path), start=start, end=end)
+            md = ""
 
         raw_cl = results.get("content_list")
         raw_mj = results.get("middle_json")

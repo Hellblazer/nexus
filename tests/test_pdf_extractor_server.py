@@ -239,10 +239,10 @@ class TestMineruRunViaServer:
             with pytest.raises(RuntimeError, match="missing key"):
                 extractor._mineru_run_via_server(dummy_pdf, 0, None)
 
-    def test_empty_md_content_raises(
+    def test_empty_md_content_returns_empty(
         self, extractor: PDFExtractor, dummy_pdf: Path,
     ) -> None:
-        """Empty md_content raises RuntimeError."""
+        """Empty md_content returns empty string (blank/image-only page)."""
         response = _server_response(md_content="")
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -256,8 +256,8 @@ class TestMineruRunViaServer:
                         "mineru_table_enable": False},
             }),
         ):
-            with pytest.raises(RuntimeError, match="empty md_content"):
-                extractor._mineru_run_via_server(dummy_pdf, 0, None)
+            md, cl, pi = extractor._mineru_run_via_server(dummy_pdf, 0, None)
+            assert md == ""
 
     def test_json_fields_are_parsed(
         self, extractor: PDFExtractor, dummy_pdf: Path,
