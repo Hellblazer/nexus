@@ -292,7 +292,7 @@ def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) 
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
         for e in page:
             doc_id = e.get("id", "")[:16]
-            title = (e.get("title") or "")[:40]
+            title = (e.get("title") or e.get("source_title") or "")[:40]
             tags = e.get("tags") or ""
             ttl_days = e.get("ttl_days", 0)
             expires_at = e.get("expires_at") or ""
