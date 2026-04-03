@@ -7,8 +7,10 @@ priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-03
+epic: nexus-u0q5
 related_issues:
   - "RDR-046 - MinerU Server-Backed PDF Extraction (closed)"
+  - "nexus-u0q5 - Epic: Large PDF Extraction Resilience"
   - "nexus-jr1p - Incremental upsert"
   - "nexus-15p0 - Embed/upsert progress"
   - "nexus-cmcp - Parallel embedding"
