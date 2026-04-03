@@ -263,6 +263,31 @@ class T3Database:
             if embeddings is not None:
                 embeddings = [embeddings[i] for i in valid]
 
+        # Trim metadata to stay under the 32-key limit.
+        # Strategy: drop known-droppable keys (empty pdf_* fields, docling_title),
+        # preserving load-bearing keys like expires_at="" (TTL guard).
+        max_keys = QUOTAS.MAX_RECORD_METADATA_KEYS
+        _DROPPABLE_WHEN_EMPTY = {
+            "pdf_creator", "pdf_producer", "pdf_creation_date", "pdf_mod_date",
+            "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords",
+            "docling_title",
+        }
+        stripped = []
+        for m in metadatas:
+            if len(m) > max_keys:
+                # Drop known-droppable keys that are empty
+                cleaned = {
+                    k: v for k, v in m.items()
+                    if not (k in _DROPPABLE_WHEN_EMPTY and v == "")
+                }
+                # Hard guard: if still over, truncate
+                if len(cleaned) > max_keys:
+                    cleaned = dict(list(cleaned.items())[:max_keys])
+                stripped.append(cleaned)
+            else:
+                stripped.append(m)
+        metadatas = stripped
+
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection_name):
             for start in range(0, len(ids), size):
