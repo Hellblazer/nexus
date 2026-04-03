@@ -246,6 +246,46 @@ def test_config_get_missing_key_reports_not_set(runner: CliRunner, fake_home: Pa
     assert "not set" in result.output.lower()
 
 
+# ── nx config get — dotted keys ───────────────────────────────────────────────
+
+
+def test_config_get_dotted_key_returns_value(runner: CliRunner, fake_home: Path) -> None:
+    """nx config get pdf.mineru_server_url returns the set value."""
+    runner.invoke(main, ["config", "set", "pdf.mineru_server_url=http://10.0.0.1:9000"])
+    result = runner.invoke(main, ["config", "get", "pdf.mineru_server_url"])
+    assert result.exit_code == 0, result.output
+    assert "http://10.0.0.1:9000" in result.output
+
+
+def test_config_get_dotted_key_returns_default(runner: CliRunner, fake_home: Path) -> None:
+    """nx config get pdf.mineru_server_url returns the built-in default when not set."""
+    result = runner.invoke(main, ["config", "get", "pdf.mineru_server_url"])
+    assert result.exit_code == 0, result.output
+    assert "127.0.0.1" in result.output
+
+
+def test_config_get_dotted_key_show_flag_not_masked(runner: CliRunner, fake_home: Path) -> None:
+    """nx config get --show pdf.extractor shows the plain value (settings are not masked)."""
+    runner.invoke(main, ["config", "set", "pdf.extractor=docling"])
+    result = runner.invoke(main, ["config", "get", "--show", "pdf.extractor"])
+    assert result.exit_code == 0, result.output
+    assert "docling" in result.output
+
+
+def test_config_get_dotted_key_missing_leaf_reports_not_set(runner: CliRunner, fake_home: Path) -> None:
+    """nx config get reports 'not set' for a nonexistent leaf under a known section."""
+    result = runner.invoke(main, ["config", "get", "pdf.nonexistent_key"])
+    assert result.exit_code == 0, result.output
+    assert "not set" in result.output.lower()
+
+
+def test_config_get_dotted_key_missing_section_reports_not_set(runner: CliRunner, fake_home: Path) -> None:
+    """nx config get reports 'not set' for a completely nonexistent section.key."""
+    result = runner.invoke(main, ["config", "get", "ghost.setting"])
+    assert result.exit_code == 0, result.output
+    assert "not set" in result.output.lower()
+
+
 # ── nx config list ────────────────────────────────────────────────────────────
 
 def test_config_list_masks_api_key_values(runner: CliRunner, fake_home: Path) -> None:

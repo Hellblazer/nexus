@@ -13,6 +13,23 @@ from nexus.config import (
     set_credential,
 )
 
+
+def _get_config_value(dotted_key: str) -> str | None:
+    """Look up a dotted key (e.g. ``pdf.mineru_server_url``) in the merged config.
+
+    Returns the string value or ``None`` when the key is absent.
+    """
+    parts = dotted_key.split(".")
+    node: object = load_config()
+    for part in parts:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+        if node is None:
+            return None
+    return str(node) if node is not None else None
+
+
 # ── Signup hints shown during `nx config init` ────────────────────────────────
 
 _SIGNUP = {
@@ -66,13 +83,28 @@ def config_set(key_value: str, value: str | None) -> None:
 @click.argument("key")
 @click.option("--show", is_flag=True, default=False, help="Reveal the full value instead of masking.")
 def config_get(key: str, show: bool) -> None:
-    """Print the current value of a credential (env var takes precedence)."""
+    """Print the current value of a credential or config setting.
+
+    Accepts plain credential names or dotted paths for nested settings:
+
+    \b
+      nx config get voyage_api_key
+      nx config get pdf.mineru_server_url
+    """
     key = key.strip().lower().replace("-", "_")
-    val = get_credential(key)
-    if val:
-        click.echo(val if show else _mask(val))
+    if "." in key:
+        val = _get_config_value(key)
+        if val is not None:
+            # Non-credential settings are not secrets; display without masking
+            click.echo(val)
+        else:
+            click.echo(f"{key}: not set")
     else:
-        click.echo(f"{key}: not set")
+        val = get_credential(key)
+        if val:
+            click.echo(val if show else _mask(val))
+        else:
+            click.echo(f"{key}: not set")
 
 
 # ── list ──────────────────────────────────────────────────────────────────────
