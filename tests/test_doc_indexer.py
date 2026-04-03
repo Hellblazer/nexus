@@ -2396,6 +2396,60 @@ def test_index_pdf_incremental_progress_fires(sample_pdf, monkeypatch):
     assert progress_calls[-1][1] == n_chunks
 
 
+def test_index_pdf_incremental_checkpoint_exceeds_total(sample_pdf, monkeypatch):
+    """Checkpoint with chunks_upserted > actual chunks is clamped, not skipped."""
+    from nexus.doc_indexer import _INCREMENTAL_THRESHOLD
+    from nexus.checkpoint import CheckpointData, write_checkpoint
+
+    set_credentials(monkeypatch)
+    ckpt_dir = sample_pdf.parent / "ckpt"
+    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
+    monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
+
+    n_chunks = _INCREMENTAL_THRESHOLD + 10
+    mock_chunks = _make_n_chunks(n_chunks)
+    content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+
+    # Checkpoint claims more chunks upserted than actually exist
+    ck = CheckpointData(
+        pdf=str(sample_pdf),
+        collection="docs__test",
+        content_hash=content_hash,
+        chunks_upserted=n_chunks + 100,  # exceeds total
+        total_chunks=n_chunks + 100,
+        embedding_model="voyage-context-3",
+    )
+    write_checkpoint(ck)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    def _fake_embed(texts, model, **kwargs):
+        return [[0.1] * 128] * len(texts), model
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                mock_ext = MagicMock()
+                mock_ext_cls.return_value = mock_ext
+                mock_ext.extract.return_value = MagicMock(
+                    text="x" * 5000,
+                    metadata={"extraction_method": "docling", "page_count": 50,
+                              "format": "markdown", "page_boundaries": []},
+                )
+                mock_chk = MagicMock()
+                mock_chk_cls.return_value = mock_chk
+                mock_chk.chunk.return_value = mock_chunks
+
+                result = index_pdf(sample_pdf, corpus="test", embed_fn=_fake_embed)
+
+    # Clamped to total: no embed/upsert calls (all "done"), but result is still correct
+    assert result == n_chunks
+
+
 # ── parallel embedding + rate limiter (nexus-cmcp) ───────────────────────────
 
 import time

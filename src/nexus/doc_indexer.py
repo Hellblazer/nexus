@@ -207,7 +207,8 @@ def _embed_with_fallback(
                 for i, future in enumerate(futures):
                     future.result()  # raises if the batch failed
                     embs = batch_results[i]
-                    assert embs is not None
+                    if embs is None:
+                        raise RuntimeError(f"Batch {i} embedding result missing after future completed")
                     all_embeddings.extend(embs)
                     done_count += len(embs)
                     if on_progress:
@@ -366,7 +367,7 @@ def _index_pdf_incremental(
     ckpt = read_checkpoint(content_hash, collection_name)
     start_offset = 0
     if ckpt is not None:
-        start_offset = ckpt.chunks_upserted
+        start_offset = min(ckpt.chunks_upserted, total)
         _log.info(
             "checkpoint_resume",
             pdf=str(file_path),

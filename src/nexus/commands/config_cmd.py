@@ -27,7 +27,7 @@ def _get_config_value(dotted_key: str) -> str | None:
         node = node.get(part)
         if node is None:
             return None
-    return str(node) if node is not None else None
+    return str(node)
 
 
 # ── Signup hints shown during `nx config init` ────────────────────────────────
