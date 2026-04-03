@@ -105,6 +105,9 @@ def main() -> None:
     output_lines.append("Scratch: `nx scratch put/search/list/flag` — session-scoped, shared across agents")
     output_lines.append("Pagination: search/store_list/memory_search return paged results. Footer shows `offset=N` for next page.")
     output_lines.append("")
+    output_lines.append("**MCP tools are deferred.** Load before first use:")
+    output_lines.append('ToolSearch("select:mcp__plugin_nx_nexus__search,mcp__plugin_nx_nexus__query,mcp__plugin_nx_nexus__scratch,mcp__plugin_nx_nexus__store_put,mcp__plugin_nx_nexus__store_list,mcp__plugin_nx_nexus__store_get,mcp__plugin_nx_nexus__store_delete,mcp__plugin_nx_nexus__memory_put,mcp__plugin_nx_nexus__memory_get,mcp__plugin_nx_nexus__memory_delete,mcp__plugin_nx_nexus__memory_search,mcp__plugin_nx_nexus__collection_list,mcp__plugin_nx_nexus__collection_info")')
+    output_lines.append("")
 
     if output_lines:
         print("\n".join(output_lines))
