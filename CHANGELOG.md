@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-04-03
+
+### Fixed
+- **ChromaDB 32-metadata-key limit** — PDF extractors emit ~37 keys; `_write_batch` now strips empty droppable keys (pdf_creator, pdf_producer, etc.) while preserving load-bearing empty strings (expires_at="" for TTL). Hard truncation guard if still over limit.
+
 ## [2.11.0] - 2026-04-03
 
 ### Added
