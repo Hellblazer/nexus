@@ -116,3 +116,66 @@ def delete_checkpoint(content_hash: str, collection: str) -> None:
         target.unlink()
     except FileNotFoundError:
         pass
+
+
+def scan_orphaned_checkpoints(
+    *,
+    delete: bool = False,
+) -> list[Path]:
+    """Scan the checkpoint directory for orphaned checkpoint files.
+
+    A checkpoint is considered orphaned when the PDF it references no longer
+    exists on disk.  This covers two cases:
+    - The PDF was moved or deleted after indexing started.
+    - The checkpoint was written for a path that was later cleaned up.
+
+    Content-hash verification is intentionally skipped here: we only check
+    file existence because re-hashing every PDF just for a doctor check would
+    be prohibitively expensive.
+
+    Parameters
+    ----------
+    delete:
+        When True, delete each orphaned checkpoint file from disk.
+        When False (default), return the list without modifying anything.
+
+    Returns
+    -------
+    list[Path]
+        Paths of checkpoint files that are orphaned.
+    """
+    if not CHECKPOINT_DIR.exists():
+        return []
+
+    orphans: list[Path] = []
+    for ckpt_file in CHECKPOINT_DIR.glob("*.json"):
+        try:
+            raw = json.loads(ckpt_file.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            _log.debug("checkpoint_scan_unreadable", path=str(ckpt_file), error=str(exc))
+            # Unreadable checkpoint — treat as orphaned
+            orphans.append(ckpt_file)
+            if delete:
+                try:
+                    ckpt_file.unlink()
+                    _log.info("orphaned_checkpoint_deleted", path=str(ckpt_file), reason="unreadable")
+                except FileNotFoundError:
+                    pass
+            continue
+
+        pdf_path_str = raw.get("pdf", "")
+        if not pdf_path_str or not Path(pdf_path_str).exists():
+            orphans.append(ckpt_file)
+            _log.debug(
+                "orphaned_checkpoint_detected",
+                path=str(ckpt_file),
+                pdf=pdf_path_str or "(missing key)",
+            )
+            if delete:
+                try:
+                    ckpt_file.unlink()
+                    _log.info("orphaned_checkpoint_deleted", path=str(ckpt_file), pdf=pdf_path_str)
+                except FileNotFoundError:
+                    pass
+
+    return orphans

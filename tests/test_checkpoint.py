@@ -200,3 +200,141 @@ def test_different_collections_different_paths(ckpt_dir: Path):
     p1 = checkpoint_path("abc123", "knowledge__art")
     p2 = checkpoint_path("abc123", "docs__test")
     assert p1 != p2
+
+
+# ── scan_orphaned_checkpoints ─────────────────────────────────────────────────
+
+
+from nexus.checkpoint import scan_orphaned_checkpoints  # noqa: E402
+
+
+def test_scan_returns_empty_when_no_checkpoint_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """If checkpoint directory does not exist, return empty list without error."""
+    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", tmp_path / "nonexistent")
+    result = scan_orphaned_checkpoints()
+    assert result == []
+
+
+def test_scan_returns_empty_when_no_checkpoints(ckpt_dir: Path):
+    """If checkpoint dir exists but is empty, return empty list."""
+    result = scan_orphaned_checkpoints()
+    assert result == []
+
+
+def test_scan_detects_orphan_when_pdf_missing(ckpt_dir: Path, tmp_path: Path):
+    """Checkpoint whose PDF no longer exists is reported as orphaned."""
+    missing_pdf = tmp_path / "vanished.pdf"
+    # Do NOT create the file — it should be missing
+
+    ck = CheckpointData(
+        pdf=str(missing_pdf),
+        collection="knowledge__art",
+        content_hash="orphan1",
+        chunks_upserted=10,
+        total_chunks=100,
+        embedding_model="voyage-context-3",
+    )
+    write_checkpoint(ck)
+
+    orphans = scan_orphaned_checkpoints()
+    assert len(orphans) == 1
+    assert orphans[0].name == checkpoint_path("orphan1", "knowledge__art").name
+
+
+def test_scan_does_not_report_live_checkpoint(ckpt_dir: Path, tmp_path: Path):
+    """Checkpoint whose PDF still exists is NOT reported as orphaned."""
+    live_pdf = tmp_path / "exists.pdf"
+    live_pdf.write_bytes(b"%PDF-1.4")
+
+    ck = CheckpointData(
+        pdf=str(live_pdf),
+        collection="knowledge__art",
+        content_hash="live1",
+        chunks_upserted=50,
+        total_chunks=200,
+        embedding_model="voyage-context-3",
+    )
+    write_checkpoint(ck)
+
+    orphans = scan_orphaned_checkpoints()
+    assert orphans == []
+
+
+def test_scan_mixes_live_and_orphaned(ckpt_dir: Path, tmp_path: Path):
+    """Only orphaned checkpoints are returned when both live and dead exist."""
+    live_pdf = tmp_path / "live.pdf"
+    live_pdf.write_bytes(b"%PDF-1.4")
+
+    ck_live = CheckpointData(
+        pdf=str(live_pdf),
+        collection="knowledge__art",
+        content_hash="live2",
+        chunks_upserted=10,
+        total_chunks=100,
+        embedding_model="voyage-context-3",
+    )
+    write_checkpoint(ck_live)
+
+    ck_dead = CheckpointData(
+        pdf=str(tmp_path / "gone.pdf"),  # does not exist
+        collection="knowledge__art",
+        content_hash="dead2",
+        chunks_upserted=5,
+        total_chunks=50,
+        embedding_model="voyage-context-3",
+    )
+    write_checkpoint(ck_dead)
+
+    orphans = scan_orphaned_checkpoints()
+    assert len(orphans) == 1
+    assert "dead2" in orphans[0].name
+
+
+def test_scan_delete_true_removes_orphan(ckpt_dir: Path, tmp_path: Path):
+    """With delete=True, orphaned checkpoint files are deleted from disk."""
+    missing_pdf = tmp_path / "deleted.pdf"
+
+    ck = CheckpointData(
+        pdf=str(missing_pdf),
+        collection="knowledge__art",
+        content_hash="todel",
+        chunks_upserted=10,
+        total_chunks=100,
+        embedding_model="voyage-context-3",
+    )
+    write_checkpoint(ck)
+
+    ckpt_file = checkpoint_path("todel", "knowledge__art")
+    assert ckpt_file.exists()
+
+    orphans = scan_orphaned_checkpoints(delete=True)
+    assert len(orphans) == 1
+    assert not ckpt_file.exists(), "Orphaned checkpoint was not deleted"
+
+
+def test_scan_delete_false_preserves_orphan(ckpt_dir: Path, tmp_path: Path):
+    """With delete=False (default), orphaned files are reported but not deleted."""
+    ck = CheckpointData(
+        pdf=str(tmp_path / "nope.pdf"),
+        collection="knowledge__art",
+        content_hash="nodelete",
+        chunks_upserted=10,
+        total_chunks=100,
+        embedding_model="voyage-context-3",
+    )
+    write_checkpoint(ck)
+
+    ckpt_file = checkpoint_path("nodelete", "knowledge__art")
+    orphans = scan_orphaned_checkpoints(delete=False)
+    assert len(orphans) == 1
+    assert ckpt_file.exists(), "File must not be deleted when delete=False"
+
+
+def test_scan_handles_corrupted_checkpoint(ckpt_dir: Path):
+    """Corrupted checkpoint JSON is treated as orphaned (unreadable = unknown PDF)."""
+    bad_file = ckpt_dir / "corrupt-orphan.json"
+    bad_file.write_text("{invalid json here")
+
+    orphans = scan_orphaned_checkpoints()
+    assert len(orphans) == 1
+    assert orphans[0] == bad_file

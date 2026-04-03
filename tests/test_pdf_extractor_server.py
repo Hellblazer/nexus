@@ -588,17 +588,22 @@ class TestAdaptivePageRanges:
     def test_oom_retry_single_page_propagates(
         self, extractor: PDFExtractor, dummy_pdf: Path,
     ) -> None:
-        """Already at batch_size=1 and fails → RuntimeError propagates (no infinite loop)."""
+        """Already at batch_size=1 and both MinerU + Docling fail → error propagates."""
         def mock_isolated(path, start, end):
             raise RuntimeError("MinerU subprocess exited with code -9")
+
+        def mock_docling_fail(path, enriched=True):
+            raise RuntimeError("Docling fallback also failed")
 
         with (
             _mock_pymupdf(3), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=1),
             patch.object(extractor, "_mineru_run_isolated",
                          side_effect=mock_isolated),
+            patch.object(extractor, "_extract_with_docling",
+                         side_effect=mock_docling_fail),
         ):
-            with pytest.raises(RuntimeError, match="code -9"):
+            with pytest.raises(RuntimeError):
                 extractor._extract_with_mineru(dummy_pdf)
 
     def test_oom_retry_structlog_event(

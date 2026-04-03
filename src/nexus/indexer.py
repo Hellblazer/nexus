@@ -16,8 +16,10 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
   nexus.indexer_utils  — staleness check, credential check, shared helpers
   nexus.index_context  — IndexContext dataclass
 """
+import errno
 import fcntl
 import fnmatch
+import os
 import subprocess
 import time
 from collections.abc import Callable
@@ -168,6 +170,40 @@ def _repo_lock_path(repo: Path) -> Path:
     return Path.home() / ".config" / "nexus" / "locks" / f"{path_hash}.lock"
 
 
+def _clear_stale_lock(lock_path: Path) -> None:
+    """Delete *lock_path* if it contains a dead PID.
+
+    Only removes a lock file when we can confirm the recorded PID is dead
+    (``ESRCH`` from ``os.kill(pid, 0)``).  Files with no parseable PID are
+    left alone — they may belong to an active process that hasn't written
+    its PID yet.
+
+    This is advisory only — ``fcntl.flock`` provides the real mutual exclusion.
+    """
+    if not lock_path.exists():
+        return
+    try:
+        pid = int(lock_path.read_text().strip())
+    except (ValueError, OSError):
+        # No readable PID — could be a just-opened lock. Leave it;
+        # flock will handle contention.
+        return
+    try:
+        os.kill(pid, 0)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            _remove_stale(lock_path)
+
+
+def _remove_stale(lock_path: Path) -> None:
+    """Unlink *lock_path*, ignoring FileNotFoundError (concurrent cleanup)."""
+    try:
+        lock_path.unlink()
+        _log.debug("stale_lock_removed", path=str(lock_path))
+    except FileNotFoundError:
+        pass
+
+
 def index_repository(
     repo: Path,
     registry: "RepoRegistry",
@@ -206,10 +242,17 @@ def index_repository(
     ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
     lock_fd = None
+    lock_path: Path | None = None
     if not frecency_only:
         lock_path = _repo_lock_path(repo)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        _clear_stale_lock(lock_path)
         lock_fd = open(lock_path, "w")  # noqa: SIM115  (must stay open while locked)
+        try:
+            lock_fd.write(str(os.getpid()))
+            lock_fd.flush()
+        except OSError:
+            pass  # PID write is best-effort; lock still works without it
         lock_flag = fcntl.LOCK_EX if on_locked == "wait" else fcntl.LOCK_EX | fcntl.LOCK_NB
         try:
             fcntl.flock(lock_fd, lock_flag)
@@ -239,6 +282,11 @@ def index_repository(
         if lock_fd is not None:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
+        if lock_path is not None:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass  # already gone — harmless
 
 
 def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:

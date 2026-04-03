@@ -100,6 +100,37 @@ def _check_orphan_t1(lines: list[str]) -> bool:
     return True
 
 
+def _check_orphan_checkpoints(lines: list[str]) -> bool:
+    """Check for orphaned PDF checkpoint files.  Returns True if all clean."""
+    from nexus.checkpoint import CHECKPOINT_DIR, scan_orphaned_checkpoints
+
+    if not CHECKPOINT_DIR.exists():
+        lines.append(_check_line("PDF checkpoints", True, "no checkpoint directory"))
+        return True
+
+    try:
+        orphans = scan_orphaned_checkpoints(delete=False)
+    except Exception as exc:
+        _log.debug("orphan_checkpoint_scan_failed", error=str(exc))
+        lines.append(_check_line("PDF checkpoints", True, "scan failed — skipping"))
+        return True
+
+    total = len(list(CHECKPOINT_DIR.glob("*.json")))
+    if orphans:
+        lines.append(_check_line(
+            "PDF checkpoints", False,
+            f"{len(orphans)} orphaned checkpoint(s) out of {total} total",
+        ))
+        _fix(lines, "Remove stale checkpoints: nx doctor --clean-checkpoints")
+        return False
+
+    lines.append(_check_line(
+        "PDF checkpoints", True,
+        f"{total} checkpoint(s), none orphaned" if total else "no checkpoints",
+    ))
+    return True
+
+
 def _check_t2_integrity(lines: list[str]) -> bool:
     """Verify T2 SQLite + FTS5 index integrity. Returns True if all ok."""
     db_path = default_db_path()
@@ -182,8 +213,23 @@ def _check_chroma_pagination(lines: list[str], client: object, db_name: str) -> 
 
 
 @click.command("doctor")
-def doctor_cmd() -> None:
+@click.option(
+    "--clean-checkpoints",
+    is_flag=True,
+    default=False,
+    help="Delete orphaned PDF checkpoint files (where the source PDF no longer exists).",
+)
+def doctor_cmd(clean_checkpoints: bool) -> None:
     """Verify that all required services and credentials are available."""
+    if clean_checkpoints:
+        from nexus.checkpoint import scan_orphaned_checkpoints
+        deleted = scan_orphaned_checkpoints(delete=True)
+        if deleted:
+            click.echo(f"Deleted {len(deleted)} orphaned checkpoint(s).")
+        else:
+            click.echo("No orphaned checkpoints found.")
+        return
+
     lines: list[str] = ["Nexus health check:\n"]
     failed = False
 
@@ -440,6 +486,10 @@ def doctor_cmd() -> None:
     # ── Orphan T1 process detection ───────────────────────────────────────────
     # Non-fatal: stale session files are annoying but do not block operation.
     _check_orphan_t1(lines)
+
+    # ── Orphaned checkpoint files ─────────────────────────────────────────────
+    # Non-fatal: orphaned checkpoints waste disk space but do not block indexing.
+    _check_orphan_checkpoints(lines)
 
     # ── T2 database integrity ─────────────────────────────────────────────────
     # Non-fatal: integrity failure is logged but does not set failed=True.
