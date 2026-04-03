@@ -2,7 +2,9 @@
 title: "MinerU Server-Backed PDF Extraction"
 id: RDR-046
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-04-02
+close_reason: implemented
 priority: high
 author: Hal Hildebrand
 reviewed-by: self

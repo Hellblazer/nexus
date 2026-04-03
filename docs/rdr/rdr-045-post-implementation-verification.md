@@ -2,7 +2,9 @@
 id: RDR-045
 title: Post-Implementation Verification Gate
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-04-02
+close_reason: implemented
 priority: P2
 created: 2026-04-01
 accepted_date: 2026-04-01

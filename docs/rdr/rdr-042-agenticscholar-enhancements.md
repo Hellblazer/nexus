@@ -2,7 +2,9 @@
 title: "AgenticScholar-Inspired Enhancements"
 id: RDR-042
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-04-02
+close_reason: implemented
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self

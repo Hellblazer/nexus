@@ -2,7 +2,9 @@
 title: "Widen Plan-Enricher Scope"
 id: RDR-043
 type: Enhancement
-status: accepted
+status: closed
+closed_date: 2026-04-02
+close_reason: implemented
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
