@@ -55,13 +55,23 @@ os._exit(0)
 _log = structlog.get_logger(__name__)
 
 
-def _progress(msg: str, end: str = "\n") -> None:
-    """Write progress message visible alongside tqdm progress bars."""
+def _progress(msg: str) -> None:
+    """Write progress message visible alongside tqdm progress bars.
+
+    Clears any active tqdm bar, writes the message, then lets tqdm
+    redraw on its next update.
+    """
     try:
         from tqdm import tqdm
-        tqdm.write(msg, end=end)
-    except ImportError:
-        print(msg, end=end, file=sys.stderr, flush=True)
+        # Get all active tqdm instances and temporarily clear them
+        instances = list(tqdm._instances) if hasattr(tqdm, '_instances') else []
+        for inst in instances:
+            inst.clear()
+        print(msg, file=sys.stderr, flush=True)
+        for inst in instances:
+            inst.refresh()
+    except (ImportError, Exception):
+        print(msg, file=sys.stderr, flush=True)
 
 
 def _normalize_whitespace_edge_cases(text: str) -> str:
