@@ -149,3 +149,18 @@ Key principle: **every operation >5s needs visible progress. Every fallback need
 Pipeline accumulates at every level: pages in extractor, chunks in indexer, embeddings in embed function, records in write batch. For 20-page papers, each holds seconds of work. For 771 pages, each holds minutes. Failure cost scales linearly with document size.
 
 Fix is architectural: **process and persist in bounded increments**. Extract N pages → chunk → embed → upsert → checkpoint → repeat. Same pattern as database WAL, TCP sliding windows, git per-object storage. Cap failure cost at one batch, not one document.
+
+### RF-8: Checkpoint design for PDF extraction resume (2026-04-03)
+**Classification**: Design proposal | **Confidence**: MEDIUM
+
+Checkpoint file at `~/.config/nexus/checkpoints/<content_hash>-<collection>.json`. Written atomically after each batch upsert. Contains pages_completed, chunks_upserted, chunk_ids. Resume skips to `pages_completed + 1`. Content hash mismatch = stale checkpoint, delete and restart. Maximum work at risk: 50 pages (~2 min). Key constraint: chunk IDs must be deterministic (`content_hash_chunkindex`) — already true.
+
+### RF-9: Incremental upsert — minimal refactoring surface (2026-04-03)
+**Classification**: Design proposal | **Confidence**: MEDIUM
+
+Internal components already work in bounded chunks. Only the top-level orchestration needs restructuring: new `_index_document_incremental` that loops over 50-page batches, calling existing extract/chunk/embed/upsert per batch. Cross-page chunking concern: last chunk of batch N may need to merge with first chunk of batch N+1. Options: overlap extraction, accept boundary artifacts, or post-process boundaries.
+
+### RF-10: Resilience hierarchy — defense in depth (2026-04-03)
+**Classification**: Design proposal validated by empirical session | **Confidence**: HIGH
+
+Five layers: (1) Server auto-restart — IMPLEMENTED, handled CMRB page 99. (2) Subprocess fallback — IMPLEMENTED, handled all OOM pages. (3) Graceful page degradation — NOT YET, Docling fallback + placeholders. (4) Incremental upsert + checkpoint — NOT YET, the big one. (5) Embed/upsert error recovery — PARTIAL (CCE retry, metadata stripping done; progress, parallelism not done). Goal: any single failure costs at most 2 minutes of work.
