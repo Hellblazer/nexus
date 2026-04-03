@@ -138,7 +138,14 @@ class PDFExtractor:
             return self._extract_with_mineru(pdf_path)
 
         # extractor == "auto"
-        _progress(f"  Docling: extracting {pdf_path.name} (formula detection)…")
+        # Get page count upfront so user knows the scale of the wait
+        try:
+            import pymupdf
+            with pymupdf.open(pdf_path) as doc:
+                _page_count = len(doc)
+            _progress(f"  Docling: extracting {pdf_path.name} ({_page_count} pages, formula detection — may take a few minutes)…")
+        except Exception:
+            _progress(f"  Docling: extracting {pdf_path.name} (formula detection)…")
         try:
             fast_result = self._extract_with_docling(pdf_path)
         except Exception as exc:
