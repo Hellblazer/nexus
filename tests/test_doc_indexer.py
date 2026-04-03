@@ -2034,3 +2034,363 @@ def test_index_markdown_threads_on_progress(sample_md, monkeypatch):
     assert isinstance(result, int)
     assert result == 1
     assert len(progress_calls) > 0
+
+
+# ── incremental PDF indexing (nexus-jr1p) ────────────────────────────────────
+
+
+def _make_n_chunks(n: int, *, start: int = 0):
+    """Create n mock chunks with sequential indices."""
+    chunks = []
+    for i in range(start, start + n):
+        c = MagicMock()
+        c.text = f"chunk text {i}" * 20  # ~200 chars each
+        c.chunk_index = i
+        c.metadata = {"chunk_start_char": i * 200, "chunk_end_char": (i + 1) * 200, "page_number": i // 5 + 1}
+        chunks.append(c)
+    return chunks
+
+
+def test_index_pdf_incremental_indexes_all_chunks(sample_pdf, monkeypatch):
+    """Incremental path processes all chunks through embed/upsert batches."""
+    from nexus.doc_indexer import _INCREMENTAL_THRESHOLD
+    set_credentials(monkeypatch)
+
+    n_chunks = _INCREMENTAL_THRESHOLD + 10
+    mock_chunks = _make_n_chunks(n_chunks)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    def _fake_embed(texts, model, **kwargs):
+        return [[0.1] * 128] * len(texts), model
+
+    # Ensure no real checkpoint files (use tmp dir)
+    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", sample_pdf.parent / "ckpt")
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                mock_ext = MagicMock()
+                mock_ext_cls.return_value = mock_ext
+                mock_ext.extract.return_value = MagicMock(
+                    text="x" * 5000,
+                    metadata={"extraction_method": "docling", "page_count": 50, "format": "markdown", "page_boundaries": []},
+                )
+                mock_chk = MagicMock()
+                mock_chk_cls.return_value = mock_chk
+                mock_chk.chunk.return_value = mock_chunks
+
+                result = index_pdf(sample_pdf, corpus="test", embed_fn=_fake_embed)
+
+    assert result == n_chunks
+    # Verify upsert was called (possibly multiple batches)
+    assert mock_t3.upsert_chunks_with_embeddings.call_count >= 1
+    # Total chunks upserted across all calls
+    total_upserted = sum(
+        len(call.args[1]) for call in mock_t3.upsert_chunks_with_embeddings.call_args_list
+    )
+    assert total_upserted == n_chunks
+
+
+def test_index_pdf_incremental_resumes_from_checkpoint(sample_pdf, monkeypatch):
+    """When a checkpoint exists, skip already-upserted chunks."""
+    from nexus.doc_indexer import _INCREMENTAL_THRESHOLD, _INCREMENTAL_BATCH_SIZE
+    from nexus.checkpoint import CheckpointData, write_checkpoint
+
+    set_credentials(monkeypatch)
+    ckpt_dir = sample_pdf.parent / "ckpt"
+    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
+    monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
+
+    n_chunks = _INCREMENTAL_THRESHOLD + 50
+    mock_chunks = _make_n_chunks(n_chunks)
+    content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+
+    # Pre-write a checkpoint saying 64 chunks already done
+    already_done = 64
+    ck = CheckpointData(
+        pdf=str(sample_pdf),
+        collection="docs__test",
+        content_hash=content_hash,
+        chunks_upserted=already_done,
+        total_chunks=n_chunks,
+        embedding_model="voyage-context-3",
+    )
+    write_checkpoint(ck)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    def _fake_embed(texts, model, **kwargs):
+        return [[0.1] * 128] * len(texts), model
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                mock_ext = MagicMock()
+                mock_ext_cls.return_value = mock_ext
+                mock_ext.extract.return_value = MagicMock(
+                    text="x" * 5000,
+                    metadata={"extraction_method": "docling", "page_count": 50, "format": "markdown", "page_boundaries": []},
+                )
+                mock_chk = MagicMock()
+                mock_chk_cls.return_value = mock_chk
+                mock_chk.chunk.return_value = mock_chunks
+
+                result = index_pdf(sample_pdf, corpus="test", embed_fn=_fake_embed)
+
+    assert result == n_chunks
+    # Only the remaining chunks should have been embedded/upserted
+    total_upserted = sum(
+        len(call.args[1]) for call in mock_t3.upsert_chunks_with_embeddings.call_args_list
+    )
+    assert total_upserted == n_chunks - already_done
+
+
+def test_index_pdf_incremental_deletes_checkpoint_on_success(sample_pdf, monkeypatch):
+    """Checkpoint file is cleaned up after successful completion."""
+    from nexus.doc_indexer import _INCREMENTAL_THRESHOLD
+    from nexus.checkpoint import checkpoint_path
+
+    set_credentials(monkeypatch)
+    ckpt_dir = sample_pdf.parent / "ckpt"
+    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
+    monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
+
+    n_chunks = _INCREMENTAL_THRESHOLD + 10
+    mock_chunks = _make_n_chunks(n_chunks)
+    content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    def _fake_embed(texts, model, **kwargs):
+        return [[0.1] * 128] * len(texts), model
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                mock_ext = MagicMock()
+                mock_ext_cls.return_value = mock_ext
+                mock_ext.extract.return_value = MagicMock(
+                    text="x" * 5000,
+                    metadata={"extraction_method": "docling", "page_count": 50, "format": "markdown", "page_boundaries": []},
+                )
+                mock_chk = MagicMock()
+                mock_chk_cls.return_value = mock_chk
+                mock_chk.chunk.return_value = mock_chunks
+
+                result = index_pdf(sample_pdf, corpus="test", embed_fn=_fake_embed)
+
+    assert result == n_chunks
+    # Checkpoint should be deleted after success
+    ckpt = checkpoint_path(content_hash, "docs__test")
+    assert not ckpt.exists()
+
+
+def test_index_pdf_small_doc_uses_original_path(sample_pdf, monkeypatch):
+    """Documents with fewer chunks than threshold use the original non-incremental path."""
+    set_credentials(monkeypatch)
+
+    mock_chunks = _make_n_chunks(5)  # Well below threshold
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    def _fake_embed(texts, model, **kwargs):
+        return [[0.1] * 128] * len(texts), model
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                mock_ext = MagicMock()
+                mock_ext_cls.return_value = mock_ext
+                mock_ext.extract.return_value = MagicMock(
+                    text="small doc",
+                    metadata={"extraction_method": "docling", "page_count": 3, "format": "markdown", "page_boundaries": []},
+                )
+                mock_chk = MagicMock()
+                mock_chk_cls.return_value = mock_chk
+                mock_chk.chunk.return_value = mock_chunks
+
+                result = index_pdf(sample_pdf, corpus="test", embed_fn=_fake_embed)
+
+    assert result == 5
+    # Original path calls upsert once with all chunks
+    assert mock_t3.upsert_chunks_with_embeddings.call_count == 1
+
+
+def test_index_pdf_incremental_writes_checkpoints_per_batch(sample_pdf, monkeypatch):
+    """Checkpoints are written after each batch, not just at the end."""
+    from nexus.doc_indexer import _INCREMENTAL_THRESHOLD, _INCREMENTAL_BATCH_SIZE
+    from nexus.checkpoint import CheckpointData
+
+    set_credentials(monkeypatch)
+    ckpt_dir = sample_pdf.parent / "ckpt"
+    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
+    monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
+
+    # Use enough chunks to require multiple batches
+    n_chunks = _INCREMENTAL_BATCH_SIZE * 3 + 10
+    mock_chunks = _make_n_chunks(n_chunks)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    checkpoint_writes = []
+    original_write = __import__("nexus.checkpoint", fromlist=["write_checkpoint"]).write_checkpoint
+
+    def _tracking_write(data: CheckpointData):
+        checkpoint_writes.append(data.chunks_upserted)
+        original_write(data)
+
+    def _fake_embed(texts, model, **kwargs):
+        return [[0.1] * 128] * len(texts), model
+
+    with patch("nexus.doc_indexer.write_checkpoint", side_effect=_tracking_write):
+        with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+            with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+                with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                    mock_ext = MagicMock()
+                    mock_ext_cls.return_value = mock_ext
+                    mock_ext.extract.return_value = MagicMock(
+                        text="x" * 5000,
+                        metadata={"extraction_method": "docling", "page_count": 50, "format": "markdown", "page_boundaries": []},
+                    )
+                    mock_chk = MagicMock()
+                    mock_chk_cls.return_value = mock_chk
+                    mock_chk.chunk.return_value = mock_chunks
+
+                    result = index_pdf(sample_pdf, corpus="test", embed_fn=_fake_embed)
+
+    assert result == n_chunks
+    # Should have written a checkpoint after each batch (at least 3 batches)
+    assert len(checkpoint_writes) >= 3
+    # Checkpoint values should be monotonically increasing
+    for i in range(1, len(checkpoint_writes)):
+        assert checkpoint_writes[i] > checkpoint_writes[i - 1]
+    # Final checkpoint write should equal total chunks
+    assert checkpoint_writes[-1] == n_chunks
+
+
+def test_index_pdf_incremental_stale_checkpoint_deleted(sample_pdf, monkeypatch):
+    """A checkpoint with wrong content_hash is deleted and indexing starts fresh."""
+    from nexus.doc_indexer import _INCREMENTAL_THRESHOLD
+    from nexus.checkpoint import CheckpointData, write_checkpoint, checkpoint_path
+
+    set_credentials(monkeypatch)
+    ckpt_dir = sample_pdf.parent / "ckpt"
+    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
+    monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
+
+    n_chunks = _INCREMENTAL_THRESHOLD + 10
+    mock_chunks = _make_n_chunks(n_chunks)
+
+    # Write a checkpoint with a WRONG content hash — should be ignored
+    ck = CheckpointData(
+        pdf=str(sample_pdf),
+        collection="docs__test",
+        content_hash="wrong_hash_from_old_version",
+        chunks_upserted=50,
+        total_chunks=200,
+        embedding_model="voyage-context-3",
+    )
+    write_checkpoint(ck)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    def _fake_embed(texts, model, **kwargs):
+        return [[0.1] * 128] * len(texts), model
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                mock_ext = MagicMock()
+                mock_ext_cls.return_value = mock_ext
+                mock_ext.extract.return_value = MagicMock(
+                    text="x" * 5000,
+                    metadata={"extraction_method": "docling", "page_count": 50, "format": "markdown", "page_boundaries": []},
+                )
+                mock_chk = MagicMock()
+                mock_chk_cls.return_value = mock_chk
+                mock_chk.chunk.return_value = mock_chunks
+
+                result = index_pdf(sample_pdf, corpus="test", embed_fn=_fake_embed)
+
+    # All chunks should be indexed (no resume from stale checkpoint)
+    assert result == n_chunks
+    total_upserted = sum(
+        len(call.args[1]) for call in mock_t3.upsert_chunks_with_embeddings.call_args_list
+    )
+    assert total_upserted == n_chunks
+
+
+def test_index_pdf_incremental_progress_fires(sample_pdf, monkeypatch):
+    """Progress callback fires during incremental indexing."""
+    from nexus.doc_indexer import _INCREMENTAL_THRESHOLD
+
+    set_credentials(monkeypatch)
+    ckpt_dir = sample_pdf.parent / "ckpt"
+    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
+    monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
+
+    n_chunks = _INCREMENTAL_THRESHOLD + 10
+    mock_chunks = _make_n_chunks(n_chunks)
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+
+    progress_calls = []
+
+    def _on_progress(done, total):
+        progress_calls.append((done, total))
+
+    def _fake_embed(texts, model, **kwargs):
+        return [[0.1] * 128] * len(texts), model
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as mock_chk_cls:
+                mock_ext = MagicMock()
+                mock_ext_cls.return_value = mock_ext
+                mock_ext.extract.return_value = MagicMock(
+                    text="x" * 5000,
+                    metadata={"extraction_method": "docling", "page_count": 50, "format": "markdown", "page_boundaries": []},
+                )
+                mock_chk = MagicMock()
+                mock_chk_cls.return_value = mock_chk
+                mock_chk.chunk.return_value = mock_chunks
+
+                result = index_pdf(
+                    sample_pdf, corpus="test", embed_fn=_fake_embed,
+                    on_progress=_on_progress,
+                )
+
+    assert result == n_chunks
+    assert len(progress_calls) > 0
+    # Last progress call should report all chunks done
+    assert progress_calls[-1][0] == n_chunks
+    assert progress_calls[-1][1] == n_chunks

@@ -16,6 +16,13 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+from nexus.checkpoint import (
+    CHECKPOINT_DIR,
+    CheckpointData,
+    delete_checkpoint,
+    read_checkpoint,
+    write_checkpoint,
+)
 from nexus.corpus import index_model_for_collection
 from nexus.db import make_t3
 from nexus.retry import _chroma_with_retry, _voyage_with_retry
@@ -52,6 +59,8 @@ _CCE_TOTAL_TOKEN_LIMIT = 120_000  # Voyage API total token limit across all inpu
 _CCE_MAX_TOTAL_CHUNKS = 16_000  # Voyage API limit: max 16K chunks across all inputs
 _EMBED_BATCH_SIZE = 128  # Voyage AI embed() limit is 1,000; use conservative batch size
 _CCE_MAX_BATCH_CHUNKS = 1000  # Voyage API limit: max 1,000 inputs per request
+_INCREMENTAL_BATCH_SIZE = 128  # Chunks per incremental embed/upsert batch
+_INCREMENTAL_THRESHOLD = 128  # Use incremental path when chunk count exceeds this
 
 
 def _batch_chunks_for_cce(chunks: list[str]) -> list[list[str]]:
@@ -264,6 +273,112 @@ def _index_document(
     return len(prepared)
 
 
+def _index_pdf_incremental(
+    file_path: Path,
+    corpus: str,
+    prepared: list[tuple[str, str, dict]],
+    content_hash: str,
+    collection_name: str,
+    t3: Any,
+    *,
+    embed_fn: EmbedFn | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> int:
+    """Embed and upsert chunks in batches with checkpoint support.
+
+    Designed for large PDFs where the embed/upsert phase can take many minutes.
+    Writes a checkpoint after each batch so a crash loses at most one batch
+    of work (~128 chunks).
+
+    The full document has already been extracted and chunked — this function
+    only handles the embed → upsert → checkpoint loop.
+
+    Returns the total number of chunks indexed.
+    """
+    target_model = prepared[0][2]["embedding_model"] if prepared else "voyage-context-3"
+    total = len(prepared)
+
+    # Check for existing checkpoint — resume from where we left off.
+    ckpt = read_checkpoint(content_hash, collection_name)
+    start_offset = 0
+    if ckpt is not None:
+        start_offset = ckpt.chunks_upserted
+        _log.info(
+            "checkpoint_resume",
+            pdf=str(file_path),
+            chunks_done=start_offset,
+            total=total,
+        )
+
+    ids_all = [p[0] for p in prepared]
+    documents_all = [p[1] for p in prepared]
+    metadatas_all = [p[2] for p in prepared]
+
+    for batch_start in range(start_offset, total, _INCREMENTAL_BATCH_SIZE):
+        batch_end = min(batch_start + _INCREMENTAL_BATCH_SIZE, total)
+        batch_docs = documents_all[batch_start:batch_end]
+        batch_ids = ids_all[batch_start:batch_end]
+        batch_metas = metadatas_all[batch_start:batch_end]
+
+        # Embed
+        if embed_fn is not None:
+            embeddings, actual_model = embed_fn(batch_docs, target_model)
+        else:
+            from nexus.config import get_credential, load_config
+            voyage_key = get_credential("voyage_api_key")
+            if not voyage_key:
+                raise RuntimeError("voyage_api_key required")
+            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+            embeddings, actual_model = _embed_with_fallback(
+                batch_docs, target_model, voyage_key, timeout=timeout,
+            )
+
+        if actual_model != target_model:
+            for m in batch_metas:
+                m["embedding_model"] = actual_model
+
+        # Upsert
+        t3.upsert_chunks_with_embeddings(collection_name, batch_ids, batch_docs, embeddings, batch_metas)
+
+        # Checkpoint
+        write_checkpoint(CheckpointData(
+            pdf=str(file_path),
+            collection=collection_name,
+            content_hash=content_hash,
+            chunks_upserted=batch_end,
+            total_chunks=total,
+            embedding_model=target_model,
+        ))
+
+        if on_progress:
+            on_progress(batch_end, total)
+
+    # Prune stale chunks from a previous (larger) version of this file.
+    col = t3.get_or_create_collection(collection_name)
+    current_ids_set = set(ids_all)
+    stale_ids: list[str] = []
+    offset = 0
+    while True:
+        batch = _chroma_with_retry(
+            col.get,
+            where={"source_path": str(file_path)},
+            include=[],
+            limit=300,
+            offset=offset,
+        )
+        batch_ids = batch.get("ids", [])
+        stale_ids.extend(eid for eid in batch_ids if eid not in current_ids_set)
+        if len(batch_ids) < 300:
+            break
+        offset += 300
+    if stale_ids:
+        _chroma_with_retry(col.delete, ids=stale_ids)
+
+    # Clean up checkpoint on success
+    delete_checkpoint(content_hash, collection_name)
+    return total
+
+
 def _pdf_chunks(
     pdf_path: Path,
     content_hash: str,
@@ -435,24 +550,102 @@ def index_pdf(
     ``nx enrich <collection>`` for deliberate backfill.
     """
     from functools import partial
-    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor)
-    raw = _index_document(
-        pdf_path, corpus, chunk_fn, t3=t3,
-        collection_name=collection_name, embed_fn=embed_fn,
-        force=force, return_metadata=return_metadata, on_progress=on_progress,
+
+    _empty_meta = {"chunks": 0, "pages": [], "title": "", "author": ""}
+    if embed_fn is None and not _has_credentials():
+        return _empty_meta if return_metadata else 0
+
+    content_hash = _sha256(pdf_path)
+    col_name = collection_name if collection_name is not None else f"docs__{corpus}"
+    db = t3 if t3 is not None else make_t3()
+    col = db.get_or_create_collection(col_name)
+    target_model = index_model_for_collection(col_name)
+
+    # Incremental sync: skip if file is already indexed with the same hash AND model
+    existing = _chroma_with_retry(
+        col.get,
+        where={"source_path": str(pdf_path)},
+        include=["metadatas"],
+        limit=1,
     )
-    if not return_metadata:
-        assert isinstance(raw, int)
-        return raw
-    if not isinstance(raw, list):
-        return {"chunks": 0, "pages": [], "title": "", "author": ""}
-    metadatas: list[dict] = raw
-    return {
-        "chunks": len(metadatas),
-        "pages": sorted({m.get("page_number", 0) for m in metadatas}),
-        "title": metadatas[0].get("source_title", "") if metadatas else "",
-        "author": metadatas[0].get("source_author", "") if metadatas else "",
-    }
+    if not force and existing["metadatas"]:
+        stored_hash = existing["metadatas"][0].get("content_hash", "")
+        stored_model = existing["metadatas"][0].get("embedding_model", "")
+        if stored_hash == content_hash and stored_model == target_model:
+            if return_metadata:
+                return {"chunks": 0, "pages": [], "title": "", "author": ""}
+            return 0
+
+    # Extract and chunk the entire document
+    now_iso = datetime.now(UTC).isoformat()
+    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor)
+    prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
+    if not prepared:
+        return _empty_meta if return_metadata else 0
+
+    # Route: incremental for large documents, original path for small ones
+    if len(prepared) > _INCREMENTAL_THRESHOLD:
+        count = _index_pdf_incremental(
+            pdf_path, corpus, prepared, content_hash, col_name, db,
+            embed_fn=embed_fn, on_progress=on_progress,
+        )
+        if return_metadata:
+            metadatas = [p[2] for p in prepared]
+            return {
+                "chunks": len(metadatas),
+                "pages": sorted({m.get("page_number", 0) for m in metadatas}),
+                "title": metadatas[0].get("source_title", "") if metadatas else "",
+                "author": metadatas[0].get("source_author", "") if metadatas else "",
+            }
+        return count
+
+    # Small document: use the original all-at-once path
+    ids = [p[0] for p in prepared]
+    documents = [p[1] for p in prepared]
+    metadatas_list = [p[2] for p in prepared]
+
+    if embed_fn is not None:
+        embeddings, actual_model = embed_fn(documents, target_model)
+    else:
+        from nexus.config import get_credential, load_config
+        voyage_key = get_credential("voyage_api_key")
+        if not voyage_key:
+            raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+        timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+    if actual_model != target_model:
+        for m in metadatas_list:
+            m["embedding_model"] = actual_model
+    db.upsert_chunks_with_embeddings(col_name, ids, documents, embeddings, metadatas_list)
+
+    # Prune stale chunks
+    current_ids_set = set(ids)
+    stale_ids: list[str] = []
+    offset = 0
+    while True:
+        batch = _chroma_with_retry(
+            col.get,
+            where={"source_path": str(pdf_path)},
+            include=[],
+            limit=300,
+            offset=offset,
+        )
+        batch_ids = batch.get("ids", [])
+        stale_ids.extend(eid for eid in batch_ids if eid not in current_ids_set)
+        if len(batch_ids) < 300:
+            break
+        offset += 300
+    if stale_ids:
+        _chroma_with_retry(col.delete, ids=stale_ids)
+
+    if return_metadata:
+        return {
+            "chunks": len(metadatas_list),
+            "pages": sorted({m.get("page_number", 0) for m in metadatas_list}),
+            "title": metadatas_list[0].get("source_title", "") if metadatas_list else "",
+            "author": metadatas_list[0].get("source_author", "") if metadatas_list else "",
+        }
+    return len(prepared)
 
 
 def index_markdown(
