@@ -132,7 +132,11 @@ class PDFExtractor:
         if formula_count == 0:
             return fast_result
 
-        # Math paper detected — try MinerU
+        # Math paper detected — switch to MinerU for formula-aware extraction
+        print(
+            f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}",
+            file=sys.stderr, flush=True,
+        )
         try:
             return self._extract_with_mineru(pdf_path, formula_count=formula_count)
         except Exception:
