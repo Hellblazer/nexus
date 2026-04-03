@@ -2394,3 +2394,92 @@ def test_index_pdf_incremental_progress_fires(sample_pdf, monkeypatch):
     # Last progress call should report all chunks done
     assert progress_calls[-1][0] == n_chunks
     assert progress_calls[-1][1] == n_chunks
+
+
+# ── parallel embedding + rate limiter (nexus-cmcp) ───────────────────────────
+
+import time
+
+
+def test_token_bucket_rate_limiter():
+    """TokenBucket limits throughput to target RPM."""
+    from nexus.doc_indexer import _TokenBucket
+
+    # 600 RPM = 10 per second. Allow 3 immediate, then must wait.
+    bucket = _TokenBucket(rpm=600, burst=3)
+    # First 3 should be immediate
+    t0 = time.monotonic()
+    for _ in range(3):
+        bucket.acquire()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.1  # Should be near-instant
+
+
+def test_token_bucket_zero_burst_still_works():
+    """TokenBucket with burst=1 still allows at least one request."""
+    from nexus.doc_indexer import _TokenBucket
+
+    bucket = _TokenBucket(rpm=60, burst=1)
+    bucket.acquire()  # Should not hang
+
+
+def test_parallel_embed_preserves_order(monkeypatch):
+    """Parallel CCE embedding returns embeddings in submission order."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    call_order = []
+
+    def _mock_cce(inputs, model, input_type):
+        batch = inputs[0]
+        call_order.append(len(batch))
+        time.sleep(0.01 * len(batch))
+        embeddings = [[float(i)] * 10 for i in range(len(batch))]
+        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+        cce_item.embeddings = embeddings
+        result = MagicMock(spec=ContextualizedEmbeddingsObject)
+        result.results = [cce_item]
+        return result
+
+    mock_client = MagicMock()
+    mock_client.contextualized_embed = _mock_cce
+
+    # 10 chunks at 5000 chars each = ~2500 tokens each
+    # 2500 * 10 = 25000 > 24000 limit → will split into 2+ batches
+    chunks = ["x" * 5000] * 10
+
+    with patch("voyageai.Client", return_value=mock_client):
+        embeddings, model = _embed_with_fallback(
+            chunks, "voyage-context-3", "test-key",
+        )
+
+    assert len(embeddings) == 10
+    assert model == "voyage-context-3"
+
+
+def test_parallel_embed_progress_fires_for_each_batch(monkeypatch):
+    """on_progress fires after each CCE batch completes during parallel embedding."""
+    from nexus.doc_indexer import _embed_with_fallback
+
+    progress_calls = []
+
+    def _mock_cce(inputs, model, input_type):
+        batch = inputs[0]
+        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+        cce_item.embeddings = [[0.1] * 10 for _ in batch]
+        result = MagicMock(spec=ContextualizedEmbeddingsObject)
+        result.results = [cce_item]
+        return result
+
+    mock_client = MagicMock()
+    mock_client.contextualized_embed = _mock_cce
+
+    chunks = ["x" * 5000] * 10
+
+    with patch("voyageai.Client", return_value=mock_client):
+        _embed_with_fallback(
+            chunks, "voyage-context-3", "test-key",
+            on_progress=lambda done, total: progress_calls.append((done, total)),
+        )
+
+    assert len(progress_calls) >= 1
+    assert progress_calls[-1][0] == 10

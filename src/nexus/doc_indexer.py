@@ -7,7 +7,9 @@ override the collection name for other prefixes (e.g. ``rdr__``).
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -61,6 +63,36 @@ _EMBED_BATCH_SIZE = 128  # Voyage AI embed() limit is 1,000; use conservative ba
 _CCE_MAX_BATCH_CHUNKS = 1000  # Voyage API limit: max 1,000 inputs per request
 _INCREMENTAL_BATCH_SIZE = 128  # Chunks per incremental embed/upsert batch
 _INCREMENTAL_THRESHOLD = 128  # Use incremental path when chunk count exceeds this
+_PARALLEL_WORKERS = 4  # Concurrent Voyage API calls for CCE embedding
+_RATE_LIMIT_RPM = 250  # Target RPM for Voyage API (83% of 300 RPM limit)
+
+
+class _TokenBucket:
+    """Simple token-bucket rate limiter for API call throttling.
+
+    Allows *burst* immediate calls, then throttles to *rpm* requests per minute.
+    Thread-safe.
+    """
+
+    def __init__(self, rpm: int = _RATE_LIMIT_RPM, burst: int = 4) -> None:
+        self._interval = 60.0 / rpm  # seconds between tokens
+        self._burst = burst
+        self._tokens = float(burst)
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        """Block until a token is available."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last
+                self._tokens = min(self._burst, self._tokens + elapsed / self._interval)
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+            time.sleep(self._interval * 0.5)
 
 
 def _batch_chunks_for_cce(chunks: list[str]) -> list[list[str]]:
@@ -132,29 +164,61 @@ def _embed_with_fallback(
         # single-chunk docs are indexed in the same embedding space as CCE queries.
         batches = _batch_chunks_for_cce(chunks) if len(chunks) >= 2 else [[chunks[0]]]
         all_embeddings: list[list[float]] = []
-        for batch in batches:
+
+        def _embed_one_batch(batch: list[str]) -> list[list[float]]:
+            """Embed a single CCE batch, splitting on failure."""
             try:
-                result = _voyage_with_retry(
+                r = _voyage_with_retry(
                     client.contextualized_embed,
                     inputs=[batch], model=model, input_type=input_type,
                 )
-                all_embeddings.extend(result.results[0].embeddings)
+                return r.results[0].embeddings
             except Exception as exc:
-                # Batch too large — split in half and retry with same model.
-                # Never fall back to a different model (causes embedding mismatch).
                 if len(batch) <= 1:
-                    raise  # single chunk exceeds limit — cannot split further
+                    raise
                 _log.warning("cce_batch_too_large_splitting",
                              error=str(exc), batch_size=len(batch))
                 mid = len(batch) // 2
+                result_embs: list[list[float]] = []
                 for half in (batch[:mid], batch[mid:]):
-                    result = _voyage_with_retry(
+                    r = _voyage_with_retry(
                         client.contextualized_embed,
                         inputs=[half], model=model, input_type=input_type,
                     )
-                    all_embeddings.extend(result.results[0].embeddings)
+                    result_embs.extend(r.results[0].embeddings)
+                return result_embs
+
+        if len(batches) >= 2:
+            # Parallel CCE embedding with rate limiting (nexus-cmcp)
+            bucket = _TokenBucket(rpm=_RATE_LIMIT_RPM, burst=_PARALLEL_WORKERS)
+            batch_results: list[list[list[float]] | None] = [None] * len(batches)
+
+            def _rate_limited_embed(idx: int, batch: list[str]) -> None:
+                bucket.acquire()
+                batch_results[idx] = _embed_one_batch(batch)
+
+            with ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as pool:
+                futures = [
+                    pool.submit(_rate_limited_embed, i, b)
+                    for i, b in enumerate(batches)
+                ]
+                # Collect in submission order to preserve embedding order
+                done_count = 0
+                for i, future in enumerate(futures):
+                    future.result()  # raises if the batch failed
+                    embs = batch_results[i]
+                    assert embs is not None
+                    all_embeddings.extend(embs)
+                    done_count += len(embs)
+                    if on_progress:
+                        on_progress(done_count, len(chunks))
+        else:
+            # Single batch — no parallelism overhead
+            embs = _embed_one_batch(batches[0])
+            all_embeddings.extend(embs)
             if on_progress:
                 on_progress(len(all_embeddings), len(chunks))
+
         if all_embeddings:
             return all_embeddings, model
         model = "voyage-4"
