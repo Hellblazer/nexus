@@ -18,13 +18,16 @@ effort: high
 
 ## MANDATORY: nx Tool Setup
 
-Before any nx MCP tool call, load schemas (tools are deferred — calls fail without this):
+nx MCP tools use the full prefix `mcp__plugin_nx_nexus__`. Examples:
 
 ```
-ToolSearch("select:mcp__plugin_nx_nexus__search,mcp__plugin_nx_nexus__query,mcp__plugin_nx_nexus__scratch,mcp__plugin_nx_nexus__store_put,mcp__plugin_nx_nexus__store_get,mcp__plugin_nx_nexus__memory_get,mcp__plugin_nx_nexus__memory_search")
+mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
+mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
+mcp__plugin_nx_nexus__scratch(action="put", content="...")
+mcp__plugin_nx_nexus__memory_get(project="...", title="")
 ```
 
-Call this FIRST, before any other action.
+See SubagentStart hook output for full tool reference.
 
 
 ## Relay Reception (MANDATORY)
