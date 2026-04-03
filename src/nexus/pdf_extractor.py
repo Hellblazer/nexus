@@ -128,11 +128,9 @@ class PDFExtractor:
             _progress(f"  Docling: extracting {pdf_path.name}…")
             try:
                 return self._extract_with_docling(pdf_path)
-            except Exception:
-                _log.warning(
-                    "docling extraction failed; falling back to pymupdf_normalized",
-                    exc_info=True,
-                )
+            except Exception as exc:
+                _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
+                _log.debug("docling_extraction_failed", error=str(exc), path=str(pdf_path))
                 return self._extract_normalized(pdf_path)
 
         if extractor == "mineru":
@@ -143,11 +141,9 @@ class PDFExtractor:
         _progress(f"  Docling: extracting {pdf_path.name} (formula detection)…")
         try:
             fast_result = self._extract_with_docling(pdf_path)
-        except Exception:
-            _log.warning(
-                "docling fast pass failed; falling back to pymupdf_normalized",
-                exc_info=True,
-            )
+        except Exception as exc:
+            _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
+            _log.debug("docling_auto_pass_failed", error=str(exc), path=str(pdf_path))
             return self._extract_normalized(pdf_path)
 
         formula_count = fast_result.metadata.get("formula_count", 0)
@@ -158,11 +154,9 @@ class PDFExtractor:
         _progress(f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}")
         try:
             return self._extract_with_mineru(pdf_path, formula_count=formula_count)
-        except Exception:
-            _log.warning(
-                "mineru_extraction_failed; returning docling result",
-                exc_info=True,
-            )
+        except Exception as exc:
+            _progress(f"  MinerU failed ({type(exc).__name__}), using Docling result: {pdf_path.name}")
+            _log.debug("mineru_extraction_failed", error=str(exc), path=str(pdf_path))
             return fast_result
 
     # ── internal extraction methods ───────────────────────────────────────────

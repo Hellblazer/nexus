@@ -706,9 +706,10 @@ class TestAutoDetectRouting:
             result = extractor.extract(dummy_pdf, extractor="auto")
 
         assert result is fast_result
-        mock_log.warning.assert_any_call(
-            "mineru_extraction_failed; returning docling result",
-            exc_info=True,
+        mock_log.debug.assert_any_call(
+            "mineru_extraction_failed",
+            error="MinerU model download failed",
+            path=str(dummy_pdf),
         )
 
     def test_forced_docling_skips_mineru(self, extractor, dummy_pdf):
