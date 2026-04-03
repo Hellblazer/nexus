@@ -242,11 +242,8 @@ class PDFExtractor:
             },
         )
 
-    # Maximum pages per MinerU batch.  Large formula-dense PDFs (e.g. 108-page
-    # Grossberg 1986) OOM during MFR prediction when processed as a single pass.
-    # Splitting into page ranges keeps peak memory bounded.  Small batches add
-    # only ~5s model-init overhead each — negligible vs. the cost of an OOM kill.
-    MINERU_PAGE_BATCH = 1
+    # Page batch size is read from config via get_mineru_page_batch() (default 1).
+    # Formula-dense PDFs OOM during MFR prediction at larger batch sizes.
 
     def _extract_with_mineru(
         self, pdf_path: Path, *, formula_count: int = 0,

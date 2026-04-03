@@ -96,8 +96,10 @@ def _embed_with_fallback(
     CCE token limit.  Returns ``(embeddings, actual_model_used)`` so callers
     can record the model that produced the stored vectors in metadata.
 
-    Note: both voyage-context-3 and voyage-4 produce 1024-dim embeddings,
-    so mixed CCE/fallback batches are dimensionally compatible for ChromaDB.
+    On CCE batch failure (token limit exceeded), the batch is split in half
+    and retried with the same model. Never falls back to a different model —
+    all vectors in a collection must come from the same embedding space.
+    Single-chunk failures that cannot be split further raise immediately.
 
     We rely on Voyage's default truncation=True. Our chunker keeps chunks well
     under model context limits, so truncation should never activate. If it does,
