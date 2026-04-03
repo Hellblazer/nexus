@@ -41,9 +41,9 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search Nexus for missing context: Use search tool: query="query", corpus="knowledge", limit=5
-2. Check Nexus memory for session state: Use memory_search tool: query="[topic]", project="{project}"
-3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
+1. Search Nexus for missing context: mcp__plugin_nx_nexus__search(query="query", corpus="knowledge", limit=5
+2. Check Nexus memory for session state: mcp__plugin_nx_nexus__memory_search(query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -113,7 +113,7 @@ Your review format should be:
 
 ## Structured Review with Sequential Thinking
 
-Use `mcp__sequential-thinking__sequentialthinking` for systematic review of complex code changes.
+Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for systematic review of complex code changes.
 
 **When to Use**: Large PRs, architectural changes, security-sensitive code, unfamiliar codebases.
 
@@ -143,8 +143,8 @@ Set `needsMoreThoughts: true` to continue analysis, `isRevision: true` to revise
 
 **Check for developer context.** Search scratch for the developer's session experience:
 
-Use scratch tool: action="search", query="failed approach what was tried didn't work", limit=5
-Use scratch tool: action="search", query="implementation checkpoint step completed", limit=5
+mcp__plugin_nx_nexus__scratch(action="search", query="failed approach what was tried didn't work", limit=5
+mcp__plugin_nx_nexus__scratch(action="search", query="implementation checkpoint step completed", limit=5
 
 If the developer struggled with specific areas (tagged `failed-approach`), focus extra review attention there — code that was hard to get right is more likely to have subtle issues. If scratch is empty, proceed normally.
 
@@ -164,7 +164,7 @@ grep -r "similar-method-or-concept" --include="*.java" src/
 If the project's code collection has been re-indexed with small chunks (RDR-006), supplement
 with semantic search for conceptual patterns:
 
-Use search tool: query="error handling patterns in this module", corpus="code", limit=10
+mcp__plugin_nx_nexus__search(query="error handling patterns in this module", corpus="code", limit=10
 
 Use Grep as the primary path; the search tool as a supplement for conceptual queries when
 cross-file pattern discovery cannot be expressed as a grep.
@@ -197,20 +197,20 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Significant Issues**: Create beads for critical findings
 - **Pattern Violations Found**: When a review identifies a violation of established patterns
   (naming, error handling, structural conventions), store it to T3:
-  Use store_put tool: content="# Review: Pattern Violation\n## Pattern\n{pattern name}\n## Violation\n{what was found}\n## File\n{path}\n## Recommendation\n{fix}", collection="knowledge", title="review-pattern-{pattern-name}-{date}", tags="review,pattern,violation"
+  mcp__plugin_nx_nexus__store_put(content="# Review: Pattern Violation\n## Pattern\n{pattern name}\n## Violation\n{what was found}\n## File\n{path}\n## Recommendation\n{fix}", collection="knowledge", title="review-pattern-{pattern-name}-{date}", tags="review,pattern,violation"
   Store when: a pattern is violated across multiple locations in the reviewed code; a violation
   suggests the pattern itself may need documentation; the violation is non-obvious (not a typo).
   Do not store: single-instance style nits, formatting errors, trivial cases.
 - **Approval/Rejection**: Document in bead status
 - **Review Working Notes**: Use T1 scratch to track findings during review, then consolidate:
   Note a finding during review:
-  Use scratch tool: action="put", content="Critical: {issue description} in {file}:{line}", tags="review,critical"
+  mcp__plugin_nx_nexus__scratch(action="put", content="Critical: {issue description} in {file}:{line}", tags="review,critical"
   If review spans multiple sessions, promote notes to T2:
-  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="review-notes.md"
+  mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>", project="{project}", title="review-notes.md"
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **Nexus memory**: Use memory_put tool: content="content", project="{project}", title="{topic}.md" (e.g., project=ART, title=auth-implementation.md)
+- **Nexus memory**: mcp__plugin_nx_nexus__memory_put(content="content", project="{project}", title="{topic}.md" (e.g., project=ART, title=auth-implementation.md)
 - **Bead Description**: Include `Context: nx` line
 
 

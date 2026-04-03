@@ -42,9 +42,9 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
-3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
+1. Search nx T3 store for missing context: mcp__plugin_nx_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check nx T2 memory for session state: mcp__plugin_nx_nexus__memory_search(query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -82,7 +82,7 @@ For each PDF in the input:
    - `--monitor` shows a per-chunk tqdm progress bar during embedding (not just post-hoc metadata)
 
 4. **Verify indexing**:
-   Use search tool: query="representative query from the document", corpus="docs__{corpus-name}", limit=3
+   mcp__plugin_nx_nexus__search(query="representative query from the document", corpus="docs__{corpus-name}", limit=3
 
 5. **Report results**: chunk count, collection name, sample search results.
 
@@ -109,7 +109,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **T3 knowledge**: Indexed PDF content via `nx index pdf` (atomic pipeline — extraction, chunking, embedding, storage)
 - **Processing Reports**: Include in response with chunk count and collection name
 - **T2 memory**: Log index status after processing:
-  Use memory_put tool: content="PDF processed: {filename} -> {corpus-name}, {N} chunks, {date}", project="{project}", title="pdf-index-log.md"
+  mcp__plugin_nx_nexus__memory_put(content="PDF processed: {filename} -> {corpus-name}, {N} chunks, {date}", project="{project}", title="pdf-index-log.md"
 
 ## Relationship to Other Agents
 

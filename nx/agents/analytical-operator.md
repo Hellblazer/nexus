@@ -41,9 +41,9 @@ Before starting, validate the relay contains all required fields:
 3. [ ] **params** object present (may be empty `{}` for default behavior)
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search Nexus for missing context: Use search tool: query="[topic]", corpus="knowledge", limit=5
-2. Check Nexus memory for session state: Use memory_search tool: query="[topic]", project="{project}"
-3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="query-step"
+1. Search Nexus for missing context: mcp__plugin_nx_nexus__search(query="[topic]", corpus="knowledge", limit=5
+2. Check Nexus memory for session state: mcp__plugin_nx_nexus__memory_search(query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="query-step"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -71,7 +71,7 @@ The relay must carry structured JSON in the `### Context Notes` section or as a 
 ### Step Output Resolution
 
 When inputs reference a prior step as `$step_N`, read from T1 scratch:
-Use scratch tool: action="search", query="query-step step-N"
+mcp__plugin_nx_nexus__scratch(action="search", query="query-step step-N"
 
 Use the retrieved content as the input for this operation.
 
@@ -233,11 +233,11 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 
 - **Operation Results**: Write output to T1 scratch so the `/nx:query` skill can reference it from subsequent steps:
-  Use scratch tool: action="put", content="{operation} result: {output}", tags="query-step,step-N,{operation}"
+  mcp__plugin_nx_nexus__scratch(action="put", content="{operation} result: {output}", tags="query-step,step-N,{operation}"
   Replace `step-N` with the actual step number provided in the relay params (default to `step-1` if not specified).
 
 - **Partial Failures**: If the operation cannot complete (e.g., inputs are empty, template is malformed), write an error note to scratch and return a clearly marked error response:
-  Use scratch tool: action="put", content="Error in {operation}: {reason}", tags="query-step,step-N,error"
+  mcp__plugin_nx_nexus__scratch(action="put", content="Error in {operation}: {reason}", tags="query-step,step-N,error"
   Then return: `{"error": "description of what went wrong", "operation": "...", "inputs_received": N}`
 
 - **Do not promote to T2**: Operation results are ephemeral query outputs. The `/nx:query` skill decides whether to persist the overall plan to T2.

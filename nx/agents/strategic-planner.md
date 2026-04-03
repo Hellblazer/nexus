@@ -42,16 +42,16 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 6. [ ] **RDR status check** — Scan the relay Task field and Input Artifacts for
    the pattern `RDR-\d+`. For each match, run:
-   Use memory_get tool: project="{repo}_rdr", title="NNN"
+   mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN"
    If status is not `accepted` or `closed`, warn the user:
    "RDR-NNN is {status}. Consider running `/nx:rdr-gate NNN` and `/nx:rdr-accept NNN` first."
    If the lookup fails or returns no result, warn and proceed (fail-open).
    If no RDR pattern is found, proceed normally.
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
-3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
+1. Search nx T3 store for missing context: mcp__plugin_nx_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check nx T2 memory for session state: mcp__plugin_nx_nexus__memory_search(query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -72,7 +72,7 @@ You are an expert strategic planner specializing in software development project
 ## Planning Process
 
 ### Phase 1: Analysis & Infrastructure Detection
-1. Use `mcp__sequential-thinking__sequentialthinking` to systematically analyze the problem space.
+1. Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` to systematically analyze the problem space.
 
 **When to Use**: Complex features spanning multiple modules, unclear implementation path, multiple valid approaches with non-obvious trade-offs.
 
@@ -90,18 +90,18 @@ Thought 8: Identify critical risks and mitigations
 
 Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to refine earlier analysis.
 2. Search relevant knowledge bases for prior art and context:
-   - nx T3 store: Use search tool: query="relevant topic", corpus="knowledge", limit=5
-   - nx T2 memory: Use memory_get tool: project="{project}", title="plan.md"
+   - nx T3 store: mcp__plugin_nx_nexus__search(query="relevant topic", corpus="knowledge", limit=5
+   - nx T2 memory: mcp__plugin_nx_nexus__memory_get(project="{project}", title="plan.md"
 3. Identify constraints, dependencies, and success criteria
 5. **Discover Relevant Project History and Patterns with nx search**:
    Project structure and organization:
-   Use search tool: query="project structure modules and how things are organized", corpus="code", limit=20
+   mcp__plugin_nx_nexus__search(query="project structure modules and how things are organized", corpus="code", limit=20
 
    Similar feature implementations:
-   Use search tool: query="similar features we have implemented before", corpus="knowledge", limit=15
+   mcp__plugin_nx_nexus__search(query="similar features we have implemented before", corpus="knowledge", limit=15
 
    Technical patterns and decisions:
-   Use search tool: query="architectural decisions and technical patterns in this project", corpus="knowledge", limit=15
+   mcp__plugin_nx_nexus__search(query="architectural decisions and technical patterns in this project", corpus="knowledge", limit=15
    Use findings to ensure your plan reuses established patterns, identify similar work that informs estimation, and reference prior decisions that apply to this feature.
 
 ### Phase 2: Plan Creation
@@ -116,7 +116,7 @@ Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought
    - Acceptance criteria
    - Dependencies (use /beads:dep add)
    - Knowledge base search terms for executing agent
-   - Reminder to use `mcp__sequential-thinking__sequentialthinking` for complex work
+   - Reminder to use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for complex work
    - Context pointers to nx memory, nx store, or documentation
 
 ### Review Gates (MANDATORY in every plan)
@@ -151,8 +151,8 @@ Each bead must contain sufficient context for autonomous execution:
 ### Task: [Title]
 
 **Context**
-- Related nx memory docs: Use memory_get tool: project="{project}", title=""
-- nx store collections to search: Use search tool: query="[keywords]", corpus="knowledge", limit=5
+- Related nx memory docs: mcp__plugin_nx_nexus__memory_get(project="{project}", title=""
+- nx store collections to search: mcp__plugin_nx_nexus__search(query="[keywords]", corpus="knowledge", limit=5
 - Search keywords: [relevant terms for knowledge retrieval]
 
 **Prerequisites**
@@ -160,7 +160,7 @@ Each bead must contain sufficient context for autonomous execution:
 - Required state: [what must be true before starting]
 
 **Execution Instructions**
-1. Use `mcp__sequential-thinking__sequentialthinking` for analysis phase
+1. Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for analysis phase
 2. [Detailed steps]
 3. Write tests FIRST (TDD)
 4. Implement to pass tests
@@ -174,7 +174,7 @@ Each bead must contain sufficient context for autonomous execution:
 
 **Continuation State**
 - Update nx memory after each significant milestone:
-  Use memory_put tool: content="state content", project="{project}", title="continuation-state.md"
+  mcp__plugin_nx_nexus__memory_put(content="state content", project="{project}", title="continuation-state.md"
 - Track: current step, completed items, blocking issues, next actions
 
 **Validation**
@@ -217,12 +217,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Bead Hierarchy**: Epic -> Phase -> Task structure
 - **Dependency Maps**: Use `/beads:dep add` for all relationships
 - **Planning Notes**: Use T1 scratch for intermediate analysis during planning; flag for T2 at session end:
-  Use scratch tool: action="put", content="Planning note: {consideration}", tags="planning,analysis"
-  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="planning-notes.md"
+  mcp__plugin_nx_nexus__scratch(action="put", content="Planning note: {consideration}", tags="planning,analysis"
+  mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>", project="{project}", title="planning-notes.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: Use memory_put tool: project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
+- **nx memory**: mcp__plugin_nx_nexus__memory_put(project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
 ### Completion Protocol
@@ -231,9 +231,9 @@ Store using these naming conventions:
 
 **Sequence** (follow strictly):
 1. **Create Bead Hierarchy**: Create all beads (epic, phases, tasks) with dependencies
-2. **Write Plan to nx Memory**: Store complete plan: Use memory_put tool: content="plan content", project="{project}", title="plan-{name}.md"
+2. **Write Plan to nx Memory**: Store complete plan: mcp__plugin_nx_nexus__memory_put(content="plan content", project="{project}", title="plan-{name}.md"
 3. **Store Dependency Map**: Use `/beads:dep add` for all relationships
-4. **Verify Persistence**: Confirm beads created (/beads:list) and memory written (Use memory_get tool: project="{project}", title="plan-{name}.md")
+4. **Verify Persistence**: Confirm beads created (/beads:list) and memory written (mcp__plugin_nx_nexus__memory_get(project="{project}", title="plan-{name}.md")
 5. **Generate Response**: Only after all above steps complete, generate final plan response
 
 **Verification Checklist**:
@@ -245,7 +245,7 @@ Store using these naming conventions:
 **If Verification Fails** (partial persistence):
 1. **Retry once**: Attempt failed operation again
 2. **Document partial state**: Note which beads/dependencies succeeded/failed in response
-3. **Persist recovery notes**: Use memory_put tool: content="failure details with bead IDs", project="{project}", title="plan-persistence-failure-{date}.md"
+3. **Persist recovery notes**: mcp__plugin_nx_nexus__memory_put(content="failure details with bead IDs", project="{project}", title="plan-persistence-failure-{date}.md"
 4. **Continue with response**: Include successfully created beads and manual commands for failed items
 
 Example: If 2 of 5 beads fail to create, note in response: "3 beads created successfully (IDs: epic-1, phase-1, task-1). Failed beads can be created manually with: /beads:create 'Title' -t type -p priority"
@@ -267,7 +267,7 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 
 ### Include in Every Bead
 - Reminder to SPAWN parallel agents to conserve context
-- Reminder to use `mcp__sequential-thinking__sequentialthinking` for complex analysis
+- Reminder to use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for complex analysis
 - Reminder to maintain TDD discipline
 - Reminder to update continuation state
 - Reminder sub-agents can spawn children for intensive work (use judiciously)

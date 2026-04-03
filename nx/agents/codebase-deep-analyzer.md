@@ -41,9 +41,9 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
-3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
+1. Search nx T3 store for missing context: mcp__plugin_nx_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check nx T2 memory for session state: mcp__plugin_nx_nexus__memory_search(query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -60,8 +60,8 @@ You are an elite codebase architect and analysis specialist with deep expertise 
 
 Before analysis, ensure the codebase is indexed:
 1. Run `nx index repo <path>` to index the repository (if not already done)
-2. Use search tool: query="query", corpus="code__<repo>", limit=20 for semantic code search throughout analysis
-3. Use search tool: query="query", corpus="code" for cross-repo searches
+2. mcp__plugin_nx_nexus__search(query="query", corpus="code__<repo>", limit=20 for semantic code search throughout analysis
+3. mcp__plugin_nx_nexus__search(query="query", corpus="code" for cross-repo searches
 
 This provides semantic search + ripgrep + git frecency, far more powerful than grep alone.
 
@@ -83,7 +83,7 @@ This provides semantic search + ripgrep + git frecency, far more powerful than g
    - What questions does this raise for deeper investigation?
    - What should I document for coordination with other subtasks?
 
-   Use `mcp__sequential-thinking__sequentialthinking` for systematic architectural analysis. Prevents premature conclusions from first impressions.
+   Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for systematic architectural analysis. Prevents premature conclusions from first impressions.
 
 **When to Use**: Onboarding to an unfamiliar codebase, mapping ownership of a cross-cutting concern, before major refactoring.
 
@@ -102,8 +102,8 @@ Thought 8: Synthesize findings into a coherent architectural picture
 Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to explore separate concerns in parallel.
 
 4. **Nexus Knowledge Management**: Use store_put and search tools as documentation repository and coordination hub:
-   - Store findings: Use store_put tool: content="content", collection="knowledge", title="ID", tags="category"
-   - Query findings: Use search tool: query="query", corpus="knowledge", limit=5
+   - Store findings: mcp__plugin_nx_nexus__store_put(content="content", collection="knowledge", title="ID", tags="category"
+   - Query findings: mcp__plugin_nx_nexus__search(query="query", corpus="knowledge", limit=5
    - Document relationships between components
    - Track analysis progress and coverage gaps
    - Coordinate insights between parallel subtasks
@@ -111,13 +111,13 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 
 5. **Initial Reconnaissance with Nexus**: Begin semantic exploration before traditional file analysis:
    Understand architecture:
-   Use search tool: query="system architecture and module dependencies", corpus="code", limit=30
+   mcp__plugin_nx_nexus__search(query="system architecture and module dependencies", corpus="code", limit=30
 
    Find key abstractions:
-   Use search tool: query="main design patterns used in codebase", corpus="code", limit=25
+   mcp__plugin_nx_nexus__search(query="main design patterns used in codebase", corpus="code", limit=25
 
    Locate integration points:
-   Use search tool: query="external service integrations and APIs", corpus="code", limit=20
+   mcp__plugin_nx_nexus__search(query="external service integrations and APIs", corpus="code", limit=20
    Combine semantic findings with Glob (file structure) and Serena (symbol navigation — see nx:serena-code-nav) for complete understanding.
 
 6. **Context Conservation Strategy**:
@@ -179,21 +179,21 @@ When your analysis reveals work that needs to be planned (e.g., refactoring, new
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Architecture Maps**: Use store_put tool: content="...", collection="knowledge", title="architecture-{scope}-{date}", tags="architecture"
+- **Architecture Maps**: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="architecture-{scope}-{date}", tags="architecture"
 - **Dependency Analysis**: Include in response
 - **Technical Debt**: Create chore beads for significant debt
-- **Pattern Catalog**: Use store_put tool: content="...", collection="knowledge", title="pattern-codebase-{name}", tags="pattern"
+- **Pattern Catalog**: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="pattern-codebase-{name}", tags="pattern"
 - **Per-Subtask Findings**: Use T1 scratch to track findings during parallel subtask analysis:
   Store subtask finding:
-  Use scratch tool: action="put", content="# Subtask: {module}\n{findings}", tags="analysis,subtask-{n}"
+  mcp__plugin_nx_nexus__scratch(action="put", content="# Subtask: {module}\n{findings}", tags="analysis,subtask-{n}"
   At end of each subtask, promote to T2:
-  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="subtask-{n}-findings.md"
+  mcp__plugin_nx_nexus__scratch_manage(action="promote", entry_id="<id>", project="{project}", title="subtask-{n}-findings.md"
   Final synthesis: promote all to T2:
-  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="analysis-session.md"
+  mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>", project="{project}", title="analysis-session.md"
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **Nexus memory**: Use memory_put tool: content="content", project="{project}", title="{topic}.md" (e.g., project=ART, title=auth-implementation.md)
+- **Nexus memory**: mcp__plugin_nx_nexus__memory_put(content="content", project="{project}", title="{topic}.md" (e.g., project=ART, title=auth-implementation.md)
 - **Bead Description**: Include `Context: nx` line
 
 

@@ -247,4 +247,4 @@ tmux kill-pane -t "$PANE"
 7. Use `tmux list-panes` to see all active panes
 8. Quote pane targets: `tmux send-keys -t "$PANE"` (targets contain colons/dots)
 
-**Session Scratch (T1)**: Use scratch tool: action="put", content="..." to note interactive session findings (pane IDs, interim output, working hypotheses). Flagged items auto-promote to T2 at session end.
+**Session Scratch (T1)**: mcp__plugin_nx_nexus__scratch(action="put", content="..." to note interactive session findings (pane IDs, interim output, working hypotheses). Flagged items auto-promote to T2 at session end.

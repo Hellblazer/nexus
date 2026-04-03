@@ -17,8 +17,8 @@ effort: low
 1. **Resolve RDR directory**: Read from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`.
 2. **Determine RDR ID**: From user's argument, or default to most recently modified RDR in `$RDR_DIR/`
 3. **Read the markdown file**: `$RDR_DIR/NNN-*.md`
-4. **Read T2 metadata** (if available): Use memory_get tool: project="{repo}_rdr", title="NNN"
-5. **Read research findings** (if available): Use memory_get tool: project="{repo}_rdr", title="" and filter titles matching `NNN-research-*`
+4. **Read T2 metadata** (if available): mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN"
+5. **Read research findings** (if available): mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="" and filter titles matching `NNN-research-*`
 6. **Display unified view**:
 
 ### Output Format

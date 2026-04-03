@@ -41,9 +41,9 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
-3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
+1. Search nx T3 store for missing context: mcp__plugin_nx_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check nx T2 memory for session state: mcp__plugin_nx_nexus__memory_search(query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -60,15 +60,15 @@ Search T1 scratch for context written by upstream agents in the current session.
 
 ### Required Searches
 
-1. **RDR Planning Context**: Use scratch tool: action="search", query="rdr-planning-context"
+1. **RDR Planning Context**: mcp__plugin_nx_nexus__scratch(action="search", query="rdr-planning-context"
    - Expect: RDR ID, title, acceptance metadata
    - If empty: warn user "No RDR planning context found in T1 scratch — proceeding with available context"
 
-2. **Plan Structure**: Use scratch tool: action="search", query="plan-structure"
+2. **Plan Structure**: mcp__plugin_nx_nexus__scratch(action="search", query="plan-structure"
    - Expect: Epic bead ID, child bead IDs, dependency graph from strategic-planner
    - If empty: warn user "No plan structure found in T1 scratch — will discover from beads directly"
 
-3. **Audit Findings** (optional): Use scratch tool: action="search", query="audit-findings"
+3. **Audit Findings** (optional): mcp__plugin_nx_nexus__scratch(action="search", query="audit-findings"
    - Expect: Gap analysis, severity classifications, recommendations from plan-auditor
    - If empty: proceed normally — audit findings enhance enrichment but are not required
 
@@ -82,7 +82,7 @@ If any T1 search returns empty:
 
 ## Bead Enrichment Workflow
 
-Use `mcp__sequential-thinking__sequentialthinking` for design decisions during enrichment.
+Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for design decisions during enrichment.
 
 **When to Use**: Resolving ambiguous file paths, choosing between enrichment approaches for complex beads, mapping audit findings (when present) to specific beads.
 
@@ -142,7 +142,7 @@ Plan-enricher owns the T2 write for epic bead ID — the accept skill's executio
 1. **Write epic bead ID to T2**: First read the existing T2 record via memory_get tool: project="{repo}_rdr", title="NNN" (where NNN is the RDR ID extracted from the T1 `rdr-planning-context` scratch entry). Then write back the **full merged content** — all original fields (status, type, priority, file_path, etc.) plus the new fields `epic_bead: <epic-id>`, `enriched: YYYY-MM-DD`, `bead_count: N`. Use memory_put tool with the merged content.
    - **Critical**: Do not write only the new fields — memory_put overwrites by key, so omitting existing fields will lose them
 
-2. **Write enrichment summary to T1**: Use scratch tool: action="put", content="Plan enrichment complete for RDR-NNN: {N} beads enriched, epic={epic-id}", tags="enrichment-complete,rdr-NNN"
+2. **Write enrichment summary to T1**: mcp__plugin_nx_nexus__scratch(action="put", content="Plan enrichment complete for RDR-NNN: {N} beads enriched, epic={epic-id}", tags="enrichment-complete,rdr-NNN"
 
 ## Beads Integration
 
@@ -176,7 +176,7 @@ See [ERROR_HANDLING.md](./_shared/ERROR_HANDLING.md) for common error patterns a
 - **Console output**: Enriched plan summary table
 
 Store using these naming conventions:
-- **nx memory**: Use memory_put tool: project="{repo}_rdr", title="NNN" (updates existing RDR record)
+- **nx memory**: mcp__plugin_nx_nexus__memory_put(project="{repo}_rdr", title="NNN" (updates existing RDR record)
 - **Bead Description**: Include `Context: nx` line
 
 ### Completion Protocol
@@ -199,7 +199,7 @@ Store using these naming conventions:
 **If Verification Fails** (partial persistence):
 1. **Retry once**: Attempt failed /beads:update or memory_put again
 2. **Document partial state**: Note which beads succeeded/failed in response
-3. **Persist recovery notes**: Use memory_put tool: content="failure details", project="{project}", title="enrichment-failure-{date}.md"
+3. **Persist recovery notes**: mcp__plugin_nx_nexus__memory_put(content="failure details", project="{project}", title="enrichment-failure-{date}.md"
 4. **Continue with response**: Include count of succeeded enrichments and list of failed bead IDs
 
 **Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.

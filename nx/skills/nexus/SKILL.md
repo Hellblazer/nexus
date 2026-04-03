@@ -18,22 +18,22 @@ effort: low
 
 ```
 # Search
-Use search tool: query="query"                          # semantic search across T3
-Use search tool: query="query", corpus="code"           # code only
-Use search tool: query="query", corpus="knowledge", limit=5 # knowledge with limit
+mcp__plugin_nx_nexus__search(query="query"                          # semantic search across T3
+mcp__plugin_nx_nexus__search(query="query", corpus="code"           # code only
+mcp__plugin_nx_nexus__search(query="query", corpus="knowledge", limit=5 # knowledge with limit
 
 # Memory (T2)
-Use memory_put tool: content="content", project="{repo}", title="file.md"
-Use memory_get tool: project="{repo}", title="file.md"
-Use memory_search tool: query="query", project="{repo}"
+mcp__plugin_nx_nexus__memory_put(content="content", project="{repo}", title="file.md"
+mcp__plugin_nx_nexus__memory_get(project="{repo}", title="file.md"
+mcp__plugin_nx_nexus__memory_search(query="query", project="{repo}"
 
 # Knowledge (T3)
-Use store_put tool: content="content", collection="knowledge", title="title", tags="tag"
-Use store_list tool: collection="knowledge"
+mcp__plugin_nx_nexus__store_put(content="content", collection="knowledge", title="title", tags="tag"
+mcp__plugin_nx_nexus__store_list(collection="knowledge"
 
 # Scratch (T1)
-Use scratch tool: action="put", content="working note"
-Use scratch_manage tool: action="flag", entry_id="<id>"       # auto-promote to T2 at session end
+mcp__plugin_nx_nexus__scratch(action="put", content="working note"
+mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>"       # auto-promote to T2 at session end
 ```
 
 ## Indexing (CLI only — no MCP equivalent)

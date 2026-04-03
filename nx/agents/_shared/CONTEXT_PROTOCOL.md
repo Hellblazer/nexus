@@ -19,9 +19,9 @@ These agents **MUST proactively search** for context before starting:
 **Search Sources in Order**:
 1. **Bead**: `/beads:show <id>` for task context, design field, dependencies
 2. **Project Infrastructure**: T2 memory and beads context is auto-injected by SessionStart and SubagentStart hooks
-3. **nx T3 store**: Use search tool: `query="[topic]", corpus="knowledge", limit=5`
-4. **nx T2 memory**: Use memory_get tool: `project="{project}", title="ACTIVE_INDEX.md"`
-5. **T1 scratch** (current session): Use scratch tool: `action="search", query="[topic]"`
+3. **nx T3 store**: mcp__plugin_nx_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
+4. **nx T2 memory**: mcp__plugin_nx_nexus__memory_get( `project="{project}", title="ACTIVE_INDEX.md"`
+5. **T1 scratch** (current session): mcp__plugin_nx_nexus__scratch( `action="search", query="[topic]"`
 
 ### Relay-Reliant Agents (Execution & Validation)
 
@@ -34,7 +34,7 @@ These agents **rely on relays** for context (do not proactively search):
 
 **Sibling context (SHOULD, not MUST):** Before starting work, relay-reliant agents SHOULD search scratch for predecessor findings:
 
-Use scratch tool: action="search", query="[task topic]", limit=5
+mcp__plugin_nx_nexus__scratch( action="search", query="[task topic]", limit=5
 
 If results exist, incorporate them as supplementary context. If scratch is empty, proceed normally. This adds one MCP call (~100ms) and provides context that relays may omit.
 
@@ -77,12 +77,12 @@ Tags are comma-separated. Combine with domain tags: `failed-approach,auth,retry`
 
 **T1 MCP Tools:**
 ```
-Use scratch tool: action="put", content="<content>", tags="TAG1,TAG2"
-Use scratch tool: action="get", entry_id="<id>"
-Use scratch tool: action="search", query="<query>", limit=10
-Use scratch tool: action="list"
-Use scratch_manage tool: action="flag", entry_id="<id>", project="PROJECT", title="TITLE"
-Use scratch_manage tool: action="promote", entry_id="<id>", project="PROJECT", title="TITLE"
+mcp__plugin_nx_nexus__scratch(action="put", content="<content>", tags="TAG1,TAG2")
+mcp__plugin_nx_nexus__scratch(action="get", entry_id="<id>")
+mcp__plugin_nx_nexus__scratch(action="search", query="<query>", limit=10)
+mcp__plugin_nx_nexus__scratch(action="list")
+mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>", project="PROJECT", title="TITLE")
+mcp__plugin_nx_nexus__scratch_manage(action="promote", entry_id="<id>", project="PROJECT", title="TITLE")
 ```
 
 The SessionEnd hook runs automatically at session close and auto-promotes flagged T1 items to T2. Flagging items with scratch_manage `action="flag"` is how you opt in.
@@ -112,17 +112,17 @@ Use the right search form for the task:
 
 | Goal | Tool Call |
 |---|---|
-| Find related prior knowledge | Use search tool: `query="topic", corpus="knowledge", limit=5` |
-| Research question (which documents match?) | Use query tool: `question="topic", corpus="knowledge"` |
-| Filter by year, tag, or metadata | Use query tool: `question="topic", where="bib_year>=2023"` |
-| Filter by multiple criteria | Use query tool: `question="topic", where="bib_year>=2020,tags=arch"` |
+| Find related prior knowledge | mcp__plugin_nx_nexus__search( `query="topic", corpus="knowledge", limit=5` |
+| Research question (which documents match?) | mcp__plugin_nx_nexus__query( `question="topic", corpus="knowledge"` |
+| Filter by year, tag, or metadata | mcp__plugin_nx_nexus__query( `question="topic", where="bib_year>=2023"` |
+| Filter by multiple criteria | mcp__plugin_nx_nexus__query( `question="topic", where="bib_year>=2020,tags=arch"` |
 | Research with uncertain vocabulary | Run 2 queries: primary term, then alternate framing |
-| Conceptual code search (unfamiliar codebase) | Use search tool: `query="concept", corpus="code", limit=15` |
-| Documentation search | Use search tool: `query="topic", corpus="docs", limit=10` |
+| Conceptual code search (unfamiliar codebase) | mcp__plugin_nx_nexus__search( `query="concept", corpus="code", limit=15` |
+| Documentation search | mcp__plugin_nx_nexus__search( `query="topic", corpus="docs", limit=10` |
 | Exact code navigation | Use Grep tool instead — faster and more precise |
 | Cross-corpus research | Use query tool with `corpus="all"` or multiple query calls |
-| List documents in a collection | Use store_list tool: `collection="knowledge__art", docs=true` |
-| Browse collection contents | Use collection_info tool: `name="knowledge__art"` (shows sample titles) |
+| List documents in a collection | mcp__plugin_nx_nexus__store_list( `collection="knowledge__art", docs=true` |
+| Browse collection contents | mcp__plugin_nx_nexus__collection_info( `name="knowledge__art"` (shows sample titles) |
 
 **When NOT to use search:**
 - When the relay already contains the information needed
@@ -139,11 +139,11 @@ Agents produce artifacts based on their specialization:
 - **Interim Working Notes**: Use T1 scratch for session-scoped state; promote to T2 when validated:
   ```
   # Store ephemeral working note
-  Use scratch tool: action="put", content="<hypothesis or interim finding>", tags="hypothesis"
+  mcp__plugin_nx_nexus__scratch( action="put", content="<hypothesis or interim finding>", tags="hypothesis"
   # Flag for auto-flush to T2 at session end
-  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="interim-notes.md"
+  mcp__plugin_nx_nexus__scratch_manage( action="flag", entry_id="<id>", project="{project}", title="interim-notes.md"
   # Or promote immediately
-  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="interim-findings.md"
+  mcp__plugin_nx_nexus__scratch_manage( action="promote", entry_id="<id>", project="{project}", title="interim-findings.md"
   ```
 
 ### Naming Conventions
@@ -186,9 +186,9 @@ See [RELAY_TEMPLATE.md](./RELAY_TEMPLATE.md) for the full template, extended tem
 ## RECOVER (If Context Missing)
 
 If expected context not received:
-1. Search nx T3 store for related prior work: Use search tool: `query="[topic]", corpus="knowledge", limit=5`
-2. Check nx T2 memory for session state: Use memory_search tool: `query="[topic]", project="{project}"`
-3. Check T1 scratch for in-session notes: Use scratch tool: `action="search", query="[topic]"`
+1. Search nx T3 store for related prior work: mcp__plugin_nx_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
+2. Check nx T2 memory for session state: mcp__plugin_nx_nexus__memory_search( `query="[topic]", project="{project}"`
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch( `action="search", query="[topic]"`
 4. Query active work via `/beads:list` with status=in_progress
 5. Document assumption in bead notes
 6. Flag incomplete context in downstream relay
@@ -215,13 +215,13 @@ All agents should:
 ### Storage Tools
 ```
 # Store a document
-Use store_put tool: content="content", collection="knowledge", title="research-topic-date", tags="category"
+mcp__plugin_nx_nexus__store_put( content="content", collection="knowledge", title="research-topic-date", tags="category"
 
 # Search stored knowledge
-Use search tool: query="query", corpus="knowledge", limit=5
+mcp__plugin_nx_nexus__search( query="query", corpus="knowledge", limit=5
 
 # List stored documents
-Use store_list tool: collection="knowledge"
+mcp__plugin_nx_nexus__store_list( collection="knowledge"
 ```
 
 ### Metadata
@@ -242,16 +242,16 @@ Common titles under `{repo}`:
 ### Memory Tools
 ```
 # Write to memory
-Use memory_put tool: content="content", project="{project}", title="findings.md", ttl=30
+mcp__plugin_nx_nexus__memory_put( content="content", project="{project}", title="findings.md", ttl=30
 
 # Read from memory
-Use memory_get tool: project="{project}", title="findings.md"
+mcp__plugin_nx_nexus__memory_get( project="{project}", title="findings.md"
 
 # Search memory
-Use memory_search tool: query="query", project="{project}"
+mcp__plugin_nx_nexus__memory_search( query="query", project="{project}"
 
 # List memory files
-Use memory_get tool: project="{project}", title=""
+mcp__plugin_nx_nexus__memory_get( project="{project}", title=""
 ```
 
 ## Usage in Agent Files

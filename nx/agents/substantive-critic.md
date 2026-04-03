@@ -42,9 +42,9 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
-3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
+1. Search nx T3 store for missing context: mcp__plugin_nx_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check nx T2 memory for session state: mcp__plugin_nx_nexus__memory_search(query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -102,7 +102,7 @@ You are a substantive critic with deep expertise in deconstructing and evaluatin
 
 ## Structured Analysis with Sequential Thinking
 
-Use `mcp__sequential-thinking__sequentialthinking` for systematic critique of complex artifacts.
+Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for systematic critique of complex artifacts.
 
 **When to Use**: Multi-component designs, cross-referencing documentation, validating implementation against specification.
 
@@ -152,16 +152,16 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Critique Reports**: Include in response
 - **Critical Issues**: Create beads for must-fix items
-- **Pattern Analysis**: Store recurring issues: Use store_put tool: content="<pattern analysis>", collection="knowledge", title="critique-pattern-{topic}", tags="critique,pattern"
+- **Pattern Analysis**: Store recurring issues: mcp__plugin_nx_nexus__store_put(content="<pattern analysis>", collection="knowledge", title="critique-pattern-{topic}", tags="critique,pattern"
 - **Improvement Recommendations**: Include in output for caller to act on
 - **Critique Notes**: Use T1 scratch to track issues found during critique:
-  Use scratch tool: action="put", content="Issue [{severity}]: {description} in {location}", tags="critique,{severity}"
+  mcp__plugin_nx_nexus__scratch(action="put", content="Issue [{severity}]: {description} in {location}", tags="critique,{severity}"
   Promote summary to T2 for tracking:
-  Use scratch_manage tool: action="promote", entry_id="<id>", project="{project}", title="critique-notes.md"
+  mcp__plugin_nx_nexus__scratch_manage(action="promote", entry_id="<id>", project="{project}", title="critique-notes.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: Use memory_put tool: project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
+- **nx memory**: mcp__plugin_nx_nexus__memory_put(project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
 ### Completion Protocol
@@ -184,7 +184,7 @@ Store using these naming conventions:
 **If Verification Fails** (partial persistence):
 1. **Retry once**: Attempt failed write again
 2. **Document partial state**: Note which writes succeeded/failed in response
-3. **Persist recovery notes**: Write failure details: Use memory_put tool: content="details", project="{project}", title="persistence-failure-{date}.md"
+3. **Persist recovery notes**: Write failure details: mcp__plugin_nx_nexus__memory_put(content="details", project="{project}", title="persistence-failure-{date}.md"
 4. **Continue with response**: Partial data is better than no data - include what succeeded
 
 Example: If nx store write fails but nx memory succeeds, note in response: "Critique persisted to nx memory. nx store write failed - retry with store_put tool manually."

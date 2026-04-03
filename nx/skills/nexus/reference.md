@@ -26,12 +26,12 @@ Semantic search across T3 knowledge collections.
 | `where` | str | `""` | Metadata filter: `KEY=VALUE` or `KEY>=VALUE`, comma-separated. Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Numeric fields auto-coerced: `bib_year`, `bib_citation_count`, `page_count` |
 
 ```
-Use search tool: query="query"                                  # knowledge + code + docs (default)
-Use search tool: query="query", corpus="all"                    # all T3 collections
-Use search tool: query="query", corpus="code"                   # code collections only
-Use search tool: query="query", corpus="knowledge__art", limit=15  # specific collection
-Use search tool: query="query", where="bib_year>=2023"          # filter by year
-Use search tool: query="query", where="tags=arch,bib_year>=2020" # multiple filters
+mcp__plugin_nx_nexus__search(query="query"                                  # knowledge + code + docs (default)
+mcp__plugin_nx_nexus__search(query="query", corpus="all"                    # all T3 collections
+mcp__plugin_nx_nexus__search(query="query", corpus="code"                   # code collections only
+mcp__plugin_nx_nexus__search(query="query", corpus="knowledge__art", limit=15  # specific collection
+mcp__plugin_nx_nexus__search(query="query", where="bib_year>=2023"          # filter by year
+mcp__plugin_nx_nexus__search(query="query", where="tags=arch,bib_year>=2020" # multiple filters
 ```
 
 ### query
@@ -46,9 +46,9 @@ Document-level semantic search for analytical questions. Unlike `search` which r
 | `limit` | int | `10` | Maximum documents to return |
 
 ```
-Use query tool: question="adaptive resonance theory cortical maps"
-Use query tool: question="speech processing", corpus="knowledge__art", where="page_count>=50"
-Use query tool: question="error handling patterns", corpus="code", limit=5
+mcp__plugin_nx_nexus__query(question="adaptive resonance theory cortical maps"
+mcp__plugin_nx_nexus__query(question="speech processing", corpus="knowledge__art", where="page_count>=50"
+mcp__plugin_nx_nexus__query(question="error handling patterns", corpus="code", limit=5
 ```
 
 Returns per-document: title, relevance score, bibliographic metadata (year, authors, venue, citations), technical metadata (pages, chunks, extraction method, formulas), collection, and best matching snippet.
@@ -68,8 +68,8 @@ Store content in the T3 permanent knowledge store.
 | `ttl` | str | `"permanent"` | TTL: `Nd`, `Nw`, or `"permanent"` |
 
 ```
-Use store_put tool: content="finding text", collection="knowledge", title="research-topic", tags="arch"
-Use store_put tool: content="notes", collection="knowledge", title="sprint-notes", ttl="30d"
+mcp__plugin_nx_nexus__store_put(content="finding text", collection="knowledge", title="research-topic", tags="arch"
+mcp__plugin_nx_nexus__store_put(content="notes", collection="knowledge", title="sprint-notes", ttl="30d"
 ```
 
 **TTL formats**: `30d` (30 days), `4w` (4 weeks), `permanent` or `never` (no expiry).
@@ -84,7 +84,7 @@ Retrieve the full content and metadata of a T3 entry by document ID.
 | `collection` | str | `"knowledge"` | Collection name or prefix |
 
 ```
-Use store_get tool: doc_id="a1b2c3d4e5f6g7h8", collection="knowledge__notes"
+mcp__plugin_nx_nexus__store_get(doc_id="a1b2c3d4e5f6g7h8", collection="knowledge__notes"
 ```
 
 ### store_list
@@ -99,9 +99,9 @@ List entries in a T3 knowledge collection.
 | `docs` | bool | `false` | Show unique documents instead of individual chunks. Deduplicates by content_hash, shows title, chunk count, page count, extraction method |
 
 ```
-Use store_list tool: collection="knowledge"
-Use store_list tool: collection="knowledge__art", docs=true       # document-level view
-Use store_list tool: collection="knowledge__notes", limit=50, offset=100
+mcp__plugin_nx_nexus__store_list(collection="knowledge"
+mcp__plugin_nx_nexus__store_list(collection="knowledge__art", docs=true       # document-level view
+mcp__plugin_nx_nexus__store_list(collection="knowledge__notes", limit=50, offset=100
 ```
 
 ### store_delete
@@ -114,7 +114,7 @@ Delete a T3 knowledge entry by document ID.
 | `collection` | str | `"knowledge"` | Collection name or prefix |
 
 ```
-Use store_delete tool: doc_id="a1b2c3d4e5f6g7h8", collection="knowledge"
+mcp__plugin_nx_nexus__store_delete(doc_id="a1b2c3d4e5f6g7h8", collection="knowledge"
 ```
 
 ### memory_put
@@ -130,8 +130,8 @@ Store a memory entry in T2 (SQLite). Upserts by (project, title).
 | `ttl` | int | `30` | Time-to-live in days (0 for permanent) |
 
 ```
-Use memory_put tool: content="content", project="{repo}", title="findings.md"
-Use memory_put tool: content="content", project="{repo}", title="findings.md", ttl=0
+mcp__plugin_nx_nexus__memory_put(content="content", project="{repo}", title="findings.md"
+mcp__plugin_nx_nexus__memory_put(content="content", project="{repo}", title="findings.md", ttl=0
 ```
 
 **Project naming**: Use purpose-specific suffixes:
@@ -150,8 +150,8 @@ When title is empty, lists all entries for the project (titles only — a second
 | `title` | str | `""` | Entry title. Leave empty to LIST entries (titles only) |
 
 ```
-Use memory_get tool: project="{repo}", title="findings.md"       # get content
-Use memory_get tool: project="{repo}", title=""                   # list titles only
+mcp__plugin_nx_nexus__memory_get(project="{repo}", title="findings.md"       # get content
+mcp__plugin_nx_nexus__memory_get(project="{repo}", title=""                   # list titles only
 ```
 
 ### memory_delete
@@ -164,7 +164,7 @@ Delete a T2 memory entry by project and title.
 | `title` | str | required | Entry title to delete |
 
 ```
-Use memory_delete tool: project="{repo}", title="stale-finding"
+mcp__plugin_nx_nexus__memory_delete(project="{repo}", title="stale-finding"
 ```
 
 ### memory_search
@@ -179,8 +179,8 @@ Full-text search across T2 memory entries. Searches title, content, and tags fie
 | `offset` | int | `0` | Skip this many results. Footer shows `next: offset=N` for next page |
 
 ```
-Use memory_search tool: query="query"
-Use memory_search tool: query="query", project="{repo}"
+mcp__plugin_nx_nexus__memory_search(query="query"
+mcp__plugin_nx_nexus__memory_search(query="query", project="{repo}"
 ```
 
 ### scratch
@@ -197,11 +197,11 @@ T1 session scratch pad — ephemeral within-session storage.
 | `limit` | int | `10` | Max results for search |
 
 ```
-Use scratch tool: action="put", content="working hypothesis: the cache is stale"
-Use scratch tool: action="search", query="cache"
-Use scratch tool: action="list"
-Use scratch tool: action="get", entry_id="<id>"
-Use scratch tool: action="delete", entry_id="<id>"
+mcp__plugin_nx_nexus__scratch(action="put", content="working hypothesis: the cache is stale"
+mcp__plugin_nx_nexus__scratch(action="search", query="cache"
+mcp__plugin_nx_nexus__scratch(action="list"
+mcp__plugin_nx_nexus__scratch(action="get", entry_id="<id>"
+mcp__plugin_nx_nexus__scratch(action="delete", entry_id="<id>"
 ```
 
 ### scratch_manage
@@ -216,8 +216,8 @@ Manage scratch entries: flag for persistence or promote to T2.
 | `title` | str | `""` | Target title (required for promote) |
 
 ```
-Use scratch_manage tool: action="flag", entry_id="<id>"
-Use scratch_manage tool: action="promote", entry_id="<id>", project="{repo}", title="findings.md"
+mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>"
+mcp__plugin_nx_nexus__scratch_manage(action="promote", entry_id="<id>", project="{repo}", title="findings.md"
 ```
 
 **Usage pattern**: Use T1 scratch for in-flight working notes. Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via store_put.
@@ -227,7 +227,7 @@ Use scratch_manage tool: action="promote", entry_id="<id>", project="{repo}", ti
 List all T3 collections with document counts.
 
 ```
-Use collection_list tool
+mcp__plugin_nx_nexus__collection_list()
 ```
 
 Returns collection names, document counts, and embedding models for every collection in the T3 database.
@@ -241,8 +241,8 @@ Get detailed information about a T3 collection (count, models, sample entries).
 | `name` | str | required | Full collection name (e.g. `knowledge__notes`) |
 
 ```
-Use collection_info tool: name="knowledge__notes"
-Use collection_info tool: name="code__myrepo"
+mcp__plugin_nx_nexus__collection_info(name="knowledge__notes"
+mcp__plugin_nx_nexus__collection_info(name="code__myrepo"
 ```
 
 Returns count, index/query models, and a peek at the first few entry titles for discoverability.
@@ -316,10 +316,10 @@ nx mineru stop                             # stop server
 ## Workflow — when and why to use each tier
 
 **Session lifecycle:**
-1. Search T3 for prior art before starting work: Use search tool: `query="topic", corpus="knowledge"`
+1. Search T3 for prior art before starting work: mcp__plugin_nx_nexus__search(`query="topic", corpus="knowledge"`
 2. Index the codebase once per repo: `nx index repo <path>` (CLI)
 3. Use T1 scratch for working notes during the session
-4. Flag important scratch items for auto-promote to T2: Use scratch_manage tool: `action="flag", entry_id="<id>"`
+4. Flag important scratch items for auto-promote to T2: mcp__plugin_nx_nexus__scratch_manage(`action="flag", entry_id="<id>"`
 5. Persist validated findings to T3 at session end: Use store_put tool
 
 **Tier selection:**

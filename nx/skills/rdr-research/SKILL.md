@@ -30,10 +30,10 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 **Behavior:**
 
-1. **Determine next sequence number**: Use memory_get tool: project="{repo}_rdr", title=""
+1. **Determine next sequence number**: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title=""
    Filter entries where title matches `NNN-research-*`. Parse sequence numbers. Next seq = max + 1. If none exist, start at 1.
 
-2. **Write T2 record**: Use memory_put tool: content="rdr_id: NNN\nseq: {seq}\nfinding: Finding text here\nclassification: verified\nverification_method: source_search\nsource: Source description here\nacknowledged: false", project="{repo}_rdr", title="NNN-research-{seq}", ttl="permanent", tags="rdr,research,{classification}"
+2. **Write T2 record**: mcp__plugin_nx_nexus__memory_put(content="rdr_id: NNN\nseq: {seq}\nfinding: Finding text here\nclassification: verified\nverification_method: source_search\nsource: Source description here\nacknowledged: false", project="{repo}_rdr", title="NNN-research-{seq}", ttl="permanent", tags="rdr,research,{classification}"
 
 3. **Append to RDR markdown**: Add a formatted entry to the Research Findings > Key Discoveries section:
    ```markdown
@@ -43,7 +43,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 ### `/nx:rdr-research status <id>`
 
-1. List T2 entries: Use memory_get tool: project="{repo}_rdr", title=""
+1. List T2 entries: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title=""
 2. Filter titles matching `NNN-research-*`
 3. Parse and display summary:
    ```
@@ -57,7 +57,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 ### `/nx:rdr-research verify <id> <finding-seq>`
 
-1. Read T2 record: Use memory_get tool: project="{repo}_rdr", title="NNN-research-{seq}"
+1. Read T2 record: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN-research-{seq}"
 2. Prompt for new classification (verified or documented) and updated verification method
 3. Update T2 record (overwrite with updated content)
 4. Update the emoji marker in the RDR markdown file (e.g., ❓ → ✅)

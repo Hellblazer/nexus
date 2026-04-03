@@ -44,7 +44,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 The agent uses `mcp__sequential-thinking__sequentialthinking`:
 1. Form hypothesis about what information is needed
-2. Search nx store for existing knowledge: Use search tool: query="topic", corpus="knowledge"
+2. Search nx store for existing knowledge: mcp__plugin_nx_nexus__search(query="topic", corpus="knowledge"
 3. Search web resources for current information
 4. Analyze relevant code if applicable
 5. Synthesize findings from all sources

@@ -90,14 +90,14 @@ For each step in `plan["steps"]` in order:
 Execute via the search MCP tool directly:
 
 ```
-Use search tool: query="{step.search_query}", corpus="{step.corpus}", limit=10, where="{step.where}"
+mcp__plugin_nx_nexus__search(query="{step.search_query}", corpus="{step.corpus}", limit=10, where="{step.where}"
 ```
 
 If `step.where` is empty, omit the `where` parameter. If corpus contains multiple values (e.g., `"knowledge,code"`), run one search per corpus and concatenate the results.
 
 Write results to T1 scratch:
 ```
-Use scratch tool: action="put", content="{search results as text}", tags="query-step,step-{N},search"
+mcp__plugin_nx_nexus__scratch(action="put", content="{search results as text}", tags="query-step,step-{N},search"
 ```
 
 #### For all other operations (extract, summarize, rank, compare, generate):
@@ -105,7 +105,7 @@ Use scratch tool: action="put", content="{search results as text}", tags="query-
 **Resolve inputs**: Before dispatching the operator, resolve any `$step_N` references by reading from T1 scratch:
 
 ```
-Use scratch tool: action="search", query="query-step step-{N}"
+mcp__plugin_nx_nexus__scratch(action="search", query="query-step step-{N}"
 ```
 
 Retrieve the content from the matching scratch entry. If multiple entries match, use the most recent. Substitute the resolved content for the `$step_N` reference in the relay.
@@ -147,7 +147,7 @@ Operation result written to T1 scratch with tag "query-step,step-{N+1},{operatio
 Wait for the operator to complete. Write the operator's output to T1 scratch with tag `query-step,step-{N},{step.operation}`:
 
 ```
-Use scratch tool: action="put", content="{operator output}", tags="query-step,step-{N},{operation}"
+mcp__plugin_nx_nexus__scratch(action="put", content="{operator output}", tags="query-step,step-{N},{operation}"
 ```
 
 **Note**: The analytical-operator also writes to scratch itself. This redundant write by the skill ensures the tag `query-step,step-{N}` is always present for subsequent step resolution, regardless of the operator's exact tag format.
@@ -156,7 +156,7 @@ Use scratch tool: action="put", content="{operator output}", tags="query-step,st
 
 If an operator step fails (operator returns `{"error": ...}` or an exception):
 1. Log the error message.
-2. Write a failure marker to scratch: `Use scratch tool: action="put", content="FAILED: {reason}", tags="query-step,step-{N},error"`
+2. Write a failure marker to scratch: `mcp__plugin_nx_nexus__scratch(action="put", content="FAILED: {reason}", tags="query-step,step-{N},error"`
 3. Continue executing remaining steps. Steps that reference a failed step's output will receive the failure marker text as input — the operator will surface the absence of real data in its output.
 4. Track partial failure: set `outcome = "partial"` for any plan library save at the end.
 
@@ -165,7 +165,7 @@ If an operator step fails (operator returns `{"error": ...}` or an exception):
 After all steps complete, read the last step's output from T1 scratch:
 
 ```
-Use scratch tool: action="search", query="query-step step-{last_N}"
+mcp__plugin_nx_nexus__scratch(action="search", query="query-step step-{last_N}"
 ```
 
 Present the result to the user with a brief header:
