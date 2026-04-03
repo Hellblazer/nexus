@@ -288,8 +288,15 @@ class PDFExtractor:
         all_content_list: list[dict] = []
         all_pdf_info: list[dict] = []
 
-        for start, end in batches:
+        fname = pdf_path.name
+        for batch_idx, (start, end) in enumerate(batches):
             label = f"{start + 1}–{end}" if end is not None else f"{start + 1}–{total_pages}"
+            # Visible progress on stderr — the repo indexer progress bar freezes
+            # during MinerU extraction, so this is the only sign of life.
+            print(
+                f"\r  MinerU: page {start + 1}/{total_pages} ({fname})",
+                end="", flush=True, file=sys.stderr,
+            )
             _log.info("mineru_batch", pages=label, path=str(pdf_path))
             try:
                 md, content_list, pdf_info = self._mineru_run_isolated(pdf_path, start, end)
@@ -308,6 +315,10 @@ class PDFExtractor:
                     original_batch=span,
                 )
                 for page in range(start, end or total_pages):
+                    print(
+                        f"\r  MinerU: page {page + 1}/{total_pages} (retry, {fname})",
+                        end="", flush=True, file=sys.stderr,
+                    )
                     md, content_list, pdf_info = self._mineru_run_isolated(
                         pdf_path, page, page + 1,
                     )
@@ -318,6 +329,12 @@ class PDFExtractor:
             md_parts.append(md)
             all_content_list.extend(content_list)
             all_pdf_info.extend(pdf_info)
+
+        if batches:
+            print(
+                f"\r  MinerU: {total_pages}/{total_pages} done ({fname})",
+                file=sys.stderr,
+            )
 
         md_text = "\n".join(md_parts)
         return self._mineru_build_result(
