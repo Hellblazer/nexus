@@ -70,13 +70,7 @@ cat <<'NXTOOLS'
 
 ## nx Storage Tools
 
-**STEP 0 — REQUIRED before any nx tool call:** Load tools via ToolSearch. Tools are deferred and DO NOT EXIST until loaded.
-
-```
-ToolSearch("select:mcp__plugin_nx_nexus__search,mcp__plugin_nx_nexus__query,mcp__plugin_nx_nexus__scratch,mcp__plugin_nx_nexus__store_put,mcp__plugin_nx_nexus__memory_get,mcp__plugin_nx_nexus__memory_search")
-```
-
-Call ToolSearch ONCE with the tools you need before your first nx tool call. If you skip this step, your tool calls will fail.
+nx MCP tools are schema-deferred — names are visible but calls fail without loading schemas first. See your agent's MANDATORY nx Tool Setup section for the ToolSearch call.
 
 All results from search/list tools are **paged**. Response footer shows `Next page: offset=N`. Re-call with that offset to get more.
 

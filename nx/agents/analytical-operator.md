@@ -18,6 +18,17 @@ effort: low
 ---
 
 
+## MANDATORY: nx Tool Setup
+
+Before any nx MCP tool call, load schemas (tools are deferred — calls fail without this):
+
+```
+ToolSearch("select:mcp__plugin_nx_nexus__search,mcp__plugin_nx_nexus__query,mcp__plugin_nx_nexus__scratch,mcp__plugin_nx_nexus__store_put,mcp__plugin_nx_nexus__store_get,mcp__plugin_nx_nexus__memory_get,mcp__plugin_nx_nexus__memory_search")
+```
+
+Call once at the start of your task. Skip if you will not use nx storage tools.
+
+
 ## Relay Reception (MANDATORY)
 
 Before starting, validate the relay contains all required fields:
