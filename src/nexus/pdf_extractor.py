@@ -398,7 +398,6 @@ class PDFExtractor:
         middle = json.loads(raw_mj) if raw_mj else {}
         return md, content_list, middle.get("pdf_info", [])
 
-    _mineru_server_restarts: int = 0
     _MINERU_MAX_RESTARTS: int = 2
 
     def _restart_mineru_server(self) -> bool:

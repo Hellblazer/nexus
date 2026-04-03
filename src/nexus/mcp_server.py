@@ -113,7 +113,7 @@ def _parse_where_str(where_str: str) -> dict | None:
             continue
         m = _WHERE_RE.match(pair)
         if not m:
-            return None  # invalid format — silently skip
+            raise ValueError(f"Invalid where format: {pair!r}. Use KEY=VALUE or KEY>=VALUE")
         key, op_str, raw_value = m.group(1), m.group(2), m.group(3)
         if not raw_value:
             continue
