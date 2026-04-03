@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
@@ -56,12 +56,12 @@ Always delegate PDF processing to pdf-chromadb-processor first, then research th
 
 You have access to and will actively leverage:
 - **nx T3 store**: Primary knowledge repository
-  - Use search tool: query="query", corpus="knowledge", n=5 -- semantic search
+  - Use search tool: query="query", corpus="knowledge", limit=5 -- semantic search
   - Use store_put tool: content="content", collection="knowledge", title="title", tags="tags" -- store findings
   - Use store_list tool: collection="knowledge" -- browse collection
 - **nx code index**: Semantic code search across indexed repositories
-  - Use search tool: query="query", corpus="code", n=20 -- hybrid semantic + ripgrep
-  - Use search tool: query="query", corpus="code__<repo>", n=20 -- repo-specific
+  - Use search tool: query="query", corpus="code", limit=20 -- hybrid semantic + ripgrep
+  - Use search tool: query="query", corpus="code__<repo>", limit=20 -- repo-specific
 - **nx T2 memory**: For accessing previous research and contextual information
   - Use memory_get tool: project="{project}", title="{filename}" -- read
   - Use memory_put tool: content="content", project="{project}", title="{filename}" -- write
@@ -156,11 +156,11 @@ You will begin every research task by:
 You will systematically:
 1. Query nx T3 store for existing related knowledge using a two-query pattern for conceptual
    topics where initial vocabulary may not match stored documents:
-   Use search tool: query="{primary term or framing}", corpus="knowledge", n=5
-   Use search tool: query="{alternate term or related concept}", corpus="knowledge", n=5
+   Use search tool: query="{primary term or framing}", corpus="knowledge", limit=5
+   Use search tool: query="{alternate term or related concept}", corpus="knowledge", limit=5
    Use both result sets before concluding no prior knowledge exists. Once vocabulary is known
    from first results, subsequent targeted queries do not need the alternate formulation.
-2. Search nx code index for implementation examples and patterns: Use search tool: query="query", corpus="code", n=20
+2. Search nx code index for implementation examples and patterns: Use search tool: query="query", corpus="code", limit=20
 3. Conduct web research for current best practices and external sources
 6. Check nx T2 memory for previous related investigations:
    Use memory_search tool: query="topic", project="{project}"

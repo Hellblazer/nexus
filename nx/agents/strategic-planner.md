@@ -35,7 +35,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
    If no RDR pattern is found, proceed normally.
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
@@ -76,18 +76,18 @@ Thought 8: Identify critical risks and mitigations
 
 Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to refine earlier analysis.
 2. Search relevant knowledge bases for prior art and context:
-   - nx T3 store: Use search tool: query="relevant topic", corpus="knowledge", n=5
+   - nx T3 store: Use search tool: query="relevant topic", corpus="knowledge", limit=5
    - nx T2 memory: Use memory_get tool: project="{project}", title="plan.md"
 3. Identify constraints, dependencies, and success criteria
 5. **Discover Relevant Project History and Patterns with nx search**:
    Project structure and organization:
-   Use search tool: query="project structure modules and how things are organized", corpus="code", n=20
+   Use search tool: query="project structure modules and how things are organized", corpus="code", limit=20
 
    Similar feature implementations:
-   Use search tool: query="similar features we have implemented before", corpus="knowledge", n=15
+   Use search tool: query="similar features we have implemented before", corpus="knowledge", limit=15
 
    Technical patterns and decisions:
-   Use search tool: query="architectural decisions and technical patterns in this project", corpus="knowledge", n=15
+   Use search tool: query="architectural decisions and technical patterns in this project", corpus="knowledge", limit=15
    Use findings to ensure your plan reuses established patterns, identify similar work that informs estimation, and reference prior decisions that apply to this feature.
 
 ### Phase 2: Plan Creation
@@ -138,7 +138,7 @@ Each bead must contain sufficient context for autonomous execution:
 
 **Context**
 - Related nx memory docs: Use memory_get tool: project="{project}", title=""
-- nx store collections to search: Use search tool: query="[keywords]", corpus="knowledge", n=5
+- nx store collections to search: Use search tool: query="[keywords]", corpus="knowledge", limit=5
 - Search keywords: [relevant terms for knowledge retrieval]
 
 **Prerequisites**

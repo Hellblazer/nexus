@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search Nexus for missing context: Use search tool: query="query", corpus="knowledge", n=5
+1. Search Nexus for missing context: Use search tool: query="query", corpus="knowledge", limit=5
 2. Check Nexus memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
@@ -129,8 +129,8 @@ Set `needsMoreThoughts: true` to continue analysis, `isRevision: true` to revise
 
 **Check for developer context.** Search scratch for the developer's session experience:
 
-Use scratch tool: action="search", query="failed approach what was tried didn't work", n=5
-Use scratch tool: action="search", query="implementation checkpoint step completed", n=5
+Use scratch tool: action="search", query="failed approach what was tried didn't work", limit=5
+Use scratch tool: action="search", query="implementation checkpoint step completed", limit=5
 
 If the developer struggled with specific areas (tagged `failed-approach`), focus extra review attention there — code that was hard to get right is more likely to have subtle issues. If scratch is empty, proceed normally.
 
@@ -150,7 +150,7 @@ grep -r "similar-method-or-concept" --include="*.java" src/
 If the project's code collection has been re-indexed with small chunks (RDR-006), supplement
 with semantic search for conceptual patterns:
 
-Use search tool: query="error handling patterns in this module", corpus="code", n=10
+Use search tool: query="error handling patterns in this module", corpus="code", limit=10
 
 Use Grep as the primary path; the search tool as a supplement for conceptual queries when
 cross-file pattern discovery cannot be expressed as a grep.

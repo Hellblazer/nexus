@@ -161,7 +161,7 @@ Before starting, validate relay contains:
 5. [ ] At least one **Quality Criterion** in checkbox format: - [ ]
 
 If validation fails:
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
 2. Check nx T2 memory: Use memory_get tool: project="{project}", title="ACTIVE_INDEX.md"
 3. Query active beads: /beads:list --status=in_progress
 4. Flag incomplete relay in response to user

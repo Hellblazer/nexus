@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
@@ -80,8 +80,8 @@ Examine the problem from multiple perspectives:
 
 Search T3 for prior analysis of this component or failure class before gathering new evidence:
 
-Use search tool: query="{component} analysis findings", corpus="knowledge", n=5
-Use search tool: query="{error type or symptom}", corpus="knowledge", n=5
+Use search tool: query="{component} analysis findings", corpus="knowledge", limit=5
+Use search tool: query="{error type or symptom}", corpus="knowledge", limit=5
 
 A prior root-cause analysis for this failure class may immediately narrow the hypothesis space.
 Incorporate or explicitly refute prior findings in Thought 1. When T3 is empty the cost is

@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
@@ -118,23 +118,23 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 Before designing architecture, use Nexus extensively to understand existing patterns, integration points, and technical constraints in the codebase.
 
 **Phase 1: Understand System Architecture** (broad understanding):
-Use search tool: query="overall system architecture pattern and major components", corpus="code", n=30
+Use search tool: query="overall system architecture pattern and major components", corpus="code", limit=30
 Use to understand existing architectural style (microservices, monolith, modular, etc.).
 
 **Phase 2: Find Integration Patterns** (specific integrations):
-Use search tool: query="how are different modules integrated together", corpus="code", n=25
+Use search tool: query="how are different modules integrated together", corpus="code", limit=25
 Use to understand message passing, coupling, dependency patterns.
 
 **Phase 3: Identify Technical Constraints** (requirements):
-Use search tool: query="performance requirements and scalability constraints", corpus="code", n=20
+Use search tool: query="performance requirements and scalability constraints", corpus="code", limit=20
 Use to understand non-functional requirements affecting architecture.
 
 **Phase 4: Discover Similar Features** (precedent):
-Use search tool: query="similar feature implementations we have already designed", corpus="code", n=25
+Use search tool: query="similar feature implementations we have already designed", corpus="code", limit=25
 Use to leverage existing patterns for new features.
 
 **Phase 5: Find Technology Stack Patterns** (consistency):
-Use search tool: query="libraries and frameworks used across the system", corpus="code", n=20
+Use search tool: query="libraries and frameworks used across the system", corpus="code", limit=20
 Use to propose architectures using proven technologies.
 
 ### Integration with Planning Process

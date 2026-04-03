@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search Nexus for missing context: Use search tool: query="query", corpus="knowledge", n=5
+1. Search Nexus for missing context: Use search tool: query="query", corpus="knowledge", limit=5
 2. Check Nexus memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
@@ -48,8 +48,8 @@ Check `/beads:ready` for unblocked tasks.
 If the relay's Input Artifacts section contains no nx store titles and no nx memory paths —
 i.e., no prior knowledge has been assembled — search before starting:
 
-Use search tool: query="similar implementation patterns for {feature}", corpus="knowledge", n=5
-Use search tool: query="{key class or interface}", corpus="code", n=10
+Use search tool: query="similar implementation patterns for {feature}", corpus="knowledge", limit=5
+Use search tool: query="{key class or interface}", corpus="code", limit=10
 
 Skip this if the relay already includes nx store or nx memory artifacts. The relay is the
 primary source of context; this is a fallback for when none was assembled.
@@ -147,7 +147,7 @@ Store using these naming conventions:
 
 ## Tool Usage
 
-**Nexus Knowledge Store**: Use store_put tool for storing and relating complex information during long-running projects. Store architectural decisions, design patterns used, relationships between modules, and any knowledge that needs to be referenced across sessions. Query with search tool: query="query", corpus="knowledge", n=5.
+**Nexus Knowledge Store**: Use store_put tool for storing and relating complex information during long-running projects. Store architectural decisions, design patterns used, relationships between modules, and any knowledge that needs to be referenced across sessions. Query with search tool: query="query", corpus="knowledge", limit=5.
 
 **Nexus Memory (T2)**: Use memory_put/memory_get tools for persistent per-project memory (30d default TTL), intermediate results, and working notes during development. Use scratch tool for ephemeral session scratch that does not need to persist across sessions.
 
@@ -155,10 +155,10 @@ Store using these naming conventions:
 
 **Code Discovery with Nexus**: Before implementing features, use Nexus to find similar patterns in the codebase
 Find related implementations:
-Use search tool: query="similar caching patterns in codebase", corpus="code", n=15
+Use search tool: query="similar caching patterns in codebase", corpus="code", limit=15
 
 Locate error handling examples:
-Use search tool: query="how do we handle database exceptions", corpus="code", n=10
+Use search tool: query="how do we handle database exceptions", corpus="code", limit=10
 
 Integration with test-first:
 1. Use search tool to understand existing patterns

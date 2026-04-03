@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields:
 3. [ ] **params** object present (may be empty `{}` for default behavior)
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search Nexus for missing context: Use search tool: query="[topic]", corpus="knowledge", n=5
+1. Search Nexus for missing context: Use search tool: query="[topic]", corpus="knowledge", limit=5
 2. Check Nexus memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="query-step"
 4. Query active work via `/beads:list` with status=in_progress

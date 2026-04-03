@@ -65,7 +65,7 @@ If the developer agent returns with `## ESCALATION: Debugger Required` in its ou
 
 1. **Do not re-dispatch the developer.** The circuit breaker fired for a reason.
 2. **Escalation guard — check before dispatching:**
-   Use scratch tool: action="search", query="circuit-breaker-fired-for-[bead-id]", n=1
+   Use scratch tool: action="search", query="circuit-breaker-fired-for-[bead-id]", limit=1
    - **If found**: do NOT dispatch the debugger. Report to the user: "Developer circuit breaker has fired twice for bead [ID]. The debugger's fix did not resolve the issue. Human investigation recommended." **Stop here.**
    - **If not found**: write the guard entry NOW: Use scratch tool: action="put", content="circuit-breaker-fired-for-[bead-id]", tags="escalation-guard". Then proceed to step 3.
 3. **Dispatch the debugger** using this relay:

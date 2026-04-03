@@ -20,7 +20,7 @@ effort: low
 # Search
 Use search tool: query="query"                          # semantic search across T3
 Use search tool: query="query", corpus="code"           # code only
-Use search tool: query="query", corpus="knowledge", n=5 # knowledge with limit
+Use search tool: query="query", corpus="knowledge", limit=5 # knowledge with limit
 
 # Memory (T2)
 Use memory_put tool: content="content", project="{repo}", title="file.md"

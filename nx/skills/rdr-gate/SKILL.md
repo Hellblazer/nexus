@@ -100,7 +100,7 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 
 **Prior-art search** (within the agent): enumerate RDR collections and search:
 - Use store_list tool to enumerate collections, filter for `rdr__`
-- Use search tool: query="relevant query terms from RDR problem statement", corpus="{each_collection}", n=5
+- Use search tool: query="relevant query terms from RDR problem statement", corpus="{each_collection}", limit=5
 If no collections found: "No prior RDRs indexed. Cross-project prior-art search will improve as RDRs are indexed and closed."
 
 ### Gate Aggregation

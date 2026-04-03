@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
@@ -46,7 +46,7 @@ You are an elite codebase architect and analysis specialist with deep expertise 
 
 Before analysis, ensure the codebase is indexed:
 1. Run `nx index repo <path>` to index the repository (if not already done)
-2. Use search tool: query="query", corpus="code__<repo>", n=20 for semantic code search throughout analysis
+2. Use search tool: query="query", corpus="code__<repo>", limit=20 for semantic code search throughout analysis
 3. Use search tool: query="query", corpus="code" for cross-repo searches
 
 This provides semantic search + ripgrep + git frecency, far more powerful than grep alone.
@@ -89,7 +89,7 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 
 4. **Nexus Knowledge Management**: Use store_put and search tools as documentation repository and coordination hub:
    - Store findings: Use store_put tool: content="content", collection="knowledge", title="ID", tags="category"
-   - Query findings: Use search tool: query="query", corpus="knowledge", n=5
+   - Query findings: Use search tool: query="query", corpus="knowledge", limit=5
    - Document relationships between components
    - Track analysis progress and coverage gaps
    - Coordinate insights between parallel subtasks
@@ -97,13 +97,13 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 
 5. **Initial Reconnaissance with Nexus**: Begin semantic exploration before traditional file analysis:
    Understand architecture:
-   Use search tool: query="system architecture and module dependencies", corpus="code", n=30
+   Use search tool: query="system architecture and module dependencies", corpus="code", limit=30
 
    Find key abstractions:
-   Use search tool: query="main design patterns used in codebase", corpus="code", n=25
+   Use search tool: query="main design patterns used in codebase", corpus="code", limit=25
 
    Locate integration points:
-   Use search tool: query="external service integrations and APIs", corpus="code", n=20
+   Use search tool: query="external service integrations and APIs", corpus="code", limit=20
    Combine semantic findings with Glob (file structure) and Serena (symbol navigation — see nx:serena-code-nav) for complete understanding.
 
 6. **Context Conservation Strategy**:

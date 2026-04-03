@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
@@ -49,7 +49,7 @@ T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 - Validate version numbers, API compatibility, and dependency requirements
 - Verify that proposed solutions actually solve the stated problems
 - Check mathematical formulas, algorithms, and computational approaches for correctness
-- Use Nexus to maintain a knowledge graph of verified facts and relationships: Use search tool: query="query", corpus="knowledge", n=5
+- Use Nexus to maintain a knowledge graph of verified facts and relationships: Use search tool: query="query", corpus="knowledge", limit=5
 
 ### 3. Relevancy Analysis
 - Assess whether each component directly contributes to the stated objectives
@@ -93,7 +93,7 @@ grep -r "authenticate\|AuthFilter" --include="*.java" src/
 
 For conceptual cross-file pattern questions where Grep is insufficient, and only after RDR-006
 re-indexing with small chunks:
-Use search tool: query="EntityManager usage patterns", corpus="code", n=5
+Use search tool: query="EntityManager usage patterns", corpus="code", limit=5
 
 Use Grep as the primary path; the search tool as a supplement for conceptual queries only.
 
@@ -157,7 +157,7 @@ You will follow this systematic approach:
 You will leverage Nexus to:
 - Store and relate all plan components, requirements, and constraints: Use store_put tool: content="...", collection="knowledge", title="validation-plan-{plan-id}", tags="audit"
 - Build a knowledge graph of technology relationships and compatibility
-- Track validation history and identified issues: Use search tool: query="query", corpus="knowledge", n=5
+- Track validation history and identified issues: Use search tool: query="query", corpus="knowledge", limit=5
 - Maintain a repository of best practices and anti-patterns
 - Create semantic connections between related concepts
 - Query for similar past issues and their resolutions
@@ -231,7 +231,7 @@ Store using these naming conventions:
 
 **Verification Checklist**:
 - [ ] Nexus memory audit file written: Use memory_get tool: project="{project}", title="audit-{date}.md" to verify
-- [ ] Nexus knowledge validation document created: Use search tool: query="validation plan {plan-id}", corpus="knowledge", n=1 to verify
+- [ ] Nexus knowledge validation document created: Use search tool: query="validation plan {plan-id}", corpus="knowledge", limit=1 to verify
 - [ ] Bead design field updated with recommendations (use /beads:show <id> when updating plan beads)
 - [ ] All data persisted before composing final response
 
@@ -288,7 +288,7 @@ You will:
 - Validate your conclusions through multiple reasoning paths
 - Seek clarification on ambiguous points rather than making assumptions
 - Provide evidence and references for all critical findings
-- Use Nexus to cross-reference and verify consistency of your analysis: Use search tool: query="query", corpus="knowledge", n=5
+- Use Nexus to cross-reference and verify consistency of your analysis: Use search tool: query="query", corpus="knowledge", limit=5
 
 Your goal is to ensure that when implementation begins, there are no surprises, no missing pieces, and no fundamental flaws that could derail the project. Be thorough, be critical, but also be constructive in your feedback.
 

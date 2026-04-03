@@ -90,7 +90,7 @@ For each step in `plan["steps"]` in order:
 Execute via the search MCP tool directly:
 
 ```
-Use search tool: query="{step.search_query}", corpus="{step.corpus}", n=10
+Use search tool: query="{step.search_query}", corpus="{step.corpus}", limit=10
 ```
 
 If corpus contains multiple values (e.g., `"knowledge,code"`), run one search per corpus and concatenate the results.

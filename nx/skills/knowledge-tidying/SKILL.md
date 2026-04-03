@@ -55,7 +55,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 - `pattern-{pattern-name}` - Reusable patterns
 
 **Verify storage**:
-- Use search tool: query="topic", corpus="knowledge", n=5 — confirm searchable
+- Use search tool: query="topic", corpus="knowledge", limit=5 — confirm searchable
 - Use store_list tool: collection="knowledge" — list all knowledge entries
 
 ## Contradiction Handling

@@ -25,7 +25,7 @@ Before starting, validate the relay contains:
 2. [ ] Optional **few_shot_plans** — examples from the T2 plan library (may be empty or absent)
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search Nexus for missing context: Use search tool: query="[topic]", corpus="knowledge", n=5
+1. Search Nexus for missing context: Use search tool: query="[topic]", corpus="knowledge", limit=5
 2. Check Nexus memory for session state: Use memory_search tool: query="query plan", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="query question"
 4. Query active work via `/beads:list` with status=in_progress

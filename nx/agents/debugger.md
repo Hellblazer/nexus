@@ -27,7 +27,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
+1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", limit=5
 2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
@@ -42,7 +42,7 @@ T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
 Before forming hypotheses, check if the developer or other agents left context in scratch:
 
-Use scratch tool: action="search", query="failed approach what was tried didn't work", n=5
+Use scratch tool: action="search", query="failed approach what was tried didn't work", limit=5
 
 If `failed-approach` entries exist, incorporate them — these are approaches already ruled out. Do not re-investigate what a predecessor already disproved.
 
@@ -51,8 +51,8 @@ If `failed-approach` entries exist, incorporate them — these are approaches al
 Search T3 for prior root-cause analyses before forming hypotheses — a prior trace for this
 failure class may immediately narrow the search space:
 
-Use search tool: query="{error message or symptom}", corpus="knowledge", n=5
-Use search tool: query="{component or class} failures", corpus="knowledge", n=5
+Use search tool: query="{error message or symptom}", corpus="knowledge", limit=5
+Use search tool: query="{component or class} failures", corpus="knowledge", limit=5
 
 Incorporate confirmed prior findings into Thought 1. If prior findings are present but the
 symptom differs, note the distinction explicitly before branching.
@@ -118,13 +118,13 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 **Context Gathering with Nexus:**
 Use semantic search to understand error patterns and data flow:
 Find error handling patterns:
-Use search tool: query="how are NPEs handled in service layer", corpus="code", n=15
+Use search tool: query="how are NPEs handled in service layer", corpus="code", limit=15
 
 Locate similar bugs:
-Use search tool: query="past issues with database connection timeouts", corpus="knowledge", n=10
+Use search tool: query="past issues with database connection timeouts", corpus="knowledge", limit=10
 
 Understand data flow:
-Use search tool: query="how does user data flow from controller to database", corpus="code", n=20
+Use search tool: query="how does user data flow from controller to database", corpus="code", limit=20
 
 Pattern: Form hypothesis -> Use search tool to gather evidence -> Validate with tests
 
