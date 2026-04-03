@@ -194,3 +194,40 @@ class TestBatchIndexErrors:
         ])
         assert result.exit_code != 0
         assert "dry-run" in result.output.lower()
+
+
+class TestBatchServerAdvisory:
+    """Server availability advisory in batch mode."""
+
+    def test_server_absent_warning(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        """When MinerU server is not running, batch prints advisory."""
+        with (
+            patch("nexus.doc_indexer.index_pdf", side_effect=_mock_index_pdf),
+            patch("nexus.pdf_extractor.PDFExtractor._mineru_server_available",
+                  return_value=False),
+        ):
+            result = runner.invoke(main, [
+                "index", "pdf", "--dir", str(pdf_dir), "--extractor", "mineru",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert "not running" in result.output.lower()
+        assert "nx mineru start" in result.output
+
+    def test_server_available_message(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        """When MinerU server is running, batch confirms it."""
+        with (
+            patch("nexus.doc_indexer.index_pdf", side_effect=_mock_index_pdf),
+            patch("nexus.pdf_extractor.PDFExtractor._mineru_server_available",
+                  return_value=True),
+        ):
+            result = runner.invoke(main, [
+                "index", "pdf", "--dir", str(pdf_dir), "--extractor", "mineru",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert "server available" in result.output.lower()

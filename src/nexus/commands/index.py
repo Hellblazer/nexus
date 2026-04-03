@@ -229,6 +229,20 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         total = len(pdfs)
         total_chunks = 0
         failures: list[tuple[Path, str]] = []
+
+        # Check if MinerU server is available for batch performance
+        if extractor in ("auto", "mineru"):
+            from nexus.pdf_extractor import PDFExtractor
+            _extractor = PDFExtractor()
+            server_up = _extractor._mineru_server_available()
+            if server_up:
+                click.echo(f"MinerU server available — using server-backed extraction")
+            else:
+                click.echo(
+                    "MinerU server not running. Batch will use subprocess mode "
+                    "(slower). Start with: nx mineru start"
+                )
+
         batch_start = _time.monotonic()
 
         for i, pdf in enumerate(pdfs, 1):
