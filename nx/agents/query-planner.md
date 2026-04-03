@@ -83,7 +83,8 @@ Return a single JSON object with this structure:
       "step": 1,
       "operation": "search",
       "search_query": "relevant search terms derived from the question",
-      "corpus": "knowledge,code,docs"
+      "corpus": "knowledge,code,docs",
+      "where": ""
     },
     {
       "step": 2,
@@ -138,9 +139,12 @@ Retrieves content from nx T3 collections. Executed by the skill via the search M
 
 **Required fields**: `search_query`, `corpus` (optional, defaults to `knowledge`)
 
-**Example**:
+**Optional fields**: `where` — metadata filter in `KEY=VALUE` or `KEY>=VALUE` format, comma-separated. Useful for filtering by `bib_year`, `tags`, `bib_citation_count`, etc.
+
+**Examples**:
 ```json
 {"step": 1, "operation": "search", "search_query": "LRU caching eviction policy implementation", "corpus": "knowledge,code"}
+{"step": 1, "operation": "search", "search_query": "adaptive resonance theory", "corpus": "knowledge", "where": "bib_year>=2020"}
 ```
 
 ---

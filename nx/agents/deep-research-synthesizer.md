@@ -57,8 +57,10 @@ Always delegate PDF processing to pdf-chromadb-processor first, then research th
 You have access to and will actively leverage:
 - **nx T3 store**: Primary knowledge repository
   - Use search tool: query="query", corpus="knowledge", limit=5 -- semantic search
+  - Use search tool: query="query", where="bib_year>=2023" -- filter by metadata
+  - Use store_list tool: collection="knowledge__art", docs=true -- document-level view
   - Use store_put tool: content="content", collection="knowledge", title="title", tags="tags" -- store findings
-  - Use store_list tool: collection="knowledge" -- browse collection
+  - Use store_list tool: collection="knowledge" -- browse chunks
 - **nx code index**: Semantic code search across indexed repositories
   - Use search tool: query="query", corpus="code", limit=20 -- hybrid semantic + ripgrep
   - Use search tool: query="query", corpus="code__<repo>", limit=20 -- repo-specific

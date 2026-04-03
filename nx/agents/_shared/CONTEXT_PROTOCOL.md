@@ -111,11 +111,15 @@ Use the right search form for the task:
 | Goal | Tool Call |
 |---|---|
 | Find related prior knowledge | Use search tool: `query="topic", corpus="knowledge", limit=5` |
+| Filter by year, tag, or metadata | Use search tool: `query="topic", where="bib_year>=2023"` |
+| Filter by multiple criteria | Use search tool: `query="topic", where="bib_year>=2020,tags=arch"` |
 | Research with uncertain vocabulary | Run 2 searches: primary term, then alternate framing |
 | Conceptual code search (unfamiliar codebase) | Use search tool: `query="concept", corpus="code", limit=15` |
 | Documentation search | Use search tool: `query="topic", corpus="docs", limit=10` |
 | Exact code navigation | Use Grep tool instead — faster and more precise |
 | Cross-corpus research | Run multiple search calls with different corpus values |
+| List documents in a collection | Use store_list tool: `collection="knowledge__art", docs=true` |
+| Browse collection contents | Use collection_info tool: `name="knowledge__art"` (shows sample titles) |
 
 **When NOT to use search:**
 - When the relay already contains the information needed

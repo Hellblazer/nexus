@@ -90,10 +90,10 @@ For each step in `plan["steps"]` in order:
 Execute via the search MCP tool directly:
 
 ```
-Use search tool: query="{step.search_query}", corpus="{step.corpus}", limit=10
+Use search tool: query="{step.search_query}", corpus="{step.corpus}", limit=10, where="{step.where}"
 ```
 
-If corpus contains multiple values (e.g., `"knowledge,code"`), run one search per corpus and concatenate the results.
+If `step.where` is empty, omit the `where` parameter. If corpus contains multiple values (e.g., `"knowledge,code"`), run one search per corpus and concatenate the results.
 
 Write results to T1 scratch:
 ```
