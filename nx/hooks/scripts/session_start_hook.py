@@ -98,12 +98,15 @@ def main() -> None:
     # --- Capabilities summary (AI-optimized, minimal tokens) ---
     output_lines.append("## nx Capabilities")
     output_lines.append("")
-    output_lines.append("Search: `nx search QUERY` — `--where KEY>=VALUE` (operators: = >= <= > < !=, numeric auto-coerced)")
-    output_lines.append("Analytical queries: `/nx:query` — cross-corpus consistency, structured extraction, multi-source synthesis")
-    output_lines.append("Enrichment: `nx enrich COLLECTION` — Semantic Scholar metadata backfill")
+    output_lines.append("Search: `search` MCP tool — `where=\"KEY>=VALUE\"` for metadata filtering")
+    output_lines.append("Document search: `query` MCP tool — document-level results with full metadata")
+    output_lines.append("Analytical queries: `/nx:query` skill — multi-step retrieval and analysis")
     output_lines.append("Plan library: `plan_save`/`plan_search` MCP tools (T2, project-scoped)")
-    output_lines.append("Scratch: `nx scratch put/search/list/flag` — session-scoped, shared across agents")
+    output_lines.append("Scratch: `scratch` MCP tool — session-scoped, shared across agents")
+    output_lines.append("Enrichment: `nx enrich COLLECTION` (CLI only)")
     output_lines.append("Pagination: search/store_list/memory_search return paged results. Footer shows `offset=N` for next page.")
+    output_lines.append("")
+    output_lines.append("MCP tool prefix: `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_nexus__search`, `mcp__plugin_nx_nexus__query`)")
     output_lines.append("")
 
     if output_lines:

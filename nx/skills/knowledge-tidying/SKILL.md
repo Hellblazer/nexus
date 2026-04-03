@@ -55,13 +55,13 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 - `pattern-{pattern-name}` - Reusable patterns
 
 **Verify storage**:
-- Use search tool: query="topic", corpus="knowledge", n=5 — confirm searchable
-- Use store_list tool: collection="knowledge" — list all knowledge entries
+- mcp__plugin_nx_nexus__search(query="topic", corpus="knowledge", limit=5 — confirm searchable
+- mcp__plugin_nx_nexus__store_list(collection="knowledge" — list all knowledge entries
 
 ## Contradiction Handling
 
 If contradictions found with existing knowledge:
-1. Search: Use search tool: query="topic", corpus="knowledge" to find related entries
+1. Search: mcp__plugin_nx_nexus__search(query="topic", corpus="knowledge" to find related entries
 2. Identify which is more current/accurate
 3. Replace the stale entry by re-storing with the corrected content
 

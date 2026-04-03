@@ -11,6 +11,7 @@ Architecture:
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 import warnings
@@ -68,11 +69,7 @@ def _get_t3():
 
 
 def _get_collection_names() -> list[str]:
-    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds.
-
-    Uses atomic tuple assignment to avoid the two-write race where a concurrent
-    reader could see the updated list but the stale timestamp (or vice versa).
-    """
+    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds."""
     global _collections_cache
     names, ts = _collections_cache
     now = time.monotonic()
@@ -87,6 +84,64 @@ def _t2_ctx():
     """Return a T2Database context manager — fresh per call."""
     from nexus.db.t2 import T2Database
     return T2Database(default_db_path())
+
+
+# ── Where-filter parser (shared with CLI) ────────────────────────────────────
+
+_NUMERIC_FIELDS = frozenset({
+    "bib_year", "bib_citation_count", "page_number", "page_count",
+    "chunk_index", "chunk_count", "chunk_start_char", "chunk_end_char",
+})
+_WHERE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(>=|<=|!=|>|<|=)(.*)$")
+_OP_MAP: dict[str, str | None] = {
+    ">=": "$gte", "<=": "$lte", "!=": "$ne",
+    ">": "$gt", "<": "$lt", "=": None,
+}
+
+
+def _parse_where_str(where_str: str) -> dict | None:
+    """Parse comma-separated KEY{op}VALUE pairs into a ChromaDB where dict.
+
+    Returns None when where_str is empty.
+    """
+    if not where_str.strip():
+        return None
+    parts: list[dict] = []
+    for pair in where_str.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        m = _WHERE_RE.match(pair)
+        if not m:
+            raise ValueError(f"Invalid where format: {pair!r}. Use KEY=VALUE or KEY>=VALUE")
+        key, op_str, raw_value = m.group(1), m.group(2), m.group(3)
+        if not raw_value:
+            continue
+        # Auto-coerce numeric fields
+        value: str | int | float = raw_value
+        if key in _NUMERIC_FIELDS:
+            try:
+                value = int(raw_value)
+            except ValueError:
+                try:
+                    value = float(raw_value)
+                except ValueError:
+                    pass
+        chroma_op = _OP_MAP[op_str]
+        if chroma_op is None:
+            parts.append({key: value})
+        else:
+            parts.append({key: {chroma_op: value}})
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    if all(not isinstance(v, dict) for p in parts for v in p.values()):
+        merged: dict = {}
+        for p in parts:
+            merged.update(p)
+        return merged
+    return {"$and": parts}
 
 
 # ── Test injection ────────────────────────────────────────────────────────────
@@ -119,22 +174,27 @@ _DEFAULT_PAGE_SIZE = 10
 
 
 @mcp.tool()
-def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10, offset: int = 0) -> str:
+def search(
+    query: str,
+    corpus: str = "knowledge,code,docs",
+    limit: int = 10,
+    offset: int = 0,
+    where: str = "",
+) -> str:
     """Semantic search across T3 knowledge collections.
 
-    Results are paged. Use offset to retrieve subsequent pages.
-
     Results are paged. Response footer shows ``offset=N`` for next page.
-    Semantic search cannot report a true total — when results equal
-    the fetch limit, the footer says "may have more". Stop paginating
-    when you receive "No results at offset N".
 
     Args:
         query: Search query string
-        corpus: Comma-separated corpus prefixes or full collection names (default: knowledge,code,docs).
-                Use "all" to search all corpora (knowledge, code, docs, rdr).
-        n: Page size — results per page (default 10)
+        corpus: Comma-separated corpus prefixes or full collection names.
+                Use "all" to search all corpora.
+        limit: Page size — results per page (default 10)
         offset: Skip this many results (default 0). Use for pagination.
+        where: Metadata filter in KEY=VALUE format, comma-separated.
+               Operators: =, >=, <=, >, <, !=
+               Numeric fields auto-coerced: bib_year, bib_citation_count, page_count.
+               Example: "bib_year>=2023,tags=arch"
     """
     try:
         from nexus.search_engine import search_cross_corpus
@@ -156,29 +216,34 @@ def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10, offset:
 
         if not target:
             return f"No collections match corpus {corpus!r}"
+
+        where_dict = _parse_where_str(where)
+
         # Fetch enough to fill the requested page
-        fetch_n = offset + n
-        results = search_cross_corpus(query, target, n_results=fetch_n, t3=t3)
+        fetch_n = offset + limit
+        results = search_cross_corpus(
+            query, target, n_results=fetch_n, t3=t3, where=where_dict,
+        )
         results.sort(key=lambda r: r.distance)
         if not results:
             return "No results."
 
         # Apply pagination
         total = len(results)
-        page = results[offset:offset + n]
+        page = results[offset:offset + limit]
         if not page:
             return f"No results at offset {offset} (total {total})."
 
         lines: list[str] = []
         for r in page:
-            title = r.metadata.get("title", "")
+            title = r.metadata.get("source_title") or r.metadata.get("title", "")
             source = r.metadata.get("source_path", "")
             dist = f"{r.distance:.4f}"
             label = title or source or r.id
             snippet = r.content[:200].replace("\n", " ")
             lines.append(f"[{dist}] {label}\n  {snippet}")
 
-        # Pagination footer (standardized format across all paged tools)
+        # Pagination footer
         shown_end = offset + len(page)
         if shown_end < total:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
@@ -188,6 +253,138 @@ def search(query: str, corpus: str = "knowledge,code,docs", n: int = 10, offset:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
 
         return "\n\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def query(
+    question: str,
+    corpus: str = "knowledge",
+    where: str = "",
+    limit: int = 10,
+) -> str:
+    """Document-level semantic search for analytical questions.
+
+    Unlike ``search`` which returns individual chunks, ``query`` groups results
+    by source document and returns the best-matching snippet per document along
+    with full metadata (title, year, citations, page count, extraction method).
+
+    Use this for research questions where you need to know WHICH documents match,
+    not just which text fragments. The calling agent handles analysis/synthesis.
+
+    Args:
+        question: Natural-language research question
+        corpus: Corpus prefix or full collection name (default: knowledge).
+                Use "all" for all corpora.
+        where: Metadata filter — KEY=VALUE, comma-separated.
+               Example: "bib_year>=2020,tags=arch"
+        limit: Maximum documents to return (default 10)
+    """
+    try:
+        from nexus.search_engine import search_cross_corpus
+        t3 = _get_t3()
+
+        if corpus == "all":
+            corpus = "knowledge,code,docs,rdr"
+
+        target: list[str] = []
+        all_names = _get_collection_names()
+        for part in corpus.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "__" in part:
+                target.append(part)
+            else:
+                target.extend(resolve_corpus(part, all_names))
+
+        if not target:
+            return f"No collections match corpus {corpus!r}"
+
+        where_dict = _parse_where_str(where)
+
+        # Over-fetch chunks to ensure good document coverage
+        fetch_n = limit * 10
+        results = search_cross_corpus(
+            question, target, n_results=fetch_n, t3=t3, where=where_dict,
+        )
+        results.sort(key=lambda r: r.distance)
+        if not results:
+            return "No documents found."
+
+        # Group by document: use content_hash or source_title as doc key
+        docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
+        for r in results:
+            meta = r.metadata
+            doc_key = (
+                meta.get("content_hash")
+                or meta.get("source_title")
+                or meta.get("source_path")
+                or r.id
+            )
+            if doc_key not in docs:
+                docs[doc_key] = {
+                    "title": meta.get("source_title") or meta.get("title") or doc_key[:40],
+                    "collection": r.collection,
+                    "distance": r.distance,
+                    "snippet": r.content[:300].replace("\n", " "),
+                    "bib_year": meta.get("bib_year", ""),
+                    "bib_authors": meta.get("bib_authors", ""),
+                    "bib_citation_count": meta.get("bib_citation_count", ""),
+                    "bib_venue": meta.get("bib_venue", ""),
+                    "page_count": meta.get("page_count", ""),
+                    "chunk_count": meta.get("chunk_count", ""),
+                    "extraction_method": meta.get("extraction_method", ""),
+                    "has_formulas": meta.get("has_formulas", ""),
+                    "source_path": meta.get("source_path", ""),
+                }
+            elif r.distance < docs[doc_key]["distance"]:
+                # Better matching chunk — update snippet
+                docs[doc_key]["distance"] = r.distance
+                docs[doc_key]["snippet"] = r.content[:300].replace("\n", " ")
+
+        # Sort by best match distance, limit
+        sorted_docs = sorted(docs.values(), key=lambda d: d["distance"])[:limit]
+
+        lines: list[str] = [f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"]
+        lines.append("")
+        for i, d in enumerate(sorted_docs, 1):
+            dist = f"{d['distance']:.4f}"
+            title = d["title"][:70]
+            header_parts = [f"[{dist}] {title}"]
+            # Bibliographic metadata
+            bib_parts: list[str] = []
+            if d["bib_year"]:
+                bib_parts.append(str(d["bib_year"]))
+            if d["bib_authors"]:
+                authors = d["bib_authors"][:60]
+                bib_parts.append(authors)
+            if d["bib_venue"]:
+                bib_parts.append(d["bib_venue"][:30])
+            if d["bib_citation_count"]:
+                bib_parts.append(f"{d['bib_citation_count']} citations")
+            # Technical metadata
+            tech_parts: list[str] = []
+            if d["page_count"]:
+                tech_parts.append(f"{d['page_count']}p")
+            if d["chunk_count"]:
+                tech_parts.append(f"{d['chunk_count']} chunks")
+            if d["extraction_method"]:
+                tech_parts.append(d["extraction_method"])
+            if d["has_formulas"]:
+                tech_parts.append("formulas")
+
+            lines.append(f"{i}. {' | '.join(header_parts)}")
+            if bib_parts:
+                lines.append(f"   {' · '.join(bib_parts)}")
+            if tech_parts:
+                lines.append(f"   [{' · '.join(tech_parts)}]")
+            lines.append(f"   {d['collection']}")
+            lines.append(f"   {d['snippet']}")
+            lines.append("")
+
+        return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
 
@@ -230,10 +427,9 @@ def store_put(
 
 @mcp.tool()
 def store_get(doc_id: str, collection: str = "knowledge") -> str:
-    """Retrieve the full content and metadata of a T3 knowledge entry by its document ID.
+    """Retrieve the full content and metadata of a T3 knowledge entry by document ID.
 
-    Use this after store_list or search to read a complete document beyond the 200-char
-    search snippet. The doc_id is the 16-char hex ID shown by store_list or store_put.
+    Use after store_list or search to read the complete document.
 
     Args:
         doc_id: Exact document ID (from store_list or store_put output)
@@ -247,14 +443,17 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         entry = t3.get_by_id(col_name, doc_id)
         if entry is None:
             return f"Not found: {doc_id!r} in {col_name}"
-        title = entry.get("title", "")
+        title = entry.get("source_title") or entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
+        method = entry.get("extraction_method", "")
         lines: list[str] = [f"ID:         {entry['id']}", f"Collection: {col_name}"]
         if title:
             lines.append(f"Title:      {title}")
         if tags:
             lines.append(f"Tags:       {tags}")
+        if method:
+            lines.append(f"Extractor:  {method}")
         if indexed_at:
             lines.append(f"Indexed:    {indexed_at}")
         lines.append("")
@@ -265,7 +464,12 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
 
 
 @mcp.tool()
-def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) -> str:
+def store_list(
+    collection: str = "knowledge",
+    limit: int = 20,
+    offset: int = 0,
+    docs: bool = False,
+) -> str:
     """List entries in a T3 knowledge collection.
 
     Results are paged. Use offset to retrieve subsequent pages.
@@ -274,11 +478,13 @@ def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) 
         collection: Collection name or prefix (default: knowledge)
         limit: Page size (default 20)
         offset: Skip this many entries (default 0). Use for pagination.
+        docs: If True, show unique documents instead of individual chunks.
+              Deduplicates by content_hash, shows title, chunk count, page count,
+              and extraction method. Ignores offset/limit (scans full collection).
     """
     try:
         col_name = t3_collection_name(collection)
         t3 = _get_t3()
-        # Get true total from collection count
         try:
             info = t3.collection_info(col_name)
             total = info["count"]
@@ -286,14 +492,17 @@ def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) 
             return f"Collection not found: {col_name}"
         if total == 0:
             return f"No entries in {col_name}."
-        entries = t3.list_store(col_name, limit=offset + limit)
-        page = entries[offset:offset + limit]
+
+        if docs:
+            return _store_list_docs(t3, col_name, total)
+
+        page = t3.list_store(col_name, limit=limit, offset=offset)
         if not page:
             return f"No entries at offset {offset} (total {total})."
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
         for e in page:
             doc_id = e.get("id", "")[:16]
-            title = (e.get("title") or "")[:40]
+            title = (e.get("title") or e.get("source_title") or "")[:40]
             tags = e.get("tags") or ""
             ttl_days = e.get("ttl_days", 0)
             expires_at = e.get("expires_at") or ""
@@ -310,6 +519,56 @@ def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) 
         else:
             lines.append(f"--- showing {offset + 1}-{shown_end} of {total} (end)")
         return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _store_list_docs(t3, col_name: str, total: int) -> str:
+    """Document-level view: deduplicate chunks by content_hash."""
+    seen: dict[str, dict] = {}
+    offset = 0
+    while offset < total:
+        entries = t3.list_store(col_name, limit=300, offset=offset)
+        if not entries:
+            break
+        for e in entries:
+            h = e.get("content_hash", e.get("id", ""))
+            if h not in seen:
+                seen[h] = e
+        offset += 300
+
+    if not seen:
+        return f"No documents in {col_name}."
+
+    docs = sorted(seen.values(), key=lambda d: d.get("source_title") or d.get("title") or "")
+    lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
+    for i, d in enumerate(docs, 1):
+        title = (d.get("source_title") or d.get("title") or "untitled")[:60]
+        chunks = d.get("chunk_count", "?")
+        pages = d.get("page_count", "?")
+        method = d.get("extraction_method", "")
+        indexed = (d.get("indexed_at") or "")[:10]
+        lines.append(f"  {i:3d}. {title:<60}  {chunks:>4} chunks  {pages:>3}p  {method:<8}  {indexed}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def store_delete(doc_id: str, collection: str = "knowledge") -> str:
+    """Delete a T3 knowledge entry by document ID.
+
+    Args:
+        doc_id: Document ID to delete (from store_list or store_put output)
+        collection: Collection name or prefix (default: knowledge)
+    """
+    try:
+        if not doc_id:
+            return "Error: doc_id is required"
+        col_name = t3_collection_name(collection)
+        t3 = _get_t3()
+        deleted = t3.delete_by_id(col_name, doc_id)
+        if deleted:
+            return f"Deleted: {doc_id} from {col_name}"
+        return f"Not found: {doc_id!r} in {col_name}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -349,11 +608,14 @@ def memory_put(
 
 @mcp.tool()
 def memory_get(project: str, title: str = "") -> str:
-    """Retrieve a memory entry by project and title, or list entries if title is empty.
+    """Retrieve a memory entry by project and title.
+
+    When title is empty, lists all entries for the project (titles only — use
+    a second call with the specific title to get content).
 
     Args:
         project: Project namespace
-        title: Entry title (empty = list all entries for project)
+        title: Entry title. Leave empty to LIST all entries (titles only).
     """
     try:
         with _t2_ctx() as db:
@@ -371,7 +633,7 @@ def memory_get(project: str, title: str = "") -> str:
                 entries = db.list_entries(project=project)
                 if not entries:
                     return f"No entries for project {project!r}."
-                lines: list[str] = [f"{project}  ({len(entries)} entries)"]
+                lines: list[str] = [f"{project}  ({len(entries)} entries — titles only, call with title to get content)"]
                 for e in entries:
                     lines.append(f"  [{e['id']}] {e['title']}  ({e.get('timestamp', '')[:10]})")
                 return "\n".join(lines)
@@ -380,13 +642,34 @@ def memory_get(project: str, title: str = "") -> str:
 
 
 @mcp.tool()
+def memory_delete(project: str, title: str) -> str:
+    """Delete a T2 memory entry by project and title.
+
+    Args:
+        project: Project namespace
+        title: Entry title to delete
+    """
+    try:
+        if not project or not title:
+            return "Error: project and title are required"
+        with _t2_ctx() as db:
+            deleted = db.delete(project=project, title=title)
+        if deleted:
+            return f"Deleted: {project}/{title}"
+        return f"Not found: {project}/{title}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 0) -> str:
     """Full-text search across T2 memory entries.
 
+    Searches title, content, and tags fields via FTS5.
     Results are paged. Use offset to retrieve subsequent pages.
 
     Args:
-        query: Search query (FTS5 syntax)
+        query: Search query (FTS5 syntax — matches tokens in title, content, and tags)
         project: Optional project filter
         limit: Page size (default 20)
         offset: Skip this many results (default 0). Use for pagination.
@@ -421,17 +704,17 @@ def scratch(
     query: str = "",
     tags: str = "",
     entry_id: str = "",
-    n: int = 10,
+    limit: int = 10,
 ) -> str:
     """T1 session scratch pad — ephemeral within-session storage.
 
     Args:
-        action: One of "put", "search", "list", "get"
+        action: One of "put", "search", "list", "get", "delete"
         content: Content to store (for "put")
         query: Search query (for "search")
         tags: Comma-separated tags (for "put")
-        entry_id: Entry ID (for "get")
-        n: Max results for search
+        entry_id: Entry ID (for "get", "delete")
+        limit: Max results for search/list (default 10)
     """
     try:
         t1, isolated = _get_t1()
@@ -446,7 +729,7 @@ def scratch(
         elif action == "search":
             if not query:
                 return "Error: query is required for search"
-            results = t1.search(query, n_results=n)
+            results = t1.search(query, n_results=limit)
             if not results:
                 return f"{prefix}No results."
             lines: list[str] = []
@@ -474,8 +757,16 @@ def scratch(
                 return f"{prefix}Not found: {entry_id}"
             return f"{prefix}{entry['content']}"
 
+        elif action == "delete":
+            if not entry_id:
+                return "Error: entry_id is required for delete"
+            deleted = t1.delete(entry_id)
+            if deleted:
+                return f"{prefix}Deleted: {entry_id}"
+            return f"{prefix}Not found or not owned: {entry_id}"
+
         else:
-            return f"Error: unknown action {action!r}. Use: put, search, list, get"
+            return f"Error: unknown action {action!r}. Use: put, search, list, get, delete"
     except Exception as e:
         return f"Error: {e}"
 
@@ -534,7 +825,7 @@ def collection_list() -> str:
 
 @mcp.tool()
 def collection_info(name: str) -> str:
-    """Get detailed information about a T3 collection.
+    """Get detailed information about a T3 collection, including a sample of entries.
 
     Args:
         name: Fully-qualified collection name (e.g. "knowledge__notes", "code__myrepo")
@@ -547,15 +838,27 @@ def collection_info(name: str) -> str:
             return f"Collection not found: {name!r}"
         qry_model = embedding_model_for_collection(name)
         idx_model = index_model_for_collection(name)
+        count = info.get("count", 0)
         lines: list[str] = [
             f"Collection:  {name}",
-            f"Documents:   {info.get('count', 0)}",
+            f"Documents:   {count}",
             f"Index model: {idx_model}",
             f"Query model: {qry_model}",
         ]
         meta = info.get("metadata", {})
         if meta:
             lines.append(f"Metadata:    {meta}")
+
+        # Peek: show first few entry titles for discoverability
+        if count > 0:
+            peek = db.list_store(name, limit=5, offset=0)
+            if peek:
+                lines.append("")
+                lines.append("Sample entries:")
+                for e in peek:
+                    title = (e.get("source_title") or e.get("title") or "untitled")[:60]
+                    lines.append(f"  - {title}")
+
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
@@ -598,9 +901,12 @@ def plan_save(
 ) -> str:
     """Save a query execution plan to the T2 plan library.
 
+    The plan_json should be a JSON string with the execution plan structure.
+    Minimal schema: {"steps": [...], "tools_used": [...], "outcome_notes": "..."}
+
     Args:
         query: The original natural-language question
-        plan_json: JSON string of the execution plan
+        plan_json: JSON string of the execution plan (see schema above)
         project: Project namespace for scoping (e.g. "nexus")
         outcome: Plan outcome — "success" or "partial"
         tags: Comma-separated tags (e.g. operation types used)

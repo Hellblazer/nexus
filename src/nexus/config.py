@@ -117,6 +117,24 @@ def get_pdf_extractor(repo_root: Path | None = None) -> str:
     return value
 
 
+def get_mineru_server_url(repo_root: Path | None = None) -> str:
+    """Return the configured MinerU server URL (default http://127.0.0.1:8010)."""
+    cfg = load_config(repo_root=repo_root)
+    return cfg.get("pdf", {}).get("mineru_server_url", "http://127.0.0.1:8010")
+
+
+def get_mineru_table_enable(repo_root: Path | None = None) -> bool:
+    """Return whether MinerU table extraction is enabled (default False)."""
+    cfg = load_config(repo_root=repo_root)
+    return bool(cfg.get("pdf", {}).get("mineru_table_enable", False))
+
+
+def get_mineru_page_batch(repo_root: Path | None = None) -> int:
+    """Return the configured MinerU page batch size (default 1)."""
+    cfg = load_config(repo_root=repo_root)
+    return max(1, int(cfg.get("pdf", {}).get("mineru_page_batch", 1)))
+
+
 def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:
     """Return a TuningConfig loaded from the merged configuration.
 
@@ -246,6 +264,9 @@ _DEFAULTS: dict[str, Any] = {
     },
     "pdf": {
         "extractor": "auto",
+        "mineru_server_url": "http://127.0.0.1:8010",
+        "mineru_table_enable": False,
+        "mineru_page_batch": 1,
     },
     "search": {
         "hybrid_default": False,

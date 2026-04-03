@@ -76,7 +76,7 @@ Replace `[NUMBER]` with the assigned ID and `[TITLE]` with the user's title.
 
 ### Step 4: Write T2 record
 
-Use memory_put tool: content="id: NNN\nprefix: PREFIX\ntitle: User's Title\nstatus: Draft\ntype: Feature\npriority: Medium\ncreated: YYYY-MM-DD\ngated: \nclosed: \nclose_reason: \nsuperseded_by: \nsupersedes: \nepic_bead: \narchived: false\nfile_path: $RDR_DIR/NNN-kebab-title.md", project="{repo}_rdr", title="{NNN}", ttl="permanent", tags="rdr,{type}"
+mcp__plugin_nx_nexus__memory_put(content="id: NNN\nprefix: PREFIX\ntitle: User's Title\nstatus: Draft\ntype: Feature\npriority: Medium\ncreated: YYYY-MM-DD\ngated: \nclosed: \nclose_reason: \nsuperseded_by: \nsupersedes: \nepic_bead: \narchived: false\nfile_path: $RDR_DIR/NNN-kebab-title.md", project="{repo}_rdr", title="{NNN}", ttl="permanent", tags="rdr,{type}"
 
 ### Step 5: Regenerate README index
 

@@ -63,10 +63,11 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-039](rdr-039-claude-code-framework-alignment.md) | Claude Code Framework Alignment (v2.1.72–v2.1.81) | Technical Debt | Accepted | 2026-03-21 |
 | [RDR-040](rdr-040-developer-agent-circuit-breaker.md) | Developer Agent Circuit Breaker for Test Failure Escalation | Architecture | Closed | 2026-03-25 |
 | [RDR-041](rdr-041-t1-scratch-inter-agent-context.md) | T1 Scratch Inter-Agent Context Sharing | Architecture | Closed | 2026-03-26 |
-| [RDR-042](rdr-042-agenticscholar-enhancements.md) | AgenticScholar-Inspired Enhancements | Architecture | Accepted | 2026-03-29 |
-| [RDR-043](rdr-043-plan-enricher-scope.md) | Widen Plan-Enricher Scope | Enhancement | Accepted | 2026-03-30 |
+| [RDR-042](rdr-042-agenticscholar-enhancements.md) | AgenticScholar-Inspired Enhancements | Architecture | Closed | 2026-03-29 |
+| [RDR-043](rdr-043-plan-enricher-scope.md) | Widen Plan-Enricher Scope | Enhancement | Closed | 2026-03-30 |
 | [RDR-044](rdr-044-math-aware-pdf-extraction.md) | Math-Aware PDF Extraction | Bug | Closed | 2026-03-31 |
-| [RDR-045](rdr-045-post-implementation-verification.md) | Post-Implementation Verification Gate | Architecture | Accepted | 2026-04-01 |
+| [RDR-045](rdr-045-post-implementation-verification.md) | Post-Implementation Verification Gate | Architecture | Closed | 2026-04-01 |
+| [RDR-046](rdr-046-mineru-server-backed-extraction.md) | MinerU Server-Backed PDF Extraction | Architecture | Closed | 2026-04-02 |
 
 ---
 

@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 
+import httpx
 import structlog
 
 try:
@@ -29,8 +30,10 @@ except ImportError:
 
 
 # Inline script executed in a child Python process for memory isolation.
+# Uses os._exit to force-terminate without waiting for daemon threads / worker
+# pools that MinerU's pipeline may leave running.
 _MINERU_WORKER_SCRIPT = '''
-import json, sys
+import json, sys, os
 from pathlib import Path
 from mineru.cli.common import do_parse
 
@@ -42,10 +45,11 @@ do_parse(
     pdf_bytes_list=[Path(pdf_path).read_bytes()],
     p_lang_list=["en"],
     formula_enable=True,
-    table_enable=True,
+    table_enable=True,  # Note: server path uses config (default False) — see RDR-046 RF-2
     start_page_id=start,
     end_page_id=end,
 )
+os._exit(0)
 '''
 
 _log = structlog.get_logger(__name__)
@@ -83,6 +87,9 @@ class PDFExtractor:
     def __init__(self) -> None:
         self._converter = None  # lazy init — fast mode (no formula enrichment)
         self._converter_enriched = None  # lazy init — enriched mode (formula enrichment)
+        self._mineru_server_checked: bool = False
+        self._mineru_server_up: bool = False
+        self._mineru_server_restarts: int = 0
 
     def extract(self, pdf_path: Path, *, extractor: str = "auto") -> ExtractionResult:
         """Extract text from *pdf_path*. Returns ExtractionResult.
@@ -127,7 +134,7 @@ class PDFExtractor:
 
         # Math paper detected — try MinerU
         try:
-            return self._extract_with_mineru(pdf_path)
+            return self._extract_with_mineru(pdf_path, formula_count=formula_count)
         except Exception:
             _log.warning(
                 "mineru_extraction_failed; returning docling result",
@@ -235,19 +242,21 @@ class PDFExtractor:
             },
         )
 
-    # Maximum pages per MinerU batch.  Large formula-dense PDFs (e.g. 108-page
-    # Grossberg 1986) OOM during MFR prediction when processed as a single pass.
-    # Splitting into page ranges keeps peak memory bounded.  Small batches add
-    # only ~5s model-init overhead each — negligible vs. the cost of an OOM kill.
-    MINERU_PAGE_BATCH = 5
+    # Page batch size is read from config via get_mineru_page_batch() (default 1).
+    # Formula-dense PDFs OOM during MFR prediction at larger batch sizes.
 
-    def _extract_with_mineru(self, pdf_path: Path) -> ExtractionResult:
+    def _extract_with_mineru(
+        self, pdf_path: Path, *, formula_count: int = 0,
+    ) -> ExtractionResult:
         """Extract text via MinerU (math-aware, optional dependency).
 
         Each page-range batch runs in a **subprocess** so that MinerU's
         GPU/model memory is fully reclaimed between batches.  Without this,
         memory accumulates across in-process ``do_parse`` calls and large
         formula-dense PDFs get OOM-killed.
+
+        OOM retry: if a multi-page batch fails, retries at 1-page granularity.
+        Single-page failures propagate immediately (no infinite retry).
         """
         if do_parse is None:
             raise ImportError(
@@ -259,18 +268,21 @@ class PDFExtractor:
         with pymupdf.open(pdf_path) as doc:
             total_pages = len(doc)
 
+        from nexus.config import get_mineru_page_batch
+        batch_size = get_mineru_page_batch()
+
         batches: list[tuple[int, int | None]] = []
-        if total_pages <= self.MINERU_PAGE_BATCH:
+        if total_pages <= batch_size:
             batches.append((0, None))
         else:
             _log.info(
                 "mineru_splitting_large_pdf",
                 total_pages=total_pages,
-                batch_size=self.MINERU_PAGE_BATCH,
+                batch_size=batch_size,
                 path=str(pdf_path),
             )
-            for start in range(0, total_pages, self.MINERU_PAGE_BATCH):
-                batches.append((start, min(start + self.MINERU_PAGE_BATCH, total_pages)))
+            for start in range(0, total_pages, batch_size):
+                batches.append((start, min(start + batch_size, total_pages)))
 
         md_parts: list[str] = []
         all_content_list: list[dict] = []
@@ -279,7 +291,30 @@ class PDFExtractor:
         for start, end in batches:
             label = f"{start + 1}–{end}" if end is not None else f"{start + 1}–{total_pages}"
             _log.info("mineru_batch", pages=label, path=str(pdf_path))
-            md, content_list, pdf_info = self._mineru_run_isolated(pdf_path, start, end)
+            try:
+                md, content_list, pdf_info = self._mineru_run_isolated(pdf_path, start, end)
+            except RuntimeError:
+                # OOM or subprocess failure — retry at 1-page granularity.
+                # This catches both subprocess OOM (exit code -9) and server-crash
+                # fallback failures. Single-page retries that also fail propagate
+                # immediately (span <= 1 → re-raise), so the document fails cleanly.
+                span = (end or total_pages) - start
+                if span <= 1:
+                    raise  # already single-page, no retry possible
+                _log.warning(
+                    "mineru_oom_retry",
+                    pages=label,
+                    path=str(pdf_path),
+                    original_batch=span,
+                )
+                for page in range(start, end or total_pages):
+                    md, content_list, pdf_info = self._mineru_run_isolated(
+                        pdf_path, page, page + 1,
+                    )
+                    md_parts.append(md)
+                    all_content_list.extend(content_list)
+                    all_pdf_info.extend(pdf_info)
+                continue
             md_parts.append(md)
             all_content_list.extend(content_list)
             all_pdf_info.extend(pdf_info)
@@ -289,7 +324,193 @@ class PDFExtractor:
             pdf_path, md_text, all_content_list, all_pdf_info,
         )
 
+    def _mineru_server_available(self) -> bool:
+        """Check if the MinerU API server is reachable.
+
+        Result cached for the lifetime of this PDFExtractor instance —
+        a False result is never retried. Create a new instance to re-check.
+        """
+        if self._mineru_server_checked:
+            return self._mineru_server_up
+
+        from nexus.config import get_mineru_server_url
+        url = f"{get_mineru_server_url()}/health"
+        try:
+            resp = httpx.get(url, timeout=2)
+            self._mineru_server_up = resp.status_code == 200
+        except (httpx.ConnectError, httpx.TimeoutException):
+            self._mineru_server_up = False
+
+        self._mineru_server_checked = True
+        return self._mineru_server_up
+
+    def _mineru_run_via_server(
+        self, pdf_path: Path, start: int, end: int | None,
+    ) -> tuple[str, list[dict], list[dict]]:
+        """Extract via MinerU HTTP server (POST /file_parse)."""
+        from nexus.config import get_mineru_server_url, get_mineru_table_enable
+
+        url = f"{get_mineru_server_url()}/file_parse"
+        with pdf_path.open("rb") as f:
+            resp = httpx.post(
+                url,
+                files=[("files", (pdf_path.name, f, "application/pdf"))],
+                data={
+                    "backend": "pipeline",
+                    "start_page_id": str(start),
+                    "end_page_id": str(end if end is not None else 99999),
+                    "formula_enable": "true",
+                    "table_enable": str(get_mineru_table_enable()).lower(),
+                    "return_md": "true",
+                    "return_middle_json": "true",
+                    "return_content_list": "true",
+                    "parse_method": "auto",
+                    "lang_list": "en",
+                },
+                timeout=300,
+            )
+        resp.raise_for_status()
+        data = resp.json()
+
+        all_results = data.get("results", {})
+        stem = pdf_path.stem
+        results = all_results.get(stem)
+        if results is None:
+            if len(all_results) == 1:
+                results = next(iter(all_results.values()))
+            else:
+                raise RuntimeError(
+                    f"Server results missing key {stem!r}; "
+                    f"available keys: {list(all_results.keys())}"
+                )
+
+        md = results.get("md_content", "")
+        if not md:
+            raise RuntimeError(
+                f"Server returned empty md_content for {pdf_path.name}"
+            )
+
+        raw_cl = results.get("content_list")
+        raw_mj = results.get("middle_json")
+        if raw_mj is None:
+            _log.warning("mineru_server_no_middle_json", path=str(pdf_path))
+        content_list = json.loads(raw_cl) if raw_cl else []
+        middle = json.loads(raw_mj) if raw_mj else {}
+        return md, content_list, middle.get("pdf_info", [])
+
+    _MINERU_MAX_RESTARTS: int = 2
+
+    def _restart_mineru_server(self) -> bool:
+        """Attempt to restart the MinerU server after a crash.
+
+        Returns True if the server was restarted and is healthy.
+        Limited to _MINERU_MAX_RESTARTS per PDFExtractor instance.
+        """
+        if self._mineru_server_restarts >= self._MINERU_MAX_RESTARTS:
+            _log.warning("mineru_restart_budget_exhausted",
+                         restarts=self._mineru_server_restarts)
+            return False
+
+        self._mineru_server_restarts += 1
+        _log.info("mineru_server_restarting",
+                  attempt=self._mineru_server_restarts)
+
+        from nexus.commands.mineru import (
+            _is_process_alive,
+            _pid_file_path,
+            _read_pid_file,
+        )
+
+        # Clean up stale PID file if the server is dead
+        info = _read_pid_file()
+        if info is not None and not _is_process_alive(info["pid"]):
+            _pid_file_path().unlink(missing_ok=True)
+
+        # Start a new server via the same logic as `nx mineru start`
+        import subprocess as _sp
+        import time as _time
+        from nexus.commands.mineru import (
+            _HEALTH_POLL_INTERVAL,
+            _find_free_port,
+            _server_env,
+        )
+        from nexus.config import set_config_value
+
+        port = _find_free_port()
+        cmd = ["mineru-api", "--host", "127.0.0.1", "--port", str(port)]
+        try:
+            proc = _sp.Popen(
+                cmd, env=_server_env(),
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            _log.warning("mineru_restart_failed", reason="mineru-api not found")
+            return False
+
+        # Poll health for up to 60s (models already cached in memory by OS)
+        url = f"http://127.0.0.1:{port}/health"
+        deadline = _time.monotonic() + 60
+        while _time.monotonic() < deadline:
+            if proc.poll() is not None:
+                _log.warning("mineru_restart_failed", reason="process exited")
+                return False
+            try:
+                resp = httpx.get(url, timeout=2)
+                if resp.status_code == 200:
+                    break
+            except (httpx.ConnectError, httpx.TimeoutException):
+                pass
+            _time.sleep(_HEALTH_POLL_INTERVAL)
+        else:
+            _log.warning("mineru_restart_failed", reason="health timeout")
+            return False
+
+        # Write PID file and update config
+        import json as _json
+        from datetime import datetime, timezone
+        pid_path = _pid_file_path()
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(_json.dumps({
+            "pid": proc.pid, "port": port,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }))
+        set_config_value("pdf.mineru_server_url", f"http://127.0.0.1:{port}")
+
+        # Reset availability cache
+        self._mineru_server_checked = True
+        self._mineru_server_up = True
+        _log.info("mineru_server_restarted", pid=proc.pid, port=port)
+        return True
+
     def _mineru_run_isolated(
+        self, pdf_path: Path, start: int, end: int | None,
+    ) -> tuple[str, list[dict], list[dict]]:
+        """Dispatch to server or subprocess based on server availability."""
+        if self._mineru_server_available():
+            try:
+                return self._mineru_run_via_server(pdf_path, start, end)
+            except (httpx.ConnectError, httpx.TimeoutException,
+                    httpx.RemoteProtocolError) as exc:
+                # Server crashed — invalidate cache, try restart
+                self._mineru_server_checked = True
+                self._mineru_server_up = False
+                _log.warning("mineru_server_lost", path=str(pdf_path),
+                             pages=f"{start}–{end}", error=str(exc))
+                if self._restart_mineru_server():
+                    # Retry this page on the new server
+                    try:
+                        return self._mineru_run_via_server(pdf_path, start, end)
+                    except Exception:
+                        pass  # fall through to subprocess
+                return self._mineru_run_subprocess(pdf_path, start, end)
+            except httpx.HTTPStatusError as exc:
+                _log.warning("mineru_server_error", path=str(pdf_path),
+                             pages=f"{start}–{end}", error=str(exc))
+                return self._mineru_run_subprocess(pdf_path, start, end)
+        return self._mineru_run_subprocess(pdf_path, start, end)
+
+    def _mineru_run_subprocess(
         self, pdf_path: Path, start: int, end: int | None,
     ) -> tuple[str, list[dict], list[dict]]:
         """Run MinerU in a fresh OS process for full memory isolation.
@@ -300,25 +521,50 @@ class PDFExtractor:
         """
         result_dir = tempfile.mkdtemp()
         try:
-            result = subprocess.run(
+            import os as _os
+            import signal
+
+            proc = subprocess.Popen(
                 [
                     sys.executable, "-c", _MINERU_WORKER_SCRIPT,
                     str(pdf_path), result_dir,
                     str(start), "none" if end is None else str(end),
                 ],
                 stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,  # own process group
             )
-            if result.returncode != 0:
+            try:
+                returncode = proc.wait(timeout=180)
+            except subprocess.TimeoutExpired:
+                _os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                raise RuntimeError(
+                    f"MinerU subprocess timed out after 180s "
+                    f"(pages {start}–{end}, path={pdf_path})"
+                )
+            if returncode != 0:
+                # Clean up any orphaned children in the process group
+                try:
+                    _os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 _log.error(
                     "mineru_subprocess_failed",
-                    returncode=result.returncode,
+                    returncode=returncode,
                     pages=f"{start}–{end}",
                     path=str(pdf_path),
                 )
                 raise RuntimeError(
-                    f"MinerU subprocess exited with code {result.returncode} "
+                    f"MinerU subprocess exited with code {returncode} "
                     f"(pages {start}–{end}, path={pdf_path})"
                 )
+            # Kill any lingering workers in the process group
+            try:
+                _os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
             pdf_name = pdf_path.name
             base = Path(result_dir) / pdf_name / "auto"

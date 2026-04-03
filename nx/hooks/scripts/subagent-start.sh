@@ -73,28 +73,49 @@ cat <<'NXTOOLS'
 All results from search/list tools are **paged**. Response footer shows `Next page: offset=N`. Re-call with that offset to get more.
 
 T1 scratch — session-scoped, shared across all sibling agents:
-  scratch(action="put", content="...", tags="hypothesis,failed-approach,decision")
-  scratch(action="search", query="...", n=5)
-  scratch(action="list")
-  scratch(action="get", entry_id="...")
-  scratch_manage(action="flag", entry_id="...", project="...", title="...")  → promotes to T2
+  Tool: mcp__plugin_nx_nexus__scratch
+    scratch(action="put", content="...", tags="hypothesis,decision")
+    scratch(action="search", query="...", limit=5)
+    scratch(action="list")
+    scratch(action="get", entry_id="...")
+    scratch(action="delete", entry_id="...")
+  Tool: mcp__plugin_nx_nexus__scratch_manage
+    scratch_manage(action="flag", entry_id="...", project="...", title="...")
 
 T2 memory — project-scoped, persistent:
-  memory_get(project="...", title="...")       read one entry
-  memory_get(project="...", title="")          list all entries
-  memory_search(query="...", project="...", limit=20, offset=0)
-  memory_put(content="...", project="...", title="...", ttl=30)
+  Tool: mcp__plugin_nx_nexus__memory_get
+    memory_get(project="...", title="...")       read one entry
+    memory_get(project="...", title="")          list titles only
+  Tool: mcp__plugin_nx_nexus__memory_search
+    memory_search(query="...", project="...", limit=20, offset=0)
+  Tool: mcp__plugin_nx_nexus__memory_put
+    memory_put(content="...", project="...", title="...", ttl=30)
+  Tool: mcp__plugin_nx_nexus__memory_delete
+    memory_delete(project="...", title="...")
 
 T3 knowledge — permanent, semantic search:
-  search(query="...", corpus="knowledge", n=10, offset=0)
-  store_list(collection="knowledge", limit=20, offset=0)
-  store_put(content="...", collection="knowledge", title="...", tags="...")
+  Tool: mcp__plugin_nx_nexus__search
+    search(query="...", corpus="knowledge", limit=10, offset=0, where="bib_year>=2023")
+  Tool: mcp__plugin_nx_nexus__query
+    query(question="...", corpus="knowledge", where="bib_year>=2020", limit=10)  → document-level results
+  Tool: mcp__plugin_nx_nexus__store_list
+    store_list(collection="knowledge", limit=20, offset=0)
+    store_list(collection="knowledge__art", docs=true)   → document-level view
+  Tool: mcp__plugin_nx_nexus__store_get
+    store_get(doc_id="...", collection="knowledge")
+  Tool: mcp__plugin_nx_nexus__store_put
+    store_put(content="...", collection="knowledge", title="...", tags="...")
+  Tool: mcp__plugin_nx_nexus__store_delete
+    store_delete(doc_id="...", collection="knowledge")
+  Tool: mcp__plugin_nx_nexus__collection_list
+  Tool: mcp__plugin_nx_nexus__collection_info
+    collection_info(name="knowledge__art")
 
-Plan library — saved query execution plans (T2):
-  plan_search(query="...", project="...", limit=5)
-  plan_save(query="...", plan_json="...", project="...", tags="...")
-
-Tool prefix: mcp__plugin_nx_nexus__
+Plan library (T2):
+  Tool: mcp__plugin_nx_nexus__plan_search
+    plan_search(query="...", project="...", limit=5)
+  Tool: mcp__plugin_nx_nexus__plan_save
+    plan_save(query="...", plan_json="...", project="...", tags="...")
 
 Routing: T1 for sibling sharing → T2 for project persistence → T3 for semantic knowledge.
 NXTOOLS

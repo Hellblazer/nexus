@@ -57,7 +57,7 @@ Example section:
 
 **Find Related Code**:
 ```
-Use search tool: query="how does feature X work in our codebase", corpus="code", n=15
+Use search tool: query="how does feature X work in our codebase", corpus="code", limit=15
 ```
 
 ### Integration with Workflow

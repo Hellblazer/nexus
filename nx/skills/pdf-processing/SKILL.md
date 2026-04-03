@@ -30,7 +30,7 @@ nx index pdf /path/to/file.pdf --corpus {corpus-name} --dry-run
 # Force re-index (bypass staleness check)
 nx index pdf /path/to/file.pdf --corpus {corpus-name} --force --monitor
 
-# Verify indexing — use search tool: query="representative query", corpus="docs__{corpus-name}", n=3
+# Verify indexing — use search tool: query="representative query", corpus="docs__{corpus-name}", limit=3
 ```
 
 **Corpus naming**: Use `author-year-short-title` pattern. The `--corpus` flag auto-prepends `docs__` — do NOT include the prefix.

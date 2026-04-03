@@ -25,7 +25,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 ## Pre-Check
 
-1. Read T2 record: Use memory_get tool: project="{repo}_rdr", title="NNN"
+1. Read T2 record: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN"
 2. If status is not "accepted" (or "final") and reason is "Implemented":
    - Warn: "RDR NNN status is '{current_status}' — expected 'accepted'. Close anyway?"
    - Require `--force` or explicit user confirmation to proceed
@@ -61,7 +61,7 @@ Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. 
 ### Step 3: Bead Status Gate
 
 If T2 record has an `epic_bead` field (set during accept-time planning):
-1. Read epic bead ID from T2: Use memory_get tool: project="{repo}_rdr", title="NNN"
+1. Read epic bead ID from T2: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN"
 2. Run `/beads:show <epic-id>` to get child bead statuses
 3. Display bead status table to user:
    - Bead ID, title, status (open/in_progress/closed)
@@ -79,7 +79,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 ### Step 4: Update State
 
-1. Update T2 record: Use memory_put tool: content="... (same fields, status: Implemented, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
+1. Update T2 record: mcp__plugin_nx_nexus__memory_put(content="... (same fields, status: Implemented, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
    If T3 archive fails, set `archived: false` — retryable by re-running `/nx:rdr-close`
 
 2. Update status in RDR markdown metadata
@@ -90,7 +90,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 The main RDR is already semantically indexed by Step 4's `nx index rdr` (CCE embeddings, section-level chunks). Do **not** duplicate it with store_put tool — that would create voyage-4 blob entries in the same collection, degrading search quality.
 
-If a post-mortem exists, archive it to a separate collection (using the exact file path from Step 2, not a glob): Use store_put tool: content=(contents of $RDR_DIR/post-mortem/NNN-kebab-title.md), collection="knowledge__rdr_postmortem__{repo}", title="PREFIX-NNN Title (post-mortem)", tags="rdr,post-mortem,{drift-categories}"
+If a post-mortem exists, archive it to a separate collection (using the exact file path from Step 2, not a glob): mcp__plugin_nx_nexus__store_put(content=(contents of $RDR_DIR/post-mortem/NNN-kebab-title.md), collection="knowledge__rdr_postmortem__{repo}", title="PREFIX-NNN Title (post-mortem)", tags="rdr,post-mortem,{drift-categories}"
 
 Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem contains substantial divergence analysis that benefits from knowledge organization.
 

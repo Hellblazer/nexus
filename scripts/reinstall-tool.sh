@@ -33,3 +33,19 @@ else
 fi
 
 nx --version
+
+# Symlink extra entrypoints that uv tool doesn't expose automatically.
+# uv only symlinks the package's own console_scripts (nx, nx-mcp);
+# dependency console_scripts (mineru-api, mineru, etc.) stay hidden
+# in the tool venv bin dir.
+TOOL_BIN="$(uv tool dir)/conexus/bin"
+LOCAL_BIN="${HOME}/.local/bin"
+
+if [[ "$EXTRAS" == *"mineru"* && -d "$TOOL_BIN" ]]; then
+    for cmd in mineru-api mineru; do
+        if [[ -f "$TOOL_BIN/$cmd" ]]; then
+            ln -sf "$TOOL_BIN/$cmd" "$LOCAL_BIN/$cmd"
+            echo "Symlinked: $cmd"
+        fi
+    done
+fi

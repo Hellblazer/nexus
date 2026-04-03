@@ -169,7 +169,8 @@ class TestMineruOrchestration:
         pdf_info = [{"page_idx": 0, "para_blocks": []}]
         isolated_return = ("# Title", [], pdf_info)
 
-        with self._mock_pymupdf(3), self._mock_do_parse(), \
+        with self._mock_pymupdf(1), self._mock_do_parse(), \
+             patch("nexus.config.get_mineru_page_batch", return_value=1), \
              patch.object(extractor, "_mineru_run_isolated", return_value=isolated_return) as mock_iso:
             result = extractor._extract_with_mineru(dummy_pdf)
 
@@ -178,11 +179,11 @@ class TestMineruOrchestration:
 
     def test_large_pdf_splits_into_batches(self, extractor, dummy_pdf):
         """PDF with > MINERU_PAGE_BATCH pages splits into multiple batches."""
-        extractor.MINERU_PAGE_BATCH = 5
         pdf_info = [{"page_idx": 0, "para_blocks": []}]
         isolated_return = ("batch text", [], pdf_info)
 
         with self._mock_pymupdf(12), self._mock_do_parse(), \
+             patch("nexus.config.get_mineru_page_batch", return_value=5), \
              patch.object(extractor, "_mineru_run_isolated", return_value=isolated_return) as mock_iso:
             result = extractor._extract_with_mineru(dummy_pdf)
 
@@ -195,13 +196,13 @@ class TestMineruOrchestration:
 
     def test_batch_results_merged(self, extractor, dummy_pdf):
         """Markdown from batches is joined; content_list and pdf_info are concatenated."""
-        extractor.MINERU_PAGE_BATCH = 2
         batch1 = ("# Page 1", [{"type": "equation", "text": "E=mc2"}],
                    [{"page_idx": 0, "para_blocks": []}])
         batch2 = ("# Page 2", [{"type": "text", "text": "plain"}],
                    [{"page_idx": 1, "para_blocks": []}])
 
         with self._mock_pymupdf(4), self._mock_do_parse(), \
+             patch("nexus.config.get_mineru_page_batch", return_value=2), \
              patch.object(extractor, "_mineru_run_isolated", side_effect=[batch1, batch2]):
             result = extractor._extract_with_mineru(dummy_pdf)
 

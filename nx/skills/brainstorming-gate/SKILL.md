@@ -47,7 +47,7 @@ digraph brainstorming {
 ## Checklist
 
 1. **Prior art search** — search T3 for prior decisions on this topic **before** exploring files
-   or asking questions: Use search tool: query="{feature or topic}", corpus="knowledge", n=5
+   or asking questions: mcp__plugin_nx_nexus__search(query="{feature or topic}", corpus="knowledge", limit=5
    If a prior decision exists, surface it immediately — either re-use it (if still valid) or
    acknowledge it explicitly before proposing alternatives. Don't re-litigate settled decisions
    without knowing they were settled. If no prior decision exists, proceed to file and commit
@@ -58,7 +58,7 @@ digraph brainstorming {
 5. **Present design** — scaled to complexity, get user approval after each section
 6. **RDR status check** — Scan the user request, design doc, and relay task for the
    pattern `RDR-\d+`. For each match:
-   - Use memory_get tool: project="{repo}_rdr", title="NNN"
+   - mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN"
    - If status is not `accepted` or `closed`, **warn the user**:
      "RDR-NNN is still {status}. Run `/nx:rdr-gate NNN` and `/nx:rdr-accept NNN`
      before planning implementation."

@@ -114,27 +114,86 @@ def put_cmd(
               help="Collection name or prefix (default: knowledge)")
 @click.option("--limit", "-n", default=200, show_default=True,
               help="Maximum entries to show")
-def list_cmd(collection: str, limit: int) -> None:
+@click.option("--offset", default=0, show_default=True,
+              help="Skip this many entries (for pagination)")
+@click.option("--docs", is_flag=True, default=False,
+              help="Show unique documents instead of individual chunks")
+def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     """List entries in a T3 knowledge collection."""
     col_name = t3_collection_name(collection)
-    entries = _t3().list_store(col_name, limit=limit)
-    if not entries:
-        click.echo(f"No entries in {col_name}.")
+    db = _t3()
+
+    if docs:
+        _list_documents(db, col_name)
         return
-    click.echo(f"{col_name}  ({len(entries)} {'entry' if len(entries) == 1 else 'entries'})\n")
+
+    entries = db.list_store(col_name, limit=limit, offset=offset)
+    if not entries:
+        click.echo(f"No entries in {col_name} at offset {offset}.")
+        return
+
+    # Get total count for page info
+    try:
+        total = db.collection_info(col_name)["count"]
+    except (KeyError, Exception):
+        total = "?"
+
+    shown_start = offset + 1
+    shown_end = offset + len(entries)
+    click.echo(f"{col_name}  (showing {shown_start}-{shown_end} of {total})\n")
     for e in entries:
         doc_id = e.get("id", "")[:16]
-        title = (e.get("title") or "")[:40]
+        title = (e.get("title") or e.get("source_title") or "")[:40]
         tags = e.get("tags") or ""
         ttl_days = e.get("ttl_days", 0)
         expires_at = e.get("expires_at") or ""
-        indexed_at = (e.get("indexed_at") or "")[:10]  # date only
+        indexed_at = (e.get("indexed_at") or "")[:10]
         if ttl_days and ttl_days > 0 and expires_at:
             ttl_str = f"expires {expires_at[:10]}"
         else:
             ttl_str = "permanent"
         tag_str = f"  [{tags}]" if tags else ""
         click.echo(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
+
+    if shown_end < (total if isinstance(total, int) else float("inf")):
+        click.echo(f"\n  Next page: --offset {shown_end}")
+
+
+def _list_documents(db: T3Database, col_name: str) -> None:
+    """List unique documents (deduplicated by content_hash) in a collection."""
+    try:
+        total_chunks = db.collection_info(col_name)["count"]
+    except (KeyError, Exception):
+        click.echo(f"Collection not found: {col_name}")
+        return
+
+    # Page through all chunks to collect unique documents
+    seen: dict[str, dict] = {}  # content_hash → metadata
+    offset = 0
+    batch = 300
+    while offset < total_chunks:
+        entries = db.list_store(col_name, limit=batch, offset=offset)
+        if not entries:
+            break
+        for e in entries:
+            h = e.get("content_hash", e.get("id", ""))
+            if h not in seen:
+                seen[h] = e
+        offset += batch
+
+    if not seen:
+        click.echo(f"No documents in {col_name}.")
+        return
+
+    docs = sorted(seen.values(), key=lambda d: d.get("source_title") or d.get("title") or "")
+    click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} chunks)\n")
+    for i, d in enumerate(docs, 1):
+        title = (d.get("source_title") or d.get("title") or "untitled")[:60]
+        chunks = d.get("chunk_count", "?")
+        pages = d.get("page_count", "?")
+        method = d.get("extraction_method", "")
+        indexed = (d.get("indexed_at") or "")[:10]
+        click.echo(f"  {i:3d}. {title:<60}  {chunks:>4} chunks  {pages:>3}p  {method:<8}  {indexed}")
 
 
 

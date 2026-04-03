@@ -218,12 +218,15 @@ def test_t3_store_put_and_list_roundtrip(runner: CliRunner) -> None:
     ], input=f"Integration test document with unique token {unique}")
     assert result.exit_code == 0, result.output
 
+    # Extract doc_id from put output ("Stored: <id>  →  <collection>")
+    doc_id = result.output.split("Stored: ")[1].split()[0]
+
     result = runner.invoke(main, [
-        "store", "list",
+        "store", "get", doc_id,
         "--collection", _T3_TEST_COLLECTION,
     ])
     assert result.exit_code == 0, result.output
-    assert title in result.output
+    assert unique in result.output
 
 
 @pytest.mark.integration

@@ -47,7 +47,7 @@ The codebase-deep-analyzer uses `mcp__sequential-thinking__sequentialthinking`:
 2. Gather evidence from code structure, naming, dependencies
 3. Validate/refute hypothesis against actual code
 4. Map module/package structure and document patterns
-5. Persist findings to nx store: Use store_put tool: content="...", collection="knowledge", title="architecture-{project}-{component}", tags="architecture"
+5. Persist findings to nx store: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="architecture-{project}-{component}", tags="architecture"
 
 ## Success Criteria
 

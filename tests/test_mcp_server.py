@@ -94,7 +94,7 @@ def _patch_t2(t2_path, monkeypatch):
 def test_search_returns_results(t3):
     """search tool returns formatted results from T3."""
     t3.put(collection="knowledge__test", content="chromadb vector database", title="doc1")
-    result = search(query="vector database", corpus="knowledge__test", n=5)
+    result = search(query="vector database", corpus="knowledge__test", limit=5)
     assert not result.startswith("Error:"), f"search returned error: {result}"
     assert "vector database" in result.lower() or "doc1" in result
 
@@ -332,7 +332,7 @@ def test_search_default_multi_corpus():
 
     captured: list[list[str]] = []
 
-    def fake_search(query, collections, n_results, t3):
+    def fake_search(query, collections, n_results, t3, where=None):
         captured.append(list(collections))
         return []
 
@@ -358,7 +358,7 @@ def test_search_single_corpus_backward_compat():
 
     captured: list[list[str]] = []
 
-    def fake_search(query, collections, n_results, t3):
+    def fake_search(query, collections, n_results, t3, where=None):
         captured.append(list(collections))
         return []
 
@@ -385,7 +385,7 @@ def test_search_all_alias():
 
     captured: list[list[str]] = []
 
-    def fake_search(query, collections, n_results, t3):
+    def fake_search(query, collections, n_results, t3, where=None):
         captured.append(list(collections))
         return []
 
@@ -412,7 +412,7 @@ def test_search_fully_qualified_collection():
 
     captured: list[list[str]] = []
 
-    def fake_search(query, collections, n_results, t3):
+    def fake_search(query, collections, n_results, t3, where=None):
         captured.append(list(collections))
         return []
 
@@ -631,7 +631,7 @@ def test_search_pagination_first_page(t3):
     """search offset=0 returns first page with next offset."""
     for i in range(5):
         t3.put(collection="knowledge__pag", content=f"document about topic {i}", title=f"doc{i}")
-    result = search(query="topic", corpus="knowledge__pag", n=2, offset=0)
+    result = search(query="topic", corpus="knowledge__pag", limit=2, offset=0)
     assert "showing 1-2" in result
     assert "offset=2" in result
 
@@ -640,8 +640,8 @@ def test_search_pagination_pages_differ(t3):
     """Page 2 content differs from page 1."""
     for i in range(6):
         t3.put(collection="knowledge__pag2", content=f"unique searchable content number {i}", title=f"doc{i}")
-    page1 = search(query="searchable content", corpus="knowledge__pag2", n=2, offset=0)
-    page2 = search(query="searchable content", corpus="knowledge__pag2", n=2, offset=2)
+    page1 = search(query="searchable content", corpus="knowledge__pag2", limit=2, offset=0)
+    page2 = search(query="searchable content", corpus="knowledge__pag2", limit=2, offset=2)
     assert not page2.startswith("Error:")
     # Extract doc IDs from both pages — they should not overlap
     page1_ids = {line.split("]")[0] for line in page1.split("\n") if line.startswith("[")}
@@ -652,14 +652,14 @@ def test_search_pagination_pages_differ(t3):
 def test_search_pagination_last_page(t3):
     """Single-result search shows (end) indicator."""
     t3.put(collection="knowledge__pag3", content="only document about finality", title="solo")
-    result = search(query="finality", corpus="knowledge__pag3", n=10, offset=0)
+    result = search(query="finality", corpus="knowledge__pag3", limit=10, offset=0)
     assert "(end)" in result
 
 
 def test_search_pagination_offset_beyond_end(t3):
     """Offset past all results returns 'No results at offset'."""
     t3.put(collection="knowledge__pag4", content="small collection", title="one")
-    result = search(query="small", corpus="knowledge__pag4", n=10, offset=100)
+    result = search(query="small", corpus="knowledge__pag4", limit=10, offset=100)
     assert "No results at offset 100" in result
 
 

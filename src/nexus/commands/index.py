@@ -144,7 +144,9 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
 
 
 @index.command("pdf")
-@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("path", type=click.Path(exists=True, path_type=Path), required=False, default=None)
+@click.option("--dir", "dir_path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=None, help="Index all PDFs in a directory.")
 @click.option("--corpus", default="default", show_default=True, help="Corpus name for docs__ collection.")
 @click.option(
     "--collection",
@@ -186,17 +188,90 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         "(requires: uv pip install 'conexus[mineru]')."
     ),
 )
-def index_pdf_cmd(path: Path, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None) -> None:
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
+    import time as _time
+
+    import structlog
+
+    _log = structlog.get_logger(__name__)
+
     from nexus.config import get_pdf_extractor
     from nexus.corpus import t3_collection_name
     from nexus.doc_indexer import index_pdf
+
+    if path is not None and dir_path is not None:
+        raise click.UsageError("PATH and --dir are mutually exclusive.")
+    if path is None and dir_path is None:
+        raise click.UsageError("Provide either PATH or --dir.")
 
     if extractor is None:
         extractor = get_pdf_extractor()
 
     if force and dry_run:
         raise click.UsageError("--force and --dry-run are mutually exclusive.")
+    if dry_run and dir_path is not None:
+        raise click.UsageError("--dry-run is not supported with --dir.")
+
+    # ── Batch mode (--dir) ──────────────────────────────────────────────
+    if dir_path is not None:
+        pdfs = sorted(
+            p for p in dir_path.iterdir()
+            if p.is_file() and p.suffix.lower() == ".pdf"
+        )
+        if not pdfs:
+            click.echo(f"No PDF files found in {dir_path}")
+            return
+
+        if collection is not None:
+            collection = t3_collection_name(collection)
+
+        total = len(pdfs)
+        total_chunks = 0
+        failures: list[tuple[Path, str]] = []
+
+        # Check if MinerU server is available for batch performance
+        if extractor in ("auto", "mineru"):
+            from nexus.pdf_extractor import PDFExtractor
+            _extractor = PDFExtractor()
+            server_up = _extractor._mineru_server_available()
+            if server_up:
+                click.echo(f"MinerU server available — using server-backed extraction")
+            else:
+                click.echo(
+                    "MinerU server not running. Batch will use subprocess mode "
+                    "(slower). Start with: nx mineru start"
+                )
+
+        batch_start = _time.monotonic()
+
+        for i, pdf in enumerate(pdfs, 1):
+            click.echo(f"[{i}/{total}] {pdf.name}…", nl=False)
+            t0 = _time.monotonic()
+            try:
+                n = index_pdf(
+                    pdf, corpus=corpus, collection_name=collection,
+                    force=force, enrich=enrich, extractor=extractor,
+                )
+                elapsed = _time.monotonic() - t0
+                total_chunks += n
+                click.echo(f" — {n} chunks, {elapsed:.1f}s")
+            except Exception as exc:
+                elapsed = _time.monotonic() - t0
+                failures.append((pdf, str(exc)))
+                _log.warning("batch_index_failed", path=str(pdf), error=str(exc))
+                click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
+
+        batch_elapsed = _time.monotonic() - batch_start
+        click.echo(
+            f"\nSummary: {total} PDFs, {total_chunks} chunks, "
+            f"{batch_elapsed:.1f}s total"
+        )
+        if failures:
+            click.echo(f"  {len(failures)} failure(s):")
+            for fp, err in failures:
+                click.echo(f"    {fp.name}: {err}")
+        return
 
     # Normalize --collection through t3_collection_name() so bare names like
     # "knowledge" become "knowledge__knowledge", matching search conventions.

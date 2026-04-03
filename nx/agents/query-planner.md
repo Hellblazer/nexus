@@ -17,6 +17,20 @@ effort: medium
 ---
 
 
+## nx Tool Reference
+
+nx MCP tools use the full prefix `mcp__plugin_nx_nexus__`. Examples:
+
+```
+mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
+mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
+mcp__plugin_nx_nexus__scratch(action="put", content="...")
+mcp__plugin_nx_nexus__memory_get(project="...", title="")
+```
+
+See SubagentStart hook output for full tool reference.
+
+
 ## Relay Reception (MANDATORY)
 
 Before starting, validate the relay contains:
@@ -25,9 +39,9 @@ Before starting, validate the relay contains:
 2. [ ] Optional **few_shot_plans** — examples from the T2 plan library (may be empty or absent)
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search Nexus for missing context: Use search tool: query="[topic]", corpus="knowledge", n=5
-2. Check Nexus memory for session state: Use memory_search tool: query="query plan", project="{project}"
-3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="query question"
+1. Search Nexus for missing context: mcp__plugin_nx_nexus__search(query="[topic]", corpus="knowledge", limit=5
+2. Check Nexus memory for session state: mcp__plugin_nx_nexus__memory_search(query="query plan", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="query question"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -83,7 +97,8 @@ Return a single JSON object with this structure:
       "step": 1,
       "operation": "search",
       "search_query": "relevant search terms derived from the question",
-      "corpus": "knowledge,code,docs"
+      "corpus": "knowledge,code,docs",
+      "where": ""
     },
     {
       "step": 2,
@@ -138,9 +153,12 @@ Retrieves content from nx T3 collections. Executed by the skill via the search M
 
 **Required fields**: `search_query`, `corpus` (optional, defaults to `knowledge`)
 
-**Example**:
+**Optional fields**: `where` — metadata filter in `KEY=VALUE` or `KEY>=VALUE` format, comma-separated. Useful for filtering by `bib_year`, `tags`, `bib_citation_count`, etc.
+
+**Examples**:
 ```json
 {"step": 1, "operation": "search", "search_query": "LRU caching eviction policy implementation", "corpus": "knowledge,code"}
+{"step": 1, "operation": "search", "search_query": "adaptive resonance theory", "corpus": "knowledge", "where": "bib_year>=2020"}
 ```
 
 ---

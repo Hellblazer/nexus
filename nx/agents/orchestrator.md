@@ -17,6 +17,20 @@ effort: medium
 ---
 
 
+## nx Tool Reference
+
+nx MCP tools use the full prefix `mcp__plugin_nx_nexus__`. Examples:
+
+```
+mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
+mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
+mcp__plugin_nx_nexus__scratch(action="put", content="...")
+mcp__plugin_nx_nexus__memory_get(project="...", title="")
+```
+
+See SubagentStart hook output for full tool reference.
+
+
 ## Relay Reception (OPTIONAL)
 
 **Note**: orchestrator typically receives unstructured user requests for routing, not formal relays. However, when receiving a structured relay from another agent, validate it contains:
@@ -28,9 +42,9 @@ effort: medium
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: Use search tool: query="[task topic]", corpus="knowledge", n=5
-2. Check nx T2 memory for session state: Use memory_search tool: query="[topic]", project="{project}"
-3. Check T1 scratch for in-session notes: Use scratch tool: action="search", query="[topic]"
+1. Search nx T3 store for missing context: mcp__plugin_nx_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check nx T2 memory for session state: mcp__plugin_nx_nexus__memory_search(query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -146,12 +160,12 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - **Routing Decisions**: Document in response; for significant routing patterns, store in T3:
-  Use store_put tool: content="# Routing Pattern: {pattern}\n{rationale}", collection="knowledge", title="pattern-orchestrator-{routing-scenario}", tags="routing,orchestration"
+  mcp__plugin_nx_nexus__store_put(content="# Routing Pattern: {pattern}\n{rationale}", collection="knowledge", title="pattern-orchestrator-{routing-scenario}", tags="routing,orchestration"
 - **Pipeline Coordination**: Track via beads with dependencies
 - **Interim Routing Notes**: Use T1 scratch for working notes during complex pipeline analysis:
-  Use scratch tool: action="put", content="Routing hypothesis: {agent} because {reason}", tags="routing,pipeline"
+  mcp__plugin_nx_nexus__scratch(action="put", content="Routing hypothesis: {agent} because {reason}", tags="routing,pipeline"
   If worth preserving:
-  Use scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="routing-notes.md"
+  mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>", project="{project}", title="routing-notes.md"
 - **Context Aggregation**: Gather and pass through; don't create new storage
 - **Escalation Notes**: Create blocker beads when needed
 

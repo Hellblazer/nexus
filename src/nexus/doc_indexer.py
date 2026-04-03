@@ -46,7 +46,7 @@ def _has_credentials() -> bool:
     return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
 
 
-_CCE_TOKEN_LIMIT = 32_000
+_CCE_TOKEN_LIMIT = 24_000  # 75% of Voyage's 32K to account for token estimation error
 _CCE_TOTAL_TOKEN_LIMIT = 120_000  # Voyage API total token limit across all inputs
 # Note: per-batch limit of 32K means we never hit 120K in a single call
 _CCE_MAX_TOTAL_CHUNKS = 16_000  # Voyage API limit: max 16K chunks across all inputs
@@ -64,7 +64,7 @@ def _batch_chunks_for_cce(chunks: list[str]) -> list[list[str]]:
     current: list[str] = []
     current_tokens = 0
     for chunk in chunks:
-        chunk_tokens = len(chunk) // 3
+        chunk_tokens = len(chunk) // 2  # conservative: ~2 chars/token for academic text
         if current and (current_tokens + chunk_tokens > _CCE_TOKEN_LIMIT or len(current) >= _CCE_MAX_BATCH_CHUNKS):
             batches.append(current)
             current = [chunk]
@@ -96,8 +96,10 @@ def _embed_with_fallback(
     CCE token limit.  Returns ``(embeddings, actual_model_used)`` so callers
     can record the model that produced the stored vectors in metadata.
 
-    Note: both voyage-context-3 and voyage-4 produce 1024-dim embeddings,
-    so mixed CCE/fallback batches are dimensionally compatible for ChromaDB.
+    On CCE batch failure (token limit exceeded), the batch is split in half
+    and retried with the same model. Never falls back to a different model —
+    all vectors in a collection must come from the same embedding space.
+    Single-chunk failures that cannot be split further raise immediately.
 
     We rely on Voyage's default truncation=True. Our chunker keeps chunks well
     under model context limits, so truncation should never activate. If it does,
@@ -121,7 +123,6 @@ def _embed_with_fallback(
         # single-chunk docs are indexed in the same embedding space as CCE queries.
         batches = _batch_chunks_for_cce(chunks) if len(chunks) >= 2 else [[chunks[0]]]
         all_embeddings: list[list[float]] = []
-        any_fallback = False
         for batch in batches:
             try:
                 result = _voyage_with_retry(
@@ -129,24 +130,22 @@ def _embed_with_fallback(
                     inputs=[batch], model=model, input_type=input_type,
                 )
                 all_embeddings.extend(result.results[0].embeddings)
-                if on_progress:
-                    on_progress(len(all_embeddings), len(chunks))
             except Exception as exc:
-                any_fallback = True
-                _log.warning("CCE failed for batch, falling back to voyage-4",
+                # Batch too large — split in half and retry with same model.
+                # Never fall back to a different model (causes embedding mismatch).
+                if len(batch) <= 1:
+                    raise  # single chunk exceeds limit — cannot split further
+                _log.warning("cce_batch_too_large_splitting",
                              error=str(exc), batch_size=len(batch))
-        if any_fallback:
-            # Discard any partial CCE embeddings and re-embed the entire document
-            # with voyage-4 so all stored vectors come from a single model.
-            _log.warning("partial_cce_failure_reembed", chunks=len(chunks))
-            all_embeddings = []
-            for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
-                batch = chunks[i:i + _EMBED_BATCH_SIZE]
-                result = _voyage_with_retry(client.embed, texts=batch, model="voyage-4", input_type=input_type)
-                all_embeddings.extend(result.embeddings)
-                if on_progress:
-                    on_progress(len(all_embeddings), len(chunks))
-            return all_embeddings, "voyage-4"
+                mid = len(batch) // 2
+                for half in (batch[:mid], batch[mid:]):
+                    result = _voyage_with_retry(
+                        client.contextualized_embed,
+                        inputs=[half], model=model, input_type=input_type,
+                    )
+                    all_embeddings.extend(result.results[0].embeddings)
+            if on_progress:
+                on_progress(len(all_embeddings), len(chunks))
         if all_embeddings:
             return all_embeddings, model
         model = "voyage-4"

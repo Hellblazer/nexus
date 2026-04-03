@@ -46,7 +46,7 @@ Read the RDR markdown file. Check that these sections are present AND non-empty 
 
 ### Layer 2 — Assumption Audit (from T2, no AI)
 
-Use memory_get tool: project="{repo}_rdr", title=""
+mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title=""
 
 Filter entries matching `NNN-research-*`. Analyze:
 
@@ -100,7 +100,7 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 
 **Prior-art search** (within the agent): enumerate RDR collections and search:
 - Use store_list tool to enumerate collections, filter for `rdr__`
-- Use search tool: query="relevant query terms from RDR problem statement", corpus="{each_collection}", n=5
+- mcp__plugin_nx_nexus__search(query="relevant query terms from RDR problem statement", corpus="{each_collection}", limit=5
 If no collections found: "No prior RDRs indexed. Cross-project prior-art search will improve as RDRs are indexed and closed."
 
 ### Gate Aggregation
@@ -113,7 +113,7 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 
 ### On Pass
 
-1. Write gate result to T2: Use memory_put tool: content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nsummary: One-sentence summary", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"
+1. Write gate result to T2: mcp__plugin_nx_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nsummary: One-sentence summary", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"
 2. Append gate findings to the RDR's Revision History section
 3. Print: `> Run '/nx:rdr-accept <id>' to accept this RDR.`
 
