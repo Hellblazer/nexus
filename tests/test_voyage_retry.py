@@ -274,31 +274,27 @@ def test_reset_voyage_client_clears_singleton() -> None:
 
 # ── nexus-n4v9: integration tests ─────────────────────────────────────────────
 
-def test_embed_with_fallback_cce_retry_then_degrade_e2e() -> None:
-    """Full flow: CCE raises APIConnectionError 3 times (exhausting _voyage_with_retry),
-    except block catches and falls back to voyage-4 embed.
-    Verify: CCE called 3 times, fallback embed called once, returned model is 'voyage-4'.
+def test_embed_with_fallback_cce_retry_then_split_then_propagate_e2e() -> None:
+    """Full flow: CCE raises APIConnectionError persistently. Batch splits in half,
+    but single-chunk halves also fail → error propagates (never degrades to voyage-4).
     """
     from nexus.doc_indexer import _embed_with_fallback
 
     cce_failure = _ve.APIConnectionError("persistent down")
-    voyage4_result = MagicMock()
-    voyage4_result.embeddings = [[0.1] * 1024]
 
     mock_client = MagicMock()
     mock_client.contextualized_embed.side_effect = cce_failure
-    mock_client.embed.return_value = voyage4_result
 
     with patch("voyageai.Client", return_value=mock_client), \
          patch("nexus.retry.time.sleep"):
-        # CCE requires >= 2 chunks; use two chunks to trigger the CCE path
-        embeddings, model = _embed_with_fallback(
-            ["chunk one", "chunk two"], "voyage-context-3", "test-key"
-        )
+        with pytest.raises(_ve.APIConnectionError):
+            _embed_with_fallback(
+                ["chunk one", "chunk two"], "voyage-context-3", "test-key"
+            )
 
-    assert mock_client.contextualized_embed.call_count == 3  # 3 retry attempts
-    assert mock_client.embed.call_count == 1                  # fallback fired once
-    assert model == "voyage-4"
+    # CCE attempted: original batch (retried 3x) → split → each half (retried 3x)
+    assert mock_client.contextualized_embed.call_count >= 3
+    mock_client.embed.assert_not_called()  # never falls back to different model
 
 
 def test_embed_with_fallback_standard_path_propagates_after_retry_exhaustion() -> None:

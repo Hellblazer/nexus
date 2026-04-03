@@ -533,16 +533,26 @@ def test_single_chunk_cce_uses_contextualized_embed():
     assert len(embeddings) == 1
 
 
-def test_embed_with_fallback_falls_back_on_error(monkeypatch):
-    """contextualized_embed raises Exception -> falls back to embed(), returns voyage-4 model."""
+def test_embed_with_fallback_splits_batch_on_error(monkeypatch):
+    """contextualized_embed raises on full batch → splits in half and retries with same model."""
     from unittest.mock import MagicMock, patch
     from nexus.doc_indexer import _embed_with_fallback
 
     mock_client = MagicMock()
-    mock_client.contextualized_embed.side_effect = RuntimeError("API error")
-    mock_result = MagicMock(spec=EmbeddingsObject)
-    mock_result.embeddings = [[0.1, 0.2], [0.3, 0.4]]
-    mock_client.embed.return_value = mock_result
+    call_count = [0]
+
+    def fake_cce(inputs, model, input_type):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("batch too large")
+        # Split halves succeed
+        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+        cce_item.embeddings = [[0.1] for _ in inputs[0]]
+        result = MagicMock(spec=ContextualizedEmbeddingsObject)
+        result.results = [cce_item]
+        return result
+
+    mock_client.contextualized_embed.side_effect = fake_cce
 
     with patch("voyageai.Client", return_value=mock_client):
         embeddings, actual_model = _embed_with_fallback(
@@ -551,11 +561,12 @@ def test_embed_with_fallback_falls_back_on_error(monkeypatch):
             api_key="vk_test",
         )
 
-    mock_client.contextualized_embed.assert_called_once()
-    mock_client.embed.assert_called_once()
-    assert embeddings == [[0.1, 0.2], [0.3, 0.4]]
-    # Critical: fallback must report voyage-4 so callers store the correct model in metadata
-    assert actual_model == "voyage-4"
+    # First call failed, then 2 split calls succeeded
+    assert call_count[0] == 3
+    assert len(embeddings) == 2
+    # Never falls back to a different model
+    assert actual_model == "voyage-context-3"
+    mock_client.embed.assert_not_called()
 
 
 def test_embed_with_fallback_batches_large_input(monkeypatch):
@@ -593,22 +604,29 @@ def test_embed_with_fallback_batches_large_input(monkeypatch):
     assert len(embeddings) == 6
 
 
-def test_embed_with_fallback_metadata_reflects_actual_model(monkeypatch):
-    """When CCE fails and falls back to voyage-4, the returned model is voyage-4.
+def test_embed_with_fallback_never_switches_model(monkeypatch):
+    """CCE failure retries with same model (split), never falls back to voyage-4.
 
-    This is the companion test to Critical Issue C1: callers must use the returned
-    model name (not the requested target_model) when writing embedding_model metadata.
-    If this were incorrect, the staleness check would permanently skip re-indexing
-    even after the CCE error is resolved.
+    The returned model name must always match the requested model so metadata
+    is consistent within the collection.
     """
     from unittest.mock import MagicMock, patch
     from nexus.doc_indexer import _embed_with_fallback
 
     mock_client = MagicMock()
-    mock_client.contextualized_embed.side_effect = Exception("network error")
-    fallback_result = MagicMock(spec=EmbeddingsObject)
-    fallback_result.embeddings = [[0.1, 0.2], [0.3, 0.4]]
-    mock_client.embed.return_value = fallback_result
+    call_count = [0]
+
+    def fake_cce(inputs, model, input_type):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise Exception("network error")
+        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+        cce_item.embeddings = [[0.1] for _ in inputs[0]]
+        result = MagicMock(spec=ContextualizedEmbeddingsObject)
+        result.results = [cce_item]
+        return result
+
+    mock_client.contextualized_embed.side_effect = fake_cce
 
     with patch("voyageai.Client", return_value=mock_client):
         embeddings, actual_model = _embed_with_fallback(
@@ -617,45 +635,36 @@ def test_embed_with_fallback_metadata_reflects_actual_model(monkeypatch):
             api_key="vk_test",
         )
 
-    # Embeddings come from standard path
-    assert embeddings == [[0.1, 0.2], [0.3, 0.4]]
-    # Model MUST reflect what was actually used — not the requested voyage-context-3
-    assert actual_model == "voyage-4", (
-        "Fallback must return 'voyage-4' so callers record the correct model in metadata"
-    )
+    assert actual_model == "voyage-context-3"
+    mock_client.embed.assert_not_called()
 
 
-def test_partial_cce_failure_reembeds_consistently():
-    """If any CCE batch fails, re-embed entire doc with voyage-4 for consistency.
+def test_partial_cce_failure_splits_failed_batch():
+    """If a CCE batch fails, it is split in half and retried with same model.
 
-    C4 fix: when multi-batch CCE embedding partially fails (some batches succeed
-    with voyage-context-3, others fall back to voyage-4), all_embeddings would
-    contain vectors from two incompatible embedding spaces.  The fix discards all
-    accumulated CCE embeddings and re-embeds the entire document with voyage-4 so
-    that all stored vectors come from a single, consistent model.
-
-    We patch _batch_chunks_for_cce to return exactly 2 batches of 2 chunks each,
-    isolating the test from token-estimation details.
+    Multi-batch CCE: batch 1 succeeds, batch 2 fails → batch 2 is split into
+    two halves and retried. All embeddings come from voyage-context-3.
     """
     from unittest.mock import MagicMock, patch
     from nexus.doc_indexer import _embed_with_fallback
 
     mock_client = MagicMock()
-    # First batch succeeds with CCE
-    cce_success = MagicMock(spec=ContextualizedEmbeddingsObject)
-    cce_result = MagicMock(spec=ContextualizedEmbeddingsResult)
-    cce_result.embeddings = [[0.1] * 10, [0.2] * 10]
-    cce_success.results = [cce_result]
-    # Second batch fails
-    mock_client.contextualized_embed.side_effect = [cce_success, RuntimeError("API error")]
+    call_count = [0]
 
-    # embed (voyage-4 fallback) always works; return 4 embeddings for 4 total chunks
-    v4_result = MagicMock(spec=EmbeddingsObject)
-    v4_result.embeddings = [[0.3] * 10, [0.4] * 10, [0.5] * 10, [0.6] * 10]
-    mock_client.embed.return_value = v4_result
+    def fake_cce(inputs, model, input_type):
+        call_count[0] += 1
+        if call_count[0] == 2:
+            # Second batch (of the original batches) fails
+            raise RuntimeError("API error")
+        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+        cce_item.embeddings = [[0.1] for _ in inputs[0]]
+        result = MagicMock(spec=ContextualizedEmbeddingsObject)
+        result.results = [cce_item]
+        return result
+
+    mock_client.contextualized_embed.side_effect = fake_cce
 
     chunks = ["chunk a", "chunk b", "chunk c", "chunk d"]
-    # Force batching into exactly [[c0,c1], [c2,c3]] regardless of token estimates
     forced_batches = [["chunk a", "chunk b"], ["chunk c", "chunk d"]]
 
     with patch("voyageai.Client", return_value=mock_client), \
@@ -664,14 +673,11 @@ def test_partial_cce_failure_reembeds_consistently():
             chunks, "voyage-context-3", "test-key"
         )
 
-    assert model == "voyage-4", "Partial failure must report voyage-4"
-    # embed() must have been called for ALL 4 chunks (re-embed entire doc)
-    all_embed_texts: list[str] = []
-    for c in mock_client.embed.call_args_list:
-        all_embed_texts.extend(c.kwargs.get("texts", c.args[0] if c.args else []))
-    assert len(all_embed_texts) == 4, (
-        f"All 4 chunks must be re-embedded with voyage-4, got {len(all_embed_texts)}"
-    )
+    assert model == "voyage-context-3", "Must stay on same model after split retry"
+    assert len(embeddings) == 4
+    # CCE called: batch1 ok, batch2 fail, half1 ok, half2 ok = 4 calls
+    assert call_count[0] == 4
+    mock_client.embed.assert_not_called()
 
 
 # ── CCE contract tests: prevent regression of voyageai API misuse ────────────
@@ -803,17 +809,16 @@ def test_cce_contract_embed_with_fallback_uses_correct_access_path(monkeypatch):
     mock_client.contextualized_embed.assert_called_once()
 
 
-def test_cce_contract_token_limit_is_32k():
-    """The CCE token limit constant must be 32_000 (voyage-context-3 context window).
+def test_cce_contract_token_limit_has_safety_margin():
+    """The CCE token limit must be below Voyage's 32K to account for estimation error.
 
-    Bug #2 regression guard: the old code used 100_000 but the actual API limit
-    for voyage-context-3 is 32k tokens.
+    We use 75% of 32K (24K) because chars-to-tokens estimation for academic text
+    with equations can be off by 30-50%.
     """
     from nexus.doc_indexer import _CCE_TOKEN_LIMIT
 
-    assert _CCE_TOKEN_LIMIT == 32_000, (
-        f"_CCE_TOKEN_LIMIT must be 32_000, got {_CCE_TOKEN_LIMIT}"
-    )
+    assert _CCE_TOKEN_LIMIT <= 32_000, f"Must not exceed Voyage limit, got {_CCE_TOKEN_LIMIT}"
+    assert _CCE_TOKEN_LIMIT >= 16_000, f"Too conservative, got {_CCE_TOKEN_LIMIT}"
 
 
 def test_cce_contract_batch_chunks_splits_large_input():
@@ -844,11 +849,11 @@ def test_cce_contract_batch_chunks_merges_singleton_tail():
     from nexus.doc_indexer import _batch_chunks_for_cce
 
     # Fill one batch, then have a single leftover
-    big = "x" * 90_000   # ~30k tokens (fits in one batch)
+    big = "x" * 40_000   # ~20k tokens at //2 estimate (fits in one batch under 24K limit)
     small = "y" * 300     # tiny
     tiny = "z" * 300      # tiny — would be singleton if not merged
     batches = _batch_chunks_for_cce([big, small, tiny])
-    # All should end up together (total ~30.2k < 32k) or singleton merged back
+    # All should end up together or singleton merged back
     for batch in batches:
         assert len(batch) >= 2, f"Batch has {len(batch)} chunks, CCE needs >= 2"
 
@@ -1182,29 +1187,27 @@ def test_embed_with_fallback_warns_at_exactly_limit(monkeypatch):
 
 # ── C3: Fallback embed() in CCE error handler also batches ──────────────────
 
-def test_cce_fallback_embed_batches_large_batch(monkeypatch):
-    """When CCE fails, the fallback embed() must batch chunks (not send all at once)."""
+def test_cce_failure_splits_recursively(monkeypatch):
+    """When CCE batch fails, split in half and retry — both halves use same model."""
     from unittest.mock import MagicMock, patch
-    from nexus.doc_indexer import _embed_with_fallback, _EMBED_BATCH_SIZE
+    from nexus.doc_indexer import _embed_with_fallback
 
-    # 200 chunks — CCE will fail, fallback must batch embed() calls
-    chunks = [f"chunk_{i}" for i in range(200)]
+    chunks = [f"chunk_{i}" for i in range(4)]
 
     mock_client = MagicMock()
-    mock_client.contextualized_embed.side_effect = RuntimeError("CCE error")
+    call_count = [0]
 
-    embed_call_count = [0]
-
-    def fake_embed(texts, model, input_type):
-        embed_call_count[0] += 1
-        assert len(texts) <= _EMBED_BATCH_SIZE, (
-            f"Fallback embed() received {len(texts)} texts, max is {_EMBED_BATCH_SIZE}"
-        )
-        result = MagicMock(spec=EmbeddingsObject)
-        result.embeddings = [[0.1] for _ in texts]
+    def fake_cce(inputs, model, input_type):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("batch too large")
+        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+        cce_item.embeddings = [[0.1] for _ in inputs[0]]
+        result = MagicMock(spec=ContextualizedEmbeddingsObject)
+        result.results = [cce_item]
         return result
 
-    mock_client.embed.side_effect = fake_embed
+    mock_client.contextualized_embed.side_effect = fake_cce
 
     with patch("voyageai.Client", return_value=mock_client):
         embeddings, actual_model = _embed_with_fallback(
@@ -1213,95 +1216,71 @@ def test_cce_fallback_embed_batches_large_batch(monkeypatch):
             api_key="vk_test",
         )
 
-    assert embed_call_count[0] == 2, (
-        f"Expected 2 fallback embed() calls for 200 chunks, got {embed_call_count[0]}"
-    )
-    assert len(embeddings) == 200
-    assert actual_model == "voyage-4"
+    assert len(embeddings) == 4
+    assert actual_model == "voyage-context-3"
+    mock_client.embed.assert_not_called()
 
 
 # ── B7: Partial batch failure (mixed model) ──────────────────────────────────
 
-def test_embed_partial_batch_failure_mixed_model(monkeypatch):
-    """CCE succeeds for batch 1 but fails for batch 2: all embeddings collected, model=voyage-4."""
+def test_embed_partial_batch_failure_stays_same_model(monkeypatch):
+    """CCE succeeds for batch 1, fails for batch 2: batch 2 is split, all embeddings from CCE."""
     from unittest.mock import MagicMock, patch
     from nexus.doc_indexer import _embed_with_fallback
 
-    # 6 large chunks → 2 CCE batches (each ~8k tokens → ~24k per 3-chunk batch)
-    chunks = [f"chunk{i}_" + "x" * 24_000 for i in range(6)]
+    # Use forced batches to avoid token-estimation coupling
+    chunks = ["chunk a", "chunk b", "chunk c", "chunk d"]
+    forced_batches = [["chunk a", "chunk b"], ["chunk c", "chunk d"]]
 
     mock_client = MagicMock()
     cce_call_count = [0]
+    failed_once = [False]
 
     def fake_cce(inputs, model, input_type):
         cce_call_count[0] += 1
-        if cce_call_count[0] == 1:
-            # First batch succeeds
-            cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
-            cce_item.embeddings = [[1.0] for _ in inputs[0]]
-            result = MagicMock(spec=ContextualizedEmbeddingsObject)
-            result.results = [cce_item]
-            return result
-        else:
+        # Fail on the second original batch only, not the retried halves
+        if cce_call_count[0] == 2 and not failed_once[0]:
+            failed_once[0] = True
             raise RuntimeError("CCE batch 2 failed")
+        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+        cce_item.embeddings = [[1.0] for _ in inputs[0]]
+        result = MagicMock(spec=ContextualizedEmbeddingsObject)
+        result.results = [cce_item]
+        return result
 
     mock_client.contextualized_embed.side_effect = fake_cce
 
-    def fake_embed(texts, model, input_type):
-        result = MagicMock(spec=EmbeddingsObject)
-        result.embeddings = [[2.0] for _ in texts]
-        return result
-
-    mock_client.embed.side_effect = fake_embed
-
-    with patch("voyageai.Client", return_value=mock_client):
+    with patch("voyageai.Client", return_value=mock_client), \
+         patch("nexus.doc_indexer._batch_chunks_for_cce", return_value=forced_batches):
         embeddings, actual_model = _embed_with_fallback(
             chunks=chunks,
             model="voyage-context-3",
             api_key="vk_test",
         )
 
-    # All 6 embeddings must be present
-    assert len(embeddings) == 6
-    # Model must be voyage-4 because a fallback occurred
-    assert actual_model == "voyage-4"
-    # embed() was called for the failed batch only (not for the successful one)
-    assert mock_client.embed.call_count >= 1
+    assert len(embeddings) == 4
+    assert actual_model == "voyage-context-3"
+    mock_client.embed.assert_not_called()
 
 
 # ── F5: All-batches-fail double-fallback ─────────────────────────────────────
 
-def test_embed_all_batches_fail_double_fallback(monkeypatch):
-    """When every CCE batch fails, all embeddings come from fallback embed()."""
+def test_embed_single_chunk_failure_raises(monkeypatch):
+    """When a single-chunk batch fails CCE, it raises (cannot split further)."""
     from unittest.mock import MagicMock, patch
     from nexus.doc_indexer import _embed_with_fallback
 
-    # 6 large chunks → multiple CCE batches, all fail
-    chunks = [f"chunk{i}_" + "x" * 24_000 for i in range(6)]
-
     mock_client = MagicMock()
-    mock_client.contextualized_embed.side_effect = RuntimeError("CCE always fails")
+    mock_client.contextualized_embed.side_effect = RuntimeError("single chunk too large")
 
-    def fake_embed(texts, model, input_type):
-        result = MagicMock(spec=EmbeddingsObject)
-        result.embeddings = [[3.0] for _ in texts]
-        return result
-
-    mock_client.embed.side_effect = fake_embed
-
+    # Single chunk — can't split, must raise
     with patch("voyageai.Client", return_value=mock_client):
-        embeddings, actual_model = _embed_with_fallback(
-            chunks=chunks,
-            model="voyage-context-3",
-            api_key="vk_test",
-        )
-
-    assert len(embeddings) == 6
-    assert actual_model == "voyage-4"
-    # C4 fix: consolidated re-embed pass — embed() called at least once for ALL chunks
-    assert mock_client.embed.call_count >= 1
-    # All embeddings from fallback — no mixed-model vectors
-    assert all(e == [3.0] for e in embeddings)
+        with pytest.raises(RuntimeError, match="single chunk too large"):
+            _embed_with_fallback(
+                chunks=["one giant chunk"],
+                model="voyage-context-3",
+                api_key="vk_test",
+            )
 
 
 # ── F3: batch_index_markdowns failure test ───────────────────────────────────
