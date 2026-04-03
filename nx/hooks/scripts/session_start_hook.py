@@ -106,8 +106,7 @@ def main() -> None:
     output_lines.append("Enrichment: `nx enrich COLLECTION` (CLI only)")
     output_lines.append("Pagination: search/store_list/memory_search return paged results. Footer shows `offset=N` for next page.")
     output_lines.append("")
-    output_lines.append("**MCP tools are schema-deferred.** Load before first use:")
-    output_lines.append('ToolSearch("select:mcp__plugin_nx_nexus__search,mcp__plugin_nx_nexus__query,mcp__plugin_nx_nexus__scratch,mcp__plugin_nx_nexus__store_put,mcp__plugin_nx_nexus__store_list,mcp__plugin_nx_nexus__store_get,mcp__plugin_nx_nexus__store_delete,mcp__plugin_nx_nexus__memory_put,mcp__plugin_nx_nexus__memory_get,mcp__plugin_nx_nexus__memory_delete,mcp__plugin_nx_nexus__memory_search,mcp__plugin_nx_nexus__collection_list,mcp__plugin_nx_nexus__collection_info")')
+    output_lines.append("MCP tool prefix: `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_nexus__search`, `mcp__plugin_nx_nexus__query`)")
     output_lines.append("")
 
     if output_lines:

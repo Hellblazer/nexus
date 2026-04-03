@@ -94,11 +94,7 @@ The SessionEnd hook runs automatically at session close and auto-promotes flagge
 
 ## Storage Tier Quick Reference
 
-**IMPORTANT: All nx MCP tools are deferred.** Before your first call to any nx tool, load it:
-```
-ToolSearch("select:mcp__plugin_nx_nexus__search,mcp__plugin_nx_nexus__query,mcp__plugin_nx_nexus__scratch")
-```
-Load only the tools you need. Tools do not exist until loaded via ToolSearch.
+nx MCP tools use the full prefix `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_nexus__search`).
 
 | Tier | Name | Scope | MCP Tools | Use Cases | TTL |
 |------|------|-------|-----------|-----------|-----|

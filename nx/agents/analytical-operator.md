@@ -18,7 +18,7 @@ effort: low
 ---
 
 
-## MANDATORY: nx Tool Setup
+## nx Tool Reference
 
 nx MCP tools use the full prefix `mcp__plugin_nx_nexus__`. Examples:
 
