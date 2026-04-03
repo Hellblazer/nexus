@@ -11,7 +11,7 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 
 All nexus MCP tools are prefixed `mcp__plugin_nx_nexus__` in Claude Code.
 
-There are 16 tools: `search`, `store_put`, `store_get`, `store_list`, `store_delete`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `scratch`, `scratch_manage`, `collection_list`, `collection_info`, `collection_verify`, `plan_save`, `plan_search`.
+There are 17 tools: `search`, `query`, `store_put`, `store_get`, `store_list`, `store_delete`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `scratch`, `scratch_manage`, `collection_list`, `collection_info`, `collection_verify`, `plan_save`, `plan_search`.
 
 ### search
 
@@ -33,6 +33,27 @@ Use search tool: query="query", corpus="knowledge__art", limit=15  # specific co
 Use search tool: query="query", where="bib_year>=2023"          # filter by year
 Use search tool: query="query", where="tags=arch,bib_year>=2020" # multiple filters
 ```
+
+### query
+
+Document-level semantic search for analytical questions. Unlike `search` which returns individual chunks, `query` groups results by source document and returns the best-matching snippet per document with full metadata.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `question` | str | required | Natural-language research question |
+| `corpus` | str | `"knowledge"` | Corpus prefix or full collection name. `"all"` for all corpora |
+| `where` | str | `""` | Metadata filter: `KEY=VALUE`, comma-separated. Same syntax as `search` |
+| `limit` | int | `10` | Maximum documents to return |
+
+```
+Use query tool: question="adaptive resonance theory cortical maps"
+Use query tool: question="speech processing", corpus="knowledge__art", where="page_count>=50"
+Use query tool: question="error handling patterns", corpus="code", limit=5
+```
+
+Returns per-document: title, relevance score, bibliographic metadata (year, authors, venue, citations), technical metadata (pages, chunks, extraction method, formulas), collection, and best matching snippet.
+
+Use `search` for chunk-level retrieval. Use `query` when you need to know **which documents** match.
 
 ### store_put
 

@@ -89,6 +89,7 @@ T2 memory — project-scoped, persistent:
 
 T3 knowledge — permanent, semantic search:
   search(query="...", corpus="knowledge", limit=10, offset=0, where="bib_year>=2023")
+  query(question="research question", corpus="knowledge", where="bib_year>=2020", limit=10)  → document-level results
   store_list(collection="knowledge", limit=20, offset=0)
   store_list(collection="knowledge__art", docs=true)   → document-level view
   store_get(doc_id="...", collection="knowledge")

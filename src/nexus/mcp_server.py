@@ -258,6 +258,138 @@ def search(
 
 
 @mcp.tool()
+def query(
+    question: str,
+    corpus: str = "knowledge",
+    where: str = "",
+    limit: int = 10,
+) -> str:
+    """Document-level semantic search for analytical questions.
+
+    Unlike ``search`` which returns individual chunks, ``query`` groups results
+    by source document and returns the best-matching snippet per document along
+    with full metadata (title, year, citations, page count, extraction method).
+
+    Use this for research questions where you need to know WHICH documents match,
+    not just which text fragments. The calling agent handles analysis/synthesis.
+
+    Args:
+        question: Natural-language research question
+        corpus: Corpus prefix or full collection name (default: knowledge).
+                Use "all" for all corpora.
+        where: Metadata filter — KEY=VALUE, comma-separated.
+               Example: "bib_year>=2020,tags=arch"
+        limit: Maximum documents to return (default 10)
+    """
+    try:
+        from nexus.search_engine import search_cross_corpus
+        t3 = _get_t3()
+
+        if corpus == "all":
+            corpus = "knowledge,code,docs,rdr"
+
+        target: list[str] = []
+        all_names = _get_collection_names()
+        for part in corpus.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "__" in part:
+                target.append(part)
+            else:
+                target.extend(resolve_corpus(part, all_names))
+
+        if not target:
+            return f"No collections match corpus {corpus!r}"
+
+        where_dict = _parse_where_str(where)
+
+        # Over-fetch chunks to ensure good document coverage
+        fetch_n = limit * 10
+        results = search_cross_corpus(
+            question, target, n_results=fetch_n, t3=t3, where=where_dict,
+        )
+        results.sort(key=lambda r: r.distance)
+        if not results:
+            return "No documents found."
+
+        # Group by document: use content_hash or source_title as doc key
+        docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
+        for r in results:
+            meta = r.metadata
+            doc_key = (
+                meta.get("content_hash")
+                or meta.get("source_title")
+                or meta.get("source_path")
+                or r.id
+            )
+            if doc_key not in docs:
+                docs[doc_key] = {
+                    "title": meta.get("source_title") or meta.get("title") or doc_key[:40],
+                    "collection": r.collection,
+                    "distance": r.distance,
+                    "snippet": r.content[:300].replace("\n", " "),
+                    "bib_year": meta.get("bib_year", ""),
+                    "bib_authors": meta.get("bib_authors", ""),
+                    "bib_citation_count": meta.get("bib_citation_count", ""),
+                    "bib_venue": meta.get("bib_venue", ""),
+                    "page_count": meta.get("page_count", ""),
+                    "chunk_count": meta.get("chunk_count", ""),
+                    "extraction_method": meta.get("extraction_method", ""),
+                    "has_formulas": meta.get("has_formulas", ""),
+                    "source_path": meta.get("source_path", ""),
+                }
+            elif r.distance < docs[doc_key]["distance"]:
+                # Better matching chunk — update snippet
+                docs[doc_key]["distance"] = r.distance
+                docs[doc_key]["snippet"] = r.content[:300].replace("\n", " ")
+
+        # Sort by best match distance, limit
+        sorted_docs = sorted(docs.values(), key=lambda d: d["distance"])[:limit]
+
+        lines: list[str] = [f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"]
+        lines.append("")
+        for i, d in enumerate(sorted_docs, 1):
+            dist = f"{d['distance']:.4f}"
+            title = d["title"][:70]
+            header_parts = [f"[{dist}] {title}"]
+            # Bibliographic metadata
+            bib_parts: list[str] = []
+            if d["bib_year"]:
+                bib_parts.append(str(d["bib_year"]))
+            if d["bib_authors"]:
+                authors = d["bib_authors"][:60]
+                bib_parts.append(authors)
+            if d["bib_venue"]:
+                bib_parts.append(d["bib_venue"][:30])
+            if d["bib_citation_count"]:
+                bib_parts.append(f"{d['bib_citation_count']} citations")
+            # Technical metadata
+            tech_parts: list[str] = []
+            if d["page_count"]:
+                tech_parts.append(f"{d['page_count']}p")
+            if d["chunk_count"]:
+                tech_parts.append(f"{d['chunk_count']} chunks")
+            if d["extraction_method"]:
+                tech_parts.append(d["extraction_method"])
+            if d["has_formulas"]:
+                tech_parts.append("formulas")
+
+            lines.append(f"{i}. {' | '.join(header_parts)}")
+            if bib_parts:
+                lines.append(f"   {' · '.join(bib_parts)}")
+            if tech_parts:
+                lines.append(f"   [{' · '.join(tech_parts)}]")
+            lines.append(f"   {d['collection']}")
+            lines.append(f"   {d['snippet']}")
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def store_put(
     content: str,
     collection: str = "knowledge",
