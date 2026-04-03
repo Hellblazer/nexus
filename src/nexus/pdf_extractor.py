@@ -45,7 +45,7 @@ do_parse(
     pdf_bytes_list=[Path(pdf_path).read_bytes()],
     p_lang_list=["en"],
     formula_enable=True,
-    table_enable=True,
+    table_enable=True,  # Note: server path uses config (default False) — see RDR-046 RF-2
     start_page_id=start,
     end_page_id=end,
 )
@@ -297,7 +297,10 @@ class PDFExtractor:
             try:
                 md, content_list, pdf_info = self._mineru_run_isolated(pdf_path, start, end)
             except RuntimeError:
-                # OOM or subprocess failure — retry at 1-page granularity
+                # OOM or subprocess failure — retry at 1-page granularity.
+                # This catches both subprocess OOM (exit code -9) and server-crash
+                # fallback failures. Single-page retries that also fail propagate
+                # immediately (span <= 1 → re-raise), so the document fails cleanly.
                 span = (end or total_pages) - start
                 if span <= 1:
                     raise  # already single-page, no retry possible

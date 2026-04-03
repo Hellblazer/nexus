@@ -214,6 +214,31 @@ class TestMineruRunViaServer:
 
         assert md == "# Recovered"
 
+    def test_key_miss_multiple_results_raises(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """When stem doesn't match and multiple result keys exist, raises RuntimeError."""
+        response = {
+            "results": {
+                "other_paper": {"md_content": "# Wrong"},
+                "another_paper": {"md_content": "# Also wrong"},
+            },
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = response
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch("nexus.pdf_extractor.httpx.post", return_value=mock_resp),
+            patch("nexus.config.load_config", return_value={
+                "pdf": {"mineru_server_url": "http://127.0.0.1:8010",
+                        "mineru_table_enable": False},
+            }),
+        ):
+            with pytest.raises(RuntimeError, match="missing key"):
+                extractor._mineru_run_via_server(dummy_pdf, 0, None)
+
     def test_empty_md_content_raises(
         self, extractor: PDFExtractor, dummy_pdf: Path,
     ) -> None:

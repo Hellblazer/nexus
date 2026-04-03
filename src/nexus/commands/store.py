@@ -159,7 +159,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
         click.echo(f"\n  Next page: --offset {shown_end}")
 
 
-def _list_documents(db: "T3Database", col_name: str) -> None:
+def _list_documents(db: T3Database, col_name: str) -> None:
     """List unique documents (deduplicated by content_hash) in a collection."""
     try:
         total_chunks = db.collection_info(col_name)["count"]
