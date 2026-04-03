@@ -135,3 +135,17 @@ Enriched Docling: 20+ min/PDF. Non-enriched: 12s. Unicode math scan: 0.05s. Repl
 **Classification**: Verified — source + Context7 docs | **Confidence**: HIGH
 
 `formula_enable=false` disables both detection AND recognition. No way to cheaply identify formula pages without running MFR. Per-page formula routing requires external detector or upstream API change.
+
+### RF-6: Observability gaps are the real user pain (2026-04-03)
+**Classification**: Verified — empirical (user feedback) | **Confidence**: HIGH
+
+Technical failures were recoverable. UX failures were not: (1) Docling enrichment produced zero output for 20 min — user killed and restarted. (2) Post-extraction embed/upsert phase silent for 5-10 min — appeared hung. (3) Stale server config (wrong port) caused silent fallback with no indication. (4) tqdm progress bar fights made progress messages invisible.
+
+Key principle: **every operation >5s needs visible progress. Every fallback needs a visible message. Every skip needs a reason.**
+
+### RF-7: Accumulation is the architectural trap (2026-04-03)
+**Classification**: Verified — empirical + architectural analysis | **Confidence**: HIGH
+
+Pipeline accumulates at every level: pages in extractor, chunks in indexer, embeddings in embed function, records in write batch. For 20-page papers, each holds seconds of work. For 771 pages, each holds minutes. Failure cost scales linearly with document size.
+
+Fix is architectural: **process and persist in bounded increments**. Extract N pages → chunk → embed → upsert → checkpoint → repeat. Same pattern as database WAL, TCP sliding windows, git per-object storage. Cap failure cost at one batch, not one document.
