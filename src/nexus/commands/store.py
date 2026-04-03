@@ -114,10 +114,12 @@ def put_cmd(
               help="Collection name or prefix (default: knowledge)")
 @click.option("--limit", "-n", default=200, show_default=True,
               help="Maximum entries to show")
-def list_cmd(collection: str, limit: int) -> None:
+@click.option("--offset", default=0, show_default=True,
+              help="Skip this many entries (for pagination)")
+def list_cmd(collection: str, limit: int, offset: int) -> None:
     """List entries in a T3 knowledge collection."""
     col_name = t3_collection_name(collection)
-    entries = _t3().list_store(col_name, limit=limit)
+    entries = _t3().list_store(col_name, limit=limit, offset=offset)
     if not entries:
         click.echo(f"No entries in {col_name}.")
         return

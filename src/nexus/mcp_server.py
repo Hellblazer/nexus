@@ -286,8 +286,7 @@ def store_list(collection: str = "knowledge", limit: int = 20, offset: int = 0) 
             return f"Collection not found: {col_name}"
         if total == 0:
             return f"No entries in {col_name}."
-        entries = t3.list_store(col_name, limit=offset + limit)
-        page = entries[offset:offset + limit]
+        page = t3.list_store(col_name, limit=limit, offset=offset)
         if not page:
             return f"No entries at offset {offset} (total {total})."
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]

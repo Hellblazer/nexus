@@ -569,12 +569,16 @@ class T3Database:
 
     # ── Collection management ─────────────────────────────────────────────────
 
-    def list_store(self, collection: str, limit: int = 200) -> list[dict]:
+    def list_store(
+        self, collection: str, limit: int = 200, offset: int = 0,
+    ) -> list[dict]:
         """Return metadata for entries in a single knowledge__ collection.
 
         Each entry is a dict with at minimum ``id``, ``title``, ``tags``,
         ``ttl_days``, ``expires_at``, and ``indexed_at``.  Returns an empty
         list when the collection does not exist.
+
+        Supports offset-based pagination via ChromaDB's native offset param.
         """
         try:
             col = self._client_for(collection).get_collection(collection)
@@ -582,7 +586,9 @@ class T3Database:
             return []
         clamped = limit if self._local_mode else min(limit, QUOTAS.MAX_QUERY_RESULTS)
         with self._read_sem(collection):
-            result = _chroma_with_retry(col.get, include=["metadatas"], limit=clamped)
+            result = _chroma_with_retry(
+                col.get, include=["metadatas"], limit=clamped, offset=offset,
+            )
         return [
             {"id": doc_id, **meta}
             for doc_id, meta in zip(result["ids"], result["metadatas"])
