@@ -108,3 +108,30 @@ Per-page formula detection via vision/layout model to skip non-formula pages in 
 - [ ] Embedding phase completes in under 2 minutes for 2000 chunks (parallel API calls)
 - [ ] Page failure (OOM) produces Docling fallback text, not a lost page
 - [ ] `nx index repo` with 6 PDFs shares one PDFExtractor instance
+
+## Research Findings
+
+### RF-1: All-or-nothing extraction pipeline (2026-04-03)
+**Classification**: Verified — empirical (CMRB, 771 pages) | **Confidence**: HIGH
+
+`_extract_with_mineru` accumulates all pages in memory before returning. Any failure loses all work. Observed: 30 min lost at page 766/771 (blank page). Blank-page trigger fixed but accumulation architecture remains.
+
+### RF-2: Sequential Voyage CCE embedding bottleneck (2026-04-03)
+**Classification**: Verified — empirical + code inspection | **Confidence**: HIGH
+
+CCE batches sent sequentially. 5,724 chunks = ~89 sequential API calls. 5-10 minute silent phase after extraction. Voyage API supports 300 RPM — ThreadPoolExecutor(4) would cut time ~4x.
+
+### RF-3: MinerU server OOM pattern (2026-04-03)
+**Classification**: Verified — empirical across 4 corpora | **Confidence**: HIGH
+
+OOM triggered by MFR batching all formula-like regions per page as single inference. Complex diagrams misidentified as formula regions. Auto-restart (2x budget) + subprocess fallback handled all observed cases.
+
+### RF-4: Non-enriched Docling is 100x faster (2026-04-03)
+**Classification**: Verified — empirical | **Confidence**: HIGH
+
+Enriched Docling: 20+ min/PDF. Non-enriched: 12s. Unicode math scan: 0.05s. Replaced enriched screening with quick scan + non-enriched extraction. Limitation: only works for digital PDFs, not scanned.
+
+### RF-5: MinerU has no layout-only mode (2026-04-03)
+**Classification**: Verified — source + Context7 docs | **Confidence**: HIGH
+
+`formula_enable=false` disables both detection AND recognition. No way to cheaply identify formula pages without running MFR. Per-page formula routing requires external detector or upstream API change.
