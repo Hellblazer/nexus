@@ -55,6 +55,15 @@ os._exit(0)
 _log = structlog.get_logger(__name__)
 
 
+def _progress(msg: str, end: str = "\n") -> None:
+    """Write progress message visible alongside tqdm progress bars."""
+    try:
+        from tqdm import tqdm
+        tqdm.write(msg, end=end)
+    except ImportError:
+        print(msg, end=end, file=sys.stderr, flush=True)
+
+
 def _normalize_whitespace_edge_cases(text: str) -> str:
     """Normalize whitespace variants not covered by basic normalization.
 
@@ -133,10 +142,7 @@ class PDFExtractor:
             return fast_result
 
         # Math paper detected — switch to MinerU for formula-aware extraction
-        print(
-            f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}",
-            file=sys.stderr, flush=True,
-        )
+        _progress(f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}")
         try:
             return self._extract_with_mineru(pdf_path, formula_count=formula_count)
         except Exception:
@@ -295,11 +301,8 @@ class PDFExtractor:
         fname = pdf_path.name
         for batch_idx, (start, end) in enumerate(batches):
             label = f"{start + 1}–{end}" if end is not None else f"{start + 1}–{total_pages}"
-            # Visible progress on stderr — the repo indexer progress bar freezes
-            # during MinerU extraction, so this is the only sign of life.
-            print(
-                f"\r  MinerU: page {start + 1}/{total_pages} ({fname})",
-                end="", flush=True, file=sys.stderr,
+            _progress(
+                f"  MinerU: page {start + 1}/{total_pages} ({fname})",
             )
             _log.info("mineru_batch", pages=label, path=str(pdf_path))
             try:
@@ -319,9 +322,8 @@ class PDFExtractor:
                     original_batch=span,
                 )
                 for page in range(start, end or total_pages):
-                    print(
-                        f"\r  MinerU: page {page + 1}/{total_pages} (retry, {fname})",
-                        end="", flush=True, file=sys.stderr,
+                    _progress(
+                        f"  MinerU: page {page + 1}/{total_pages} (retry, {fname})",
                     )
                     md, content_list, pdf_info = self._mineru_run_isolated(
                         pdf_path, page, page + 1,
@@ -335,10 +337,7 @@ class PDFExtractor:
             all_pdf_info.extend(pdf_info)
 
         if batches:
-            print(
-                f"\r  MinerU: {total_pages}/{total_pages} done ({fname})",
-                file=sys.stderr,
-            )
+            _progress(f"  MinerU: {total_pages}/{total_pages} done ({fname})")
 
         md_text = "\n".join(md_parts)
         return self._mineru_build_result(
