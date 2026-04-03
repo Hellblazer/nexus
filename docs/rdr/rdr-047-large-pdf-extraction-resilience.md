@@ -2,7 +2,8 @@
 title: "Large PDF Extraction Resilience"
 id: RDR-047
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-04-03
 priority: high
 author: Hal Hildebrand
 reviewed-by: self

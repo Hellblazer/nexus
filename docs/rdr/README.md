@@ -68,7 +68,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-044](rdr-044-math-aware-pdf-extraction.md) | Math-Aware PDF Extraction | Bug | Closed | 2026-03-31 |
 | [RDR-045](rdr-045-post-implementation-verification.md) | Post-Implementation Verification Gate | Architecture | Closed | 2026-04-01 |
 | [RDR-046](rdr-046-mineru-server-backed-extraction.md) | MinerU Server-Backed PDF Extraction | Architecture | Closed | 2026-04-02 |
-| [RDR-047](rdr-047-large-pdf-extraction-resilience.md) | Large PDF Extraction Resilience | Architecture | Draft | 2026-04-03 |
+| [RDR-047](rdr-047-large-pdf-extraction-resilience.md) | Large PDF Extraction Resilience | Architecture | Accepted | 2026-04-03 |
 
 ---
 
