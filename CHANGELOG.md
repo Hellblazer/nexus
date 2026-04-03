@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-04-03
+
+### Added
+- **MinerU server-backed PDF extraction** (RDR-046) — `nx mineru start/stop/status` manages a persistent mineru-api server. HTTP client in pdf_extractor with subprocess fallback. Auto-restart on server OOM (2x budget). Dynamic port allocation.
+- **Batch PDF indexing** — `nx index pdf --dir <path>` indexes all PDFs in a directory with progress `[i/N]`, timing, error isolation, and summary. Server-absent advisory.
+- **`query` MCP tool** — document-level semantic search. Groups results by source document with full metadata (title, year, authors, citations, page count, extraction method). No LLM required.
+- **`store_delete` MCP tool** — delete T3 knowledge entries by document ID
+- **`memory_delete` MCP tool** — delete T2 memory entries by project and title
+- **`search` `where` filter** — metadata filtering on MCP search and query tools. `KEY=VALUE` or `KEY>=VALUE` format, comma-separated. Numeric fields auto-coerced.
+- **`store_list` `docs` mode** — document-level view deduplicating chunks by content_hash. Shows title, chunk count, page count, extraction method.
+- **`collection_info` peek** — sample entry titles for collection discoverability
+- **`scratch` delete action** — delete T1 scratch entries
+- **Adaptive page ranges with OOM retry** — multi-page batch failure splits to 1-page retry. Config-driven `pdf.mineru_page_batch`.
+
+### Fixed
+- **CCE embedding model consistency** — eliminated voyage-4 fallback. On CCE batch failure, splits in half and retries with same model (voyage-context-3). Prevents embedding model mismatch within collections.
+- **T3 list_store pagination** — real `offset` parameter passed to ChromaDB (was capped at 300 in cloud mode)
+- **store_list title display** — falls back to `source_title` for PDF-indexed entries
+- **`search` param `n` → `limit`** — consistent pagination parameter naming across all tools
+- **FTS5 title search** — corrected documentation: memory_search searches title, content, and tags (was incorrectly documented as "title not searchable")
+- **Agent tool discoverability** — all tool references use full `mcp__plugin_nx_nexus__` prefix. Fixed `mcp__sequential-thinking__` → `mcp__plugin_nx_sequential-thinking__` in 13 agent files.
+- **`reinstall-tool.sh`** — symlinks `mineru-api` to `~/.local/bin` when `[mineru]` extra is present
+- **`plan_save` schema** — documented minimal JSON schema in tool docstring
+
+### Changed
+- MCP tool count: 12 → 17
+- `_CCE_TOKEN_LIMIT`: 32K → 24K (safety margin for academic text token estimation)
+- Token estimate in CCE batching: `len//3` → `len//2` (conservative for academic text)
+
+### Docs
+- `reference.md` — 17 tools documented with full parameter tables and examples
+- All 17 agent `.md` files updated with `nx Tool Reference` block and full tool names
+- `CONTEXT_PROTOCOL.md` — full tool names throughout, search options table expanded
+- `subagent-start.sh` — full tool names with `Tool:` prefix labels
+- RDR-042, 043, 045, 046 closed
+
 ## [2.10.8] - 2026-04-02
 
 ### Changed

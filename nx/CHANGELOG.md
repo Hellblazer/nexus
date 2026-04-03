@@ -6,6 +6,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-04-03
+
+### Added
+- `query` MCP tool — document-level semantic search with full metadata
+- `store_delete`, `memory_delete` MCP tools
+- `search`/`query` `where` filter for metadata filtering
+- `store_list` `docs` mode for document-level view
+- `collection_info` peek (sample titles)
+- `scratch` delete action
+
+### Fixed
+- All agent/skill tool references use full `mcp__plugin_nx_nexus__` prefix
+- Fixed `mcp__sequential-thinking__` prefix in 13 agent files
+- Real offset pagination in T3 `list_store`
+- `source_title` fallback in store_list and search
+- FTS5 title search corrected in docs
+- `search` param `n` → `limit`
+
+### Changed
+- MCP tool count: 12 → 17
+- Session start hook references MCP tools (not CLI commands)
+- Subagent start hook uses `Tool:` prefix with full names
+
 ## [2.10.8] - 2026-04-02
 
 Plugin version aligned with Nexus CLI 2.10.8. No plugin-level functional changes.
