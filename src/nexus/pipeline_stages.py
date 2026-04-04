@@ -450,6 +450,12 @@ def pipeline_index_pdf(
     if db is None:
         db = PipelineDB(PIPELINE_DB_PATH)
 
+    # Pre-flight: check if pipeline should run before resolving credentials.
+    result = db.create_pipeline(content_hash, str(pdf_path), collection)
+    if result == "skip":
+        _log.info("pipeline_skip", content_hash=content_hash, reason="already completed or running")
+        return 0
+
     # Resolve embed_fn from credentials when not provided (matches batch path).
     if embed_fn is None:
         from nexus.config import get_credential, load_config
@@ -459,12 +465,8 @@ def pipeline_index_pdf(
             timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
             embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
         else:
+            db.mark_failed(content_hash, error="voyage_api_key not configured")
             raise RuntimeError("voyage_api_key not configured — cannot embed for streaming pipeline")
-
-    result = db.create_pipeline(content_hash, str(pdf_path), collection)
-    if result == "skip":
-        _log.info("pipeline_skip", content_hash=content_hash, reason="already completed or running")
-        return 0
 
     cancel = threading.Event()
     extraction_done = threading.Event()
