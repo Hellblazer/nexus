@@ -657,6 +657,7 @@ def index_pdf(
             count = pipeline_index_pdf(
                 pdf_path, content_hash, col_name, db,
                 embed_fn=embed_fn, extractor=extractor,
+                corpus=corpus, target_model=target_model,
             )
             if return_metadata:
                 # Query T3 for metadata after streaming upload.

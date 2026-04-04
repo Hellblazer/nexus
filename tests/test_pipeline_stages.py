@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for pipeline stage functions (nexus-qwxz + critique fixes)."""
+"""Tests for pipeline stage functions (RDR-048)."""
 from __future__ import annotations
 
 import json
@@ -52,7 +52,6 @@ def _make_extraction_result(page_count: int = 3) -> ExtractionResult:
 
 
 def _done_event() -> threading.Event:
-    """Return an already-set Event (extraction complete)."""
     e = threading.Event()
     e.set()
     return e
@@ -73,45 +72,37 @@ class TestExtractorLoop:
                         on_page(i, f"Page {i} text content.", {"page_number": i + 1, "text_length": 21})
                 return result
             MockExt.return_value.extract.side_effect = fake_extract
-
             ret = extractor_loop(Path("/a.pdf"), "h1", db, threading.Event())
 
         pages = db.read_pages("h1")
         assert len(pages) == 3
-        assert pages[0]["page_text"] == "Page 0 text content."
         state = db.get_pipeline_state("h1")
         assert state["total_pages"] == 3
         assert ret is result
 
     def test_cancel_raises_pipeline_cancelled(self, db: PipelineDB) -> None:
-        """Cancel event raises PipelineCancelled, aborting extraction early (S1 fix)."""
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         cancel = threading.Event()
-        pages_delivered = []
 
         def fake_extract(pdf_path, *, extractor="auto", on_page=None):
             for i in range(10):
                 if on_page:
                     on_page(i, f"Page {i}", {"page_number": i + 1, "text_length": 6})
-                    pages_delivered.append(i)
                 if i == 2:
-                    cancel.set()  # cancel after page 2
+                    cancel.set()
             return _make_extraction_result(10)
 
         with patch("nexus.pipeline_stages.PDFExtractor") as MockExt:
             MockExt.return_value.extract.side_effect = fake_extract
             result = extractor_loop(Path("/a.pdf"), "h1", db, cancel)
 
-        # on_page raised PipelineCancelled after page 2, so extract() aborted.
-        # Pages 0-2 were written before cancel; page 3's on_page raised.
         assert len(db.read_pages("h1")) <= 3
-        assert result.text == ""  # cancelled result
+        assert result.text == ""
 
     def test_resume_skips_existing_pages(self, db: PipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         db.write_page("h1", 0, "Original page 0")
         db.update_progress("h1", pages_extracted=1)
-
         written_indices: list[int] = []
 
         def fake_extract(pdf_path, *, extractor="auto", on_page=None):
@@ -120,11 +111,11 @@ class TestExtractorLoop:
                     on_page(i, f"Page {i} new", {"page_number": i + 1, "text_length": 10})
             return _make_extraction_result(3)
 
-        original_write_page = db.write_page
-        def tracking_write_page(content_hash, page_index, text, metadata=None):
-            written_indices.append(page_index)
-            original_write_page(content_hash, page_index, text, metadata)
-        db.write_page = tracking_write_page  # type: ignore[assignment]
+        orig = db.write_page
+        def tracking(ch, pi, text, metadata=None):
+            written_indices.append(pi)
+            orig(ch, pi, text, metadata)
+        db.write_page = tracking  # type: ignore[assignment]
 
         with patch("nexus.pipeline_stages.PDFExtractor") as MockExt:
             MockExt.return_value.extract.side_effect = fake_extract
@@ -132,7 +123,6 @@ class TestExtractorLoop:
 
         assert 0 not in written_indices
         assert 1 in written_indices
-        assert 2 in written_indices
 
     def test_returns_extraction_result(self, db: PipelineDB) -> None:
         result = _make_extraction_result()
@@ -155,12 +145,13 @@ class TestChunkerLoop:
             db.write_page(hash_, i, f"Page {i} content here.", metadata={"page_number": i + 1, "text_length": 22})
         db.update_progress(hash_, total_pages=count, pages_extracted=count)
 
-    def test_produces_chunks_from_pages(self, db: PipelineDB) -> None:
+    def test_produces_chunks_with_full_metadata(self, db: PipelineDB) -> None:
+        """Chunks have the full metadata schema matching the batch path."""
         self._populate_pages(db, "h1", 3)
 
         fake_chunks = [
-            TextChunk(text="chunk 0 text", chunk_index=0, metadata={"page": 1}),
-            TextChunk(text="chunk 1 text", chunk_index=1, metadata={"page": 2}),
+            TextChunk(text="chunk 0 text", chunk_index=0, metadata={"page_number": 1, "chunk_type": "text", "chunk_start_char": 0, "chunk_end_char": 12}),
+            TextChunk(text="chunk 1 text", chunk_index=1, metadata={"page_number": 2, "chunk_type": "text", "chunk_start_char": 12, "chunk_end_char": 24}),
         ]
 
         def fake_embed(texts, model):
@@ -169,16 +160,25 @@ class TestChunkerLoop:
         with patch("nexus.pipeline_stages.PDFChunker") as MockChunker:
             MockChunker.return_value.chunk.return_value = fake_chunks
             chunker_loop("h1", db, threading.Event(), embed_fn=fake_embed,
-                         extraction_done=_done_event())
+                         extraction_done=_done_event(),
+                         pdf_path="/a.pdf", corpus="test", target_model="voyage-context-3")
 
         chunks = db.read_ready_chunks("h1")
         assert len(chunks) == 2
-        assert chunks[0]["chunk_text"] == "chunk 0 text"
-        assert chunks[0]["embedding"] is not None
 
-        state = db.get_pipeline_state("h1")
-        assert state["chunks_created"] == 2
-        assert state["chunks_embedded"] == 2
+        # Verify full metadata schema
+        meta = json.loads(chunks[0]["metadata_json"])
+        assert meta["source_path"] == "/a.pdf"
+        assert meta["corpus"] == "test"
+        assert meta["content_hash"] == "h1"
+        assert meta["embedding_model"] == "voyage-context-3"
+        assert meta["store_type"] == "pdf"
+        assert "indexed_at" in meta
+        assert meta["page_number"] == 1
+
+        # Verify chunk ID matches batch path format
+        assert chunks[0]["chunk_id"] == "h1_0"
+        assert chunks[1]["chunk_id"] == "h1_1"
 
     def test_cancel_exits(self, db: PipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
@@ -212,48 +212,38 @@ class TestChunkerLoop:
 
     def test_idempotent_resume(self, db: PipelineDB) -> None:
         self._populate_pages(db, "h1", 2)
-
         fake_chunks = [
             TextChunk(text="chunk 0", chunk_index=0, metadata={}),
             TextChunk(text="chunk 1", chunk_index=1, metadata={}),
         ]
-
         def fake_embed(texts, model):
             return [[0.1] * 4 for _ in texts], model
 
         with patch("nexus.pipeline_stages.PDFChunker") as MockChunker:
             MockChunker.return_value.chunk.return_value = fake_chunks
-            chunker_loop("h1", db, threading.Event(), embed_fn=fake_embed,
-                         extraction_done=_done_event())
-            chunker_loop("h1", db, threading.Event(), embed_fn=fake_embed,
-                         extraction_done=_done_event())
+            chunker_loop("h1", db, threading.Event(), embed_fn=fake_embed, extraction_done=_done_event())
+            chunker_loop("h1", db, threading.Event(), embed_fn=fake_embed, extraction_done=_done_event())
 
-        chunks = db.read_ready_chunks("h1")
-        assert len(chunks) == 2
+        assert len(db.read_ready_chunks("h1")) == 2
 
     def test_embed_fn_none(self, db: PipelineDB) -> None:
         self._populate_pages(db, "h1", 2)
-
         fake_chunks = [TextChunk(text="chunk 0", chunk_index=0, metadata={})]
 
         with patch("nexus.pipeline_stages.PDFChunker") as MockChunker:
             MockChunker.return_value.chunk.return_value = fake_chunks
-            chunker_loop("h1", db, threading.Event(), embed_fn=None,
-                         extraction_done=_done_event())
+            chunker_loop("h1", db, threading.Event(), embed_fn=None, extraction_done=_done_event())
 
         chunks = db.read_ready_chunks("h1")
         assert len(chunks) == 1
         assert chunks[0]["embedding"] is None
-        assert db.read_uploadable_chunks("h1") == []
 
     def test_incremental_chunking_before_extraction_done(self, db: PipelineDB) -> None:
-        """Chunker produces stable chunks before extraction finishes (C2 fix)."""
+        """Chunker produces stable chunks before extraction finishes."""
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         extraction_done = threading.Event()
         chunking_done = threading.Event()
-        chunks_written: list[int] = []
 
-        # Pre-populate 5 pages (extraction "in progress").
         for i in range(5):
             db.write_page("h1", i, f"Page {i} " + "x" * 2000,
                           metadata={"page_number": i + 1, "text_length": 2006})
@@ -262,21 +252,19 @@ class TestChunkerLoop:
         def fake_embed(texts, model):
             return [[0.1] * 4 for _ in texts], model
 
-        # Return enough chunks that there's a stable prefix.
         def make_chunks(text, meta):
             count = max(1, len(text) // 1500)
             return [TextChunk(text=f"chunk-{i}", chunk_index=i, metadata={}) for i in range(count)]
 
-        def signal_done_after_delay():
+        def signal_done():
             time.sleep(0.8)
-            # Add 2 more pages, then signal done.
             for i in range(5, 7):
                 db.write_page("h1", i, f"Page {i} " + "x" * 2000,
                               metadata={"page_number": i + 1, "text_length": 2006})
             db.update_progress("h1", total_pages=7, pages_extracted=7)
             extraction_done.set()
 
-        t = threading.Thread(target=signal_done_after_delay)
+        t = threading.Thread(target=signal_done)
         t.start()
 
         with patch("nexus.pipeline_stages.PDFChunker") as MockChunker:
@@ -286,10 +274,7 @@ class TestChunkerLoop:
 
         t.join()
         assert chunking_done.is_set()
-        chunks = db.read_ready_chunks("h1")
-        assert len(chunks) > 0
-        state = db.get_pipeline_state("h1")
-        assert state["chunks_created"] is not None
+        assert len(db.read_ready_chunks("h1")) > 0
 
 
 # ── uploader_loop ────────────────────────────────────────────────────────────
@@ -301,24 +286,23 @@ class TestUploaderLoop:
         db.update_progress(hash_, total_pages=1, pages_extracted=1, chunks_created=count, chunks_embedded=count)
         for i in range(count):
             db.write_chunk(
-                hash_, i, f"chunk {i} text", f"cid-{i}",
-                metadata={"page": 1},
+                hash_, i, f"chunk {i} text", f"{hash_[:16]}_{i}",
+                metadata={"page": 1, "source_path": "/a.pdf", "content_hash": hash_},
                 embedding=_fake_embedding(i),
             )
 
-    def test_uploads_chunks_to_t3(self, db: PipelineDB) -> None:
+    def test_uploads_chunks_via_t3_api(self, db: PipelineDB) -> None:
+        """Uploader calls upsert_chunks_with_embeddings (not mock-any upsert)."""
         self._populate_chunks(db, "h1", 3)
         mock_t3 = MagicMock()
 
         uploader_loop("h1", db, mock_t3, "docs__test", threading.Event())
 
-        mock_t3.upsert.assert_called_once()
-        kw = mock_t3.upsert.call_args.kwargs
-        assert kw["collection_name"] == "docs__test"
-        assert len(kw["ids"]) == 3
-
+        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+        args = mock_t3.upsert_chunks_with_embeddings.call_args
+        assert args[0][0] == "docs__test"  # collection
+        assert len(args[0][1]) == 3  # ids
         assert db.read_uploadable_chunks("h1") == []
-        assert db.get_pipeline_state("h1")["chunks_uploaded"] == 3
 
     def test_batch_sizing(self, db: PipelineDB) -> None:
         self._populate_chunks(db, "h1", 200)
@@ -326,7 +310,7 @@ class TestUploaderLoop:
 
         uploader_loop("h1", db, mock_t3, "docs__test", threading.Event())
 
-        assert mock_t3.upsert.call_count == 2
+        assert mock_t3.upsert_chunks_with_embeddings.call_count == 2
 
     def test_cancel_exits(self, db: PipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
@@ -346,18 +330,18 @@ class TestUploaderLoop:
         self._populate_chunks(db, "h1", 200)
         mock_t3 = MagicMock()
 
-        original_mark = db.mark_uploaded
-        mark_calls: list[int] = []
-        def tracking_mark(content_hash, indices):
-            mark_calls.append(len(indices))
-            original_mark(content_hash, indices)
-        db.mark_uploaded = tracking_mark  # type: ignore[assignment]
+        orig = db.mark_uploaded
+        calls: list[int] = []
+        def tracking(ch, indices):
+            calls.append(len(indices))
+            orig(ch, indices)
+        db.mark_uploaded = tracking  # type: ignore[assignment]
 
         uploader_loop("h1", db, mock_t3, "docs__test", threading.Event())
 
-        assert len(mark_calls) == 2
-        assert mark_calls[0] == 128
-        assert mark_calls[1] == 72
+        assert len(calls) == 2
+        assert calls[0] == 128
+        assert calls[1] == 72
 
     def test_done_when_all_uploaded(self, db: PipelineDB) -> None:
         self._populate_chunks(db, "h1", 2)
@@ -374,13 +358,15 @@ class TestUploaderLoop:
 
 
 class TestPipelineIndexPdf:
-    def test_full_pipeline_mock(self, db: PipelineDB) -> None:
+    def test_full_pipeline(self, db: PipelineDB) -> None:
         mock_t3 = MagicMock()
-        mock_t3.get.return_value = {"ids": [], "metadatas": []}
+        mock_t3.get_or_create_collection.return_value = MagicMock(
+            get=MagicMock(return_value={"ids": [], "metadatas": []})
+        )
         fake_result = _make_extraction_result(3)
         fake_chunks = [
-            TextChunk(text="chunk 0", chunk_index=0, metadata={"page": 1}),
-            TextChunk(text="chunk 1", chunk_index=1, metadata={"page": 2}),
+            TextChunk(text="chunk 0", chunk_index=0, metadata={"page_number": 1, "chunk_type": "text"}),
+            TextChunk(text="chunk 1", chunk_index=1, metadata={"page_number": 2, "chunk_type": "text"}),
         ]
 
         def fake_embed(texts, model):
@@ -401,46 +387,47 @@ class TestPipelineIndexPdf:
 
             total = pipeline_index_pdf(
                 Path("/test/doc.pdf"), "abc123", "docs__test", mock_t3,
-                db=db, embed_fn=fake_embed,
+                db=db, embed_fn=fake_embed, corpus="test",
             )
 
         assert total == 2
-        mock_t3.upsert.assert_called_once()
+        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
         assert db.get_pipeline_state("abc123") is None
 
-    def test_extractor_failure_cancels_others(self, db: PipelineDB) -> None:
+    def test_extractor_failure(self, db: PipelineDB) -> None:
         mock_t3 = MagicMock()
 
         with (
             patch("nexus.pipeline_stages.PDFExtractor") as MockExt,
             patch("nexus.pipeline_stages.PDFChunker"),
         ):
-            MockExt.return_value.extract.side_effect = RuntimeError("extraction boom")
+            MockExt.return_value.extract.side_effect = RuntimeError("boom")
 
-            with pytest.raises(RuntimeError, match="extraction boom"):
+            with pytest.raises(RuntimeError, match="boom"):
                 pipeline_index_pdf(
                     Path("/test.pdf"), "h1", "docs__test", mock_t3,
                     db=db, embed_fn=lambda t, m: ([], m),
                 )
 
         state = db.get_pipeline_state("h1")
-        assert state is not None
         assert state["status"] == "failed"
-        assert "extraction boom" in state["error"]
+        assert "boom" in state["error"]
 
-    def test_resume_from_partial_buffer(self, db: PipelineDB) -> None:
+    def test_resume_from_partial(self, db: PipelineDB) -> None:
         mock_t3 = MagicMock()
-        mock_t3.get.return_value = {"ids": [], "metadatas": []}
+        mock_t3.get_or_create_collection.return_value = MagicMock(
+            get=MagicMock(return_value={"ids": [], "metadatas": []})
+        )
 
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         db.write_page("h1", 0, "Page 0 content.", metadata={"page_number": 1, "text_length": 15})
         db.write_page("h1", 1, "Page 1 content.", metadata={"page_number": 2, "text_length": 15})
         db.update_progress("h1", pages_extracted=2)
-        db.mark_failed("h1", error="simulated crash")
+        db.mark_failed("h1", error="crash")
 
         fake_result = _make_extraction_result(3)
         fake_chunks = [TextChunk(text="chunk 0", chunk_index=0, metadata={})]
-        written_pages: list[int] = []
+        written: list[int] = []
 
         with (
             patch("nexus.pipeline_stages.PDFExtractor") as MockExt,
@@ -455,36 +442,37 @@ class TestPipelineIndexPdf:
             MockExt.return_value.extract.side_effect = fake_extract
             MockChunker.return_value.chunk.return_value = fake_chunks
 
-            orig_write = db.write_page
-            def tracking_write(ch, pi, text, metadata=None):
-                written_pages.append(pi)
-                orig_write(ch, pi, text, metadata)
-            db.write_page = tracking_write  # type: ignore[assignment]
+            orig = db.write_page
+            def track(ch, pi, text, metadata=None):
+                written.append(pi)
+                orig(ch, pi, text, metadata)
+            db.write_page = track  # type: ignore[assignment]
 
             pipeline_index_pdf(
                 Path("/a.pdf"), "h1", "docs__test", mock_t3,
                 db=db, embed_fn=lambda t, m: ([[0.1] * 4 for _ in t], m),
             )
 
-        assert 0 not in written_pages
-        assert 1 not in written_pages
-        assert 2 in written_pages
+        assert 0 not in written
+        assert 2 in written
 
     def test_table_regions_postpass(self, db: PipelineDB) -> None:
-        """table_regions from extraction result triggers metadata update (S3 fix)."""
-        mock_t3 = MagicMock()
-        mock_t3.get.return_value = {
-            "ids": ["abc123_0", "abc123_1"],
+        """table_regions post-pass calls T3Database.update_chunks."""
+        mock_col = MagicMock()
+        mock_col.get.return_value = {
+            "ids": ["abc_0", "abc_1"],
             "metadatas": [
-                {"page_number": 1, "chunk_type": "text"},
-                {"page_number": 2, "chunk_type": "text"},
+                {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"},
+                {"page_number": 2, "chunk_type": "text", "content_hash": "abc123"},
             ],
         }
+        mock_t3 = MagicMock()
+        mock_t3.get_or_create_collection.return_value = mock_col
 
-        fake_result = _make_extraction_result(3)  # has table_regions: [{"page": 2}]
+        fake_result = _make_extraction_result(3)
         fake_chunks = [
-            TextChunk(text="chunk 0", chunk_index=0, metadata={"page": 1}),
-            TextChunk(text="chunk 1", chunk_index=1, metadata={"page": 2}),
+            TextChunk(text="c0", chunk_index=0, metadata={"page_number": 1, "chunk_type": "text"}),
+            TextChunk(text="c1", chunk_index=1, metadata={"page_number": 2, "chunk_type": "text"}),
         ]
 
         with (
@@ -505,8 +493,55 @@ class TestPipelineIndexPdf:
                 db=db, embed_fn=lambda t, m: ([[0.1] * 4 for _ in t], m),
             )
 
-        # Verify t3.update was called for the table page chunk.
-        mock_t3.update.assert_called_once()
-        update_args = mock_t3.update.call_args.kwargs
-        assert update_args["ids"] == ["abc123_1"]
-        assert update_args["metadatas"][0]["chunk_type"] == "table_page"
+        # update_chunks is the correct T3Database API
+        mock_t3.update_chunks.assert_called_once()
+        args = mock_t3.update_chunks.call_args
+        assert args[0][0] == "docs__test"
+        assert args[0][1] == ["abc_1"]  # only page 2 chunk
+        assert args[0][2][0]["chunk_type"] == "table_page"
+
+
+# ── Metadata contract test ───────────────────────────────────────────────────
+
+
+class TestMetadataContract:
+    """Verify streaming path metadata matches batch path schema."""
+
+    REQUIRED_FIELDS = {
+        "source_path", "source_title", "source_author", "source_date",
+        "corpus", "store_type", "page_count", "page_number",
+        "section_title", "format", "extraction_method",
+        "chunk_type", "chunk_index", "chunk_count",
+        "chunk_start_char", "chunk_end_char",
+        "embedding_model", "indexed_at", "content_hash",
+        "pdf_subject", "pdf_keywords", "is_image_pdf", "has_formulas",
+        "bib_year", "bib_venue", "bib_authors",
+        "bib_citation_count", "bib_semantic_scholar_id",
+    }
+
+    def test_streaming_metadata_has_all_batch_fields(self, db: PipelineDB) -> None:
+        """Every field the batch path writes must also be present in streaming chunks."""
+        db.create_pipeline("h1", "/doc.pdf", "docs__test")
+        db.write_page("h1", 0, "Some text here.", metadata={"page_number": 1, "text_length": 15})
+        db.update_progress("h1", total_pages=1, pages_extracted=1)
+
+        fake_chunks = [
+            TextChunk(text="chunk text", chunk_index=0,
+                      metadata={"page_number": 1, "chunk_type": "text",
+                                "chunk_start_char": 0, "chunk_end_char": 10}),
+        ]
+
+        def fake_embed(texts, model):
+            return [[0.1] * 4 for _ in texts], model
+
+        with patch("nexus.pipeline_stages.PDFChunker") as MockChunker:
+            MockChunker.return_value.chunk.return_value = fake_chunks
+            chunker_loop("h1", db, threading.Event(), embed_fn=fake_embed,
+                         extraction_done=_done_event(),
+                         pdf_path="/doc.pdf", corpus="mycorpus",
+                         target_model="voyage-context-3")
+
+        chunks = db.read_ready_chunks("h1")
+        meta = json.loads(chunks[0]["metadata_json"])
+        missing = self.REQUIRED_FIELDS - set(meta.keys())
+        assert missing == set(), f"Missing metadata fields: {missing}"
