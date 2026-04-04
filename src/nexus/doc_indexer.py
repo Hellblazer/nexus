@@ -63,7 +63,7 @@ _EMBED_BATCH_SIZE = 128  # Voyage AI embed() limit is 1,000; use conservative ba
 _CCE_MAX_BATCH_CHUNKS = 1000  # Voyage API limit: max 1,000 inputs per request
 _INCREMENTAL_BATCH_SIZE = 128  # Chunks per incremental embed/upsert batch
 _INCREMENTAL_THRESHOLD = 128  # Use incremental path when chunk count exceeds this
-_STREAMING_THRESHOLD = 100    # Page count: route to streaming pipeline when >= this
+_STREAMING_THRESHOLD = 0      # All valid PDFs use the streaming pipeline
 _PARALLEL_WORKERS = 4  # Concurrent Voyage API calls for CCE embedding
 _RATE_LIMIT_RPM = 250  # Target RPM for Voyage API (83% of 300 RPM limit)
 
@@ -588,7 +588,7 @@ def index_pdf(
     on_progress: Callable[[int, int], None] | None = None,
     enrich: bool = False,
     extractor: str = "auto",
-    streaming: str = "auto",
+    streaming: str = "never",
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -650,8 +650,8 @@ def index_pdf(
             with pymupdf.open(str(pdf_path)) as _doc:
                 page_count = len(_doc)
         except Exception:
-            page_count = 0  # can't count pages — fall through to batch path
-        use_streaming = streaming == "always" or page_count >= _STREAMING_THRESHOLD
+            page_count = -1  # can't open PDF — fall through to batch path
+        use_streaming = streaming == "always" or (page_count >= 0 and page_count >= _STREAMING_THRESHOLD)
         if use_streaming:
             from nexus.pipeline_stages import pipeline_index_pdf
             count = pipeline_index_pdf(

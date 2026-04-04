@@ -2545,9 +2545,9 @@ def test_parallel_embed_progress_fires_for_each_batch(monkeypatch):
 class TestStreamingRouting:
     """Verify index_pdf() routes to streaming vs batch based on page count."""
 
-    def test_small_pdf_uses_batch_path(self, tmp_path):
-        """PDFs under the streaming threshold use the existing batch path."""
-        from nexus.doc_indexer import index_pdf, _STREAMING_THRESHOLD
+    def test_streaming_never_forces_batch_path(self, tmp_path):
+        """streaming='never' uses batch path for any PDF."""
+        from nexus.doc_indexer import index_pdf
 
         pdf = tmp_path / "small.pdf"
         pdf.write_bytes(b"dummy")
@@ -2557,19 +2557,11 @@ class TestStreamingRouting:
             patch("nexus.doc_indexer._sha256", return_value="abc123"),
             patch("nexus.doc_indexer.make_t3") as mock_t3,
             patch("nexus.doc_indexer._chroma_with_retry", return_value={"metadatas": []}),
-            patch("pymupdf.open") as mock_pymupdf_open,
             patch("nexus.doc_indexer._pdf_chunks", return_value=[]) as mock_chunks,
         ):
-            # Simulate a 10-page PDF (below threshold)
-            mock_doc = MagicMock()
-            mock_doc.__enter__ = MagicMock(return_value=mock_doc)
-            mock_doc.__exit__ = MagicMock(return_value=False)
-            mock_doc.__len__ = MagicMock(return_value=10)
-            mock_pymupdf_open.return_value = mock_doc
+            result = index_pdf(pdf, "test", streaming="never")
 
-            result = index_pdf(pdf, "test", streaming="auto")
-
-        assert result == 0  # No chunks from empty _pdf_chunks
+        assert result == 0
         mock_chunks.assert_called_once()  # Batch path was used
 
     def test_large_pdf_uses_streaming_path(self, tmp_path):
@@ -2597,25 +2589,6 @@ class TestStreamingRouting:
 
         assert result == 42
         mock_pipeline.assert_called_once()
-
-    def test_streaming_never_uses_batch_path(self, tmp_path):
-        """streaming='never' uses batch path regardless of page count."""
-        from nexus.doc_indexer import index_pdf
-
-        pdf = tmp_path / "huge.pdf"
-        pdf.write_bytes(b"dummy")
-
-        with (
-            patch("nexus.doc_indexer._has_credentials", return_value=True),
-            patch("nexus.doc_indexer._sha256", return_value="abc123"),
-            patch("nexus.doc_indexer.make_t3") as mock_t3,
-            patch("nexus.doc_indexer._chroma_with_retry", return_value={"metadatas": []}),
-            patch("nexus.doc_indexer._pdf_chunks", return_value=[]) as mock_chunks,
-        ):
-            # streaming=never should skip page count check entirely
-            result = index_pdf(pdf, "test", streaming="never")
-
-        mock_chunks.assert_called_once()
 
     def test_streaming_always_uses_pipeline(self, tmp_path):
         """streaming='always' uses pipeline even for small PDFs."""

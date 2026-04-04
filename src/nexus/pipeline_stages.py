@@ -30,8 +30,8 @@ _log = structlog.get_logger(__name__)
 # Upload batch size — matches _INCREMENTAL_BATCH_SIZE in doc_indexer.py.
 _UPLOAD_BATCH_SIZE = 128
 
-# Poll interval for chunker and uploader loops (RF-11).
-_POLL_INTERVAL = 0.5
+# Poll interval for uploader loop (checks for new chunks to upload).
+_POLL_INTERVAL = 0.1
 
 # Type alias matching doc_indexer.EmbedFn.
 EmbedFn = Callable[[list[str], str], tuple[list[list[float]], str]]
@@ -46,9 +46,11 @@ def extractor_loop(
     db: PipelineDB,
     cancel: threading.Event,
     extractor: str = "auto",
+    extraction_done: threading.Event | None = None,
 ) -> ExtractionResult:
     """Extract pages to PipelineDB buffer via the on_page streaming callback.
 
+    Sets *extraction_done* when all pages are written and ``total_pages`` is set.
     Returns the ``ExtractionResult`` (needed for ``table_regions`` post-pass).
     """
     state = db.get_pipeline_state(content_hash)
@@ -65,9 +67,11 @@ def extractor_loop(
     ext = PDFExtractor()
     result = ext.extract(pdf_path, extractor=extractor, on_page=on_page)
 
-    # Signal extraction complete: set total_pages.
+    # Signal extraction complete: set total_pages, then notify waiters.
     page_count = result.metadata.get("page_count", 0)
     db.update_progress(content_hash, total_pages=page_count)
+    if extraction_done is not None:
+        extraction_done.set()
 
     return result
 
@@ -81,20 +85,28 @@ def chunker_loop(
     cancel: threading.Event,
     embed_fn: EmbedFn | None,
     chunk_chars: int = 1500,
+    extraction_done: threading.Event | None = None,
+    chunking_done: threading.Event | None = None,
 ) -> None:
-    """Poll page buffer, chunk accumulated text, embed, write to chunk buffer.
+    """Wait for extraction, chunk text, embed, write to chunk buffer.
 
-    Waits for extraction to complete (``total_pages`` set and
-    ``pages_extracted == total_pages``), then chunks the full text once.
+    Blocks on *extraction_done* event (or polls pipeline state as fallback).
     Embedding is performed via *embed_fn*; chunks + embeddings are written
     to ``pdf_chunks`` via INSERT OR IGNORE (idempotent on resume).
+    Sets *chunking_done* when finished.
     """
-    # Poll until extraction is complete.
-    while not cancel.is_set():
-        state = db.get_pipeline_state(content_hash)
-        if state and state["total_pages"] is not None and state["pages_extracted"] >= state["total_pages"]:
-            break
-        time.sleep(_POLL_INTERVAL)
+    # Wait for extraction to complete.
+    if extraction_done is not None:
+        # Event-based: block until extraction signals or cancel fires.
+        while not cancel.is_set() and not extraction_done.is_set():
+            extraction_done.wait(timeout=0.5)
+    else:
+        # Fallback: poll pipeline state (for standalone/resume use).
+        while not cancel.is_set():
+            state = db.get_pipeline_state(content_hash)
+            if state and state["total_pages"] is not None and state["pages_extracted"] >= state["total_pages"]:
+                break
+            time.sleep(_POLL_INTERVAL)
 
     if cancel.is_set():
         return
@@ -103,6 +115,8 @@ def chunker_loop(
     pages = db.read_pages(content_hash)
     if not pages:
         db.update_progress(content_hash, chunks_created=0, chunks_embedded=0)
+        if chunking_done is not None:
+            chunking_done.set()
         return
 
     text = "\n".join(row["page_text"] for row in pages)
@@ -126,6 +140,8 @@ def chunker_loop(
 
     if not chunks:
         db.update_progress(content_hash, chunks_created=0, chunks_embedded=0)
+        if chunking_done is not None:
+            chunking_done.set()
         return
 
     # Embed all chunks.
@@ -157,6 +173,8 @@ def chunker_loop(
         chunks_created=len(chunks),
         chunks_embedded=len(embeddings),
     )
+    if chunking_done is not None:
+        chunking_done.set()
 
 
 # ── Stage 3: Uploader ───────────────────────────────────────────────────────
@@ -168,12 +186,13 @@ def uploader_loop(
     t3: Any,
     collection: str,
     cancel: threading.Event,
+    chunking_done: threading.Event | None = None,
 ) -> None:
     """Poll chunk buffer for embedded chunks and upsert to T3 ChromaDB.
 
     Batches upserts into groups of ``_UPLOAD_BATCH_SIZE`` (128). Marks each
     batch as uploaded after successful upsert. Sets pipeline status to
-    ``'completed'`` when all chunks are uploaded and extraction is done.
+    ``'completed'`` when all chunks are uploaded and chunking is done.
     """
     total_uploaded = 0
 
@@ -211,17 +230,14 @@ def uploader_loop(
                 total_uploaded += len(batch)
                 db.update_progress(content_hash, chunks_uploaded=total_uploaded)
 
-        # Check done condition.
+        # Check done condition: chunker finished + all chunks uploaded.
         state = db.get_pipeline_state(content_hash)
-        if state:
-            extraction_done = (
-                state["total_pages"] is not None
-                and state["pages_extracted"] >= state["total_pages"]
+        if state and state["chunks_created"] is not None:
+            chunker_finished = (
+                (chunking_done is not None and chunking_done.is_set())
+                or state["chunks_created"] >= 0  # fallback: explicitly set by chunker
             )
-            # chunks_created is NULL until the chunker sets it explicitly.
-            chunking_done = state["chunks_created"] is not None
-            all_uploaded = chunking_done and state["chunks_uploaded"] >= state["chunks_created"]
-            if extraction_done and all_uploaded:
+            if chunker_finished and state["chunks_uploaded"] >= state["chunks_created"]:
                 db.mark_completed(content_hash)
                 return
 
@@ -261,17 +277,22 @@ def pipeline_index_pdf(
         return 0
 
     cancel = threading.Event()
+    extraction_done = threading.Event()
+    chunking_done = threading.Event()
     first_exc: BaseException | None = None
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         extract_future = pool.submit(
             extractor_loop, pdf_path, content_hash, db, cancel, extractor,
+            extraction_done,
         )
         chunk_future = pool.submit(
             chunker_loop, content_hash, db, cancel, embed_fn,
+            extraction_done=extraction_done, chunking_done=chunking_done,
         )
         upload_future = pool.submit(
             uploader_loop, content_hash, db, t3, collection, cancel,
+            chunking_done,
         )
 
         all_futures: set[Future] = {extract_future, chunk_future, upload_future}
