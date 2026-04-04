@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS pdf_pipeline (
     chunks_uploaded  INTEGER DEFAULT 0,
     status           TEXT DEFAULT 'running',
     error            TEXT DEFAULT '',
+    extraction_meta  TEXT DEFAULT '',  -- JSON: ExtractionResult.metadata (for resume)
     started_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
@@ -105,6 +106,18 @@ class PipelineDB:
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         if mode.lower() != "wal":
             _log.warning("WAL mode not available", actual_mode=mode)
+        self._migrate_if_needed(conn)
+
+    def _migrate_if_needed(self, conn: sqlite3.Connection) -> None:
+        """Add columns introduced after initial schema deployment."""
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='pdf_pipeline'"
+        ).fetchone()
+        if row is None:
+            return
+        if "extraction_meta" not in row[0]:
+            conn.execute("ALTER TABLE pdf_pipeline ADD COLUMN extraction_meta TEXT DEFAULT ''")
+            conn.commit()
 
     # ── Pipeline state ───────────────────────────────────────────────────────
 
@@ -127,14 +140,18 @@ class PipelineDB:
         now = _now()
 
         if row is None:
-            conn.execute(
-                "INSERT INTO pdf_pipeline "
-                "(content_hash, pdf_path, collection, status, started_at, updated_at) "
-                "VALUES (?, ?, ?, 'running', ?, ?)",
-                (content_hash, pdf_path, collection, now, now),
-            )
-            conn.commit()
-            return "created"
+            try:
+                conn.execute(
+                    "INSERT INTO pdf_pipeline "
+                    "(content_hash, pdf_path, collection, status, started_at, updated_at) "
+                    "VALUES (?, ?, ?, 'running', ?, ?)",
+                    (content_hash, pdf_path, collection, now, now),
+                )
+                conn.commit()
+                return "created"
+            except sqlite3.IntegrityError:
+                # Concurrent insert won — treat as already running.
+                return "skip"
 
         status = row["status"]
 
@@ -227,6 +244,15 @@ class PipelineDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def read_pages_from(self, content_hash: str, start_index: int) -> list[dict[str, Any]]:
+        """Return pages with page_index >= start_index, ordered by page_index."""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM pdf_pages WHERE content_hash = ? AND page_index >= ? ORDER BY page_index",
+            (content_hash, start_index),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Chunk CRUD ───────────────────────────────────────────────────────────
 
     def write_chunk(
@@ -263,15 +289,20 @@ class PipelineDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def read_uploadable_chunks(self, content_hash: str) -> list[dict[str, Any]]:
-        """Return chunks with embeddings that are not yet uploaded."""
+    def read_uploadable_chunks(self, content_hash: str, limit: int = 0) -> list[dict[str, Any]]:
+        """Return chunks with embeddings that are not yet uploaded.
+
+        Pass *limit* to cap the number of rows returned (0 = no limit).
+        """
         conn = self._conn()
-        rows = conn.execute(
+        sql = (
             "SELECT * FROM pdf_chunks "
             "WHERE content_hash = ? AND embedding IS NOT NULL AND uploaded = 0 "
-            "ORDER BY chunk_index",
-            (content_hash,),
-        ).fetchall()
+            "ORDER BY chunk_index"
+        )
+        if limit > 0:
+            sql += f" LIMIT {limit}"
+        rows = conn.execute(sql, (content_hash,)).fetchall()
         return [dict(r) for r in rows]
 
     def mark_uploaded(self, content_hash: str, chunk_indices: list[int]) -> None:
@@ -284,6 +315,15 @@ class PipelineDB:
             f"UPDATE pdf_chunks SET uploaded = 1 "
             f"WHERE content_hash = ? AND chunk_index IN ({placeholders})",
             [content_hash, *chunk_indices],
+        )
+        conn.commit()
+
+    def store_extraction_metadata(self, content_hash: str, metadata: dict) -> None:
+        """Persist ExtractionResult.metadata for resume without re-extraction."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE pdf_pipeline SET extraction_meta = ?, updated_at = ? WHERE content_hash = ?",
+            (json.dumps(metadata), _now(), content_hash),
         )
         conn.commit()
 

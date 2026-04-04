@@ -57,9 +57,22 @@ def extractor_loop(
     extractor: str = "auto",
     extraction_done: threading.Event | None = None,
 ) -> ExtractionResult:
-    """Extract pages to PipelineDB buffer via the on_page streaming callback."""
+    """Extract pages to PipelineDB buffer via the on_page streaming callback.
+
+    On resume, if all pages are already in the buffer, skips re-extraction
+    entirely and returns the stored ExtractionResult metadata.
+    """
     state = db.get_pipeline_state(content_hash)
     pages_extracted_at_start = state["pages_extracted"] if state else 0
+
+    # Resume fast path: if all pages already in buffer, skip extraction.
+    if (state and state["total_pages"] is not None
+            and state["pages_extracted"] >= state["total_pages"]
+            and state.get("extraction_meta")):
+        stored_meta = json.loads(state["extraction_meta"])
+        if extraction_done is not None:
+            extraction_done.set()
+        return ExtractionResult(text="", metadata=stored_meta)
 
     def on_page(page_index: int, page_text: str, page_metadata: dict) -> None:
         if cancel.is_set():
@@ -77,6 +90,8 @@ def extractor_loop(
 
     page_count = result.metadata.get("page_count", 0)
     db.update_progress(content_hash, total_pages=page_count)
+    # Store extraction metadata for resume (avoids re-extraction on crash recovery).
+    db.store_extraction_metadata(content_hash, result.metadata)
     if extraction_done is not None:
         extraction_done.set()
 
@@ -215,25 +230,43 @@ def chunker_loop(
     corpus: str = "",
     target_model: str = "voyage-context-3",
 ) -> None:
-    """Incrementally chunk pages as they arrive, overlapping with extraction."""
+    """Incrementally chunk pages as they arrive, overlapping with extraction.
+
+    Caches accumulated page text in memory to avoid O(pages²) re-reads from
+    SQLite. Only NEW pages are fetched on each iteration via ``read_pages_from``.
+    """
     chunker = PDFChunker(chunk_chars=chunk_chars)
-    # Resume: count all embedded chunks (both uploaded and not-yet-uploaded)
-    # to avoid re-chunking/re-embedding work already done.
-    # Note: if embed_fn failed or cancel fired mid-batch, chunks beyond the
-    # last fully-embedded batch are not written at all (not NULL-embedding rows).
-    # On resume, count_embedded_chunks returns the count of successfully embedded
-    # rows, so the chunker re-processes from the correct position.
     written_up_to = db.count_embedded_chunks(content_hash)
-    last_page_count = 0
     total_embedded = written_up_to
     now_iso = datetime.now(UTC).isoformat()
+    current_model = target_model
+
+    # In-memory cache: accumulated text and boundaries from all pages seen so far.
+    # Only new pages are read from SQLite and appended.
+    accumulated_text = ""
+    accumulated_boundaries: list[dict] = []
+    pages_cached = 0
+    char_pos = 0
 
     def _signal_done() -> None:
         if chunking_done is not None:
             chunking_done.set()
 
-    # Track current embedding model — may differ from target if embed_fn falls back.
-    current_model = target_model
+    # Seed cache from existing pages (resume case).
+    existing_pages = db.read_pages(content_hash)
+    if existing_pages:
+        parts = []
+        for row in existing_pages:
+            meta = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
+            accumulated_boundaries.append({
+                "page_number": meta.get("page_number", row["page_index"] + 1),
+                "start_char": char_pos,
+                "page_text_length": len(row["page_text"]) + 1,
+            })
+            parts.append(row["page_text"])
+            char_pos += len(row["page_text"]) + 1
+        accumulated_text = "\n".join(parts)
+        pages_cached = len(existing_pages)
 
     while not cancel.is_set():
         is_final = False
@@ -244,28 +277,43 @@ def chunker_loop(
             if state and state["total_pages"] is not None and state["pages_extracted"] >= state["total_pages"]:
                 is_final = True
 
-        pages = db.read_pages(content_hash)
+        # Read only NEW pages (O(new_pages) not O(all_pages)).
+        new_pages = db.read_pages_from(content_hash, pages_cached)
 
-        if len(pages) == last_page_count and not is_final:
+        if not new_pages and not is_final:
             if extraction_done is not None:
                 extraction_done.wait(timeout=0.5)
             else:
                 time.sleep(_POLL_INTERVAL)
             continue
 
-        last_page_count = len(pages)
+        # Append new pages to cache.
+        if new_pages:
+            parts = []
+            for row in new_pages:
+                meta = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
+                accumulated_boundaries.append({
+                    "page_number": meta.get("page_number", row["page_index"] + 1),
+                    "start_char": char_pos,
+                    "page_text_length": len(row["page_text"]) + 1,
+                })
+                parts.append(row["page_text"])
+                char_pos += len(row["page_text"]) + 1
+            if accumulated_text:
+                accumulated_text += "\n" + "\n".join(parts)
+            else:
+                accumulated_text = "\n".join(parts)
+            pages_cached += len(new_pages)
 
-        if not pages:
+        if not accumulated_text:
             if is_final:
                 db.update_progress(content_hash, chunks_created=0, chunks_embedded=0)
                 _signal_done()
                 return
             continue
 
-        text = "\n".join(row["page_text"] for row in pages)
-        boundaries = _rebuild_boundaries(pages)
-        chunk_metadata = {"page_boundaries": boundaries, "table_regions": []}
-        chunks = chunker.chunk(text, chunk_metadata)
+        chunk_metadata = {"page_boundaries": accumulated_boundaries, "table_regions": []}
+        chunks = chunker.chunk(accumulated_text, chunk_metadata)
 
         batch_kwargs = dict(
             pdf_path=pdf_path, corpus=corpus, target_model=current_model,
@@ -316,7 +364,7 @@ def uploader_loop(
     total_uploaded = 0
 
     while not cancel.is_set():
-        chunks = db.read_uploadable_chunks(content_hash)
+        chunks = db.read_uploadable_chunks(content_hash, limit=_UPLOAD_BATCH_SIZE)
 
         if chunks:
             for batch_start in range(0, len(chunks), _UPLOAD_BATCH_SIZE):
@@ -360,7 +408,7 @@ def uploader_loop(
 
         if cancel.is_set():
             return
-        remaining = db.read_uploadable_chunks(content_hash)
+        remaining = db.read_uploadable_chunks(content_hash, limit=1)
         if remaining:
             continue
 
