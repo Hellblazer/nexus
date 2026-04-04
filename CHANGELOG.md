@@ -6,6 +6,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-04-04
+
+### Added
+- **Streaming PDF pipeline** (RDR-048) — three-stage concurrent indexing pipeline (extractor → chunker → uploader) connected via a SQLite WAL buffer (`PipelineDB`). Replaces the sequential extract-then-chunk-then-embed pipeline for all PDFs. Pages stream to buffer as they're extracted; chunker processes the stable prefix while extraction continues; uploader pushes embedded chunks to T3 ChromaDB as they become available.
+- **Crash recovery** — every page, chunk, and embedding is durably persisted in SQLite before the next stage processes it. Resume from any crash point (extraction, chunking, embedding, upload) with no re-work beyond the in-flight batch. Extraction metadata stored in `pipeline.db` for instant resume without re-extraction.
+- **Incremental chunking** — chunker caches page text in memory, reads only new pages from SQLite (`O(new_pages)` not `O(all_pages)`), and holds back the last chunk until extraction completes (boundary may shift). Eliminates the O(pages^2) re-chunking overhead.
+- **`--streaming` CLI flag** — `nx index pdf --streaming auto|always|never`. Default `auto` routes all PDFs through the streaming pipeline. `never` falls back to the batch+checkpoint path (RDR-047).
+- **`PipelineCancelled` exception** — `on_page` callback raises on cancel, propagating through MinerU's subprocess batch loop for fast abort instead of silently skipping writes.
+- **`on_page` streaming callback** on `PDFExtractor.extract()` — fires per page across all three backends (Docling, MinerU, PyMuPDF). Auto-mode Docling probe runs without callback to avoid double-firing; pages replayed from result if Docling wins.
+- **Metadata enrichment post-pass** — after upload, queries T3 and enriches all chunks with source_title, source_author, extraction_method, page_count, is_image_pdf, has_formulas, chunk_count. Resolves key names from ExtractionResult (docling_title → pdf_title → filename).
+- **table_regions post-pass** (RF-14) — tags chunks on table pages with `chunk_type=table_page` after extraction completes.
+- **Stale chunk pruning** — after upload, deletes chunks from previous versions of the same PDF (uses full `content_hash` from metadata, not ID prefix).
+- **`nx doctor --clean-pipelines`** — scans `pipeline.db` for orphaned entries (missing source PDF, stale running pipelines) and deletes them with cascade across all three buffer tables.
+- **Incremental PDF upsert with checkpoints** (RDR-047) — batch-path crash recovery for the `--streaming never` path. Checkpoints track embed/upsert progress per batch.
+- **Parallel CCE embedding** — `ThreadPoolExecutor(4)` with token-bucket rate limiter for Voyage API calls during embedding.
+- **`nx config get` dotted-path traversal** — e.g. `nx config get pdf.extractor`.
+
+### Fixed
+- **Concurrent pipeline guard** — `create_pipeline` catches `IntegrityError` on concurrent INSERT (two processes indexing same file).
+- **Credential resolution in streaming path** — `embed_fn=None` now resolved from `voyage_api_key` credential in the orchestrator, matching batch path behavior. Fast-fail `RuntimeError` when credentials are absent.
+- **Auto-mode double `on_page`** — Docling probe no longer fires `on_page`; pages replayed from `page_boundaries` if Docling wins. Prevents `total_pages` showing double the actual count for formula PDFs.
+- **Uploader completion guard** — removed early-exit on provisional `chunks_created` counter during incremental chunking (could cause premature completion). Resume path uses durable state.
+- **Resume cursor** — counts all embedded chunks (both uploaded and not-yet-uploaded) to avoid re-embedding work on crash recovery.
+- **Embedding heartbeat** — embeds in batches of 32 with `update_progress` between, preventing stale-pipeline detection during long embedding calls.
+- **Schema migration** — `_migrate_if_needed` adds `extraction_meta` column to existing `pipeline.db` files.
+
+### Docs
+- `docs/rdr/rdr-048-streaming-pdf-pipeline.md` — full architecture spec with 16 research findings
+- `docs/cli-reference.md` — `--streaming` flag, `--clean-pipelines`, `--clean-checkpoints`
+- `docs/architecture.md` — `pipeline_buffer.py`, `pipeline_stages.py`, `checkpoint.py` in module table
+- `CLAUDE.md` — new modules in source layout
+
 ## [2.11.2] - 2026-04-03
 
 ### Fixed
