@@ -63,6 +63,7 @@ _EMBED_BATCH_SIZE = 128  # Voyage AI embed() limit is 1,000; use conservative ba
 _CCE_MAX_BATCH_CHUNKS = 1000  # Voyage API limit: max 1,000 inputs per request
 _INCREMENTAL_BATCH_SIZE = 128  # Chunks per incremental embed/upsert batch
 _INCREMENTAL_THRESHOLD = 128  # Use incremental path when chunk count exceeds this
+_STREAMING_THRESHOLD = 100    # Page count: route to streaming pipeline when >= this
 _PARALLEL_WORKERS = 4  # Concurrent Voyage API calls for CCE embedding
 _RATE_LIMIT_RPM = 250  # Target RPM for Voyage API (83% of 300 RPM limit)
 
@@ -587,6 +588,7 @@ def index_pdf(
     on_progress: Callable[[int, int], None] | None = None,
     enrich: bool = False,
     extractor: str = "auto",
+    streaming: str = "auto",
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -640,6 +642,45 @@ def index_pdf(
             if return_metadata:
                 return {"chunks": 0, "pages": [], "title": "", "author": ""}
             return 0
+
+    # Streaming pipeline routing: check page count before full extraction.
+    if streaming in ("auto", "always"):
+        try:
+            import pymupdf
+            with pymupdf.open(str(pdf_path)) as _doc:
+                page_count = len(_doc)
+        except Exception:
+            page_count = 0  # can't count pages — fall through to batch path
+        use_streaming = streaming == "always" or page_count >= _STREAMING_THRESHOLD
+        if use_streaming:
+            from nexus.pipeline_stages import pipeline_index_pdf
+            count = pipeline_index_pdf(
+                pdf_path, content_hash, col_name, db,
+                embed_fn=embed_fn, extractor=extractor,
+            )
+            if return_metadata:
+                # Query T3 for metadata after streaming upload.
+                all_meta: list[dict] = []
+                offset = 0
+                while True:
+                    batch = _chroma_with_retry(
+                        col.get,
+                        where={"source_path": str(pdf_path)},
+                        include=["metadatas"],
+                        limit=300,
+                        offset=offset,
+                    )
+                    all_meta.extend(batch.get("metadatas", []))
+                    if len(batch.get("ids", [])) < 300:
+                        break
+                    offset += 300
+                return {
+                    "chunks": count,
+                    "pages": sorted({m.get("page_number", 0) for m in all_meta}),
+                    "title": all_meta[0].get("source_title", "") if all_meta else "",
+                    "author": all_meta[0].get("source_author", "") if all_meta else "",
+                }
+            return count
 
     # Extract and chunk the entire document
     now_iso = datetime.now(UTC).isoformat()

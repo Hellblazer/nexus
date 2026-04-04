@@ -52,7 +52,7 @@ def test_extract_uses_docling_by_default(extractor, dummy_pdf):
     expected = _make_result("docling")
     with patch.object(extractor, "_extract_with_docling", return_value=expected) as mock_docling:
         result = extractor.extract(dummy_pdf)
-    mock_docling.assert_called_once_with(dummy_pdf, enriched=False)
+    mock_docling.assert_called_once_with(dummy_pdf, enriched=False, on_page=None)
     assert result.metadata["extraction_method"] == "docling"
 
 
@@ -62,7 +62,7 @@ def test_extract_falls_back_on_docling_exception(extractor, dummy_pdf):
     with patch.object(extractor, "_extract_with_docling", side_effect=RuntimeError("crash")):
         with patch.object(extractor, "_extract_normalized", return_value=expected) as mock_norm:
             result = extractor.extract(dummy_pdf)
-    mock_norm.assert_called_once_with(dummy_pdf)
+    mock_norm.assert_called_once_with(dummy_pdf, on_page=None)
     assert result.metadata["extraction_method"] == "pymupdf_normalized"
 
 
@@ -690,7 +690,7 @@ class TestAutoDetectRouting:
             result = extractor.extract(dummy_pdf, extractor="auto")
 
         assert result.metadata["extraction_method"] == "mineru"
-        mock_mineru.assert_called_once_with(dummy_pdf, formula_count=10)
+        mock_mineru.assert_called_once_with(dummy_pdf, formula_count=10, on_page=None)
 
     def test_auto_falls_back_to_fast_result_when_mineru_fails(self, extractor, dummy_pdf):
         """extractor='auto' returns the initial Docling result when MinerU raises."""
@@ -744,3 +744,171 @@ class TestAutoDetectRouting:
         """Unknown extractor value raises ValueError."""
         with pytest.raises(ValueError, match="extractor"):
             extractor.extract(dummy_pdf, extractor="invalid")
+
+
+# ── on_page callback (RDR-048, nexus-qwxz.3) ───────────────────────────────
+
+
+class TestOnPageCallbackDocling:
+    """Verify on_page fires per page in the Docling backend."""
+
+    def test_callback_receives_pages_in_order(self, extractor, dummy_pdf):
+        pages = ["# Page One", "## Page Two", "### Page Three"]
+        mock_converter, _ = _make_mock_docling(pages)
+        extractor._converter_enriched = mock_converter
+        received: list[tuple] = []
+
+        with patch.object(extractor, "_extract_title", return_value=""):
+            extractor._extract_with_docling(
+                dummy_pdf, on_page=lambda idx, text, meta: received.append((idx, text, meta)),
+            )
+
+        assert len(received) == 3
+        assert received[0][0] == 0
+        assert received[0][1] == "# Page One"
+        assert received[1][0] == 1
+        assert received[2][0] == 2
+
+    def test_callback_metadata_has_page_number_and_length(self, extractor, dummy_pdf):
+        pages = ["Hello world"]
+        mock_converter, _ = _make_mock_docling(pages)
+        extractor._converter_enriched = mock_converter
+        received: list[dict] = []
+
+        with patch.object(extractor, "_extract_title", return_value=""):
+            extractor._extract_with_docling(
+                dummy_pdf, on_page=lambda idx, text, meta: received.append(meta),
+            )
+
+        assert received[0]["page_number"] == 1
+        assert received[0]["text_length"] == len("Hello world")
+
+    def test_callback_skips_empty_pages(self, extractor, dummy_pdf):
+        pages = ["# Page 1", "", "# Page 3"]
+        mock_converter, _ = _make_mock_docling(pages)
+        extractor._converter_enriched = mock_converter
+        received: list[int] = []
+
+        with patch.object(extractor, "_extract_title", return_value=""):
+            extractor._extract_with_docling(
+                dummy_pdf, on_page=lambda idx, text, meta: received.append(idx),
+            )
+
+        # page 2 (index 1) is empty and should be skipped
+        assert received == [0, 2]
+
+    def test_none_callback_preserves_result(self, extractor, dummy_pdf):
+        """on_page=None produces identical ExtractionResult as before."""
+        pages = ["# Page 1", "## Page 2"]
+        mock_converter, _ = _make_mock_docling(pages)
+        extractor._converter_enriched = mock_converter
+
+        with patch.object(extractor, "_extract_title", return_value=""):
+            result = extractor._extract_with_docling(dummy_pdf, on_page=None)
+
+        assert result.text == "# Page 1\n## Page 2"
+        assert len(result.metadata["page_boundaries"]) == 2
+
+    def test_result_complete_with_callback(self, extractor, dummy_pdf):
+        """ExtractionResult is fully populated even when on_page is used."""
+        pages = ["# Page 1", "## Page 2"]
+        mock_converter, _ = _make_mock_docling(pages)
+        extractor._converter_enriched = mock_converter
+
+        with patch.object(extractor, "_extract_title", return_value="Title"):
+            result = extractor._extract_with_docling(
+                dummy_pdf, on_page=lambda *a: None,
+            )
+
+        assert result.text == "# Page 1\n## Page 2"
+        assert result.metadata["page_boundaries"]
+        assert result.metadata["extraction_method"] == "docling"
+
+
+class TestOnPageCallbackPyMuPDF:
+    """Verify on_page fires per page in the PyMuPDF normalized backend."""
+
+    def test_callback_receives_pages_in_order(self, extractor, dummy_pdf):
+        mock_page_0 = MagicMock()
+        mock_page_0.get_text.return_value = "Page zero text"
+        mock_page_1 = MagicMock()
+        mock_page_1.get_text.return_value = "Page one text"
+        mock_doc = MagicMock()
+        mock_doc.__enter__ = MagicMock(return_value=mock_doc)
+        mock_doc.__exit__ = MagicMock(return_value=False)
+        mock_doc.__iter__ = MagicMock(return_value=iter([mock_page_0, mock_page_1]))
+        mock_doc.__len__ = MagicMock(return_value=2)
+        mock_doc.metadata = {}
+
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open.return_value = mock_doc
+        received: list[tuple] = []
+
+        with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
+            extractor._extract_normalized(
+                dummy_pdf, on_page=lambda idx, text, meta: received.append((idx, text, meta)),
+            )
+
+        assert len(received) == 2
+        assert received[0][0] == 0
+        assert "Page zero text" in received[0][1]
+        assert received[1][0] == 1
+        assert received[0][2]["page_number"] == 1
+        assert received[1][2]["page_number"] == 2
+
+    def test_result_complete_with_callback(self, extractor, dummy_pdf):
+        mock_page = MagicMock()
+        mock_page.get_text.return_value = "Some content"
+        mock_doc = MagicMock()
+        mock_doc.__enter__ = MagicMock(return_value=mock_doc)
+        mock_doc.__exit__ = MagicMock(return_value=False)
+        mock_doc.__iter__ = MagicMock(return_value=iter([mock_page]))
+        mock_doc.__len__ = MagicMock(return_value=1)
+        mock_doc.metadata = {}
+
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open.return_value = mock_doc
+
+        with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
+            result = extractor._extract_normalized(
+                dummy_pdf, on_page=lambda *a: None,
+            )
+
+        assert result.text
+        assert result.metadata["page_boundaries"]
+
+
+class TestOnPageCallbackExtract:
+    """Verify on_page is threaded through extract() to backends."""
+
+    def test_extract_passes_on_page_to_docling(self, extractor, dummy_pdf):
+        expected = _make_result("docling")
+        cb = lambda *a: None
+
+        with patch.object(extractor, "_extract_with_docling", return_value=expected) as mock_d:
+            extractor.extract(dummy_pdf, extractor="docling", on_page=cb)
+
+        mock_d.assert_called_once_with(dummy_pdf, on_page=cb)
+
+    def test_extract_passes_on_page_to_normalized_fallback(self, extractor, dummy_pdf):
+        expected = _make_result("pymupdf_normalized")
+        cb = lambda *a: None
+
+        with patch.object(extractor, "_extract_with_docling", side_effect=RuntimeError("fail")):
+            with patch.object(extractor, "_extract_normalized", return_value=expected) as mock_n:
+                extractor.extract(dummy_pdf, extractor="docling", on_page=cb)
+
+        mock_n.assert_called_once_with(dummy_pdf, on_page=cb)
+
+    def test_extract_auto_passes_on_page_to_docling_fast_pass(self, extractor, dummy_pdf):
+        """Auto mode propagates on_page to the Docling fast (non-enriched) pass."""
+        expected = _make_result("docling")
+        cb = lambda *a: None
+
+        with (
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=0),
+            patch.object(extractor, "_extract_with_docling", return_value=expected) as mock_d,
+        ):
+            extractor.extract(dummy_pdf, on_page=cb)
+
+        mock_d.assert_called_once_with(dummy_pdf, enriched=False, on_page=cb)
