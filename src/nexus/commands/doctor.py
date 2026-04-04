@@ -147,8 +147,7 @@ def _check_orphan_pipelines(lines: list[str]) -> bool:
         lines.append(_check_line("PDF pipeline buffer", True, "scan failed — skipping"))
         return True
 
-    conn = db._conn()
-    total = conn.execute("SELECT COUNT(*) FROM pdf_pipeline").fetchone()[0]
+    total = db.count_pipelines()
 
     if orphans:
         lines.append(_check_line(

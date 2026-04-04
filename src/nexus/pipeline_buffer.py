@@ -305,6 +305,10 @@ class PipelineDB:
         )
         conn.commit()
 
+    def count_pipelines(self) -> int:
+        """Return the total number of pipeline entries."""
+        return self._conn().execute("SELECT COUNT(*) FROM pdf_pipeline").fetchone()[0]
+
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
     def scan_orphaned_pipelines(self, *, delete: bool = False) -> list[str]:
@@ -343,6 +347,8 @@ class PipelineDB:
                 continue
 
             # Case 2: Stale running pipeline (crashed).
+            # Note: status='failed' with existing PDF is intentionally NOT orphaned —
+            # failed pipelines are reset to 'running' on the next create_pipeline() call.
             if status == "running":
                 updated_at = datetime.fromisoformat(row["updated_at"])
                 if now - updated_at > STALE_THRESHOLD:
