@@ -131,6 +131,40 @@ def _check_orphan_checkpoints(lines: list[str]) -> bool:
     return True
 
 
+def _check_orphan_pipelines(lines: list[str]) -> bool:
+    """Check for orphaned PDF pipeline buffer entries.  Returns True if all clean."""
+    from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB
+
+    if not PIPELINE_DB_PATH.exists():
+        lines.append(_check_line("PDF pipeline buffer", True, "no pipeline database"))
+        return True
+
+    try:
+        db = PipelineDB(PIPELINE_DB_PATH)
+        orphans = db.scan_orphaned_pipelines(delete=False)
+    except Exception as exc:
+        _log.debug("orphan_pipeline_scan_failed", error=str(exc))
+        lines.append(_check_line("PDF pipeline buffer", True, "scan failed — skipping"))
+        return True
+
+    conn = db._conn()
+    total = conn.execute("SELECT COUNT(*) FROM pdf_pipeline").fetchone()[0]
+
+    if orphans:
+        lines.append(_check_line(
+            "PDF pipeline buffer", False,
+            f"{len(orphans)} orphaned entry/entries out of {total} total",
+        ))
+        _fix(lines, "Remove stale entries: nx doctor --clean-pipelines")
+        return False
+
+    lines.append(_check_line(
+        "PDF pipeline buffer", True,
+        f"{total} entry/entries, none orphaned" if total else "empty",
+    ))
+    return True
+
+
 def _check_t2_integrity(lines: list[str]) -> bool:
     """Verify T2 SQLite + FTS5 index integrity. Returns True if all ok."""
     db_path = default_db_path()
@@ -219,7 +253,13 @@ def _check_chroma_pagination(lines: list[str], client: object, db_name: str) -> 
     default=False,
     help="Delete orphaned PDF checkpoint files (where the source PDF no longer exists).",
 )
-def doctor_cmd(clean_checkpoints: bool) -> None:
+@click.option(
+    "--clean-pipelines",
+    is_flag=True,
+    default=False,
+    help="Delete orphaned PDF pipeline buffer entries (stale or missing source PDF).",
+)
+def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool) -> None:
     """Verify that all required services and credentials are available."""
     if clean_checkpoints:
         from nexus.checkpoint import scan_orphaned_checkpoints
@@ -228,6 +268,19 @@ def doctor_cmd(clean_checkpoints: bool) -> None:
             click.echo(f"Deleted {len(deleted)} orphaned checkpoint(s).")
         else:
             click.echo("No orphaned checkpoints found.")
+        return
+
+    if clean_pipelines:
+        from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB
+        if not PIPELINE_DB_PATH.exists():
+            click.echo("No pipeline database found.")
+            return
+        db = PipelineDB(PIPELINE_DB_PATH)
+        deleted = db.scan_orphaned_pipelines(delete=True)
+        if deleted:
+            click.echo(f"Deleted {len(deleted)} orphaned pipeline entry/entries.")
+        else:
+            click.echo("No orphaned pipeline entries found.")
         return
 
     lines: list[str] = ["Nexus health check:\n"]
@@ -490,6 +543,10 @@ def doctor_cmd(clean_checkpoints: bool) -> None:
     # ── Orphaned checkpoint files ─────────────────────────────────────────────
     # Non-fatal: orphaned checkpoints waste disk space but do not block indexing.
     _check_orphan_checkpoints(lines)
+
+    # ── Orphaned pipeline buffer entries ──────────────────────────────────────
+    # Non-fatal: orphaned entries waste disk space but do not block indexing.
+    _check_orphan_pipelines(lines)
 
     # ── T2 database integrity ─────────────────────────────────────────────────
     # Non-fatal: integrity failure is logged but does not set failed=True.

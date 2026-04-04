@@ -307,3 +307,68 @@ class TestEdgeCases:
         db.update_progress("hash1")
         state_after = db.get_pipeline_state("hash1")
         assert state_after["updated_at"] == state_before["updated_at"]
+
+
+# ── Orphan Scan ──────────────────────────────────────────────────────────────
+
+
+class TestScanOrphanedPipelines:
+    def test_detects_missing_pdf(self, db: PipelineDB) -> None:
+        """Entry with non-existent pdf_path is orphaned."""
+        db.create_pipeline("hash1", "/nonexistent/gone.pdf", "docs__test")
+        orphans = db.scan_orphaned_pipelines()
+        assert "hash1" in orphans
+
+    def test_detects_stale_running(self, db: PipelineDB) -> None:
+        """Running entry with old heartbeat is orphaned."""
+        db.create_pipeline("hash1", __file__, "docs__test")  # use this test file as valid path
+        conn = db._conn()
+        conn.execute(
+            "UPDATE pdf_pipeline SET updated_at = '2020-01-01T00:00:00+00:00' WHERE content_hash = ?",
+            ("hash1",),
+        )
+        conn.commit()
+        orphans = db.scan_orphaned_pipelines()
+        assert "hash1" in orphans
+
+    def test_recent_running_not_orphaned(self, db: PipelineDB) -> None:
+        """Running entry with recent heartbeat is NOT orphaned."""
+        db.create_pipeline("hash1", __file__, "docs__test")
+        orphans = db.scan_orphaned_pipelines()
+        assert orphans == []
+
+    def test_completed_not_orphaned(self, db: PipelineDB) -> None:
+        """Completed entry is never orphaned regardless of age."""
+        db.create_pipeline("hash1", __file__, "docs__test")
+        db.mark_completed("hash1")
+        conn = db._conn()
+        conn.execute(
+            "UPDATE pdf_pipeline SET updated_at = '2020-01-01T00:00:00+00:00' WHERE content_hash = ?",
+            ("hash1",),
+        )
+        conn.commit()
+        orphans = db.scan_orphaned_pipelines()
+        assert orphans == []
+
+    def test_failed_with_missing_pdf_is_orphaned(self, db: PipelineDB) -> None:
+        """Failed entry where PDF no longer exists is orphaned."""
+        db.create_pipeline("hash1", "/nonexistent/gone.pdf", "docs__test")
+        db.mark_failed("hash1", "crash")
+        orphans = db.scan_orphaned_pipelines()
+        assert "hash1" in orphans
+
+    def test_delete_cleans_all_tables(self, db: PipelineDB) -> None:
+        """delete=True removes orphan data from all three tables."""
+        db.create_pipeline("hash1", "/nonexistent/gone.pdf", "docs__test")
+        db.write_page("hash1", 0, "page text")
+        db.write_chunk("hash1", 0, "chunk text", "cid-0")
+
+        orphans = db.scan_orphaned_pipelines(delete=True)
+        assert "hash1" in orphans
+        assert db.get_pipeline_state("hash1") is None
+        assert db.read_pages("hash1") == []
+        assert db.read_ready_chunks("hash1") == []
+
+    def test_empty_database(self, db: PipelineDB) -> None:
+        """No entries → no orphans."""
+        assert db.scan_orphaned_pipelines() == []

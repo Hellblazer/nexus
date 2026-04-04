@@ -307,6 +307,51 @@ class PipelineDB:
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
+    def scan_orphaned_pipelines(self, *, delete: bool = False) -> list[str]:
+        """Scan for orphaned pipeline entries.
+
+        An entry is orphaned when:
+        1. ``pdf_path`` no longer exists on disk (file moved/deleted).
+        2. ``status='running'`` and ``updated_at`` is older than the stale
+           threshold (crashed pipeline).
+
+        Content-hash re-verification is intentionally skipped (existence
+        check only — re-hashing every PDF is prohibitively expensive,
+        matching the ``scan_orphaned_checkpoints`` policy).
+
+        When *delete* is True, removes all data (pages, chunks, pipeline
+        row) for each orphan.
+        """
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT content_hash, pdf_path, status, updated_at FROM pdf_pipeline"
+        ).fetchall()
+
+        now = datetime.now(UTC)
+        orphans: list[str] = []
+
+        for row in rows:
+            content_hash = row["content_hash"]
+            pdf_path = row["pdf_path"]
+            status = row["status"]
+
+            # Case 1: PDF file no longer exists.
+            if not Path(pdf_path).exists():
+                orphans.append(content_hash)
+                if delete:
+                    self.delete_pipeline_data(content_hash)
+                continue
+
+            # Case 2: Stale running pipeline (crashed).
+            if status == "running":
+                updated_at = datetime.fromisoformat(row["updated_at"])
+                if now - updated_at > STALE_THRESHOLD:
+                    orphans.append(content_hash)
+                    if delete:
+                        self.delete_pipeline_data(content_hash)
+
+        return orphans
+
     def delete_pipeline_data(self, content_hash: str) -> None:
         """Remove all data for a content_hash across all three tables."""
         conn = self._conn()
