@@ -192,7 +192,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     "--streaming",
     type=click.Choice(["auto", "always", "never"]),
     default="auto",
-    help="Streaming pipeline mode: auto (≥100 pages), always, never. Default auto.",
+    help="Streaming pipeline mode: auto (default, all PDFs), always, never.",
 )
 def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, streaming: str) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""

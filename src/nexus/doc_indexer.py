@@ -63,7 +63,7 @@ _EMBED_BATCH_SIZE = 128  # Voyage AI embed() limit is 1,000; use conservative ba
 _CCE_MAX_BATCH_CHUNKS = 1000  # Voyage API limit: max 1,000 inputs per request
 _INCREMENTAL_BATCH_SIZE = 128  # Chunks per incremental embed/upsert batch
 _INCREMENTAL_THRESHOLD = 128  # Use incremental path when chunk count exceeds this
-_STREAMING_THRESHOLD = 100    # Pages: use streaming pipeline when >= this (RF-5)
+_STREAMING_THRESHOLD = 0      # All PDFs use the streaming pipeline (resilient path)
 _PARALLEL_WORKERS = 4  # Concurrent Voyage API calls for CCE embedding
 _RATE_LIMIT_RPM = 250  # Target RPM for Voyage API (83% of 300 RPM limit)
 
