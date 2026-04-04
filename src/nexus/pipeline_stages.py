@@ -219,9 +219,10 @@ def chunker_loop(
     chunker = PDFChunker(chunk_chars=chunk_chars)
     # Resume: count all embedded chunks (both uploaded and not-yet-uploaded)
     # to avoid re-chunking/re-embedding work already done.
-    # Note: if embed_fn failed mid-batch, some chunks may have NULL embeddings
-    # at indices < written_up_to. These are re-encountered but INSERT OR IGNORE
-    # skips them; they'll be re-embedded on the next run that processes those indices.
+    # Note: if embed_fn failed or cancel fired mid-batch, chunks beyond the
+    # last fully-embedded batch are not written at all (not NULL-embedding rows).
+    # On resume, count_embedded_chunks returns the count of successfully embedded
+    # rows, so the chunker re-processes from the correct position.
     written_up_to = db.count_embedded_chunks(content_hash)
     last_page_count = 0
     total_embedded = written_up_to

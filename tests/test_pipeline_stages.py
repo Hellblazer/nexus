@@ -259,7 +259,7 @@ class TestChunkerLoop:
             chunker_loop("h1", db, threading.Event(), embed_fn=tracking_embed, extraction_done=_done_event())
 
         # No new embed calls — all 3 chunks were already embedded.
-        assert embed_calls == [] or (len(embed_calls) == 1 and embed_calls[0] == 0)
+        assert embed_calls == []
 
     def test_embed_fn_none(self, db: PipelineDB) -> None:
         self._populate_pages(db, "h1", 2)
@@ -648,6 +648,39 @@ class TestPipelineIndexPdf:
         deleted_ids = mock_col.delete.call_args.kwargs.get("ids", mock_col.delete.call_args[1].get("ids", []))
         assert "old_hash_0" in deleted_ids
         assert "abc123_0" not in deleted_ids
+
+    def test_skip_already_running(self, db: PipelineDB) -> None:
+        """Orchestrator returns 0 when pipeline is already running."""
+        mock_t3 = MagicMock()
+        db.create_pipeline("h1", "/a.pdf", "docs__test")  # creates as 'running'
+
+        result = pipeline_index_pdf(
+            Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db,
+        )
+
+        assert result == 0
+        mock_t3.upsert_chunks_with_embeddings.assert_not_called()
+
+
+# ── Buffer edge case tests ───────────────────────────────────────────────────
+
+
+class TestBufferEdgeCases:
+    def test_count_pipelines(self, db: PipelineDB) -> None:
+        assert db.count_pipelines() == 0
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        assert db.count_pipelines() == 1
+
+    def test_count_embedded_chunks(self, db: PipelineDB) -> None:
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        db.write_chunk("h1", 0, "text", "cid-0", embedding=b"\x00\x01")
+        db.write_chunk("h1", 1, "text", "cid-1")  # no embedding
+        assert db.count_embedded_chunks("h1") == 1
+
+    def test_mark_uploaded_empty_list(self, db: PipelineDB) -> None:
+        """Empty list is a no-op."""
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        db.mark_uploaded("h1", [])  # should not raise
 
 
 # ── Metadata contract test ───────────────────────────────────────────────────
