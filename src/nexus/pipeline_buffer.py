@@ -309,6 +309,13 @@ class PipelineDB:
         """Return the total number of pipeline entries."""
         return self._conn().execute("SELECT COUNT(*) FROM pdf_pipeline").fetchone()[0]
 
+    def count_embedded_chunks(self, content_hash: str) -> int:
+        """Return the count of chunks with embeddings (both uploaded and not)."""
+        return self._conn().execute(
+            "SELECT COUNT(*) FROM pdf_chunks WHERE content_hash = ? AND embedding IS NOT NULL",
+            (content_hash,),
+        ).fetchone()[0]
+
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
     def scan_orphaned_pipelines(self, *, delete: bool = False) -> list[str]:

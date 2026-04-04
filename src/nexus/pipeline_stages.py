@@ -218,12 +218,11 @@ def chunker_loop(
 ) -> None:
     """Incrementally chunk pages as they arrive, overlapping with extraction."""
     chunker = PDFChunker(chunk_chars=chunk_chars)
-    # Resume: skip only chunks that were fully embedded (not null-embedding rows
-    # left by a crash during the embed phase).
-    existing_chunks = db.read_ready_chunks(content_hash)
-    written_up_to = sum(1 for c in existing_chunks if c["embedding"] is not None)
+    # Resume: count all embedded chunks (both uploaded and not-yet-uploaded)
+    # to avoid re-chunking/re-embedding work already done.
+    written_up_to = db.count_embedded_chunks(content_hash)
     last_page_count = 0
-    total_embedded = 0
+    total_embedded = written_up_to
     now_iso = datetime.now(UTC).isoformat()
 
     def _signal_done() -> None:
@@ -282,6 +281,7 @@ def chunker_loop(
             _signal_done()
             return
 
+        # Hold back the last chunk — its boundary may shift when more pages arrive.
         stable_end = max(written_up_to, len(chunks) - 1)
         new_chunks = chunks[written_up_to:stable_end]
         if new_chunks:
@@ -540,8 +540,8 @@ def _enrich_metadata_from_extraction(
         updated_metas = [{**m, **enrichment, "chunk_count": chunk_count} for m in all_metas]
 
         t3.update_chunks(collection, all_ids, updated_metas)
-    except Exception:
-        _log.debug("metadata_enrichment_failed", content_hash=content_hash)
+    except Exception as exc:
+        _log.warning("metadata_enrichment_failed", content_hash=content_hash, error=str(exc))
 
 
 def _update_chunk_metadata(
