@@ -36,7 +36,7 @@ from nexus.retry import _chroma_with_retry
 _log = structlog.get_logger(__name__)
 
 _UPLOAD_BATCH_SIZE = 128
-_EMBED_BATCH_SIZE = 32
+_EMBED_BATCH_SIZE = 32  # Smaller than batch path (128) — favours heartbeat freshness in streaming
 _POLL_INTERVAL = 0.1
 
 EmbedFn = Callable[[list[str], str], tuple[list[list[float]], str]]
@@ -458,14 +458,14 @@ def pipeline_index_pdf(
     table_regions = extraction_result.metadata.get("table_regions", [])
     if table_regions:
         table_pages: set[int] = {r["page"] for r in table_regions}
-        _update_chunk_metadata(
-            t3, collection, content_hash,
-            lambda meta: (
-                meta.update({"chunk_type": "table_page"}) or True  # type: ignore[func-returns-value]
-                if meta.get("page_number", 0) in table_pages and meta.get("chunk_type") != "table_page"
-                else False
-            ),
-        )
+
+        def _tag_table_page(meta: dict) -> bool:
+            if meta.get("page_number", 0) in table_pages and meta.get("chunk_type") != "table_page":
+                meta["chunk_type"] = "table_page"
+                return True
+            return False
+
+        _update_chunk_metadata(t3, collection, content_hash, _tag_table_page)
 
     # 3. Stale chunk pruning.
     _prune_stale_chunks(t3, collection, str(pdf_path), content_hash)
@@ -489,6 +489,10 @@ def _enrich_metadata_from_extraction(
     Resolves source_title (docling_title → pdf_title → filename), source_author,
     extraction_method, format, page_count, is_image_pdf, has_formulas — matching
     the batch path in doc_indexer._pdf_chunks.
+
+    Cannot use ``_update_chunk_metadata`` because ``chunk_count`` requires
+    knowing the total number of chunks (``len(all_ids)``), which is only
+    available after the full paginated query.
     """
     meta = result.metadata
     page_count = meta.get("page_count", 0) or 1
