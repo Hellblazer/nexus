@@ -59,8 +59,8 @@ CREATE TABLE IF NOT EXISTS pdf_pipeline (
     collection       TEXT NOT NULL,
     total_pages      INTEGER,
     pages_extracted  INTEGER DEFAULT 0,
-    chunks_created   INTEGER,
-    chunks_embedded  INTEGER,
+    chunks_created   INTEGER,   -- NULL = chunking not started; set explicitly by chunker
+    chunks_embedded  INTEGER,   -- NULL = embedding not started
     chunks_uploaded  INTEGER DEFAULT 0,
     status           TEXT DEFAULT 'running',
     error            TEXT DEFAULT '',

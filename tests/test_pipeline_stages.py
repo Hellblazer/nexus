@@ -226,6 +226,41 @@ class TestChunkerLoop:
 
         assert len(db.read_ready_chunks("h1")) == 2
 
+    def test_resume_with_partially_uploaded_chunks(self, db: PipelineDB) -> None:
+        """Resume skips already-embedded chunks even if some are uploaded."""
+        self._populate_pages(db, "h1", 2)
+
+        fake_chunks = [
+            TextChunk(text="chunk 0", chunk_index=0, metadata={}),
+            TextChunk(text="chunk 1", chunk_index=1, metadata={}),
+            TextChunk(text="chunk 2", chunk_index=2, metadata={}),
+        ]
+
+        def fake_embed(texts, model):
+            return [[0.1] * 4 for _ in texts], model
+
+        # First run: embed all 3 chunks.
+        with patch("nexus.pipeline_stages.PDFChunker") as MockChunker:
+            MockChunker.return_value.chunk.return_value = fake_chunks
+            chunker_loop("h1", db, threading.Event(), embed_fn=fake_embed, extraction_done=_done_event())
+
+        # Simulate: chunks 0-1 uploaded, chunk 2 not yet uploaded.
+        db.mark_uploaded("h1", [0, 1])
+
+        # Track embed calls on second run.
+        embed_calls: list[int] = []
+        def tracking_embed(texts, model):
+            embed_calls.append(len(texts))
+            return [[0.1] * 4 for _ in texts], model
+
+        # Resume: chunker should see all 3 are embedded and skip re-embedding.
+        with patch("nexus.pipeline_stages.PDFChunker") as MockChunker:
+            MockChunker.return_value.chunk.return_value = fake_chunks
+            chunker_loop("h1", db, threading.Event(), embed_fn=tracking_embed, extraction_done=_done_event())
+
+        # No new embed calls — all 3 chunks were already embedded.
+        assert embed_calls == [] or (len(embed_calls) == 1 and embed_calls[0] == 0)
+
     def test_embed_fn_none(self, db: PipelineDB) -> None:
         self._populate_pages(db, "h1", 2)
         fake_chunks = [TextChunk(text="chunk 0", chunk_index=0, metadata={})]

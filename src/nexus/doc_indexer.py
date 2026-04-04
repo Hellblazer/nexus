@@ -624,7 +624,7 @@ def index_pdf(
 
     content_hash = _sha256(pdf_path)
     col_name = collection_name if collection_name is not None else f"docs__{corpus}"
-    db = t3 if t3 is not None else make_t3()
+    db = t3 if t3 is not None else make_t3()  # T3Database instance (not PipelineDB)
     col = db.get_or_create_collection(col_name)
     target_model = index_model_for_collection(col_name)
 
@@ -654,6 +654,9 @@ def index_pdf(
         use_streaming = streaming == "always" or (page_count >= 0 and page_count >= _STREAMING_THRESHOLD)
         if use_streaming:
             from nexus.pipeline_stages import pipeline_index_pdf
+            # Returns 0 if skipped (already running or completed by another process).
+            # The staleness check above (line 638-644) handles the "unchanged" case;
+            # a 0 here means a concurrent pipeline is active on this content_hash.
             count = pipeline_index_pdf(
                 pdf_path, content_hash, col_name, db,
                 embed_fn=embed_fn, extractor=extractor,
