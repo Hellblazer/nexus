@@ -218,9 +218,10 @@ def chunker_loop(
 ) -> None:
     """Incrementally chunk pages as they arrive, overlapping with extraction."""
     chunker = PDFChunker(chunk_chars=chunk_chars)
-    # Resume: skip chunks already in the buffer from a previous run.
+    # Resume: skip only chunks that were fully embedded (not null-embedding rows
+    # left by a crash during the embed phase).
     existing_chunks = db.read_ready_chunks(content_hash)
-    written_up_to = len(existing_chunks)
+    written_up_to = sum(1 for c in existing_chunks if c["embedding"] is not None)
     last_page_count = 0
     total_embedded = 0
     now_iso = datetime.now(UTC).isoformat()
@@ -268,12 +269,15 @@ def chunker_loop(
 
         if is_final:
             new_chunks = chunks[written_up_to:]
-            count, _ = _embed_and_write_batch(
+            count, actual_model = _embed_and_write_batch(
                 new_chunks, content_hash, db, embed_fn, cancel,
                 total_embedded, chunk_count=len(chunks), **common_kwargs,
             )
             total_embedded += count
             written_up_to += count
+            # Update target_model for metadata if embed_fn returned a different model.
+            if actual_model != target_model:
+                common_kwargs["target_model"] = actual_model
             db.update_progress(content_hash, chunks_created=len(chunks), chunks_embedded=total_embedded)
             _signal_done()
             return
@@ -281,10 +285,12 @@ def chunker_loop(
         stable_end = max(written_up_to, len(chunks) - 1)
         new_chunks = chunks[written_up_to:stable_end]
         if new_chunks:
-            count, _ = _embed_and_write_batch(
+            count, actual_model = _embed_and_write_batch(
                 new_chunks, content_hash, db, embed_fn, cancel,
                 total_embedded, chunk_count=0, **common_kwargs,  # provisional
             )
+            if actual_model != target_model:
+                common_kwargs["target_model"] = actual_model
             total_embedded += count
             written_up_to += count
             db.update_progress(content_hash, chunks_created=written_up_to)
@@ -335,11 +341,17 @@ def uploader_loop(
 
         chunker_finished = chunking_done is not None and chunking_done.is_set()
         if not chunker_finished:
-            state = db.get_pipeline_state(content_hash)
-            if state and state["chunks_created"] is not None:
-                if state["chunks_uploaded"] >= state["chunks_created"]:
-                    db.mark_completed(content_hash)
-                    return
+            if chunking_done is None:
+                # Resume path (no event): use durable state. Safe because on resume
+                # the chunker runs to completion before the uploader starts — there
+                # is no incremental chunks_created race.
+                state = db.get_pipeline_state(content_hash)
+                if state and state["chunks_created"] is not None:
+                    if state["chunks_uploaded"] >= state["chunks_created"]:
+                        db.mark_completed(content_hash)
+                        return
+            # Orchestrated path: wait for chunking_done event — don't trust
+            # provisional chunks_created during incremental chunking.
             time.sleep(_POLL_INTERVAL)
             continue
 
@@ -525,11 +537,7 @@ def _enrich_metadata_from_extraction(
             return
 
         chunk_count = len(all_ids)
-        updated_metas: list[dict] = []
-        for m in all_metas:
-            m.update(enrichment)
-            m["chunk_count"] = chunk_count
-            updated_metas.append(m)
+        updated_metas = [{**m, **enrichment, "chunk_count": chunk_count} for m in all_metas]
 
         t3.update_chunks(collection, all_ids, updated_metas)
     except Exception:
@@ -542,21 +550,35 @@ def _update_chunk_metadata(
     content_hash: str,
     update_fn: Callable[[dict], bool],
 ) -> None:
-    """Generic post-pass: query chunks by content_hash, apply update_fn to each."""
+    """Generic post-pass: query chunks by content_hash, apply update_fn to each.
+
+    Paginates the T3 query to handle documents with 300+ chunks.
+    """
     try:
         col = t3.get_or_create_collection(collection)
-        result = _chroma_with_retry(
-            col.get,
-            where={"content_hash": content_hash},
-            include=["metadatas"],
-        )
+        all_ids: list[str] = []
+        all_metas: list[dict] = []
+        offset = 0
+        while True:
+            batch = _chroma_with_retry(
+                col.get,
+                where={"content_hash": content_hash},
+                include=["metadatas"],
+                limit=300,
+                offset=offset,
+            )
+            all_ids.extend(batch.get("ids", []))
+            all_metas.extend(batch.get("metadatas", []))
+            if len(batch.get("ids", [])) < 300:
+                break
+            offset += 300
     except Exception:
         _log.debug("chunk_metadata_query_failed", content_hash=content_hash)
         return
 
     ids_to_update: list[str] = []
     updated_metas: list[dict] = []
-    for cid, meta in zip(result.get("ids", []), result.get("metadatas", [])):
+    for cid, meta in zip(all_ids, all_metas):
         if update_fn(meta):
             ids_to_update.append(cid)
             updated_metas.append(meta)
@@ -574,25 +596,22 @@ def _prune_stale_chunks(
     """Delete chunks from T3 that belong to a previous version of the same PDF."""
     try:
         col = t3.get_or_create_collection(collection)
-        current_ids: set[str] = set()
         stale_ids: list[str] = []
         offset = 0
 
-        # Collect all IDs for this source_path.
+        # Use full content_hash from metadata to distinguish current vs stale.
         while True:
             batch = _chroma_with_retry(
                 col.get,
                 where={"source_path": pdf_path},
-                include=[],
+                include=["metadatas"],
                 limit=300,
                 offset=offset,
             )
             batch_ids = batch.get("ids", [])
-            for eid in batch_ids:
-                # Current version's IDs start with content_hash[:16]
-                if eid.startswith(content_hash[:16]):
-                    current_ids.add(eid)
-                else:
+            batch_metas = batch.get("metadatas", [])
+            for eid, meta in zip(batch_ids, batch_metas):
+                if meta.get("content_hash") != content_hash:
                     stale_ids.append(eid)
             if len(batch_ids) < 300:
                 break
