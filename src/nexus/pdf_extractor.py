@@ -11,6 +11,7 @@ Extraction backends (three tiers, selected by ``extractor`` param):
 Auto mode (default): Docling pass → if formulas detected → try MinerU → fallback
 to Docling → fallback to PyMuPDF normalized.
 """
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -142,7 +143,13 @@ class PDFExtractor:
         self._mineru_server_up: bool = False
         self._mineru_server_restarts: int = 0
 
-    def extract(self, pdf_path: Path, *, extractor: str = "auto") -> ExtractionResult:
+    def extract(
+        self,
+        pdf_path: Path,
+        *,
+        extractor: str = "auto",
+        on_page: Callable[[int, str, dict], None] | None = None,
+    ) -> ExtractionResult:
         """Extract text from *pdf_path*. Returns ExtractionResult.
 
         *extractor* selects the backend:
@@ -150,6 +157,12 @@ class PDFExtractor:
           formulas found, try MinerU then fall back to PyMuPDF normalized.
         - ``"docling"`` — Docling with PyMuPDF normalized fallback.
         - ``"mineru"`` — MinerU directly (no fallback).
+
+        *on_page* — optional streaming callback fired per extracted page (or
+        per MinerU batch when ``mineru_page_batch > 1``):
+        ``on_page(page_index, page_text, page_metadata)``.
+        ``page_metadata`` contains ``"page_number"`` (1-based) and
+        ``"text_length"``.
         """
         if extractor not in ("auto", "docling", "mineru"):
             raise ValueError(
@@ -159,28 +172,29 @@ class PDFExtractor:
         if extractor == "docling":
             _progress(f"  Docling: extracting {pdf_path.name}…")
             try:
-                return self._extract_with_docling(pdf_path)
+                return self._extract_with_docling(pdf_path, on_page=on_page)
             except Exception as exc:
                 _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
                 _log.debug("docling_extraction_failed", error=str(exc), path=str(pdf_path))
-                return self._extract_normalized(pdf_path)
+                return self._extract_normalized(pdf_path, on_page=on_page)
 
         if extractor == "mineru":
             _progress(f"  MinerU: extracting {pdf_path.name}…")
-            return self._extract_with_mineru(pdf_path)
+            return self._extract_with_mineru(pdf_path, on_page=on_page)
 
         # extractor == "auto"
         # Step 1: Quick formula pre-screen via raw PDF text (~0.1s)
         formula_count = _has_formulas_quick(pdf_path)
 
-        # Step 2: Extract with non-enriched Docling (12s, not 20min enriched)
+        # Step 2: Extract with non-enriched Docling (probe — no on_page callback
+        # to avoid double-firing if MinerU takes over for formula PDFs)
         _progress(f"  Docling: extracting {pdf_path.name}…")
         try:
             fast_result = self._extract_with_docling(pdf_path, enriched=False)
         except Exception as exc:
             _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
             _log.debug("docling_auto_pass_failed", error=str(exc), path=str(pdf_path))
-            return self._extract_normalized(pdf_path)
+            return self._extract_normalized(pdf_path, on_page=on_page)
 
         # Also check the Docling markdown for LaTeX markers (catches formulas
         # that Docling renders as LaTeX even without enrichment)
@@ -188,12 +202,21 @@ class PDFExtractor:
         formula_count = max(formula_count, text_markers)
 
         if formula_count < 5:
+            # Docling wins — replay on_page from page_boundaries since the
+            # probe pass didn't fire the callback.
+            if on_page is not None:
+                for boundary in fast_result.metadata.get("page_boundaries", []):
+                    page_num = boundary["page_number"]
+                    start = boundary["start_char"]
+                    length = boundary["page_text_length"] - 1  # -1 for \n separator
+                    page_text = fast_result.text[start : start + length]
+                    on_page(page_num - 1, page_text, {"page_number": page_num, "text_length": length})
             return fast_result
 
         # Math paper detected — switch to MinerU for formula-aware extraction
         _progress(f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}")
         try:
-            return self._extract_with_mineru(pdf_path, formula_count=formula_count)
+            return self._extract_with_mineru(pdf_path, formula_count=formula_count, on_page=on_page)
         except Exception as exc:
             _progress(f"  MinerU failed ({type(exc).__name__}), using Docling result: {pdf_path.name}")
             _log.debug("mineru_extraction_failed", error=str(exc), path=str(pdf_path))
@@ -227,7 +250,11 @@ class PDFExtractor:
         return converter
 
     def _extract_with_docling(
-        self, pdf_path: Path, *, enriched: bool = True,
+        self,
+        pdf_path: Path,
+        *,
+        enriched: bool = True,
+        on_page: Callable[[int, str, dict], None] | None = None,
     ) -> ExtractionResult:
         """Extract per-page markdown via Docling."""
         result = self._get_converter(enriched=enriched).convert(str(pdf_path))
@@ -251,6 +278,8 @@ class PDFExtractor:
                         "page_text_length": len(page_md) + 1,
                     }
                 )
+                if on_page is not None:
+                    on_page(p - 1, page_md, {"page_number": p, "text_length": len(page_md)})
                 page_texts.append(page_md)
                 current_pos += len(page_md) + 1
 
@@ -323,7 +352,11 @@ class PDFExtractor:
     # Formula-dense PDFs OOM during MFR prediction at larger batch sizes.
 
     def _extract_with_mineru(
-        self, pdf_path: Path, *, formula_count: int = 0,
+        self,
+        pdf_path: Path,
+        *,
+        formula_count: int = 0,
+        on_page: Callable[[int, str, dict], None] | None = None,
     ) -> ExtractionResult:
         """Extract text via MinerU (math-aware, optional dependency).
 
@@ -334,6 +367,10 @@ class PDFExtractor:
 
         OOM retry: if a multi-page batch fails, retries at 1-page granularity.
         Single-page failures propagate immediately (no infinite retry).
+
+        *on_page* fires once per batch (default batch size is 1 page via
+        ``mineru_page_batch`` config).  The callback receives the batch start
+        page index, the batch markdown, and metadata.
         """
         if do_parse is None:
             raise ImportError(
@@ -395,10 +432,18 @@ class PDFExtractor:
                     md, content_list, pdf_info = self._mineru_run_isolated(
                         pdf_path, page, page + 1,
                     )
+                    if on_page is not None:
+                        on_page(page, md, {"page_number": page + 1, "text_length": len(md)})
                     md_parts.append(md)
                     all_content_list.extend(content_list)
                     all_pdf_info.extend(pdf_info)
                 continue
+            if on_page is not None:
+                # Note: for batch_size > 1, fires once per batch with the batch's
+                # combined markdown and start page index. Page-number metadata is
+                # only accurate when batch_size=1 (the default). The streaming
+                # pipeline relies on this default for correct page attribution.
+                on_page(start, md, {"page_number": start + 1, "text_length": len(md)})
             md_parts.append(md)
             all_content_list.extend(content_list)
             all_pdf_info.extend(pdf_info)
@@ -764,7 +809,12 @@ class PDFExtractor:
 
         return ""
 
-    def _extract_normalized(self, pdf_path: Path) -> ExtractionResult:
+    def _extract_normalized(
+        self,
+        pdf_path: Path,
+        *,
+        on_page: Callable[[int, str, dict], None] | None = None,
+    ) -> ExtractionResult:
         """Extract via raw PyMuPDF with whitespace normalization."""
         import pymupdf  # lazy
 
@@ -794,6 +844,8 @@ class PDFExtractor:
                             "page_text_length": len(page_text) + 1,
                         }
                     )
+                    if on_page is not None:
+                        on_page(page_num, page_text, {"page_number": page_num + 1, "text_length": len(page_text)})
                     text_parts.append(page_text)
                     current_pos += len(page_text) + 1
 

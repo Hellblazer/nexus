@@ -1891,3 +1891,133 @@ def test_prune_misclassified_paginates(tmp_path: Path) -> None:
 
     expected = {f"stale-{i}" for i in range(310)}
     assert expected == deleted_ids, f"Not all stale chunks deleted: {expected - deleted_ids}"
+
+
+# ── Lock file cleanup (nexus-luor) ────────────────────────────────────────────
+
+
+def test_lock_file_deleted_after_successful_index(tmp_path: Path, registry) -> None:
+    """Lock file must be unlinked (not just unlocked) after indexing completes."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+
+    def fake_lock_path(r: Path) -> Path:
+        return lock_dir / "test.lock"
+
+    with patch("nexus.indexer._repo_lock_path", side_effect=fake_lock_path):
+        with patch("nexus.indexer._run_index"):
+            index_repository(repo, registry)
+
+    # The lock file must have been deleted, not merely released
+    assert not (lock_dir / "test.lock").exists(), "Lock file was not deleted after successful indexing"
+
+
+def test_lock_file_deleted_after_failed_index(tmp_path: Path, registry) -> None:
+    """Lock file must be unlinked even when indexing raises an exception."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+
+    def fake_lock_path(r: Path) -> Path:
+        return lock_dir / "test.lock"
+
+    with patch("nexus.indexer._repo_lock_path", side_effect=fake_lock_path):
+        with patch("nexus.indexer._run_index", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                index_repository(repo, registry)
+
+    assert not (lock_dir / "test.lock").exists(), "Lock file was not deleted after failed indexing"
+
+
+def test_lock_file_deleted_after_credentials_error(tmp_path: Path, registry) -> None:
+    """Lock file must be unlinked when CredentialsMissingError is raised."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+
+    def fake_lock_path(r: Path) -> Path:
+        return lock_dir / "test.lock"
+
+    with patch("nexus.indexer._repo_lock_path", side_effect=fake_lock_path):
+        with patch("nexus.indexer._run_index", side_effect=CredentialsMissingError("no creds")):
+            with pytest.raises(CredentialsMissingError):
+                index_repository(repo, registry)
+
+    assert not (lock_dir / "test.lock").exists(), "Lock file was not deleted after CredentialsMissingError"
+
+
+def test_stale_lock_removed_before_acquire(tmp_path: Path, registry) -> None:
+    """If a lock file exists but its PID is dead, it is removed before acquiring the lock.
+
+    This verifies that stale lock detection does not leave a dangling file: the
+    pre-existing stale lock is deleted, a fresh lock is acquired, indexing runs,
+    and the lock is cleaned up on exit.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    lock_file = lock_dir / "test.lock"
+
+    # Write a lock file containing a PID that is guaranteed to be dead.
+    dead_pid = 999999999  # guaranteed non-running on any sane OS
+    lock_file.write_text(str(dead_pid))
+
+    def fake_lock_path(r: Path) -> Path:
+        return lock_file
+
+    with patch("nexus.indexer._repo_lock_path", side_effect=fake_lock_path):
+        with patch("nexus.indexer._run_index"):
+            index_repository(repo, registry)
+
+    # Indexing completed successfully and the lock was cleaned up
+    assert not lock_file.exists(), "Lock file still present after stale-lock cleanup + successful run"
+
+
+def test_stale_lock_detection_live_pid_not_removed(tmp_path: Path, registry) -> None:
+    """If a lock file contains the PID of a live process, it is NOT deleted during stale check.
+
+    The lock acquisition via flock will then block (or skip); we use on_locked='skip' here
+    to avoid blocking the test.  The test verifies we do NOT wrongly clobber a real lock.
+    """
+    import os
+    import fcntl as _fcntl
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    lock_file = lock_dir / "test.lock"
+
+    # Write our own PID — this process is definitely alive
+    lock_file.write_text(str(os.getpid()))
+
+    # Open a competing flock handle to simulate another process holding the lock.
+    competing_fd = open(lock_file, "r+")  # noqa: SIM115
+    _fcntl.flock(competing_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+
+    def fake_lock_path(r: Path) -> Path:
+        return lock_file
+
+    try:
+        with patch("nexus.indexer._repo_lock_path", side_effect=fake_lock_path):
+            result = index_repository(repo, registry, on_locked="skip")
+        # 'skip' returns {} immediately without indexing
+        assert result == {}
+    finally:
+        _fcntl.flock(competing_fd, _fcntl.LOCK_UN)
+        competing_fd.close()
+        # Lock file still here because we held it — now clean up manually
+        try:
+            lock_file.unlink()
+        except FileNotFoundError:
+            pass

@@ -188,7 +188,13 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         "(requires: uv pip install 'conexus[mineru]')."
     ),
 )
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None) -> None:
+@click.option(
+    "--streaming",
+    type=click.Choice(["auto", "always", "never"]),
+    default="auto",
+    help="Streaming pipeline mode: auto (default, all PDFs), always, never.",
+)
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, streaming: str) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time
 
@@ -252,6 +258,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 n = index_pdf(
                     pdf, corpus=corpus, collection_name=collection,
                     force=force, enrich=enrich, extractor=extractor,
+                    streaming=streaming,
                 )
                 elapsed = _time.monotonic() - t0
                 total_chunks += n
@@ -296,7 +303,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed, enrich=enrich, extractor=extractor)
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed, enrich=enrich, extractor=extractor, streaming=streaming)
         except ImportError as e:
             raise click.ClickException(str(e)) from e
 
@@ -345,7 +352,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         try:
             meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
-                             return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor)
+                             return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, streaming=streaming)
         except ImportError as e:
             raise click.ClickException(str(e)) from e
         chunk_bar.close()
@@ -362,7 +369,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(f"\n  {'  '.join(parts)}")
     else:
         try:
-            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor)
+            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, streaming=streaming)
         except ImportError as e:
             raise click.ClickException(str(e)) from e
     result_label = "Force re-indexed" if force else "Indexed"

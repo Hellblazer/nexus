@@ -14,6 +14,7 @@ from nexus.commands.doctor import (
     _check_orphan_t1,
     _check_t2_integrity,
     _check_chroma_pagination,
+    _check_orphan_checkpoints,
 )
 from nexus.db.t2 import T2Database
 
@@ -309,3 +310,70 @@ class TestCheckChromaPagination:
         _check_chroma_pagination(lines, ephemeral_client, "test_db")
         # Only one line added (one audit, not three).
         assert len(lines) == 1
+
+
+# ── Orphan checkpoint detection ───────────────────────────────────────────────
+
+class TestCheckOrphanCheckpoints:
+    """Tests for _check_orphan_checkpoints in doctor.py."""
+
+    @pytest.fixture()
+    def ckpt_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        d = tmp_path / "checkpoints"
+        d.mkdir()
+        monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", d)
+        return d
+
+    def _write_ckpt(self, ckpt_dir: Path, pdf: str, content_hash: str, collection: str = "knowledge__art") -> None:
+        from nexus.checkpoint import CheckpointData, write_checkpoint
+        write_checkpoint(CheckpointData(
+            pdf=pdf,
+            collection=collection,
+            content_hash=content_hash,
+            chunks_upserted=10,
+            total_chunks=100,
+            embedding_model="voyage-context-3",
+        ))
+
+    def test_no_checkpoint_dir_reports_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", tmp_path / "nonexistent")
+        lines: list[str] = []
+        ok = _check_orphan_checkpoints(lines)
+        assert ok is True
+        assert "PDF checkpoints" in lines[0]
+        assert "\u2713" in lines[0]
+
+    def test_empty_checkpoint_dir_reports_ok(self, ckpt_dir: Path) -> None:
+        lines: list[str] = []
+        ok = _check_orphan_checkpoints(lines)
+        assert ok is True
+        assert "\u2713" in lines[0]
+
+    def test_live_pdf_reports_ok(self, ckpt_dir: Path, tmp_path: Path) -> None:
+        live_pdf = tmp_path / "present.pdf"
+        live_pdf.write_bytes(b"%PDF")
+        self._write_ckpt(ckpt_dir, str(live_pdf), "live123")
+
+        lines: list[str] = []
+        ok = _check_orphan_checkpoints(lines)
+        assert ok is True
+        assert "\u2713" in lines[0]
+
+    def test_dead_pdf_reports_failure(self, ckpt_dir: Path, tmp_path: Path) -> None:
+        missing_pdf = str(tmp_path / "gone.pdf")  # does not exist
+        self._write_ckpt(ckpt_dir, missing_pdf, "dead123")
+
+        lines: list[str] = []
+        ok = _check_orphan_checkpoints(lines)
+        assert ok is False
+        assert "\u2717" in lines[0]
+
+    def test_mixed_reports_failure(self, ckpt_dir: Path, tmp_path: Path) -> None:
+        live_pdf = tmp_path / "here.pdf"
+        live_pdf.write_bytes(b"%PDF")
+        self._write_ckpt(ckpt_dir, str(live_pdf), "live_mixed")
+        self._write_ckpt(ckpt_dir, str(tmp_path / "nope.pdf"), "dead_mixed")
+
+        lines: list[str] = []
+        ok = _check_orphan_checkpoints(lines)
+        assert ok is False
