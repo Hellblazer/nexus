@@ -48,11 +48,12 @@ def _make_mock_docling(pages: list[str], title: str = ""):
 # ── extract() primary path ────────────────────────────────────────────────────
 
 def test_extract_uses_docling_by_default(extractor, dummy_pdf):
-    """Primary path: _extract_with_docling is called for a normal PDF."""
+    """Primary path: _extract_with_docling is called for a normal PDF (probe, no on_page)."""
     expected = _make_result("docling")
     with patch.object(extractor, "_extract_with_docling", return_value=expected) as mock_docling:
         result = extractor.extract(dummy_pdf)
-    mock_docling.assert_called_once_with(dummy_pdf, enriched=False, on_page=None)
+    # Auto mode: Docling probe runs without on_page (avoids double-fire if MinerU takes over)
+    mock_docling.assert_called_once_with(dummy_pdf, enriched=False)
     assert result.metadata["extraction_method"] == "docling"
 
 
@@ -900,15 +901,22 @@ class TestOnPageCallbackExtract:
 
         mock_n.assert_called_once_with(dummy_pdf, on_page=cb)
 
-    def test_extract_auto_passes_on_page_to_docling_fast_pass(self, extractor, dummy_pdf):
-        """Auto mode propagates on_page to the Docling fast (non-enriched) pass."""
-        expected = _make_result("docling")
-        cb = lambda *a: None
+    def test_extract_auto_replays_on_page_for_docling_win(self, extractor, dummy_pdf):
+        """Auto mode: Docling probe runs without on_page; pages replayed if Docling wins."""
+        pages = ["# Page One", "## Page Two"]
+        mock_converter, _ = _make_mock_docling(pages)
+        extractor._converter = mock_converter
+        received: list[tuple] = []
 
         with (
             patch("nexus.pdf_extractor._has_formulas_quick", return_value=0),
-            patch.object(extractor, "_extract_with_docling", return_value=expected) as mock_d,
+            patch.object(extractor, "_extract_title", return_value=""),
         ):
-            extractor.extract(dummy_pdf, on_page=cb)
+            extractor.extract(
+                dummy_pdf, on_page=lambda idx, text, meta: received.append((idx, text)),
+            )
 
-        mock_d.assert_called_once_with(dummy_pdf, enriched=False, on_page=cb)
+        # on_page replayed from result — both pages received
+        assert len(received) == 2
+        assert received[0][0] == 0
+        assert received[1][0] == 1

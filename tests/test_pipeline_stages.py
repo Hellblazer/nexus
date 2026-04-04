@@ -670,6 +670,46 @@ class TestPipelineIndexPdf:
         assert result == 0
         mock_t3.upsert_chunks_with_embeddings.assert_not_called()
 
+    def test_embed_fn_none_resolves_credentials(self, db: PipelineDB) -> None:
+        """When embed_fn=None, orchestrator resolves from Voyage credentials."""
+        mock_t3 = self._make_t3()
+        fake_result = _make_extraction_result(1)
+        fake_chunks = [TextChunk(text="c0", chunk_index=0, metadata={"page_number": 1, "chunk_type": "text"})]
+
+        with (
+            patch("nexus.pipeline_stages.PDFExtractor") as MockExt,
+            patch("nexus.pipeline_stages.PDFChunker") as MockChunker,
+            patch("nexus.config.get_credential", return_value="fake-key"),
+            patch("nexus.config.load_config", return_value={}),
+            patch("nexus.doc_indexer._embed_with_fallback") as mock_embed,
+        ):
+            mock_embed.return_value = ([[0.1] * 4], "voyage-context-3")
+            def fake_extract(p, *, extractor="auto", on_page=None):
+                if on_page:
+                    on_page(0, "Page 0.", {"page_number": 1, "text_length": 7})
+                return fake_result
+            MockExt.return_value.extract.side_effect = fake_extract
+            MockChunker.return_value.chunk.return_value = fake_chunks
+
+            total = pipeline_index_pdf(
+                Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db,
+            )
+
+        assert total == 1
+        mock_embed.assert_called()
+
+    def test_embed_fn_none_no_credentials_fails_fast(self, db: PipelineDB) -> None:
+        """When embed_fn=None and no credentials, orchestrator raises immediately."""
+        mock_t3 = self._make_t3()
+
+        with (
+            patch("nexus.config.get_credential", return_value=None),
+        ):
+            with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
+                pipeline_index_pdf(
+                    Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db,
+                )
+
 
 # ── Buffer edge case tests ───────────────────────────────────────────────────
 

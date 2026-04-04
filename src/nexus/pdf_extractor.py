@@ -186,10 +186,11 @@ class PDFExtractor:
         # Step 1: Quick formula pre-screen via raw PDF text (~0.1s)
         formula_count = _has_formulas_quick(pdf_path)
 
-        # Step 2: Extract with non-enriched Docling (12s, not 20min enriched)
+        # Step 2: Extract with non-enriched Docling (probe — no on_page callback
+        # to avoid double-firing if MinerU takes over for formula PDFs)
         _progress(f"  Docling: extracting {pdf_path.name}…")
         try:
-            fast_result = self._extract_with_docling(pdf_path, enriched=False, on_page=on_page)
+            fast_result = self._extract_with_docling(pdf_path, enriched=False)
         except Exception as exc:
             _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
             _log.debug("docling_auto_pass_failed", error=str(exc), path=str(pdf_path))
@@ -201,6 +202,15 @@ class PDFExtractor:
         formula_count = max(formula_count, text_markers)
 
         if formula_count < 5:
+            # Docling wins — replay on_page from page_boundaries since the
+            # probe pass didn't fire the callback.
+            if on_page is not None:
+                for boundary in fast_result.metadata.get("page_boundaries", []):
+                    page_num = boundary["page_number"]
+                    start = boundary["start_char"]
+                    length = boundary["page_text_length"] - 1  # -1 for \n separator
+                    page_text = fast_result.text[start : start + length]
+                    on_page(page_num - 1, page_text, {"page_number": page_num, "text_length": length})
             return fast_result
 
         # Math paper detected — switch to MinerU for formula-aware extraction

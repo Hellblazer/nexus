@@ -410,6 +410,8 @@ def pipeline_index_pdf(
             from nexus.doc_indexer import _embed_with_fallback
             timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
             embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
+        else:
+            raise RuntimeError("voyage_api_key not configured — cannot embed for streaming pipeline")
 
     result = db.create_pipeline(content_hash, str(pdf_path), collection)
     if result == "skip":
