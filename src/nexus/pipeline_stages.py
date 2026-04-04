@@ -35,7 +35,7 @@ from nexus.retry import _chroma_with_retry
 
 _log = structlog.get_logger(__name__)
 
-_UPLOAD_BATCH_SIZE = 128
+_UPLOAD_BATCH_SIZE = 128  # Conservative vs ChromaDB's 300 limit — matches _INCREMENTAL_BATCH_SIZE in doc_indexer
 _EMBED_BATCH_SIZE = 32  # Smaller than batch path (128) — favours heartbeat freshness in streaming
 _POLL_INTERVAL = 0.1
 

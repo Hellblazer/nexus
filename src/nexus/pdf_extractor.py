@@ -429,6 +429,10 @@ class PDFExtractor:
                     all_pdf_info.extend(pdf_info)
                 continue
             if on_page is not None:
+                # Note: for batch_size > 1, fires once per batch with the batch's
+                # combined markdown and start page index. Page-number metadata is
+                # only accurate when batch_size=1 (the default). The streaming
+                # pipeline relies on this default for correct page attribution.
                 on_page(start, md, {"page_number": start + 1, "text_length": len(md)})
             md_parts.append(md)
             all_content_list.extend(content_list)

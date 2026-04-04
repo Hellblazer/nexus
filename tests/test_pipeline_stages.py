@@ -7,12 +7,13 @@ import struct
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
 from nexus.pdf_chunker import TextChunk
 from nexus.pdf_extractor import ExtractionResult
+from nexus.db.t3 import T3Database
 from nexus.pipeline_buffer import PipelineDB
 from nexus.pipeline_stages import (
     PipelineCancelled,
@@ -420,11 +421,22 @@ class TestUploaderLoop:
 
 
 class TestPipelineIndexPdf:
-    def test_full_pipeline(self, db: PipelineDB) -> None:
-        mock_t3 = MagicMock()
-        mock_t3.get_or_create_collection.return_value = MagicMock(
-            get=MagicMock(return_value={"ids": [], "metadatas": []})
+    @staticmethod
+    def _make_t3(col_get_result: dict | None = None) -> MagicMock:
+        """Create a T3Database mock that enforces the real API surface.
+
+        Uses create_autospec so that calling a nonexistent method (e.g.
+        t3.upsert instead of t3.upsert_chunks_with_embeddings) raises
+        AttributeError — catching the class of bug from round 2.
+        """
+        mock = create_autospec(T3Database, instance=True)
+        mock.get_or_create_collection.return_value = MagicMock(
+            get=MagicMock(return_value=col_get_result or {"ids": [], "metadatas": []})
         )
+        return mock
+
+    def test_full_pipeline(self, db: PipelineDB) -> None:
+        mock_t3 = self._make_t3()
         fake_result = _make_extraction_result(3)
         fake_chunks = [
             TextChunk(text="chunk 0", chunk_index=0, metadata={"page_number": 1, "chunk_type": "text"}),
@@ -457,7 +469,7 @@ class TestPipelineIndexPdf:
         assert db.get_pipeline_state("abc123") is None
 
     def test_extractor_failure(self, db: PipelineDB) -> None:
-        mock_t3 = MagicMock()
+        mock_t3 = self._make_t3()
 
         with (
             patch("nexus.pipeline_stages.PDFExtractor") as MockExt,
@@ -476,10 +488,7 @@ class TestPipelineIndexPdf:
         assert "boom" in state["error"]
 
     def test_resume_from_partial(self, db: PipelineDB) -> None:
-        mock_t3 = MagicMock()
-        mock_t3.get_or_create_collection.return_value = MagicMock(
-            get=MagicMock(return_value={"ids": [], "metadatas": []})
-        )
+        mock_t3 = self._make_t3()
 
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         db.write_page("h1", 0, "Page 0 content.", metadata={"page_number": 1, "text_length": 15})
@@ -528,7 +537,7 @@ class TestPipelineIndexPdf:
                 {"page_number": 2, "chunk_type": "text", "content_hash": "abc123"},
             ],
         }
-        mock_t3 = MagicMock()
+        mock_t3 = create_autospec(T3Database, instance=True)
         mock_t3.get_or_create_collection.return_value = mock_col
 
         fake_result = _make_extraction_result(3)
@@ -573,7 +582,7 @@ class TestPipelineIndexPdf:
             "ids": ["abc_0"],
             "metadatas": [{"source_title": "", "content_hash": "abc123", "page_number": 1}],
         }
-        mock_t3 = MagicMock()
+        mock_t3 = create_autospec(T3Database, instance=True)
         mock_t3.get_or_create_collection.return_value = mock_col
 
         fake_result = _make_extraction_result(1)
@@ -621,7 +630,7 @@ class TestPipelineIndexPdf:
                 {"content_hash": "previous_hash", "source_path": "/a.pdf"},
             ],
         }
-        mock_t3 = MagicMock()
+        mock_t3 = create_autospec(T3Database, instance=True)
         mock_t3.get_or_create_collection.return_value = mock_col
 
         fake_result = _make_extraction_result(1)
@@ -651,7 +660,7 @@ class TestPipelineIndexPdf:
 
     def test_skip_already_running(self, db: PipelineDB) -> None:
         """Orchestrator returns 0 when pipeline is already running."""
-        mock_t3 = MagicMock()
+        mock_t3 = self._make_t3()
         db.create_pipeline("h1", "/a.pdf", "docs__test")  # creates as 'running'
 
         result = pipeline_index_pdf(

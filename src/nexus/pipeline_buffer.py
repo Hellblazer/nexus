@@ -143,18 +143,18 @@ class PipelineDB:
 
         if status == "failed":
             conn.execute(
-                "UPDATE pdf_pipeline SET status = 'running', updated_at = ? "
+                "UPDATE pdf_pipeline SET status = 'resuming', updated_at = ? "
                 "WHERE content_hash = ?",
                 (now, content_hash),
             )
             conn.commit()
             return "resuming"
 
-        # status == 'running' (or 'resuming') — check staleness
+        # status == 'running' or 'resuming' — check staleness
         updated_at = datetime.fromisoformat(row["updated_at"])
         if datetime.now(UTC) - updated_at > STALE_THRESHOLD:
             conn.execute(
-                "UPDATE pdf_pipeline SET status = 'running', updated_at = ? "
+                "UPDATE pdf_pipeline SET status = 'resuming', updated_at = ? "
                 "WHERE content_hash = ?",
                 (now, content_hash),
             )
@@ -355,10 +355,10 @@ class PipelineDB:
                     self.delete_pipeline_data(content_hash)
                 continue
 
-            # Case 2: Stale running pipeline (crashed).
+            # Case 2: Stale running/resuming pipeline (crashed).
             # Note: status='failed' with existing PDF is intentionally NOT orphaned —
-            # failed pipelines are reset to 'running' on the next create_pipeline() call.
-            if status == "running":
+            # failed pipelines are reset to 'resuming' on the next create_pipeline() call.
+            if status in ("running", "resuming"):
                 updated_at = datetime.fromisoformat(row["updated_at"])
                 if now - updated_at > STALE_THRESHOLD:
                     orphans.append(content_hash)
