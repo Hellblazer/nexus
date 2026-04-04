@@ -1063,7 +1063,7 @@ def test_batch_index_pdfs_marks_failed_on_error(tmp_path, monkeypatch):
 
     mock_t3 = MagicMock()
 
-    def _side_effect(path, corpus, t3=None, *, force=False, extractor="auto"):
+    def _side_effect(path, corpus, t3=None, *, force=False, extractor="auto", **kwargs):
         if "bad" in str(path):
             raise RuntimeError("extraction failed")
         return 2

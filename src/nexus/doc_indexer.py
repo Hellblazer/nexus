@@ -826,7 +826,7 @@ def batch_index_pdfs(
         count: int = 0
         t0 = time.monotonic()
         try:
-            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor)
+            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, streaming="auto")
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:

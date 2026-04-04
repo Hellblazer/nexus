@@ -156,7 +156,7 @@ def reindex_cmd(name: str, force: bool) -> None:
                 continue
             try:
                 if p.suffix.lower() == ".pdf":
-                    index_pdf(p, corpus=corpus, collection_name=name, force=True)
+                    index_pdf(p, corpus=corpus, collection_name=name, force=True, streaming="auto")
                 else:
                     index_markdown(p, corpus=corpus, collection_name=name, force=True)
                 indexed += 1
