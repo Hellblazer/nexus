@@ -334,6 +334,8 @@ class PipelineDB:
         row) for each orphan.
         """
         conn = self._conn()
+        # Full table scan is acceptable — pipeline entries are deleted after
+        # successful completion, so this table stays small in practice.
         rows = conn.execute(
             "SELECT content_hash, pdf_path, status, updated_at FROM pdf_pipeline"
         ).fetchall()

@@ -278,6 +278,7 @@ class TestChunkerLoop:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         extraction_done = threading.Event()
         chunking_done = threading.Event()
+        chunker_polled = threading.Event()  # signals chunker has read pages at least once
 
         for i in range(5):
             db.write_page("h1", i, f"Page {i} " + "x" * 2000,
@@ -287,12 +288,18 @@ class TestChunkerLoop:
         def fake_embed(texts, model):
             return [[0.1] * 4 for _ in texts], model
 
+        call_count = 0
+
         def make_chunks(text, meta):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                chunker_polled.set()  # first chunk call done — safe to add more pages
             count = max(1, len(text) // 1500)
             return [TextChunk(text=f"chunk-{i}", chunk_index=i, metadata={}) for i in range(count)]
 
         def signal_done():
-            time.sleep(0.8)
+            chunker_polled.wait(timeout=5)  # wait for chunker to process first batch
             for i in range(5, 7):
                 db.write_page("h1", i, f"Page {i} " + "x" * 2000,
                               metadata={"page_number": i + 1, "text_length": 2006})
@@ -317,6 +324,12 @@ class TestChunkerLoop:
 
 class TestUploaderLoop:
     def _populate_chunks(self, db: PipelineDB, hash_: str, count: int) -> None:
+        """Pre-populate buffer for uploader tests.
+
+        Sets chunks_created=chunks_embedded=count to simulate the state after
+        chunker_loop completes. In the real pipeline these are set independently
+        (chunks_embedded lags during incremental chunking).
+        """
         db.create_pipeline(hash_, "/a.pdf", "docs__test")
         db.update_progress(hash_, total_pages=1, pages_extracted=1, chunks_created=count, chunks_embedded=count)
         for i in range(count):
@@ -387,6 +400,20 @@ class TestUploaderLoop:
         state = db.get_pipeline_state("h1")
         assert state["chunks_uploaded"] == 2
         assert state["status"] == "completed"
+
+    def test_done_via_chunking_done_event(self, db: PipelineDB) -> None:
+        """Uploader completes via chunking_done event (orchestrated path)."""
+        self._populate_chunks(db, "h1", 3)
+        mock_t3 = MagicMock()
+        chunking_done = threading.Event()
+        chunking_done.set()
+
+        uploader_loop("h1", db, mock_t3, "docs__test", threading.Event(), chunking_done)
+
+        state = db.get_pipeline_state("h1")
+        assert state["chunks_uploaded"] == 3
+        assert state["status"] == "completed"
+        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
 
 
 # ── pipeline_index_pdf orchestrator ──────────────────────────────────────────

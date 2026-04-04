@@ -220,6 +220,9 @@ def chunker_loop(
     chunker = PDFChunker(chunk_chars=chunk_chars)
     # Resume: count all embedded chunks (both uploaded and not-yet-uploaded)
     # to avoid re-chunking/re-embedding work already done.
+    # Note: if embed_fn failed mid-batch, some chunks may have NULL embeddings
+    # at indices < written_up_to. These are re-encountered but INSERT OR IGNORE
+    # skips them; they'll be re-embedded on the next run that processes those indices.
     written_up_to = db.count_embedded_chunks(content_hash)
     last_page_count = 0
     total_embedded = written_up_to
@@ -229,10 +232,8 @@ def chunker_loop(
         if chunking_done is not None:
             chunking_done.set()
 
-    common_kwargs = dict(
-        pdf_path=pdf_path, corpus=corpus, target_model=target_model,
-        now_iso=now_iso,
-    )
+    # Track current embedding model — may differ from target if embed_fn falls back.
+    current_model = target_model
 
     while not cancel.is_set():
         is_final = False
@@ -266,17 +267,20 @@ def chunker_loop(
         chunk_metadata = {"page_boundaries": boundaries, "table_regions": []}
         chunks = chunker.chunk(text, chunk_metadata)
 
+        batch_kwargs = dict(
+            pdf_path=pdf_path, corpus=corpus, target_model=current_model,
+            now_iso=now_iso,
+        )
+
         if is_final:
             new_chunks = chunks[written_up_to:]
             count, actual_model = _embed_and_write_batch(
                 new_chunks, content_hash, db, embed_fn, cancel,
-                total_embedded, chunk_count=len(chunks), **common_kwargs,
+                total_embedded, chunk_count=len(chunks), **batch_kwargs,
             )
             total_embedded += count
             written_up_to += count
-            # Update target_model for metadata if embed_fn returned a different model.
-            if actual_model != target_model:
-                common_kwargs["target_model"] = actual_model
+            current_model = actual_model
             db.update_progress(content_hash, chunks_created=len(chunks), chunks_embedded=total_embedded)
             _signal_done()
             return
@@ -287,10 +291,9 @@ def chunker_loop(
         if new_chunks:
             count, actual_model = _embed_and_write_batch(
                 new_chunks, content_hash, db, embed_fn, cancel,
-                total_embedded, chunk_count=0, **common_kwargs,  # provisional
+                total_embedded, chunk_count=0, **batch_kwargs,  # provisional
             )
-            if actual_model != target_model:
-                common_kwargs["target_model"] = actual_model
+            current_model = actual_model
             total_embedded += count
             written_up_to += count
             db.update_progress(content_hash, chunks_created=written_up_to)
@@ -451,8 +454,11 @@ def pipeline_index_pdf(
 
     extraction_result = extract_future.result()
 
+    # Resolve collection once for all post-passes (avoids repeated API calls).
+    col = t3.get_or_create_collection(collection)
+
     # 1. Metadata enrichment from ExtractionResult.
-    _enrich_metadata_from_extraction(content_hash, extraction_result, pdf_path, t3, collection)
+    _enrich_metadata_from_extraction(content_hash, extraction_result, pdf_path, t3, col, collection)
 
     # 2. table_regions post-pass.
     table_regions = extraction_result.metadata.get("table_regions", [])
@@ -465,10 +471,10 @@ def pipeline_index_pdf(
                 return True
             return False
 
-        _update_chunk_metadata(t3, collection, content_hash, _tag_table_page)
+        _update_chunk_metadata(t3, col, collection, content_hash, _tag_table_page)
 
     # 3. Stale chunk pruning.
-    _prune_stale_chunks(t3, collection, str(pdf_path), content_hash)
+    _prune_stale_chunks(col, str(pdf_path), content_hash)
 
     state = db.get_pipeline_state(content_hash)
     total_chunks = state["chunks_uploaded"] if state else 0
@@ -482,6 +488,7 @@ def _enrich_metadata_from_extraction(
     result: ExtractionResult,
     pdf_path: Path,
     t3: Any,
+    col: Any,
     collection: str,
 ) -> None:
     """Post-pass: update chunk metadata with fields from ExtractionResult.
@@ -519,7 +526,6 @@ def _enrich_metadata_from_extraction(
 
     # Also correct chunk_count to the final total.
     try:
-        col = t3.get_or_create_collection(collection)
         all_ids: list[str] = []
         all_metas: list[dict] = []
         offset = 0
@@ -550,6 +556,7 @@ def _enrich_metadata_from_extraction(
 
 def _update_chunk_metadata(
     t3: Any,
+    col: Any,
     collection: str,
     content_hash: str,
     update_fn: Callable[[dict], bool],
@@ -559,7 +566,6 @@ def _update_chunk_metadata(
     Paginates the T3 query to handle documents with 300+ chunks.
     """
     try:
-        col = t3.get_or_create_collection(collection)
         all_ids: list[str] = []
         all_metas: list[dict] = []
         offset = 0
@@ -595,11 +601,10 @@ def _update_chunk_metadata(
 
 
 def _prune_stale_chunks(
-    t3: Any, collection: str, pdf_path: str, content_hash: str,
+    col: Any, pdf_path: str, content_hash: str,
 ) -> None:
     """Delete chunks from T3 that belong to a previous version of the same PDF."""
     try:
-        col = t3.get_or_create_collection(collection)
         stale_ids: list[str] = []
         offset = 0
 
