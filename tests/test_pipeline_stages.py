@@ -493,12 +493,59 @@ class TestPipelineIndexPdf:
                 db=db, embed_fn=lambda t, m: ([[0.1] * 4 for _ in t], m),
             )
 
-        # update_chunks is the correct T3Database API
-        mock_t3.update_chunks.assert_called_once()
-        args = mock_t3.update_chunks.call_args
-        assert args[0][0] == "docs__test"
-        assert args[0][1] == ["abc_1"]  # only page 2 chunk
-        assert args[0][2][0]["chunk_type"] == "table_page"
+        # update_chunks called for both enrichment and table_regions post-pass
+        assert mock_t3.update_chunks.call_count >= 1
+        # Find the table_regions call (updates chunk_type to table_page)
+        for call in mock_t3.update_chunks.call_args_list:
+            args = call[0]
+            if args[0] == "docs__test" and any(m.get("chunk_type") == "table_page" for m in args[2]):
+                assert "abc_1" in args[1]
+                break
+        else:
+            pytest.fail("table_regions post-pass did not update any chunks to table_page")
+
+    def test_metadata_enrichment_postpass(self, db: PipelineDB) -> None:
+        """Post-pass enriches chunks with extraction metadata (title, author, etc.)."""
+        mock_col = MagicMock()
+        mock_col.get.return_value = {
+            "ids": ["abc_0"],
+            "metadatas": [{"source_title": "", "content_hash": "abc123", "page_number": 1}],
+        }
+        mock_t3 = MagicMock()
+        mock_t3.get_or_create_collection.return_value = mock_col
+
+        fake_result = _make_extraction_result(1)
+        fake_result.metadata["docling_title"] = "My Paper Title"
+        fake_result.metadata["pdf_author"] = "Jane Doe"
+        fake_chunks = [TextChunk(text="c0", chunk_index=0, metadata={"page_number": 1, "chunk_type": "text"})]
+
+        with (
+            patch("nexus.pipeline_stages.PDFExtractor") as MockExt,
+            patch("nexus.pipeline_stages.PDFChunker") as MockChunker,
+        ):
+            def fake_extract(p, *, extractor="auto", on_page=None):
+                if on_page:
+                    on_page(0, "Page 0.", {"page_number": 1, "text_length": 7})
+                return fake_result
+            MockExt.return_value.extract.side_effect = fake_extract
+            MockChunker.return_value.chunk.return_value = fake_chunks
+
+            pipeline_index_pdf(
+                Path("/paper.pdf"), "abc123", "docs__test", mock_t3,
+                db=db, embed_fn=lambda t, m: ([[0.1] * 4 for _ in t], m),
+            )
+
+        # Find the enrichment update_chunks call
+        for call in mock_t3.update_chunks.call_args_list:
+            args = call[0]
+            if args[0] == "docs__test":
+                meta = args[2][0]
+                assert meta["source_title"] == "My Paper Title"
+                assert meta["source_author"] == "Jane Doe"
+                assert meta["extraction_method"] == "docling"
+                break
+        else:
+            pytest.fail("metadata enrichment post-pass not called")
 
 
 # ── Metadata contract test ───────────────────────────────────────────────────
@@ -520,7 +567,7 @@ class TestMetadataContract:
     }
 
     def test_streaming_metadata_has_all_batch_fields(self, db: PipelineDB) -> None:
-        """Every field the batch path writes must also be present in streaming chunks."""
+        """Every field the batch path writes is present in streaming chunks."""
         db.create_pipeline("h1", "/doc.pdf", "docs__test")
         db.write_page("h1", 0, "Some text here.", metadata={"page_number": 1, "text_length": 15})
         db.update_progress("h1", total_pages=1, pages_extracted=1)

@@ -7,6 +7,12 @@ Three concurrent stages connected by PipelineDB:
 1. **extractor_loop** — extracts pages → ``pdf_pages`` buffer
 2. **chunker_loop** — polls pages, chunks stable prefix, embeds → ``pdf_chunks``
 3. **uploader_loop** — reads embedded chunks, upserts to T3 ChromaDB
+
+After all three stages complete, the orchestrator runs post-passes to:
+- Enrich chunk metadata from the ExtractionResult (title, author, etc.)
+- Tag table-page chunks (table_regions post-pass)
+- Correct chunk_count to the final total
+- Prune stale chunks from a previous version
 """
 from __future__ import annotations
 
@@ -51,11 +57,7 @@ def extractor_loop(
     extractor: str = "auto",
     extraction_done: threading.Event | None = None,
 ) -> ExtractionResult:
-    """Extract pages to PipelineDB buffer via the on_page streaming callback.
-
-    Raises ``PipelineCancelled`` inside on_page to abort extraction early
-    when cancel is set (propagates through MinerU batch loop).
-    """
+    """Extract pages to PipelineDB buffer via the on_page streaming callback."""
     state = db.get_pipeline_state(content_hash)
     pages_extracted_at_start = state["pages_extracted"] if state else 0
 
@@ -85,7 +87,6 @@ def extractor_loop(
 
 
 def _rebuild_boundaries(pages: list[dict]) -> list[dict]:
-    """Reconstruct page_boundaries from buffered page rows."""
     boundaries: list[dict] = []
     pos = 0
     for row in pages:
@@ -105,39 +106,40 @@ def _build_chunk_metadata(
     content_hash: str,
     pdf_path: str,
     corpus: str,
-    target_model: str,
-    extraction_metadata: dict,
+    embedding_model: str,
     chunk_count: int,
     now_iso: str,
 ) -> dict:
-    """Build the full metadata dict for a chunk, matching the batch path schema.
+    """Build chunk metadata with fields known at chunk time.
 
-    See ``doc_indexer._pdf_chunks`` (lines 498-527) for the canonical schema.
+    Extraction-dependent fields (source_title, source_author, extraction_method,
+    format, page_count, is_image_pdf, has_formulas) are set to defaults here
+    and corrected by the metadata post-pass after extraction completes.
     """
     return {
         "source_path": pdf_path,
-        "source_title": extraction_metadata.get("source_title", ""),
-        "source_author": extraction_metadata.get("source_author", ""),
-        "source_date": extraction_metadata.get("source_date", ""),
+        "source_title": "",       # post-pass: from ExtractionResult
+        "source_author": "",      # post-pass: from ExtractionResult
+        "source_date": "",        # post-pass: from ExtractionResult
         "corpus": corpus,
         "store_type": "pdf",
-        "page_count": extraction_metadata.get("page_count", 0),
+        "page_count": 0,          # post-pass: from ExtractionResult
         "page_number": chunk.metadata.get("page_number", 0),
         "section_title": "",
-        "format": extraction_metadata.get("format", ""),
-        "extraction_method": extraction_metadata.get("extraction_method", ""),
+        "format": "",             # post-pass: from ExtractionResult
+        "extraction_method": "",  # post-pass: from ExtractionResult
         "chunk_type": chunk.metadata.get("chunk_type", "text"),
         "chunk_index": chunk.chunk_index,
-        "chunk_count": chunk_count,
+        "chunk_count": chunk_count,  # provisional; corrected in post-pass
         "chunk_start_char": chunk.metadata.get("chunk_start_char", 0),
         "chunk_end_char": chunk.metadata.get("chunk_end_char", 0),
-        "embedding_model": target_model,
+        "embedding_model": embedding_model,
         "indexed_at": now_iso,
         "content_hash": content_hash,
-        "pdf_subject": extraction_metadata.get("pdf_subject", ""),
-        "pdf_keywords": extraction_metadata.get("pdf_keywords", ""),
-        "is_image_pdf": extraction_metadata.get("is_image_pdf", False),
-        "has_formulas": extraction_metadata.get("has_formulas", False),
+        "pdf_subject": "",        # post-pass
+        "pdf_keywords": "",       # post-pass
+        "is_image_pdf": False,    # post-pass
+        "has_formulas": False,    # post-pass
         "bib_year": 0,
         "bib_venue": "",
         "bib_authors": "",
@@ -157,52 +159,47 @@ def _embed_and_write_batch(
     pdf_path: str,
     corpus: str,
     target_model: str,
-    extraction_metadata: dict,
     chunk_count: int,
     now_iso: str,
-) -> int:
-    """Embed a batch of chunks in sub-batches for heartbeat, then write to buffer.
-
-    Only writes chunks that were fully embedded. Returns count written.
-    """
+) -> tuple[int, str]:
+    """Embed and write a batch of chunks. Returns (count_written, actual_model)."""
     if not chunks_to_embed:
-        return 0
+        return 0, target_model
 
     chunk_texts = [c.text for c in chunks_to_embed]
     embeddings: list[list[float]] = []
+    actual_model = target_model
 
     if embed_fn is not None:
         for batch_start in range(0, len(chunk_texts), _EMBED_BATCH_SIZE):
             if cancel.is_set():
                 break
             batch = chunk_texts[batch_start : batch_start + _EMBED_BATCH_SIZE]
-            batch_embs, _ = embed_fn(batch, target_model)
+            batch_embs, batch_model = embed_fn(batch, target_model)
             embeddings.extend(batch_embs)
+            actual_model = batch_model
             db.update_progress(content_hash, chunks_embedded=total_embedded_so_far + len(embeddings))
 
-    # Only write chunks that have embeddings (or all if embed_fn is None).
     write_count = len(embeddings) if embed_fn is not None else len(chunks_to_embed)
     for i in range(write_count):
         chunk = chunks_to_embed[i]
         emb_bytes = None
         if i < len(embeddings):
             emb_bytes = struct.pack(f"{len(embeddings[i])}f", *embeddings[i])
-        # Chunk ID must match batch path: {hash[:16]}_{chunk_index}
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta = _build_chunk_metadata(
             chunk,
             content_hash=content_hash,
             pdf_path=pdf_path,
             corpus=corpus,
-            target_model=target_model,
-            extraction_metadata=extraction_metadata,
+            embedding_model=actual_model,
             chunk_count=chunk_count,
             now_iso=now_iso,
         )
         db.write_chunk(content_hash, chunk.chunk_index, chunk.text, chunk_id,
                         metadata=meta, embedding=emb_bytes)
 
-    return write_count
+    return write_count, actual_model
 
 
 def chunker_loop(
@@ -219,22 +216,23 @@ def chunker_loop(
     target_model: str = "voyage-context-3",
     doc_metadata: dict | None = None,
 ) -> None:
-    """Incrementally chunk pages as they arrive, overlapping with extraction.
-
-    Polls for new pages. When enough text has accumulated, chunks the stable
-    prefix (all but the last chunk, whose boundary may shift). When extraction
-    completes, flushes remaining chunks. Embeds in sub-batches for heartbeat.
-    """
+    """Incrementally chunk pages as they arrive, overlapping with extraction."""
     chunker = PDFChunker(chunk_chars=chunk_chars)
-    written_up_to = 0
+    # Resume: skip chunks already in the buffer from a previous run.
+    existing_chunks = db.read_ready_chunks(content_hash)
+    written_up_to = len(existing_chunks)
     last_page_count = 0
     total_embedded = 0
     now_iso = datetime.now(UTC).isoformat()
-    extraction_metadata = doc_metadata or {}
 
     def _signal_done() -> None:
         if chunking_done is not None:
             chunking_done.set()
+
+    common_kwargs = dict(
+        pdf_path=pdf_path, corpus=corpus, target_model=target_model,
+        now_iso=now_iso,
+    )
 
     while not cancel.is_set():
         is_final = False
@@ -268,15 +266,12 @@ def chunker_loop(
         chunk_metadata = {"page_boundaries": boundaries, "table_regions": []}
         chunks = chunker.chunk(text, chunk_metadata)
 
-        common_kwargs = dict(
-            content_hash=content_hash, db=db, embed_fn=embed_fn, cancel=cancel,
-            pdf_path=pdf_path, corpus=corpus, target_model=target_model,
-            extraction_metadata=extraction_metadata, chunk_count=len(chunks), now_iso=now_iso,
-        )
-
         if is_final:
             new_chunks = chunks[written_up_to:]
-            count = _embed_and_write_batch(new_chunks, total_embedded_so_far=total_embedded, **common_kwargs)
+            count, _ = _embed_and_write_batch(
+                new_chunks, content_hash, db, embed_fn, cancel,
+                total_embedded, chunk_count=len(chunks), **common_kwargs,
+            )
             total_embedded += count
             written_up_to += count
             db.update_progress(content_hash, chunks_created=len(chunks), chunks_embedded=total_embedded)
@@ -286,7 +281,10 @@ def chunker_loop(
         stable_end = max(written_up_to, len(chunks) - 1)
         new_chunks = chunks[written_up_to:stable_end]
         if new_chunks:
-            count = _embed_and_write_batch(new_chunks, total_embedded_so_far=total_embedded, **common_kwargs)
+            count, _ = _embed_and_write_batch(
+                new_chunks, content_hash, db, embed_fn, cancel,
+                total_embedded, chunk_count=0, **common_kwargs,  # provisional
+            )
             total_embedded += count
             written_up_to += count
             db.update_progress(content_hash, chunks_created=written_up_to)
@@ -305,11 +303,7 @@ def uploader_loop(
     cancel: threading.Event,
     chunking_done: threading.Event | None = None,
 ) -> None:
-    """Poll chunk buffer for embedded chunks and upsert to T3 ChromaDB.
-
-    Uses ``T3Database.upsert_chunks_with_embeddings`` for upload and
-    ``T3Database.update_chunks`` for metadata post-passes.
-    """
+    """Poll chunk buffer for embedded chunks and upsert to T3 ChromaDB."""
     total_uploaded = 0
 
     while not cancel.is_set():
@@ -339,7 +333,6 @@ def uploader_loop(
                 total_uploaded += len(batch)
                 db.update_progress(content_hash, chunks_uploaded=total_uploaded)
 
-        # Done condition: chunking_done event or durable chunks_created IS NOT NULL.
         chunker_finished = chunking_done is not None and chunking_done.is_set()
         if not chunker_finished:
             state = db.get_pipeline_state(content_hash)
@@ -350,7 +343,6 @@ def uploader_loop(
             time.sleep(_POLL_INTERVAL)
             continue
 
-        # Chunker finished — drain remaining and complete.
         if cancel.is_set():
             return
         remaining = db.read_uploadable_chunks(content_hash)
@@ -382,9 +374,11 @@ def pipeline_index_pdf(
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
-    Submits ``extractor_loop``, ``chunker_loop``, and ``uploader_loop`` to a
-    ``ThreadPoolExecutor(max_workers=3)``.  On first exception the cancel event
-    is set and all futures are joined before cleanup (F2 fix).
+    After the three stages complete, runs post-passes to:
+    - Enrich chunk metadata from the ExtractionResult
+    - Tag table-page chunks
+    - Correct chunk_count to the final total
+    - Prune stale chunks from a previous version
 
     Returns total chunks indexed.
     """
@@ -421,18 +415,15 @@ def pipeline_index_pdf(
         all_futures: set[Future] = {extract_future, chunk_future, upload_future}
 
         done, not_done = wait(all_futures, return_when=FIRST_EXCEPTION)
-
         for f in done:
             exc = f.exception()
             if exc is not None:
                 first_exc = exc
                 cancel.set()
                 break
-
         if not_done:
             wait(not_done, return_when=ALL_COMPLETED)
 
-    # Only assign first_exc if not already set (S4 fix).
     if first_exc is None:
         for f in all_futures:
             exc = f.exception()
@@ -444,12 +435,28 @@ def pipeline_index_pdf(
         db.mark_failed(content_hash, error=str(first_exc))
         raise first_exc
 
-    # table_regions post-pass.
+    # ── Post-passes (after all three stages complete) ────────────────────────
+
     extraction_result = extract_future.result()
+
+    # 1. Metadata enrichment from ExtractionResult.
+    _enrich_metadata_from_extraction(content_hash, extraction_result, pdf_path, t3, collection)
+
+    # 2. table_regions post-pass.
     table_regions = extraction_result.metadata.get("table_regions", [])
     if table_regions:
         table_pages: set[int] = {r["page"] for r in table_regions}
-        _apply_table_regions(content_hash, table_pages, t3, collection)
+        _update_chunk_metadata(
+            t3, collection, content_hash,
+            lambda meta: (
+                meta.update({"chunk_type": "table_page"}) or True  # type: ignore[func-returns-value]
+                if meta.get("page_number", 0) in table_pages and meta.get("chunk_type") != "table_page"
+                else False
+            ),
+        )
+
+    # 3. Stale chunk pruning.
+    _prune_stale_chunks(t3, collection, str(pdf_path), content_hash)
 
     state = db.get_pipeline_state(content_hash)
     total_chunks = state["chunks_uploaded"] if state else 0
@@ -458,14 +465,84 @@ def pipeline_index_pdf(
     return total_chunks
 
 
-def _apply_table_regions(
-    content_hash: str, table_pages: set[int], t3: Any, collection: str,
+def _enrich_metadata_from_extraction(
+    content_hash: str,
+    result: ExtractionResult,
+    pdf_path: Path,
+    t3: Any,
+    collection: str,
 ) -> None:
-    """Update chunk_type metadata for chunks on table pages (RF-14 post-pass).
+    """Post-pass: update chunk metadata with fields from ExtractionResult.
 
-    Uses ``T3Database.get_or_create_collection`` for querying and
-    ``T3Database.update_chunks`` for the metadata update.
+    Resolves source_title (docling_title → pdf_title → filename), source_author,
+    extraction_method, format, page_count, is_image_pdf, has_formulas — matching
+    the batch path in doc_indexer._pdf_chunks.
     """
+    meta = result.metadata
+    page_count = meta.get("page_count", 0) or 1
+    text_len = len(result.text) if result.text else 0
+
+    source_title = (
+        meta.get("docling_title", "")
+        or meta.get("pdf_title", "")
+        or pdf_path.stem.replace("_", " ").replace("-", " ")
+    )
+
+    enrichment = {
+        "source_title": source_title,
+        "source_author": meta.get("pdf_author", ""),
+        "source_date": meta.get("pdf_creation_date", ""),
+        "extraction_method": meta.get("extraction_method", ""),
+        "format": meta.get("format", ""),
+        "page_count": meta.get("page_count", 0),
+        "pdf_subject": meta.get("pdf_subject", ""),
+        "pdf_keywords": meta.get("pdf_keywords", ""),
+        "is_image_pdf": (text_len / page_count) < 20 if page_count else False,
+        "has_formulas": meta.get("formula_count", 0) > 0,
+    }
+
+    # Also correct chunk_count to the final total.
+    try:
+        col = t3.get_or_create_collection(collection)
+        all_ids: list[str] = []
+        all_metas: list[dict] = []
+        offset = 0
+        while True:
+            batch = _chroma_with_retry(
+                col.get,
+                where={"content_hash": content_hash},
+                include=["metadatas"],
+                limit=300,
+                offset=offset,
+            )
+            all_ids.extend(batch.get("ids", []))
+            all_metas.extend(batch.get("metadatas", []))
+            if len(batch.get("ids", [])) < 300:
+                break
+            offset += 300
+
+        if not all_ids:
+            return
+
+        chunk_count = len(all_ids)
+        updated_metas: list[dict] = []
+        for m in all_metas:
+            m.update(enrichment)
+            m["chunk_count"] = chunk_count
+            updated_metas.append(m)
+
+        t3.update_chunks(collection, all_ids, updated_metas)
+    except Exception:
+        _log.debug("metadata_enrichment_failed", content_hash=content_hash)
+
+
+def _update_chunk_metadata(
+    t3: Any,
+    collection: str,
+    content_hash: str,
+    update_fn: Callable[[dict], bool],
+) -> None:
+    """Generic post-pass: query chunks by content_hash, apply update_fn to each."""
     try:
         col = t3.get_or_create_collection(collection)
         result = _chroma_with_retry(
@@ -474,15 +551,13 @@ def _apply_table_regions(
             include=["metadatas"],
         )
     except Exception:
-        _log.debug("table_regions_postpass_query_failed", content_hash=content_hash)
+        _log.debug("chunk_metadata_query_failed", content_hash=content_hash)
         return
 
     ids_to_update: list[str] = []
     updated_metas: list[dict] = []
     for cid, meta in zip(result.get("ids", []), result.get("metadatas", [])):
-        page = meta.get("page_number", 0)
-        if page in table_pages and meta.get("chunk_type") != "table_page":
-            meta["chunk_type"] = "table_page"
+        if update_fn(meta):
             ids_to_update.append(cid)
             updated_metas.append(meta)
 
@@ -490,4 +565,41 @@ def _apply_table_regions(
         try:
             t3.update_chunks(collection, ids_to_update, updated_metas)
         except Exception:
-            _log.debug("table_regions_update_failed", count=len(ids_to_update))
+            _log.debug("chunk_metadata_update_failed", count=len(ids_to_update))
+
+
+def _prune_stale_chunks(
+    t3: Any, collection: str, pdf_path: str, content_hash: str,
+) -> None:
+    """Delete chunks from T3 that belong to a previous version of the same PDF."""
+    try:
+        col = t3.get_or_create_collection(collection)
+        current_ids: set[str] = set()
+        stale_ids: list[str] = []
+        offset = 0
+
+        # Collect all IDs for this source_path.
+        while True:
+            batch = _chroma_with_retry(
+                col.get,
+                where={"source_path": pdf_path},
+                include=[],
+                limit=300,
+                offset=offset,
+            )
+            batch_ids = batch.get("ids", [])
+            for eid in batch_ids:
+                # Current version's IDs start with content_hash[:16]
+                if eid.startswith(content_hash[:16]):
+                    current_ids.add(eid)
+                else:
+                    stale_ids.append(eid)
+            if len(batch_ids) < 300:
+                break
+            offset += 300
+
+        if stale_ids:
+            _chroma_with_retry(col.delete, ids=stale_ids)
+            _log.info("stale_chunks_pruned", count=len(stale_ids), collection=collection)
+    except Exception:
+        _log.debug("stale_prune_failed", collection=collection, pdf_path=pdf_path)
