@@ -70,6 +70,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-046](rdr-046-mineru-server-backed-extraction.md) | MinerU Server-Backed PDF Extraction | Architecture | Closed | 2026-04-02 |
 | [RDR-047](rdr-047-large-pdf-extraction-resilience.md) | Large PDF Extraction Resilience | Architecture | Accepted | 2026-04-03 |
 | [RDR-048](rdr-048-streaming-pdf-pipeline.md) | Streaming PDF Pipeline | Architecture | Accepted | 2026-04-03 |
+| [RDR-049](rdr-049-git-backed-catalog.md) | Git-Backed Xanadu-Inspired Catalog for T3 | Architecture | Accepted | 2026-04-04 |
+| [RDR-050](rdr-050-knowledge-graph-query-planning.md) | Knowledge Graph and Catalog-Aware Query Planning | Architecture | Draft | 2026-04-04 |
 
 ---
 
