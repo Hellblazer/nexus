@@ -80,6 +80,7 @@ nx index repo ./my-project
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich <collection>` for bulk backfill |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
 | `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
+| `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for PDFs ≥100 pages; `always` forces streaming; `never` uses the batch+checkpoint path |
 
 ### PDF Extraction Backends
 
@@ -382,4 +383,9 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks: ChromaDB API key, ChromaDB tenant, T3 database (`CHROMA_DATABASE`), Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time.
+Checks: ChromaDB API key, ChromaDB tenant, T3 database (`CHROMA_DATABASE`), Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity.
+
+```
+nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files
+nx doctor --clean-pipelines     # Delete orphaned pipeline buffer entries
+```

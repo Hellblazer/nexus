@@ -77,6 +77,9 @@ src/nexus/           # Core package
   pdf_chunker.py     # PDF → chunks
   bib_enricher.py    # Semantic Scholar bibliographic metadata lookup
   doc_indexer.py     # Incremental doc indexer with hash-based dedup
+  pipeline_buffer.py # SQLite WAL buffer for streaming PDF pipeline (RDR-048)
+  pipeline_stages.py # Concurrent extractor/chunker/uploader stages + orchestrator
+  checkpoint.py      # Batch-path crash recovery (RDR-047)
   search_engine.py   # Semantic + hybrid search
   frecency.py        # Git frecency scoring
   scoring.py         # Reranking

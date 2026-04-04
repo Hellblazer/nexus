@@ -98,10 +98,10 @@ CREATE TABLE pdf_pipeline (
     collection       TEXT NOT NULL,
     total_pages      INTEGER,
     pages_extracted  INTEGER DEFAULT 0,
-    chunks_created   INTEGER DEFAULT 0,
-    chunks_embedded  INTEGER DEFAULT 0,
+    chunks_created   INTEGER,               -- NULL until chunker sets explicitly
+    chunks_embedded  INTEGER,               -- NULL until chunker sets explicitly
     chunks_uploaded  INTEGER DEFAULT 0,
-    status           TEXT DEFAULT 'running',  -- running|done|failed|resuming
+    status           TEXT DEFAULT 'running',  -- running|completed|failed|resuming
     error            TEXT DEFAULT '',          -- error details when status='failed'
     started_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
@@ -137,32 +137,32 @@ On resume, only re-uploads chunks where `uploaded = 0` — no re-embedding neede
 ### Concurrency Model
 
 ```python
-cancel = threading.Event()  # fast in-process cancellation (RF-7)
-first_error: Exception | None = None
+cancel = threading.Event()           # fast in-process cancellation (RF-7)
+extraction_done = threading.Event()  # extractor → chunker signal
+chunking_done = threading.Event()    # chunker → uploader signal
+first_exc: BaseException | None = None
 
 with ThreadPoolExecutor(max_workers=3) as pool:
-    futures = [
-        pool.submit(extractor_loop, pdf_path, content_hash, db, cancel),
-        pool.submit(chunker_loop, content_hash, db, cancel),
-        pool.submit(uploader_loop, content_hash, db, t3, collection, cancel),
-    ]
+    extract_future = pool.submit(extractor_loop, ..., extraction_done)
+    chunk_future = pool.submit(chunker_loop, ..., extraction_done, chunking_done)
+    upload_future = pool.submit(uploader_loop, ..., chunking_done)
 
-    # Collect results; on first exception, cancel others but don't raise
-    # until all futures are joined (avoids cleanup race with still-running threads)
-    for f in futures:
-        try:
-            f.result()
-        except Exception as exc:
-            if first_error is None:
-                first_error = exc
-                cancel.set()  # signal other stages to stop
+    all_futures = {extract_future, chunk_future, upload_future}
 
-# ThreadPoolExecutor.__exit__ waits for all futures before reaching here.
-# All threads are stopped. Safe to update state and cleanup.
-if first_error is not None:
-    db.execute("UPDATE pdf_pipeline SET status='failed', error=? WHERE content_hash=?",
-               (str(first_error), content_hash))
-    raise first_error
+    # F2 fix: wait for first exception, cancel, then join all remaining.
+    done, not_done = wait(all_futures, return_when=FIRST_EXCEPTION)
+    for f in done:
+        if (exc := f.exception()) is not None:
+            first_exc = exc
+            cancel.set()
+            break
+    if not_done:
+        wait(not_done, return_when=ALL_COMPLETED)
+
+# All threads stopped. Post-passes: metadata enrichment, table_regions, stale pruning.
+if first_exc is not None:
+    db.mark_failed(content_hash, error=str(first_exc))
+    raise first_exc
 ```
 
 Each stage loop checks `cancel.is_set()` at the top of each iteration and exits cleanly if set. On crash (no clean shutdown), `pdf_pipeline.status` remains `running`. The concurrent guard distinguishes live from crashed pipelines using `updated_at`: if `status = 'running'` AND `updated_at` is older than 5 minutes, the pipeline is stale (crashed) — set `status = 'resuming'` and take ownership. If `updated_at` is recent, another process is actively running — skip. Each stage updates `updated_at` on every batch write, acting as a heartbeat.
@@ -365,6 +365,8 @@ Two options for inter-stage signaling:
 
 **Recommendation**: Start with Option A (polling). 500ms latency is negligible when extraction takes 400ms/page and embedding takes 200-500ms/batch. Optimize to Option B only if profiling shows polling overhead is significant. The simplicity of "just read from SQLite" makes the code much easier to reason about and debug.
 
+**Implementation note**: The shipped implementation uses `threading.Event` signals (`extraction_done`, `chunking_done`) for zero-latency inter-stage notification in the orchestrated path, with SQLite polling as a fallback for the standalone resume path. This hybrid combines Option A's crash durability with Option B's responsiveness.
+
 ### RF-12: CCE embedding quality is preserved — no regression from streaming (2026-04-03)
 **Classification**: Verified — code inspection + API semantics | **Confidence**: HIGH
 
@@ -428,7 +430,7 @@ The original `pdf_pipeline.status` had values: `extracting|chunking|embedding|up
 
 **Revised state machine**:
 - `running` — at least one stage is active
-- `done` — all stages completed successfully
+- `completed` — all stages completed successfully, buffer cleaned
 - `failed` — at least one stage failed (error details in a separate `error` column)
 - `resuming` — resume in progress after a previous crash
 
