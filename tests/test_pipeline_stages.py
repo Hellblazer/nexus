@@ -609,6 +609,46 @@ class TestPipelineIndexPdf:
         else:
             pytest.fail("metadata enrichment post-pass not called")
 
+    def test_stale_chunk_pruning(self, db: PipelineDB) -> None:
+        """Stale chunks from a previous version are deleted after upload."""
+        mock_col = MagicMock()
+        # Simulate: T3 has 2 chunks from old version + 1 from current.
+        mock_col.get.return_value = {
+            "ids": ["abc123_0", "abc123_1", "old_hash_0"],
+            "metadatas": [
+                {"content_hash": "abc123_full", "source_path": "/a.pdf"},
+                {"content_hash": "abc123_full", "source_path": "/a.pdf"},
+                {"content_hash": "previous_hash", "source_path": "/a.pdf"},
+            ],
+        }
+        mock_t3 = MagicMock()
+        mock_t3.get_or_create_collection.return_value = mock_col
+
+        fake_result = _make_extraction_result(1)
+        fake_chunks = [TextChunk(text="c0", chunk_index=0, metadata={"page_number": 1, "chunk_type": "text"})]
+
+        with (
+            patch("nexus.pipeline_stages.PDFExtractor") as MockExt,
+            patch("nexus.pipeline_stages.PDFChunker") as MockChunker,
+        ):
+            def fake_extract(p, *, extractor="auto", on_page=None):
+                if on_page:
+                    on_page(0, "Page 0.", {"page_number": 1, "text_length": 7})
+                return fake_result
+            MockExt.return_value.extract.side_effect = fake_extract
+            MockChunker.return_value.chunk.return_value = fake_chunks
+
+            pipeline_index_pdf(
+                Path("/a.pdf"), "abc123_full", "docs__test", mock_t3,
+                db=db, embed_fn=lambda t, m: ([[0.1] * 4 for _ in t], m),
+            )
+
+        # Verify stale chunk was deleted (the one with different content_hash).
+        mock_col.delete.assert_called_once()
+        deleted_ids = mock_col.delete.call_args.kwargs.get("ids", mock_col.delete.call_args[1].get("ids", []))
+        assert "old_hash_0" in deleted_ids
+        assert "abc123_0" not in deleted_ids
+
 
 # ── Metadata contract test ───────────────────────────────────────────────────
 

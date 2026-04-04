@@ -214,7 +214,6 @@ def chunker_loop(
     pdf_path: str = "",
     corpus: str = "",
     target_model: str = "voyage-context-3",
-    doc_metadata: dict | None = None,
 ) -> None:
     """Incrementally chunk pages as they arrive, overlapping with extraction."""
     chunker = PDFChunker(chunk_chars=chunk_chars)
@@ -628,6 +627,6 @@ def _prune_stale_chunks(
 
         if stale_ids:
             _chroma_with_retry(col.delete, ids=stale_ids)
-            _log.info("stale_chunks_pruned", count=len(stale_ids), collection=collection)
+            _log.info("stale_chunks_pruned", count=len(stale_ids), pdf_path=pdf_path)
     except Exception:
-        _log.debug("stale_prune_failed", collection=collection, pdf_path=pdf_path)
+        _log.debug("stale_prune_failed", pdf_path=pdf_path)
