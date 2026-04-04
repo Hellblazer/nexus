@@ -63,7 +63,7 @@ _EMBED_BATCH_SIZE = 128  # Voyage AI embed() limit is 1,000; use conservative ba
 _CCE_MAX_BATCH_CHUNKS = 1000  # Voyage API limit: max 1,000 inputs per request
 _INCREMENTAL_BATCH_SIZE = 128  # Chunks per incremental embed/upsert batch
 _INCREMENTAL_THRESHOLD = 128  # Use incremental path when chunk count exceeds this
-_STREAMING_THRESHOLD = 0      # All valid PDFs use the streaming pipeline
+_STREAMING_THRESHOLD = 100    # Pages: use streaming pipeline when >= this (RF-5)
 _PARALLEL_WORKERS = 4  # Concurrent Voyage API calls for CCE embedding
 _RATE_LIMIT_RPM = 250  # Target RPM for Voyage API (83% of 300 RPM limit)
 
@@ -588,7 +588,7 @@ def index_pdf(
     on_progress: Callable[[int, int], None] | None = None,
     enrich: bool = False,
     extractor: str = "auto",
-    streaming: str = "never",
+    streaming: str = "auto",
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -826,7 +826,7 @@ def batch_index_pdfs(
         count: int = 0
         t0 = time.monotonic()
         try:
-            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, streaming="auto")
+            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
