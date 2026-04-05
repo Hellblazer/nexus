@@ -255,3 +255,18 @@ The catalog provides structural navigation (author, provenance, citations) that 
 **Classification**: Verified — Code Analysis | **Confidence**: HIGH
 
 The T2 plan library (RDR-034) stores plans as FTS5-searchable entries. Current usage: the skill calls `plan_search` on every query, finds 0 matches (library is nearly empty), then dispatches the planner. The auto-save prompt was declined in every observed session. The library is a good mechanism with bad UX — auto-caching fixes it.
+
+### RF-4: Current Query Pipeline Audit (2026-04-05)
+**Classification**: Verified — Codebase Analysis (11 source files read) | **Confidence**: HIGH
+
+Full audit of the current query pipeline implementation:
+
+**`query` MCP tool** (`mcp_server.py`): params `question`, `corpus`, `where`, `limit`. Over-fetches chunks (limit×10), groups by document, returns best snippet per doc. **No routing intelligence** — catalog-blind, same `search_cross_corpus()` as `search`. This is the tool to enhance.
+
+**`/nx:query` skill**: 308 lines, 5 top-level steps, 8 execution paths. **71 lines (23%) are mechanical orchestration** — collection extraction from catalog results, `$step_N` reference resolution via scratch, fanout dedup for multi-tumbler catalog_links, redundant scratch re-writes. This is deterministic pipeline logic encoded as LLM-interpreted markdown.
+
+**Query planner agent**: knows 9 operations, has 5 few-shot examples. The catalog-first routing decision is **purely heuristic** — the LLM reads prose instructions and decides. This is the sole non-deterministic branch point with correctness risk.
+
+**Plan library**: **0 plans stored** — completely empty. The auto-save prompt has been declined in every observed session.
+
+**Determinism map**: Deterministic (should be MCP code): catalog_search execution, collection extraction, scratch resolution, plan-library keyword matching. LLM-decided (should stay in agent): which analytical operations to use, analytical output quality. The routing branch — catalog-first vs blind search — is the one decision currently requiring LLM that should be deterministic.
