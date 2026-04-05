@@ -12,14 +12,14 @@ def collection() -> None:
 
 @collection.command("list")
 def list_cmd() -> None:
-    """List all T3 collections with document counts."""
+    """List all T3 collections with chunk counts."""
     cols = _t3().list_collections()
     if not cols:
         click.echo("No collections found.")
         return
     width = max(len(c["name"]) for c in cols)
     for c in sorted(cols, key=lambda x: x["name"]):
-        click.echo(f"{c['name']:<{width}}  {c['count']:>6} docs")
+        click.echo(f"{c['name']:<{width}}  {c['count']:>6} chunks")
 
 
 @collection.command("info")
@@ -52,7 +52,7 @@ def info_cmd(name: str) -> None:
     last_indexed = max(all_timestamps) if all_timestamps else "unknown"
 
     click.echo(f"Collection:  {match['name']}")
-    click.echo(f"Documents:   {match['count']}")
+    click.echo(f"Chunks:      {match['count']}")
     click.echo(f"Index model: {idx_model}")
     click.echo(f"Query model: {query_model}")
     click.echo(f"Indexed:     {last_indexed}")
@@ -113,7 +113,7 @@ def reindex_cmd(name: str, force: bool) -> None:
         )
 
     # 3. Delete collection
-    click.echo(f"Deleting collection '{name}' ({before_count} documents)...")
+    click.echo(f"Deleting collection '{name}' ({before_count} chunks)...")
     db.delete_collection(name)
 
     # 5. Re-index based on collection type
@@ -183,7 +183,7 @@ def reindex_cmd(name: str, force: bool) -> None:
         after_count = 0
 
     click.echo(
-        f"Re-indexed: {before_count} -> {after_count} documents ({indexed} sources processed)"
+        f"Re-indexed: {before_count} -> {after_count} chunks ({indexed} sources processed)"
     )
 
     if after_count >= 2:
@@ -211,7 +211,7 @@ def verify_cmd(name: str, deep: bool) -> None:
         raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
 
     if not deep:
-        click.echo(f"Collection '{name}': {match['count']} documents — OK")
+        click.echo(f"Collection '{name}': {match['count']} chunks — OK")
         return
 
     try:
@@ -227,7 +227,7 @@ def verify_cmd(name: str, deep: bool) -> None:
 
     if result.status == "skipped":
         click.echo(
-            f"Collection '{name}': {result.doc_count} documents — skipped (too few for probe)"
+            f"Collection '{name}': {result.doc_count} chunks — skipped (too few for probe)"
         )
         return
 
@@ -237,10 +237,10 @@ def verify_cmd(name: str, deep: bool) -> None:
         else ""
     )
     if result.status == "healthy":
-        click.echo(f"Collection '{name}': {result.doc_count} documents — embedding health OK{dist_str}")
+        click.echo(f"Collection '{name}': {result.doc_count} chunks — embedding health OK{dist_str}")
     elif result.status == "broken":
         click.echo(
-            f"Collection '{name}': {result.doc_count} documents — BROKEN: probe document not in top-10{dist_str}",
+            f"Collection '{name}': {result.doc_count} chunks — BROKEN: probe chunk not in top-10{dist_str}",
             err=True,
         )
         raise click.exceptions.Exit(1)
