@@ -91,7 +91,7 @@
     "PostToolUse": [],
     "PermissionRequest": [
       {
-        "matcher": "mcp__plugin_nx_nexus__.*",
+        "matcher": "mcp__plugin_nx_.*",
         "hooks": [
           {
             "type": "command",
