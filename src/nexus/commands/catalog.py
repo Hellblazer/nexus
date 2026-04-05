@@ -64,7 +64,21 @@ def _link_to_dict(link) -> dict:
 
 @click.group()
 def catalog() -> None:
-    """Git-backed Xanadu-inspired catalog for T3 (RDR-049)."""
+    """Document catalog — search, browse, and query the knowledge graph.
+
+    \b
+    Getting started:
+      nx catalog init               # initialize catalog
+      nx catalog setup               # init + populate + generate links
+    \b
+    Daily use:
+      nx catalog search <query>      # find documents
+      nx catalog show <tumbler|title> # full document info + links
+      nx catalog links <tumbler|title> # explore link graph
+    \b
+    Most link operations are designed for agent use via MCP.
+    Use /nx:query for agent-driven citation and provenance queries.
+    """
 
 
 @catalog.command("init")
@@ -76,6 +90,41 @@ def init_cmd(remote: str) -> None:
     path = catalog_path()
     Catalog.init(path, remote=remote or None)
     click.echo(f"Catalog initialized at {path}")
+
+
+@catalog.command("setup")
+@click.option("--remote", default="", help="Optional git remote URL")
+def setup_cmd(remote: str) -> None:
+    """One-command catalog setup: init + backfill + generate links."""
+    from nexus.config import catalog_path
+
+    path = catalog_path()
+    if not Catalog.is_initialized(path):
+        Catalog.init(path, remote=remote or None)
+        click.echo(f"Catalog initialized at {path}")
+    else:
+        click.echo(f"Catalog already initialized at {path}")
+
+    cat = Catalog(path, path / ".catalog.db")
+
+    try:
+        registry = _make_registry()
+        t3 = _make_t3()
+
+        click.echo("Populating from existing collections...")
+        repo_count, repo_collections = _backfill_repos(cat, registry, dry_run=False)
+        paper_count = _backfill_papers(cat, t3, dry_run=False, repo_collections=repo_collections)
+        knowledge_count = _backfill_knowledge(cat, t3, dry_run=False)
+        click.echo(f"  Repos: {repo_count}  Papers: {paper_count}  Knowledge: {knowledge_count}")
+    except Exception as exc:
+        click.echo(f"  Backfill skipped ({type(exc).__name__}: {exc})")
+
+    click.echo("Generating links...")
+    from nexus.catalog.link_generator import generate_citation_links, generate_code_rdr_links
+    cites = generate_citation_links(cat)
+    code_rdr = generate_code_rdr_links(cat)
+    click.echo(f"  Citations: {cites}  Code-RDR: {code_rdr}")
+    click.echo("Setup complete.")
 
 
 @catalog.command("list")
@@ -260,7 +309,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
 @click.argument("to_tumbler")
 @click.option(
     "--type", "link_type", required=True,
-    type=click.Choice(["cites", "supersedes", "quotes", "relates", "comments", "implements"]),
+    type=click.Choice(["cites", "supersedes", "quotes", "relates", "comments", "implements", "implements-heuristic"]),
 )
 @click.option("--from-span", default="")
 @click.option("--to-span", default="")
@@ -290,56 +339,59 @@ def unlink_cmd(from_tumbler: str, to_tumbler: str, link_type: str) -> None:
 
 
 @catalog.command("links")
-@click.argument("tumbler")
+@click.argument("tumbler", default="")
+@click.option("--from", "from_t", default="", help="Filter by source tumbler or title")
+@click.option("--to", "to_t", default="", help="Filter by target tumbler or title")
 @click.option("--direction", default="both", type=click.Choice(["in", "out", "both"]))
 @click.option("--type", "link_type", default="")
-@click.option("--depth", default=1, type=int)
-@click.option("--json", "as_json", is_flag=True)
-def links_cmd(
-    tumbler: str, direction: str, link_type: str, depth: int, as_json: bool,
-) -> None:
-    """Show links for a catalog entry. TUMBLER accepts a tumbler or title."""
-    cat = _get_catalog()
-    t = _resolve_tumbler(cat, tumbler)
-    result = cat.graph(t, depth=depth, direction=direction, link_type=link_type)
-    if as_json:
-        click.echo(json.dumps({
-            "nodes": [_entry_to_dict(n) for n in result["nodes"]],
-            "edges": [_link_to_dict(e) for e in result["edges"]],
-        }, indent=2))
-    else:
-        for edge in result["edges"]:
-            click.echo(f"{edge.from_tumbler} → {edge.to_tumbler} ({edge.link_type})")
-
-
-@catalog.command("link-query")
-@click.option("--from", "from_t", default="", help="From tumbler or title")
-@click.option("--to", "to_t", default="", help="To tumbler or title")
-@click.option("--tumbler", default="", help="Tumbler or title (with --direction)")
-@click.option("--direction", default="both", type=click.Choice(["in", "out", "both"]))
-@click.option("--type", "link_type", default="")
-@click.option("--created-by", default="")
+@click.option("--created-by", default="", help="Filter by creator (e.g. bib_enricher)")
+@click.option("--depth", default=1, type=int, help="BFS depth for graph traversal")
 @click.option("--limit", "-n", default=50, type=int)
 @click.option("--offset", default=0, type=int)
 @click.option("--json", "as_json", is_flag=True)
-def link_query_cmd(
-    from_t: str, to_t: str, tumbler: str, direction: str,
-    link_type: str, created_by: str,
+def links_cmd(
+    tumbler: str, from_t: str, to_t: str, direction: str,
+    link_type: str, created_by: str, depth: int,
     limit: int, offset: int, as_json: bool,
 ) -> None:
-    """Query links by any combination of filters."""
+    """Show or query links. TUMBLER (optional) accepts a tumbler or title.
+
+    \b
+    Examples:
+      nx catalog links 1.1.5                    # links for document
+      nx catalog links "auth module" --type cites
+      nx catalog links --created-by bib_enricher # all links by creator
+      nx catalog links --type cites --json       # all citation links
+    """
     cat = _get_catalog()
+
+    # If a positional tumbler is given, use graph traversal (the common case)
+    if tumbler:
+        t = _resolve_tumbler(cat, tumbler)
+        result = cat.graph(t, depth=depth, direction=direction, link_type=link_type)
+        if as_json:
+            click.echo(json.dumps({
+                "nodes": [_entry_to_dict(n) for n in result["nodes"]],
+                "edges": [_link_to_dict(e) for e in result["edges"]],
+            }, indent=2))
+        else:
+            if not result["edges"]:
+                click.echo("No links found.")
+                return
+            for edge in result["edges"]:
+                click.echo(f"{edge.from_tumbler} → {edge.to_tumbler} ({edge.link_type}) by {edge.created_by}")
+        return
+
+    # No positional tumbler — flat filter query
     resolved_from = str(_resolve_tumbler(cat, from_t)) if from_t else ""
     resolved_to = str(_resolve_tumbler(cat, to_t)) if to_t else ""
-    resolved_tumbler = str(_resolve_tumbler(cat, tumbler)) if tumbler else ""
     links = cat.link_query(
         from_t=resolved_from, to_t=resolved_to,
-        tumbler=resolved_tumbler, direction=direction,
         link_type=link_type, created_by=created_by,
         limit=limit, offset=offset,
     )
     if as_json:
-        click.echo(json.dumps([_link_to_dict(l) for l in links], indent=2))
+        click.echo(json.dumps([_link_to_dict(lnk) for lnk in links], indent=2))
     else:
         if not links:
             click.echo("No links found.")
@@ -348,7 +400,7 @@ def link_query_cmd(
             click.echo(f"{edge.from_tumbler} → {edge.to_tumbler} ({edge.link_type}) by {edge.created_by}")
 
 
-@catalog.command("link-bulk-delete")
+@catalog.command("link-bulk-delete", hidden=True)
 @click.option("--from", "from_t", default="", help="From tumbler or title")
 @click.option("--to", "to_t", default="", help="To tumbler or title")
 @click.option("--type", "link_type", default="")
@@ -372,7 +424,7 @@ def link_bulk_delete_cmd(
     click.echo(f"{mode} {count} link(s)")
 
 
-@catalog.command("link-audit")
+@catalog.command("link-audit", hidden=True)
 @click.option("--json", "as_json", is_flag=True)
 def link_audit_cmd(as_json: bool) -> None:
     """Audit the link graph: stats, orphans, duplicates."""
@@ -733,7 +785,7 @@ def _make_registry():
     return RepoRegistry(Path.home() / ".config" / "nexus" / "repos.json")
 
 
-@catalog.command("backfill")
+@catalog.command("backfill", hidden=True)
 @click.option("--dry-run", is_flag=True, help="Show what would be created without writing")
 def backfill_cmd(dry_run: bool) -> None:
     """Populate catalog from existing T3 collections and registry."""

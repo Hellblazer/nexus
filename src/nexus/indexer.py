@@ -255,6 +255,14 @@ def _catalog_hook(
                     head_hash=head_hash,
                     physical_collection=collection_name,
                 )
+        # Auto-generate links after registration
+        try:
+            from nexus.catalog.link_generator import generate_code_rdr_links
+            link_count = generate_code_rdr_links(cat)
+            if link_count:
+                _log.info("catalog_links_generated", count=link_count, repo=repo_name)
+        except Exception:
+            _log.debug("catalog_link_generation_failed", exc_info=True)
     except Exception:
         _log.debug("catalog_hook_failed", exc_info=True)
 

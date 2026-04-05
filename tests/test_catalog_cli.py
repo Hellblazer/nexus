@@ -150,30 +150,30 @@ class TestLinkCommands:
         assert "1" in result.output  # removed count
 
 
-class TestLinkQueryCommand:
-    def test_link_query_cli_by_type(self, initialized_catalog, catalog_env):
+class TestLinksFilterCommand:
+    def test_links_filter_by_type(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
         runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
         runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
-        result = runner.invoke(main, ["catalog", "link-query", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "links", "--type", "cites"])
         assert result.exit_code == 0
         assert "cites" in result.output
 
-    def test_link_query_cli_json(self, initialized_catalog, catalog_env):
+    def test_links_filter_json(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
         runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
         runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
-        result = runner.invoke(main, ["catalog", "link-query", "--type", "cites", "--json"])
+        result = runner.invoke(main, ["catalog", "links", "--type", "cites", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert isinstance(data, list)
         assert len(data) == 1
 
-    def test_link_query_cli_empty(self, initialized_catalog, catalog_env):
+    def test_links_filter_empty(self, initialized_catalog, catalog_env):
         runner = CliRunner()
-        result = runner.invoke(main, ["catalog", "link-query", "--type", "nonexistent"])
+        result = runner.invoke(main, ["catalog", "links", "--type", "nonexistent"])
         assert result.exit_code == 0
         assert "No links found." in result.output
 

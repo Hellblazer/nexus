@@ -290,7 +290,7 @@ class TestCatalogLinkBulk:
         catalog_register(title="B", owner="1.1")
         catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
         result = catalog_link_bulk(link_type="cites", dry_run=True)
-        assert result["removed"] == 1
+        assert result["would_remove"] == 1
         assert result["dry_run"] is True
         # Still exists
         links = catalog_link_query(link_type="cites")

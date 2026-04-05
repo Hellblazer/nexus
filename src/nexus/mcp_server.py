@@ -1369,6 +1369,9 @@ def catalog_link_audit() -> dict:
         return {"error": str(e)}
 
 
+_BULK_DELETE_CONFIRM_THRESHOLD = 10
+
+
 @mcp.tool()
 def catalog_link_bulk(
     from_tumbler: str = "",
@@ -1377,22 +1380,36 @@ def catalog_link_bulk(
     created_by: str = "",
     created_at_before: str = "",
     dry_run: bool = False,
+    confirm_destructive: bool = False,
 ) -> dict:
-    """Bulk delete links by filter. Returns count removed.
+    """Bulk delete links by filter. DESTRUCTIVE — use dry_run=True first.
 
     dry_run=True returns count without deleting.
+    If deletion would remove more than 10 links, confirm_destructive=True is required.
     created_at_before: ISO timestamp string, e.g. "2026-01-01T00:00:00"
     """
     cat, err = _require_catalog()
     if err:
         return {"error": err}
     try:
+        # Always preview first
+        preview = cat.bulk_unlink(
+            from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
+            created_by=created_by, created_at_before=created_at_before,
+            dry_run=True,
+        )
+        if dry_run:
+            return {"would_remove": preview, "dry_run": True}
+        if preview > _BULK_DELETE_CONFIRM_THRESHOLD and not confirm_destructive:
+            return {
+                "error": f"Would remove {preview} links — set confirm_destructive=True to proceed",
+                "would_remove": preview,
+            }
         count = cat.bulk_unlink(
             from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
             created_by=created_by, created_at_before=created_at_before,
-            dry_run=dry_run,
         )
-        return {"removed": count, "dry_run": dry_run}
+        return {"removed": count}
     except Exception as e:
         return {"error": str(e)}
 

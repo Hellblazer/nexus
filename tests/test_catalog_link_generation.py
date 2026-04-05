@@ -111,7 +111,7 @@ class TestCodeRdrLinks:
         assert count == 1
         # Link direction: code → implements → RDR
         code_entry = cat.by_file_path(owner, "src/nexus/catalog/catalog.py")
-        links = cat.links_from(code_entry.tumbler, link_type="implements")
+        links = cat.links_from(code_entry.tumbler, link_type="implements-heuristic")
         assert len(links) == 1
         assert links[0].created_by == "index_hook"
 
@@ -155,7 +155,7 @@ class TestCodeRdrLinkCap:
             )
         count = generate_code_rdr_links(cat)
         assert count == _MAX_RDR_MATCHES_PER_CODE
-        links = cat.links_from(code, link_type="implements")
+        links = cat.links_from(code, link_type="implements-heuristic")
         assert len(links) == _MAX_RDR_MATCHES_PER_CODE
 
 

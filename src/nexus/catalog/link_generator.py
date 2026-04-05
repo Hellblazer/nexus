@@ -58,6 +58,8 @@ _MAX_RDR_MATCHES_PER_CODE = 5
 def generate_code_rdr_links(cat: Catalog) -> int:
     """Heuristic: match RDR entries to code files by module name in title.
 
+    Uses link_type='implements-heuristic' (not 'implements') to distinguish
+    these substring-matched links from manually created or API-backed links.
     created_by='index_hook' per RF-8. Only matches module names > 3 chars.
     Capped at _MAX_RDR_MATCHES_PER_CODE matches per code file to prevent saturation.
     """
@@ -79,7 +81,7 @@ def generate_code_rdr_links(cat: Catalog) -> int:
         matches_for_code = 0
         for rdr, rdr_title_norm in rdr_normalized:
             if module_name in rdr_title_norm:
-                if cat.link_if_absent(code.tumbler, rdr.tumbler, "implements", created_by="index_hook"):
+                if cat.link_if_absent(code.tumbler, rdr.tumbler, "implements-heuristic", created_by="index_hook"):
                     count += 1
                     _log.debug(
                         "code_rdr_link_created",
