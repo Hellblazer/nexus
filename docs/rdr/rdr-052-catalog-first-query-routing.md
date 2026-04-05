@@ -199,6 +199,7 @@ Multi-step analytical pipelines need inter-step state (extract results feed into
 1. **Template matching precision**: Should the skill use keyword signals ("author", "cites") or ask the LLM to classify the question type? Keyword signals are faster but may miss edge cases.
 2. **Auto-cache scope**: Should ALL successful query executions auto-cache, or only planner-generated plans? Auto-caching single-tool queries is wasteful (they're already fast). Proposal: only cache plans with 2+ steps.
 3. **Follow-links result format**: Should `follow_links` results be interleaved with search results or returned in a separate section? Interleaving risks confusing relevance ranking.
+4. **Dynamic link types**: Link types are an open set — the API accepts arbitrary strings, and agents may create types beyond the current 7 (`cites`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`, `implements`). The enhanced `query` tool's `follow_links` param must accept any string, not a fixed enum. Pre-built templates reference specific types (`cites`, `implements`) — should there be a generic "follow any link" template, or should the planner handle novel link types? Concept nodes (deferred Layer 3) would introduce `about` links; `derived_from` is proposed in RDR-050 RF-10. The routing layer must not hardcode link vocabulary.
 
 ## Implementation Plan
 
@@ -270,3 +271,22 @@ Full audit of the current query pipeline implementation:
 **Plan library**: **0 plans stored** — completely empty. The auto-save prompt has been declined in every observed session.
 
 **Determinism map**: Deterministic (should be MCP code): catalog_search execution, collection extraction, scratch resolution, plan-library keyword matching. LLM-decided (should stay in agent): which analytical operations to use, analytical output quality. The routing branch — catalog-first vs blind search — is the one decision currently requiring LLM that should be deterministic.
+
+### RF-5: General Systems Theory — Boundaries, Signals, Feedback (2026-04-05)
+**Classification**: Systems Analysis | **Confidence**: HIGH
+
+**Boundaries**: 7 boundary types across 4 layers. The critical boundary is B2/B3 (Skill ↔ Planner) where deterministic routing information (author, content_type, link_type) is encoded as natural language, passed through an LLM, and decoded back into structured parameters. RDR-052 eliminates this round-trip for 80% of queries.
+
+**Signal flows** (boundary crossings per query type):
+
+| Query Type | Current | RDR-052 | Reduction |
+|------------|:-------:|:-------:|:---------:|
+| Simple scoped search | 13 | 2 | 85% |
+| Citation traversal | 15 | 2 | 87% |
+| Analytical pipeline | 14 | 9-11 | 21-36% |
+
+**Feedback loops**: The plan library auto-save is the key missing positive loop — currently broken because the save prompt is always declined (RF-3). Auto-cache repairs this. **Missing feedback**: no routing quality signal. The system cannot distinguish 10 relevant results from 10 tangential results. No user satisfaction signal, no A/B comparison between routing strategies.
+
+**Variety (Ashby)**: The planner introduces O(9^N) combinatorial variety to solve problems with O(5) structural patterns — the catalog made 80% of the planner's variety redundant. Error recovery is under-engineered: one failure path (FAILED marker, continue with broken inputs), no retry, no fallback, no user guidance.
+
+**Homeostasis**: System is stuck in high-cost steady state (always-plan) because the save prompt blocks the positive feedback loop. Auto-cache creates the transition path to low-cost steady state (usually-template-match).
