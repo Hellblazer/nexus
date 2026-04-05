@@ -130,13 +130,38 @@ def setup_cmd(remote: str) -> None:
         registry = _make_registry()
         t3 = _make_t3()
 
-        click.echo("Populating from existing collections...")
+        import signal
+
+        def _timeout_handler(signum, frame):
+            raise TimeoutError("T3 cloud call timed out — try again later or check connectivity")
+
+        repo_count = paper_count = knowledge_count = 0
+
+        click.echo("Populating from repos...")
         repo_count, repo_collections = _backfill_repos(cat, registry, dry_run=False)
-        paper_count = _backfill_papers(cat, t3, dry_run=False, repo_collections=repo_collections)
-        knowledge_count = _backfill_knowledge(cat, t3, dry_run=False)
-        click.echo(f"  Repos: {repo_count}  Papers: {paper_count}  Knowledge: {knowledge_count}")
+        click.echo(f"  {repo_count} repo entries")
+
+        # Paper and knowledge backfill query T3 cloud — timeout after 60s each
+        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+        try:
+            click.echo("Populating from paper collections...")
+            signal.alarm(60)
+            paper_count = _backfill_papers(cat, t3, dry_run=False, repo_collections=repo_collections)
+            signal.alarm(0)
+            click.echo(f"  {paper_count} paper entries")
+
+            click.echo("Populating from knowledge collections...")
+            signal.alarm(30)
+            knowledge_count = _backfill_knowledge(cat, t3, dry_run=False)
+            signal.alarm(0)
+            click.echo(f"  {knowledge_count} knowledge entries")
+        except TimeoutError as exc:
+            signal.alarm(0)
+            click.echo(f"  Timed out ({exc}). Partial results saved — rerun setup to continue.")
+        finally:
+            signal.signal(signal.SIGALRM, old_handler)
     except Exception as exc:
-        click.echo(f"  Backfill skipped ({type(exc).__name__}: {exc})")
+        click.echo(f"  Backfill incomplete ({type(exc).__name__}: {exc})")
 
     click.echo("Generating links...")
     from nexus.catalog.link_generator import generate_citation_links, generate_code_rdr_links
@@ -715,8 +740,9 @@ def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool) -> int:
     collections = t3.list_collections()
     knowledge_cols = [c for c in collections if c["name"].startswith("knowledge__")]
     count = 0
+    total = len(knowledge_cols)
 
-    for col_info in knowledge_cols:
+    for i, col_info in enumerate(knowledge_cols, 1):
         col_name = col_info["name"]
         # Derive a title from the collection name
         title = col_name.replace("knowledge__", "").replace("_", " ").title()
@@ -753,10 +779,11 @@ def _backfill_papers(
     ]
     count = 0
 
-    for col_info in paper_cols:
+    total = len(paper_cols)
+    for i, col_info in enumerate(paper_cols, 1):
         col_name = col_info["name"]
 
-        # Try to extract metadata from first chunk
+        # Try to extract metadata from first chunk (cloud call — may be slow)
         title = col_name.replace("docs__", "")
         author = ""
         year = 0
@@ -785,6 +812,9 @@ def _backfill_papers(
                 physical_collection=col_name,
             )
         count += 1
+        # Progress — papers are the slow path (one cloud call per collection)
+        if total > 5 and i % 10 == 0:
+            click.echo(f"  [{i}/{total}] {title[:50]}")
 
     return count
 
