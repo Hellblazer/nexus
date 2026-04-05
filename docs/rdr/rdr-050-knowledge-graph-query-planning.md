@@ -2,10 +2,11 @@
 title: "Knowledge Graph and Catalog-Aware Query Planning"
 id: RDR-050
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-04-05
 priority: medium
 author: Hal Hildebrand
-reviewed-by: pending
+reviewed-by: self
 created: 2026-04-04
 related_issues:
   - "RDR-049 - Git-Backed Xanadu-Inspired Catalog for T3 (closed, implemented)"
