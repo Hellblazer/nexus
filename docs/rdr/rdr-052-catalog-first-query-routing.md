@@ -202,12 +202,42 @@ Multi-step analytical pipelines need inter-step state (extract results feed into
 
 ## Implementation Plan
 
-1. Enhance `query` MCP tool: add `author`, `content_type`, `follow_links`, `depth` params with internal catalog routing
-2. Seed pre-built plan templates in T2 at `nx catalog setup`
-3. Simplify `/nx:query` skill: three-path dispatch (single-tool / template / planner)
-4. Auto-cache novel plans on success, remove save prompt
-5. Update query-planner agent few-shot examples to emphasize catalog-first patterns
-6. Update agent documentation to reference enhanced `query` tool
+### Phase 1: MCP Layer (src/nexus/)
+
+1. **Enhance `query` MCP tool** (`mcp_server.py`): add `author`, `content_type`, `follow_links`, `depth` params with internal catalog routing. Internalize collection extraction from catalog results.
+2. **Seed pre-built plan templates** (`commands/catalog.py` setup command): insert 5 templates into T2 plan library at `nx catalog setup` time.
+3. **Auto-cache logic** (`mcp_server.py` or new `query_cache.py`): `plan_save` on successful novel plan execution with TTL 30 days, no user prompt.
+4. **Tests**: unit tests for enhanced `query` routing (catalog-scoped vs broad), template seeding, auto-cache lifecycle.
+
+### Phase 2: Plugin Layer (nx/)
+
+5. **Simplify `/nx:query` skill** (`nx/skills/query/SKILL.md`): three-path dispatch (single-tool / template / planner). Remove manual collection extraction instructions. Remove "save plan?" prompt.
+6. **Update query-planner agent** (`nx/agents/query-planner.md`): reduce scope to exception-path. Add note that simple scoped queries go through enhanced `query` MCP directly. Update few-shot examples to emphasize catalog-first patterns.
+7. **Update analytical-operator agent** (`nx/agents/analytical-operator.md`): no functional changes, but update references to the query pipeline flow.
+8. **Update orchestrator agent** (`nx/agents/orchestrator.md`): route simple search questions to enhanced `query` MCP, not `/nx:query` skill.
+9. **Update SubagentStart hook** (`nx/hooks/scripts/subagent-start.sh`): update `query` tool signature in the nx Storage Tools block to show new params (`author`, `content_type`, `follow_links`, `depth`).
+10. **Update related skills** that reference the query pipeline:
+    - `nx/skills/research-synthesis/SKILL.md` — reference enhanced `query` for scoped search
+    - `nx/skills/knowledge-tidying/SKILL.md` — reference enhanced `query` for dedup checks
+    - `nx/skills/deep-analysis/SKILL.md` — reference enhanced `query` for evidence gathering
+
+### Phase 3: User-Facing Documentation (docs/)
+
+11. **`docs/catalog.md`** — update the "Agents use the catalog" section: document the enhanced `query` tool as the primary interface, explain the three-path routing (single-tool / template / planner).
+12. **`docs/cli-reference.md`** — update `nx search` / `query` MCP tool documentation with new params. Add examples: `query(question="...", author="Fagin")`.
+13. **`docs/storage-tiers.md`** — update T2 plan library description: plans auto-cached on success, 30-day TTL, no user prompt.
+14. **`docs/architecture.md`** — update module map: `query` tool routing logic, plan template seeding in catalog setup.
+15. **`docs/getting-started.md`** — if query examples exist, update to show catalog-scoped queries.
+16. **`docs/memory-and-tasks.md`** — update plan library section: auto-cache behavior, template seeding.
+17. **`README.md`** — update "Analytical queries" description to reflect catalog-first routing.
+18. **`CLAUDE.md`** — update MCP tool descriptions if `query` signature changes.
+
+### Phase 4: Verification
+
+19. **End-to-end test**: scoped query via enhanced `query` MCP → verify <2s latency, correct collection scoping.
+20. **Template match test**: question with author signal → verify template selected, no planner dispatch.
+21. **Auto-cache test**: novel plan execution → verify plan_save called automatically.
+22. **Regression test**: existing `/nx:query` multi-step flows still work (extract → compare → generate).
 
 ## Research Findings
 
