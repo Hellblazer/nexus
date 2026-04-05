@@ -168,6 +168,15 @@ You will begin every research task by:
 4. Establishing clear success criteria for the research
 5. Define validation checkpoints for fact-checking rounds
 
+### Catalog-First Routing (when applicable)
+When the research question involves specific authors, paper titles, citation chains, or provenance
+("what did Fagin write", "papers about schema mappings", "what research informed X"):
+1. Start with `mcp__plugin_nx_nexus__catalog_search(query="...", author="...", corpus="...")` to scope to relevant collections
+2. Use `mcp__plugin_nx_nexus__catalog_links(tumbler="...", direction="in", link_type="cites")` for citation traversal
+3. Resolve to T3 collections via `mcp__plugin_nx_nexus__catalog_resolve(owner="...", corpus="...")`
+4. Then search those specific collections instead of blind corpus-wide search
+Skip this phase when the question is conceptual or doesn't target specific documents.
+
 ### Phase 2: Information Gathering
 You will systematically:
 1. Query nx T3 store for existing related knowledge using a two-query pattern for conceptual

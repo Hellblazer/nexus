@@ -80,6 +80,7 @@ class CatalogLink:
             "to_span": self.to_span,
             "created_by": self.created_by,
             "created_at": self.created_at,
+            "meta": self.meta,
         }
 
 

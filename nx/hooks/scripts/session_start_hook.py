@@ -103,6 +103,7 @@ def main() -> None:
     output_lines.append("Analytical queries: `/nx:query` skill — multi-step retrieval and analysis")
     output_lines.append("Plan library: `plan_save`/`plan_search` MCP tools (T2, project-scoped)")
     output_lines.append("Scratch: `scratch` MCP tool — session-scoped, shared across agents")
+    output_lines.append("Catalog: `catalog_search`/`catalog_links`/`catalog_resolve` MCP tools — metadata-first routing by author, corpus, citation")
     output_lines.append("Enrichment: `nx enrich COLLECTION` (CLI only)")
     output_lines.append("Pagination: search/store_list/memory_search return paged results. Footer shows `offset=N` for next page.")
     output_lines.append("")

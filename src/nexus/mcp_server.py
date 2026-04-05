@@ -1300,6 +1300,25 @@ def catalog_links(
 
 
 @mcp.tool()
+def catalog_unlink(
+    from_tumbler: str,
+    to_tumbler: str,
+    link_type: str = "",
+) -> dict:
+    """Remove link(s) between catalog entries. If link_type empty, removes all types."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        from nexus.catalog.tumbler import Tumbler
+
+        removed = cat.unlink(Tumbler.parse(from_tumbler), Tumbler.parse(to_tumbler), link_type)
+        return {"removed": removed, "from": from_tumbler, "to": to_tumbler}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
 def catalog_resolve(
     tumbler: str = "",
     owner: str = "",
