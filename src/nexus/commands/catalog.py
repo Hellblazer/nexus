@@ -501,6 +501,36 @@ def _backfill_papers(cat: Catalog, t3: object, dry_run: bool) -> int:
     return count
 
 
+@catalog.command("generate-links")
+@click.option("--citations/--no-citations", default=True, help="Generate citation links from bib metadata")
+@click.option("--code-rdr/--no-code-rdr", default=True, help="Generate code-RDR links by heuristic")
+@click.option("--dry-run", is_flag=True, help="Show what would be created without writing")
+def generate_links_cmd(citations: bool, code_rdr: bool, dry_run: bool) -> None:
+    """Auto-generate typed links from metadata cross-matching."""
+    cat = _get_catalog()
+    from nexus.catalog.link_generator import generate_citation_links, generate_code_rdr_links
+
+    total = 0
+    if citations:
+        if dry_run:
+            click.echo("Would generate citation links (dry-run mode not yet supported for link preview)")
+        else:
+            count = generate_citation_links(cat)
+            click.echo(f"Citation links created: {count}")
+            total += count
+
+    if code_rdr:
+        if dry_run:
+            click.echo("Would generate code-RDR links (dry-run mode not yet supported for link preview)")
+        else:
+            count = generate_code_rdr_links(cat)
+            click.echo(f"Code-RDR links created: {count}")
+            total += count
+
+    if not dry_run:
+        click.echo(f"Total links generated: {total}")
+
+
 def _make_t3():
     from nexus.db import make_t3
     return make_t3()
