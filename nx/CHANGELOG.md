@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Catalog tools injected for RDR lifecycle, knowledge, research, debug, and analysis agent contexts (SubagentStart hook)
+- 12 agents/skills wired with catalog link creation: debugger (`relates`), deep-analyst (`relates`), codebase-analyzer (`relates`, `supersedes`), architect-planner (`relates`, `cites`), developer (`implements`), knowledge-tidier (`supersedes`, `relates`), deep-research-synthesizer (`cites`), all 7 RDR skills (`supersedes`, `cites`, `relates`)
+- Query planner updated for `catalog_links` `{nodes, edges}` return format
+
+### Changed
+- `SubagentStart` hook catalog injection regex broadened — triggers on references, follow-on, catalog, RDR lifecycle, knowledge, research, debug, architecture, and analysis keywords
+
 ## [2.12.0] - 2026-04-04
 
 Plugin version aligned with Nexus CLI 2.12.0. No plugin-level functional changes.
