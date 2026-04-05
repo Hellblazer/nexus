@@ -285,7 +285,7 @@ Every deliberate departure from Nelson's Xanadu design, with rationale and trace
 | **Nelson** | Element field starts with `1` for bytes, `2` for links. Both live in the same tumbler address space. |
 | **Nexus** | 4th segment is always a chunk index. Links are in a separate SQLite table (`links`), not in tumbler space. |
 | **Rationale** | Links are metadata about relationships, not content. Putting them in the tumbler space would conflate the addressing of content with the addressing of assertions about content. Separate storage enables typed link queries, bulk operations, and provenance tracking that would be awkward in a flat tumbler space. |
-| **Consequence** | Cannot address a specific link by tumbler. Links are identified by `(from_tumbler, to_tumbler, link_type)` tuple. Nelson's "link as addressable content" pattern is lost — a link cannot itself be the target of another link. |
+| **Consequence** | Cannot address a specific link by tumbler. Links are identified by `(from_tumbler, to_tumbler, link_type)` tuple. Nelson's "link as addressable content" pattern is lost — a link cannot itself be the target of another link. This forecloses meta-links (annotations on annotations, trust provenance on citations) — a pattern Nelson's design permits (LM 4/41). |
 | **RF** | RF-10 |
 
 ### D4: TTL Expiry Violates Address Permanence
@@ -294,7 +294,7 @@ Every deliberate departure from Nelson's Xanadu design, with rationale and trace
 |---|---|
 | **Nelson** | "ALL ADDRESSES REMAIN VALID" (LM 4/19). Write-once address space. |
 | **Nexus** | Entries with `expires_at` set become unresolvable after TTL. Tumblers are never *reused* (high-water mark), but expired entries are tombstoned. |
-| **Rationale** | Cached query plans (30-day TTL) are not the docuverse — they're operational ephemera. Permanent entries (`expires_at=""`) honor the permanence principle. The TTL system is scoped to T2 plan library, not the catalog itself. |
+| **Rationale** | Cached entries (query plans, ephemeral scratch documents) carry TTL. Permanent catalog entries use `expires_at=""` and are not affected. The departure from Nelson applies to any catalog entry with a non-empty `expires_at`, not just T2 plan library entries. |
 | **Consequence** | A tumbler that once resolved may stop resolving. Links to expired entries become orphans (detectable via `link_audit()`). |
 | **RF** | Catalog docstring (RDR-052 Xanadu critique) |
 
@@ -363,12 +363,16 @@ def __ge__(self, other: Tumbler) -> bool: ...
 
 @staticmethod
 def spans_overlap(a_start: Tumbler, a_end: Tumbler, b_start: Tumbler, b_end: Tumbler) -> bool:
-    """True if span [a_start, a_end] overlaps [b_start, b_end]."""
+    """True if positional span [a_start, a_end] overlaps [b_start, b_end].
+    
+    Applies only to positional spans (line-range, chunk-index). Content-hash
+    spans (chash:) carry no ordering — overlap is undefined for them.
+    """
 ```
 
 No `distance()` — per RF-4, Nelson's difference tumbler is itself a tumbler (non-commutative, bound to an address). For span overlap detection, comparison operators suffice.
 
-Ordering enables: `sorted(tumblers)`, span overlap detection, span-weighted reranking.
+Ordering enables: `sorted(tumblers)`, span overlap detection, positional span-weighted reranking. For `chash:` spans, reranking uses a binary signal: "this chunk is referenced by a link" vs "it is not."
 
 #### Component 2: Content-Addressed Spans
 
@@ -387,7 +391,13 @@ from_span = "10-20"       # line range 10-20
 
 The `chash:` prefix identifies content-addressed spans. New links use `chash:` when `chunk_text_hash` is available.
 
+**Validation**: Update `_SPAN_PATTERN` regex in `catalog.py` to accept `chash:[0-9a-f]{64}` as a valid span format. Without this, `link()` rejects chash spans at the validation gate.
+
 **Resolution**: `resolve_span(span_str, physical_collection)` queries ChromaDB for the chunk with matching `chunk_text_hash` in metadata. Returns the chunk content and position. Falls back to position-based resolution for legacy spans without the `chash:` prefix.
+
+**Audit extension**: `link_audit(t3=None)` — when a T3 client is provided, verifies that `chash:` spans still resolve (the referenced chunk_text_hash exists in ChromaDB). Uses `EphemeralClient` in tests per existing patterns.
+
+**Span policy**: Spans are optional on all link types. Agents creating `cites` or `implements` links that can identify a specific chunk should provide `from_span=chash:{chunk_text_hash}`. Document-to-document links with no chunk context leave `from_span=""`.
 
 **No migration command needed** (RF-7): zero existing span links. Content-hash spans are the default from day one.
 
@@ -397,8 +407,9 @@ The `chash:` prefix identifies content-addressed spans. New links use `chash:` w
 |---|---|---|
 | Tumbler ordering | `tumbler.py` Tumbler class | Extend — add comparison dunder methods |
 | Content-hash spans | `catalog.py` link(), link_audit() | Extend — new span format + resolution |
-| Span migration | `commands/catalog.py` | New subcommand `nx catalog migrate-spans` |
+| Span validation | `catalog.py` _SPAN_PATTERN | Extend — add `chash:` format to regex |
 | Span resolution | `catalog.py` resolve_chunk() | Extend — add content-hash resolution path |
+| Span audit | `catalog.py` link_audit() | Extend — optional T3 client for chash verification |
 
 ### Decision Rationale
 
@@ -470,17 +481,21 @@ TDD: ordering edge cases including RF-5 zero-segment case (`1.1.3 < 1.1.3.0`), d
 
 In all four indexers (code, prose, PDF, markdown), compute `chunk_text_hash = hashlib.sha256(chunk_text.encode()).hexdigest()` and include in ChromaDB metadata alongside existing file-level `content_hash`.
 
-#### Step 2: Extend span format and resolution
+#### Step 2: Update `_SPAN_PATTERN` and span resolution
 
-Add `chash:` prefix parsing to span resolution. `resolve_span()` queries ChromaDB for chunk with matching `chunk_text_hash` metadata.
+Update `_SPAN_PATTERN` in `catalog.py` to accept `chash:[0-9a-f]{64}` format. Add `chash:` prefix parsing to span resolution. `resolve_span()` queries ChromaDB for chunk with matching `chunk_text_hash` metadata.
 
 #### Step 3: Update link creation to use chunk-text-hash spans
 
-When creating links with spans, look up the chunk's `chunk_text_hash` from ChromaDB and use `chash:{chunk_text_hash}` format.
+When creating links with spans, look up the chunk's `chunk_text_hash` from ChromaDB and use `chash:{chunk_text_hash}` format. Span policy: optional on all link types; agents provide when they can identify a specific chunk.
 
-#### Step 4: Tests
+#### Step 4: Extend `link_audit()` for chash verification
 
-TDD: chunk_text_hash computation, content-hash resolution, fallback to position for legacy, stale hash detection via link_audit().
+Add `link_audit(t3=None)` — when T3 client provided, verify `chash:` spans still resolve in ChromaDB. Uses `EphemeralClient` in tests.
+
+#### Step 5: Tests
+
+TDD: `_SPAN_PATTERN` accepts chash format, chunk_text_hash computation, content-hash resolution, fallback to position for legacy, `link_audit(t3=...)` detects missing hashes.
 
 ## Test Plan
 
@@ -488,10 +503,13 @@ TDD: chunk_text_hash computation, content-hash resolution, fallback to position 
 - **Scenario**: `Tumbler.parse("1.1.3") < Tumbler.parse("1.2.1")` — **Verify**: True (parent differs)
 - **Scenario**: `Tumbler.parse("1.1.3") < Tumbler.parse("1.1.3.0")` — **Verify**: True (RF-5 parent < child)
 - **Scenario**: Span overlap between `[1.1.3, 1.1.7]` and `[1.1.5, 1.1.10]` — **Verify**: True
+- **Scenario**: No overlap between `[1.1.1, 1.1.3]` and `[1.1.5, 1.1.7]` — **Verify**: False
 - **Scenario**: `chunk_text_hash` present in ChromaDB metadata after indexing — **Verify**: distinct per chunk
 - **Scenario**: Link with `from_span="chash:abc123"` resolves to correct chunk — **Verify**: content matches
 - **Scenario**: Re-index document, resolve chunk-text-hash span — **Verify**: same content if chunk unchanged
 - **Scenario**: Re-index with different chunking, resolve chunk-text-hash span — **Verify**: graceful fallback (hash not found, fall back to position)
+- **Scenario**: `link()` with `from_span="chash:abc..."` (64 hex chars) — **Verify**: accepted by `_SPAN_PATTERN`
+- **Scenario**: `link_audit(t3=ephemeral_client)` with chash span pointing to missing hash — **Verify**: reported in stale spans
 
 ## Validation
 
