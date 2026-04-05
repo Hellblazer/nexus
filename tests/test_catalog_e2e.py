@@ -390,6 +390,188 @@ class TestLinkLifecycleE2E:
         assert len(cat.link_query(link_type="cites")) == 2
 
 
+class TestMCPGraphTraversalE2E:
+    """The core value proposition: index → search catalog → traverse links → get collections."""
+
+    def _index_and_inject(self, catalog_repo, registry, local_t3, catalog_env, monkeypatch):
+        from nexus.indexer import index_repository
+        from nexus.mcp_server import _inject_catalog, _reset_singletons
+
+        monkeypatch.setenv("NX_LOCAL", "1")
+        with patch("nexus.db.make_t3", return_value=local_t3), \
+             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+            index_repository(catalog_repo, registry)
+
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        _reset_singletons()
+        _inject_catalog(cat)
+        return cat
+
+    def test_search_then_traverse_links(
+        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
+    ):
+        """Agent workflow: search catalog → find entry → traverse links → get connected docs."""
+        from nexus.mcp_server import catalog_links, catalog_search
+
+        cat = self._index_and_inject(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
+
+        # Step 1: agent searches for a code file by name
+        results = catalog_search(query="ttl")
+        assert len(results) >= 1
+        tumbler = results[0]["tumbler"]
+
+        # Step 2: agent traverses the link graph from that entry
+        graph = catalog_links(tumbler=tumbler, depth=1)
+        assert "nodes" in graph
+        assert "edges" in graph
+        # The indexer hook auto-generates implements-heuristic links
+        # so the code file should have outbound links to matching RDRs
+        node_tumblers = {n["tumbler"] for n in graph["nodes"]}
+        assert tumbler in node_tumblers  # starting node included
+
+    def test_link_creation_via_mcp_with_title(
+        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
+    ):
+        """Agent creates a link using document titles, not tumblers."""
+        from nexus.mcp_server import catalog_link, catalog_link_query
+
+        self._index_and_inject(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
+
+        # Create a 'relates' link between two entries using exact titles
+        # (exact title match bypasses the ambiguity guard)
+        result = catalog_link(
+            from_tumbler="types.py", to_tumbler="corpus.py",
+            link_type="relates", created_by="test",
+        )
+        assert "error" not in result
+        assert result["created"] is True
+
+        # Verify via query
+        links = catalog_link_query(link_type="relates", created_by="test")
+        assert len(links) >= 1
+
+    def test_catalog_link_audit_after_indexing(
+        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
+    ):
+        """Audit reports correct stats after real indexing."""
+        from nexus.mcp_server import catalog_link_audit
+
+        self._index_and_inject(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
+
+        audit = catalog_link_audit()
+        assert "error" not in audit
+        assert audit["total"] >= 1  # auto-generated links exist
+        assert "implements-heuristic" in audit["by_type"]
+        assert audit["orphaned_count"] == 0  # all endpoints live
+
+
+class TestMCPStorePutCatalogE2E:
+    """MCP store_put creates catalog entries — the primary agent write path."""
+
+    def test_store_put_registers_in_catalog(self, tmp_path, monkeypatch):
+        from nexus.mcp_server import _reset_singletons, store_put
+
+        catalog_dir = tmp_path / "catalog"
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        cat = Catalog.init(catalog_dir)
+
+        # Pre-create a knowledge curator owner (the hook expects this)
+        cat.register_owner("knowledge", "curator")
+
+        _reset_singletons()
+
+        # Simulate what an agent does: store_put via MCP
+        with patch("nexus.mcp_server._get_t3") as mock_t3:
+            mock_db = MagicMock()
+            mock_db.put.return_value = "doc-abc123"
+            mock_t3.return_value = mock_db
+
+            result = store_put(
+                content="# Research: Vector Indexing\n\nFindings about HNSW...",
+                collection="knowledge",
+                title="research-vector-indexing",
+                tags="research,embeddings",
+            )
+
+        assert "Stored" in result
+
+        # Verify the catalog entry was created
+        cat2 = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+        entry = cat2.by_doc_id("doc-abc123")
+        assert entry is not None
+        assert entry.title == "research-vector-indexing"
+
+
+class TestTumblerPermanenceE2E:
+    """Tumbler permanence under real conditions: index → delete → compact → re-index."""
+
+    def test_tumblers_stable_across_delete_compact_reindex(
+        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
+    ):
+        from nexus.indexer import index_repository
+
+        monkeypatch.setenv("NX_LOCAL", "1")
+        with patch("nexus.db.make_t3", return_value=local_t3), \
+             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+            index_repository(catalog_repo, registry)
+
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        original_tumblers = {
+            r[0] for r in cat._db.execute("SELECT tumbler FROM documents").fetchall()
+        }
+        original_count = len(original_tumblers)
+
+        # Delete one document
+        first_tumbler = sorted(original_tumblers)[0]
+        from nexus.catalog.tumbler import Tumbler
+        cat.delete_document(Tumbler.parse(first_tumbler))
+
+        # Compact (removes tombstones)
+        cat.compact()
+
+        # Re-index — new files should get NEW tumblers, not reuse deleted one
+        with patch("nexus.db.make_t3", return_value=local_t3), \
+             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+            index_repository(catalog_repo, registry, force=True)
+
+        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        new_tumblers = {
+            r[0] for r in cat2._db.execute("SELECT tumbler FROM documents").fetchall()
+        }
+
+        # The deleted tumbler must NOT reappear
+        assert first_tumbler not in new_tumblers, \
+            f"Deleted tumbler {first_tumbler} was reused — permanent addressing violated"
+        # We should have at least as many docs as before (minus 1 deleted, plus re-registered)
+        assert len(new_tumblers) >= original_count - 1
+
+
+class TestSpanTransclusionE2E:
+    """Span-addressed links with text resolution."""
+
+    def test_link_with_line_span_resolves_text(self, tmp_path):
+        catalog_dir = tmp_path / "catalog"
+        cat = Catalog.init(catalog_dir)
+        owner = cat.register_owner("test", "repo", repo_hash="e2etest")
+
+        # Create a real file with known content
+        src_file = tmp_path / "source.py"
+        src_file.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+
+        doc_a = cat.register(owner, "source.py", content_type="code",
+                             file_path=str(src_file))
+        doc_b = cat.register(owner, "target.py", content_type="code",
+                             file_path="target.py")
+
+        # Create a link with a span pointing to lines 2-4 of the source
+        cat.link(doc_a, doc_b, "quotes", created_by="user",
+                 from_span="2-4", to_span="")
+
+        # Resolve the span — should return the actual text
+        text = cat.resolve_span(doc_a, "2-4")
+        assert text == "line2\nline3\nline4"
+
+
 class TestCatalogRebuildFromJSONL:
     """A fresh Catalog instance rebuilds correctly from JSONL truth."""
 
