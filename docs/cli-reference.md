@@ -166,7 +166,9 @@ Document catalog — track indexed documents and the relationships between them.
 nx catalog setup [--remote URL]
 ```
 
-One-command onboarding: creates the catalog, populates from existing T3 collections and repos, generates links. Run once after installing or upgrading.
+One-command onboarding: creates the catalog, populates from existing T3 collections and repos, generates links. Run once after installing or upgrading. Warns if no git remote is configured (cloud users should add one for durability).
+
+On a new machine with an existing catalog remote: `nx catalog setup --remote <url>` clones from the remote instead of creating an empty catalog.
 
 ### nx catalog search
 
@@ -208,7 +210,16 @@ nx catalog unlink FROM TO [--type TYPE]
 
 Remove link(s). Omit `--type` to remove all link types between the pair.
 
-### nx catalog list / stats / owners / delete / sync / pull
+### nx catalog sync / pull
+
+```
+nx catalog sync [-m MESSAGE]     # commit JSONL changes + push to remote (if configured)
+nx catalog pull                  # pull from remote + rebuild SQLite
+```
+
+`sync` is called automatically at session close (via the Stop hook) when JSONL files have changed. Manual use is rarely needed.
+
+### nx catalog list / stats / owners / delete
 
 Standard catalog management. Run `nx catalog COMMAND --help` for details.
 

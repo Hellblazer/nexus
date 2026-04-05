@@ -53,6 +53,25 @@ The highest-signal chunks are typically the **Problem Statement** (best for dete
 
 `/nx:rdr-accept` optionally decomposes the Implementation Plan into beads (epic + tasks) via the planning chain. The `epic_bead` T2 field links each accepted decision to its implementation work items. Session hooks inject T2 context and the active bead into spawned agents, so they pick up where the previous session left off.
 
+## Catalog — document registry and link graph
+
+When the [catalog](catalog.md) is initialized, RDR lifecycle skills create typed links that connect RDRs to each other and to the broader knowledge base:
+
+| Lifecycle stage | What happens in the catalog |
+|---|---|
+| `nx index rdr` / `nx index repo` | RDR document registered with tumbler, title from frontmatter, content_type=rdr |
+| `/nx:rdr-research add` | `cites` link from RDR to referenced paper (if indexed in catalog) |
+| `/nx:rdr-gate` | Prior-art search uses `catalog_search` + `catalog_links` before falling back to T3 |
+| `/nx:rdr-accept` | `relates` links to topically related RDRs found during planning |
+| `/nx:rdr-show` | Displays inbound/outbound catalog links (implements-heuristic, cites, supersedes) |
+| `/nx:rdr-close` (Superseded) | `supersedes` link between new and old RDR |
+| `/nx:rdr-close` (Implemented) | `cites` links from RDR to referenced research papers |
+| Indexer hook | `implements-heuristic` links from code files to RDRs (title substring match) |
+
+This means `nx catalog links "RDR-051"` shows which code implements it, what research it cites, and what it supersedes — without parsing markdown.
+
+All catalog steps are skipped silently if the catalog isn't initialized. T2 and the markdown file remain the authorities.
+
 ## Learning from post-mortems
 
 `/nx:rdr-close` creates a post-mortem template for drift analysis. Findings from post-mortems feed directly into the next RDR:

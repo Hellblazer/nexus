@@ -155,14 +155,16 @@ cd ~/.config/nexus/catalog
 git remote add origin git@github.com:you/nexus-catalog.git
 ```
 
-Then periodically:
+The catalog auto-syncs at session close — if JSONL files have changed, the Stop hook runs `nx catalog sync` automatically. This commits locally and pushes to the remote if one is configured. No manual sync needed during normal use.
+
+For manual sync:
 
 ```bash
 nx catalog sync                # commit + push to remote
 nx catalog pull                # pull from remote + rebuild SQLite
 ```
 
-On a new machine, `nx catalog init --remote <url>` clones the remote and rebuilds SQLite. Your tumblers, links, and full document registry are restored.
+**New machine restore**: `nx catalog setup --remote <url>` clones from the remote instead of creating an empty catalog. Your tumblers, links, and full document registry are restored instantly.
 
 **CI/ephemeral environments**: configure `NEXUS_CATALOG_PATH` to point at a persistent volume, or use `init --remote` on each run to clone from the remote. The catalog rebuilds SQLite from JSONL in milliseconds.
 
