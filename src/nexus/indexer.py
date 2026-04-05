@@ -124,16 +124,31 @@ def _git_ls_files(repo: Path, *, include_untracked: bool = False) -> list[Path]:
     By default returns only tracked (committed/staged) files.
     With *include_untracked*, also includes untracked files that are not
     ignored by .gitignore / .git/info/exclude / global gitignore.
+
+    In a git repo (.git exists), failure raises RuntimeError — silent fallback
+    to rglob would index .gitignored secrets like .env (nexus-3ov6).
+    Non-git directories return [] so the caller can use rglob.
     """
+    is_git_repo = (repo / ".git").is_dir()
     args = ["git", "ls-files", "--cached", "-z"]
     if include_untracked:
         args.extend(["--others", "--exclude-standard"])
-    result = subprocess.run(
-        args, cwd=repo, capture_output=True, text=True, timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            args, cwd=repo, capture_output=True, text=True, timeout=60,
+        )
+    except Exception as exc:
+        if is_git_repo:
+            raise RuntimeError(
+                f"git ls-files failed in git repo {repo}: {exc}"
+            ) from exc
+        return []
     if result.returncode != 0:
-        _log.warning("git ls-files failed, falling back to rglob", error=result.stderr.strip())
-        return []  # caller should fall back
+        if is_git_repo:
+            raise RuntimeError(
+                f"git ls-files failed in git repo {repo}: {result.stderr.strip()}"
+            )
+        return []  # non-git directory — caller uses rglob
     # -z uses NUL separators (handles filenames with spaces/newlines)
     paths = []
     for rel_str in result.stdout.split("\0"):

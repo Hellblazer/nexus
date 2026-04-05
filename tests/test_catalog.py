@@ -399,3 +399,27 @@ class TestRebuild:
         cat2 = Catalog(tmp_path / "catalog", tmp_path / "catalog" / ".catalog.db2")
         cat2.rebuild()
         assert cat2.resolve(doc) is None
+
+
+# ── nexus-f2vp: _ensure_consistent sets degraded flag on failure ─────────
+
+
+class TestEnsureConsistentDegradedFlag:
+    """Catalog must surface rebuild failures, not silently serve stale data."""
+
+    def test_degraded_false_on_success(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        assert cat.degraded is False
+
+    def test_degraded_true_on_rebuild_failure(self, tmp_path):
+        """Rebuild failure (e.g. disk full, SQLite corruption) sets degraded flag."""
+        from unittest.mock import patch
+
+        catalog_dir = tmp_path / "catalog"
+        catalog_dir.mkdir()
+        (catalog_dir / "documents.jsonl").write_text("{}\n")
+
+        with patch("nexus.catalog.catalog.CatalogDB.rebuild", side_effect=RuntimeError("disk full")):
+            cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+
+        assert cat.degraded is True

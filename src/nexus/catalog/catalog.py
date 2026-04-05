@@ -111,6 +111,7 @@ class Catalog:
         self._owners_path = catalog_dir / "owners.jsonl"
         self._documents_path = catalog_dir / "documents.jsonl"
         self._links_path = catalog_dir / "links.jsonl"
+        self.degraded: bool = False
         # C1+C2: rebuild SQLite from JSONL on construction to ensure consistency
         if self._documents_path.exists():
             self._ensure_consistent()
@@ -133,15 +134,21 @@ class Catalog:
         )
 
     def _ensure_consistent(self) -> None:
-        """Rebuild SQLite from JSONL truth. Called when JSONL mtime changes."""
+        """Rebuild SQLite from JSONL truth. Called when JSONL mtime changes.
+
+        Sets ``degraded`` flag on failure so callers can surface the stale
+        state rather than silently serving outdated data (nexus-f2vp).
+        """
         try:
             owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
             documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
             links_dict = read_links(self._links_path) if self._links_path.exists() else {}
             _log.debug("catalog_consistency_rebuild")
             self._db.rebuild(owners, documents, list(links_dict.values()))
-        except Exception:
-            _log.debug("catalog_consistency_check_failed", exc_info=True)
+            self.degraded = False
+        except Exception as exc:
+            _log.warning("catalog_consistency_rebuild_failed", error=str(exc), exc_info=True)
+            self.degraded = True
 
     def jsonl_paths(self) -> tuple[Path, ...]:
         """Public accessor for JSONL file paths (used by mtime checks)."""

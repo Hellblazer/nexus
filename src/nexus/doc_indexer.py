@@ -223,7 +223,10 @@ def _embed_with_fallback(
 
         if all_embeddings:
             return all_embeddings, model
-        model = "voyage-4"
+        raise RuntimeError(
+            f"CCE embedding returned no vectors for {len(chunks)} chunks — "
+            "refusing to fall through to voyage-4 (would corrupt vector space)"
+        )
     # Standard embedding path (voyage-4 or any non-CCE model)
     all_emb: list[list[float]] = []
     for i in range(0, len(chunks), _EMBED_BATCH_SIZE):

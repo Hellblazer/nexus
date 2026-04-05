@@ -38,13 +38,18 @@ def info_cmd(name: str) -> None:
     info = db.collection_info(name)
 
     col = db.get_or_create_collection(name)
-    # Sample first page (300 records max) — best-effort for last_indexed timestamp.
-    # ChromaDB Cloud caps col.get() at 300 records; full pagination is expensive
-    # and unnecessary for a display-only timestamp.
-    result = col.get(limit=300, include=["metadatas"])
-    metadatas: list[dict] = result.get("metadatas") or []
-    timestamps = [m["indexed_at"] for m in metadatas if m and "indexed_at" in m]
-    last_indexed = max(timestamps) if timestamps else "unknown"
+    # Paginate for accurate MAX(indexed_at) timestamp (nexus-j857).
+    all_timestamps: list[str] = []
+    offset = 0
+    while True:
+        batch = col.get(limit=300, offset=offset, include=["metadatas"])
+        for meta in batch.get("metadatas") or []:
+            if meta and "indexed_at" in meta:
+                all_timestamps.append(meta["indexed_at"])
+        if len(batch.get("ids", [])) < 300:
+            break
+        offset += 300
+    last_indexed = max(all_timestamps) if all_timestamps else "unknown"
 
     click.echo(f"Collection:  {match['name']}")
     click.echo(f"Documents:   {match['count']}")
@@ -84,34 +89,30 @@ def reindex_cmd(name: str, force: bool) -> None:
 
     before_count = info["count"]
 
-    # 2. Pre-delete safety: check for sourceless entries
+    # 2. Pre-delete safety: paginate for sourceless entries (nexus-unyc)
     col = db.get_or_create_collection(name)
-    sample = col.get(limit=100, include=["metadatas"])
-    sourceless = [
-        mid
-        for mid, meta in zip(sample["ids"], sample["metadatas"] or [])
-        if not (meta or {}).get("source_path")
-    ]
+    sourceless: list[str] = []
+    source_paths: set[str] = set()
+    offset = 0
+    while True:
+        batch = col.get(limit=300, offset=offset, include=["metadatas"])
+        for mid, meta in zip(batch["ids"], batch["metadatas"] or []):
+            sp = (meta or {}).get("source_path", "")
+            if sp:
+                source_paths.add(sp)
+            else:
+                sourceless.append(mid)
+        if len(batch["ids"]) < 300:
+            break
+        offset += 300
+
     if sourceless and not force:
         raise click.ClickException(
             f"{len(sourceless)} entries lack source_path (manual entries). "
             f"These cannot be re-indexed and will be LOST. Use --force to proceed."
         )
 
-    # 3. Gather distinct source paths before deleting (paginate)
-    source_paths: set[str] = set()
-    offset = 0
-    while True:
-        batch = col.get(limit=300, offset=offset, include=["metadatas"])
-        for meta in batch["metadatas"] or []:
-            sp = (meta or {}).get("source_path", "")
-            if sp:
-                source_paths.add(sp)
-        if len(batch["ids"]) < 300:
-            break
-        offset += 300
-
-    # 4. Delete collection
+    # 3. Delete collection
     click.echo(f"Deleting collection '{name}' ({before_count} documents)...")
     db.delete_collection(name)
 

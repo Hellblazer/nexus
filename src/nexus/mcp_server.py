@@ -189,8 +189,8 @@ def _get_catalog():
                     if current_mtime > _catalog_mtime:
                         _catalog_mtime = current_mtime
                         _catalog_instance._ensure_consistent()
-        except Exception:
-            pass  # stat failure is non-fatal
+        except OSError:
+            pass  # stat failure is non-fatal (file not found, permission denied)
     return _catalog_instance
 
 

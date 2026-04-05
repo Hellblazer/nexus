@@ -7,6 +7,10 @@ from collections.abc import Callable
 from typing import TypeVar
 from uuid import uuid4
 
+import structlog
+
+_log = structlog.get_logger(__name__)
+
 from nexus.db.t2 import T2Database
 from nexus.session import SESSIONS_DIR, find_ancestor_session
 
@@ -71,7 +75,8 @@ class T1Database:
         """Re-resolve the T1 server connection after a connectivity failure.
 
         Walks the PPID chain for a (possibly restarted) server record.
-        Falls back to EphemeralClient when no record is found.
+        Falls back to EphemeralClient when no record is found — but this
+        loses all prior scratch entries including flagged ones (nexus-uhch).
         Sets ``_dead=True`` immediately to prevent cascading reconnect loops.
         """
         import chromadb
@@ -88,6 +93,13 @@ class T1Database:
             )
             self._session_id = record["session_id"]
         else:
+            warnings.warn(
+                "T1 reconnect falling back to EphemeralClient — "
+                "all prior scratch entries (including flagged ones) are lost.",
+                stacklevel=2,
+            )
+            _log.warning("t1_reconnect_ephemeral_fallback_data_lost",
+                         session_id=self._session_id)
             self._client = chromadb.EphemeralClient()
             # session_id intentionally preserved from original construction.
 
@@ -184,16 +196,35 @@ class T1Database:
         return self._exec(_do)
 
     def list_entries(self) -> list[dict]:
-        """Return all entries belonging to this session."""
-        result = self._exec(lambda: self._col.get(
-            where={"session_id": self._session_id},
-            include=["documents", "metadatas"],
-        ))
+        """Return all entries belonging to this session.
+
+        Paginates to avoid ChromaDB default limit truncation (nexus-885n).
+        """
+        all_ids: list[str] = []
+        all_docs: list[str] = []
+        all_metas: list[dict] = []
+        offset = 0
+
+        def _page() -> dict:
+            return self._col.get(
+                where={"session_id": self._session_id},
+                include=["documents", "metadatas"],
+                limit=300,
+                offset=offset,
+            )
+
+        while True:
+            result = self._exec(_page)
+            all_ids.extend(result["ids"])
+            all_docs.extend(result["documents"])
+            all_metas.extend(result["metadatas"])
+            if len(result["ids"]) < 300:
+                break
+            offset += 300
+
         return [
             self._to_row(did, doc, meta)
-            for did, doc, meta in zip(
-                result["ids"], result["documents"], result["metadatas"]
-            )
+            for did, doc, meta in zip(all_ids, all_docs, all_metas)
         ]
 
     def flagged_entries(self) -> list[dict]:
@@ -265,19 +296,26 @@ class T1Database:
     # ── Clear ─────────────────────────────────────────────────────────────────
 
     def clear(self) -> int:
-        """Remove all session entries. Returns the count deleted."""
+        """Remove all session entries. Returns the count deleted.
+
+        Paginates to avoid ChromaDB default limit truncation (nexus-885n).
+        """
         def _do() -> int:
-            # Query by session_id directly — the former total-count early-exit was
-            # incorrect: if the collection has entries from OTHER sessions (count > 0)
-            # but THIS session has none, the early return would still proceed to the
-            # get() call unnecessarily.  Removing it is cleaner and correct.
-            result = self._col.get(
-                where={"session_id": self._session_id},
-                include=[],
-            )
-            ids = result["ids"]
-            if ids:
-                self._col.delete(ids=ids)
-            return len(ids)
+            all_ids: list[str] = []
+            offset = 0
+            while True:
+                result = self._col.get(
+                    where={"session_id": self._session_id},
+                    include=[],
+                    limit=300,
+                    offset=offset,
+                )
+                all_ids.extend(result["ids"])
+                if len(result["ids"]) < 300:
+                    break
+                offset += 300
+            if all_ids:
+                self._col.delete(ids=all_ids)
+            return len(all_ids)
 
         return self._exec(_do)
