@@ -252,6 +252,12 @@ This means a single transient 504 from the ChromaDB Cloud gateway no longer abor
 multi-thousand-file indexing run. See [RDR-019](rdr/rdr-019-chromadb-transient-retry.md)
 for the full decision record.
 
+## Catalog Registration
+
+When you index a repo, every classified file is automatically registered in the [document catalog](catalog.md) with its tumbler address, content type, file path, and T3 collection name. Code files that match RDR titles by name get `implements-heuristic` links auto-generated.
+
+This means `nx catalog search` and `nx catalog links` work immediately after indexing — no separate setup step needed (assuming `nx catalog setup` was run once).
+
 ## Searching Indexed Repos
 
 ```bash
