@@ -351,6 +351,11 @@ def query(
     corpus: str = "knowledge",
     where: str = "",
     limit: int = 10,
+    author: str = "",
+    content_type: str = "",
+    follow_links: str = "",
+    depth: int = 1,
+    subtree: str = "",
 ) -> str:
     """Document-level semantic search for analytical questions.
 
@@ -361,6 +366,13 @@ def query(
     Use this for research questions where you need to know WHICH documents match,
     not just which text fragments. The calling agent handles analysis/synthesis.
 
+    Catalog-aware routing (optional — all require an initialized catalog):
+        author: Filter to documents by this author (catalog metadata search)
+        content_type: Filter to documents of this type (code, paper, rdr, knowledge)
+        follow_links: Follow links of this type from catalog results (e.g. "cites", "implements")
+        depth: BFS depth for follow_links traversal (default 1)
+        subtree: Tumbler prefix — search only documents in this subtree (e.g. "1.1")
+
     Args:
         question: Natural-language research question
         corpus: Corpus prefix or full collection name (default: knowledge).
@@ -368,24 +380,79 @@ def query(
         where: Metadata filter — KEY=VALUE, comma-separated.
                Example: "bib_year>=2020,tags=arch"
         limit: Maximum documents to return (default 10)
+        author: Filter by author (catalog metadata)
+        content_type: Filter by content type (catalog metadata)
+        follow_links: Follow link type from matched documents (catalog graph)
+        depth: BFS depth for follow_links (default 1)
+        subtree: Tumbler prefix to scope search to a subtree
     """
     try:
         from nexus.search_engine import search_cross_corpus
         t3 = _get_t3()
 
-        if corpus == "all":
-            corpus = "knowledge,code,docs,rdr"
+        # Catalog-aware routing: derive target collections from catalog metadata
+        catalog_collections: set[str] | None = None
+        has_catalog_params = author or content_type or follow_links or subtree
 
-        target: list[str] = []
-        all_names = _get_collection_names()
-        for part in corpus.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "__" in part:
-                target.append(part)
-            else:
-                target.extend(resolve_corpus(part, all_names))
+        if has_catalog_params:
+            from nexus.catalog.tumbler import Tumbler
+            cat = _get_catalog()
+            if cat is None:
+                return "Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'"
+
+            if subtree:
+                # Use descendants() directly — NOT catalog_search(owner=) which has depth-equality bug
+                desc = cat.descendants(subtree)
+                catalog_collections = {d["physical_collection"] for d in desc if d.get("physical_collection")}
+            elif author or content_type:
+                results = cat.find(author or question, content_type=content_type or None)
+                if author:
+                    results = [r for r in results if author.lower() in (r.author or "").lower()]
+                catalog_collections = {r.physical_collection for r in results if r.physical_collection}
+
+            if follow_links and catalog_collections is not None:
+                # Expand via link graph from matched documents
+                linked_collections: set[str] = set()
+                for r in (cat.find(author or question, content_type=content_type or None) if not subtree
+                          else [cat.resolve(Tumbler.parse(d["tumbler"])) for d in cat.descendants(subtree)]):
+                    if r is None:
+                        continue
+                    graph = cat.graph(r.tumbler if hasattr(r, 'tumbler') else r, depth=depth, link_type=follow_links)
+                    for node in graph["nodes"]:
+                        if node.physical_collection:
+                            linked_collections.add(node.physical_collection)
+                catalog_collections |= linked_collections
+            elif follow_links:
+                # follow_links without other filters: need at least a starting point
+                # Use question as catalog search to find starting documents
+                seed_results = cat.find(question)
+                catalog_collections = set()
+                for r in seed_results[:5]:  # limit seed to avoid explosion
+                    graph = cat.graph(r.tumbler, depth=depth, link_type=follow_links)
+                    for node in graph["nodes"]:
+                        if node.physical_collection:
+                            catalog_collections.add(node.physical_collection)
+
+            if catalog_collections is not None and not catalog_collections:
+                return f"No documents found matching catalog filters (author={author!r}, content_type={content_type!r}, subtree={subtree!r}, follow_links={follow_links!r})"
+
+        if catalog_collections is not None:
+            # Catalog routing overrides corpus param
+            target = [c for c in catalog_collections if c]
+        else:
+            if corpus == "all":
+                corpus = "knowledge,code,docs,rdr"
+
+            target: list[str] = []
+            all_names = _get_collection_names()
+            for part in corpus.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "__" in part:
+                    target.append(part)
+                else:
+                    target.extend(resolve_corpus(part, all_names))
 
         if not target:
             return f"No collections match corpus {corpus!r}"

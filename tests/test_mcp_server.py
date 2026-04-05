@@ -19,6 +19,7 @@ from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.mcp_server import (
+    _inject_catalog,
     _inject_t1,
     _inject_t3,
     _reset_singletons,
@@ -30,6 +31,7 @@ from nexus.mcp_server import (
     memory_search,
     plan_save,
     plan_search,
+    query,
     scratch,
     scratch_manage,
     search,
@@ -758,3 +760,97 @@ def test_get_catalog_propagates_non_os_errors():
         mock_catalog._ensure_consistent.side_effect = OSError("file not found")
         result = _get_catalog()  # should not raise
         assert result is mock_catalog
+
+
+# ── Enhanced query catalog-routing tests ─────────────────────────────────────
+
+
+@pytest.fixture()
+def catalog_with_docs(tmp_path):
+    """Catalog pre-loaded with test documents for query routing tests."""
+    from nexus.catalog.catalog import Catalog
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+    o1 = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+    o2 = cat.register_owner("papers", "curator")
+
+    cat.register(
+        o1, "indexer.py", content_type="code", file_path="src/nexus/indexer.py",
+        physical_collection="code__nexus", chunk_count=10, author="hal",
+    )
+    cat.register(
+        o1, "chunker.py", content_type="code", file_path="src/nexus/chunker.py",
+        physical_collection="code__nexus", chunk_count=5, author="hal",
+    )
+    cat.register(
+        o2, "Attention Paper", content_type="paper",
+        physical_collection="knowledge__papers", chunk_count=20,
+        author="Vaswani",
+    )
+    cat.register(
+        o2, "BERT Paper", content_type="paper",
+        physical_collection="knowledge__papers", chunk_count=15,
+        author="Devlin",
+    )
+    # Link: Attention Paper cites BERT Paper
+    cat.link(
+        cat.find("Attention Paper")[0].tumbler,
+        cat.find("BERT Paper")[0].tumbler,
+        "cites", created_by="test",
+    )
+    _inject_catalog(cat)
+    return cat
+
+
+class TestQueryCatalogRouting:
+    def test_query_no_catalog_params_backward_compat(self, t3):
+        """query() without catalog params works as before."""
+        t3.put(collection="knowledge__test", content="vector database chunking", title="doc1")
+        result = query(question="vector database", corpus="knowledge__test")
+        assert not result.startswith("Error:")
+
+    def test_query_author_filter(self, t3, catalog_with_docs):
+        """query(author=) routes to collections containing that author's docs."""
+        t3.put(collection="knowledge__papers", content="transformer attention mechanism", title="att")
+        result = query(question="attention", author="Vaswani")
+        assert not result.startswith("Error:")
+        # Should search knowledge__papers (where Vaswani's paper lives)
+        assert "knowledge__papers" in result or "No documents found" not in result
+
+    def test_query_content_type_filter(self, t3, catalog_with_docs):
+        """query(content_type=) routes to collections for that type."""
+        t3.put(collection="code__nexus", content="def index_repo(): chunking pipeline", title="idx")
+        result = query(question="index repo", content_type="code")
+        assert not result.startswith("Error:")
+
+    def test_query_subtree_filter(self, t3, catalog_with_docs):
+        """query(subtree=) uses descendants() to find collections in subtree."""
+        t3.put(collection="code__nexus", content="def chunk_file(): ast parsing", title="chk")
+        # Owner 1.1 = nexus repo, subtree should find code__nexus
+        result = query(question="chunk file", subtree="1.1")
+        assert not result.startswith("Error:")
+
+    def test_query_follow_links(self, t3, catalog_with_docs):
+        """query(follow_links=) expands search via catalog link graph."""
+        t3.put(collection="knowledge__papers", content="transformer attention is all you need", title="att-link")
+        result = query(question="attention", follow_links="cites")
+        assert not result.startswith("Error:")
+
+    def test_query_catalog_params_without_catalog(self, t3, monkeypatch):
+        """query() with catalog params but no catalog returns clear error."""
+        import nexus.mcp_server as mod
+        monkeypatch.setattr(mod, "_get_catalog", lambda: None)
+        result = query(question="test", author="someone")
+        assert "catalog not initialized" in result.lower()
+
+    def test_query_author_no_match(self, t3, catalog_with_docs):
+        """query(author=) with non-existent author returns no-match message."""
+        result = query(question="anything", author="NonexistentAuthor")
+        assert "No documents found matching catalog filters" in result
+
+    def test_query_subtree_empty(self, t3, catalog_with_docs):
+        """query(subtree=) for empty subtree returns no-match message."""
+        result = query(question="anything", subtree="9.9")
+        assert "No documents found matching catalog filters" in result
