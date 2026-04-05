@@ -290,3 +290,57 @@ Full audit of the current query pipeline implementation:
 **Variety (Ashby)**: The planner introduces O(9^N) combinatorial variety to solve problems with O(5) structural patterns — the catalog made 80% of the planner's variety redundant. Error recovery is under-engineered: one failure path (FAILED marker, continue with broken inputs), no retry, no fallback, no user guidance.
 
 **Homeostasis**: System is stuck in high-cost steady state (always-plan) because the save prompt blocks the positive feedback loop. Auto-cache creates the transition path to low-cost steady state (usually-template-match).
+
+### RF-6: Tumbler Hierarchy — Nelson vs Nexus vs ltree (2026-04-05)
+**Classification**: Verified — Literary Machines Ch. 4 + xanadu repo + codebase analysis | **Confidence**: HIGH
+
+**Nelson's tumbler design** (from Literary Machines and the xanadu Java implementation):
+
+| Capability | Nelson/Xanadu | Nexus | PostgreSQL ltree |
+|-----------|---------------|-------|------------------|
+| Hierarchy levels | 5 (server.user.document.version.element) | 3 (store.owner.document) | unlimited |
+| Span representation | First-class: pair of tumblers → range | Advisory strings on links | N/A |
+| Difference tumblers | Yes — relative widths via subtraction | No | N/A |
+| Tumbler arithmetic | Add (step forward), subtract (span width) | No | N/A |
+| Ghost elements | Yes — addressable even when empty | Partially (deferred concept nodes) | N/A |
+| Ancestor query | Implicit via tumbler line ordering | None | `@>` operator |
+| Descendant query | Implicit via span containment | `_prefix_sql` (single level only) | `<@` operator |
+| Path pattern matching | Via span-set operations | None | `~` lquery |
+| Links connect | Span-sets (arbitrary content ranges) | Documents (whole entries) | N/A |
+
+**What we're missing for query routing**:
+
+1. **No tumbler index on documents table** — `LIKE` queries do full scan. Fix: `CREATE INDEX idx_documents_tumbler ON documents(tumbler)`.
+
+2. **No descendants-at-any-depth** — `_prefix_sql` finds direct children only. `WHERE tumbler LIKE '1.1.%'` would find all descendants but we don't use it. This matters for `catalog_resolve(owner="1.1")` — should find everything under owner 1.1, not just direct children.
+
+3. **No ancestor lookup** — given tumbler `1.1.42`, no way to ask "what owner is this under?" without parsing the string in Python. SQLite can do this: split tumbler, query each prefix.
+
+4. **Spans are disconnected from search** — link spans (`from_span="chunks:3-7"`) are metadata strings, never used for search scoping. Nelson's system links SPANS of content; ours links whole documents. The query tool should be able to use span info to weight specific chunks higher.
+
+**What we CAN build with SQLite** (ltree-equivalent, no extension needed):
+
+```python
+def ancestors(tumbler: str) -> list[str]:
+    """Return all prefixes: '1.1.42' → ['1', '1.1', '1.1.42']"""
+    parts = tumbler.split('.')
+    return ['.'.join(parts[:i+1]) for i in range(len(parts))]
+
+def descendants(prefix: str) -> str:
+    """SQL WHERE clause for all descendants at any depth."""
+    return f"tumbler LIKE '{prefix}.%'"
+
+def depth(tumbler: str) -> int:
+    return tumbler.count('.') + 1
+
+def lca(t1: str, t2: str) -> str:
+    """Longest common ancestor."""
+    p1, p2 = t1.split('.'), t2.split('.')
+    common = []
+    for a, b in zip(p1, p2):
+        if a == b: common.append(a)
+        else: break
+    return '.'.join(common)
+```
+
+**Impact on RDR-052**: The enhanced `query` tool should support tumbler subtree scoping — `query(question="...", subtree="1.1")` searches all documents under owner 1.1 at any depth. This is the ltree `@>` equivalent and replaces `catalog_resolve` for many use cases. Implementation requires adding the tumbler index + a `descendants()` helper to catalog_db.py.
