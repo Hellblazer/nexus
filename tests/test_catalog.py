@@ -153,6 +153,16 @@ class TestUpdate:
         entry = cat.resolve(doc)
         assert entry.tumbler == doc
 
+    def test_update_merges_meta(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc = cat.register(owner, "a.py", content_type="knowledge", meta={"doc_id": "abc123"})
+        cat.update(doc, meta={"venue": "NeurIPS", "year_enriched": 2017})
+        entry = cat.resolve(doc)
+        # Both original and new keys should be present
+        assert entry.meta["doc_id"] == "abc123"
+        assert entry.meta["venue"] == "NeurIPS"
+
 
 class TestFind:
     def test_find_by_title(self, tmp_path):

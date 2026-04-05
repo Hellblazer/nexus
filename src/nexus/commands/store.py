@@ -3,6 +3,9 @@ import sys
 from pathlib import Path
 
 import click
+import structlog
+
+_log = structlog.get_logger(__name__)
 
 from nexus.corpus import t3_collection_name
 from nexus.db import make_t3
@@ -142,7 +145,7 @@ def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> None:
             meta={"doc_id": doc_id},
         )
     except Exception:
-        pass  # Never propagate
+        _log.debug("catalog_store_hook_failed", exc_info=True)
 
 
 @store.command("list")

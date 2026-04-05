@@ -160,4 +160,4 @@ def _catalog_enrich_hook(title: str, bib_meta: dict) -> None:
                 },
             )
     except Exception:
-        pass  # Never propagate
+        _log.debug("catalog_enrich_hook_failed", exc_info=True)

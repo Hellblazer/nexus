@@ -291,6 +291,11 @@ class Catalog:
                 "indexed_at": entry.indexed_at,
                 "meta": entry.meta,
             }
+            # Merge meta dict rather than replace
+            if "meta" in fields and isinstance(fields["meta"], dict):
+                merged_meta = dict(rec_dict["meta"])
+                merged_meta.update(fields["meta"])
+                fields = dict(fields, meta=merged_meta)
             rec_dict.update(fields)
             self._append_jsonl(self._documents_path, rec_dict)
             # Upsert SQLite
