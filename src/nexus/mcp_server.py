@@ -1031,8 +1031,11 @@ def catalog_search(
     cat, err = _require_catalog()
     if err:
         return [{"error": err}]
-    results = cat.find(query, content_type=content_type or None)[:limit]
-    return [_entry_to_dict(e) for e in results]
+    try:
+        results = cat.find(query, content_type=content_type or None)[:limit]
+        return [_entry_to_dict(e) for e in results]
+    except Exception as e:
+        return [{"error": str(e)}]
 
 
 @mcp.tool()
@@ -1044,22 +1047,25 @@ def catalog_show(
     cat, err = _require_catalog()
     if err:
         return {"error": err}
-    from nexus.catalog.tumbler import Tumbler
+    try:
+        from nexus.catalog.tumbler import Tumbler
 
-    entry = None
-    if tumbler:
-        entry = cat.resolve(Tumbler.parse(tumbler))
-    elif title:
-        results = cat.find(title)
-        entry = results[0] if results else None
+        entry = None
+        if tumbler:
+            entry = cat.resolve(Tumbler.parse(tumbler))
+        elif title:
+            results = cat.find(title)
+            entry = results[0] if results else None
 
-    if entry is None:
-        return {"error": f"Not found: {tumbler or title}"}
+        if entry is None:
+            return {"error": f"Not found: {tumbler or title}"}
 
-    d = _entry_to_dict(entry)
-    d["links_from"] = [_link_to_dict(l) for l in cat.links_from(entry.tumbler)]
-    d["links_to"] = [_link_to_dict(l) for l in cat.links_to(entry.tumbler)]
-    return d
+        d = _entry_to_dict(entry)
+        d["links_from"] = [_link_to_dict(l) for l in cat.links_from(entry.tumbler)]
+        d["links_to"] = [_link_to_dict(l) for l in cat.links_to(entry.tumbler)]
+        return d
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -1073,33 +1079,36 @@ def catalog_list(
     cat, err = _require_catalog()
     if err:
         return [{"error": err}]
-    from nexus.catalog.tumbler import Tumbler
+    try:
+        from nexus.catalog.tumbler import Tumbler
 
-    if owner:
-        entries = cat.by_owner(Tumbler.parse(owner))
-    else:
-        import json as _json
+        if owner:
+            entries = cat.by_owner(Tumbler.parse(owner))
+        else:
+            import json as _json
 
-        rows = cat._db._conn.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-            "FROM documents LIMIT ? OFFSET ?",
-            (limit, offset),
-        ).fetchall()
-        from nexus.catalog.catalog import CatalogEntry
+            rows = cat._db._conn.execute(
+                "SELECT tumbler, title, author, year, content_type, file_path, "
+                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+                "FROM documents LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+            from nexus.catalog.catalog import CatalogEntry
 
-        entries = [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=_json.loads(r[11]) if r[11] else {},
-            )
-            for r in rows
-        ]
-    if content_type:
-        entries = [e for e in entries if e.content_type == content_type]
-    return [_entry_to_dict(e) for e in entries[:limit]]
+            entries = [
+                CatalogEntry(
+                    tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
+                    content_type=r[4], file_path=r[5], corpus=r[6],
+                    physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
+                    indexed_at=r[10], meta=_json.loads(r[11]) if r[11] else {},
+                )
+                for r in rows
+            ]
+        if content_type:
+            entries = [e for e in entries if e.content_type == content_type]
+        return [_entry_to_dict(e) for e in entries[:limit]]
+    except Exception as e:
+        return [{"error": str(e)}]
 
 
 @mcp.tool()
@@ -1118,18 +1127,21 @@ def catalog_register(
     cat, err = _require_catalog()
     if err:
         return {"error": err}
-    import json as _json
+    try:
+        import json as _json
 
-    from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.tumbler import Tumbler
 
-    tumbler = cat.register(
-        Tumbler.parse(owner), title,
-        content_type=content_type, file_path=file_path,
-        corpus=corpus, author=author, year=year,
-        physical_collection=physical_collection,
-        meta=_json.loads(meta) if meta else None,
-    )
-    return {"tumbler": str(tumbler), "title": title}
+        tumbler = cat.register(
+            Tumbler.parse(owner), title,
+            content_type=content_type, file_path=file_path,
+            corpus=corpus, author=author, year=year,
+            physical_collection=physical_collection,
+            meta=_json.loads(meta) if meta else None,
+        )
+        return {"tumbler": str(tumbler), "title": title}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -1146,25 +1158,30 @@ def catalog_update(
     cat, err = _require_catalog()
     if err:
         return {"error": err}
-    import json as _json
+    try:
+        import json as _json
 
-    from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.tumbler import Tumbler
 
-    fields: dict = {}
-    if title:
-        fields["title"] = title
-    if author:
-        fields["author"] = author
-    if year:
-        fields["year"] = year
-    if corpus:
-        fields["corpus"] = corpus
-    if physical_collection:
-        fields["physical_collection"] = physical_collection
-    if meta:
-        fields["meta"] = _json.loads(meta)
-    cat.update(Tumbler.parse(tumbler), **fields)
-    return {"tumbler": tumbler, "updated": list(fields.keys())}
+        fields: dict = {}
+        if title:
+            fields["title"] = title
+        if author:
+            fields["author"] = author
+        if year:
+            fields["year"] = year
+        if corpus:
+            fields["corpus"] = corpus
+        if physical_collection:
+            fields["physical_collection"] = physical_collection
+        if meta:
+            fields["meta"] = _json.loads(meta)
+        if not fields:
+            return {"error": "No fields to update"}
+        cat.update(Tumbler.parse(tumbler), **fields)
+        return {"tumbler": tumbler, "updated": list(fields.keys())}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -1180,14 +1197,17 @@ def catalog_link(
     cat, err = _require_catalog()
     if err:
         return {"error": err}
-    from nexus.catalog.tumbler import Tumbler
+    try:
+        from nexus.catalog.tumbler import Tumbler
 
-    cat.link(
-        Tumbler.parse(from_tumbler), Tumbler.parse(to_tumbler),
-        link_type, created_by,
-        from_span=from_span, to_span=to_span,
-    )
-    return {"from": from_tumbler, "to": to_tumbler, "type": link_type}
+        cat.link(
+            Tumbler.parse(from_tumbler), Tumbler.parse(to_tumbler),
+            link_type, created_by,
+            from_span=from_span, to_span=to_span,
+        )
+        return {"from": from_tumbler, "to": to_tumbler, "type": link_type}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -1201,13 +1221,16 @@ def catalog_links(
     cat, err = _require_catalog()
     if err:
         return [{"error": err}]
-    from nexus.catalog.tumbler import Tumbler
+    try:
+        from nexus.catalog.tumbler import Tumbler
 
-    result = cat.graph(
-        Tumbler.parse(tumbler), depth=depth,
-        direction=direction, link_type=link_type,
-    )
-    return [_link_to_dict(e) for e in result["edges"]]
+        result = cat.graph(
+            Tumbler.parse(tumbler), depth=depth,
+            direction=direction, link_type=link_type,
+        )
+        return [_link_to_dict(e) for e in result["edges"]]
+    except Exception as e:
+        return [{"error": str(e)}]
 
 
 @mcp.tool()
@@ -1221,27 +1244,30 @@ def catalog_resolve(
     cat, err = _require_catalog()
     if err:
         return [f"Error: {err}"]
-    from nexus.catalog.tumbler import Tumbler
+    try:
+        from nexus.catalog.tumbler import Tumbler
 
-    collections: set[str] = set()
-    if tumbler:
-        entry = cat.resolve(Tumbler.parse(tumbler))
-        if entry and entry.physical_collection:
-            collections.add(entry.physical_collection)
-    if owner:
-        entries = cat.by_owner(Tumbler.parse(owner))
-        for e in entries:
-            if e.physical_collection:
-                collections.add(e.physical_collection)
-    if corpus:
-        rows = cat._db._conn.execute(
-            "SELECT DISTINCT physical_collection FROM documents WHERE corpus = ?",
-            (corpus,),
-        ).fetchall()
-        for r in rows:
-            if r[0]:
-                collections.add(r[0])
-    return sorted(collections)
+        collections: set[str] = set()
+        if tumbler:
+            entry = cat.resolve(Tumbler.parse(tumbler))
+            if entry and entry.physical_collection:
+                collections.add(entry.physical_collection)
+        if owner:
+            entries = cat.by_owner(Tumbler.parse(owner))
+            for e in entries:
+                if e.physical_collection:
+                    collections.add(e.physical_collection)
+        if corpus:
+            rows = cat._db._conn.execute(
+                "SELECT DISTINCT physical_collection FROM documents WHERE corpus = ?",
+                (corpus,),
+            ).fetchall()
+            for r in rows:
+                if r[0]:
+                    collections.add(r[0])
+        return sorted(collections)
+    except Exception as e:
+        return [f"Error: {e}"]
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -11,6 +11,14 @@ from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 
 
+@pytest.fixture(autouse=True)
+def git_identity(monkeypatch):
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+
+
 @pytest.fixture
 def catalog_env(tmp_path, monkeypatch):
     """Set up a catalog in tmp_path and point NEXUS_CATALOG_PATH at it."""

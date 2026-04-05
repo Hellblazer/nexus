@@ -10,6 +10,14 @@ import pytest
 from nexus.catalog.catalog import Catalog
 
 
+@pytest.fixture(autouse=True)
+def git_identity(monkeypatch):
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+
+
 class TestInit:
     def test_creates_structure(self, tmp_path):
         cat = Catalog.init(tmp_path / "catalog")
