@@ -34,6 +34,8 @@ def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
         t = Tumbler.parse(value)
         if cat.resolve(t) is not None:
             return t
+        # Valid tumbler format but document deleted/missing
+        raise click.ClickException(f"Not found: {value}")
     except ValueError:
         pass
 
