@@ -148,11 +148,16 @@ def _parse_where_str(where_str: str) -> dict | None:
 
 _catalog_instance = None
 _catalog_lock = threading.Lock()
+_catalog_mtime: float = 0.0
 
 
 def _get_catalog():
-    """Return Catalog singleton or None if not initialized."""
-    global _catalog_instance
+    """Return Catalog singleton or None if not initialized.
+
+    Checks JSONL mtime on each access — if files changed externally
+    (e.g., git pull from another process), triggers a rebuild.
+    """
+    global _catalog_instance, _catalog_mtime
     if _catalog_instance is None:
         with _catalog_lock:
             if _catalog_instance is None:
@@ -162,6 +167,18 @@ def _get_catalog():
                 path = catalog_path()
                 if Catalog.is_initialized(path):
                     _catalog_instance = Catalog(path, path / ".catalog.db")
+                    docs_path = path / "documents.jsonl"
+                    _catalog_mtime = docs_path.stat().st_mtime if docs_path.exists() else 0.0
+    elif _catalog_instance is not None:
+        # Check for external JSONL changes (git pull, another process)
+        try:
+            docs_path = _catalog_instance._documents_path
+            current_mtime = docs_path.stat().st_mtime if docs_path.exists() else 0.0
+            if current_mtime > _catalog_mtime:
+                _catalog_mtime = current_mtime
+                _catalog_instance._ensure_consistent()
+        except Exception:
+            pass  # stat failure is non-fatal
     return _catalog_instance
 
 
@@ -175,12 +192,13 @@ def _require_catalog():
 
 def _reset_singletons():
     """Reset lazy singletons (for tests only)."""
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
     _collections_cache = ([], 0.0)
     _catalog_instance = None
+    _catalog_mtime = 0.0
 
 
 def _inject_t1(t1, *, isolated: bool = False):

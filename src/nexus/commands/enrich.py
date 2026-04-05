@@ -128,7 +128,7 @@ def enrich(collection: str, delay: float, limit: int) -> None:
                 year=bib.get("year"),
                 venue=bib.get("venue"),
             )
-            _catalog_enrich_hook(title=title, bib_meta=bib)
+            _catalog_enrich_hook(title=title, bib_meta=bib, collection_name=collection)
 
     click.echo(
         f"Done: enriched {enriched_chunks} chunks across {enriched_titles} titles; "
@@ -136,7 +136,7 @@ def enrich(collection: str, delay: float, limit: int) -> None:
     )
 
 
-def _catalog_enrich_hook(title: str, bib_meta: dict) -> None:
+def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") -> None:
     """Update catalog entry with bib metadata. Silently skipped if absent."""
     try:
         from nexus.catalog import Catalog
@@ -147,10 +147,26 @@ def _catalog_enrich_hook(title: str, bib_meta: dict) -> None:
             return
 
         cat = Catalog(cat_path, cat_path / ".catalog.db")
-        entries = cat.find(title, content_type="paper")
-        if entries:
+
+        # Prefer exact physical_collection lookup over FTS title search
+        entry = None
+        if collection_name:
+            row = cat._db._conn.execute(
+                "SELECT tumbler FROM documents WHERE physical_collection = ? LIMIT 1",
+                (collection_name,),
+            ).fetchone()
+            if row:
+                from nexus.catalog.tumbler import Tumbler
+                entry = cat.resolve(Tumbler.parse(row[0]))
+
+        # Fallback to FTS title search
+        if entry is None:
+            entries = cat.find(title, content_type="paper")
+            entry = entries[0] if entries else None
+
+        if entry:
             cat.update(
-                entries[0].tumbler,
+                entry.tumbler,
                 author=bib_meta.get("authors", ""),
                 year=bib_meta.get("year", 0),
                 meta={
