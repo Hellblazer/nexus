@@ -237,7 +237,7 @@ Produces evidence-grounded text from context. Dispatched to `analytical-operator
 ---
 
 ### catalog_search
-Finds catalog entries by metadata (author, corpus, title, file path). Executed by the skill via the `catalog_search` MCP tool. Returns catalog entry dicts, each containing `tumbler`, `physical_collection`, and metadata fields.
+Finds catalog entries by metadata (author, corpus, title, file path). Executed by the skill via `mcp__plugin_nx_nexus__catalog_search`. Returns catalog entry dicts, each containing `tumbler`, `physical_collection`, and metadata fields.
 
 **When to use**: When the question targets a specific author, corpus, paper title, or code file — and you need to scope the subsequent `search` to relevant collections only. Always before a `search` step that should be narrowed.
 
@@ -255,7 +255,7 @@ Finds catalog entries by metadata (author, corpus, title, file path). Executed b
 ---
 
 ### catalog_links
-Navigates the catalog link graph from a tumbler. Executed by the skill via the `catalog_links` MCP tool. Returns `{"nodes": [...], "edges": [...]}` — access edges via `result["edges"]`, starting node via `result["nodes"]`.
+Navigates the catalog link graph from a tumbler. Executed by the skill via `mcp__plugin_nx_nexus__catalog_links`. Returns `{"nodes": [...], "edges": [...]}` — access edges via `result["edges"]`, starting node via `result["nodes"]`.
 
 **When to use**: When the question asks about citations ("what cites X?"), provenance ("what research informed this code?"), or relationships ("what implements this RDR?"). Use after `catalog_search` to traverse from a found entry.
 
@@ -274,7 +274,7 @@ Navigates the catalog link graph from a tumbler. Executed by the skill via the `
 ---
 
 ### catalog_resolve
-Maps a catalog owner or corpus to physical T3 collection names. Executed by the skill via the `catalog_resolve` MCP tool.
+Maps a catalog owner or corpus to physical T3 collection names. Executed by the skill via `mcp__plugin_nx_nexus__catalog_resolve`.
 
 **When to use**: When you need all collections for an entire owner or corpus without knowing specific documents. Use before `search` to scope the corpus.
 

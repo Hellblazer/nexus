@@ -91,7 +91,7 @@ For each step in `plan["steps"]` in order:
 
 #### If `step["operation"] == "catalog_search"`:
 
-Execute via the `catalog_search` MCP tool directly:
+Execute via `mcp__plugin_nx_nexus__catalog_search` directly:
 
 ```
 mcp__plugin_nx_nexus__catalog_search(query="{params.query}", author="{params.author}", corpus="{params.corpus}", owner="{params.owner}", file_path="{params.file_path}", content_type="{params.content_type}")
@@ -108,9 +108,9 @@ mcp__plugin_nx_nexus__scratch(action="put", content="{results as text}", tags="q
 
 **Resolve tumbler**: If `params.tumbler` is set, use it directly. If `inputs` references a prior step, read from T1 scratch:
 - If prior step returned a **single entry**, extract its `tumbler` field.
-- If prior step returned **multiple entries**, iterate: call `catalog_links` for each entry's tumbler and merge the results (union of edges, deduplicated by `(from, to, type)`). This handles questions like "What papers have any Fagin paper cited?" where `catalog_search` returns multiple papers.
+- If prior step returned **multiple entries**, iterate: call `mcp__plugin_nx_nexus__catalog_links` for each entry's tumbler and merge the results (union of edges, deduplicated by `(from, to, type)`). This handles questions like "What papers have any Fagin paper cited?" where the prior catalog_search step returned multiple papers.
 
-Execute via the `catalog_links` MCP tool:
+Execute via `mcp__plugin_nx_nexus__catalog_links`:
 ```
 mcp__plugin_nx_nexus__catalog_links(tumbler="{tumbler}", direction="{params.direction}", link_type="{params.link_type}", depth={params.depth})
 ```
@@ -120,11 +120,11 @@ Write results to T1 scratch:
 mcp__plugin_nx_nexus__scratch(action="put", content="{link results as text}", tags="query-step,step-{N},catalog_links")
 ```
 
-**Extract collections**: `catalog_links` returns `{"nodes": [...], "edges": [...]}`. Nodes include CatalogEntry dicts with `physical_collection`. For each node, collect `physical_collection`. Filter out empty strings (ghost elements with no T3 backing). Store as `$step_N.collections`. Note: only links to live documents are returned — deleted documents are excluded from the graph.
+**Extract collections**: The result of `mcp__plugin_nx_nexus__catalog_links` is `{"nodes": [...], "edges": [...]}`. Nodes include CatalogEntry dicts with `physical_collection`. For each node, collect `physical_collection`. Filter out empty strings (ghost elements with no T3 backing). Store as `$step_N.collections`. Note: only links to live documents are returned — deleted documents are excluded from the graph.
 
 #### If `step["operation"] == "catalog_resolve"`:
 
-Execute via the `catalog_resolve` MCP tool:
+Execute via `mcp__plugin_nx_nexus__catalog_resolve`:
 ```
 mcp__plugin_nx_nexus__catalog_resolve(tumbler="{params.tumbler}", owner="{params.owner}", corpus="{params.corpus}")
 ```
