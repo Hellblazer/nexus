@@ -23,6 +23,14 @@ from nexus.mcp_server import (
 
 
 @pytest.fixture(autouse=True)
+def git_identity(monkeypatch):
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+
+
+@pytest.fixture(autouse=True)
 def clean_singletons():
     _reset_singletons()
     yield

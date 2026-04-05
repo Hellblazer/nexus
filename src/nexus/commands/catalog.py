@@ -395,8 +395,10 @@ def _backfill_repos(cat: Catalog, registry: object, dry_run: bool) -> int:
             click.echo(f"  [dry-run] Would register owner: {repo_name} ({path_hash})")
             if code_col:
                 click.echo(f"  [dry-run]   code: {code_col}")
+                count += 1
             if docs_col:
                 click.echo(f"  [dry-run]   docs: {docs_col}")
+                count += 1
             continue
 
         owner = cat.owner_for_repo(path_hash)
@@ -481,7 +483,7 @@ def _backfill_papers(cat: Catalog, t3: object, dry_run: bool) -> int:
                 author = meta.get("bib_authors", "") or meta.get("author", "")
                 year = int(meta.get("bib_year", 0) or 0)
         except Exception:
-            pass
+            _log.debug("backfill_papers_metadata_error", col=col_name, exc_info=True)
 
         if dry_run:
             click.echo(f"  [dry-run] Would register paper: {title} → {col_name}")
