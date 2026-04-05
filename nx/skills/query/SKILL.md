@@ -34,7 +34,7 @@ Capture the user's natural-language analytical question. This is the `query` tha
 
 ### Step 1: Plan Library Lookup
 
-**Auto-trigger when the query contains any of**: author, cite, citation, cites, cited by, relationship, provenance, implements, links from, links to, relates to, corpus, collection, papers by, papers about, who wrote, what research, informed by, based on, building on.
+**Auto-trigger when the query contains any of**: author, cite, citation, cites, cited by, relationship, provenance, implements, links from, links to, relates to, corpus, collection, papers by, papers about, who wrote, what did, what research, informed by, based on, building on, schema mapping, data exchange.
 
 **Also trigger when** the user explicitly requests plan reuse ("reuse a similar plan", "check if we've done this before").
 
