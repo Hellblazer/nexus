@@ -275,3 +275,43 @@ Links are stored as rows in SQLite `links` table with composite indexes `idx_lin
 **Classification**: Verified — Literary Machines Ch. 4 | **Confidence**: HIGH
 
 Nelson's Xanadu links are immutable in the public record but mutable in the user's private link space. Our catalog is a private link space (owned by one user/team), so mutability is appropriate. The git history of `links.jsonl` serves as the immutable audit trail — the current state is mutable, the history is not.
+
+### RF-4: Implementation Audit — 10 Concrete Gaps (2026-04-05)
+**Classification**: Verified — Deep Codebase Analysis | **Confidence**: HIGH
+
+Full trace of every link code path (write, read, delete) with line numbers. Key findings:
+
+**Schema gaps:**
+1. No UNIQUE constraint on `(from_tumbler, to_tumbler, link_type)` in SQLite — application dedup only
+2. No `link_type` validation in `Catalog.link()` or MCP `catalog_link` — free string accepted
+3. No endpoint validation — links to nonexistent tumblers silently accepted
+4. `created` vs `created_at` naming inconsistency across JSONL/SQLite/CatalogLink
+
+**Write path gaps:**
+5. `Catalog.link()` has no dedup check — calling twice creates duplicate rows
+6. Partial write risk: JSONL append before SQLite INSERT; crash between leaves inconsistent state (recovered by `_ensure_consistent` on next startup)
+
+**Read path gaps:**
+7. MCP `catalog_links` drops `graph()` nodes — returns edges only
+8. No `catalog_link_query` MCP tool — no way to filter links by created_by or type globally
+9. Link `id` (SQLite primary key) never exposed — cannot reference a specific link row
+
+**Delete path gaps:**
+10. No filter-only delete — cannot delete all links of a type from a node without specifying every target
+
+**Design decisions from audit:**
+- Add `UNIQUE(from_tumbler, to_tumbler, link_type)` to schema with `INSERT OR IGNORE` for idempotent `link_if_absent()`
+- `link()` stays permissive (no type validation at core — CLI and agents enforce their own sets)
+- `update_link()` when changing type: tombstone old key + insert new key (RF-2 confirmed)
+- `link_query()` built on parameterized WHERE — all needed indexes already exist (RF-1 confirmed)
+- Expose `id` in `CatalogLink` for targeted operations but keep `(from, to, type)` as the logical key
+
+### RF-5: Naming Inconsistency — `created` vs `created_at` (2026-04-05)
+**Classification**: Verified — Codebase Analysis | **Confidence**: HIGH
+
+Three layers use different names for the same timestamp field:
+- `LinkRecord.created` (tumbler.py:93) — JSONL serialization uses `"created"`
+- SQLite column: `created_at` (catalog_db.py:72)
+- `CatalogLink.created_at` (catalog.py:70) — Python API uses `created_at`
+
+The mapping works via positional indexing (`row[6]` in `_row_to_link`) and explicit assignment in `rebuild()` (`lnk.created` → `created_at` column). Correct but fragile. RDR-051 should standardize on `created_at` everywhere or accept the mismatch as documented technical debt.
