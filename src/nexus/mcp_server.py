@@ -407,6 +407,10 @@ def query(
             # Resolve seed entries for catalog routing
             seed_entries: list = []
             if subtree:
+                # Depth check: document-level (3+ segments) has no descendants in the catalog
+                subtree_depth = len(subtree.split("."))
+                if subtree_depth >= 3:
+                    return f"Error: subtree '{subtree}' is a document-level address — use an owner prefix (e.g., '{'.'.join(subtree.split('.')[:2])}') to search a subtree"
                 # Use descendants() directly — NOT catalog_search(owner=) which has depth-equality bug
                 desc = cat.descendants(subtree)
                 catalog_collections = {d["physical_collection"] for d in desc if d.get("physical_collection")}
@@ -447,9 +451,20 @@ def query(
             if catalog_collections is not None and not catalog_collections:
                 return f"No documents found matching catalog filters (author={author!r}, content_type={content_type!r}, subtree={subtree!r}, follow_links={follow_links!r})"
 
+        routing_note = ""
         if catalog_collections is not None:
             # Catalog routing overrides corpus param
             target = [c for c in catalog_collections if c]
+            parts = []
+            if author:
+                parts.append(f"author={author!r}")
+            if content_type:
+                parts.append(f"content_type={content_type!r}")
+            if subtree:
+                parts.append(f"subtree={subtree!r}")
+            if follow_links:
+                parts.append(f"follow_links={follow_links!r}")
+            routing_note = f"[Catalog routing: {', '.join(parts)} -> {len(target)} collections]"
         else:
             if corpus == "all":
                 corpus = "knowledge,code,docs,rdr"
@@ -513,7 +528,8 @@ def query(
         # Sort by best match distance, limit
         sorted_docs = sorted(docs.values(), key=lambda d: d["distance"])[:limit]
 
-        lines: list[str] = [f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"]
+        header = f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"
+        lines: list[str] = [f"{routing_note}\n{header}" if routing_note else header]
         lines.append("")
         for i, d in enumerate(sorted_docs, 1):
             dist = f"{d['distance']:.4f}"

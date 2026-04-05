@@ -29,18 +29,13 @@ mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
 ```
 
-### Direct query() vs /nx:query skill
+### query() routing
 
-For **simple scoped queries** (find, search, "papers by", "show me", single lookup):
-→ Call `query()` MCP directly with catalog params. Skip `/nx:query`.
+The `/nx:query` skill is the **single routing authority** for all natural-language search and retrieval questions. It handles three-path dispatch internally (direct query → template → planner).
 
-For **analytical questions** (compare, extract, generate, synthesize, rank, contradictions):
-→ Dispatch `/nx:query` skill (which uses Path 1/2/3 internally).
+**Always dispatch `/nx:query` for NL questions** — do not attempt to classify or route queries yourself. The skill has catalog probe logic and analytical signal detection that the orchestrator should not duplicate.
 
-**Decision signals for direct query()**:
-- Question asks "what", "find", "search", "papers by", "show me" — single lookup
-- Single corpus or catalog-scoped (author/type/subtree)
-- No signal words: "compare", "extract", "generate", "synthesize", "rank"
+**Direct `query()` MCP is appropriate only when** the caller (not the orchestrator) supplies explicit catalog params — e.g., another agent or skill that already knows `author="Fagin"` or `subtree="1.1"`.
 
 See SubagentStart hook output for full tool reference.
 

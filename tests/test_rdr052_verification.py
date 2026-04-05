@@ -154,6 +154,12 @@ class TestPathRouting:
         result = query(question="anything", subtree="9.9")
         assert "No documents found matching catalog filters" in result
 
+    def test_subtree_document_level_returns_error(self, t3, catalog):
+        """query(subtree="1.1.42") is document-level — should return helpful error."""
+        result = query(question="anything", subtree="1.1.42")
+        assert "document-level address" in result
+        assert "1.1" in result  # suggests the owner prefix
+
     def test_catalog_params_without_catalog_returns_error(self, t3, monkeypatch):
         """query() with catalog params but no catalog returns clear error."""
         import nexus.mcp_server as mod
@@ -357,7 +363,7 @@ class TestTemplateRetrieval:
         assert len(builtin) >= 1
         plan = json.loads(builtin[0]["plan_json"])
         assert "steps" in plan
-        assert any("op" in step for step in plan["steps"])
+        assert any("operation" in step for step in plan["steps"])
         db.close()
 
     def test_all_five_templates_searchable(self, tmp_path, monkeypatch):

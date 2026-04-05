@@ -30,17 +30,27 @@ Three-path dispatch for analytical queries over nx knowledge. The skill routes e
 
 ### Routing Order
 
-**Check analytical signals first.** If the question contains analytical signal words (compare, extract, generate, synthesize, rank, contradictions, differences, "how do X differ"), route to Path 2 or Path 3 — even if the catalog probe would match. Analytical questions need multi-step plans, not single-tool lookups.
+Evaluate **simultaneously**, not sequentially:
 
-If no analytical signals: check catalog → Path 1. If Path 1 returns no results: try Path 2 template match.
+1. Does the question have **explicit catalog handles** (author name, content type, subtree prefix, citation/link signals)?
+2. Does the question have **analytical signal words** (compare, extract, generate, synthesize, rank, contradictions, differences)?
 
-### Path 1: Single-Tool (most questions without analytical signals)
+| Catalog handles | Analytical signals | Route |
+|---|---|---|
+| Yes | No | **Path 1** — single `query()` call with catalog params |
+| Yes | Yes | **Hybrid** — execute catalog-scoped `query()` calls, pass results to `analytical-operator` directly (skip planner) |
+| No | No | **Path 1** via catalog probe, or broad search if probe misses |
+| No | Yes | **Path 2** (template match) or **Path 3** (planner) |
+
+The hybrid path avoids unnecessary planner dispatch for questions like "compare papers by Fagin and Bernstein" — two deterministic catalog-scoped queries plus one analytical operator.
+
+### Path 1: Single-Tool (most questions)
 
 The enhanced `query` MCP tool handles catalog-aware routing internally. Use this when the question maps to a single scoped retrieval.
 
-**Detection**: No analytical signal words AND (the question has explicit catalog handles — author, content type, subtree, citation/link signals — OR a catalog probe returns a match).
+**Detection**: The question has explicit catalog handles (author, content type, subtree, citation/link signals) without analytical signals. Or: no catalog handles but a catalog probe returns a match.
 
-**Catalog probe**: Call `mcp__plugin_nx_nexus__catalog_search(query="{question}", limit=1)`. If results are returned, the question has a catalog handle — route through Path 1.
+**Catalog probe**: Call `mcp__plugin_nx_nexus__catalog_search(query="{question}", limit=1)`. Route to Path 1 only if the result's `title` or `author` field contains a token from the question (not just any FTS5 match).
 
 **Execution**: Call `query()` MCP directly with appropriate catalog params:
 
@@ -180,13 +190,15 @@ Read the last step's output from T1 scratch. Present to the user:
 
 #### Step 5: Auto-Cache Plan
 
-After successful execution, save the plan automatically (no user prompt):
+**Only cache fully successful plans.** If any step failed (`outcome = "partial"`), do NOT cache — the next similar query will re-dispatch the planner fresh. Partial plans served from cache would repeat the same failure for up to 30 days.
+
+When `outcome == "success"`:
 
 ```
 mcp__plugin_nx_nexus__plan_save(
     query="{original question}",
     plan_json="{serialized plan JSON}",
-    outcome="{success or partial}",
+    outcome="success",
     tags="{comma-separated operation types}",
     ttl=30
 )
