@@ -60,7 +60,7 @@ def list_cmd(owner: str, content_type: str, limit: int, as_json: bool) -> None:
         entries = cat.by_owner(Tumbler.parse(owner))
     else:
         # List all documents via SQLite
-        rows = cat._db._conn.execute(
+        rows = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
             "FROM documents LIMIT ?",
@@ -264,7 +264,7 @@ def links_cmd(
 def owners_cmd(as_json: bool) -> None:
     """List registered owners."""
     cat = _get_catalog()
-    rows = cat._db._conn.execute(
+    rows = cat._db.execute(
         "SELECT tumbler_prefix, name, owner_type, repo_hash, description FROM owners"
     ).fetchall()
     if as_json:
@@ -300,17 +300,17 @@ def pull_cmd() -> None:
 def stats_cmd(as_json: bool) -> None:
     """Show catalog statistics."""
     cat = _get_catalog()
-    conn = cat._db._conn
-    owner_count = conn.execute("SELECT count(*) FROM owners").fetchone()[0]
-    doc_count = conn.execute("SELECT count(*) FROM documents").fetchone()[0]
-    link_count = conn.execute("SELECT count(*) FROM links").fetchone()[0]
+    db = cat._db
+    owner_count = db.execute("SELECT count(*) FROM owners").fetchone()[0]
+    doc_count = db.execute("SELECT count(*) FROM documents").fetchone()[0]
+    link_count = db.execute("SELECT count(*) FROM links").fetchone()[0]
     type_counts = dict(
-        conn.execute(
+        db.execute(
             "SELECT content_type, count(*) FROM documents GROUP BY content_type"
         ).fetchall()
     )
     link_type_counts = dict(
-        conn.execute(
+        db.execute(
             "SELECT link_type, count(*) FROM links GROUP BY link_type"
         ).fetchall()
     )
@@ -351,7 +351,7 @@ def compact_cmd() -> None:
 
 def _owner_by_name(cat: Catalog, name: str) -> Tumbler | None:
     """Look up owner by name."""
-    row = cat._db._conn.execute(
+    row = cat._db.execute(
         "SELECT tumbler_prefix FROM owners WHERE name = ?", (name,)
     ).fetchone()
     return Tumbler.parse(row[0]) if row else None

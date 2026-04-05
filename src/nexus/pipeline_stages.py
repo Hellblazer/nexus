@@ -448,7 +448,7 @@ def _catalog_pdf_hook(
 
         # Get or create curator owner
         owner = None
-        rows = cat._db._conn.execute(
+        rows = cat._db.execute(
             "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
         ).fetchone()
         if rows:
@@ -457,14 +457,10 @@ def _catalog_pdf_hook(
         else:
             owner = cat.register_owner(owner_name, "curator")
 
-        # Dedup by file_path (stable) before falling back to FTS title search
+        # Dedup by file_path (stable identifier for PDFs)
         from datetime import UTC, datetime
         file_path_str = str(pdf_path)
         existing = cat.by_file_path(owner, file_path_str)
-        if existing is None:
-            # Fallback: FTS title search for entries registered without file_path
-            results = cat.find(effective_title, content_type="paper")
-            existing = results[0] if results else None
 
         if existing:
             cat.update(

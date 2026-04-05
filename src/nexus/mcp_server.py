@@ -1075,7 +1075,7 @@ def catalog_search(
                 f"FROM documents WHERE {' AND '.join(conditions)} LIMIT ?"
             )
             params.append(limit)
-            rows = cat._db._conn.execute(sql, params).fetchall()
+            rows = cat._db.execute(sql, params).fetchall()
             from nexus.catalog.catalog import CatalogEntry
             entries = [
                 CatalogEntry(
@@ -1149,7 +1149,7 @@ def catalog_list(
         else:
             import json as _json
 
-            rows = cat._db._conn.execute(
+            rows = cat._db.execute(
                 "SELECT tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
                 "FROM documents LIMIT ? OFFSET ?",
@@ -1320,7 +1320,7 @@ def catalog_resolve(
                 if e.physical_collection:
                     collections.add(e.physical_collection)
         if corpus:
-            rows = cat._db._conn.execute(
+            rows = cat._db.execute(
                 "SELECT DISTINCT physical_collection FROM documents WHERE corpus = ?",
                 (corpus,),
             ).fetchall()

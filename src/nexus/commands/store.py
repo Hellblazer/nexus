@@ -130,7 +130,7 @@ def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> None:
             return
 
         # Get or create "knowledge" curator owner
-        rows = cat._db._conn.execute(
+        rows = cat._db.execute(
             "SELECT tumbler_prefix FROM owners WHERE name = 'knowledge'"
         ).fetchone()
         if rows:

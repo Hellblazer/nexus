@@ -151,7 +151,7 @@ def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") 
         # Prefer exact physical_collection lookup over FTS title search
         entry = None
         if collection_name:
-            row = cat._db._conn.execute(
+            row = cat._db.execute(
                 "SELECT tumbler FROM documents WHERE physical_collection = ? LIMIT 1",
                 (collection_name,),
             ).fetchone()

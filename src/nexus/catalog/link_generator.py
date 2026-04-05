@@ -17,7 +17,7 @@ _log = structlog.get_logger()
 
 def _all_entries(cat: Catalog) -> list[CatalogEntry]:
     """Fetch all catalog entries."""
-    rows = cat._db._conn.execute(
+    rows = cat._db.execute(
         "SELECT tumbler, title, author, year, content_type, file_path, "
         "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
         "FROM documents"

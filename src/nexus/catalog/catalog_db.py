@@ -199,6 +199,16 @@ class CatalogDB:
                         "head_hash", "indexed_at", "metadata"]
             return [dict(zip(columns, row)) for row in rows]
 
+    def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
+        """Thread-safe execute wrapper. Acquires _lock before executing."""
+        with self._lock:
+            return self._conn.execute(sql, params)
+
+    def commit(self) -> None:
+        """Thread-safe commit wrapper."""
+        with self._lock:
+            self._conn.commit()
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

@@ -129,7 +129,7 @@ class Catalog:
                 1 for line in self._documents_path.open()
                 if line.strip() and not '"_deleted": true' in line
             ) if self._documents_path.exists() else 0
-            sqlite_count = self._db._conn.execute(
+            sqlite_count = self._db.execute(
                 "SELECT count(*) FROM documents"
             ).fetchone()[0]
             if jsonl_count != sqlite_count:
@@ -240,18 +240,18 @@ class Catalog:
             )
             self._append_jsonl(self._owners_path, rec.__dict__)
             # Upsert SQLite
-            self._db._conn.execute(
+            self._db.execute(
                 "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (prefix, name, owner_type, repo_hash, description),
             )
-            self._db._conn.commit()
+            self._db.commit()
             return Tumbler.parse(prefix)
         finally:
             self._release_lock(dir_fd)
 
     def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
-        row = self._db._conn.execute(
+        row = self._db.execute(
             "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?", (repo_hash,)
         ).fetchone()
         return Tumbler.parse(row[0]) if row else None
@@ -299,7 +299,7 @@ class Catalog:
                 meta=meta or {},
             )
             self._append_jsonl(self._documents_path, rec.__dict__)
-            self._db._conn.execute(
+            self._db.execute(
                 "INSERT INTO documents "
                 "(tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata) "
@@ -310,13 +310,13 @@ class Catalog:
                     json.dumps(meta or {}),
                 ),
             )
-            self._db._conn.commit()
+            self._db.commit()
             return tumbler
         finally:
             self._release_lock(dir_fd)
 
     def resolve(self, tumbler: Tumbler) -> CatalogEntry | None:
-        row = self._db._conn.execute(
+        row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
             "FROM documents WHERE tumbler = ?",
@@ -368,7 +368,7 @@ class Catalog:
             rec_dict.update(fields)
             self._append_jsonl(self._documents_path, rec_dict)
             # Upsert SQLite
-            self._db._conn.execute(
+            self._db.execute(
                 "INSERT OR REPLACE INTO documents "
                 "(tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata) "
@@ -381,7 +381,7 @@ class Catalog:
                     rec_dict["indexed_at"], json.dumps(rec_dict["meta"]),
                 ),
             )
-            self._db._conn.commit()
+            self._db.commit()
         finally:
             self._release_lock(dir_fd)
 
@@ -406,7 +406,7 @@ class Catalog:
         ]
 
     def by_file_path(self, owner: Tumbler, file_path: str) -> CatalogEntry | None:
-        row = self._db._conn.execute(
+        row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
             f"FROM documents WHERE {self._prefix_sql(str(owner))[0]} AND file_path = ?",
@@ -430,7 +430,7 @@ class Catalog:
         )
 
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
-        rows = self._db._conn.execute(
+        rows = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
             f"FROM documents WHERE {self._prefix_sql(str(owner))[0]}",
@@ -456,7 +456,7 @@ class Catalog:
 
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
         """List all entries with the given corpus tag."""
-        rows = self._db._conn.execute(
+        rows = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
             "FROM documents WHERE corpus = ?",
@@ -474,7 +474,7 @@ class Catalog:
 
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         """Look up catalog entry by T3 doc_id stored in meta.doc_id."""
-        row = self._db._conn.execute(
+        row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
             "FROM documents WHERE json_extract(metadata, '$.doc_id') = ?",
@@ -524,7 +524,7 @@ class Catalog:
                 meta=dict(meta),
             )
             self._append_jsonl(self._links_path, rec.__dict__)
-            self._db._conn.execute(
+            self._db.execute(
                 "INSERT INTO links "
                 "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
                 "created_by, created_at, metadata) "
@@ -534,7 +534,7 @@ class Catalog:
                     created_by, now, json.dumps(dict(meta)),
                 ),
             )
-            self._db._conn.commit()
+            self._db.commit()
         finally:
             self._release_lock(dir_fd)
 
@@ -542,12 +542,12 @@ class Catalog:
         dir_fd = self._acquire_lock()
         try:
             if link_type:
-                rows = self._db._conn.execute(
+                rows = self._db.execute(
                     "SELECT id, link_type FROM links WHERE from_tumbler = ? AND to_tumbler = ? AND link_type = ?",
                     (str(from_t), str(to_t), link_type),
                 ).fetchall()
             else:
-                rows = self._db._conn.execute(
+                rows = self._db.execute(
                     "SELECT id, link_type FROM links WHERE from_tumbler = ? AND to_tumbler = ?",
                     (str(from_t), str(to_t)),
                 ).fetchall()
@@ -565,9 +565,9 @@ class Catalog:
                     "meta": {},
                 }
                 self._append_jsonl(self._links_path, tombstone)
-                self._db._conn.execute("DELETE FROM links WHERE id = ?", (row_id,))
+                self._db.execute("DELETE FROM links WHERE id = ?", (row_id,))
 
-            self._db._conn.commit()
+            self._db.commit()
             return len(rows)
         finally:
             self._release_lock(dir_fd)
@@ -593,7 +593,7 @@ class Catalog:
         if link_type:
             sql += " AND link_type = ?"
             params.append(link_type)
-        return [self._row_to_link(r) for r in self._db._conn.execute(sql, params).fetchall()]
+        return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
 
     def links_to(self, tumbler: Tumbler, link_type: str = "") -> list[CatalogLink]:
         sql = (
@@ -604,7 +604,7 @@ class Catalog:
         if link_type:
             sql += " AND link_type = ?"
             params.append(link_type)
-        return [self._row_to_link(r) for r in self._db._conn.execute(sql, params).fetchall()]
+        return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
 
     def graph(
         self,
