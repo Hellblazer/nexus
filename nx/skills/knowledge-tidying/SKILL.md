@@ -55,7 +55,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 - `pattern-{pattern-name}` - Reusable patterns
 
 **Verify storage**:
-- mcp__plugin_nx_nexus__search(query="topic", corpus="knowledge", limit=5 — confirm searchable
+- mcp__plugin_nx_nexus__query(question="topic", content_type="knowledge") — confirm searchable via catalog-scoped query
 - mcp__plugin_nx_nexus__store_list(collection="knowledge" — list all knowledge entries
 
 ## Contradiction Handling

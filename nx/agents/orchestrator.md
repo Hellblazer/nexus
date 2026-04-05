@@ -23,10 +23,24 @@ nx MCP tools use the full prefix `mcp__plugin_nx_nexus__`. Examples:
 
 ```
 mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
-mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
+mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5,
+      author="", content_type="", follow_links="cites", depth=1, subtree="1.1")
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
 ```
+
+### Direct query() vs /nx:query skill
+
+For **simple scoped queries** (find, search, "papers by", "show me", single lookup):
+→ Call `query()` MCP directly with catalog params. Skip `/nx:query`.
+
+For **analytical questions** (compare, extract, generate, synthesize, rank, contradictions):
+→ Dispatch `/nx:query` skill (which uses Path 1/2/3 internally).
+
+**Decision signals for direct query()**:
+- Question asks "what", "find", "search", "papers by", "show me" — single lookup
+- Single corpus or catalog-scoped (author/type/subtree)
+- No signal words: "compare", "extract", "generate", "synthesize", "rank"
 
 See SubagentStart hook output for full tool reference.
 

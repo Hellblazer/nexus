@@ -97,7 +97,11 @@ T3 knowledge — permanent, semantic search:
   Tool: mcp__plugin_nx_nexus__search
     search(query="...", corpus="knowledge", limit=10, offset=0, where="bib_year>=2023")
   Tool: mcp__plugin_nx_nexus__query
-    query(question="...", corpus="knowledge", where="bib_year>=2020", limit=10)  → document-level results
+    query(question="...", corpus="knowledge", where="bib_year>=2020", limit=10,
+          author="", content_type="", follow_links="cites", depth=1, subtree="1.1")
+    → document-level results; catalog params scope search before vector query
+    → subtree: all descendants of tumbler prefix (e.g. "1.1" = all nexus docs)
+    → follow_links: enrich results with linked docs (any link type)
   Tool: mcp__plugin_nx_nexus__store_list
     store_list(collection="knowledge", limit=20, offset=0)
     store_list(collection="knowledge__art", docs=true)   → document-level view
@@ -115,7 +119,7 @@ Plan library (T2):
   Tool: mcp__plugin_nx_nexus__plan_search
     plan_search(query="...", project="...", limit=5)
   Tool: mcp__plugin_nx_nexus__plan_save
-    plan_save(query="...", plan_json="...", project="...", tags="...")
+    plan_save(query="...", plan_json="...", project="...", tags="...", ttl=30)
 
 Routing: T1 for sibling sharing → T2 for project persistence → T3 for semantic knowledge.
 NXTOOLS
