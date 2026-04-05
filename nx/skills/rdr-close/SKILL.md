@@ -86,7 +86,25 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 3. Regenerate `docs/rdr/README.md` index
 4. Run `nx index rdr` to update T3 semantic index
 
-### Step 5: T3 Archive (post-mortem only)
+### Step 5: Catalog Links (if catalog initialized)
+
+After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to capture implementation provenance:
+
+1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically — no action needed here.
+
+2. **RDR→prior-RDR links**: If the RDR's T2 record has a `supersedes` field, create the catalog link:
+   ```
+   mcp__plugin_nx_nexus__catalog_link(from_tumbler="<this-rdr-title>", to_tumbler="<superseded-rdr-title>", link_type="supersedes", created_by="rdr-close")
+   ```
+
+3. **RDR→research links**: If research findings reference indexed papers, create `cites` links:
+   - Read T2 research findings for this RDR
+   - For each finding with a URL or paper title as source, search catalog: `mcp__plugin_nx_nexus__catalog_search(query="<source>")`
+   - If found, create: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="<rdr-title>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
+
+Skip all catalog steps silently if catalog is not initialized. The T2 record and markdown are the authorities — catalog links are supplementary graph enrichment.
+
+### Step 6: T3 Archive (post-mortem only)
 
 The main RDR is already semantically indexed by Step 4's `nx index rdr` (CCE embeddings, section-level chunks). Do **not** duplicate it with store_put tool — that would create voyage-4 blob entries in the same collection, degrading search quality.
 
@@ -111,7 +129,13 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
    - **Old RDR**: In T2, set `superseded_by: "NNN"`. In markdown, add "Superseded by RDR-NNN" note
    - **New RDR**: In T2, set `supersedes: "MMM"`. In markdown, add "Supersedes RDR-MMM" note
 3. Run `nx index rdr` to update T3 semantic index
-4. Regenerate index
+4. **Catalog link** (if catalog initialized): Create `supersedes` link in the catalog so the graph reflects the relationship:
+   ```
+   # Find both RDRs by title in catalog
+   mcp__plugin_nx_nexus__catalog_link(from_tumbler="<new-rdr-title>", to_tumbler="<old-rdr-title>", link_type="supersedes", created_by="rdr-close")
+   ```
+   If catalog is not initialized or either RDR is not found, skip silently — the T2 record is the authority.
+5. Regenerate index
 
 ## Failure Handling
 

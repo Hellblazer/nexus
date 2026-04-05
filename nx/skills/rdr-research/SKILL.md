@@ -41,6 +41,17 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
      *Source: source description*
    ```
 
+4. **Catalog citation link** (optional, if catalog initialized and source is a paper/URL):
+   If the source references a paper title or URL that may be indexed in the knowledge store:
+   ```
+   mcp__plugin_nx_nexus__catalog_search(query="<source title or keywords>")
+   ```
+   If a matching catalog entry is found, and the current RDR has a catalog entry:
+   ```
+   mcp__plugin_nx_nexus__catalog_link(from_tumbler="<rdr-title>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-research")
+   ```
+   Skip silently if catalog not initialized, RDR not indexed, or no match found. This enriches the citation graph incrementally as research findings are added.
+
 ### `/nx:rdr-research status <id>`
 
 1. List T2 entries: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title=""
