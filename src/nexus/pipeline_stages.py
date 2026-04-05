@@ -423,6 +423,64 @@ def uploader_loop(
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 
+def _catalog_pdf_hook(
+    pdf_path: Path,
+    collection_name: str,
+    title: str = "",
+    author: str = "",
+    year: int = 0,
+    corpus: str = "",
+    chunk_count: int = 0,
+) -> None:
+    """Register PDF document in catalog after successful indexing. Silently skipped if absent."""
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            _log.debug("catalog_pdf_hook_skipped", reason="catalog not initialized")
+            return
+
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        effective_title = title or pdf_path.stem
+        owner_name = corpus if corpus else "standalone-pdfs"
+
+        # Get or create curator owner
+        owner = None
+        rows = cat._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+        ).fetchone()
+        if rows:
+            from nexus.catalog.tumbler import Tumbler
+            owner = Tumbler.parse(rows[0])
+        else:
+            owner = cat.register_owner(owner_name, "curator")
+
+        # Dedup by file_path (stable identifier for PDFs)
+        from datetime import UTC, datetime
+        file_path_str = pdf_path.name  # Portable — not machine-specific absolute path
+        existing = cat.by_file_path(owner, file_path_str)
+
+        if existing:
+            cat.update(
+                existing.tumbler,
+                physical_collection=collection_name,
+                chunk_count=chunk_count,
+                indexed_at=datetime.now(UTC).isoformat(),
+            )
+        else:
+            cat.register(
+                owner=owner, title=effective_title, content_type="paper",
+                author=author, year=year, corpus=corpus,
+                physical_collection=collection_name,
+                chunk_count=chunk_count,
+                file_path=file_path_str,
+            )
+    except Exception:
+        _log.debug("catalog_pdf_hook_failed", exc_info=True)
+
+
 def pipeline_index_pdf(
     pdf_path: Path,
     content_hash: str,
@@ -540,6 +598,26 @@ def pipeline_index_pdf(
     state = db.get_pipeline_state(content_hash)
     total_chunks = state["chunks_uploaded"] if state else 0
     db.delete_pipeline_data(content_hash)
+
+    # Catalog hook: register PDF in catalog (opt-in, graceful absence)
+    title = (
+        extraction_result.title
+        if hasattr(extraction_result, "title") and extraction_result.title
+        else extraction_result.metadata.get("title", "")
+        if hasattr(extraction_result, "metadata")
+        else ""
+    ) or pdf_path.stem
+    author = extraction_result.metadata.get("author", "") if hasattr(extraction_result, "metadata") else ""
+    year_raw = extraction_result.metadata.get("year", 0) if hasattr(extraction_result, "metadata") else 0
+    _catalog_pdf_hook(
+        pdf_path=pdf_path,
+        collection_name=collection,
+        title=title,
+        author=author,
+        year=int(year_raw) if year_raw else 0,
+        corpus=corpus,
+        chunk_count=total_chunks,
+    )
 
     return total_chunks
 

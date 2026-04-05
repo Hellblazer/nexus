@@ -568,6 +568,28 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool) -> None:
                 lines.append(_check_line(f"ChromaDB pagination ({chroma_database})", True,
                                          "skipped (client unavailable)"))
 
+    # ── Catalog ────────────────────────────────────────────────────────────
+    try:
+        from nexus.catalog.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if Catalog.is_initialized(cat_path):
+            cat = Catalog(cat_path, cat_path / ".catalog.db")
+            doc_count = cat._db.execute("SELECT count(*) FROM documents").fetchone()[0]
+            link_count = cat._db.execute("SELECT count(*) FROM links").fetchone()[0]
+            lines.append(_check_line(
+                "Catalog", True,
+                f"{doc_count} documents, {link_count} links at {cat_path}",
+            ))
+        else:
+            lines.append(_check_line(
+                "Catalog", True,
+                "not initialized (optional — run: nx catalog init && nx catalog backfill)",
+            ))
+    except Exception:
+        lines.append(_check_line("Catalog", True, "check failed (non-critical)"))
+
     click.echo("\n".join(lines))
 
     if failed:

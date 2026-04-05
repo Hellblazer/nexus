@@ -36,6 +36,21 @@ mcp__plugin_nx_nexus__scratch(action="put", content="working note"
 mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>"       # auto-promote to T2 at session end
 ```
 
+## Catalog (T3 metadata — document registry + link graph)
+
+```
+# Search by metadata (author, corpus, title, file_path)
+mcp__plugin_nx_nexus__catalog_search(query="schema mappings", author="Fagin", corpus="schema-evolution"
+mcp__plugin_nx_nexus__catalog_show(tumbler="1.9.14"                    # full entry with links
+mcp__plugin_nx_nexus__catalog_links(tumbler="1.9.14", direction="in", link_type="cites", depth=2
+mcp__plugin_nx_nexus__catalog_resolve(owner="1.1", corpus="schema-evolution"  # → collection names
+mcp__plugin_nx_nexus__catalog_stats                                    # health summary
+mcp__plugin_nx_nexus__catalog_link(from_tumbler="1.1.1", to_tumbler="1.2.5", link_type="cites", created_by="user"
+```
+
+Use catalog for: author queries, citation traversal, provenance chains, corpus-scoped search.
+The `/nx:query` skill handles full catalog-aware plan execution.
+
 ## Indexing (CLI only — no MCP equivalent)
 
 ```bash

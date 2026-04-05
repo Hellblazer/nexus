@@ -146,13 +146,97 @@ def _parse_where_str(where_str: str) -> dict | None:
 
 # ── Test injection ────────────────────────────────────────────────────────────
 
+_catalog_instance = None
+_catalog_lock = threading.Lock()
+_catalog_mtime: float = 0.0
+
+
+def _max_jsonl_mtime(cat) -> float:
+    """Return max mtime across all three JSONL files."""
+    mtime = 0.0
+    for path in cat.jsonl_paths():
+        try:
+            mtime = max(mtime, path.stat().st_mtime) if path.exists() else mtime
+        except OSError:
+            pass
+    return mtime
+
+
+def _get_catalog():
+    """Return Catalog singleton or None if not initialized.
+
+    Checks JSONL mtime on each access — if files changed externally
+    (e.g., git pull from another process), triggers a rebuild.
+    """
+    global _catalog_instance, _catalog_mtime
+    if _catalog_instance is None:
+        with _catalog_lock:
+            if _catalog_instance is None:
+                from nexus.catalog import Catalog
+                from nexus.config import catalog_path
+
+                path = catalog_path()
+                if Catalog.is_initialized(path):
+                    _catalog_instance = Catalog(path, path / ".catalog.db")
+                    _catalog_mtime = _max_jsonl_mtime(_catalog_instance)
+    elif _catalog_instance is not None:
+        # Check for external JSONL changes (git pull, another process)
+        try:
+            current_mtime = _max_jsonl_mtime(_catalog_instance)
+            if current_mtime > _catalog_mtime:
+                with _catalog_lock:
+                    # Double-check under lock to avoid redundant rebuilds
+                    if current_mtime > _catalog_mtime:
+                        _catalog_mtime = current_mtime
+                        _catalog_instance._ensure_consistent()
+        except Exception:
+            pass  # stat failure is non-fatal
+    return _catalog_instance
+
+
+def _require_catalog():
+    """Return (catalog, None) or (None, error_message)."""
+    cat = _get_catalog()
+    if cat is None:
+        return None, "Catalog not initialized — run: nx catalog init"
+    return cat, None
+
+
+def _resolve_tumbler_mcp(
+    cat: "Catalog", value: str
+) -> "tuple[Tumbler | None, str | None]":
+    """Resolve tumbler string OR title/filename. Returns (tumbler, None) or (None, error)."""
+    from nexus.catalog.tumbler import Tumbler
+    parsed_tumbler = False
+    try:
+        t = Tumbler.parse(value)
+        parsed_tumbler = True
+        if cat.resolve(t) is not None:
+            return t, None
+        # Valid tumbler format but document deleted/missing — don't fall through to FTS
+        return None, f"Not found: {value!r}"
+    except ValueError:
+        pass
+    results = cat.find(value)
+    if results:
+        exact = [r for r in results if r.title == value]
+        if exact:
+            return exact[0].tumbler, None
+        if len(results) == 1:
+            return results[0].tumbler, None
+        return None, f"Ambiguous: {len(results)} documents match {value!r} — use tumbler"
+    return None, f"Not found: {value!r}"
+
+
 def _reset_singletons():
     """Reset lazy singletons (for tests only)."""
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
     _collections_cache = ([], 0.0)
+    _catalog_instance = None
+    _catalog_mtime = 0.0
 
 
 def _inject_t1(t1, *, isolated: bool = False):
@@ -166,6 +250,12 @@ def _inject_t3(t3):
     """Inject a T3Database for testing."""
     global _t3_instance
     _t3_instance = t3
+
+
+def _inject_catalog(cat):
+    """Inject a Catalog for testing."""
+    global _catalog_instance
+    _catalog_instance = cat
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -952,6 +1042,454 @@ def plan_search(query: str, project: str = "", limit: int = 5) -> str:
         return "\n\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
+
+
+# ── Catalog tools ─────────────────────────────────────────────────────────────
+
+
+def _entry_to_dict(entry) -> dict:
+    return entry.to_dict()
+
+
+def _link_to_dict(link) -> dict:
+    return link.to_dict()
+
+
+@mcp.tool()
+def catalog_search(
+    query: str = "",
+    content_type: str = "",
+    author: str = "",
+    corpus: str = "",
+    owner: str = "",
+    file_path: str = "",
+    limit: int = 20,
+) -> list[dict]:
+    """Search the catalog by title, author, corpus, or file path.
+    Returns catalog entries — NOT content. Use `search` for semantic content search.
+    Structured filters (author, corpus, owner, file_path) are exact SQL matches;
+    query is FTS5 free-text over title/author/corpus/file_path."""
+    cat, err = _require_catalog()
+    if err:
+        return [{"error": err}]
+    try:
+        from nexus.catalog.tumbler import Tumbler
+        import json as _json
+
+        # Structured filters via SQL when provided
+        if owner or corpus or file_path or (author and not query):
+            conditions = ["1=1"]
+            params: list = []
+            if owner:
+                depth = len(owner.split("."))
+                conditions.append("tumbler LIKE ?")
+                params.append(owner + ".%")
+                conditions.append("(length(tumbler) - length(replace(tumbler, '.', ''))) = ?")
+                params.append(depth)
+            if corpus:
+                conditions.append("corpus = ?")
+                params.append(corpus)
+            if file_path:
+                conditions.append("file_path = ?")
+                params.append(file_path)
+            if author:
+                conditions.append("author LIKE ?")
+                params.append(f"%{author}%")
+            if content_type:
+                conditions.append("content_type = ?")
+                params.append(content_type)
+            sql = (
+                "SELECT tumbler, title, author, year, content_type, file_path, "
+                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+                f"FROM documents WHERE {' AND '.join(conditions)} LIMIT ?"
+            )
+            params.append(limit)
+            rows = cat._db.execute(sql, params).fetchall()
+            from nexus.catalog.catalog import CatalogEntry
+            entries = [
+                CatalogEntry(
+                    tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
+                    content_type=r[4], file_path=r[5], corpus=r[6],
+                    physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
+                    indexed_at=r[10], meta=_json.loads(r[11]) if r[11] else {},
+                )
+                for r in rows
+            ]
+            return [_entry_to_dict(e) for e in entries]
+
+        # FTS5 free-text search (append author to query if both provided)
+        fts_query = query
+        if author and query:
+            fts_query = f"{query} {author}"
+        if not fts_query.strip():
+            return [{"error": "query or at least one filter required"}]
+        results = cat.find(fts_query, content_type=content_type or None)[:limit]
+        return [_entry_to_dict(e) for e in results]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+def catalog_show(
+    tumbler: str = "",
+    title: str = "",
+) -> dict:
+    """Full catalog entry including links in and out."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        from nexus.catalog.tumbler import Tumbler
+
+        entry = None
+        if tumbler:
+            entry = cat.resolve(Tumbler.parse(tumbler))
+        elif title:
+            results = cat.find(title)
+            entry = results[0] if results else None
+
+        if entry is None:
+            return {"error": f"Not found: {tumbler or title}"}
+
+        d = _entry_to_dict(entry)
+        d["links_from"] = [_link_to_dict(l) for l in cat.links_from(entry.tumbler)]
+        d["links_to"] = [_link_to_dict(l) for l in cat.links_to(entry.tumbler)]
+        return d
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_list(
+    owner: str = "",
+    content_type: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    """List catalog entries with optional filters."""
+    cat, err = _require_catalog()
+    if err:
+        return [{"error": err}]
+    try:
+        from nexus.catalog.tumbler import Tumbler
+
+        if owner:
+            entries = cat.by_owner(Tumbler.parse(owner))
+            entries = entries[offset:offset + limit]
+        else:
+            import json as _json
+
+            rows = cat._db.execute(
+                "SELECT tumbler, title, author, year, content_type, file_path, "
+                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+                "FROM documents LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+            from nexus.catalog.catalog import CatalogEntry
+
+            entries = [
+                CatalogEntry(
+                    tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
+                    content_type=r[4], file_path=r[5], corpus=r[6],
+                    physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
+                    indexed_at=r[10], meta=_json.loads(r[11]) if r[11] else {},
+                )
+                for r in rows
+            ]
+        if content_type:
+            entries = [e for e in entries if e.content_type == content_type]
+        return [_entry_to_dict(e) for e in entries[:limit]]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+def catalog_register(
+    title: str,
+    owner: str,
+    content_type: str = "paper",
+    author: str = "",
+    year: int = 0,
+    file_path: str = "",
+    corpus: str = "",
+    physical_collection: str = "",
+    meta: str = "",
+) -> dict:
+    """Register a document. Assigns tumbler. Ghost elements: physical_collection can be empty."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        import json as _json
+
+        from nexus.catalog.tumbler import Tumbler
+
+        tumbler = cat.register(
+            Tumbler.parse(owner), title,
+            content_type=content_type, file_path=file_path,
+            corpus=corpus, author=author, year=year,
+            physical_collection=physical_collection,
+            meta=_json.loads(meta) if meta else None,
+        )
+        return {"tumbler": str(tumbler), "title": title}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_update(
+    tumbler: str,
+    title: str = "",
+    author: str = "",
+    year: int = 0,
+    corpus: str = "",
+    physical_collection: str = "",
+    meta: str = "",
+) -> dict:
+    """Update a catalog entry's metadata."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        import json as _json
+
+        from nexus.catalog.tumbler import Tumbler
+
+        fields: dict = {}
+        if title:
+            fields["title"] = title
+        if author:
+            fields["author"] = author
+        if year:
+            fields["year"] = year
+        if corpus:
+            fields["corpus"] = corpus
+        if physical_collection:
+            fields["physical_collection"] = physical_collection
+        if meta:
+            fields["meta"] = _json.loads(meta)
+        if not fields:
+            return {"error": "No fields to update"}
+        cat.update(Tumbler.parse(tumbler), **fields)
+        return {"tumbler": tumbler, "updated": list(fields.keys())}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_link(
+    from_tumbler: str,
+    to_tumbler: str,
+    link_type: str,
+    created_by: str = "user",
+    from_span: str = "",
+    to_span: str = "",
+) -> dict:
+    """Create a typed link. Accepts tumblers or titles. created_by tracks origin (RF-8)."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        ft, err = _resolve_tumbler_mcp(cat, from_tumbler)
+        if err:
+            return {"error": err}
+        tt, err = _resolve_tumbler_mcp(cat, to_tumbler)
+        if err:
+            return {"error": err}
+        created = cat.link(ft, tt, link_type, created_by, from_span=from_span, to_span=to_span)
+        return {"from": str(ft), "to": str(tt), "type": link_type, "created": created}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_links(
+    tumbler: str,
+    direction: str = "both",
+    link_type: str = "",
+    depth: int = 1,
+) -> dict:
+    """Links to/from a catalog entry. Accepts tumbler or title. depth controls BFS depth (default 1 = direct neighbors).
+
+    Returns {"nodes": [CatalogEntry dicts], "edges": [CatalogLink dicts]}.
+    Note: only returns links whose endpoints are live documents (deleted nodes excluded).
+    Use catalog_link_query to see all links including those to deleted documents.
+    """
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        t, err = _resolve_tumbler_mcp(cat, tumbler)
+        if err:
+            return {"error": err}
+        result = cat.graph(t, depth=depth, direction=direction, link_type=link_type)
+        return {
+            "nodes": [_entry_to_dict(n) for n in result["nodes"]],
+            "edges": [_link_to_dict(e) for e in result["edges"]],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_unlink(
+    from_tumbler: str,
+    to_tumbler: str,
+    link_type: str = "",
+) -> dict:
+    """Remove link(s) between catalog entries. Accepts tumblers or titles. If link_type empty, removes all types."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        ft, err = _resolve_tumbler_mcp(cat, from_tumbler)
+        if err:
+            return {"error": err}
+        tt, err = _resolve_tumbler_mcp(cat, to_tumbler)
+        if err:
+            return {"error": err}
+        removed = cat.unlink(ft, tt, link_type)
+        return {"removed": removed, "from": str(ft), "to": str(tt)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_link_audit() -> dict:
+    """Audit the link graph: counts by type/creator, orphaned links, duplicates.
+
+    Use to verify link health before/after bulk operations.
+    """
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        return cat.link_audit()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_link_bulk(
+    from_tumbler: str = "",
+    to_tumbler: str = "",
+    link_type: str = "",
+    created_by: str = "",
+    created_at_before: str = "",
+    dry_run: bool = False,
+) -> dict:
+    """Bulk delete links by filter. Returns count removed.
+
+    dry_run=True returns count without deleting.
+    created_at_before: ISO timestamp string, e.g. "2026-01-01T00:00:00"
+    """
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        count = cat.bulk_unlink(
+            from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
+            created_by=created_by, created_at_before=created_at_before,
+            dry_run=dry_run,
+        )
+        return {"removed": count, "dry_run": dry_run}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_link_query(
+    from_tumbler: str = "",
+    to_tumbler: str = "",
+    link_type: str = "",
+    created_by: str = "",
+    direction: str = "both",
+    tumbler: str = "",
+    created_at_before: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    """Query links by any combination of filters. For admin/audit use.
+
+    NOT a query-planner step — use catalog_links for graph traversal.
+    Use for: audit by creator, find all links of a type, count generator output.
+    created_at_before: ISO timestamp — only links created before this time.
+    Note: returns ALL matching links including orphans (links to deleted documents).
+    Use catalog_links for live-documents-only graph traversal.
+    """
+    cat, err = _require_catalog()
+    if err:
+        return [{"error": err}]
+    try:
+        links = cat.link_query(
+            from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
+            created_by=created_by, direction=direction, tumbler=tumbler,
+            created_at_before=created_at_before,
+            limit=limit, offset=offset,
+        )
+        return [_link_to_dict(l) for l in links]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+def catalog_resolve(
+    tumbler: str = "",
+    owner: str = "",
+    corpus: str = "",
+) -> list[str]:
+    """Resolve to physical ChromaDB collection names.
+    Returns collection names usable with the `search` tool."""
+    cat, err = _require_catalog()
+    if err:
+        return [f"Error: {err}"]
+    try:
+        from nexus.catalog.tumbler import Tumbler
+
+        collections: set[str] = set()
+        if tumbler:
+            entry = cat.resolve(Tumbler.parse(tumbler))
+            if entry and entry.physical_collection:
+                collections.add(entry.physical_collection)
+        if owner:
+            entries = cat.by_owner(Tumbler.parse(owner))
+            for e in entries:
+                if e.physical_collection:
+                    collections.add(e.physical_collection)
+        if corpus:
+            rows = cat._db.execute(
+                "SELECT DISTINCT physical_collection FROM documents WHERE corpus = ?",
+                (corpus,),
+            ).fetchall()
+            for r in rows:
+                if r[0]:
+                    collections.add(r[0])
+        return sorted(collections)
+    except Exception as e:
+        return [f"Error: {e}"]
+
+
+@mcp.tool()
+def catalog_stats() -> dict:
+    """Catalog health summary: owner/document/link counts by type."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        db = cat._db
+        return {
+            "owners": db.execute("SELECT count(*) FROM owners").fetchone()[0],
+            "documents": db.execute("SELECT count(*) FROM documents").fetchone()[0],
+            "links": db.execute("SELECT count(*) FROM links").fetchone()[0],
+            "by_type": dict(db.execute(
+                "SELECT content_type, count(*) FROM documents GROUP BY content_type"
+            ).fetchall()),
+            "by_link_type": dict(db.execute(
+                "SELECT link_type, count(*) FROM links GROUP BY link_type"
+            ).fetchall()),
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

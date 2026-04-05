@@ -141,6 +141,37 @@ Step outputs: T1 scratch tag `query-step,step-N`.
 OPERATORS
 fi
 
+# Catalog awareness — inject only for catalog-relevant tasks
+if echo "$TASK_TEXT" | grep -qiE "author|cit(e|ation|es|ed)|who wrote|what did.*write|papers (by|about)|provenance|corpus|collection|tumbler|what research|informed by|based on|relationship|links (from|to)"; then
+  CATALOG_PATH="${NEXUS_CATALOG_PATH:-$HOME/.config/nexus/catalog}"
+  if [[ -d "$CATALOG_PATH/.git" && -f "$CATALOG_PATH/documents.jsonl" ]]; then
+    cat <<'CATALOG'
+
+## Catalog (RDR-049)
+
+Use catalog tools for metadata-first queries (author, corpus, title, citations, provenance).
+The `/nx:query` skill handles full catalog-aware plan execution.
+
+  Tool: mcp__plugin_nx_nexus__catalog_search
+    catalog_search(query="...", author="...", corpus="...", owner="...", file_path="...", content_type="...")
+  Tool: mcp__plugin_nx_nexus__catalog_show
+    catalog_show(tumbler="1.2.5")
+  Tool: mcp__plugin_nx_nexus__catalog_links
+    catalog_links(tumbler="1.2.5", direction="in", link_type="cites", depth=2)
+    Returns {"nodes": [...], "edges": [...]} — use result["edges"] for link list.
+  Tool: mcp__plugin_nx_nexus__catalog_link_query
+    catalog_link_query(from_tumbler="", to_tumbler="", link_type="cites", created_by="bib_enricher", limit=50)
+    Query links by any combination of filters. Admin/audit use — not a planner step.
+  Tool: mcp__plugin_nx_nexus__catalog_link_audit
+    catalog_link_audit()
+    Audit the link graph: total, by_type, by_creator, orphaned links, duplicates.
+  Tool: mcp__plugin_nx_nexus__catalog_resolve
+    catalog_resolve(owner="1.1", corpus="schema-evolution")
+  Tool: mcp__plugin_nx_nexus__catalog_stats
+CATALOG
+  fi
+fi
+
 # Inject current T1 scratch entries
 if command -v nx &> /dev/null; then
   T1_ENTRIES=$(nx scratch list 2>/dev/null)

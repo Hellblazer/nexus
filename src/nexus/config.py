@@ -225,6 +225,17 @@ def _default_local_path() -> Path:
     return Path.home() / ".local" / "share" / "nexus" / "chroma"
 
 
+def catalog_path() -> Path:
+    """Return the catalog directory path.
+
+    Priority: NEXUS_CATALOG_PATH env → default ~/.config/nexus/catalog/
+    """
+    env = os.environ.get("NEXUS_CATALOG_PATH", "").strip()
+    if env:
+        return Path(env)
+    return Path.home() / ".config" / "nexus" / "catalog"
+
+
 def is_local_mode() -> bool:
     """Return True if nexus should use the local T3 backend.
 

@@ -83,6 +83,8 @@ Receive a natural-language analytical question and return a structured JSON exec
 - **Chain outputs**: Use `$step_N` references to pass outputs from earlier steps to later ones.
 - **Match operation to goal**: Choose the operation type that directly addresses what the question needs.
 - **Reuse few-shot patterns**: If a few-shot example closely matches the question, adapt its structure rather than starting from scratch.
+- **Use catalog operations for metadata-first routing**: When the question mentions a specific author, paper title, citation relationship, provenance chain, or corpus name, start with `catalog_search` or `catalog_resolve` rather than a blind `search`. This scopes T3 retrieval to relevant collections only.
+- **Catalog before search**: In catalog-aware plans, `catalog_search` or `catalog_resolve` almost always precedes `search`. The catalog narrows the corpus; `search` retrieves the content.
 
 
 ## Output Schema
@@ -137,7 +139,7 @@ Return a single JSON object with this structure:
 - `"query"`: Copy the question verbatim from the relay.
 - `"steps"`: Ordered list; step numbers must be sequential starting at 1.
 - `"step"`: Integer step number (1-based).
-- `"operation"`: One of `search`, `extract`, `summarize`, `rank`, `compare`, `generate`.
+- `"operation"`: One of `search`, `extract`, `summarize`, `rank`, `compare`, `generate`, `catalog_search`, `catalog_links`, `catalog_resolve`.
 - `"inputs"`: Either `"$step_N"` (reference to step N's output) or `["$step_N", "$step_M"]` (multiple references). For `search` steps, omit — use `search_query` instead.
 - `"params"`: Operation-specific parameters (see Operation Types below).
 - `"search_query"`: Only for `search` steps. A concise search string (not the full question).
@@ -232,6 +234,61 @@ Produces evidence-grounded text from context. Dispatched to `analytical-operator
 ```
 
 
+---
+
+### catalog_search
+Finds catalog entries by metadata (author, corpus, title, file path). Executed by the skill via the `catalog_search` MCP tool. Returns catalog entry dicts, each containing `tumbler`, `physical_collection`, and metadata fields.
+
+**When to use**: When the question targets a specific author, corpus, paper title, or code file — and you need to scope the subsequent `search` to relevant collections only. Always before a `search` step that should be narrowed.
+
+**Optional params** (at least one required): `query` (FTS5 free-text), `author` (exact match), `corpus` (exact match), `owner` (tumbler prefix), `file_path` (exact match), `content_type` (exact match).
+
+**Output**: List of catalog entry dicts. The skill extracts distinct `physical_collection` values into `$step_N.collections` for downstream `search` steps.
+
+**Examples**:
+```json
+{"step": 1, "operation": "catalog_search", "params": {"author": "Fagin", "corpus": "schema-evolution"}}
+{"step": 1, "operation": "catalog_search", "params": {"query": "Inverting Schema Mappings"}}
+{"step": 1, "operation": "catalog_search", "params": {"file_path": "src/nexus/chunker.py", "owner": "1.1"}}
+```
+
+---
+
+### catalog_links
+Navigates the catalog link graph from a tumbler. Executed by the skill via the `catalog_links` MCP tool. Returns `{"nodes": [...], "edges": [...]}` — access edges via `result["edges"]`, starting node via `result["nodes"]`.
+
+**When to use**: When the question asks about citations ("what cites X?"), provenance ("what research informed this code?"), or relationships ("what implements this RDR?"). Use after `catalog_search` to traverse from a found entry.
+
+**Required params**: `tumbler` — starting point. Either set `tumbler` explicitly in `params`, or use `inputs: "$step_N"` (skill extracts first entry's tumbler). A `catalog_links` step must have either `params.tumbler` or `inputs` — never neither. **Optional params**: `direction` (`in`/`out`/`both`, default `both`), `link_type` (e.g., `cites`, `implements`, `supersedes`), `depth` (default 1).
+
+**Fanout rule**: When `inputs` references a prior step that returned a list, the skill extracts the first entry's tumbler.
+
+**Output**: Dict with `"nodes"` (CatalogEntry dicts) and `"edges"` (link dicts with `from`, `to`, `type`). The skill resolves link target tumblers to `physical_collection` values into `$step_N.collections`.
+
+**Examples**:
+```json
+{"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "link_type": "cites", "depth": 2}}
+{"step": 2, "operation": "catalog_links", "params": {"tumbler": "1.2.5", "direction": "out", "link_type": "implements"}}
+```
+
+---
+
+### catalog_resolve
+Maps a catalog owner or corpus to physical T3 collection names. Executed by the skill via the `catalog_resolve` MCP tool.
+
+**When to use**: When you need all collections for an entire owner or corpus without knowing specific documents. Use before `search` to scope the corpus.
+
+**Optional params** (at least one required): `tumbler` (single document), `owner` (tumbler prefix — all docs for that owner), `corpus` (corpus tag — all docs with that corpus).
+
+**Output**: List of collection name strings. Directly usable as the `corpus` for a subsequent `search` step.
+
+**Example**:
+```json
+{"step": 1, "operation": "catalog_resolve", "params": {"corpus": "distributed-systems"}}
+```
+
+---
+
 ## Example Plans
 
 ### Simple research question (2 steps)
@@ -272,6 +329,36 @@ Question: "Are the architecture docs consistent with the actual code implementat
     {"step": 2, "operation": "search", "search_query": "architecture design patterns modules", "corpus": "code"},
     {"step": 3, "operation": "summarize", "inputs": "$step_1", "params": {"mode": "short"}},
     {"step": 4, "operation": "compare", "inputs": ["$step_3", "$step_2"], "params": {"criterion": "structural consistency between docs and code"}}
+  ]
+}
+```
+
+
+### Catalog-aware: narrow-then-search (3 steps)
+Question: "What does Fagin say about the chase procedure?"
+
+```json
+{
+  "query": "What does Fagin say about the chase procedure?",
+  "steps": [
+    {"step": 1, "operation": "catalog_search", "params": {"author": "Fagin", "corpus": "schema-evolution"}},
+    {"step": 2, "operation": "search", "search_query": "chase procedure optimization", "corpus": "$step_1.collections"},
+    {"step": 3, "operation": "summarize", "inputs": "$step_2", "params": {"mode": "evidence"}}
+  ]
+}
+```
+
+### Catalog-aware: citation traversal (4 steps)
+Question: "What papers cite Inverting Schema Mappings?"
+
+```json
+{
+  "query": "What papers cite Inverting Schema Mappings?",
+  "steps": [
+    {"step": 1, "operation": "catalog_search", "params": {"query": "Inverting Schema Mappings"}},
+    {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "link_type": "cites", "depth": 1}},
+    {"step": 3, "operation": "search", "search_query": "novel contribution methodology", "corpus": "$step_2.collections"},
+    {"step": 4, "operation": "summarize", "inputs": "$step_3", "params": {"mode": "short"}}
   ]
 }
 ```

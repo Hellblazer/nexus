@@ -128,8 +128,69 @@ def enrich(collection: str, delay: float, limit: int) -> None:
                 year=bib.get("year"),
                 venue=bib.get("venue"),
             )
+            _catalog_enrich_hook(title=title, bib_meta=bib, collection_name=collection)
 
     click.echo(
         f"Done: enriched {enriched_chunks} chunks across {enriched_titles} titles; "
         f"{skipped_titles} titles had no Semantic Scholar match."
     )
+
+    # Auto-generate citation links if catalog is initialized
+    if enriched_titles > 0:
+        try:
+            from nexus.catalog import Catalog
+            from nexus.config import catalog_path
+
+            cat_path = catalog_path()
+            if Catalog.is_initialized(cat_path):
+                from nexus.catalog.link_generator import generate_citation_links
+
+                cat = Catalog(cat_path, cat_path / ".catalog.db")
+                link_count = generate_citation_links(cat)
+                if link_count > 0:
+                    click.echo(f"Auto-generated {link_count} citation links in catalog.")
+        except Exception:
+            _log.debug("auto_citation_links_failed", exc_info=True)
+
+
+def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") -> None:
+    """Update catalog entry with bib metadata. Silently skipped if absent."""
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return
+
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+
+        # Prefer exact physical_collection lookup over FTS title search
+        entry = None
+        if collection_name:
+            row = cat._db.execute(
+                "SELECT tumbler FROM documents WHERE physical_collection = ? LIMIT 1",
+                (collection_name,),
+            ).fetchone()
+            if row:
+                from nexus.catalog.tumbler import Tumbler
+                entry = cat.resolve(Tumbler.parse(row[0]))
+
+        # Fallback to FTS title search
+        if entry is None:
+            entries = cat.find(title, content_type="paper")
+            entry = entries[0] if entries else None
+
+        if entry:
+            cat.update(
+                entry.tumbler,
+                author=bib_meta.get("authors", ""),
+                year=bib_meta.get("year", 0),
+                meta={
+                    "venue": bib_meta.get("venue", ""),
+                    "bib_semantic_scholar_id": bib_meta.get("semantic_scholar_id", ""),
+                    "citation_count": bib_meta.get("citation_count", 0),
+                },
+            )
+    except Exception:
+        _log.debug("catalog_enrich_hook_failed", exc_info=True)

@@ -3,6 +3,9 @@ import sys
 from pathlib import Path
 
 import click
+import structlog
+
+_log = structlog.get_logger(__name__)
 
 from nexus.corpus import t3_collection_name
 from nexus.db import make_t3
@@ -107,6 +110,42 @@ def put_cmd(
         ttl_days=ttl_days,
     )
     click.echo(f"Stored: {doc_id}  →  {col_name}")
+    _catalog_store_hook(title=title, doc_id=doc_id, collection_name=col_name)
+
+
+def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> None:
+    """Register knowledge entry in catalog. Silently skipped if absent."""
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return
+
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+
+        # Dedup by doc_id
+        if cat.by_doc_id(doc_id) is not None:
+            return
+
+        # Get or create "knowledge" curator owner
+        rows = cat._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE name = 'knowledge'"
+        ).fetchone()
+        if rows:
+            from nexus.catalog.tumbler import Tumbler
+            owner = Tumbler.parse(rows[0])
+        else:
+            owner = cat.register_owner("knowledge", "curator")
+
+        cat.register(
+            owner=owner, title=title, content_type="knowledge",
+            physical_collection=collection_name,
+            meta={"doc_id": doc_id},
+        )
+    except Exception:
+        _log.debug("catalog_store_hook_failed", exc_info=True)
 
 
 @store.command("list")

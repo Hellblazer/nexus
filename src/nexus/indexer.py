@@ -204,6 +204,61 @@ def _remove_stale(lock_path: Path) -> None:
         pass
 
 
+def _catalog_hook(
+    repo: Path,
+    repo_name: str,
+    repo_hash: str,
+    head_hash: str,
+    indexed_files: list[tuple[Path, str, str]],
+) -> None:
+    """Register/update indexed files in catalog. Silently skipped if catalog absent."""
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            _log.debug("catalog_hook_skipped", reason="catalog not initialized")
+            return
+
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+
+        owner = cat.owner_for_repo(repo_hash)
+        if owner is None:
+            owner = cat.register_owner(
+                name=repo_name,
+                owner_type="repo",
+                repo_hash=repo_hash,
+                description=f"Git repository: {repo_name}",
+            )
+            _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
+
+        for abs_path, content_type, collection_name in indexed_files:
+            try:
+                rel_path = str(abs_path.relative_to(repo))
+            except ValueError:
+                rel_path = abs_path.name
+
+            existing = cat.by_file_path(owner, rel_path)
+            if existing is None:
+                cat.register(
+                    owner=owner,
+                    title=abs_path.name,
+                    content_type=content_type,
+                    file_path=rel_path,
+                    physical_collection=collection_name,
+                    head_hash=head_hash,
+                )
+            else:
+                cat.update(
+                    existing.tumbler,
+                    head_hash=head_hash,
+                    physical_collection=collection_name,
+                )
+    except Exception:
+        _log.debug("catalog_hook_failed", exc_info=True)
+
+
 def index_repository(
     repo: Path,
     registry: "RepoRegistry",
@@ -965,6 +1020,30 @@ def _run_index(
                 stamp_collection_version(rdr_col)
             except Exception:
                 _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
+
+    # Catalog hook: register indexed files (opt-in, graceful absence)
+    indexed_for_catalog: list[tuple[Path, str, str]] = []
+    for _, f in code_files:
+        indexed_for_catalog.append((f, "code", code_collection))
+    for _, f in prose_files:
+        indexed_for_catalog.append((f, "prose", docs_collection))
+    # Include RDR files so code→RDR provenance links can be generated
+    # Register regardless of T3 indexing success — catalog tracks existence
+    if rdr_abs_paths:
+        from nexus.registry import _rdr_collection_name
+        rdr_col = _rdr_collection_name(repo)
+        for rdr_dir in rdr_abs_paths:
+            if rdr_dir.is_dir():
+                for md_file in sorted(rdr_dir.rglob("*.md")):
+                    if md_file.is_file():
+                        indexed_for_catalog.append((md_file, "rdr", rdr_col))
+    _catalog_hook(
+        repo=repo,
+        repo_name=_repo_basename,
+        repo_hash=_repo_hash,
+        head_hash=_current_head(repo),
+        indexed_files=indexed_for_catalog,
+    )
 
     return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
 
