@@ -32,11 +32,15 @@ Drives multi-step analytical queries by orchestrating the **query-planner** and 
 
 Capture the user's natural-language analytical question. This is the `query` that drives the entire flow.
 
-### Step 1: Plan Library Lookup (opt-in)
+### Step 1: Plan Library Lookup
 
-**Skip by default.** Only search the plan library when the user explicitly requests plan reuse (e.g., "reuse a similar plan", "check if we've done this before") or when the query closely matches a known analytical pattern.
+**Auto-trigger when the query contains any of**: author, cite, citation, cites, cited by, relationship, provenance, implements, links from, links to, relates to, corpus, collection.
 
-When opted in, use the `plan_search` MCP tool:
+**Also trigger when** the user explicitly requests plan reuse ("reuse a similar plan", "check if we've done this before").
+
+**Skip otherwise** — for purely content questions with no catalog signals, the overhead is not justified.
+
+When triggered, use the `plan_search` MCP tool:
 
 ```
 mcp__plugin_nx_nexus__plan_search(query="{user question}", project="{project}", limit=3)
@@ -62,7 +66,7 @@ Use the Agent tool to invoke **query-planner** with:
 - Files: none
 
 ### Deliverable
-A JSON execution plan with ordered steps (search, extract, summarize, rank, compare, or generate).
+A JSON execution plan with ordered steps (search, extract, summarize, rank, compare, generate, catalog_search, catalog_links, or catalog_resolve).
 
 ### Quality Criteria
 - [ ] Plan is valid JSON with "query" and "steps" fields
@@ -84,6 +88,51 @@ If the plan cannot be parsed, log the error and ask the user to rephrase the que
 ### Step 3: Execute Plan Steps
 
 For each step in `plan["steps"]` in order:
+
+#### If `step["operation"] == "catalog_search"`:
+
+Execute via the `catalog_search` MCP tool directly:
+
+```
+mcp__plugin_nx_nexus__catalog_search(query="{params.query}", author="{params.author}", corpus="{params.corpus}", owner="{params.owner}", file_path="{params.file_path}", content_type="{params.content_type}")
+```
+
+Omit any param that is empty or absent. Write results to T1 scratch:
+```
+mcp__plugin_nx_nexus__scratch(action="put", content="{results as text}", tags="query-step,step-{N},catalog_search")
+```
+
+**Extract collections**: From the result list, collect distinct `physical_collection` values. Store as `$step_N.collections` — when a subsequent `search` step uses `corpus: "$step_N.collections"`, substitute these comma-separated collection names.
+
+#### If `step["operation"] == "catalog_links"`:
+
+**Resolve tumbler**: If `params.tumbler` is set, use it directly. If `inputs` references a prior step, read from T1 scratch, parse the first entry's `tumbler` field.
+
+Execute via the `catalog_links` MCP tool:
+```
+mcp__plugin_nx_nexus__catalog_links(tumbler="{tumbler}", direction="{params.direction}", link_type="{params.link_type}", depth={params.depth})
+```
+
+Write results to T1 scratch:
+```
+mcp__plugin_nx_nexus__scratch(action="put", content="{link results as text}", tags="query-step,step-{N},catalog_links")
+```
+
+**Extract collections**: For each unique `to` tumbler in the link results, call `mcp__plugin_nx_nexus__catalog_show(tumbler="{to}")` and collect `physical_collection`. Store as `$step_N.collections`.
+
+#### If `step["operation"] == "catalog_resolve"`:
+
+Execute via the `catalog_resolve` MCP tool:
+```
+mcp__plugin_nx_nexus__catalog_resolve(tumbler="{params.tumbler}", owner="{params.owner}", corpus="{params.corpus}")
+```
+
+Write the collection name list to T1 scratch:
+```
+mcp__plugin_nx_nexus__scratch(action="put", content="{collection names}", tags="query-step,step-{N},catalog_resolve")
+```
+
+The result is directly usable as `$step_N.collections` for downstream `search` steps.
 
 #### If `step["operation"] == "search"`:
 
@@ -209,6 +258,9 @@ T1 scratch is the cross-dispatch persistence mechanism. Every step output is wri
 | Tag pattern | Written by | Read by |
 |-------------|-----------|---------|
 | `query-step,step-{N},search` | Skill (after search MCP call) | Skill (resolving $step_N for next dispatch) |
+| `query-step,step-{N},catalog_search` | Skill (after catalog_search) | Skill (resolving $step_N and $step_N.collections) |
+| `query-step,step-{N},catalog_links` | Skill (after catalog_links) | Skill (resolving $step_N and $step_N.collections) |
+| `query-step,step-{N},catalog_resolve` | Skill (after catalog_resolve) | Skill (resolving $step_N.collections for search) |
 | `query-step,step-{N},{operation}` | analytical-operator + Skill | Skill (resolving $step_N for next dispatch) |
 | `query-step,step-{N},error` | Skill (on operator failure) | Skill (to detect partial failures) |
 
