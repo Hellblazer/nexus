@@ -39,10 +39,29 @@ class TestDanglingLinkPrevention:
         cat.link(doc_a, Tumbler.parse("1.1.99"), "cites", created_by="user", allow_dangling=True)
         assert len(cat.links_from(doc_a)) == 1
 
-    def test_link_if_absent_rejects_dangling(self, tmp_path):
+    def test_link_if_absent_rejects_dangling_from(self, tmp_path):
         cat, _, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(ValueError, match="from_tumbler.*not found"):
             cat.link_if_absent(Tumbler.parse("1.1.99"), doc_b, "cites", created_by="user")
+
+    def test_link_if_absent_rejects_dangling_to(self, tmp_path):
+        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
+        with pytest.raises(ValueError, match="to_tumbler.*not found"):
+            cat.link_if_absent(doc_a, Tumbler.parse("1.1.99"), "cites", created_by="user")
+
+    def test_link_if_absent_both_dangling(self, tmp_path):
+        cat, _, _, _ = _make_catalog_with_docs(tmp_path)
+        with pytest.raises(ValueError, match="not found"):
+            cat.link_if_absent(Tumbler.parse("1.1.98"), Tumbler.parse("1.1.99"),
+                               "cites", created_by="user")
+
+    def test_link_if_absent_existing_dangling_returns_false(self, tmp_path):
+        """Existing dangling link returns False without re-validating endpoints."""
+        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
+        ghost = Tumbler.parse("1.1.99")
+        cat.link_if_absent(doc_a, ghost, "cites", created_by="user", allow_dangling=True)
+        result = cat.link_if_absent(doc_a, ghost, "cites", created_by="user")
+        assert result is False
 
     def test_link_if_absent_allow_dangling(self, tmp_path):
         cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
@@ -256,6 +275,21 @@ class TestLinkQuery:
         results = cat.link_query(link_type="cites", created_at_before="2000-01-01T00:00:00")
         assert len(results) == 0
 
+    def test_link_query_no_filter_returns_all(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_c, "relates", created_by="bib_enricher")
+        results = cat.link_query()
+        assert len(results) == 2
+
+    def test_link_query_limit_zero_returns_all(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_c, "relates", created_by="user")
+        cat.link(doc_b, doc_c, "cites", created_by="user")
+        results = cat.link_query(limit=0)
+        assert len(results) == 3  # unlimited
+
     def test_link_query_by_tumbler_out_only(self, tmp_path):
         cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
         cat.link(doc_a, doc_b, "cites", created_by="user")
@@ -399,6 +433,10 @@ class TestLinkAudit:
         cat.link(doc_a, doc_b, "cites", created_by="other")  # merge, not duplicate
         result = cat.link_audit()
         assert result["duplicate_count"] == 0
+        # Verify merge actually happened
+        links = cat.links_from(doc_a, link_type="cites")
+        assert len(links) == 1
+        assert links[0].meta.get("co_discovered_by") == ["other"]
 
 
 class TestGraphTraversal:
@@ -420,9 +458,31 @@ class TestGraphTraversal:
     def test_graph_depth_clamped(self, tmp_path):
         cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
         cat.link(doc_a, doc_b, "cites", created_by="user")
-        # depth=100 is clamped to _MAX_GRAPH_DEPTH — should not crash
-        result = cat.graph(doc_a, depth=100)
-        assert len(result["nodes"]) >= 1
+        # depth=100 is clamped to _MAX_GRAPH_DEPTH — verify same result as explicit max
+        result_clamped = cat.graph(doc_a, depth=100)
+        result_max = cat.graph(doc_a, depth=cat._MAX_GRAPH_DEPTH)
+        assert {str(n.tumbler) for n in result_clamped["nodes"]} == \
+               {str(n.tumbler) for n in result_max["nodes"]}
+
+    def test_graph_deleted_starting_node(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user", allow_dangling=True)
+        cat.delete_document(doc_a)
+        result = cat.graph(doc_a, depth=1)
+        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
+        assert str(doc_a) not in node_tumblers
+        assert str(doc_b) in node_tumblers
+
+    def test_graph_node_limit_truncates(self, tmp_path):
+        from unittest.mock import patch
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_b, doc_c, "relates", created_by="user")
+        # Cap at 1 — only starting node in visited, BFS cannot expand
+        with patch.object(type(cat), '_MAX_GRAPH_NODES', 1):
+            result = cat.graph(doc_a, depth=2)
+            assert len(result["nodes"]) == 1  # only starting node
+            assert result["edges"] == []  # no expansion happened
 
     def test_depth_1(self, tmp_path):
         cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)

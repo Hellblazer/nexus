@@ -202,8 +202,7 @@ class TestLinkBulkDeleteCommand:
             "catalog", "link-bulk-delete", "--type", "cites", "--dry-run",
         ])
         assert result.exit_code == 0
-        assert "would remove" in result.output.lower()
-        assert "1" in result.output
+        assert "Would remove 1 link(s)" in result.output
 
 
 class TestLinkAuditCommand:

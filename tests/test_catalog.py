@@ -164,6 +164,36 @@ class TestUpdate:
         assert entry.meta["venue"] == "NeurIPS"
 
 
+    def test_update_missing_tumbler_raises(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        with pytest.raises(KeyError):
+            cat.update(Tumbler.parse("1.1.999"), title="x")
+
+
+class TestEnsureConsistent:
+    def test_malformed_jsonl_does_not_crash_constructor(self, tmp_path):
+        """Corrupted JSONL at startup should not raise — catalog degrades gracefully."""
+        catalog_dir = tmp_path / "catalog"
+        catalog_dir.mkdir(parents=True)
+        (catalog_dir / "owners.jsonl").write_text("NOT-JSON\n")
+        (catalog_dir / "documents.jsonl").touch()
+        (catalog_dir / "links.jsonl").touch()
+        # Should not raise
+        cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+        assert cat.all_documents() == []
+
+
+class TestCompactReturn:
+    def test_compact_returns_removed_counts(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        cat.update(doc, head_hash="new")  # adds second JSONL line for same doc
+        removed = cat.compact()
+        assert "documents.jsonl" in removed
+        assert removed["documents.jsonl"] >= 1  # at least one overwrite removed
+
+
 class TestFind:
     def test_find_by_title(self, tmp_path):
         cat = _make_catalog(tmp_path)

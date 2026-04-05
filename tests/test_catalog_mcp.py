@@ -222,6 +222,15 @@ class TestTitleResolution:
         assert "error" in result
         assert "dangling" in result["error"] or "Not found" in result["error"]
 
+    def test_catalog_link_ambiguous_title_returns_error(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="auth module main", owner="1.1")
+        catalog_register(title="auth module test", owner="1.1")
+        result = catalog_link(from_tumbler="auth module", to_tumbler="1.1.2", link_type="cites")
+        assert "error" in result
+        assert "Ambiguous" in result["error"]
+
     def test_catalog_link_not_found_returns_error(self, tmp_path):
         cat = _make_test_catalog(tmp_path)
         _inject_catalog(cat)

@@ -137,6 +137,28 @@ class TestCodeRdrLinks:
         assert count2 == 0
 
 
+class TestCodeRdrLinkCap:
+    def test_cap_enforced(self, tmp_path):
+        from nexus.catalog.link_generator import generate_code_rdr_links, _MAX_RDR_MATCHES_PER_CODE
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
+        code = cat.register(
+            owner, "indexer.py", content_type="code",
+            file_path="src/nexus/indexer.py",
+        )
+        # Create more RDRs than the cap, all matching "indexer"
+        for i in range(_MAX_RDR_MATCHES_PER_CODE + 2):
+            cat.register(
+                owner, f"Indexer Design Part {i}", content_type="rdr",
+                file_path=f"docs/rdr/rdr-{100+i}-indexer-{i}.md",
+            )
+        count = generate_code_rdr_links(cat)
+        assert count == _MAX_RDR_MATCHES_PER_CODE
+        links = cat.links_from(code, link_type="implements")
+        assert len(links) == _MAX_RDR_MATCHES_PER_CODE
+
+
 class TestCreatedByTracking:
     def test_all_auto_links_have_machine_created_by(self, tmp_path):
         from nexus.catalog.link_generator import (
