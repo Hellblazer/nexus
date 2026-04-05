@@ -2,15 +2,17 @@
 title: "Link Lifecycle: Full CRUD, Queryable Links, Bulk Operations"
 id: RDR-051
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-04-05
+closed_date: "2026-04-05"
+close_reason: implemented
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-05
 related_issues:
   - "RDR-049 - Git-Backed Xanadu-Inspired Catalog for T3 (closed)"
-  - "RDR-050 - Knowledge Graph and Catalog-Aware Query Planning (accepted)"
+  - "RDR-050 - Knowledge Graph and Catalog-Aware Query Planning (closed)"
 ---
 
 # RDR-051: Link Lifecycle — Full CRUD, Queryable Links, Bulk Operations
