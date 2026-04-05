@@ -24,6 +24,27 @@ def _get_catalog() -> Catalog:
     return Catalog(path, path / ".catalog.db")
 
 
+def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
+    """Resolve a tumbler string OR a title/filename to a Tumbler.
+
+    Tries numeric parse first. Falls back to FTS search, then file_path match.
+    """
+    # Try as tumbler first
+    try:
+        t = Tumbler.parse(value)
+        if cat.resolve(t) is not None:
+            return t
+    except ValueError:
+        pass
+
+    # Try FTS search by title/filename
+    results = cat.find(value)
+    if results:
+        return results[0].tumbler
+
+    raise click.ClickException(f"Not found: {value}")
+
+
 def _entry_to_dict(entry) -> dict:
     return entry.to_dict()
 
@@ -91,16 +112,10 @@ def list_cmd(owner: str, content_type: str, limit: int, as_json: bool) -> None:
 @click.argument("tumbler_or_title")
 @click.option("--json", "as_json", is_flag=True)
 def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
-    """Show full catalog entry."""
+    """Show full catalog entry. Accepts a tumbler (1.9.14) or title/filename."""
     cat = _get_catalog()
-    try:
-        t = Tumbler.parse(tumbler_or_title)
-        entry = cat.resolve(t)
-    except ValueError:
-        # Try FTS search by title
-        results = cat.find(tumbler_or_title)
-        entry = results[0] if results else None
-
+    t = _resolve_tumbler(cat, tumbler_or_title)
+    entry = cat.resolve(t)
     if entry is None:
         raise click.ClickException(f"Not found: {tumbler_or_title}")
 
@@ -151,7 +166,7 @@ def search_cmd(query: str, limit: int, as_json: bool) -> None:
             click.echo(f"{str(e.tumbler):<12} {e.content_type:<10} {e.title}")
 
 
-@catalog.command("register")
+@catalog.command("register", hidden=True)
 @click.option("--title", "-t", required=True)
 @click.option("--owner", "-o", required=True)
 @click.option("--author", default="")
@@ -174,16 +189,23 @@ def register_cmd(
 
 
 @catalog.command("update")
-@click.argument("tumbler")
+@click.argument("tumbler", default="")
 @click.option("--title", default="")
 @click.option("--author", default="")
 @click.option("--year", default=0, type=int)
 @click.option("--corpus", default="")
 @click.option("--meta", default="", help="JSON string of additional metadata")
+@click.option("--owner", default="", help="Batch: update all entries for this owner")
+@click.option("--search", "search_query", default="", help="Batch: update all entries matching this search")
 def update_cmd(
     tumbler: str, title: str, author: str, year: int, corpus: str, meta: str,
+    owner: str, search_query: str,
 ) -> None:
-    """Update a catalog entry's metadata."""
+    """Update catalog entry metadata. TUMBLER can be a tumbler or title.
+
+    Batch mode: use --owner or --search to update multiple entries at once.
+    Example: nx catalog update --owner 1.9 --corpus schema-evolution
+    """
     cat = _get_catalog()
     fields: dict = {}
     if title:
@@ -198,8 +220,27 @@ def update_cmd(
         fields["meta"] = json.loads(meta)
     if not fields:
         raise click.ClickException("No fields to update")
-    cat.update(Tumbler.parse(tumbler), **fields)
-    click.echo(f"Updated: {tumbler}")
+
+    # Batch mode
+    if owner or search_query:
+        entries = []
+        if owner:
+            entries = cat.by_owner(Tumbler.parse(owner))
+        elif search_query:
+            entries = cat.find(search_query)
+        if not entries:
+            raise click.ClickException("No entries matched")
+        for entry in entries:
+            cat.update(entry.tumbler, **fields)
+        click.echo(f"Updated {len(entries)} entries")
+        return
+
+    # Single entry mode
+    if not tumbler:
+        raise click.ClickException("Provide a tumbler/title or use --owner/--search for batch")
+    t = _resolve_tumbler(cat, tumbler)
+    cat.update(t, **fields)
+    click.echo(f"Updated: {t}")
 
 
 @catalog.command("link")
@@ -215,14 +256,12 @@ def link_cmd(
     from_tumbler: str, to_tumbler: str, link_type: str,
     from_span: str, to_span: str,
 ) -> None:
-    """Create a typed link between catalog entries."""
+    """Create a typed link. Arguments accept tumblers or titles."""
     cat = _get_catalog()
-    cat.link(
-        Tumbler.parse(from_tumbler), Tumbler.parse(to_tumbler),
-        link_type, created_by="user",
-        from_span=from_span, to_span=to_span,
-    )
-    click.echo(f"Linked: {from_tumbler} → {to_tumbler} ({link_type})")
+    ft = _resolve_tumbler(cat, from_tumbler)
+    tt = _resolve_tumbler(cat, to_tumbler)
+    cat.link(ft, tt, link_type, created_by="user", from_span=from_span, to_span=to_span)
+    click.echo(f"Linked: {ft} → {tt} ({link_type})")
 
 
 @catalog.command("unlink")
@@ -230,9 +269,11 @@ def link_cmd(
 @click.argument("to_tumbler")
 @click.option("--type", "link_type", default="")
 def unlink_cmd(from_tumbler: str, to_tumbler: str, link_type: str) -> None:
-    """Remove link(s) between catalog entries."""
+    """Remove link(s). Arguments accept tumblers or titles."""
     cat = _get_catalog()
-    removed = cat.unlink(Tumbler.parse(from_tumbler), Tumbler.parse(to_tumbler), link_type)
+    ft = _resolve_tumbler(cat, from_tumbler)
+    tt = _resolve_tumbler(cat, to_tumbler)
+    removed = cat.unlink(ft, tt, link_type)
     click.echo(f"Removed {removed} link(s)")
 
 
@@ -245,9 +286,9 @@ def unlink_cmd(from_tumbler: str, to_tumbler: str, link_type: str) -> None:
 def links_cmd(
     tumbler: str, direction: str, link_type: str, depth: int, as_json: bool,
 ) -> None:
-    """Show links for a catalog entry."""
+    """Show links for a catalog entry. TUMBLER accepts a tumbler or title."""
     cat = _get_catalog()
-    t = Tumbler.parse(tumbler)
+    t = _resolve_tumbler(cat, tumbler)
     result = cat.graph(t, depth=depth, direction=direction, link_type=link_type)
     if as_json:
         click.echo(json.dumps({
@@ -336,7 +377,7 @@ def stats_cmd(as_json: bool) -> None:
                 click.echo(f"  {t:<12} {c}")
 
 
-@catalog.command("compact")
+@catalog.command("compact", hidden=True)
 def compact_cmd() -> None:
     """Rewrite JSONL files to remove tombstones and duplicate overwrites."""
     cat = _get_catalog()
@@ -526,7 +567,7 @@ def _backfill_papers(
     return count
 
 
-@catalog.command("consolidate")
+@catalog.command("consolidate", hidden=True)
 @click.argument("corpus")
 @click.option("--dry-run", is_flag=True, help="Show what would be merged without writing")
 def consolidate_cmd(corpus: str, dry_run: bool) -> None:
