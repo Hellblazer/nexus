@@ -2,10 +2,11 @@
 title: "Catalog-First Query Routing — Push Planning into MCP"
 id: RDR-052
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-04-05
 priority: P1
 author: Hal Hildebrand
-reviewed-by: ""
+reviewed-by: self
 created: 2026-04-05
 related_issues:
   - "RDR-042 - AgenticScholar Enhancements (closed)"
@@ -321,11 +322,11 @@ Full audit of the current query pipeline implementation:
 
 | Capability | Nelson/Xanadu | Nexus | PostgreSQL ltree |
 |-----------|---------------|-------|------------------|
-| Hierarchy levels | 5 (server.user.document.version.element) | 3 (store.owner.document) | unlimited |
-| Span representation | First-class: pair of tumblers → range | Advisory strings on links | N/A |
+| Hierarchy levels | 5 (server.user.document.version.element) | 4 (store.owner.document.chunk) — chunks are ghost elements | unlimited |
+| Span representation | First-class: pair of tumblers → range | Tumbler pairs on links (chunk-level, resolvable) | N/A |
 | Difference tumblers | Yes — relative widths via subtraction | No | N/A |
 | Tumbler arithmetic | Add (step forward), subtract (span width) | No | N/A |
-| Ghost elements | Yes — addressable even when empty | Partially (deferred concept nodes) | N/A |
+| Ghost elements | Yes — addressable even when empty | Yes — chunks + bytes are implicit (not registered, resolved on demand) | N/A |
 | Ancestor query | Implicit via tumbler line ordering | None | `@>` operator |
 | Descendant query | Implicit via span containment | `_prefix_sql` (single level only) | `<@` operator |
 | Path pattern matching | Via span-set operations | None | `~` lquery |
@@ -339,7 +340,7 @@ Full audit of the current query pipeline implementation:
 
 3. **No ancestor lookup** — given tumbler `1.1.42`, no way to ask "what owner is this under?" without parsing the string in Python. SQLite can do this: split tumbler, query each prefix.
 
-4. **Spans are disconnected from search** — link spans (`from_span="chunks:3-7"`) are metadata strings, never used for search scoping. Nelson's system links SPANS of content; ours links whole documents. The query tool should be able to use span info to weight specific chunks higher.
+4. **Spans should be tumbler pairs, not advisory strings** — link spans are currently free-text strings (`from_span="chunks:3-7"`). They should be tumbler addresses (`from_span="1.1.42.3"`, `to_span="1.1.42.7"`) so they're resolvable. Chunks and bytes are ghost elements — addressable without registration. Resolution: parse tumbler → extract document prefix + chunk index → query ChromaDB by `content_hash` + `chunk_index`. No catalog registration needed for sub-document addresses.
 
 **What we CAN build with SQLite** (ltree-equivalent, no extension needed):
 
@@ -389,8 +390,9 @@ Re-analysis of query pipeline boundaries with tumblers as navigable hierarchy ra
 - "Are these related?" → `lca` (was: LLM compares metadata)
 
 **Practical minimum for span-aware search** (not full Xanadu transclusion):
-1. **Span index on links table** — `CREATE INDEX idx_links_from_span ON links(from_tumbler, from_span)` — enables span-filtered link queries
+1. **Tumbler-based spans on links** — `from_span` and `to_span` store tumbler addresses (`1.1.42.3`) instead of advisory strings. Resolution: parse tumbler → document prefix + chunk index → ChromaDB query. Chunks are ghost elements — no catalog registration needed.
 2. **Span-weighted reranking** — dual signal: embedding similarity + span overlap with link targets. Chunks in a cited span rank higher than uncited chunks of the same document.
-3. **Span data in query output** — when `follow_links` returns results, include the span info so the caller can present focused excerpts.
+3. **Span data in query output** — when `follow_links` returns results, include the span tumbler so the caller can resolve to specific chunks.
+4. **Tumbler class supports 4+ segments** — `Tumbler.parse("1.1.42.3")` extracts document address `1.1.42` and chunk index `3`. Resolution helper: `resolve_chunk(tumbler) → ChromaDB chunk`.
 
 **Architectural shift**: From tumblers-as-IDs to **tumblers-as-coordinate-system**. The catalog becomes a routing layer with navigable structure orthogonal to semantic embeddings. Two independent axes for finding information: where it IS (tumbler hierarchy) and what it MEANS (vector similarity).
