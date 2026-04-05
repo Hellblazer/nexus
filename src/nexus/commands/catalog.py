@@ -341,9 +341,13 @@ def compact_cmd() -> None:
     """Rewrite JSONL files to remove tombstones and duplicate overwrites."""
     cat = _get_catalog()
     removed = cat.compact()
+    total = 0
     for filename, count in removed.items():
         click.echo(f"  {filename}: {count} lines removed")
-    click.echo("Compaction complete.")
+        total += count
+    click.echo(f"Compaction complete ({total} lines removed).")
+    if total > 0:
+        click.echo("Run 'nx catalog sync' to commit the compacted files.")
 
 
 # ── Backfill helpers ──────────────────────────────────────────────────────────

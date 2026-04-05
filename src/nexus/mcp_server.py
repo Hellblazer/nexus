@@ -184,8 +184,11 @@ def _get_catalog():
         try:
             current_mtime = _max_jsonl_mtime(_catalog_instance)
             if current_mtime > _catalog_mtime:
-                _catalog_mtime = current_mtime
-                _catalog_instance._ensure_consistent()
+                with _catalog_lock:
+                    # Double-check under lock to avoid redundant rebuilds
+                    if current_mtime > _catalog_mtime:
+                        _catalog_mtime = current_mtime
+                        _catalog_instance._ensure_consistent()
         except Exception:
             pass  # stat failure is non-fatal
     return _catalog_instance
@@ -1146,6 +1149,7 @@ def catalog_list(
 
         if owner:
             entries = cat.by_owner(Tumbler.parse(owner))
+            entries = entries[offset:offset + limit]
         else:
             import json as _json
 

@@ -125,10 +125,8 @@ class Catalog:
     def _ensure_consistent(self) -> None:
         """Check JSONL vs SQLite row counts; rebuild if diverged."""
         try:
-            jsonl_count = sum(
-                1 for line in self._documents_path.open()
-                if line.strip() and not '"_deleted": true' in line
-            ) if self._documents_path.exists() else 0
+            documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
+            jsonl_count = len(documents)
             sqlite_count = self._db.execute(
                 "SELECT count(*) FROM documents"
             ).fetchone()[0]
@@ -138,7 +136,6 @@ class Catalog:
                     jsonl=jsonl_count, sqlite=sqlite_count,
                 )
                 owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-                documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
                 links_dict = read_links(self._links_path) if self._links_path.exists() else {}
                 self._db.rebuild(owners, documents, list(links_dict.values()))
         except Exception:
@@ -183,16 +180,18 @@ class Catalog:
 
     def sync(self, message: str = "catalog update") -> None:
         """git add -A && git commit && git push (if remote configured)."""
-        _run_git(["git", "add", "-A"], cwd=self._dir)
-        # Check if there's anything to commit
-        status = _run_git(["git", "status", "--porcelain"], cwd=self._dir)
-        if not status.stdout.strip():
-            return
-        _run_git(["git", "commit", "-m", message], cwd=self._dir)
-        # Push only if remote exists
-        remote = _run_git(["git", "remote"], cwd=self._dir, check=False)
-        if remote.stdout.strip():
-            _run_git(["git", "push", "-u", "origin", "HEAD"], cwd=self._dir, check=False)
+        dir_fd = self._acquire_lock()
+        try:
+            _run_git(["git", "add", "-A"], cwd=self._dir)
+            status = _run_git(["git", "status", "--porcelain"], cwd=self._dir)
+            if not status.stdout.strip():
+                return
+            _run_git(["git", "commit", "-m", message], cwd=self._dir)
+            remote = _run_git(["git", "remote"], cwd=self._dir, check=False)
+            if remote.stdout.strip():
+                _run_git(["git", "push", "-u", "origin", "HEAD"], cwd=self._dir, check=False)
+        finally:
+            self._release_lock(dir_fd)
 
     def pull(self) -> None:
         """git pull && rebuild SQLite from JSONL."""
@@ -461,6 +460,23 @@ class Catalog:
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
             "FROM documents WHERE corpus = ?",
             (corpus,),
+        ).fetchall()
+        return [
+            CatalogEntry(
+                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
+                content_type=r[4], file_path=r[5], corpus=r[6],
+                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
+                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
+            )
+            for r in rows
+        ]
+
+    def all_documents(self) -> list[CatalogEntry]:
+        """Return all catalog entries."""
+        rows = self._db.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "FROM documents"
         ).fetchall()
         return [
             CatalogEntry(

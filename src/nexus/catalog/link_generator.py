@@ -16,23 +16,8 @@ _log = structlog.get_logger()
 
 
 def _all_entries(cat: Catalog) -> list[CatalogEntry]:
-    """Fetch all catalog entries."""
-    rows = cat._db.execute(
-        "SELECT tumbler, title, author, year, content_type, file_path, "
-        "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-        "FROM documents"
-    ).fetchall()
-    import json
-
-    return [
-        CatalogEntry(
-            tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-            content_type=r[4], file_path=r[5], corpus=r[6],
-            physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-            indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-        )
-        for r in rows
-    ]
+    """Fetch all catalog entries via the public API."""
+    return cat.all_documents()
 
 
 def generate_citation_links(cat: Catalog) -> int:

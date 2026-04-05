@@ -49,6 +49,13 @@ class Tumbler:
         return cls(tuple(int(x) for x in s.split(".")))
 
 
+def _filter_fields(cls: type, obj: dict) -> dict:
+    """Filter dict to only include fields declared on the dataclass."""
+    import dataclasses
+    valid = {f.name for f in dataclasses.fields(cls)}
+    return {k: v for k, v in obj.items() if k in valid}
+
+
 @dataclass
 class OwnerRecord:
     owner: str
@@ -103,7 +110,7 @@ def read_owners(path: Path) -> dict[str, OwnerRecord]:
             if obj.get("_deleted"):
                 records.pop(key, None)
             else:
-                records[key] = OwnerRecord(**obj)
+                records[key] = OwnerRecord(**_filter_fields(OwnerRecord, obj))
     return records
 
 
@@ -119,7 +126,7 @@ def read_documents(path: Path) -> dict[str, DocumentRecord]:
             if obj.get("_deleted"):
                 records.pop(key, None)
             else:
-                records[key] = DocumentRecord(**obj)
+                records[key] = DocumentRecord(**_filter_fields(DocumentRecord, obj))
     return records
 
 
@@ -135,5 +142,5 @@ def read_links(path: Path) -> dict[tuple[str, str, str], LinkRecord]:
             if obj.get("_deleted"):
                 records.pop(key, None)
             else:
-                records[key] = LinkRecord(**obj)
+                records[key] = LinkRecord(**_filter_fields(LinkRecord, obj))
     return records

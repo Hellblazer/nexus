@@ -459,7 +459,7 @@ def _catalog_pdf_hook(
 
         # Dedup by file_path (stable identifier for PDFs)
         from datetime import UTC, datetime
-        file_path_str = str(pdf_path)
+        file_path_str = pdf_path.name  # Portable — not machine-specific absolute path
         existing = cat.by_file_path(owner, file_path_str)
 
         if existing:
