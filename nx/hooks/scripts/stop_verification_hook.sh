@@ -47,7 +47,19 @@ if command -v git &>/dev/null; then
     fi
 fi
 
-# Check 2: Open beads
+# Check 2: Catalog sync (auto-commit + push if remote configured)
+if command -v nx &>/dev/null; then
+    CATALOG_PATH="${NEXUS_CATALOG_PATH:-$HOME/.config/nexus/catalog}"
+    if [[ -d "$CATALOG_PATH/.git" && -f "$CATALOG_PATH/documents.jsonl" ]]; then
+        # Check for uncommitted JSONL changes
+        CATALOG_DIRTY=$(git -C "$CATALOG_PATH" status --porcelain 2>/dev/null | grep -c "\.jsonl" || echo "0")
+        if [[ "$CATALOG_DIRTY" -gt 0 ]]; then
+            nx catalog sync -m "auto-sync at session close" 2>/dev/null || true
+        fi
+    fi
+fi
+
+# Check 3: Open beads
 if command -v bd &>/dev/null; then
     BEADS_OUTPUT=$(bd list --status=in_progress 2>/dev/null || echo "")
     if [[ -n "$BEADS_OUTPUT" ]] && printf '%s' "$BEADS_OUTPUT" | grep -q "in_progress"; then
