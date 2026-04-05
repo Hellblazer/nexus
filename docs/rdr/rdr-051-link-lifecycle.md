@@ -92,19 +92,18 @@ def link_if_absent(
 
 Checks `link_query(from_t, to_t, link_type)` before insert. All auto-generators should use this instead of manual dedup.
 
-### Component 3: Catalog API — `update_link()`
+### Component 3: Catalog API — `delete_document()`
 
 ```python
-def update_link(
-    self,
-    from_t: Tumbler, to_t: Tumbler, link_type: str,
-    *, new_type: str = "", new_from_span: str | None = None,
-    new_to_span: str | None = None, meta: dict | None = None,
-) -> bool:
-    """Update fields on an existing link. Preserves created_by and created_at."""
+def delete_document(self, tumbler: Tumbler) -> None:
+    """Tombstone a document. Links remain (intentionally orphaned per RF-9)."""
 ```
 
-JSONL: appends a new record (last-line-wins). SQLite: UPDATE in place. The old record remains in JSONL history for git audit trail.
+JSONL: appends tombstone (`_deleted: true`). SQLite: DELETE from documents. Links to/from this tumbler are NOT deleted — `link_audit()` reports them as orphaned. This preserves the historical record that the link existed.
+
+### ~~Component 3 (original): `update_link()`~~ — REMOVED per RF-6
+
+Changing a link's type changes its composite key — it IS a new fact. The correct operation is `unlink()` + `link()`. For span/meta changes on the same key, `link()` detects the existing entry and merges (Component 2 handles this).
 
 ### Component 4: Catalog API — Bulk Operations
 
@@ -143,12 +142,11 @@ Validation is called by `link()` and `link_if_absent()`. `link()` warns on inval
 
 | Tool | Maps to | Purpose |
 |------|---------|---------|
-| `catalog_link` | `link()` (exists) | Create — add endpoint validation |
+| `catalog_link` | `link()` (exists) | Create/upsert — idempotent with merge (RF-8) |
 | `catalog_unlink` | `unlink()` (exists) | Delete specific |
-| `catalog_link_update` | `update_link()` | Change type/span/meta |
-| `catalog_link_query` | `link_query()` | Composable filter — the workhorse |
-| `catalog_link_bulk` | `bulk_unlink()` / `bulk_update_links()` | Bulk operations by filter |
-| `catalog_link_audit` | `link_audit()` | Health report |
+| `catalog_link_query` | `link_query()` | Composable filter — admin/audit workhorse (RF-11) |
+| `catalog_link_bulk` | `bulk_unlink()` | Bulk delete by filter |
+| `catalog_link_audit` | `link_audit()` | Health report — orphans, duplicates, stats |
 | `catalog_links` | `graph()` (exists) | BFS traversal — fix to return nodes |
 
 ### Component 7: CLI Commands
@@ -163,16 +161,14 @@ nx catalog link-query                               # NEW
   --type cites --created-by bib_enricher
   --limit 20 --offset 0 --json
 
-nx catalog link-update FROM TO --type cites         # NEW
-  --new-type supersedes
-  --meta '{"note": "corrected classification"}'
-
 nx catalog link-audit                               # NEW
   --json                                            # machine-readable report
 
 nx catalog link-bulk-delete                         # NEW
   --created-by index_hook --type implements
   --dry-run                                         # preview before delete
+
+nx catalog delete TUMBLER                           # NEW — tombstone document, orphan links
 
 nx catalog generate-links                           # exists
 ```
@@ -231,33 +227,37 @@ Loses provenance (`created_at`, `created_by`). Links evolve as understanding dee
 ## Success Criteria
 
 - [ ] `link_query()` answers "all bib_enricher citations" in one call
-- [ ] `link_if_absent()` is idempotent — no duplicates from repeated generator runs
-- [ ] `update_link()` changes type without losing `created_by`/`created_at`
+- [ ] `link()` is idempotent — detects existing `(from, to, type)` and merges meta/created_by (RF-8)
+- [ ] `link_if_absent()` returns bool without merge — generators use this for fast dedup
+- [ ] `delete_document()` tombstones document, leaves links intact (RF-9)
 - [ ] `bulk_unlink(created_by="index_hook")` cleans up a bad run in one call
-- [ ] `link_audit()` reports orphans and duplicates
-- [ ] `catalog_link_query` MCP tool enables agent-driven graph exploration
+- [ ] `link_audit()` reports orphans, duplicates, and stats by type/creator
+- [ ] `catalog_link_query` MCP tool enables agent-driven audit (not a planner step — RF-11)
 - [ ] `catalog_links` MCP returns nodes + edges (no N+1 show calls)
 - [ ] All CLI commands accept titles in addition to tumblers
+- [ ] Composite index `(created_by, link_type)` added (RF-12)
 - [ ] E2E test: generate links → query by creator → bulk delete → regenerate → verify count matches
 - [ ] 100% of link operations go through `CatalogDB.execute()` (thread-safe)
+- [ ] `created` vs `created_at` naming standardized (RF-5)
 
 ## Open Questions
 
-1. **Should `link()` validate endpoints by default?** Validation adds a `resolve()` call per endpoint. For bulk generators this is O(2N) extra queries. Option: validate in `link_if_absent()` only, skip in raw `link()`.
+1. ~~**Should `link()` validate endpoints by default?**~~ **RESOLVED**: `link()` does NOT validate endpoints — links to ghost/future elements are valid (RF-9). `link_audit()` reports orphaned links post-hoc. Generators use `link_if_absent()` which is fast (dedup check only, no validation).
 
 ## Implementation Plan
 
 Depends on: RDR-049 (closed), RDR-050 (accepted).
 
 Estimated order:
-1. `link_query()` + `catalog_link_query` MCP + CLI — the foundation
-2. `link_if_absent()` + update generators to use it
-3. `update_link()` + `catalog_link_update` MCP + CLI
-4. `bulk_unlink()` / `bulk_update_links()` + MCP + CLI
-5. `link_audit()` + `catalog_link_audit` MCP + CLI
-6. Fix `catalog_links` to return nodes
-7. Update SubagentStart hook + skill references
-8. E2E test suite
+1. Schema: add UNIQUE constraint + `(created_by, link_type)` composite index + standardize `created`→`created_at`
+2. `link()` idempotent upsert with merge semantics (RF-6, RF-8) + `link_if_absent()` for generators
+3. `link_query()` + `catalog_link_query` MCP + `nx catalog link-query` CLI
+4. `bulk_unlink()` + `catalog_link_bulk` MCP + `nx catalog link-bulk-delete` CLI
+5. `delete_document()` + `nx catalog delete` CLI (RF-9)
+6. `link_audit()` + `catalog_link_audit` MCP + `nx catalog link-audit` CLI
+7. Fix `catalog_links` MCP to return nodes
+8. Update SubagentStart hook + skill references
+9. E2E test suite
 
 ## Research Findings
 
@@ -315,3 +315,58 @@ Three layers use different names for the same timestamp field:
 - `CatalogLink.created_at` (catalog.py:70) — Python API uses `created_at`
 
 The mapping works via positional indexing (`row[6]` in `_row_to_link`) and explicit assignment in `rebuild()` (`lnk.created` → `created_at` column). Correct but fragile. RDR-051 should standardize on `created_at` everywhere or accept the mismatch as documented technical debt.
+
+### RF-6: Link Identity — Composite Key Is Canonical (2026-04-05)
+**Classification**: Design Decision | **Confidence**: HIGH
+
+The canonical link identity is the composite triple `(from_t, to_t, link_type)`. The SQLite `id` is a session-ephemeral surrogate — not stored in JSONL, not stable across `rebuild()`, not exposed in the API.
+
+**Implication**: There should be no `update_link()`. Changing a link's type changes its identity — it IS a new fact. The correct operation is `unlink()` + `link()`. This is the same pattern Neo4j uses: relationship IDs are internal, identity is `(startNode, type, endNode)`. Document this as a design rule, not an omission.
+
+For span and meta changes on an existing link (same key), `link()` should detect the existing entry and merge rather than duplicate. This is an upsert, not an update.
+
+### RF-7: Link Directionality — Single Direction, Bidirectional Read (2026-04-05)
+**Classification**: Design Decision | **Confidence**: HIGH
+
+All links are stored as single directional records. `graph(direction="both")` provides bidirectional traversal by querying both `links_from()` and `links_to()`. Do NOT auto-create reverse links for `relates` — `unlink()` only deletes by exact `(from, to, type)` and would leave ghost reverse links.
+
+`quotes(A→B)` is directional. "What quotes B?" is answered by `catalog_links(B, direction="in", link_type="quotes")` — no `quoted_by` type needed.
+
+### RF-8: Concurrent Creation — Merge created_by, Don't Duplicate (2026-04-05)
+**Classification**: Design Decision | **Confidence**: HIGH
+
+When two agents independently discover the same link, the dedup key stays `(from_t, to_t, link_type)`. `link()` should detect the existing entry and merge the new `created_by` into `meta["co_discovered_by"]` (a list). The primary `created_by` retains the first discoverer. This preserves provenance without inflating link count.
+
+Do NOT include `created_by` in the dedup key — that would mean `cites(A, B, bib_enricher)` and `cites(A, B, agent-1)` are different facts, defeating deduplication.
+
+### RF-9: Document Deletion — Orphaned Links Are Intentional (2026-04-05)
+**Classification**: Design Decision (Nelson-faithful) | **Confidence**: HIGH
+
+When a document is tombstoned, its links remain. "A cited B, but B was removed" is more informative than silently deleting the citation. This matches Xanadu (addresses are vacant, not erased) and git (blame annotations survive file deletion).
+
+RDR-051 must deliver:
+1. `Catalog.delete_document(tumbler)` — write tombstone, DELETE from SQLite, leave links
+2. `link_audit()` → orphaned links (either endpoint not in documents table)
+3. Documentation: orphaned links are intentional, not a consistency violation
+
+### RF-10: Span Semantics — Advisory, Not Content-Addressed (2026-04-05)
+**Classification**: Design Decision | **Confidence**: HIGH
+
+Spans (`from_span`, `to_span`) are positional markers at index time — "chunks 3-7 when the link was created." They break on re-index if content shifts. This is acceptable: the link (A cites B) remains valid; only the span is advisory.
+
+Content-addressed spans (character offsets or chunk content hashes) require chunk-level tumblers (`1.2.5.3`). Defer to Layer 3+.
+
+### RF-11: link_query Is Admin/Audit, Not a Planner Operation (2026-04-05)
+**Classification**: Design Decision | **Confidence**: HIGH
+
+`link_query()` — "find all links matching global criteria" — is a maintenance operation, not a search scoping step. It does not produce `physical_collection` values for downstream search. Do not add it to `query-planner.md` as a plan operation. It belongs as an MCP tool (`catalog_link_query`) for direct invocation by humans and audit agents.
+
+The planner's `catalog_links` operation (BFS from a tumbler) is the correct graph traversal primitive for query plans.
+
+### RF-12: Performance — Add Composite Index (created_by, link_type) (2026-04-05)
+**Classification**: Verified — SQLite EXPLAIN QUERY PLAN | **Confidence**: HIGH
+
+The most common audit query `WHERE created_by='bib_enricher' AND link_type='cites'` uses only `idx_links_created_by` (single column). At 10K+ links, this is a full scan over all bib_enricher rows. Add:
+```sql
+CREATE INDEX IF NOT EXISTS idx_links_created_by_type ON links(created_by, link_type);
+```
