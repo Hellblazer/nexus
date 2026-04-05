@@ -138,17 +138,33 @@ Over time, JSONL files accumulate overwrites and tombstones. Two compaction mode
 - **`defrag()`** — deduplicates overwrites but keeps tombstones (deletion markers). Runs automatically during `nx catalog sync` when files exceed 3x the live record count. Safe — no history lost.
 - **`compact()`** — removes everything except live records, including tombstones. Explicit admin action via `nx catalog compact`. Erases deletion history from JSONL (though git preserves it).
 
-## Multi-machine sync (optional)
+## Durability and remote sync
 
-If you work across machines, the catalog can sync via a git remote:
+**Local mode users** (ONNX embeddings, no cloud): the catalog is as durable as your disk. If that's fine, you're done.
+
+**Cloud mode users** (ChromaDB Cloud + Voyage AI): your T3 content lives in the cloud, but the catalog — the only record of what's indexed, how documents relate, and what their tumblers are — is local. If you lose the disk, the catalog is gone. T3 content survives but you'd have to `backfill` to reconstruct the registry, and all links would be lost.
+
+**Fix this by adding a git remote:**
 
 ```bash
-nx catalog init --remote git@github.com:you/catalog.git
-nx catalog sync                # commit + push
-nx catalog pull                # pull + rebuild SQLite from remote JSONL
+# Create a private repo (GitHub, GitLab, etc.) then:
+nx catalog init --remote git@github.com:you/nexus-catalog.git
+
+# Or add a remote to an existing catalog:
+cd ~/.config/nexus/catalog
+git remote add origin git@github.com:you/nexus-catalog.git
 ```
 
-Most users don't need this. Without a remote, `sync` commits locally and `pull` is a no-op. The catalog works fine as a purely local store.
+Then periodically:
+
+```bash
+nx catalog sync                # commit + push to remote
+nx catalog pull                # pull from remote + rebuild SQLite
+```
+
+On a new machine, `nx catalog init --remote <url>` clones the remote and rebuilds SQLite. Your tumblers, links, and full document registry are restored.
+
+**CI/ephemeral environments**: configure `NEXUS_CATALOG_PATH` to point at a persistent volume, or use `init --remote` on each run to clone from the remote. The catalog rebuilds SQLite from JSONL in milliseconds.
 
 ## Admin commands
 

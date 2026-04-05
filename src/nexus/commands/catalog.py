@@ -143,7 +143,20 @@ def setup_cmd(remote: str) -> None:
     cites = generate_citation_links(cat)
     code_rdr = generate_code_rdr_links(cat)
     click.echo(f"  Citations: {cites}  Code-RDR: {code_rdr}")
-    click.echo("Setup complete.")
+
+    # Check if a remote is configured for durability
+    import subprocess
+    result = subprocess.run(
+        ["git", "remote"], cwd=str(path), capture_output=True, text=True, timeout=5,
+    )
+    if not result.stdout.strip():
+        click.echo(
+            "\nSetup complete. Catalog is local-only — add a git remote for durability:\n"
+            f"  cd {path} && git remote add origin <your-repo-url>\n"
+            "  nx catalog sync"
+        )
+    else:
+        click.echo("Setup complete.")
 
 
 @catalog.command("list")
