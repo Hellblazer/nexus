@@ -34,7 +34,7 @@ The enhanced `query` MCP tool handles catalog-aware routing internally. Use this
 
 **Detection**: The question has catalog handles (author, content type, subtree, citation/link signals) OR a catalog probe returns a match.
 
-**Catalog probe**: Call `mcp__plugin_nx_nexus__catalog_search(query="{question}", limit=1)`. If results are returned, the question has a catalog handle — route through Path 1.
+**Catalog probe**: Call `mcp__plugin_nx_nexus__catalog_search(query="{question}", limit=1)`. If results are returned, the question has a catalog handle — route through Path 1. This probe is intentionally greedy: FTS5 will match loosely, so most questions against a populated catalog will hit Path 1. This is by design — if Path 1 returns weak results, the user can rephrase with analytical signal words to trigger Path 3.
 
 **Execution**: Call `query()` MCP directly with appropriate catalog params:
 
@@ -72,7 +72,9 @@ mcp__plugin_nx_nexus__plan_search(query="{question}", limit=3)
 
 If a result with `builtin-template` in tags has a similar structure to the question, adapt and execute its plan.
 
-**Execution**: Parse the template's `plan_json`, substitute parameters from the question, then execute the plan steps using the Step 3 execution loop (below).
+**Execution**: Parse the template's `plan_json`, substitute parameters from the question, then execute the plan steps using Path 3's Step 3 execution loop below. The template matches when its primary operation type (compare, generate, extract) matches the question's intent.
+
+**Reuse**: If Path 2 called `plan_search` but no template matched, pass those results as few-shot examples to Path 3 Step 1 instead of calling `plan_search` again.
 
 
 ### Path 3: Planner (novel analytical pipelines)
