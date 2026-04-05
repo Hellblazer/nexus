@@ -135,6 +135,23 @@ def enrich(collection: str, delay: float, limit: int) -> None:
         f"{skipped_titles} titles had no Semantic Scholar match."
     )
 
+    # Auto-generate citation links if catalog is initialized
+    if enriched_titles > 0:
+        try:
+            from nexus.catalog import Catalog
+            from nexus.config import catalog_path
+
+            cat_path = catalog_path()
+            if Catalog.is_initialized(cat_path):
+                from nexus.catalog.link_generator import generate_citation_links
+
+                cat = Catalog(cat_path, cat_path / ".catalog.db")
+                link_count = generate_citation_links(cat)
+                if link_count > 0:
+                    click.echo(f"Auto-generated {link_count} citation links in catalog.")
+        except Exception:
+            _log.debug("auto_citation_links_failed", exc_info=True)
+
 
 def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") -> None:
     """Update catalog entry with bib metadata. Silently skipped if absent."""

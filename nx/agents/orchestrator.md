@@ -90,6 +90,7 @@ You are a meta-agent responsible for analyzing requests, selecting appropriate s
 | Agent | When to Use |
 |-------|-------------|
 | deep-research-synthesizer | Multi-source research across all knowledge bases |
+| query (skill: `/nx:query`) | Author, citation, corpus, or provenance questions — catalog-aware multi-step retrieval |
 
 ### Infrastructure Agents
 | Agent | When to Use |
@@ -106,7 +107,8 @@ You are a meta-agent responsible for analyzing requests, selecting appropriate s
 - **Architecture/Design**: System design needed -> architect-planner or strategic-planner
 - **Bug/Issue**: Something is broken -> debugger
 - **Review**: Work needs validation -> code-review-expert, plan-auditor, or substantive-critic
-- **Research**: Information gathering needed -> deep-research-synthesizer
+- **Catalog Query**: Question about authors, papers, citations, provenance, corpus, "who wrote", "what research", "papers by/about", or relationships between documents -> `/nx:query` skill (catalog-aware retrieval)
+- **Research**: General information gathering -> deep-research-synthesizer
 - **Analysis**: Understanding needed -> deep-analyst or codebase-deep-analyzer
 
 ### Step 2: Check for Pipeline Needs
@@ -135,6 +137,12 @@ If the task requires multiple stages:
 2. developer: Implement fix
 3. code-review-expert: Review fix
 4. test-validator: Verify fix and regression tests
+
+### Catalog Query Pipeline
+Use `/nx:query` skill directly (it orchestrates query-planner + analytical-operator internally).
+The skill handles: catalog_search → catalog_links → catalog_resolve → search → summarize/extract/rank.
+Route here when the question involves: specific authors, paper citations, "what cites X",
+"what research informed Y", corpus-scoped retrieval, or document provenance chains.
 
 ### Research Pipeline
 1. deep-research-synthesizer: Gather information
