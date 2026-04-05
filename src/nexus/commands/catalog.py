@@ -155,6 +155,12 @@ def setup_cmd(remote: str) -> None:
             knowledge_count = _backfill_knowledge(cat, t3, dry_run=False)
             signal.alarm(0)
             click.echo(f"  {knowledge_count} knowledge entries")
+
+            click.echo("Populating from RDR collections...")
+            signal.alarm(30)
+            rdr_count = _backfill_rdrs(cat, t3, dry_run=False)
+            signal.alarm(0)
+            click.echo(f"  {rdr_count} RDR entries")
         except TimeoutError as exc:
             signal.alarm(0)
             click.echo(f"  Timed out ({exc}). Partial results saved — rerun setup to continue.")
@@ -761,6 +767,45 @@ def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool) -> int:
                 physical_collection=col_name,
             )
         count += 1
+
+    return count
+
+
+def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
+    """Register rdr__* collections in catalog with per-document titles from T3 metadata."""
+    collections = t3.list_collections()
+    rdr_cols = [c for c in collections if c["name"].startswith("rdr__") and c["count"] > 0]
+    count = 0
+
+    for col_info in rdr_cols:
+        col_name = col_info["name"]
+        curator = _get_or_create_curator(cat, col_name.replace("rdr__", ""))
+
+        try:
+            col = t3.get_or_create_collection(col_name)
+            # Get unique source_path values to discover individual RDR documents
+            result = col.get(include=["metadatas"], limit=200)
+            seen_paths: set[str] = set()
+            for meta in result.get("metadatas", []):
+                path = meta.get("source_path", "")
+                if not path or path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                title = meta.get("source_title", "") or Path(path).stem
+                if dry_run:
+                    click.echo(f"  [dry-run] {title} → {col_name}")
+                    count += 1
+                    continue
+                existing = [e for e in cat.by_owner(curator) if e.file_path == path]
+                if not existing:
+                    cat.register(
+                        owner=curator, title=title, content_type="rdr",
+                        file_path=path, physical_collection=col_name,
+                    )
+                    count += 1
+        except Exception as exc:
+            click.echo(f"  warning: {col_name} — {exc}")
+            _log.debug("backfill_rdrs_error", col=col_name, exc_info=True)
 
     return count
 
