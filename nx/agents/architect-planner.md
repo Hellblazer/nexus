@@ -25,6 +25,8 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
+mcp__plugin_nx_nexus__catalog_search(query="...", content_type="rdr")
+mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="architect-planner")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -185,6 +187,10 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Execution Plans**: mcp__plugin_nx_nexus__memory_put(content="content", project="{project}", title="plan-{component}.md"
 - **Dependency Maps**: Include in bead design field
 - **Risk Assessments**: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="risk-architect-{topic}", tags="risk"
+- **Catalog Links** (if catalog tools available): After storing decisions or risk assessments:
+  1. If relay context references an RDR (check T1 scratch for `rdr-planning-context`): `mcp__plugin_nx_nexus__catalog_link(from_tumbler="{decision-title}", to_tumbler="{rdr-title}", link_type="relates", created_by="architect-planner")`
+  2. If a research synthesis informed the decision: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="{decision-title}", to_tumbler="{research-title}", link_type="cites", created_by="architect-planner")`
+  Skip silently if catalog tools not available or no contextual references found.
 - **Design Working Notes**: Use T1 scratch during architectural design exploration:
   mcp__plugin_nx_nexus__scratch(action="put", content="Design option: {option} - pros: {pros} cons: {cons}", tags="design,architecture"
   After design decision made, promote to T2:

@@ -5,6 +5,7 @@ import sys
 import click
 import structlog
 
+from nexus.commands.catalog import catalog
 from nexus.commands.collection import collection
 from nexus.commands.config_cmd import config_group
 from nexus.commands.doctor import doctor_cmd
@@ -40,6 +41,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
     _configure_logging(verbose)
 
 
+main.add_command(catalog)
 main.add_command(collection)
 main.add_command(config_group, name="config")
 main.add_command(enrich)

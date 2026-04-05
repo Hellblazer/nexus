@@ -63,6 +63,28 @@ nx memory search "JWT" -p myproject
 nx memory get -p myproject -t auth-notes
 ```
 
+### Catalog — document registry and link graph (optional)
+
+```bash
+nx catalog setup               # one command: init + populate + generate links
+nx catalog search "auth"       # find documents by metadata
+nx catalog show "auth module"  # full entry with all links
+nx catalog links "paper X"     # explore the citation/implementation graph
+```
+
+The catalog tracks every indexed document and the relationships between them. It's populated automatically when you index repos and PDFs. Run `setup` once to backfill from your existing collections.
+
+If you use cloud mode (ChromaDB Cloud), add a git remote so the catalog survives disk loss:
+
+```bash
+cd ~/.config/nexus/catalog && git remote add origin git@github.com:you/nexus-catalog.git
+nx catalog sync
+```
+
+On a new machine, restore with: `nx catalog setup --remote git@github.com:you/nexus-catalog.git`
+
+See [Document Catalog](catalog.md) for details.
+
 ## Claude Code plugin (optional)
 
 The `nx` plugin gives Claude Code agents access to all three storage tiers, 17 specialized agents, and 32 development workflow skills.

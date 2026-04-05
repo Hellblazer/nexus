@@ -156,6 +156,75 @@ Queries Semantic Scholar for each unique `source_title` in the collection and wr
 
 ---
 
+## nx catalog
+
+Document catalog — track indexed documents and the relationships between them.
+
+### nx catalog setup
+
+```
+nx catalog setup [--remote URL]
+```
+
+One-command onboarding: creates the catalog, populates from existing T3 collections and repos, generates links. Run once after installing or upgrading. Warns if no git remote is configured (cloud users should add one for durability).
+
+On a new machine with an existing catalog remote: `nx catalog setup --remote <url>` clones from the remote instead of creating an empty catalog.
+
+### nx catalog search
+
+```
+nx catalog search QUERY [--limit N] [--json]
+```
+
+Find documents by title, author, corpus, or file path. Returns tumbler, content type, and title.
+
+### nx catalog show
+
+```
+nx catalog show TUMBLER_OR_TITLE [--json]
+```
+
+Full document metadata, physical collection, and all links in and out. Accepts tumblers or titles.
+
+### nx catalog links
+
+```
+nx catalog links [TUMBLER] [--from TEXT] [--to TEXT] [--type TEXT] [--created-by TEXT] [--direction in|out|both] [--depth N] [--limit N] [--json]
+```
+
+With a positional tumbler/title: BFS graph traversal. Without: flat filter query across all links.
+
+### nx catalog link
+
+```
+nx catalog link FROM TO --type TYPE [--from-span SPAN] [--to-span SPAN]
+```
+
+Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`. Span format: `line-line` or `chunk:char-char`.
+
+### nx catalog unlink
+
+```
+nx catalog unlink FROM TO [--type TYPE]
+```
+
+Remove link(s). Omit `--type` to remove all link types between the pair.
+
+### nx catalog sync / pull
+
+```
+nx catalog sync [-m MESSAGE]     # commit JSONL changes + push to remote (if configured)
+nx catalog pull                  # pull from remote + rebuild SQLite
+```
+
+`sync` is called automatically at session close (via the Stop hook) when JSONL files have changed. Manual use is rarely needed.
+
+### nx catalog list / stats / owners / delete
+
+Standard catalog management. Run `nx catalog COMMAND --help` for details.
+
+---
+
 ## nx store
 
 Manage T3 knowledge entries.

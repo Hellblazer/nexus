@@ -98,9 +98,12 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 - [ ] Prior RDR search attempted (may return empty on cold-start)
 ```
 
-**Prior-art search** (within the agent): enumerate RDR collections and search:
-- Use store_list tool to enumerate collections, filter for `rdr__`
-- mcp__plugin_nx_nexus__search(query="relevant query terms from RDR problem statement", corpus="{each_collection}", limit=5
+**Prior-art search** (within the agent): Use catalog if available, fall back to raw search:
+- First, try catalog (structured metadata): `mcp__plugin_nx_nexus__catalog_search(query="relevant terms from problem statement", content_type="rdr")`
+  - If results found, use `mcp__plugin_nx_nexus__catalog_links(tumbler="<result>", direction="both")` to discover related RDRs in the graph
+- If catalog empty or not initialized, fall back to T3 semantic search:
+  - Use store_list tool to enumerate collections, filter for `rdr__`
+  - mcp__plugin_nx_nexus__search(query="relevant query terms from RDR problem statement", corpus="{each_collection}", limit=5
 If no collections found: "No prior RDRs indexed. Cross-project prior-art search will improve as RDRs are indexed and closed."
 
 ### Gate Aggregation

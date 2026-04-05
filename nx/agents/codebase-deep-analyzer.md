@@ -25,6 +25,8 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
+mcp__plugin_nx_nexus__catalog_search(query="...", content_type="knowledge")
+mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="codebase-deep-analyzer")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -183,6 +185,11 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Dependency Analysis**: Include in response
 - **Technical Debt**: Create chore beads for significant debt
 - **Pattern Catalog**: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="pattern-codebase-{name}", tags="pattern"
+- **Catalog Links** (if catalog tools available): After storing architecture maps or pattern catalogs:
+  1. `mcp__plugin_nx_nexus__catalog_search(query="{scope} architecture", content_type="knowledge")` — find related prior analyses
+  2. For related architecture maps on interconnected modules: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="{this-map-title}", to_tumbler="{related-map-title}", link_type="relates", created_by="codebase-deep-analyzer")`
+  3. When replacing a stale analysis: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="{new-analysis-title}", to_tumbler="{old-analysis-title}", link_type="supersedes", created_by="codebase-deep-analyzer")`
+  Skip silently if catalog tools not available.
 - **Per-Subtask Findings**: Use T1 scratch to track findings during parallel subtask analysis:
   Store subtask finding:
   mcp__plugin_nx_nexus__scratch(action="put", content="# Subtask: {module}\n{findings}", tags="analysis,subtask-{n}"

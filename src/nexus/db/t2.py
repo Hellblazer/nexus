@@ -18,7 +18,7 @@ _log = structlog.get_logger()
 #   :  (explicit column filter: "col:term")
 #   (  )  ^  "  (grouping / phrase / boost — crash if unbalanced)
 # Note: trailing * is a valid FTS5 prefix wildcard (e.g. auth*) — NOT included here.
-_FTS5_SPECIAL = set('-:()"^~')
+_FTS5_SPECIAL = set('-:()"^~.*+/')
 
 
 def _sanitize_fts5(query: str) -> str:

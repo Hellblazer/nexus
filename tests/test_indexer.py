@@ -148,10 +148,14 @@ def test_run_index_skips_hidden_files(tmp_path: Path, monkeypatch) -> None:
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    hidden_dir = repo / ".git"
-    hidden_dir.mkdir()
-    (hidden_dir / "config").write_text("git config\n")
     (repo / "main.py").write_text("x = 1\n")
+
+    # Create a real git repo so _git_ls_files succeeds (nexus-3ov6)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
 
     registry = MagicMock()
     registry.get.return_value = {
@@ -705,13 +709,16 @@ def test_run_index_returns_rdr_stats(tmp_path: Path) -> None:
         str(rdr_dir / "002-decision.md"): "skipped",
     }
 
+    def _fake_embed(chunks, model, api_key, **kw):
+        return [[0.1] * 4 for _ in chunks], model
+
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.indexer._git_metadata", return_value={}):
                 with patch("nexus.config.load_config", return_value=config_with_rdr):
                     with patch("nexus.config.get_credential", return_value="fake-key"):
                         with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("voyageai.Client"):
+                            with patch("nexus.doc_indexer._embed_with_fallback", side_effect=_fake_embed):
                                 with patch("nexus.doc_indexer.batch_index_markdowns", return_value=mock_results):
                                     stats = _run_index(repo, registry)
 
@@ -993,6 +1000,32 @@ def test_git_ls_files_fallback_on_non_git_dir(tmp_path: Path) -> None:
     assert files == [], "Non-git directory should return empty list for fallback"
 
 
+def test_git_ls_files_raises_on_failure_in_git_repo(tmp_path: Path) -> None:
+    """In a git repo, git ls-files failure must raise, not silently fall back.
+
+    Silent fallback to rglob would index .gitignored files including secrets
+    like .env and private keys (nexus-3ov6).
+    """
+    from nexus.indexer import _git_ls_files
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tracked.py").write_text("x = 1\n")
+    (repo / ".env").write_text("SECRET=abc\n")
+    (repo / ".gitignore").write_text(".env\n")
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    # Simulate git ls-files failure by making git binary not found
+    with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
+        with pytest.raises(RuntimeError, match="git ls-files failed"):
+            _git_ls_files(repo)
+
+
 # ── DEFAULT_IGNORE / _should_ignore ──────────────────────────────────────────
 
 def test_should_ignore_lock_files() -> None:
@@ -1204,13 +1237,16 @@ def test_run_index_passes_force_to_discover_rdrs(tmp_path: Path) -> None:
     registry = _registry_with_dual_collections()
     mock_db, _, _ = _make_collection_tracking_db()
 
+    def _fake_embed(chunks, model, api_key, **kw):
+        return [[0.1] * 4 for _ in chunks], model
+
     with patch("nexus.frecency.batch_frecency", return_value={}):
         with patch("nexus.ripgrep_cache.build_cache"):
             with patch("nexus.indexer._git_metadata", return_value={}):
                 with patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
                     with patch("nexus.config.get_credential", return_value="fake-key"):
                         with patch("nexus.db.make_t3", return_value=mock_db):
-                            with patch("voyageai.Client"):
+                            with patch("nexus.doc_indexer._embed_with_fallback", side_effect=_fake_embed):
                                 with patch("nexus.indexer._discover_and_index_rdrs") as mock_rdrs:
                                     mock_rdrs.return_value = (0, 0, 0)
                                     _run_index(repo, registry, force=True)

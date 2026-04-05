@@ -102,7 +102,7 @@ Finalizes an Accepted RDR. Requires status Accepted (use `--force` to override).
 
 Close reasons: `implemented` · `reverted` · `abandoned` · `superseded`
 
-Closing creates a post-mortem template for drift analysis, indexes the RDR into the `rdr__` collection for permanent semantic retrieval, and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory.
+Closing creates a post-mortem template for drift analysis, indexes the RDR into the `rdr__` collection for permanent semantic retrieval, and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory. If the [catalog](catalog.md) is initialized, closing also creates typed links — `supersedes` for superseded RDRs, `cites` for referenced research papers.
 
 ## Querying RDRs
 

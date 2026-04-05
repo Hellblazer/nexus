@@ -141,6 +141,35 @@ Step outputs: T1 scratch tag `query-step,step-N`.
 OPERATORS
 fi
 
+# Catalog awareness — inject only for catalog-relevant tasks
+if echo "$TASK_TEXT" | grep -qiE "author|cit(e|ation|es|ed)|who wrote|what did.*write|papers? (by|about)|provenance|corpus|collection|tumbler|what research|informed by|based on|relationship|links? (from|to)|referenc|follow.on|build.on|what (implements|supersedes)|link (audit|query|graph)|orphan|catalog|rdr.*(close|accept|show|gate|research)|close.*rdr|accept.*rdr|supersed|consolidat|tidy|knowledge|research|synthesiz|archive|store_put|store put|debug.*finding|root.cause|prevention.pattern|architecture.*map|pattern.*catalog|architect.*decision|risk.assess|insight.*developer|analysis.*deep|analyz.*codebas"; then
+  CATALOG_PATH="${NEXUS_CATALOG_PATH:-$HOME/.config/nexus/catalog}"
+  if [[ -d "$CATALOG_PATH/.git" && -f "$CATALOG_PATH/documents.jsonl" ]]; then
+    cat <<'CATALOG'
+
+## Catalog — Document Registry + Link Graph
+
+Use catalog tools for metadata-first queries: author, corpus, title, citations, provenance, references.
+The `/nx:query` skill handles full catalog-aware plan execution.
+
+  mcp__plugin_nx_nexus__catalog_search(query="...", author="...", corpus="...", owner="...", file_path="...", content_type="...")
+  mcp__plugin_nx_nexus__catalog_show(tumbler="1.2.5")  — full entry with links_from + links_to
+  mcp__plugin_nx_nexus__catalog_links(tumbler="1.2.5", direction="in", link_type="cites", depth=2)
+    Returns {"nodes": [CatalogEntry dicts], "edges": [link dicts]}.
+    Only live documents — deleted nodes excluded. Use mcp__plugin_nx_nexus__catalog_link_query for all links.
+  mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="user")
+    Accepts titles or tumblers. Returns {"from", "to", "type", "created": true/false}.
+  mcp__plugin_nx_nexus__catalog_link_query(link_type="cites", created_by="bib_enricher", created_at_before="...", limit=50)
+    All links including orphans. Admin/audit — not a planner step.
+  mcp__plugin_nx_nexus__catalog_link_audit()  — orphans, stats by type/creator, duplicates.
+  mcp__plugin_nx_nexus__catalog_link_bulk(link_type="cites", dry_run=True)  — bulk delete preview.
+    Requires confirm_destructive=True for >10 link deletions.
+  mcp__plugin_nx_nexus__catalog_resolve(owner="1.1", corpus="schema-evolution")  — → collection names
+  Link types: cites, implements-heuristic, supersedes, quotes, relates, comments, implements
+CATALOG
+  fi
+fi
+
 # Inject current T1 scratch entries
 if command -v nx &> /dev/null; then
   T1_ENTRIES=$(nx scratch list 2>/dev/null)

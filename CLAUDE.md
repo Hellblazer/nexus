@@ -60,6 +60,18 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 
 **Session propagation (T1)**: The `SessionStart` hook starts a per-session ChromaDB HTTP server, writes its address to `~/.config/nexus/sessions/{ppid}.session`. Child agents walk the OS PPID chain to find the nearest ancestor session file and share T1 scratch across the agent tree. Falls back to `EphemeralClient` when the server cannot start.
 
+**Catalog (T3 metadata layer)**: Git-backed document registry that tracks *what* is indexed and *how documents relate*. JSONL files are the source of truth; SQLite + FTS5 is the query cache (rebuilt automatically on mtime change). Tumblers (hierarchical addresses like `1.2.5`) identify documents. Every indexing pathway (`index repo`, `index pdf`, `index rdr`, MCP `store_put`) auto-registers entries. `nx catalog setup` creates and populates the catalog in one step.
+
+**Link graph**: Typed edges between documents — agents create these during their work:
+- `cites` — citation (auto from `nx enrich` via Semantic Scholar, or by research agents)
+- `implements-heuristic` — code→RDR (auto from indexer, title substring match)
+- `supersedes` — replacement (by rdr-close, knowledge-tidier)
+- `relates` — related findings (by debugger, deep-analyst, codebase-analyzer, architect-planner)
+- `implements` — manual or by developer agent linking insights to RDRs
+- `created_by` tracks provenance: which agent or user created each link
+
+**Two graph views**: `catalog_links` MCP tool returns live-document links only. `catalog_link_query` returns all links including orphans (for audit). The `/nx:query` skill orchestrates catalog-aware multi-step retrieval (author queries, citation traversal, provenance chains).
+
 **T3 expire guard**: always filter `ttl_days > 0 AND expires_at != "" AND expires_at < now` — the `expires_at != ""` guard is mandatory: permanent entries use `expires_at=""` which sorts before ISO timestamps and would be incorrectly deleted by a 2-condition guard.
 
 ## Source Layout
@@ -67,7 +79,12 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 ```
 src/nexus/           # Core package
   cli.py             # Click entry point; registers all command groups
-  commands/          # One file per CLI command group (index, search, memory, scratch, store, collection, config, hooks, doctor, enrich)
+  commands/          # One file per CLI command group (index, search, memory, scratch, store, collection, config, hooks, doctor, enrich, catalog)
+  catalog/           # Xanadu-inspired document catalog (JSONL truth + SQLite cache)
+    catalog.py       # Core: link(), link_query(), graph(), delete_document(), link_audit()
+    catalog_db.py    # SQLite schema + FTS5 + UNIQUE link constraint
+    tumbler.py       # Hierarchical addresses + JSONL readers with resilience
+    link_generator.py # Auto-generate citation + code-RDR links from metadata
   db/                # t1.py, t2.py, t3.py — tier implementations; local_ef.py — local ONNX embeddings
   indexer.py         # Repo indexing pipeline (classify → chunk → embed → store)
   classifier.py      # File classification: CODE / PROSE / PDF / SKIP

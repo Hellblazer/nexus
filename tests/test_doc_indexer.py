@@ -14,6 +14,23 @@ from nexus.doc_indexer import index_markdown, index_pdf
 from tests.conftest import set_credentials
 
 
+def _add_cce_mock(mock_voyage_client: MagicMock) -> None:
+    """Add a CCE-compatible mock to a voyageai.Client mock.
+
+    Without this, MagicMock().contextualized_embed() returns a MagicMock whose
+    .results[0].embeddings iterates as empty, causing _embed_with_fallback to
+    raise RuntimeError (nexus-rv6r fix).
+    """
+    def _fake_cce(inputs, model, input_type):
+        batch = inputs[0]
+        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+        cce_item.embeddings = [[0.1, 0.2] for _ in batch]
+        result = MagicMock(spec=ContextualizedEmbeddingsObject)
+        result.results = [cce_item]
+        return result
+    mock_voyage_client.contextualized_embed.side_effect = _fake_cce
+
+
 @pytest.fixture(autouse=True)
 def _no_bib_enrich(monkeypatch):
     """Prevent bib_enricher from making real HTTP calls in all tests."""
@@ -83,11 +100,7 @@ def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch):
 # ── chunk upsert ──────────────────────────────────────────────────────────────
 
 def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch):
-    """New file: extracts, chunks, and upserts into T3 collection.
-
-    With a single chunk, CCE is skipped (requires >= 2 chunks) and the
-    standard embed() path is used, which calls upsert_chunks_with_embeddings.
-    """
+    """New file: extracts, chunks, and upserts into T3 collection."""
     set_credentials(monkeypatch)
 
     mock_col = MagicMock()
@@ -102,9 +115,7 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch):
     mock_t3.get_or_create_collection.return_value = mock_col
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings =[[0.1, 0.2, 0.3]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
@@ -166,9 +177,7 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch):
     }
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings =[[0.1, 0.2]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
@@ -284,9 +293,7 @@ def test_index_pdf_sets_store_type_pdf(sample_pdf, monkeypatch):
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 1}
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings =[[0.1, 0.2]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
@@ -329,9 +336,7 @@ def test_index_markdown_sets_store_type_markdown(sample_md, monkeypatch):
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 0, "header_path": "H"}
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings =[[0.1, 0.2]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
@@ -383,9 +388,7 @@ def test_index_markdown_offsets_account_for_frontmatter(tmp_path: Path, monkeypa
     }
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings =[[0.1, 0.2]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
@@ -431,9 +434,7 @@ def test_index_markdown_no_frontmatter_offsets_unchanged(tmp_path: Path, monkeyp
     }
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings =[[0.1, 0.2]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
@@ -1296,7 +1297,7 @@ def test_batch_index_markdowns_marks_failed_on_error(tmp_path, monkeypatch):
 
     mock_t3 = MagicMock()
 
-    def _side_effect(path, corpus, t3=None, *, collection_name=None, force=False):
+    def _side_effect(path, corpus, t3=None, *, collection_name=None, content_type="prose", force=False):
         if "bad" in str(path):
             raise RuntimeError("markdown parsing failed")
         return 2
@@ -1346,9 +1347,7 @@ def test_stale_chunk_pruning_deletes_old_ids(sample_md, monkeypatch):
         mock_chunks.append(mc)
 
     mock_voyage_client = MagicMock()
-    mock_embed_result = MagicMock(spec=EmbeddingsObject)
-    mock_embed_result.embeddings = [[0.1] for _ in range(3)]
-    mock_voyage_client.embed.return_value = mock_embed_result
+    _add_cce_mock(mock_voyage_client)
 
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as mock_chunker_class:
@@ -1721,9 +1720,7 @@ def test_index_pdf_return_metadata_false_returns_int(sample_pdf, monkeypatch):
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 13, "page_number": 1}
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
@@ -1757,9 +1754,7 @@ def test_index_pdf_return_metadata_true_returns_dict(sample_pdf, monkeypatch):
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 13, "page_number": 2}
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as mock_ext_cls:
@@ -1823,9 +1818,7 @@ def test_index_markdown_return_metadata_true_returns_dict(sample_md, monkeypatch
     mock_t3.get_or_create_collection.return_value = mock_col
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("voyageai.Client", return_value=mock_voyage_client):
@@ -1957,9 +1950,7 @@ def test_index_pdf_threads_on_progress(sample_pdf, monkeypatch):
     mock_t3.get_or_create_collection.return_value = mock_col
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings = [[0.1, 0.2, 0.3]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as mock_extractor_class:
@@ -2012,9 +2003,7 @@ def test_index_markdown_threads_on_progress(sample_md, monkeypatch):
     }
 
     mock_voyage_client = MagicMock()
-    mock_voyage_result = MagicMock(spec=EmbeddingsObject)
-    mock_voyage_result.embeddings = [[0.1, 0.2]]
-    mock_voyage_client.embed.return_value = mock_voyage_result
+    _add_cce_mock(mock_voyage_client)
 
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
@@ -2537,6 +2526,42 @@ def test_parallel_embed_progress_fires_for_each_batch(monkeypatch):
 
     assert len(progress_calls) >= 1
     assert progress_calls[-1][0] == 10
+
+
+# ── nexus-rv6r: CCE empty-result must raise, not fall through to voyage-4 ───
+
+
+def test_embed_with_fallback_cce_empty_result_raises(monkeypatch):
+    """CCE returning empty embeddings raises RuntimeError, not silent voyage-4 fallthrough.
+
+    If all CCE batches complete without exception but produce zero embeddings,
+    the function must raise rather than switching to voyage-4 — mixing models
+    corrupts the vector space (nexus-rv6r).
+    """
+    from nexus.doc_indexer import _embed_with_fallback
+
+    mock_client = MagicMock()
+
+    def _cce_empty(inputs, model, input_type):
+        """Simulate CCE returning empty embeddings."""
+        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+        cce_item.embeddings = []  # empty — no vectors returned
+        result = MagicMock(spec=ContextualizedEmbeddingsObject)
+        result.results = [cce_item]
+        return result
+
+    mock_client.contextualized_embed.side_effect = _cce_empty
+
+    with patch("voyageai.Client", return_value=mock_client):
+        with pytest.raises(RuntimeError, match="CCE embedding returned no vectors"):
+            _embed_with_fallback(
+                chunks=["chunk one", "chunk two"],
+                model="voyage-context-3",
+                api_key="vk_test",
+            )
+
+    # Must never have called the standard embed (voyage-4) path
+    mock_client.embed.assert_not_called()
 
 
 # ── Streaming routing (RDR-048, nexus-qwxz.10) ──────────────────────────────

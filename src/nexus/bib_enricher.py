@@ -10,7 +10,7 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 _BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
-_FIELDS = "year,venue,authors,citationCount,externalIds"
+_FIELDS = "year,venue,authors,citationCount,externalIds,references.paperId"
 _TIMEOUT = 3.0  # fast-fail for inline use during indexing
 
 
@@ -32,6 +32,10 @@ def enrich(title: str) -> dict[str, Any]:
         if not data:
             return {}
         paper = data[0]
+        refs = [
+            r.get("paperId", "") for r in paper.get("references", [])
+            if r and r.get("paperId")
+        ]
         return {
             "year": paper.get("year", 0) or 0,
             "venue": paper.get("venue", "") or "",
@@ -40,6 +44,7 @@ def enrich(title: str) -> dict[str, Any]:
             ),
             "citation_count": paper.get("citationCount", 0) or 0,
             "semantic_scholar_id": paper.get("paperId", "") or "",
+            "references": refs,
         }
     except (httpx.HTTPError, httpx.TimeoutException, httpx.ConnectError, ValueError) as exc:
         _log.debug("bib_enricher_lookup_failed", title=title, error=str(exc))

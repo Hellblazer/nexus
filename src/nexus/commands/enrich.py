@@ -100,25 +100,32 @@ def enrich(collection: str, delay: float, limit: int) -> None:
             continue
 
         # Build per-chunk metadata updates: ChromaDB update requires full
-        # metadata dicts, so we fetch and merge.
-        fetch = _chroma_with_retry(col.get, ids=chunk_ids, include=["metadatas"])
-        fetched_ids = fetch.get("ids", [])
-        fetched_meta = fetch.get("metadatas", [])
-
+        # metadata dicts, so we fetch and merge. Batch at 200 to stay under
+        # ChromaDB Cloud's 300-record get/write limit.
+        _BATCH = 200
         updated_ids: list[str] = []
         updated_meta: list[dict] = []
-        for cid, meta in zip(fetched_ids, fetched_meta):
-            merged = dict(meta)
-            merged["bib_year"] = bib.get("year", 0)
-            merged["bib_venue"] = bib.get("venue", "")
-            merged["bib_authors"] = bib.get("authors", "")
-            merged["bib_citation_count"] = bib.get("citation_count", 0)
-            merged["bib_semantic_scholar_id"] = bib.get("semantic_scholar_id", "")
-            updated_ids.append(cid)
-            updated_meta.append(merged)
+        for batch_start in range(0, len(chunk_ids), _BATCH):
+            batch_ids = chunk_ids[batch_start:batch_start + _BATCH]
+            fetch = _chroma_with_retry(col.get, ids=batch_ids, include=["metadatas"])
+            for cid, meta in zip(fetch.get("ids", []), fetch.get("metadatas", [])):
+                merged = dict(meta)
+                merged["bib_year"] = bib.get("year", 0)
+                merged["bib_venue"] = bib.get("venue", "")
+                merged["bib_authors"] = bib.get("authors", "")
+                merged["bib_citation_count"] = bib.get("citation_count", 0)
+                merged["bib_semantic_scholar_id"] = bib.get("semantic_scholar_id", "")
+                updated_ids.append(cid)
+                updated_meta.append(merged)
 
         if updated_ids:
-            _chroma_with_retry(col.update, ids=updated_ids, metadatas=updated_meta)
+            for batch_start in range(0, len(updated_ids), _BATCH):
+                batch_end = min(batch_start + _BATCH, len(updated_ids))
+                _chroma_with_retry(
+                    col.update,
+                    ids=updated_ids[batch_start:batch_end],
+                    metadatas=updated_meta[batch_start:batch_end],
+                )
             enriched_chunks += len(updated_ids)
             enriched_titles += 1
             _log.debug(
@@ -128,8 +135,81 @@ def enrich(collection: str, delay: float, limit: int) -> None:
                 year=bib.get("year"),
                 venue=bib.get("venue"),
             )
+            _catalog_enrich_hook(title=title, bib_meta=bib, collection_name=collection)
 
     click.echo(
         f"Done: enriched {enriched_chunks} chunks across {enriched_titles} titles; "
         f"{skipped_titles} titles had no Semantic Scholar match."
     )
+
+    # Auto-generate citation links if catalog is initialized
+    if enriched_titles > 0:
+        try:
+            from nexus.catalog import Catalog
+            from nexus.config import catalog_path
+
+            cat_path = catalog_path()
+            if Catalog.is_initialized(cat_path):
+                from nexus.catalog.link_generator import generate_citation_links
+
+                cat = Catalog(cat_path, cat_path / ".catalog.db")
+                link_count = generate_citation_links(cat)
+                if link_count > 0:
+                    click.echo(f"Auto-generated {link_count} citation links in catalog.")
+        except Exception:
+            _log.debug("auto_citation_links_failed", exc_info=True)
+
+
+def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") -> None:
+    """Update catalog entry with bib metadata. Silently skipped if absent."""
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return
+
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+
+        # Look up by collection + title jointly for precision
+        entry = None
+        if collection_name:
+            from nexus.catalog.tumbler import Tumbler
+            row = cat._db.execute(
+                "SELECT tumbler FROM documents WHERE physical_collection = ? AND title = ? LIMIT 1",
+                (collection_name, title),
+            ).fetchone()
+            if row:
+                entry = cat.resolve(Tumbler.parse(row[0]))
+            if entry is None:
+                # Fallback: collection-only (for renamed/enriched titles)
+                row = cat._db.execute(
+                    "SELECT tumbler FROM documents WHERE physical_collection = ? LIMIT 1",
+                    (collection_name,),
+                ).fetchone()
+                if row:
+                    entry = cat.resolve(Tumbler.parse(row[0]))
+
+        # Fallback to FTS title search (no collection context)
+        if entry is None:
+            entries = cat.find(title, content_type="paper")
+            entry = entries[0] if entries else None
+
+        if entry:
+            meta_update: dict = {
+                "venue": bib_meta.get("venue", ""),
+                "bib_semantic_scholar_id": bib_meta.get("semantic_scholar_id", ""),
+                "citation_count": bib_meta.get("citation_count", 0),
+            }
+            refs = bib_meta.get("references", [])
+            if refs:
+                meta_update["references"] = refs
+            cat.update(
+                entry.tumbler,
+                author=bib_meta.get("authors", ""),
+                year=bib_meta.get("year", 0),
+                meta=meta_update,
+            )
+    except Exception:
+        _log.debug("catalog_enrich_hook_failed", exc_info=True)

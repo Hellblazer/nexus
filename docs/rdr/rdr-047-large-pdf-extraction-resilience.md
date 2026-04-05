@@ -2,8 +2,9 @@
 title: "Large PDF Extraction Resilience"
 id: RDR-047
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-04-03
+closed_date: 2026-04-05
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -103,12 +104,12 @@ Per-page formula detection via vision/layout model to skip non-formula pages in 
 
 ## Acceptance Criteria
 
-- [ ] 771-page book indexes successfully with at most 50 pages of work lost on any single failure
-- [ ] Crashed extraction resumes from checkpoint in under 30 seconds
-- [ ] Progress output visible during embed and upsert phases
-- [ ] Embedding phase completes in under 2 minutes for 2000 chunks (parallel API calls)
-- [ ] Page failure (OOM) produces Docling fallback text, not a lost page
-- [ ] `nx index repo` with 6 PDFs shares one PDFExtractor instance
+- [x] 771-page book indexes successfully with at most 50 pages of work lost on any single failure
+- [x] Crashed extraction resumes from checkpoint in under 30 seconds
+- [x] Progress output visible during embed and upsert phases
+- [x] Embedding phase completes in under 2 minutes for 2000 chunks (parallel API calls)
+- [x] Page failure (OOM) produces Docling fallback text, not a lost page
+- [x] `nx index repo` with 6 PDFs shares one PDFExtractor instance
 
 ## Research Findings
 
@@ -152,6 +153,7 @@ Pipeline accumulates at every level: pages in extractor, chunks in indexer, embe
 Fix is architectural: **process and persist in bounded increments**. Extract N pages → chunk → embed → upsert → checkpoint → repeat. Same pattern as database WAL, TCP sliding windows, git per-object storage. Cap failure cost at one batch, not one document.
 
 ### RF-8: Checkpoint design for PDF extraction resume (2026-04-03)
+
 **Classification**: Design proposal | **Confidence**: MEDIUM
 
 Checkpoint file at `~/.config/nexus/checkpoints/<content_hash>-<collection>.json`. Written atomically after each batch upsert. Contains pages_completed, chunks_upserted, chunk_ids. Resume skips to `pages_completed + 1`. Content hash mismatch = stale checkpoint, delete and restart. Maximum work at risk: 50 pages (~2 min). Key constraint: chunk IDs must be deterministic (`content_hash_chunkindex`) — already true.
@@ -165,3 +167,33 @@ Internal components already work in bounded chunks. Only the top-level orchestra
 **Classification**: Design proposal validated by empirical session | **Confidence**: HIGH
 
 Five layers: (1) Server auto-restart — IMPLEMENTED, handled CMRB page 99. (2) Subprocess fallback — IMPLEMENTED, handled all OOM pages. (3) Graceful page degradation — NOT YET, Docling fallback + placeholders. (4) Incremental upsert + checkpoint — NOT YET, the big one. (5) Embed/upsert error recovery — PARTIAL (CCE retry, metadata stripping done; progress, parallelism not done). Goal: any single failure costs at most 2 minutes of work.
+
+## Post-Mortem (Epic Closed 2026-04-05)
+
+Epic **nexus-u0q5** is closed. All beads completed except nexus-vu11 (deferred).
+
+### Completed Beads
+
+- **nexus-jr1p** — Incremental upsert with bounded page-batch processing
+- **nexus-15p0** — Embed/upsert progress output (visible progress for every phase >5s)
+- **nexus-cmcp** — Parallel embedding via ThreadPoolExecutor
+- **nexus-uggc** — Graceful page failure with Docling fallback
+- **nexus-u1um** — Shared PDFExtractor instance across batch indexing
+- **nexus-ezbf** — Config get nested keys fix
+- **nexus-luor** — Lock file cleanup
+
+### Deferred: nexus-vu11 (Vision Pass Formula Routing)
+
+Per-page formula routing via a vision/layout model was blocked by MinerU's bundling of formula YOLO + MFR behind a single `formula_enable` flag (RF-5). There is no layout-only mode to cheaply identify formula pages without running the full MFR pipeline.
+
+This was effectively worked around by the auto-detect extraction routing implemented in **RDR-044** (Docling → MinerU → PyMuPDF fallback chain with `--extractor` flag). The fallback chain handles formula-heavy pages through MinerU when needed and gracefully degrades when MinerU fails, making per-page formula routing a lower-priority optimization rather than a resilience requirement.
+
+### Superseded Patterns
+
+The **streaming PDF pipeline (RDR-048)** further superseded some of the batch-path resilience patterns from this RDR. RDR-048 introduced a SQLite WAL buffer with concurrent extractor/chunker/uploader stages, providing a more granular streaming architecture that naturally bounds memory usage and failure blast radius. The batch-path checkpoints from this RDR remain as the fallback for non-streaming extraction paths.
+
+### Key Lessons
+
+1. **Bounded increments are the universal resilience pattern** — WAL, TCP windows, git objects, and now PDF extraction all share the same insight: cap failure cost at one bounded batch, not one unbounded document.
+2. **Observability is resilience** — the user pain from silent phases (RF-6) was worse than the technical failures. Every operation >5s needs visible progress; every fallback needs a visible message.
+3. **Defense in depth compounds** — five independent resilience layers meant that no single observed failure could lose more than 2 minutes of work.

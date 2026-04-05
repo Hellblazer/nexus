@@ -423,6 +423,64 @@ def uploader_loop(
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 
+def _catalog_pdf_hook(
+    pdf_path: Path,
+    collection_name: str,
+    title: str = "",
+    author: str = "",
+    year: int = 0,
+    corpus: str = "",
+    chunk_count: int = 0,
+) -> None:
+    """Register PDF document in catalog after successful indexing. Silently skipped if absent."""
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            _log.debug("catalog_pdf_hook_skipped", reason="catalog not initialized")
+            return
+
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        effective_title = title or pdf_path.stem
+        owner_name = corpus if corpus else "standalone-pdfs"
+
+        # Get or create curator owner
+        owner = None
+        rows = cat._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+        ).fetchone()
+        if rows:
+            from nexus.catalog.tumbler import Tumbler
+            owner = Tumbler.parse(rows[0])
+        else:
+            owner = cat.register_owner(owner_name, "curator")
+
+        # Dedup by file_path (stable identifier for PDFs)
+        from datetime import UTC, datetime
+        file_path_str = pdf_path.name  # Portable — not machine-specific absolute path
+        existing = cat.by_file_path(owner, file_path_str)
+
+        if existing:
+            cat.update(
+                existing.tumbler,
+                physical_collection=collection_name,
+                chunk_count=chunk_count,
+                indexed_at=datetime.now(UTC).isoformat(),
+            )
+        else:
+            cat.register(
+                owner=owner, title=effective_title, content_type="paper",
+                author=author, year=year, corpus=corpus,
+                physical_collection=collection_name,
+                chunk_count=chunk_count,
+                file_path=file_path_str,
+            )
+    except Exception:
+        _log.debug("catalog_pdf_hook_failed", exc_info=True)
+
+
 def pipeline_index_pdf(
     pdf_path: Path,
     content_hash: str,
@@ -518,8 +576,12 @@ def pipeline_index_pdf(
     # Resolve collection once for all post-passes (avoids repeated API calls).
     col = t3.get_or_create_collection(collection)
 
+    # Track post-pass success — pipeline data preserved on failure (nexus-pfmr).
+    post_pass_ok = True
+
     # 1. Metadata enrichment from ExtractionResult.
-    _enrich_metadata_from_extraction(content_hash, extraction_result, pdf_path, t3, col, collection)
+    if not _enrich_metadata_from_extraction(content_hash, extraction_result, pdf_path, t3, col, collection):
+        post_pass_ok = False
 
     # 2. table_regions post-pass.
     table_regions = extraction_result.metadata.get("table_regions", [])
@@ -532,14 +594,44 @@ def pipeline_index_pdf(
                 return True
             return False
 
-        _update_chunk_metadata(t3, col, collection, content_hash, _tag_table_page)
+        if not _update_chunk_metadata(t3, col, collection, content_hash, _tag_table_page):
+            post_pass_ok = False
 
     # 3. Stale chunk pruning.
-    _prune_stale_chunks(col, str(pdf_path), content_hash)
+    if not _prune_stale_chunks(col, str(pdf_path), content_hash):
+        post_pass_ok = False
 
     state = db.get_pipeline_state(content_hash)
     total_chunks = state["chunks_uploaded"] if state else 0
-    db.delete_pipeline_data(content_hash)
+
+    if post_pass_ok:
+        db.delete_pipeline_data(content_hash)
+    else:
+        _log.warning(
+            "pipeline_data_preserved",
+            content_hash=content_hash,
+            reason="one or more post-passes failed — data kept for retry",
+        )
+
+    # Catalog hook: register PDF in catalog (opt-in, graceful absence)
+    title = (
+        extraction_result.title
+        if hasattr(extraction_result, "title") and extraction_result.title
+        else extraction_result.metadata.get("title", "")
+        if hasattr(extraction_result, "metadata")
+        else ""
+    ) or pdf_path.stem
+    author = extraction_result.metadata.get("author", "") if hasattr(extraction_result, "metadata") else ""
+    year_raw = extraction_result.metadata.get("year", 0) if hasattr(extraction_result, "metadata") else 0
+    _catalog_pdf_hook(
+        pdf_path=pdf_path,
+        collection_name=collection,
+        title=title,
+        author=author,
+        year=int(year_raw) if year_raw else 0,
+        corpus=corpus,
+        chunk_count=total_chunks,
+    )
 
     return total_chunks
 
@@ -551,7 +643,7 @@ def _enrich_metadata_from_extraction(
     t3: Any,
     col: Any,
     collection: str,
-) -> None:
+) -> bool:
     """Post-pass: update chunk metadata with fields from ExtractionResult.
 
     Resolves source_title (docling_title → pdf_title → filename), source_author,
@@ -561,6 +653,8 @@ def _enrich_metadata_from_extraction(
     Cannot use ``_update_chunk_metadata`` because ``chunk_count`` requires
     knowing the total number of chunks (``len(all_ids)``), which is only
     available after the full paginated query.
+
+    Returns True on success, False on failure (nexus-pfmr).
     """
     meta = result.metadata
     page_count = meta.get("page_count", 0) or 1
@@ -605,14 +699,16 @@ def _enrich_metadata_from_extraction(
             offset += 300
 
         if not all_ids:
-            return
+            return True
 
         chunk_count = len(all_ids)
         updated_metas = [{**m, **enrichment, "chunk_count": chunk_count} for m in all_metas]
 
         t3.update_chunks(collection, all_ids, updated_metas)
+        return True
     except Exception as exc:
         _log.warning("metadata_enrichment_failed", content_hash=content_hash, error=str(exc))
+        return False
 
 
 def _update_chunk_metadata(
@@ -621,10 +717,11 @@ def _update_chunk_metadata(
     collection: str,
     content_hash: str,
     update_fn: Callable[[dict], bool],
-) -> None:
+) -> bool:
     """Generic post-pass: query chunks by content_hash, apply update_fn to each.
 
     Paginates the T3 query to handle documents with 300+ chunks.
+    Returns True on success, False on failure (nexus-f8it).
     """
     try:
         all_ids: list[str] = []
@@ -643,9 +740,9 @@ def _update_chunk_metadata(
             if len(batch.get("ids", [])) < 300:
                 break
             offset += 300
-    except Exception:
-        _log.debug("chunk_metadata_query_failed", content_hash=content_hash)
-        return
+    except Exception as exc:
+        _log.warning("chunk_metadata_query_failed", content_hash=content_hash, error=str(exc))
+        return False
 
     ids_to_update: list[str] = []
     updated_metas: list[dict] = []
@@ -657,19 +754,26 @@ def _update_chunk_metadata(
     if ids_to_update:
         try:
             t3.update_chunks(collection, ids_to_update, updated_metas)
-        except Exception:
-            _log.debug("chunk_metadata_update_failed", count=len(ids_to_update))
+        except Exception as exc:
+            _log.warning("chunk_metadata_update_failed", count=len(ids_to_update), error=str(exc))
+            return False
+    return True
 
 
 def _prune_stale_chunks(
     col: Any, pdf_path: str, content_hash: str,
-) -> None:
-    """Delete chunks from T3 that belong to a previous version of the same PDF."""
-    try:
-        stale_ids: list[str] = []
-        offset = 0
+) -> bool:
+    """Delete chunks from T3 that belong to a previous version of the same PDF.
 
-        # Use full content_hash from metadata to distinguish current vs stale.
+    Returns True on success, False on failure.  Query and delete errors are
+    handled separately so a delete failure reports how many stale chunks
+    remain (nexus-tcwm).
+    """
+    stale_ids: list[str] = []
+    offset = 0
+
+    # Phase 1: query for stale chunks
+    try:
         while True:
             batch = _chroma_with_retry(
                 col.get,
@@ -686,9 +790,23 @@ def _prune_stale_chunks(
             if len(batch_ids) < 300:
                 break
             offset += 300
+    except Exception as exc:
+        _log.warning("stale_prune_query_failed", pdf_path=pdf_path, error=str(exc))
+        return False
 
-        if stale_ids:
-            _chroma_with_retry(col.delete, ids=stale_ids)
-            _log.info("stale_chunks_pruned", count=len(stale_ids), pdf_path=pdf_path)
-    except Exception:
-        _log.debug("stale_prune_failed", pdf_path=pdf_path)
+    if not stale_ids:
+        return True
+
+    # Phase 2: delete stale chunks
+    try:
+        _chroma_with_retry(col.delete, ids=stale_ids)
+        _log.info("stale_chunks_pruned", count=len(stale_ids), pdf_path=pdf_path)
+        return True
+    except Exception as exc:
+        _log.warning(
+            "stale_prune_delete_failed",
+            pdf_path=pdf_path,
+            stale_count=len(stale_ids),
+            error=str(exc),
+        )
+        return False

@@ -19,7 +19,14 @@ effort: low
 3. **Read the markdown file**: `$RDR_DIR/NNN-*.md`
 4. **Read T2 metadata** (if available): mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN"
 5. **Read research findings** (if available): mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="" and filter titles matching `NNN-research-*`
-6. **Display unified view**:
+6. **Catalog links** (if catalog initialized): Search for this RDR in the catalog and display graph relationships:
+   ```
+   mcp__plugin_nx_nexus__catalog_search(query="<rdr-title>", content_type="rdr")
+   ```
+   If found, call: `mcp__plugin_nx_nexus__catalog_links(tumbler="<tumbler>", depth=1)`
+   Display inbound and outbound links from the result. Skip silently if catalog not initialized.
+
+7. **Display unified view**:
 
 ### Output Format
 
@@ -42,6 +49,12 @@ effort: low
 ### Supersedes / Superseded By
 (none)
 
+### Catalog Links (from link graph)
+- ← catalog.py (implements-heuristic, by index_hook)
+- ← tumbler.py (implements-heuristic, by index_hook)
+- → "Delos: Theory of Schema Mappings" (cites, by rdr-close)
+(or: "No catalog entry — run `nx index rdr` to populate")
+
 ### Post-Mortem Drift Categories
 (not closed yet)
 ```
@@ -54,6 +67,7 @@ effort: low
 - [ ] Research findings summarized by classification (Verified, Documented, Assumed)
 - [ ] Linked beads shown with status (if `epic_bead` is set in T2)
 - [ ] Supersedes/Superseded-by relationships displayed
+- [ ] Catalog links displayed (if catalog initialized and RDR indexed)
 - [ ] Fallback to `/nx:rdr-list` behavior if RDR ID not found
 
 ## Agent-Specific PRODUCE

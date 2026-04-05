@@ -725,3 +725,36 @@ def test_plan_search_empty(t2_path):
     """plan_search returns 'No matching plans.' when library is empty."""
     result = plan_search(query="nonexistent")
     assert "No matching plans" in result
+
+
+# ── nexus-kopl: _get_catalog catches OSError, not all exceptions ─────────
+
+
+def test_get_catalog_propagates_non_os_errors():
+    """_get_catalog must not swallow non-OSError exceptions (nexus-kopl).
+
+    Previously, the broad ``except Exception: pass`` caught JSONL parse errors,
+    SQLite corruption, and MemoryError as if they were stat failures.
+    """
+    from unittest.mock import patch, MagicMock
+    from nexus.mcp_server import _get_catalog
+
+    # Set up a catalog instance that raises ValueError on _ensure_consistent
+    mock_catalog = MagicMock()
+    mock_catalog.degraded = False
+
+    with patch("nexus.mcp_server._catalog_instance", mock_catalog), \
+         patch("nexus.mcp_server._catalog_mtime", 0.0), \
+         patch("nexus.mcp_server._max_jsonl_mtime", return_value=999.0):
+        # ValueError should propagate — it's not an OSError
+        mock_catalog._ensure_consistent.side_effect = ValueError("corrupt JSONL")
+        try:
+            _get_catalog()
+            assert False, "ValueError should have propagated"
+        except ValueError:
+            pass  # expected
+
+        # OSError should be swallowed (stat failure)
+        mock_catalog._ensure_consistent.side_effect = OSError("file not found")
+        result = _get_catalog()  # should not raise
+        assert result is mock_catalog

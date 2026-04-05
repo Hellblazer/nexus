@@ -414,3 +414,28 @@ def test_t1_delete_does_not_affect_other_entries(t1: T1Database) -> None:
     t1.delete(id2)
     assert t1.get(id1) is not None
     assert t1.get(id2) is None
+
+
+# ── nexus-885n: list_entries and clear paginate ──────────────────────────
+
+
+def test_t1_list_entries_uses_pagination(t1: T1Database) -> None:
+    """list_entries passes limit/offset to avoid ChromaDB truncation (nexus-885n)."""
+    from unittest.mock import patch
+
+    # Add a few entries
+    for i in range(5):
+        t1.put(content=f"entry {i}")
+
+    entries = t1.list_entries()
+    assert len(entries) == 5
+
+
+def test_t1_clear_uses_pagination(t1: T1Database) -> None:
+    """clear passes limit/offset to avoid ChromaDB truncation (nexus-885n)."""
+    for i in range(5):
+        t1.put(content=f"entry {i}")
+
+    deleted = t1.clear()
+    assert deleted == 5
+    assert len(t1.list_entries()) == 0

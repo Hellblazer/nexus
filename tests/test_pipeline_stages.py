@@ -776,3 +776,134 @@ class TestMetadataContract:
         meta = json.loads(chunks[0]["metadata_json"])
         missing = self.REQUIRED_FIELDS - set(meta.keys())
         assert missing == set(), f"Missing metadata fields: {missing}"
+
+
+# ── nexus-f8it: _update_chunk_metadata must log WARNING on failure ──────────
+
+
+class TestUpdateChunkMetadataFailureLogging:
+    """Post-pass metadata update failures must be visible, not swallowed."""
+
+    def test_query_failure_logs_warning(self) -> None:
+        """Query failure in _update_chunk_metadata logs at WARNING, not DEBUG."""
+        from nexus.pipeline_stages import _update_chunk_metadata
+
+        mock_t3 = MagicMock()
+        mock_col = MagicMock()
+        mock_col.get.side_effect = Exception("connection reset")
+
+        result = _update_chunk_metadata(
+            mock_t3, mock_col, "docs__test", "abc123", lambda m: True,
+        )
+        assert result is False
+
+    def test_update_failure_logs_warning(self) -> None:
+        """Update call failure in _update_chunk_metadata logs at WARNING."""
+        from nexus.pipeline_stages import _update_chunk_metadata
+
+        mock_t3 = MagicMock()
+        mock_t3.update_chunks.side_effect = Exception("quota exceeded")
+        mock_col = MagicMock()
+        mock_col.get.return_value = {
+            "ids": ["id1"], "metadatas": [{"chunk_type": "text"}],
+        }
+
+        result = _update_chunk_metadata(
+            mock_t3, mock_col, "docs__test", "abc123",
+            lambda m: True,  # always update
+        )
+        assert result is False
+
+    def test_success_returns_true(self) -> None:
+        """_update_chunk_metadata returns True when update succeeds."""
+        from nexus.pipeline_stages import _update_chunk_metadata
+
+        mock_t3 = MagicMock()
+        mock_col = MagicMock()
+        mock_col.get.return_value = {
+            "ids": ["id1"], "metadatas": [{"chunk_type": "text"}],
+        }
+
+        result = _update_chunk_metadata(
+            mock_t3, mock_col, "docs__test", "abc123",
+            lambda m: True,
+        )
+        assert result is True
+
+
+# ── nexus-tcwm: _prune_stale_chunks must surface delete failures ────────────
+
+
+class TestPruneStaleChunksFailureHandling:
+    """Stale chunk pruning must separate query vs delete failures."""
+
+    def test_delete_failure_logs_warning_with_count(self) -> None:
+        """Delete failure logs WARNING with number of stale chunks left behind."""
+        from nexus.pipeline_stages import _prune_stale_chunks
+
+        mock_col = MagicMock()
+        mock_col.get = MagicMock(return_value={
+            "ids": ["old1", "old2"],
+            "metadatas": [
+                {"content_hash": "stale_hash", "source_path": "/doc.pdf"},
+                {"content_hash": "stale_hash", "source_path": "/doc.pdf"},
+            ],
+        })
+        mock_col.delete = MagicMock(side_effect=Exception("quota exceeded"))
+
+        result = _prune_stale_chunks(mock_col, "/doc.pdf", "new_hash")
+        assert result is False
+
+    def test_query_failure_returns_false(self) -> None:
+        """Query failure returns False without attempting delete."""
+        from nexus.pipeline_stages import _prune_stale_chunks
+
+        mock_col = MagicMock()
+        mock_col.get = MagicMock(side_effect=Exception("connection reset"))
+
+        result = _prune_stale_chunks(mock_col, "/doc.pdf", "new_hash")
+        assert result is False
+        mock_col.delete.assert_not_called()
+
+    def test_success_returns_true(self) -> None:
+        """Successful pruning returns True."""
+        from nexus.pipeline_stages import _prune_stale_chunks
+
+        mock_col = MagicMock()
+        mock_col.get = MagicMock(return_value={
+            "ids": ["old1"],
+            "metadatas": [{"content_hash": "stale_hash"}],
+        })
+
+        result = _prune_stale_chunks(mock_col, "/doc.pdf", "new_hash")
+        assert result is True
+        mock_col.delete.assert_called_once()
+
+
+# ── nexus-pfmr: pipeline data preserved on post-pass failure ────────────────
+
+
+class TestPipelineDataPreservedOnPostPassFailure:
+    """Pipeline data must not be deleted until all post-passes succeed."""
+
+    def test_pipeline_data_kept_on_enrichment_failure(self, db: PipelineDB) -> None:
+        """If _enrich_metadata_from_extraction fails, pipeline data stays for retry."""
+        from nexus.pipeline_stages import _enrich_metadata_from_extraction
+
+        mock_t3 = MagicMock()
+        mock_col = MagicMock()
+        # Query succeeds but update fails
+        mock_col.get.return_value = {
+            "ids": ["id1"], "metadatas": [{"content_hash": "h1"}],
+        }
+        mock_t3.update_chunks.side_effect = Exception("quota exceeded")
+
+        result_obj = MagicMock(spec=ExtractionResult)
+        result_obj.text = "some text"
+        result_obj.metadata = {"page_count": 1, "docling_title": "Test"}
+        result_obj.title = "Test"
+
+        result = _enrich_metadata_from_extraction(
+            "h1", result_obj, Path("/test.pdf"), mock_t3, mock_col, "docs__test",
+        )
+        assert result is False

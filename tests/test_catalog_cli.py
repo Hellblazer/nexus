@@ -1,0 +1,244 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from click.testing import CliRunner
+
+from nexus.catalog.catalog import Catalog
+from nexus.cli import main
+
+
+@pytest.fixture(autouse=True)
+def git_identity(monkeypatch):
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+
+
+@pytest.fixture
+def catalog_env(tmp_path, monkeypatch):
+    """Set up a catalog in tmp_path and point NEXUS_CATALOG_PATH at it."""
+    catalog_dir = tmp_path / "catalog"
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+    return catalog_dir
+
+
+@pytest.fixture
+def initialized_catalog(catalog_env):
+    """Return a Catalog that has been init'd with one owner."""
+    cat = Catalog.init(catalog_env)
+    cat.register_owner("test-repo", "repo", repo_hash="abcd1234")
+    return cat
+
+
+class TestInitCommand:
+    def test_init(self, catalog_env):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "init"])
+        assert result.exit_code == 0
+        assert Catalog.is_initialized(catalog_env)
+
+    def test_init_idempotent(self, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "init"])
+        result = runner.invoke(main, ["catalog", "init"])
+        assert result.exit_code == 0
+
+
+class TestNotInitialized:
+    def test_list_without_init(self, catalog_env):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "list"])
+        assert result.exit_code != 0
+        assert "not initialized" in result.output.lower()
+
+
+class TestRegisterAndShow:
+    def test_register_document(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Test Paper",
+            "--owner", "1.1",
+            "--type", "paper",
+        ])
+        assert result.exit_code == 0
+        assert "1.1.1" in result.output
+
+    def test_show_by_tumbler(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Test Paper",
+            "--owner", "1.1",
+        ])
+        result = runner.invoke(main, ["catalog", "show", "1.1.1"])
+        assert result.exit_code == 0
+        assert "Test Paper" in result.output
+
+    def test_show_json(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Test Paper",
+            "--owner", "1.1",
+        ])
+        result = runner.invoke(main, ["catalog", "show", "1.1.1", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["title"] == "Test Paper"
+
+
+class TestListCommand:
+    def test_list_entries(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        result = runner.invoke(main, ["catalog", "list"])
+        assert result.exit_code == 0
+        assert "A" in result.output
+        assert "B" in result.output
+
+    def test_list_json(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        result = runner.invoke(main, ["catalog", "list", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert len(data) >= 1
+
+
+class TestSearchCommand:
+    def test_search(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register",
+            "--title", "authentication module",
+            "--owner", "1.1",
+            "--type", "code",
+        ])
+        result = runner.invoke(main, ["catalog", "search", "authentication"])
+        assert result.exit_code == 0
+        assert "authentication" in result.output
+
+
+class TestLinkCommands:
+    def test_link_and_links(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        result = runner.invoke(main, [
+            "catalog", "link", "1.1.1", "1.1.2", "--type", "cites",
+        ])
+        assert result.exit_code == 0
+        result = runner.invoke(main, ["catalog", "links", "1.1.1"])
+        assert result.exit_code == 0
+        assert "cites" in result.output
+
+    def test_unlink(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "unlink", "1.1.1", "1.1.2", "--type", "cites"])
+        assert result.exit_code == 0
+        assert "1" in result.output  # removed count
+
+
+class TestLinksFilterCommand:
+    def test_links_filter_by_type(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "links", "--type", "cites"])
+        assert result.exit_code == 0
+        assert "cites" in result.output
+
+    def test_links_filter_json(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "links", "--type", "cites", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert len(data) == 1
+
+    def test_links_filter_empty(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "links", "--type", "nonexistent"])
+        assert result.exit_code == 0
+        assert "No links found." in result.output
+
+
+class TestDeleteCommand:
+    def test_delete_by_tumbler(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        result = runner.invoke(main, ["catalog", "delete", "1.1.1", "-y"])
+        assert result.exit_code == 0
+        assert "Deleted" in result.output
+
+    def test_delete_not_found(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "delete", "1.1.999", "-y"])
+        assert result.exit_code != 0
+
+
+class TestLinkBulkDeleteCommand:
+    def test_link_bulk_delete_dry_run(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, [
+            "catalog", "link-bulk-delete", "--type", "cites", "--dry-run",
+        ])
+        assert result.exit_code == 0
+        assert "Would remove 1 link(s)" in result.output
+
+
+class TestLinkAuditCommand:
+    def test_link_audit_cli(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "link-audit"])
+        assert result.exit_code == 0
+        assert "Total links" in result.output
+        assert "cites" in result.output
+
+    def test_link_audit_cli_json(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "link-audit", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["total"] == 1
+
+
+class TestOwnersCommand:
+    def test_owners(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "owners"])
+        assert result.exit_code == 0
+        assert "test-repo" in result.output
+
+
+class TestStatsCommand:
+    def test_stats(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        result = runner.invoke(main, ["catalog", "stats"])
+        assert result.exit_code == 0
+        assert "1" in result.output  # at least 1 document

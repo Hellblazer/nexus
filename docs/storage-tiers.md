@@ -9,6 +9,9 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 | T1 -- scratch | ChromaDB HTTP server (per-session) | Localhost only | Session only | Working notes, hypotheses |
 | T2 -- memory | SQLite + FTS5 (WAL) | None | Survives restarts | Per-project notes, session context |
 | T3 -- knowledge | Local ChromaDB (default) or ChromaDB Cloud + Voyage AI | Local: none / Cloud: required | Permanent | Semantic search, indexed code/docs |
+| Catalog | Git-backed JSONL + SQLite | None (optional git remote) | Permanent | Document registry, typed link graph, provenance |
+
+The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
 
 ## T1 -- Session Scratch
 
