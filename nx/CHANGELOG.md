@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-04-05
+
 ### Added
 - Catalog tools injected for RDR lifecycle, knowledge, research, debug, and analysis agent contexts (SubagentStart hook)
 - 12 agents/skills wired with catalog link creation: debugger (`relates`), deep-analyst (`relates`), codebase-analyzer (`relates`, `supersedes`), architect-planner (`relates`, `cites`), developer (`implements`), knowledge-tidier (`supersedes`, `relates`), deep-research-synthesizer (`cites`), all 7 RDR skills (`supersedes`, `cites`, `relates`)

@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-04-05
+
 ### Added
 - **Document catalog with typed link graph** (RDR-049/050/051) — Xanadu-inspired document registry tracking every indexed document and the relationships between them. Tumblers (permanent hierarchical addresses) identify documents; typed links (`cites`, `supersedes`, `implements-heuristic`, `relates`) capture provenance.
   - `nx catalog setup` — one-command onboarding: init + populate from T3 + generate links
@@ -21,7 +23,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`defrag()`** — safe JSONL compaction that deduplicates overwrites but preserves tombstones. Auto-runs in `sync()`. Use `compact()` for full tombstone purge.
 
 ### Fixed
+- **Silent data loss & corruption audit** (nexus-s5mf) — 11 bugs across 7 modules where errors were silently swallowed, causing data loss or corruption:
+  - **P0**: CCE empty-result no longer falls through to voyage-4 (would corrupt vector space with mixed embedding models)
+  - **P0**: Pipeline post-pass failures logged at WARNING and return bool; pipeline data preserved for retry on failure
+  - **P0**: `_prune_stale_chunks` separates query/delete error handling; reports stale chunk count on delete failure
+  - **P0**: `delete_pipeline_data` gated on all post-passes succeeding
+  - **P0**: `git ls-files` failure in git repos raises RuntimeError instead of silently falling back to rglob (which would index .gitignored secrets)
+  - **P1**: Catalog `_ensure_consistent` rebuild failure sets `degraded` flag and logs WARNING
+  - **P1**: MCP `_get_catalog()` catches `OSError` only (was bare `except Exception`)
+  - **P1**: `reindex_cmd` sourceless check paginates (was limit=100)
+  - **P1**: T1 `list_entries` and `clear` paginate with limit=300 to avoid ChromaDB truncation
+  - **P2**: `collection info` paginates for accurate MAX(indexed_at) timestamp
+  - **P2**: T1 reconnect fallback to EphemeralClient logs WARNING about data loss
 - **FTS5 dot/asterisk in queries** — `_sanitize_fts5` now quotes tokens containing `.`, `*`, `+`, `/`. Filenames like "types.py" no longer cause syntax errors in search or title resolution.
+- **ChromaDB Cloud quota violations** — catalog setup handles rate limits with per-collection progress and timeouts.
+- **RDR backfill pagination** — paginates through all chunks (was limited to first page).
+- **Deadlock in sync→defrag** — fixed operation ordering.
 
 ### Changed
 - **Breaking**: `catalog_links` MCP tool now returns `{"nodes": [...], "edges": [...]}` dict instead of flat edge list. Access edges via `result["edges"]`.
