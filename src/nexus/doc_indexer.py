@@ -793,8 +793,9 @@ def _catalog_markdown_hook(
 
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
-        # Derive title from frontmatter or filename
+        # Derive title and year from frontmatter or filename
         title = md_path.stem
+        year = 0
         try:
             text = md_path.read_text(encoding="utf-8")
             if text.startswith("---"):
@@ -802,6 +803,14 @@ def _catalog_markdown_hook(
                 m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
                 if m:
                     title = m.group(1).strip().strip('"').strip("'")
+                # Extract year from created/date/accepted_date frontmatter
+                for field in ("created", "date", "accepted_date"):
+                    ym = re.search(rf"^{field}:\s*(.+)$", text, re.MULTILINE)
+                    if ym:
+                        dm = re.search(r"(\d{4})", ym.group(1))
+                        if dm:
+                            year = int(dm.group(1))
+                            break
         except Exception:
             pass
 
@@ -818,7 +827,7 @@ def _catalog_markdown_hook(
         cat.register(
             owner=owner, title=title, content_type=content_type,
             file_path=str(md_path), physical_collection=collection_name,
-            chunk_count=chunk_count,
+            chunk_count=chunk_count, year=year,
         )
     except Exception:
         _log.debug("catalog_markdown_hook_failed", exc_info=True)

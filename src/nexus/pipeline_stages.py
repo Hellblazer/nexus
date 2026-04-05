@@ -622,7 +622,17 @@ def pipeline_index_pdf(
         else ""
     ) or pdf_path.stem
     author = extraction_result.metadata.get("author", "") if hasattr(extraction_result, "metadata") else ""
-    year_raw = extraction_result.metadata.get("year", 0) if hasattr(extraction_result, "metadata") else 0
+    # Extract year from pdf_creation_date or explicit year field
+    year_raw = 0
+    if hasattr(extraction_result, "metadata"):
+        year_raw = extraction_result.metadata.get("year", 0)
+        if not year_raw:
+            creation_date = extraction_result.metadata.get("pdf_creation_date", "")
+            if creation_date:
+                import re as _re
+                m = _re.search(r"(\d{4})", str(creation_date))
+                if m:
+                    year_raw = int(m.group(1))
     _catalog_pdf_hook(
         pdf_path=pdf_path,
         collection_name=collection,
