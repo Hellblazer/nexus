@@ -2,8 +2,10 @@
 title: "Git-Backed Xanadu-Inspired Catalog for T3"
 id: RDR-049
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-04-04
+closed_date: 2026-04-05
+close_reason: implemented
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
