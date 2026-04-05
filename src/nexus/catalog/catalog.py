@@ -124,20 +124,23 @@ class Catalog:
         )
 
     def _ensure_consistent(self) -> None:
-        """Check JSONL vs SQLite row counts; rebuild if diverged."""
+        """Check JSONL vs SQLite row counts for docs and links; rebuild if diverged."""
         try:
             documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
-            jsonl_count = len(documents)
-            sqlite_count = self._db.execute(
-                "SELECT count(*) FROM documents"
-            ).fetchone()[0]
-            if jsonl_count != sqlite_count:
+            links_dict = read_links(self._links_path) if self._links_path.exists() else {}
+            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+
+            doc_jsonl = len(documents)
+            doc_sqlite = self._db.execute("SELECT count(*) FROM documents").fetchone()[0]
+            link_jsonl = len(links_dict)
+            link_sqlite = self._db.execute("SELECT count(*) FROM links").fetchone()[0]
+
+            if doc_jsonl != doc_sqlite or link_jsonl != link_sqlite:
                 _log.info(
                     "catalog_consistency_rebuild",
-                    jsonl=jsonl_count, sqlite=sqlite_count,
+                    doc_jsonl=doc_jsonl, doc_sqlite=doc_sqlite,
+                    link_jsonl=link_jsonl, link_sqlite=link_sqlite,
                 )
-                owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-                links_dict = read_links(self._links_path) if self._links_path.exists() else {}
                 self._db.rebuild(owners, documents, list(links_dict.values()))
         except Exception:
             _log.debug("catalog_consistency_check_failed", exc_info=True)
@@ -634,6 +637,8 @@ class Catalog:
         **meta: object,
     ) -> bool:
         """Create link only if it does not already exist. Returns True=created, False=existed.
+
+        No merge, no co_discovered_by — pure insert-or-skip via UNIQUE constraint.
         No JSONL append on the 'already exists' path.
         """
         dir_fd = self._acquire_lock()
@@ -644,8 +649,22 @@ class Catalog:
             ).fetchone()
             if row is not None:
                 return False
-            self._link_unlocked(from_t, to_t, link_type, created_by,
-                                from_span, to_span, dict(meta))
+            now = datetime.now(UTC).isoformat()
+            combined_meta = dict(meta)
+            rec = LinkRecord(
+                from_t=str(from_t), to_t=str(to_t), link_type=link_type,
+                from_span=from_span, to_span=to_span,
+                created_by=created_by, created_at=now, meta=combined_meta,
+            )
+            self._db.execute(
+                "INSERT OR IGNORE INTO links "
+                "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
+                "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(from_t), str(to_t), link_type, from_span, to_span,
+                 created_by, now, json.dumps(combined_meta)),
+            )
+            self._append_jsonl(self._links_path, rec.__dict__)
+            self._db.commit()
             return True
         finally:
             self._release_lock(dir_fd)
@@ -728,10 +747,14 @@ class Catalog:
         created_by: str = "",
         direction: str = "both",
         tumbler: str = "",
+        created_at_before: str = "",
         limit: int = 100,
         offset: int = 0,
     ) -> list[CatalogLink]:
-        """Composable link filter. Returns CatalogLink list with LIMIT/OFFSET."""
+        """Composable link filter. Returns CatalogLink list with LIMIT/OFFSET.
+
+        limit=0 means unlimited (maps to SQLite LIMIT -1).
+        """
         conditions: list[str] = []
         params: list[str | int] = []
 
@@ -757,6 +780,9 @@ class Catalog:
         if created_by:
             conditions.append("created_by = ?")
             params.append(created_by)
+        if created_at_before:
+            conditions.append("created_at != '' AND created_at < ?")
+            params.append(created_at_before)
 
         sql = (
             "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
@@ -783,17 +809,17 @@ class Catalog:
         Tombstones preserve original created_by for JSONL audit trail.
         dry_run=True returns count without deleting.
         """
+        has_filter = any([from_t, to_t, link_type, created_by, created_at_before])
+        if not has_filter and not dry_run:
+            raise ValueError("bulk_unlink requires at least one filter (or dry_run=True)")
+
         dir_fd = self._acquire_lock()
         try:
             matching = self.link_query(
                 from_t=from_t, to_t=to_t, link_type=link_type,
-                created_by=created_by, limit=0,
+                created_by=created_by, created_at_before=created_at_before,
+                limit=0,
             )
-            if created_at_before:
-                matching = [
-                    l for l in matching
-                    if l.created_at and l.created_at < created_at_before
-                ]
 
             if dry_run:
                 return len(matching)

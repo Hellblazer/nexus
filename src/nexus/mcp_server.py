@@ -1399,6 +1399,7 @@ def catalog_link_query(
     created_by: str = "",
     direction: str = "both",
     tumbler: str = "",
+    created_at_before: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
@@ -1406,6 +1407,7 @@ def catalog_link_query(
 
     NOT a query-planner step — use catalog_links for graph traversal.
     Use for: audit by creator, find all links of a type, count generator output.
+    created_at_before: ISO timestamp — only links created before this time.
     """
     cat, err = _require_catalog()
     if err:
@@ -1414,6 +1416,7 @@ def catalog_link_query(
         links = cat.link_query(
             from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
             created_by=created_by, direction=direction, tumbler=tumbler,
+            created_at_before=created_at_before,
             limit=limit, offset=offset,
         )
         return [_link_to_dict(l) for l in links]

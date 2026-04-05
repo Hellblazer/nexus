@@ -206,6 +206,17 @@ class TestLinkQuery:
         results = cat.link_query(tumbler=str(doc_a), direction="both")
         assert len(results) == 2
 
+    def test_link_query_created_at_before_sql(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_c, "cites", created_by="user")
+        # Future cutoff: all links match
+        results = cat.link_query(link_type="cites", created_at_before="2099-01-01T00:00:00")
+        assert len(results) == 2
+        # Past cutoff: no links match
+        results = cat.link_query(link_type="cites", created_at_before="2000-01-01T00:00:00")
+        assert len(results) == 0
+
     def test_link_query_by_tumbler_out_only(self, tmp_path):
         cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
         cat.link(doc_a, doc_b, "cites", created_by="user")
@@ -247,6 +258,28 @@ class TestBulkUnlink:
         # All links created "now" — a future cutoff should match all
         removed = cat.bulk_unlink(link_type="cites", created_at_before="2099-01-01T00:00:00")
         assert removed == 2
+
+    def test_bulk_unlink_no_filters_raises(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        with pytest.raises(ValueError, match="at least one filter"):
+            cat.bulk_unlink()
+
+    def test_bulk_unlink_no_filters_dry_run_allowed(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        count = cat.bulk_unlink(dry_run=True)
+        assert count == 1  # counts all links
+        assert len(cat.link_query()) == 1  # nothing deleted
+
+    def test_bulk_unlink_time_range_excludes_past_cutoff(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_c, "cites", created_by="user")
+        # A past cutoff should match nothing (links were created "now")
+        removed = cat.bulk_unlink(link_type="cites", created_at_before="2000-01-01T00:00:00")
+        assert removed == 0
+        assert len(cat.link_query(link_type="cites")) == 2
 
     def test_bulk_unlink_tombstones_preserve_created_by(self, tmp_path):
         cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)

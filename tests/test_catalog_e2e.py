@@ -41,9 +41,9 @@ _PROSE_FILES = {
 }
 
 _RDR_FILES = {
-    "docs/rdr/rdr-001-test-design.md": (
-        "---\ntitle: Test Design Document\nstatus: accepted\n---\n\n"
-        "# RDR-001: Test Design Document\n\n"
+    "docs/rdr/rdr-001-corpus-ttl-design.md": (
+        "---\ntitle: Corpus and TTL Design\nstatus: accepted\n---\n\n"
+        "# RDR-001: Corpus and TTL Design\n\n"
         "## Decision\n\nWe use tumblers for addressing.\n"
         "## Implementation\n\nThe ttl module handles time-to-live logic.\n"
         "The corpus module handles naming.\n"
@@ -322,8 +322,9 @@ class TestLinkGenerationE2E:
         count = generate_code_rdr_links(cat)
         # At least one code→implements→RDR link should be created
         # (ttl.py or corpus.py matched against RDR title/content)
+        assert count >= 1, "Expected at least one code→RDR link (ttl or corpus match)"
         link_count = cat._db.execute("SELECT count(*) FROM links").fetchone()[0]
-        assert link_count >= 0  # May or may not match depending on title heuristic
+        assert link_count == count
 
 
 class TestLinkLifecycleE2E:
@@ -441,10 +442,13 @@ class TestPlanTemplatesSeeded:
     """Verify catalog-aware plan templates exist in T2 plan library."""
 
     def test_catalog_plan_templates_exist(self, db):
-        """Check that T2 plan library schema supports catalog-tagged plans."""
+        """Check that T2 plan library schema supports catalog-tagged plans.
+
+        Templates are seeded in production T2 via plan_save MCP, not test DB.
+        This verifies the schema can store and query catalog-tagged plans.
+        """
         rows = db.conn.execute(
             "SELECT count(*) FROM plans WHERE tags LIKE '%catalog%'"
         ).fetchall()
-        # Templates are seeded in production T2 via plan_save MCP, not test DB
-        # This verifies the schema can store and query catalog-tagged plans
-        assert rows is not None
+        assert isinstance(rows, list)  # schema query succeeds
+        assert rows[0][0] >= 0  # count is a valid integer (0 in test, >0 in prod)
