@@ -39,9 +39,9 @@ class TestPdfCatalogHook:
             corpus="papers",
         )
         # Should have created curator owner + document
-        rows = cat._db._conn.execute("SELECT count(*) FROM documents").fetchone()
+        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
         assert rows[0] == 1
-        rows = cat._db._conn.execute("SELECT title FROM documents").fetchone()
+        rows = cat._db.execute("SELECT title FROM documents").fetchone()
         assert rows[0] == "Attention Is All You Need"
 
     def test_skipped_when_not_initialized(self, tmp_path, monkeypatch):
@@ -66,7 +66,7 @@ class TestPdfCatalogHook:
             collection_name="docs__test",
             title="",
         )
-        rows = cat._db._conn.execute("SELECT title FROM documents").fetchone()
+        rows = cat._db.execute("SELECT title FROM documents").fetchone()
         assert rows[0] == "my-paper"
 
     def test_update_on_reindex(self, tmp_path, monkeypatch):
@@ -86,7 +86,7 @@ class TestPdfCatalogHook:
             title="Paper",
         )
         # Should still be 1 document, updated collection
-        rows = cat._db._conn.execute("SELECT count(*) FROM documents").fetchone()
+        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
         assert rows[0] == 1
-        rows = cat._db._conn.execute("SELECT physical_collection FROM documents").fetchone()
+        rows = cat._db.execute("SELECT physical_collection FROM documents").fetchone()
         assert rows[0] == "docs__v2"

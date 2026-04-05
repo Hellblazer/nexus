@@ -369,16 +369,42 @@ def _get_or_create_curator(cat: Catalog, name: str) -> Tumbler:
     return owner
 
 
-def _backfill_repos(cat: Catalog, registry: object, dry_run: bool) -> int:
-    """Create owner per repo from registry."""
+def _backfill_repos(
+    cat: Catalog, registry: object, dry_run: bool
+) -> tuple[int, set[str]]:
+    """Create owner per repo from registry.
+
+    Returns (count, claimed_collections) — claimed_collections is the set of
+    docs__* collection names owned by repos, so Pass 2 can exclude them.
+    """
     from hashlib import sha256
     from pathlib import Path
 
     count = 0
+    claimed: set[str] = set()
+    skipped = 0
+
+    # First pass: collect ALL repo-owned collections regardless of status
+    # so Pass 2 never mistakes repo prose for standalone papers
+    for info in registry.all_info().values():
+        for key in ("code_collection", "docs_collection", "collection"):
+            col = info.get(key, "")
+            if col:
+                claimed.add(col)
+
+    # Second pass: register only healthy repos
     for repo_path_str, info in registry.all_info().items():
         repo_path = Path(repo_path_str)
+        status = info.get("status", "")
+
+        if status not in ("ready", "indexing"):
+            skipped += 1
+            continue
+        if not repo_path.exists():
+            skipped += 1
+            continue
+
         repo_name = info.get("name", repo_path.name)
-        # Compute path_hash the same way as _repo_identity
         path_hash = sha256(str(repo_path).encode()).hexdigest()[:8]
         code_col = info.get("code_collection", "")
         docs_col = info.get("docs_collection", "")
@@ -401,7 +427,6 @@ def _backfill_repos(cat: Catalog, registry: object, dry_run: bool) -> int:
                 description=f"Git repository: {repo_name}",
             )
 
-        # Register collection-level entries for the repo
         for col_name, content_type in [(code_col, "code"), (docs_col, "prose")]:
             if not col_name:
                 continue
@@ -417,7 +442,9 @@ def _backfill_repos(cat: Catalog, registry: object, dry_run: bool) -> int:
                 )
                 count += 1
 
-    return count
+    if skipped:
+        click.echo(f"  ({skipped} stale/missing repos skipped)")
+    return count, claimed
 
 
 def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool) -> int:
@@ -449,14 +476,17 @@ def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool) -> int:
     return count
 
 
-def _backfill_papers(cat: Catalog, t3: object, dry_run: bool) -> int:
-    """Register docs__* paper collections (not docs for repos)."""
+def _backfill_papers(
+    cat: Catalog, t3: object, dry_run: bool, repo_collections: set[str] | None = None,
+) -> int:
+    """Register docs__* paper collections, excluding repo-owned collections."""
     collections = t3.list_collections()
-    # Paper collections: docs__ prefix but NOT matching known repo patterns
-    # Repos use docs__<reponame>-<hash8>; standalone papers have other patterns
+    repo_cols = repo_collections or set()
     paper_cols = [
         c for c in collections
-        if c["name"].startswith("docs__") and c["count"] > 0
+        if c["name"].startswith("docs__")
+        and c["count"] > 0
+        and c["name"] not in repo_cols
     ]
     count = 0
 
@@ -574,10 +604,10 @@ def backfill_cmd(dry_run: bool) -> None:
     t3 = _make_t3()
 
     click.echo("Pass 1: Repos...")
-    repo_count = _backfill_repos(cat, registry, dry_run)
+    repo_count, repo_collections = _backfill_repos(cat, registry, dry_run)
 
     click.echo("Pass 2: Paper collections (docs__*)...")
-    paper_count = _backfill_papers(cat, t3, dry_run)
+    paper_count = _backfill_papers(cat, t3, dry_run, repo_collections=repo_collections)
 
     click.echo("Pass 3: Knowledge collections...")
     knowledge_count = _backfill_knowledge(cat, t3, dry_run)

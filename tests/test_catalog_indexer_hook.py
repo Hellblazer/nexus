@@ -69,7 +69,7 @@ class TestCatalogHookOwner:
             head_hash="def", indexed_files=[],
         )
         # Should still be the same owner
-        rows = cat._db._conn.execute("SELECT count(*) FROM owners").fetchone()
+        rows = cat._db.execute("SELECT count(*) FROM owners").fetchone()
         assert rows[0] == 1
 
 

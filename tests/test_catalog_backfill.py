@@ -30,11 +30,14 @@ def catalog_env(tmp_path, monkeypatch):
 
 
 def _mock_registry(tmp_path: Path, repos: dict | None = None) -> MagicMock:
-    """Create a mock RepoRegistry."""
+    """Create a mock RepoRegistry with a repo that exists on disk."""
     mock = MagicMock()
+    # Create the repo dir so the path-existence check passes
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir(exist_ok=True)
     if repos is None:
         repos = {
-            str(tmp_path / "myrepo"): {
+            str(repo_dir): {
                 "name": "myrepo",
                 "collection": "code__myrepo",
                 "code_collection": "code__myrepo",
@@ -72,10 +75,11 @@ class TestBackfillRepos:
         cat = Catalog(catalog_env, catalog_env / ".catalog.db")
         registry = _mock_registry(tmp_path)
 
-        count = _backfill_repos(cat, registry, dry_run=False)
+        count, claimed = _backfill_repos(cat, registry, dry_run=False)
         assert count >= 0
+        assert len(claimed) >= 1  # Should claim at least one collection
         # Owner should exist
-        owner = cat.owner_for_repo(cat._db._conn.execute(
+        owner = cat.owner_for_repo(cat._db.execute(
             "SELECT repo_hash FROM owners WHERE owner_type='repo'"
         ).fetchone()[0])
         assert owner is not None
@@ -88,7 +92,7 @@ class TestBackfillRepos:
 
         _backfill_repos(cat, registry, dry_run=True)
         # No owners should be created
-        rows = cat._db._conn.execute("SELECT count(*) FROM owners").fetchone()
+        rows = cat._db.execute("SELECT count(*) FROM owners").fetchone()
         assert rows[0] == 0
 
     def test_backfill_repos_idempotent(self, catalog_env, tmp_path):
@@ -99,7 +103,7 @@ class TestBackfillRepos:
 
         _backfill_repos(cat, registry, dry_run=False)
         _backfill_repos(cat, registry, dry_run=False)
-        rows = cat._db._conn.execute("SELECT count(*) FROM owners WHERE owner_type='repo'").fetchone()
+        rows = cat._db.execute("SELECT count(*) FROM owners WHERE owner_type='repo'").fetchone()
         assert rows[0] == 1
 
 
@@ -112,7 +116,7 @@ class TestBackfillKnowledge:
 
         count = _backfill_knowledge(cat, t3, dry_run=False)
         assert count == 1
-        rows = cat._db._conn.execute(
+        rows = cat._db.execute(
             "SELECT title FROM documents WHERE content_type='knowledge'"
         ).fetchone()
         assert rows is not None
@@ -124,7 +128,7 @@ class TestBackfillKnowledge:
         t3 = _mock_t3([{"name": "knowledge__delos", "count": 20}])
 
         _backfill_knowledge(cat, t3, dry_run=True)
-        rows = cat._db._conn.execute("SELECT count(*) FROM documents").fetchone()
+        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
         assert rows[0] == 0
 
 

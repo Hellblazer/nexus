@@ -86,7 +86,7 @@ class TestStorePutHook:
 
         _catalog_store_hook(title="A", doc_id="doc1", collection_name="knowledge__test")
         _catalog_store_hook(title="A", doc_id="doc1", collection_name="knowledge__test")
-        rows = cat._db._conn.execute("SELECT count(*) FROM documents").fetchone()
+        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
         assert rows[0] == 1
 
 
