@@ -109,21 +109,21 @@ Changing a link's type changes its composite key — it IS a new fact. The corre
 
 ```python
 def bulk_unlink(self, **filters) -> int:
-    """Delete all links matching the filter. Returns count removed."""
-    # Uses same filter syntax as link_query
-    # Appends tombstones to JSONL for each deleted link
-
-def bulk_update_links(self, filters: dict, **fields) -> int:
-    """Update fields on all links matching the filter. Returns count updated."""
+    """Delete all links matching the filter. Returns count removed.
+    Uses same filter syntax as link_query.
+    Appends tombstones to JSONL (preserving original created_by in tombstone).
+    """
 ```
+
+~~`bulk_update_links`~~ — REMOVED per RF-6. Link identity is `(from_t, to_t, link_type)` — all three are immutable. Span and meta changes go through the idempotent `link()` upsert (Component 2). Bulk type-reclassification is `bulk_unlink()` + re-run generator.
 
 ### Component 5: Catalog API — Validation & Audit
 
 ```python
-def validate_link(self, from_t: Tumbler, to_t: Tumbler) -> list[str]:
+def validate_link(self, from_t: Tumbler, to_t: Tumbler, link_type: str) -> list[str]:
     """Return list of validation errors (empty = valid)."""
     # Check both endpoints exist via resolve()
-    # Check for duplicates
+    # Check for duplicate (from_t, to_t, link_type) — RF-6 composite key
 
 def link_audit(self) -> dict:
     """Return link graph health report."""
@@ -145,7 +145,7 @@ Validation is called by `link()` and `link_if_absent()`. `link()` warns on inval
 | `catalog_link` | `link()` (exists) | Create/upsert — idempotent with merge (RF-8) |
 | `catalog_unlink` | `unlink()` (exists) | Delete specific |
 | `catalog_link_query` | `link_query()` | Composable filter — admin/audit workhorse (RF-11) |
-| `catalog_link_bulk` | `bulk_unlink()` | Bulk delete by filter |
+| `catalog_link_bulk` | `bulk_unlink()` | Bulk delete by filter (no bulk update — RF-6) |
 | `catalog_link_audit` | `link_audit()` | Health report — orphans, duplicates, stats |
 | `catalog_links` | `graph()` (exists) | BFS traversal — fix to return nodes |
 
@@ -221,8 +221,8 @@ Would enable per-type indexes but fragments the query surface. A single table wi
 ### GraphQL-style link query language (rejected)
 Over-engineering. SQL WHERE clauses composed from keyword arguments are sufficient and match the existing `search` MCP tool's `where` parameter pattern.
 
-### Immutable links — no update, only delete+recreate (rejected)
-Loses provenance (`created_at`, `created_by`). Links evolve as understanding deepens — a `relates` link may be reclassified as `cites` after reading the paper more carefully. Preserving the creation record matters.
+### Immutable links — no update, only delete+recreate (partially adopted)
+Per RF-6: link type IS identity. Reclassifying `relates` → `cites` is `unlink()` + `link()` — a new fact, not an edit. But span and meta changes on the same `(from, to, type)` key are handled by `link()` upsert with merge, preserving `created_by` and `created_at`. This is a middle ground: identity fields are immutable, metadata fields are mutable.
 
 ## Success Criteria
 
@@ -251,13 +251,13 @@ Depends on: RDR-049 (closed), RDR-050 (accepted).
 Estimated order:
 1. **Resilience first**: JSONL reader error handling — try/except + skip + log for malformed lines (GST S2)
 2. **Schema**: UNIQUE constraint on `(from_tumbler, to_tumbler, link_type)` + `(created_by, link_type)` composite index + standardize `created`→`created_at` (RF-5, RF-12)
-3. **Idempotent link()**: upsert with merge semantics (RF-6, RF-8) + `link_if_absent()` for generators + `batch_id` in meta for generator runs (GST S3)
-4. **link_query()** + `catalog_link_query` MCP (with tumbler_or_title params — GST S4) + `nx catalog link-query` CLI
-5. **bulk_unlink()** + `catalog_link_bulk` MCP + `nx catalog link-bulk-delete` CLI (with `--created-at-before` for time-range cleanup)
-6. **delete_document()** + `nx catalog delete` CLI (RF-9)
-7. **link_audit()** + `catalog_link_audit` MCP + `nx catalog link-audit` CLI (include orphans, duplicates, stale spans)
-8. **Fix graph()**: include starting node in results + fix `catalog_links` MCP to return nodes (GST S8)
-9. **MCP parity**: add tumbler_or_title resolution to catalog_link, catalog_unlink MCP tools (GST S4)
+3. **MCP title resolution**: shared `_resolve_tumbler_mcp()` helper for all catalog MCP tools (GST S4) — prerequisite for Steps 4-5
+4. **Idempotent link()**: upsert with merge semantics (RF-6, RF-8) + `link_if_absent()` for generators + `batch_id` in meta for generator runs (GST S3) + fix tombstone to preserve original `created_by`
+5. **link_query()** + `catalog_link_query` MCP + `nx catalog link-query` CLI
+6. **bulk_unlink()** + `catalog_link_bulk` MCP + `nx catalog link-bulk-delete` CLI (with `--created-at-before` for time-range cleanup)
+7. **delete_document()** + `nx catalog delete` CLI (RF-9)
+8. **link_audit()** + `catalog_link_audit` MCP + `nx catalog link-audit` CLI (include orphans, duplicates, stale spans)
+9. **Fix graph()**: include starting node in results + fix `catalog_links` MCP to return `{nodes, edges}` dict (GST S8) — document breaking change for callers expecting list
 10. Update SubagentStart hook + skill references
 11. E2E test suite
 
@@ -266,7 +266,7 @@ Estimated order:
 ### RF-1: Current Link Storage Analysis (2026-04-05)
 **Classification**: Verified — Codebase Analysis | **Confidence**: HIGH
 
-Links are stored as rows in SQLite `links` table with composite indexes `idx_links_from_type` and `idx_links_to_type`. A `link_query()` with `(from_t, link_type)` or `(to_t, link_type)` hits an index. A query with only `created_by` requires `idx_links_created_by` (exists). A query with only `link_type` requires `idx_links_type` (exists but single-column — less selective). All index patterns needed for the proposed query filters are already in place. No schema changes required.
+Links are stored as rows in SQLite `links` table with composite indexes `idx_links_from_type` and `idx_links_to_type`. A `link_query()` with `(from_t, link_type)` or `(to_t, link_type)` hits an index. A query with only `created_by` requires `idx_links_created_by` (exists). A query with only `link_type` requires `idx_links_type` (exists but single-column — less selective). Most index patterns are already in place. Schema additions required: UNIQUE constraint on `(from_tumbler, to_tumbler, link_type)` and composite `(created_by, link_type)` index (see RF-12).
 
 ### RF-2: JSONL Last-Line-Wins for Link Updates (2026-04-05)
 **Classification**: Design Decision | **Confidence**: HIGH
