@@ -25,32 +25,11 @@ def _get_catalog() -> Catalog:
 
 
 def _entry_to_dict(entry) -> dict:
-    return {
-        "tumbler": str(entry.tumbler),
-        "title": entry.title,
-        "author": entry.author,
-        "year": entry.year,
-        "content_type": entry.content_type,
-        "file_path": entry.file_path,
-        "corpus": entry.corpus,
-        "physical_collection": entry.physical_collection,
-        "chunk_count": entry.chunk_count,
-        "head_hash": entry.head_hash,
-        "indexed_at": entry.indexed_at,
-        "meta": entry.meta,
-    }
+    return entry.to_dict()
 
 
 def _link_to_dict(link) -> dict:
-    return {
-        "from": str(link.from_tumbler),
-        "to": str(link.to_tumbler),
-        "type": link.link_type,
-        "from_span": link.from_span,
-        "to_span": link.to_span,
-        "created_by": link.created_by,
-        "created_at": link.created_at,
-    }
+    return link.to_dict()
 
 
 @click.group()
@@ -355,6 +334,16 @@ def stats_cmd(as_json: bool) -> None:
             click.echo("By link type:")
             for t, c in sorted(link_type_counts.items()):
                 click.echo(f"  {t:<12} {c}")
+
+
+@catalog.command("compact")
+def compact_cmd() -> None:
+    """Rewrite JSONL files to remove tombstones and duplicate overwrites."""
+    cat = _get_catalog()
+    removed = cat.compact()
+    for filename, count in removed.items():
+        click.echo(f"  {filename}: {count} lines removed")
+    click.echo("Compaction complete.")
 
 
 # ── Backfill helpers ──────────────────────────────────────────────────────────

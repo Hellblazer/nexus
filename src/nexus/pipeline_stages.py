@@ -457,12 +457,18 @@ def _catalog_pdf_hook(
         else:
             owner = cat.register_owner(owner_name, "curator")
 
-        # Check for existing entry by title (FTS dedup)
-        existing = cat.find(effective_title, content_type="paper")
+        # Dedup by file_path (stable) before falling back to FTS title search
+        from datetime import UTC, datetime
+        file_path_str = str(pdf_path)
+        existing = cat.by_file_path(owner, file_path_str)
+        if existing is None:
+            # Fallback: FTS title search for entries registered without file_path
+            results = cat.find(effective_title, content_type="paper")
+            existing = results[0] if results else None
+
         if existing:
-            from datetime import UTC, datetime
             cat.update(
-                existing[0].tumbler,
+                existing.tumbler,
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
                 indexed_at=datetime.now(UTC).isoformat(),
@@ -473,6 +479,7 @@ def _catalog_pdf_hook(
                 author=author, year=year, corpus=corpus,
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
+                file_path=file_path_str,
             )
     except Exception:
         _log.debug("catalog_pdf_hook_failed", exc_info=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import structlog
@@ -89,6 +90,7 @@ class CatalogDB:
     def __init__(self, db_path: Path) -> None:
         self._path = db_path
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._lock = threading.Lock()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA_SQL)
 
@@ -99,7 +101,7 @@ class CatalogDB:
         links: list[LinkRecord],
     ) -> None:
         """Truncate all tables and reload from JSONL-derived dicts."""
-        with self._conn:
+        with self._lock, self._conn:
             # Delete from base tables — triggers sync FTS automatically
             self._conn.execute("DELETE FROM links")
             self._conn.execute("DELETE FROM documents")
@@ -161,13 +163,14 @@ class CatalogDB:
         (e.g., '1.10' < '1.9' in string comparison).
         """
         depth = len(owner_prefix.split("."))
-        row = self._conn.execute(
-            "SELECT MAX(CAST(substr(tumbler, length(?) + 2) AS INTEGER)) "
-            "FROM documents WHERE tumbler LIKE ? "
-            "AND (length(tumbler) - length(replace(tumbler, '.', ''))) = ?",
-            (owner_prefix, owner_prefix + ".%", depth),
-        ).fetchone()
-        return (row[0] or 0) + 1
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(CAST(substr(tumbler, length(?) + 2) AS INTEGER)) "
+                "FROM documents WHERE tumbler LIKE ? "
+                "AND (length(tumbler) - length(replace(tumbler, '.', ''))) = ?",
+                (owner_prefix, owner_prefix + ".%", depth),
+            ).fetchone()
+            return (row[0] or 0) + 1
 
     def search(self, query: str, *, content_type: str | None = None) -> list[dict]:
         """FTS5 MATCH over title, author, corpus, file_path."""
@@ -175,25 +178,27 @@ class CatalogDB:
         if not safe_q.strip():
             return []
 
-        sql = (
-            "SELECT d.tumbler, d.title, d.author, d.year, d.content_type, "
-            "d.file_path, d.corpus, d.physical_collection, d.chunk_count, "
-            "d.head_hash, d.indexed_at, d.metadata "
-            "FROM documents d "
-            "JOIN documents_fts f ON d.rowid = f.rowid "
-            "WHERE documents_fts MATCH ?"
-        )
-        params: list[str] = [safe_q]
+        with self._lock:
+            sql = (
+                "SELECT d.tumbler, d.title, d.author, d.year, d.content_type, "
+                "d.file_path, d.corpus, d.physical_collection, d.chunk_count, "
+                "d.head_hash, d.indexed_at, d.metadata "
+                "FROM documents d "
+                "JOIN documents_fts f ON d.rowid = f.rowid "
+                "WHERE documents_fts MATCH ?"
+            )
+            params: list[str] = [safe_q]
 
-        if content_type:
-            sql += " AND d.content_type = ?"
-            params.append(content_type)
+            if content_type:
+                sql += " AND d.content_type = ?"
+                params.append(content_type)
 
-        rows = self._conn.execute(sql, params).fetchall()
-        columns = ["tumbler", "title", "author", "year", "content_type",
-                    "file_path", "corpus", "physical_collection", "chunk_count",
-                    "head_hash", "indexed_at", "metadata"]
-        return [dict(zip(columns, row)) for row in rows]
+            rows = self._conn.execute(sql, params).fetchall()
+            columns = ["tumbler", "title", "author", "year", "content_type",
+                        "file_path", "corpus", "physical_collection", "chunk_count",
+                        "head_hash", "indexed_at", "metadata"]
+            return [dict(zip(columns, row)) for row in rows]
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()

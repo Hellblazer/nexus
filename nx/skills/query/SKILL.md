@@ -106,7 +106,9 @@ mcp__plugin_nx_nexus__scratch(action="put", content="{results as text}", tags="q
 
 #### If `step["operation"] == "catalog_links"`:
 
-**Resolve tumbler**: If `params.tumbler` is set, use it directly. If `inputs` references a prior step, read from T1 scratch, parse the first entry's `tumbler` field.
+**Resolve tumbler**: If `params.tumbler` is set, use it directly. If `inputs` references a prior step, read from T1 scratch:
+- If prior step returned a **single entry**, extract its `tumbler` field.
+- If prior step returned **multiple entries**, iterate: call `catalog_links` for each entry's tumbler and merge the results (union of edges, deduplicated by `(from, to, type)`). This handles questions like "What papers have any Fagin paper cited?" where `catalog_search` returns multiple papers.
 
 Execute via the `catalog_links` MCP tool:
 ```
@@ -118,7 +120,7 @@ Write results to T1 scratch:
 mcp__plugin_nx_nexus__scratch(action="put", content="{link results as text}", tags="query-step,step-{N},catalog_links")
 ```
 
-**Extract collections**: For each unique `to` tumbler in the link results, call `mcp__plugin_nx_nexus__catalog_show(tumbler="{to}")` and collect `physical_collection`. Store as `$step_N.collections`.
+**Extract collections**: For each unique `to` tumbler in the link results, call `mcp__plugin_nx_nexus__catalog_show(tumbler="{to}")` and collect `physical_collection`. Filter out empty strings (ghost elements with no T3 backing). Store as `$step_N.collections`.
 
 #### If `step["operation"] == "catalog_resolve"`:
 

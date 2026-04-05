@@ -43,6 +43,22 @@ class CatalogEntry:
     indexed_at: str
     meta: dict = field(default_factory=dict)
 
+    def to_dict(self) -> dict:
+        return {
+            "tumbler": str(self.tumbler),
+            "title": self.title,
+            "author": self.author,
+            "year": self.year,
+            "content_type": self.content_type,
+            "file_path": self.file_path,
+            "corpus": self.corpus,
+            "physical_collection": self.physical_collection,
+            "chunk_count": self.chunk_count,
+            "head_hash": self.head_hash,
+            "indexed_at": self.indexed_at,
+            "meta": self.meta,
+        }
+
 
 @dataclass
 class CatalogLink:
@@ -54,6 +70,17 @@ class CatalogLink:
     created_by: str
     created_at: str
     meta: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "from": str(self.from_tumbler),
+            "to": str(self.to_tumbler),
+            "type": self.link_type,
+            "from_span": self.from_span,
+            "to_span": self.to_span,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+        }
 
 
 def _run_git(
@@ -630,5 +657,33 @@ class Catalog:
             documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
             links_dict = read_links(self._links_path) if self._links_path.exists() else {}
             self._db.rebuild(owners, documents, list(links_dict.values()))
+        finally:
+            self._release_lock(dir_fd)
+
+    def compact(self) -> dict[str, int]:
+        """Rewrite JSONL files to contain only current state (last-write-wins).
+
+        Removes tombstones, duplicate overwrites, and deleted entries.
+        Returns count of lines removed per file.
+        """
+        dir_fd = self._acquire_lock()
+        try:
+            removed = {}
+            for path, reader in [
+                (self._owners_path, read_owners),
+                (self._documents_path, read_documents),
+                (self._links_path, read_links),
+            ]:
+                if not path.exists():
+                    continue
+                original_lines = sum(1 for line in path.open() if line.strip())
+                records = reader(path)
+                # Rewrite with only current records
+                with path.open("w") as f:
+                    for record in records.values():
+                        f.write(json.dumps(record.__dict__, default=str) + "\n")
+                new_lines = len(records)
+                removed[path.name] = original_lines - new_lines
+            return removed
         finally:
             self._release_lock(dir_fd)
