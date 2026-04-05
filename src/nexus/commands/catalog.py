@@ -509,18 +509,18 @@ def _backfill_papers(cat: Catalog, t3: object, dry_run: bool) -> int:
 def consolidate_cmd(corpus: str, dry_run: bool) -> None:
     """Merge per-paper collections into a corpus-level collection."""
     cat = _get_catalog()
+    from nexus.catalog.consolidation import merge_corpus
 
     if dry_run:
+        result = merge_corpus(cat, None, corpus, dry_run=True)
         entries = cat.by_corpus(corpus)
         if not entries:
             raise click.ClickException(f"No entries with corpus={corpus!r}")
         target = f"docs__{corpus}"
-        click.echo(f"[dry-run] Would merge {len(entries)} collections into {target}:")
+        click.echo(f"[dry-run] Would merge {result['would_merge']} collections into {target}:")
         for e in entries:
             click.echo(f"  {e.physical_collection} ({e.chunk_count} chunks) → {target}")
         return
-
-    from nexus.catalog.consolidation import merge_corpus
 
     t3 = _make_t3()
     result = merge_corpus(cat, t3, corpus)

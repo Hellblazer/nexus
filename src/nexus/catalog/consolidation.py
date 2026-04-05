@@ -63,6 +63,10 @@ def merge_corpus(
             if actual_count == 0:
                 _log.warning("consolidation_empty_source", collection=entry.physical_collection)
                 cat.update(entry.tumbler, physical_collection=target_col_name)
+                try:
+                    t3.delete_collection(entry.physical_collection)
+                except Exception:
+                    _log.warning("consolidation_delete_failed", collection=entry.physical_collection, exc_info=True)
                 merged += 1
                 continue
 

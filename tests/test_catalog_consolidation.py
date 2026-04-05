@@ -40,7 +40,7 @@ def _mock_t3_col(ids: list[str], documents: list[str] | None = None) -> MagicMoc
     return col
 
 
-class TestByCopus:
+class TestByCorpus:
     def test_by_corpus(self, tmp_path):
         cat = _make_catalog(tmp_path)
         owner = cat.register_owner("papers", "curator")
