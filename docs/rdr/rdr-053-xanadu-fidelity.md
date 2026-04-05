@@ -56,23 +56,17 @@ The `Catalog` class docstring now documents these departures explicitly. This RD
 
 **RF-1: Nelson's Tumbler Arithmetic (2026-04-05)**
 
-Nelson describes tumblers as "transfinitesimal numbers" — the inverse of Cantor's transfinite numbers. Key operations:
+Nelson describes tumblers as "transfinitesimal numbers" — the inverse of Cantor's transfinite numbers. Initial draft identified three operations: successor, difference, comparison.
 
-- **Successor**: Given tumbler T, the next tumbler in the address space (step forward one position)
-- **Difference**: Given tumblers A and B, compute the "distance" between them (span width)
-- **Comparison**: A < B in the tumbler ordering (for span overlap detection: A.from <= B.to AND B.from <= A.to)
-
-In the original Xanadu, these operate on potentially infinite-depth nested addresses. Nexus tumblers have fixed depth (3-4 segments), making the arithmetic substantially simpler: lexicographic comparison on integer tuples suffices for ordering and overlap.
-
-**Evidence basis**: Documented (LM Ch. 4/16). The transfinitesimal number space is a generalization; for fixed-depth tumblers, tuple comparison is mathematically equivalent.
+**Evidence basis**: Documented (LM Ch. 4/16). Superseded by RF-4.
 
 **RF-2: Content-Hash Chunk Identity (2026-04-05)**
 
-ChromaDB chunk metadata already includes `content_hash` (computed by `indexer.py` during repo indexing). This hash uniquely identifies chunk content regardless of position. If a document is re-indexed with identical content but different chunking parameters, the `content_hash` of surviving chunks remains the same.
+ChromaDB chunk metadata includes `content_hash` computed by all four indexers (code, prose, PDF, markdown) using SHA-256.
 
-Limitation: `content_hash` is computed over the raw chunk text. If the chunking algorithm changes the chunk boundaries (different split points), the hash changes even if the underlying source content is identical. Content-hash stability is at the chunk level, not the source level.
+**CORRECTED by RF-6**: `content_hash` is file-level, not chunk-level. All chunks from the same file share the same hash. The proposed `hash:{content_hash}` span format is therefore ambiguous for multi-chunk files.
 
-**Evidence basis**: Verified — `content_hash` in ChromaDB metadata confirmed by reading `indexer.py`.
+**Evidence basis**: Verified — source read of all four indexers (RF-6).
 
 **RF-3: Span Stability Options (2026-04-05)**
 
@@ -81,18 +75,90 @@ Three approaches to span survivability, in increasing fidelity to Nelson:
 | Approach | Survivability | Complexity | Nelson fidelity |
 |---|---|---|---|
 | Position index (current) | Breaks on re-index | None (status quo) | Low — violates Ch. 4/43 |
-| Content hash | Survives re-index if chunk boundaries unchanged | Low — use existing `content_hash` | Medium — content-addressed, not position-addressed |
+| Content hash (chunk-level) | Survives re-index if chunk boundaries unchanged | Low — new `chunk_text_hash` at index time | Medium — content-addressed |
 | Source byte range | Survives any chunking change | High — requires source content access | High — maps to Nelson's byte-level addressing |
 
-Recommendation: Content hash (middle path). Source byte ranges are impractical — nexus doesn't store raw source content (by design, per `docs/historical.md`). Content hash is already available and provides meaningful survivability.
+Recommendation: Chunk-level content hash (middle path). Requires adding `chunk_text_hash = sha256(chunk_text)` at index time (RF-6 correction). Source byte ranges rejected — nexus doesn't store raw source content.
 
-**Evidence basis**: Verified — `content_hash` available in metadata. Source byte ranges rejected because nexus stores vectors + chunk text only.
+**Evidence basis**: Verified.
+
+**RF-4: Nelson's Exact ADD/SUBTRACT Semantics (2026-04-05)**
+
+Confirmed from LM Ch. 4/33-36 (primary source in Mixedbread xanadu store):
+
+**ADD** (LM 4/34): Augend is an address tumbler, addend is a *difference tumbler* (a span). For each leading zero in the addend, copy the corresponding address digit. At the first non-zero digit, add. Copy remaining from addend. Example: `1.1.0.2.0.2.2.0.1.777 + 0.0.0.1 = 1.1.0.3` — digits below the changed level are dropped.
+
+**SUBTRACT** (LM 4/35): For identical leading digits, yield zero. At first difference, subtract. Copy remaining from minuend.
+
+**Non-commutativity** (LM 4/33): `A+B ≠ B+A`. Difference tumblers must always be packaged with their bound address tumbler.
+
+**Design correction**: The draft's `distance() -> int` misrepresents Nelson's model — a difference tumbler is itself a Tumbler, not a scalar. For span overlap detection (the actual use case), only comparison operators are needed. Drop `distance()`.
+
+**Evidence basis**: Verified — LM Ch. 4/33-36, primary source text.
+
+**RF-5: Tuple Comparison Correctness (2026-04-05)**
+
+`sorted(list[tuple[int,...]])` produces exactly Nelson's tumbler line from LM 4/21. Verified against all 13 tumblers from the primary source — order matches.
+
+**Edge case (latent defect)**: Python tuple comparison treats shorter tuples as "less than" longer ones with the same prefix: `(1,1,3) < (1,1,3,1)` = True. But `(1,1,3,0) < (1,1,3)` = False — a chunk tumbler with segment 0 is treated as *greater* than its parent document.
+
+Since chunk indices start at 0 in the codebase, `Tumbler.__lt__` must pad the shorter tuple to handle this. Test: `Tumbler.parse("1.1.3") < Tumbler.parse("1.1.3.0")` must return True.
+
+**Evidence basis**: Verified — Python execution + LM 4/21 comparison.
+
+**RF-6: content_hash Is File-Level, Not Chunk-Level (2026-04-05)**
+
+| Indexer | Hash input | Hash function | Granularity |
+|---------|-----------|---------------|-------------|
+| code_indexer.py | UTF-8 bytes of entire source file | SHA-256 | File |
+| prose_indexer.py | UTF-8 bytes of entire file | SHA-256 | File |
+| doc_indexer.py (PDF) | Raw file bytes (64KB blocks) | SHA-256 | File |
+| doc_indexer.py (markdown) | Raw file bytes | SHA-256 | File |
+
+All chunks from the same file share the same `content_hash`. The proposed `hash:{content_hash}` span format must be revised to either:
+- `hash:{file_hash}:{chunk_index}` — file version + position (partial survivability)
+- Add new `chunk_text_hash = sha256(chunk_text)` at index time — true chunk-level content identity
+
+The second option is preferred: it provides content-addressed chunk identity independent of position, matching the IPFS DAG chunking analogue (RF-9).
+
+**Evidence basis**: Verified — source read of all four indexers.
+
+**RF-7: Span Inventory — Zero Existing Spans (2026-04-05)**
+
+Live catalog (`~/.config/nexus/catalog/links.jsonl`): 1,082 active links, **zero** with non-empty `from_span` or `to_span`. All links are document-to-document.
+
+**Design impact**: No backward compatibility required. `nx catalog migrate-spans` command can be omitted from Phase 2. Content-hash spans can be the only span format from day one.
+
+**Evidence basis**: Verified — Python analysis of live catalog JSONL.
+
+**RF-8: Nelson's Survivability Grounded in Append-Only Storage (2026-04-05)**
+
+> "A Xanadu link is not between points, but between spans of data. Thus we may visualize it as a strap between bytes." (LM 4/42)
+> "SURVIVABILITY: Links between bytes can survive deletions, insertions and rearrangements, if anything is left at each end." (LM 4/43)
+
+Nelson's survivability depends on append-only byte storage — bytes are never truly deleted, so byte addresses are permanent. Nexus does not have this property (chunks are replaced on re-index). The chunk-text-hash approach is the correct pragmatic adaptation: content-addressed identity survives re-indexing as long as the chunk text itself is preserved.
+
+**Evidence basis**: Verified — LM Ch. 4/42-43.
+
+**RF-9: Content Addressing Comparison (2026-04-05)**
+
+| System | Addressing | Granularity | Partial survival |
+|--------|-----------|-------------|-----------------|
+| Git | SHA-256 of `"blob {size}\0{content}"` | File (blob) | No |
+| IPFS | CID (multihash of DAG node) | File or chunk | No |
+| Xanadu | Position (tumbler) | Byte range | Yes (append-only) |
+| Nexus (proposed) | SHA-256 of chunk text | Chunk | No |
+
+IPFS's DAG chunking is the closest analogue to per-chunk content addressing. Neither git nor IPFS provides partial survival — that property is unique to Xanadu's append-only model.
+
+**Evidence basis**: Documented.
 
 ### Critical Assumptions
 
-- [x] `content_hash` is present in ChromaDB metadata for all indexed chunks — **Status**: Verified — **Method**: Source Search (indexer.py)
-- [ ] Tumbler tuple comparison produces the same ordering as Nelson's transfinitesimal arithmetic for fixed-depth hierarchies — **Status**: Assumed — **Method**: Docs Only (needs formal verification against LM definition)
-- [ ] Existing links with position-based spans can be migrated to content-hash spans via a one-time backfill — **Status**: Unverified — **Method**: Needs Spike (count existing span links, verify content_hash availability for each)
+- [x] `content_hash` is present in ChromaDB metadata for all indexed chunks — **Status**: Verified — **Method**: Source Search (all four indexers)
+- [x] Tumbler tuple comparison produces the same ordering as Nelson's transfinitesimal arithmetic for fixed-depth hierarchies — **Status**: Conditionally verified — **Method**: Execution test (RF-5). Edge case at zero segment requires explicit handling in `__lt__`.
+- [x] Existing links with position-based spans can be migrated — **Status**: Verified empty — **Method**: Spike (RF-7). Zero existing span links. No migration needed.
+- [ ] `chunk_text_hash` can be added to the indexing pipeline without breaking existing collections — **Status**: Unverified — **Method**: Needs Spike (add field to metadata dict, verify ChromaDB accepts new metadata keys on existing collections)
 
 ## Proposed Solution
 
@@ -100,9 +166,9 @@ Recommendation: Content hash (middle path). Source byte ranges are impractical �
 
 Two components, implementable independently:
 
-**Component 1: Tumbler Arithmetic** — Add comparison and distance operators to the `Tumbler` class.
+**Component 1: Tumbler Arithmetic** — Add comparison operators to the `Tumbler` class. No `distance()` method — Nelson's difference is a tumbler, not a scalar (RF-4).
 
-**Component 2: Content-Addressed Spans** — Replace position-index span format with content-hash span format. Maintain backward compatibility during migration.
+**Component 2: Content-Addressed Spans** — Add `chunk_text_hash` to the indexing pipeline, use as span identifier. No migration needed (RF-7: zero existing spans).
 
 ### Technical Design
 
@@ -112,45 +178,46 @@ Add to `Tumbler` (tumbler.py):
 
 ```python
 def __lt__(self, other: Tumbler) -> bool:
-    """Lexicographic ordering on integer segments."""
+    """Ordering on integer segments with depth-aware padding.
+    
+    Parent tumblers sort before their children:
+    (1,1,3) < (1,1,3,0) must be True (RF-5 edge case).
+    Pads shorter tuple with -1 sentinel before comparison.
+    """
 
 def __le__(self, other: Tumbler) -> bool: ...
 def __gt__(self, other: Tumbler) -> bool: ...
 def __ge__(self, other: Tumbler) -> bool: ...
 
-def distance(self, other: Tumbler) -> int:
-    """Integer distance in the last differing segment.
-    
-    For same-depth tumblers at the same parent, this is the
-    document-number difference. For different-depth tumblers,
-    compare at the shallowest common depth.
-    """
-
-def spans_overlap(self, self_end: Tumbler, other_start: Tumbler, other_end: Tumbler) -> bool:
-    """True if span [self, self_end] overlaps [other_start, other_end]."""
+@staticmethod
+def spans_overlap(a_start: Tumbler, a_end: Tumbler, b_start: Tumbler, b_end: Tumbler) -> bool:
+    """True if span [a_start, a_end] overlaps [b_start, b_end]."""
 ```
+
+No `distance()` — per RF-4, Nelson's difference tumbler is itself a tumbler (non-commutative, bound to an address). For span overlap detection, comparison operators suffice.
 
 Ordering enables: `sorted(tumblers)`, span overlap detection, span-weighted reranking.
 
 #### Component 2: Content-Addressed Spans
 
-New span format alongside existing position format:
+**Indexing change**: Add `chunk_text_hash = sha256(chunk_text.encode())` to chunk metadata at index time. This is distinct from the existing file-level `content_hash` (RF-6). Each chunk gets its own identity.
+
+New span format (no backward compatibility needed — RF-7 confirms zero existing spans):
 
 ```
-# Current (position-based):
-from_span = "3"           # chunk index 3
-from_span = "3:100-250"   # chunk 3, chars 100-250
-from_span = "10-20"       # line range 10-20
-
 # New (content-addressed):
-from_span = "hash:abc123def456"   # content_hash of the referenced chunk
+from_span = "chash:abc123def456"   # chunk_text_hash of the referenced chunk
+
+# Legacy (still accepted but not created):
+from_span = "3"           # chunk index 3
+from_span = "10-20"       # line range 10-20
 ```
 
-The `hash:` prefix distinguishes content-addressed spans from position spans. Both formats coexist — existing links with position spans continue to work. New links created by agents use content-hash spans when the `content_hash` is available.
+The `chash:` prefix identifies content-addressed spans. New links use `chash:` when `chunk_text_hash` is available.
 
-**Resolution**: `resolve_span(span_str, physical_collection)` queries ChromaDB for the chunk with matching `content_hash` metadata. Returns the chunk content and position. Falls back to position-based resolution if the hash prefix is absent.
+**Resolution**: `resolve_span(span_str, physical_collection)` queries ChromaDB for the chunk with matching `chunk_text_hash` in metadata. Returns the chunk content and position. Falls back to position-based resolution for legacy spans without the `chash:` prefix.
 
-**Migration**: A backfill command (`nx catalog migrate-spans`) reads all links with position spans, looks up the chunk's `content_hash` from ChromaDB, and rewrites the span. Non-destructive — appends a new JSONL line per Nelson's append-only principle.
+**No migration command needed** (RF-7): zero existing span links. Content-hash spans are the default from day one.
 
 ### Existing Infrastructure Audit
 
@@ -215,43 +282,44 @@ Tumbler arithmetic as comparison operators over transfinitesimal number space: f
 
 #### Step 1: Add comparison operators to Tumbler
 
-Add `__lt__`, `__le__`, `__gt__`, `__ge__` using tuple comparison on segments. Add `distance()` method.
+Add `__lt__`, `__le__`, `__gt__`, `__ge__` with depth-aware padding (RF-5: pad shorter tuple with -1 sentinel so parents sort before children).
 
-#### Step 2: Add `spans_overlap()` utility
+#### Step 2: Add `spans_overlap()` static method
 
 Implement overlap detection using the comparison operators.
 
 #### Step 3: Tests
 
-TDD: ordering edge cases (different depths, same parent, cross-owner), overlap detection, distance computation.
+TDD: ordering edge cases including RF-5 zero-segment case (`1.1.3 < 1.1.3.0`), different depths, same parent, cross-owner, overlap detection.
 
 ### Phase 2: Content-Addressed Spans
 
-#### Step 1: Extend span format and resolution
+#### Step 1: Add `chunk_text_hash` to indexing pipeline
 
-Add `hash:` prefix parsing to span resolution. Extend `resolve_chunk()` to handle content-hash lookup via ChromaDB metadata query.
+In all four indexers (code, prose, PDF, markdown), compute `chunk_text_hash = hashlib.sha256(chunk_text.encode()).hexdigest()` and include in ChromaDB metadata alongside existing file-level `content_hash`.
 
-#### Step 2: Update link creation to use content-hash spans
+#### Step 2: Extend span format and resolution
 
-When creating links with spans, look up the chunk's `content_hash` from ChromaDB and use `hash:{content_hash}` format.
+Add `chash:` prefix parsing to span resolution. `resolve_span()` queries ChromaDB for chunk with matching `chunk_text_hash` metadata.
 
-#### Step 3: Migration command
+#### Step 3: Update link creation to use chunk-text-hash spans
 
-`nx catalog migrate-spans` — backfill existing position spans to content-hash format.
+When creating links with spans, look up the chunk's `chunk_text_hash` from ChromaDB and use `chash:{chunk_text_hash}` format.
 
 #### Step 4: Tests
 
-TDD: content-hash resolution, fallback to position, migration idempotency, stale hash detection.
+TDD: chunk_text_hash computation, content-hash resolution, fallback to position for legacy, stale hash detection via link_audit().
 
 ## Test Plan
 
 - **Scenario**: `Tumbler.parse("1.1.3") < Tumbler.parse("1.1.10")` — **Verify**: True (integer, not lexicographic)
 - **Scenario**: `Tumbler.parse("1.1.3") < Tumbler.parse("1.2.1")` — **Verify**: True (parent differs)
+- **Scenario**: `Tumbler.parse("1.1.3") < Tumbler.parse("1.1.3.0")` — **Verify**: True (RF-5 parent < child)
 - **Scenario**: Span overlap between `[1.1.3, 1.1.7]` and `[1.1.5, 1.1.10]` — **Verify**: True
-- **Scenario**: Link with `from_span="hash:abc123"` resolves to correct chunk — **Verify**: content matches
-- **Scenario**: Re-index document, resolve content-hash span — **Verify**: same content returned
-- **Scenario**: Re-index with different chunking, resolve content-hash span — **Verify**: graceful fallback
-- **Scenario**: `nx catalog migrate-spans` on link with position span — **Verify**: span updated to hash format
+- **Scenario**: `chunk_text_hash` present in ChromaDB metadata after indexing — **Verify**: distinct per chunk
+- **Scenario**: Link with `from_span="chash:abc123"` resolves to correct chunk — **Verify**: content matches
+- **Scenario**: Re-index document, resolve chunk-text-hash span — **Verify**: same content if chunk unchanged
+- **Scenario**: Re-index with different chunking, resolve chunk-text-hash span — **Verify**: graceful fallback (hash not found, fall back to position)
 
 ## Validation
 
