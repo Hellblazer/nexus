@@ -816,8 +816,7 @@ class TestQueryCatalogRouting:
         t3.put(collection="knowledge__papers", content="transformer attention mechanism", title="att")
         result = query(question="attention", author="Vaswani")
         assert not result.startswith("Error:")
-        # Should search knowledge__papers (where Vaswani's paper lives)
-        assert "knowledge__papers" in result or "No documents found" not in result
+        assert "knowledge__papers" in result
 
     def test_query_content_type_filter(self, t3, catalog_with_docs):
         """query(content_type=) routes to collections for that type."""

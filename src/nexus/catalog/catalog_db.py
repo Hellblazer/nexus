@@ -88,8 +88,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique
 CREATE INDEX IF NOT EXISTS idx_links_created_by_type
     ON links(created_by, link_type);
 
-CREATE INDEX IF NOT EXISTS idx_documents_tumbler
-    ON documents(tumbler);
 """
 
 

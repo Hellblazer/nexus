@@ -32,6 +32,10 @@ class TestTumblerParse:
         with pytest.raises(ValueError):
             Tumbler.parse("")
 
+    def test_parse_negative_segment(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            Tumbler.parse("1.-1.42")
+
 
 class TestTumblerRoundtrip:
     def test_roundtrip_three(self):

@@ -69,7 +69,10 @@ class Tumbler:
     def parse(cls, s: str) -> Tumbler:
         if not s:
             raise ValueError("empty tumbler string")
-        return cls(tuple(int(x) for x in s.split(".")))
+        segs = tuple(int(x) for x in s.split("."))
+        if any(x < 0 for x in segs):
+            raise ValueError(f"tumbler segments must be non-negative: {s!r}")
+        return cls(segs)
 
 
 def _filter_fields(cls: type, obj: dict) -> dict:

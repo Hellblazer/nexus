@@ -400,24 +400,25 @@ def query(
             if cat is None:
                 return "Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'"
 
+            # Resolve seed entries for catalog routing
+            seed_entries: list = []
             if subtree:
                 # Use descendants() directly — NOT catalog_search(owner=) which has depth-equality bug
                 desc = cat.descendants(subtree)
                 catalog_collections = {d["physical_collection"] for d in desc if d.get("physical_collection")}
+                seed_entries = [cat.resolve(Tumbler.parse(d["tumbler"])) for d in desc]
+                seed_entries = [e for e in seed_entries if e is not None]
             elif author or content_type:
-                results = cat.find(author or question, content_type=content_type or None)
+                seed_entries = cat.find(author or question, content_type=content_type or None)
                 if author:
-                    results = [r for r in results if author.lower() in (r.author or "").lower()]
-                catalog_collections = {r.physical_collection for r in results if r.physical_collection}
+                    seed_entries = [r for r in seed_entries if author.lower() in (r.author or "").lower()]
+                catalog_collections = {r.physical_collection for r in seed_entries if r.physical_collection}
 
             if follow_links and catalog_collections is not None:
-                # Expand via link graph from matched documents
+                # Expand via link graph from already-resolved seed entries
                 linked_collections: set[str] = set()
-                for r in (cat.find(author or question, content_type=content_type or None) if not subtree
-                          else [cat.resolve(Tumbler.parse(d["tumbler"])) for d in cat.descendants(subtree)]):
-                    if r is None:
-                        continue
-                    graph = cat.graph(r.tumbler if hasattr(r, 'tumbler') else r, depth=depth, link_type=follow_links)
+                for entry in seed_entries:
+                    graph = cat.graph(entry.tumbler, depth=depth, link_type=follow_links)
                     for node in graph["nodes"]:
                         if node.physical_collection:
                             linked_collections.add(node.physical_collection)

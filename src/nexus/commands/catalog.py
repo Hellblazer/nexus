@@ -88,9 +88,8 @@ def _seed_plan_templates() -> int:
     from nexus.db.t2 import T2Database
     from nexus.commands._helpers import default_db_path
 
-    db = T2Database(default_db_path())
     seeded = 0
-    try:
+    with T2Database(default_db_path()) as db:
         for tmpl in _PLAN_TEMPLATES:
             existing = db.search_plans(tmpl["query"])
             if any(p["query"] == tmpl["query"] and "builtin-template" in p.get("tags", "") for p in existing):
@@ -101,8 +100,6 @@ def _seed_plan_templates() -> int:
                 tags=tmpl["tags"],
             )
             seeded += 1
-    finally:
-        db.close()
     return seeded
 
 
