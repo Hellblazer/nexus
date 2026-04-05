@@ -56,9 +56,30 @@ def merge_corpus(
         try:
             src_col = t3.get_or_create_collection(entry.physical_collection)
 
-            # Read all chunks with embeddings
-            result = src_col.get(include=["documents", "metadatas", "embeddings"])
-            actual_count = len(result["ids"])
+            # Paginated read — ChromaDB Cloud caps get() at 300 records
+            all_ids: list[str] = []
+            all_docs: list[str] = []
+            all_meta: list[dict] = []
+            all_emb: list[list[float]] = []
+            offset = 0
+            _PAGE = 200
+            while True:
+                page = src_col.get(
+                    include=["documents", "metadatas", "embeddings"],
+                    limit=_PAGE, offset=offset,
+                )
+                page_ids = page.get("ids", [])
+                if not page_ids:
+                    break
+                all_ids.extend(page_ids)
+                all_docs.extend(page.get("documents", []))
+                all_meta.extend(page.get("metadatas", []))
+                all_emb.extend(page.get("embeddings", []))
+                if len(page_ids) < _PAGE:
+                    break
+                offset += _PAGE
+
+            actual_count = len(all_ids)
 
             if actual_count == 0:
                 _log.warning("consolidation_empty_source", collection=entry.physical_collection)
@@ -79,13 +100,15 @@ def merge_corpus(
                     actual=actual_count,
                 )
 
-            # Upsert into target (preserve original IDs)
-            target_col.upsert(
-                ids=result["ids"],
-                documents=result["documents"],
-                metadatas=result["metadatas"],
-                embeddings=result["embeddings"],
-            )
+            # Batched upsert into target — respect 300-record write limit
+            for batch_start in range(0, actual_count, _PAGE):
+                batch_end = min(batch_start + _PAGE, actual_count)
+                target_col.upsert(
+                    ids=all_ids[batch_start:batch_end],
+                    documents=all_docs[batch_start:batch_end],
+                    metadatas=all_meta[batch_start:batch_end],
+                    embeddings=all_emb[batch_start:batch_end],
+                )
 
             # Update catalog pointer
             cat.update(entry.tumbler, physical_collection=target_col_name)

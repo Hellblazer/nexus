@@ -100,25 +100,32 @@ def enrich(collection: str, delay: float, limit: int) -> None:
             continue
 
         # Build per-chunk metadata updates: ChromaDB update requires full
-        # metadata dicts, so we fetch and merge.
-        fetch = _chroma_with_retry(col.get, ids=chunk_ids, include=["metadatas"])
-        fetched_ids = fetch.get("ids", [])
-        fetched_meta = fetch.get("metadatas", [])
-
+        # metadata dicts, so we fetch and merge. Batch at 200 to stay under
+        # ChromaDB Cloud's 300-record get/write limit.
+        _BATCH = 200
         updated_ids: list[str] = []
         updated_meta: list[dict] = []
-        for cid, meta in zip(fetched_ids, fetched_meta):
-            merged = dict(meta)
-            merged["bib_year"] = bib.get("year", 0)
-            merged["bib_venue"] = bib.get("venue", "")
-            merged["bib_authors"] = bib.get("authors", "")
-            merged["bib_citation_count"] = bib.get("citation_count", 0)
-            merged["bib_semantic_scholar_id"] = bib.get("semantic_scholar_id", "")
-            updated_ids.append(cid)
-            updated_meta.append(merged)
+        for batch_start in range(0, len(chunk_ids), _BATCH):
+            batch_ids = chunk_ids[batch_start:batch_start + _BATCH]
+            fetch = _chroma_with_retry(col.get, ids=batch_ids, include=["metadatas"])
+            for cid, meta in zip(fetch.get("ids", []), fetch.get("metadatas", [])):
+                merged = dict(meta)
+                merged["bib_year"] = bib.get("year", 0)
+                merged["bib_venue"] = bib.get("venue", "")
+                merged["bib_authors"] = bib.get("authors", "")
+                merged["bib_citation_count"] = bib.get("citation_count", 0)
+                merged["bib_semantic_scholar_id"] = bib.get("semantic_scholar_id", "")
+                updated_ids.append(cid)
+                updated_meta.append(merged)
 
         if updated_ids:
-            _chroma_with_retry(col.update, ids=updated_ids, metadatas=updated_meta)
+            for batch_start in range(0, len(updated_ids), _BATCH):
+                batch_end = min(batch_start + _BATCH, len(updated_ids))
+                _chroma_with_retry(
+                    col.update,
+                    ids=updated_ids[batch_start:batch_end],
+                    metadatas=updated_meta[batch_start:batch_end],
+                )
             enriched_chunks += len(updated_ids)
             enriched_titles += 1
             _log.debug(

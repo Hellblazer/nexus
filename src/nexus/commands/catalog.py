@@ -789,8 +789,6 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
             while True:
                 result = col.get(include=["metadatas"], limit=200, offset=offset)
                 metas = result.get("metadatas", [])
-                if not metas:
-                    break
                 for meta in metas:
                     path = meta.get("source_path", "")
                     if path and path not in seen_paths:
