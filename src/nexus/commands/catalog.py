@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import click
 
+import structlog
+
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
+
+_log = structlog.get_logger(__name__)
 
 
 def _get_catalog() -> Catalog:
@@ -350,3 +355,182 @@ def stats_cmd(as_json: bool) -> None:
             click.echo("By link type:")
             for t, c in sorted(link_type_counts.items()):
                 click.echo(f"  {t:<12} {c}")
+
+
+# ── Backfill helpers ──────────────────────────────────────────────────────────
+
+
+def _owner_by_name(cat: Catalog, name: str) -> Tumbler | None:
+    """Look up owner by name."""
+    row = cat._db._conn.execute(
+        "SELECT tumbler_prefix FROM owners WHERE name = ?", (name,)
+    ).fetchone()
+    return Tumbler.parse(row[0]) if row else None
+
+
+def _get_or_create_curator(cat: Catalog, name: str) -> Tumbler:
+    """Get or create a curator owner by name."""
+    owner = _owner_by_name(cat, name)
+    if owner is None:
+        owner = cat.register_owner(name, "curator")
+    return owner
+
+
+def _backfill_repos(cat: Catalog, registry: object, dry_run: bool) -> int:
+    """Create owner per repo from registry."""
+    from hashlib import sha256
+    from pathlib import Path
+
+    count = 0
+    for repo_path_str, info in registry.all_info().items():
+        repo_path = Path(repo_path_str)
+        repo_name = info.get("name", repo_path.name)
+        # Compute path_hash the same way as _repo_identity
+        path_hash = sha256(str(repo_path).encode()).hexdigest()[:8]
+        code_col = info.get("code_collection", "")
+        docs_col = info.get("docs_collection", "")
+        head_hash = info.get("head_hash", "")
+
+        if dry_run:
+            click.echo(f"  [dry-run] Would register owner: {repo_name} ({path_hash})")
+            if code_col:
+                click.echo(f"  [dry-run]   code: {code_col}")
+            if docs_col:
+                click.echo(f"  [dry-run]   docs: {docs_col}")
+            continue
+
+        owner = cat.owner_for_repo(path_hash)
+        if owner is None:
+            owner = cat.register_owner(
+                repo_name, "repo", repo_hash=path_hash,
+                description=f"Git repository: {repo_name}",
+            )
+
+        # Register collection-level entries for the repo
+        for col_name, content_type in [(code_col, "code"), (docs_col, "prose")]:
+            if not col_name:
+                continue
+            existing = [
+                e for e in cat.by_owner(owner) if e.physical_collection == col_name
+            ]
+            if not existing:
+                cat.register(
+                    owner=owner, title=f"{repo_name} ({content_type})",
+                    content_type=content_type,
+                    physical_collection=col_name,
+                    head_hash=head_hash,
+                )
+                count += 1
+
+    return count
+
+
+def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool) -> int:
+    """Register knowledge__* collections in catalog."""
+    collections = t3.list_collections()
+    knowledge_cols = [c for c in collections if c["name"].startswith("knowledge__")]
+    count = 0
+
+    for col_info in knowledge_cols:
+        col_name = col_info["name"]
+        # Derive a title from the collection name
+        title = col_name.replace("knowledge__", "").replace("_", " ").title()
+
+        if dry_run:
+            click.echo(f"  [dry-run] Would register knowledge: {title} → {col_name}")
+            count += 1
+            continue
+
+        curator = _get_or_create_curator(cat, "knowledge")
+        # Idempotent: check by physical_collection
+        existing = [e for e in cat.by_owner(curator) if e.physical_collection == col_name]
+        if not existing:
+            cat.register(
+                owner=curator, title=title, content_type="knowledge",
+                physical_collection=col_name,
+            )
+        count += 1
+
+    return count
+
+
+def _backfill_papers(cat: Catalog, t3: object, dry_run: bool) -> int:
+    """Register docs__* paper collections (not docs for repos)."""
+    collections = t3.list_collections()
+    # Paper collections: docs__ prefix but NOT matching known repo patterns
+    # Repos use docs__<reponame>-<hash8>; standalone papers have other patterns
+    paper_cols = [
+        c for c in collections
+        if c["name"].startswith("docs__") and c["count"] > 0
+    ]
+    count = 0
+
+    for col_info in paper_cols:
+        col_name = col_info["name"]
+
+        # Try to extract metadata from first chunk
+        title = col_name.replace("docs__", "")
+        author = ""
+        year = 0
+        try:
+            col = t3.get_or_create_collection(col_name)
+            result = col.get(limit=1, include=["metadatas"])
+            if result.get("ids") and result.get("metadatas"):
+                meta = result["metadatas"][0]
+                title = meta.get("source_title", "") or meta.get("title", "") or title
+                author = meta.get("bib_authors", "") or meta.get("author", "")
+                year = int(meta.get("bib_year", 0) or 0)
+        except Exception:
+            pass
+
+        if dry_run:
+            click.echo(f"  [dry-run] Would register paper: {title} → {col_name}")
+            count += 1
+            continue
+
+        curator = _get_or_create_curator(cat, "papers")
+        existing = [e for e in cat.by_owner(curator) if e.physical_collection == col_name]
+        if not existing:
+            cat.register(
+                owner=curator, title=title, content_type="paper",
+                author=author, year=year,
+                physical_collection=col_name,
+            )
+        count += 1
+
+    return count
+
+
+def _make_t3():
+    from nexus.db import make_t3
+    return make_t3()
+
+
+def _make_registry():
+    from nexus.registry import RepoRegistry
+    return RepoRegistry(Path.home() / ".config" / "nexus" / "repos.json")
+
+
+@catalog.command("backfill")
+@click.option("--dry-run", is_flag=True, help="Show what would be created without writing")
+def backfill_cmd(dry_run: bool) -> None:
+    """Populate catalog from existing T3 collections and registry."""
+    cat = _get_catalog()
+
+    registry = _make_registry()
+    t3 = _make_t3()
+
+    click.echo("Pass 1: Repos...")
+    repo_count = _backfill_repos(cat, registry, dry_run)
+
+    click.echo("Pass 2: Paper collections (docs__*)...")
+    paper_count = _backfill_papers(cat, t3, dry_run)
+
+    click.echo("Pass 3: Knowledge collections...")
+    knowledge_count = _backfill_knowledge(cat, t3, dry_run)
+
+    mode = "dry-run" if dry_run else "registered"
+    click.echo(f"\nBackfill complete ({mode}):")
+    click.echo(f"  Repos:     {repo_count}")
+    click.echo(f"  Papers:    {paper_count}")
+    click.echo(f"  Knowledge: {knowledge_count}")
