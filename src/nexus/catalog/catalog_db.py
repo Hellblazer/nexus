@@ -155,16 +155,17 @@ class CatalogDB:
         _log.debug("catalog_db.rebuild", owners=len(owners), documents=len(documents), links=len(links))
 
     def next_document_number(self, owner_prefix: str) -> int:
-        """Max document number for owner + 1."""
-        # Use range query to avoid LIKE prefix collision (1.1.% matches 1.10.*)
-        lower = owner_prefix + "."
-        parts = owner_prefix.split(".")
-        parts[-1] = str(int(parts[-1]) + 1)
-        upper = ".".join(parts)
+        """Max document number for owner + 1.
+
+        Uses dot-count matching to avoid lexicographic ordering bugs
+        (e.g., '1.10' < '1.9' in string comparison).
+        """
+        depth = len(owner_prefix.split("."))
         row = self._conn.execute(
             "SELECT MAX(CAST(substr(tumbler, length(?) + 2) AS INTEGER)) "
-            "FROM documents WHERE tumbler >= ? AND tumbler < ?",
-            (owner_prefix, lower, upper),
+            "FROM documents WHERE tumbler LIKE ? "
+            "AND (length(tumbler) - length(replace(tumbler, '.', ''))) = ?",
+            (owner_prefix, owner_prefix + ".%", depth),
         ).fetchone()
         return (row[0] or 0) + 1
 
@@ -177,7 +178,7 @@ class CatalogDB:
         sql = (
             "SELECT d.tumbler, d.title, d.author, d.year, d.content_type, "
             "d.file_path, d.corpus, d.physical_collection, d.chunk_count, "
-            "d.head_hash, d.indexed_at "
+            "d.head_hash, d.indexed_at, d.metadata "
             "FROM documents d "
             "JOIN documents_fts f ON d.rowid = f.rowid "
             "WHERE documents_fts MATCH ?"
@@ -191,7 +192,7 @@ class CatalogDB:
         rows = self._conn.execute(sql, params).fetchall()
         columns = ["tumbler", "title", "author", "year", "content_type",
                     "file_path", "corpus", "physical_collection", "chunk_count",
-                    "head_hash", "indexed_at"]
+                    "head_hash", "indexed_at", "metadata"]
         return [dict(zip(columns, row)) for row in rows]
 
     def close(self) -> None:

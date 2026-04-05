@@ -1027,6 +1027,15 @@ def _run_index(
         indexed_for_catalog.append((f, "code", code_collection))
     for _, f in prose_files:
         indexed_for_catalog.append((f, "prose", docs_collection))
+    # Include RDR files so code→RDR provenance links can be generated
+    if rdr_indexed > 0:
+        from nexus.registry import _rdr_collection_name
+        rdr_col = _rdr_collection_name(repo)
+        for rdr_dir in rdr_abs_paths:
+            if rdr_dir.is_dir():
+                for md_file in sorted(rdr_dir.rglob("*.md")):
+                    if md_file.is_file():
+                        indexed_for_catalog.append((md_file, "rdr", rdr_col))
     _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,

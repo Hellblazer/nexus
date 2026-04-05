@@ -79,17 +79,21 @@ class Catalog:
             self._ensure_consistent()
 
     @staticmethod
-    def _prefix_range(prefix: str) -> tuple[str, str]:
-        """Return (lower, upper) for a safe prefix range query.
+    def _prefix_sql(prefix: str) -> tuple[str, list]:
+        """Return (WHERE clause, params) for exact tumbler prefix matching.
 
-        '1.1' → ('1.1.', '1.2') — matches 1.1.* but not 1.10.*
+        Uses segment counting to avoid lexicographic ordering bugs with
+        dot-separated integers (e.g., '1.10' < '1.9' lexicographically).
         """
-        lower = prefix + "."
-        # Increment last segment for upper bound
-        parts = prefix.split(".")
-        parts[-1] = str(int(parts[-1]) + 1)
-        upper = ".".join(parts)
-        return lower, upper
+        depth = len(prefix.split("."))
+        # Match tumblers that start with prefix. and have exactly depth+1 segments
+        # e.g. prefix='1.1' (depth=2) matches '1.1.42' but not '1.10.1' or '1.1.42.7'
+        like = prefix + ".%"
+        # Exclude deeper segments: count dots must equal depth
+        return (
+            f"tumbler LIKE ? AND (length(tumbler) - length(replace(tumbler, '.', ''))) = ?",
+            [like, depth],
+        )
 
     def _ensure_consistent(self) -> None:
         """Check JSONL vs SQLite row counts; rebuild if diverged."""
@@ -369,6 +373,7 @@ class Catalog:
                 chunk_count=r["chunk_count"],
                 head_hash=r["head_hash"] or "",
                 indexed_at=r["indexed_at"] or "",
+                meta=json.loads(r["metadata"]) if r.get("metadata") else {},
             )
             for r in rows
         ]
@@ -377,8 +382,8 @@ class Catalog:
         row = self._db._conn.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-            "FROM documents WHERE tumbler >= ? AND tumbler < ? AND file_path = ?",
-            (*self._prefix_range(str(owner)), file_path),
+            f"FROM documents WHERE {self._prefix_sql(str(owner))[0]} AND file_path = ?",
+            (*self._prefix_sql(str(owner))[1], file_path),
         ).fetchone()
         if not row:
             return None
@@ -401,8 +406,8 @@ class Catalog:
         rows = self._db._conn.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-            "FROM documents WHERE tumbler >= ? AND tumbler < ?",
-            self._prefix_range(str(owner)),
+            f"FROM documents WHERE {self._prefix_sql(str(owner))[0]}",
+            self._prefix_sql(str(owner))[1],
         ).fetchall()
         return [
             CatalogEntry(

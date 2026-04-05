@@ -109,9 +109,11 @@ class TestCodeRdrLinks:
         )
         count = generate_code_rdr_links(cat)
         assert count == 1
-        rdr_entry = cat.find("catalog")[0]
-        links = cat.links_from(rdr_entry.tumbler, link_type="implements")
-        assert len(links) >= 0  # May match on catalog.py
+        # Link direction: code → implements → RDR
+        code_entry = cat.by_file_path(owner, "src/nexus/catalog/catalog.py")
+        links = cat.links_from(code_entry.tumbler, link_type="implements")
+        assert len(links) == 1
+        assert links[0].created_by == "index_hook"
 
     def test_short_names_not_matched(self, tmp_path):
         from nexus.catalog.link_generator import generate_code_rdr_links

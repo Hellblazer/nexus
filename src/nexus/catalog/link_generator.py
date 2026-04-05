@@ -79,20 +79,21 @@ def generate_code_rdr_links(cat: Catalog) -> int:
     code_entries = [e for e in entries if e.content_type == "code"]
 
     count = 0
-    for rdr in rdr_entries:
-        rdr_title_norm = rdr.title.lower().replace("-", "").replace(" ", "").replace("_", "")
-        existing_targets = {l.to_tumbler for l in cat.links_from(rdr.tumbler, link_type="implements")}
-        for code in code_entries:
-            module_name = Path(code.file_path).stem.replace("_", "").lower()
-            if len(module_name) <= 3:
-                continue
-            if module_name in rdr_title_norm and code.tumbler not in existing_targets:
-                cat.link(rdr.tumbler, code.tumbler, "implements", created_by="index_hook")
-                existing_targets.add(code.tumbler)
+    for code in code_entries:
+        module_name = Path(code.file_path).stem.replace("_", "").lower()
+        if len(module_name) <= 3:
+            continue
+        existing_targets = {l.to_tumbler for l in cat.links_from(code.tumbler, link_type="implements")}
+        for rdr in rdr_entries:
+            rdr_title_norm = rdr.title.lower().replace("-", "").replace(" ", "").replace("_", "")
+            if module_name in rdr_title_norm and rdr.tumbler not in existing_targets:
+                # code implements RDR (code → implements → RDR)
+                cat.link(code.tumbler, rdr.tumbler, "implements", created_by="index_hook")
+                existing_targets.add(rdr.tumbler)
                 count += 1
                 _log.debug(
                     "code_rdr_link_created",
-                    rdr=str(rdr.tumbler), code=str(code.tumbler),
+                    code=str(code.tumbler), rdr=str(rdr.tumbler),
                     module=module_name,
                 )
 

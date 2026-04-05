@@ -151,6 +151,17 @@ _catalog_lock = threading.Lock()
 _catalog_mtime: float = 0.0
 
 
+def _max_jsonl_mtime(cat) -> float:
+    """Return max mtime across all three JSONL files."""
+    mtime = 0.0
+    for path in (cat._owners_path, cat._documents_path, cat._links_path):
+        try:
+            mtime = max(mtime, path.stat().st_mtime) if path.exists() else mtime
+        except OSError:
+            pass
+    return mtime
+
+
 def _get_catalog():
     """Return Catalog singleton or None if not initialized.
 
@@ -167,13 +178,11 @@ def _get_catalog():
                 path = catalog_path()
                 if Catalog.is_initialized(path):
                     _catalog_instance = Catalog(path, path / ".catalog.db")
-                    docs_path = path / "documents.jsonl"
-                    _catalog_mtime = docs_path.stat().st_mtime if docs_path.exists() else 0.0
+                    _catalog_mtime = _max_jsonl_mtime(_catalog_instance)
     elif _catalog_instance is not None:
         # Check for external JSONL changes (git pull, another process)
         try:
-            docs_path = _catalog_instance._documents_path
-            current_mtime = docs_path.stat().st_mtime if docs_path.exists() else 0.0
+            current_mtime = _max_jsonl_mtime(_catalog_instance)
             if current_mtime > _catalog_mtime:
                 _catalog_mtime = current_mtime
                 _catalog_instance._ensure_consistent()
@@ -1062,14 +1071,13 @@ def catalog_search(
         # Structured filters via SQL when provided
         if owner or corpus or file_path or (author and not query):
             conditions = ["1=1"]
-            params: list[str] = []
+            params: list = []
             if owner:
-                conditions.append("tumbler >= ?")
-                params.append(owner + ".")
-                conditions.append("tumbler < ?")
-                parts = owner.split(".")
-                parts[-1] = str(int(parts[-1]) + 1)
-                params.append(".".join(parts))
+                depth = len(owner.split("."))
+                conditions.append("tumbler LIKE ?")
+                params.append(owner + ".%")
+                conditions.append("(length(tumbler) - length(replace(tumbler, '.', ''))) = ?")
+                params.append(depth)
             if corpus:
                 conditions.append("corpus = ?")
                 params.append(corpus)
