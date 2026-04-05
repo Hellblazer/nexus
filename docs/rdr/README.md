@@ -72,6 +72,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-048](rdr-048-streaming-pdf-pipeline.md) | Streaming PDF Pipeline | Architecture | Accepted | 2026-04-03 |
 | [RDR-049](rdr-049-git-backed-catalog.md) | Git-Backed Xanadu-Inspired Catalog for T3 | Architecture | Closed | 2026-04-05 |
 | [RDR-050](rdr-050-knowledge-graph-query-planning.md) | Knowledge Graph and Catalog-Aware Query Planning | Architecture | Accepted | 2026-04-05 |
+| [RDR-051](rdr-051-link-lifecycle.md) | Link Lifecycle: Full CRUD, Queryable Links, Bulk Operations | Architecture | Draft | 2026-04-05 |
 
 ---
 
