@@ -120,3 +120,69 @@ class TestTumblerEquality:
         t = Tumbler.parse("1.2.3")
         d = {t: "val"}
         assert d[Tumbler.parse("1.2.3")] == "val"
+
+
+class TestTumblerDepth:
+    def test_single_segment(self):
+        assert Tumbler.parse("5").depth == 1
+
+    def test_three_segments(self):
+        assert Tumbler.parse("1.2.42").depth == 3
+
+    def test_four_segments(self):
+        assert Tumbler.parse("1.2.42.7").depth == 4
+
+
+class TestTumblerAncestors:
+    def test_three_segment(self):
+        t = Tumbler.parse("1.2.42")
+        anc = t.ancestors()
+        assert anc == [
+            Tumbler.parse("1"),
+            Tumbler.parse("1.2"),
+            Tumbler.parse("1.2.42"),
+        ]
+
+    def test_single_segment(self):
+        t = Tumbler.parse("5")
+        assert t.ancestors() == [Tumbler.parse("5")]
+
+    def test_four_segment(self):
+        t = Tumbler.parse("1.1.42.3")
+        assert t.ancestors() == [
+            Tumbler.parse("1"),
+            Tumbler.parse("1.1"),
+            Tumbler.parse("1.1.42"),
+            Tumbler.parse("1.1.42.3"),
+        ]
+
+
+class TestTumblerLCA:
+    def test_same_tumbler(self):
+        t = Tumbler.parse("1.2.42")
+        assert Tumbler.lca(t, t) == t
+
+    def test_sibling_documents(self):
+        a = Tumbler.parse("1.1.10")
+        b = Tumbler.parse("1.1.20")
+        assert Tumbler.lca(a, b) == Tumbler.parse("1.1")
+
+    def test_different_owners(self):
+        a = Tumbler.parse("1.1.10")
+        b = Tumbler.parse("1.2.5")
+        assert Tumbler.lca(a, b) == Tumbler.parse("1")
+
+    def test_chunk_and_document(self):
+        a = Tumbler.parse("1.1.42.3")
+        b = Tumbler.parse("1.1.42")
+        assert Tumbler.lca(a, b) == Tumbler.parse("1.1.42")
+
+    def test_no_common_prefix(self):
+        a = Tumbler.parse("1.1.1")
+        b = Tumbler.parse("2.1.1")
+        assert Tumbler.lca(a, b) is None
+
+    def test_partial_overlap(self):
+        a = Tumbler.parse("1.1.42.3")
+        b = Tumbler.parse("1.1.43.7")
+        assert Tumbler.lca(a, b) == Tumbler.parse("1.1")

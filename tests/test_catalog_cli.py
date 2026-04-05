@@ -235,6 +235,54 @@ class TestOwnersCommand:
         assert "test-repo" in result.output
 
 
+class TestSeedPlanTemplates:
+    def test_seed_creates_five_templates(self, tmp_path, monkeypatch):
+        from nexus.db.t2 import T2Database
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        from nexus.commands.catalog import _seed_plan_templates
+        count = _seed_plan_templates()
+        assert count == 5
+        db = T2Database(db_path)
+        results = db.search_plans("builtin-template")
+        assert len(results) == 5
+        db.close()
+
+    def test_seed_idempotent(self, tmp_path, monkeypatch):
+        from nexus.db.t2 import T2Database
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        from nexus.commands.catalog import _seed_plan_templates
+        first = _seed_plan_templates()
+        second = _seed_plan_templates()
+        assert first == 5
+        assert second == 0
+
+    def test_seed_templates_have_builtin_tag(self, tmp_path, monkeypatch):
+        from nexus.db.t2 import T2Database
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        from nexus.commands.catalog import _seed_plan_templates
+        _seed_plan_templates()
+        db = T2Database(db_path)
+        plans = db.list_plans(limit=10)
+        for p in plans:
+            assert "builtin-template" in p["tags"]
+        db.close()
+
+    def test_seed_templates_no_ttl(self, tmp_path, monkeypatch):
+        from nexus.db.t2 import T2Database
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        from nexus.commands.catalog import _seed_plan_templates
+        _seed_plan_templates()
+        db = T2Database(db_path)
+        plans = db.list_plans(limit=10)
+        for p in plans:
+            assert p["ttl"] is None
+        db.close()
+
+
 class TestStatsCommand:
     def test_stats(self, initialized_catalog, catalog_env):
         runner = CliRunner()

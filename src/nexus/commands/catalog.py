@@ -14,6 +14,97 @@ from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger(__name__)
 
+# -- Pre-built plan templates (seeded at `nx catalog setup`) --
+
+_PLAN_TEMPLATES: list[dict[str, str]] = [
+    {
+        "query": "find documents by author",
+        "plan_json": json.dumps({
+            "steps": [
+                {"op": "catalog_search", "params": {"query": "{author_name}"}},
+                {"op": "filter", "field": "author", "match": "{author_name}"},
+                {"op": "return", "format": "ranked_by_year"},
+            ],
+            "description": "Search catalog for documents by a specific author.",
+        }),
+        "tags": "builtin-template,catalog,author",
+    },
+    {
+        "query": "trace citation chain from document",
+        "plan_json": json.dumps({
+            "steps": [
+                {"op": "catalog_resolve", "params": {"tumbler": "{start_tumbler}"}},
+                {"op": "catalog_links", "params": {"tumbler": "{start_tumbler}", "type": "cites"}},
+                {"op": "recurse", "depth": 3, "follow": "cites"},
+                {"op": "return", "format": "graph"},
+            ],
+            "description": "Follow citation links outward from a document up to 3 hops.",
+        }),
+        "tags": "builtin-template,catalog,citation",
+    },
+    {
+        "query": "trace provenance chain for document",
+        "plan_json": json.dumps({
+            "steps": [
+                {"op": "catalog_resolve", "params": {"tumbler": "{start_tumbler}"}},
+                {"op": "catalog_link_query", "params": {"tumbler": "{start_tumbler}"}},
+                {"op": "filter", "field": "created_by"},
+                {"op": "return", "format": "provenance_timeline"},
+            ],
+            "description": "Show who created each link to/from a document and when.",
+        }),
+        "tags": "builtin-template,catalog,provenance",
+    },
+    {
+        "query": "compare documents across corpora",
+        "plan_json": json.dumps({
+            "steps": [
+                {"op": "search", "params": {"query": "{topic}", "collection": "{corpus_a}"}},
+                {"op": "search", "params": {"query": "{topic}", "collection": "{corpus_b}"}},
+                {"op": "compare", "strategy": "semantic_overlap"},
+                {"op": "return", "format": "comparison_table"},
+            ],
+            "description": "Search two collections for the same topic and compare results.",
+        }),
+        "tags": "builtin-template,catalog,cross-corpus",
+    },
+    {
+        "query": "search within content type",
+        "plan_json": json.dumps({
+            "steps": [
+                {"op": "catalog_search", "params": {"query": "{question}", "content_type": "{type}"}},
+                {"op": "search", "params": {"query": "{question}", "collection": "{physical_collection}"}},
+                {"op": "return", "format": "ranked"},
+            ],
+            "description": "Scope search to a specific content type (code, paper, rdr, knowledge).",
+        }),
+        "tags": "builtin-template,catalog,type-scoped",
+    },
+]
+
+
+def _seed_plan_templates() -> int:
+    """Seed pre-built plan templates into T2. Idempotent — skips existing."""
+    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path
+
+    db = T2Database(default_db_path())
+    seeded = 0
+    try:
+        for tmpl in _PLAN_TEMPLATES:
+            existing = db.search_plans(tmpl["query"])
+            if any(p["query"] == tmpl["query"] and "builtin-template" in p.get("tags", "") for p in existing):
+                continue
+            db.save_plan(
+                query=tmpl["query"],
+                plan_json=tmpl["plan_json"],
+                tags=tmpl["tags"],
+            )
+            seeded += 1
+    finally:
+        db.close()
+    return seeded
+
 
 def _get_catalog() -> Catalog:
     from nexus.config import catalog_path
@@ -174,6 +265,10 @@ def setup_cmd(remote: str) -> None:
     cites = generate_citation_links(cat)
     code_rdr = generate_code_rdr_links(cat)
     click.echo(f"  Citations: {cites}  Code-RDR: {code_rdr}")
+
+    click.echo("Seeding plan templates...")
+    seeded = _seed_plan_templates()
+    click.echo(f"  {seeded} templates seeded")
 
     # Check if a remote is configured for durability
     import subprocess

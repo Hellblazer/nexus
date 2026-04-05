@@ -992,6 +992,7 @@ def plan_save(
     project: str = "",
     outcome: str = "success",
     tags: str = "",
+    ttl: int | None = None,
 ) -> str:
     """Save a query execution plan to the T2 plan library.
 
@@ -1004,6 +1005,7 @@ def plan_save(
         project: Project namespace for scoping (e.g. "nexus")
         outcome: Plan outcome — "success" or "partial"
         tags: Comma-separated tags (e.g. operation types used)
+        ttl: Time-to-live in days. None means permanent (no expiry).
     """
     try:
         if not query or not plan_json:
@@ -1015,6 +1017,7 @@ def plan_save(
                 outcome=outcome,
                 tags=tags,
                 project=project,
+                ttl=ttl,
             )
         return f"Saved plan: [{row_id}] {query[:80]}"
     except Exception as e:

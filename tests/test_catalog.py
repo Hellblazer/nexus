@@ -369,6 +369,73 @@ class TestDeleteDocument:
         assert len(results) == 0
 
 
+class TestDescendants:
+    def test_descendants_of_owner(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        results = cat.descendants("1.1")
+        assert len(results) == 2
+
+    def test_descendants_excludes_prefix_itself(self, tmp_path):
+        """The prefix owner '1.1' should not appear in its own descendants."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        tumblers = [r["tumbler"] for r in cat.descendants("1.1")]
+        assert "1.1" not in tumblers
+
+    def test_descendants_of_store(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        o1 = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        o2 = cat.register_owner("arcaneum", "repo", repo_hash="aabb1122")
+        cat.register(o1, "a.py", content_type="code", file_path="a.py")
+        cat.register(o2, "b.py", content_type="code", file_path="b.py")
+        results = cat.descendants("1")
+        assert len(results) == 2
+
+    def test_descendants_empty(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        results = cat.descendants("1.1")
+        assert results == []
+
+
+class TestResolveChunk:
+    def test_resolve_chunk_parses_document_prefix(self, tmp_path):
+        """resolve_chunk extracts doc tumbler + chunk index from 4-segment address."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py",
+                     physical_collection="code__nexus", chunk_count=5)
+        result = cat.resolve_chunk(Tumbler.parse("1.1.1.3"))
+        assert result is not None
+        assert result["document_tumbler"] == "1.1.1"
+        assert result["chunk_index"] == 3
+        assert result["physical_collection"] == "code__nexus"
+
+    def test_resolve_chunk_not_a_chunk(self, tmp_path):
+        """3-segment tumbler is a document, not a chunk — returns None."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        assert cat.resolve_chunk(Tumbler.parse("1.1.1")) is None
+
+    def test_resolve_chunk_document_not_found(self, tmp_path):
+        """Chunk of a non-existent document returns None."""
+        cat = _make_catalog(tmp_path)
+        assert cat.resolve_chunk(Tumbler.parse("1.1.999.3")) is None
+
+    def test_resolve_chunk_out_of_range(self, tmp_path):
+        """Chunk index beyond chunk_count returns None."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py",
+                     physical_collection="code__nexus", chunk_count=5)
+        assert cat.resolve_chunk(Tumbler.parse("1.1.1.10")) is None
+
+
 class TestRebuild:
     def test_rebuild_from_jsonl(self, tmp_path):
         cat = _make_catalog(tmp_path)

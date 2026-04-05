@@ -34,6 +34,25 @@ class Tumbler:
     def chunk(self) -> int | None:
         return self.segments[3] if len(self.segments) > 3 else None
 
+    @property
+    def depth(self) -> int:
+        """Number of segments (dot count + 1)."""
+        return len(self.segments)
+
+    def ancestors(self) -> list[Tumbler]:
+        """All tumbler prefixes including self: 1.1.42 → [1, 1.1, 1.1.42]."""
+        return [Tumbler(self.segments[: i + 1]) for i in range(len(self.segments))]
+
+    @staticmethod
+    def lca(a: Tumbler, b: Tumbler) -> Tumbler | None:
+        """Longest common ancestor. Returns None if no segments match."""
+        common: list[int] = []
+        for sa, sb in zip(a.segments, b.segments):
+            if sa != sb:
+                break
+            common.append(sa)
+        return Tumbler(tuple(common)) if common else None
+
     def is_prefix_of(self, other: Tumbler) -> bool:
         return other.segments[: len(self.segments)] == self.segments
 

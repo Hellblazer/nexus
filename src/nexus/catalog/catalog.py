@@ -431,6 +431,42 @@ class Catalog:
             meta=json.loads(row[11]) if row[11] else {},
         )
 
+    def descendants(self, prefix: str) -> list[dict]:
+        """All documents whose tumbler starts with *prefix* (any depth).
+
+        Unlike ``by_owner`` which returns only direct children, this returns
+        the full subtree.  The prefix itself is excluded.
+        """
+        return self._db.descendants(prefix)
+
+    def resolve_chunk(self, tumbler: Tumbler) -> dict | None:
+        """Resolve a 4-segment chunk tumbler to its document + chunk metadata.
+
+        Chunks are ghost elements — addressable at ``1.1.42.3`` without catalog
+        registration.  Resolution parses the document prefix, verifies the
+        document exists, and checks the chunk index is in range.
+
+        Returns ``{"document_tumbler", "chunk_index", "physical_collection", ...}``
+        or None if the tumbler is not a chunk address or the document/chunk is
+        missing.
+        """
+        if tumbler.chunk is None:
+            return None
+        doc_tumbler = tumbler.document_address()
+        entry = self.resolve(doc_tumbler)
+        if entry is None:
+            return None
+        chunk_idx = tumbler.chunk
+        if entry.chunk_count and chunk_idx >= entry.chunk_count:
+            return None
+        return {
+            "document_tumbler": str(doc_tumbler),
+            "chunk_index": chunk_idx,
+            "physical_collection": entry.physical_collection,
+            "title": entry.title,
+            "content_type": entry.content_type,
+        }
+
     def update(self, tumbler: Tumbler, **fields: object) -> None:
         dir_fd = self._acquire_lock()
         try:
