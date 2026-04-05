@@ -259,7 +259,7 @@ Navigates the catalog link graph from a tumbler. Executed by the skill via the `
 
 **When to use**: When the question asks about citations ("what cites X?"), provenance ("what research informed this code?"), or relationships ("what implements this RDR?"). Use after `catalog_search` to traverse from a found entry.
 
-**Required params**: `tumbler` — starting point (or omit to use first entry from `$step_N`). **Optional params**: `direction` (`in`/`out`/`both`, default `both`), `link_type` (e.g., `cites`, `implements`, `supersedes`), `depth` (default 1).
+**Required params**: `tumbler` — starting point. Either set `tumbler` explicitly in `params`, or use `inputs: "$step_N"` (skill extracts first entry's tumbler). A `catalog_links` step must have either `params.tumbler` or `inputs` — never neither. **Optional params**: `direction` (`in`/`out`/`both`, default `both`), `link_type` (e.g., `cites`, `implements`, `supersedes`), `depth` (default 1).
 
 **Fanout rule**: When `inputs` references a prior step that returned a list, the skill extracts the first entry's tumbler.
 

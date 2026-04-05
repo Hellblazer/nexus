@@ -202,7 +202,7 @@ The skill extracts `physical_collection` from the link targets (`to` tumblers re
 ```json
 {"steps": [
   {"step": 1, "operation": "catalog_resolve", "params": {"corpus": "distributed-systems"}},
-  {"step": 2, "operation": "search", "search_query": "consensus protocol Byzantine fault", "corpus": "$step_1"},
+  {"step": 2, "operation": "search", "search_query": "consensus protocol Byzantine fault", "corpus": "$step_1.collections"},
   {"step": 3, "operation": "rank", "inputs": "$step_2", "params": {"criterion": "relevance to practical BFT implementations"}}
 ]}
 ```
