@@ -158,7 +158,63 @@ IPFS's DAG chunking is the closest analogue to per-chunk content addressing. Nei
 - [x] `content_hash` is present in ChromaDB metadata for all indexed chunks — **Status**: Verified — **Method**: Source Search (all four indexers)
 - [x] Tumbler tuple comparison produces the same ordering as Nelson's transfinitesimal arithmetic for fixed-depth hierarchies — **Status**: Conditionally verified — **Method**: Execution test (RF-5). Edge case at zero segment requires explicit handling in `__lt__`.
 - [x] Existing links with position-based spans can be migrated — **Status**: Verified empty — **Method**: Spike (RF-7). Zero existing span links. No migration needed.
-- [ ] `chunk_text_hash` can be added to the indexing pipeline without breaking existing collections — **Status**: Unverified — **Method**: Needs Spike (add field to metadata dict, verify ChromaDB accepts new metadata keys on existing collections)
+- [x] `chunk_text_hash` can be added to the indexing pipeline without breaking existing collections — **Status**: Verified — **Method**: Spike (ChromaDB accepts heterogeneous metadata schemas; doc1 with no `chunk_text_hash`, doc2 with it — query by `chunk_text_hash` returns only doc2)
+
+**RF-10: Nelson's Full Tumbler Hierarchy vs Nexus Mapping (2026-04-05)**
+
+Nelson's full address (LM 4/28-30):
+```
+SERVER.0.USER.0.DOCUMENT.VERSION.0.ELEMENT_TYPE.ELEMENT_POS
+```
+Where `0` digits are major dividers, ELEMENT_TYPE is `1` for bytes or `2` for links.
+
+Nexus mapping:
+```
+store.owner.document[.chunk]
+```
+
+| Nelson segment | Nexus segment | Notes |
+|---|---|---|
+| SERVER | store | Direct mapping |
+| USER | owner | Direct mapping |
+| DOCUMENT | document | Direct mapping |
+| VERSION | (absent) | `head_hash` tracks version but is not addressable |
+| ELEMENT (byte) | chunk | 4th segment = chunk index |
+| ELEMENT (link) | (separate table) | Links are in catalog, not in tumbler space |
+
+**Deliberate departures**: (1) No zero-digit major dividers — nexus uses dots throughout. (2) No version segment — documents are mutable (re-indexed in place). (3) Element types (byte vs link) are not distinguished in the tumbler — links live in a separate table. These simplifications are appropriate for nexus's use case where documents are not append-only.
+
+**Evidence basis**: Verified — LM 4/28-30 (OCR text from Mixedbread xanadu store).
+
+**RF-11: ChromaDB Heterogeneous Metadata — Spike Confirmed (2026-04-05)**
+
+Spike: ChromaDB `EphemeralClient` accepts mixed metadata schemas within the same collection. Documents with `content_hash` only coexist with documents that also have `chunk_text_hash`. Metadata filter `where={'chunk_text_hash': 'xyz'}` correctly returns only matching documents.
+
+This means `chunk_text_hash` can be added incrementally — new indexing runs add it, old chunks remain without it, and query-by-hash works for chunks that have it.
+
+**Evidence basis**: Verified — spike execution (Python, chromadb.EphemeralClient).
+
+**RF-12: Depth-Aware Comparison — Spike Confirmed (2026-04-05)**
+
+The -1 sentinel padding approach for cross-depth tumbler comparison passes all 10 test cases:
+- Integer ordering: `(1,1,3) < (1,1,10)` = True
+- Parent < child: `(1,1,3) < (1,1,3,0)` = True (RF-5 edge case fixed)
+- Child > parent: `(1,1,3,0) < (1,1,3)` = False
+- Store < owner < document: all correct
+- Sorted output matches Nelson's tumbler line from LM 4/21
+
+Implementation: pad shorter tuple with `(-1,) * (max_len - len(self))` before comparison.
+
+**Evidence basis**: Verified — spike execution (Python, all 10 test cases pass).
+
+**RF-13: CCE Chunk Text Identity (2026-04-05)**
+
+The chunk text sent to Voyage AI's `contextualized_embed()` is the same raw text stored in ChromaDB's `documents` field. CCE operates on `inputs=[batch]` where `batch` is a list of raw chunk texts. Therefore `chunk_text_hash = sha256(chunk_text)` is stable across the embedding pipeline — the hash covers the stored text, not the embedding.
+
+For CCE collections (docs, knowledge, rdr): chunk text is preserved verbatim. The hash is stable.
+For code collections: chunk text includes tree-sitter extracted content. The hash is stable.
+
+**Evidence basis**: Verified — source read of `doc_indexer.py` `_embed_with_fallback()` and `prose_indexer.py`.
 
 ## Proposed Solution
 
