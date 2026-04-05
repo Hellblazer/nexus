@@ -154,7 +154,7 @@ _catalog_mtime: float = 0.0
 def _max_jsonl_mtime(cat) -> float:
     """Return max mtime across all three JSONL files."""
     mtime = 0.0
-    for path in (cat._owners_path, cat._documents_path, cat._links_path):
+    for path in cat.jsonl_paths():
         try:
             mtime = max(mtime, path.stat().st_mtime) if path.exists() else mtime
         except OSError:
@@ -1292,8 +1292,8 @@ def catalog_link(
         tt, err = _resolve_tumbler_mcp(cat, to_tumbler)
         if err:
             return {"error": err}
-        cat.link(ft, tt, link_type, created_by, from_span=from_span, to_span=to_span)
-        return {"from": str(ft), "to": str(tt), "type": link_type}
+        created = cat.link(ft, tt, link_type, created_by, from_span=from_span, to_span=to_span)
+        return {"from": str(ft), "to": str(tt), "type": link_type, "created": created}
     except Exception as e:
         return {"error": str(e)}
 
@@ -1305,9 +1305,11 @@ def catalog_links(
     link_type: str = "",
     depth: int = 1,
 ) -> dict:
-    """Links to/from a catalog entry. Accepts tumbler or title. depth > 1 traverses the graph.
+    """Links to/from a catalog entry. Accepts tumbler or title. depth controls BFS depth (default 1 = direct neighbors).
 
     Returns {"nodes": [CatalogEntry dicts], "edges": [CatalogLink dicts]}.
+    Note: only returns links whose endpoints are live documents (deleted nodes excluded).
+    Use catalog_link_query to see all links including those to deleted documents.
     """
     cat, err = _require_catalog()
     if err:
@@ -1408,6 +1410,8 @@ def catalog_link_query(
     NOT a query-planner step — use catalog_links for graph traversal.
     Use for: audit by creator, find all links of a type, count generator output.
     created_at_before: ISO timestamp — only links created before this time.
+    Note: returns ALL matching links including orphans (links to deleted documents).
+    Use catalog_links for live-documents-only graph traversal.
     """
     cat, err = _require_catalog()
     if err:

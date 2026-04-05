@@ -124,26 +124,19 @@ class Catalog:
         )
 
     def _ensure_consistent(self) -> None:
-        """Check JSONL vs SQLite row counts for docs and links; rebuild if diverged."""
+        """Rebuild SQLite from JSONL truth. Called when JSONL mtime changes."""
         try:
+            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
             documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
             links_dict = read_links(self._links_path) if self._links_path.exists() else {}
-            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-
-            doc_jsonl = len(documents)
-            doc_sqlite = self._db.execute("SELECT count(*) FROM documents").fetchone()[0]
-            link_jsonl = len(links_dict)
-            link_sqlite = self._db.execute("SELECT count(*) FROM links").fetchone()[0]
-
-            if doc_jsonl != doc_sqlite or link_jsonl != link_sqlite:
-                _log.info(
-                    "catalog_consistency_rebuild",
-                    doc_jsonl=doc_jsonl, doc_sqlite=doc_sqlite,
-                    link_jsonl=link_jsonl, link_sqlite=link_sqlite,
-                )
-                self._db.rebuild(owners, documents, list(links_dict.values()))
+            _log.debug("catalog_consistency_rebuild")
+            self._db.rebuild(owners, documents, list(links_dict.values()))
         except Exception:
             _log.debug("catalog_consistency_check_failed", exc_info=True)
+
+    def jsonl_paths(self) -> tuple[Path, ...]:
+        """Public accessor for JSONL file paths (used by mtime checks)."""
+        return (self._owners_path, self._documents_path, self._links_path)
 
     @classmethod
     def init(cls, catalog_path: Path, remote: str | None = None) -> Catalog:
@@ -182,10 +175,34 @@ class Catalog:
             and (catalog_path / "documents.jsonl").exists()
         )
 
+    def _should_compact(self, ratio: float = 3.0) -> bool:
+        """Check if JSONL bloat ratio exceeds threshold."""
+        try:
+            for path in self.jsonl_paths():
+                if not path.exists():
+                    continue
+                total_lines = sum(1 for line in path.open() if line.strip())
+                if total_lines == 0:
+                    continue
+                live_count = self._db.execute(
+                    f"SELECT count(*) FROM {path.stem}"  # owners, documents, links
+                ).fetchone()[0]
+                if live_count > 0 and total_lines / live_count >= ratio:
+                    return True
+        except Exception:
+            pass
+        return False
+
     def sync(self, message: str = "catalog update") -> None:
-        """git add -A && git commit && git push (if remote configured)."""
+        """git add -A && git commit && git push (if remote configured).
+
+        Auto-compacts JSONL files when bloat ratio exceeds 3x live records.
+        """
         dir_fd = self._acquire_lock()
         try:
+            if self._should_compact():
+                _log.info("catalog_auto_compact")
+                self.compact()
             _run_git(["git", "add", "-A"], cwd=self._dir)
             status = _run_git(["git", "status", "--porcelain"], cwd=self._dir)
             if not status.stdout.strip():
@@ -508,13 +525,16 @@ class Catalog:
             for r in rows
         ]
 
-    def all_documents(self) -> list[CatalogEntry]:
-        """Return all catalog entries."""
-        rows = self._db.execute(
+    def all_documents(self, limit: int = 0) -> list[CatalogEntry]:
+        """Return all catalog entries. limit=0 means unlimited."""
+        sql = (
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
             "FROM documents"
-        ).fetchall()
+        )
+        if limit > 0:
+            sql += f" LIMIT {limit}"
+        rows = self._db.execute(sql).fetchall()
         return [
             CatalogEntry(
                 tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
@@ -561,8 +581,18 @@ class Catalog:
         from_span: str,
         to_span: str,
         meta: dict,
+        *,
+        allow_dangling: bool = False,
     ) -> bool:
         """Core link logic — caller must hold the lock. Returns True if new, False if merged."""
+        if not allow_dangling:
+            errors = []
+            if self.resolve(from_t) is None:
+                errors.append(f"from_tumbler {from_t} not found")
+            if self.resolve(to_t) is None:
+                errors.append(f"to_tumbler {to_t} not found")
+            if errors:
+                raise ValueError(f"dangling link: {'; '.join(errors)}")
         now = datetime.now(UTC).isoformat()
         row = self._db.execute(
             "SELECT id, created_by, metadata, created_at FROM links "
@@ -616,12 +646,20 @@ class Catalog:
         *,
         from_span: str = "",
         to_span: str = "",
+        allow_dangling: bool = False,
         **meta: object,
-    ) -> None:
+    ) -> bool:
+        """Create or merge a link. Returns True if new, False if merged.
+
+        Raises ValueError if either endpoint is missing (unless allow_dangling=True).
+        """
         dir_fd = self._acquire_lock()
         try:
-            self._link_unlocked(from_t, to_t, link_type, created_by,
-                                from_span, to_span, dict(meta))
+            return self._link_unlocked(
+                from_t, to_t, link_type, created_by,
+                from_span, to_span, dict(meta),
+                allow_dangling=allow_dangling,
+            )
         finally:
             self._release_lock(dir_fd)
 
@@ -634,12 +672,14 @@ class Catalog:
         *,
         from_span: str = "",
         to_span: str = "",
+        allow_dangling: bool = False,
         **meta: object,
     ) -> bool:
         """Create link only if it does not already exist. Returns True=created, False=existed.
 
         No merge, no co_discovered_by — pure insert-or-skip via UNIQUE constraint.
         No JSONL append on the 'already exists' path.
+        Raises ValueError if either endpoint is missing (unless allow_dangling=True).
         """
         dir_fd = self._acquire_lock()
         try:
@@ -649,6 +689,14 @@ class Catalog:
             ).fetchone()
             if row is not None:
                 return False
+            if not allow_dangling:
+                errors = []
+                if self.resolve(from_t) is None:
+                    errors.append(f"from_tumbler {from_t} not found")
+                if self.resolve(to_t) is None:
+                    errors.append(f"to_tumbler {to_t} not found")
+                if errors:
+                    raise ValueError(f"dangling link: {'; '.join(errors)}")
             now = datetime.now(UTC).isoformat()
             combined_meta = dict(meta)
             rec = LinkRecord(
@@ -686,16 +734,21 @@ class Catalog:
                 ).fetchall()
 
             for row_id, lt, original_created_by in rows:
+                # Fetch full row for forensic tombstone
+                full = self._db.execute(
+                    "SELECT from_span, to_span, metadata FROM links WHERE id = ?",
+                    (row_id,),
+                ).fetchone()
                 tombstone = {
                     "from_t": str(from_t),
                     "to_t": str(to_t),
                     "link_type": lt,
                     "_deleted": True,
-                    "from_span": "",
-                    "to_span": "",
+                    "from_span": full[0] or "" if full else "",
+                    "to_span": full[1] or "" if full else "",
                     "created_by": original_created_by,
                     "created_at": datetime.now(UTC).isoformat(),
-                    "meta": {},
+                    "meta": json.loads(full[2]) if full and full[2] else {},
                 }
                 self._append_jsonl(self._links_path, tombstone)
                 self._db.execute("DELETE FROM links WHERE id = ?", (row_id,))
@@ -828,9 +881,10 @@ class Catalog:
                 tombstone = {
                     "from_t": str(lnk.from_tumbler), "to_t": str(lnk.to_tumbler),
                     "link_type": lnk.link_type, "_deleted": True,
-                    "from_span": "", "to_span": "",
+                    "from_span": lnk.from_span, "to_span": lnk.to_span,
                     "created_by": lnk.created_by,
-                    "created_at": datetime.now(UTC).isoformat(), "meta": {},
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "meta": lnk.meta,
                 }
                 self._append_jsonl(self._links_path, tombstone)
                 self._db.execute(
@@ -895,6 +949,9 @@ class Catalog:
             "duplicate_count": len(duplicates),
         }
 
+    _MAX_GRAPH_DEPTH = 10
+    _MAX_GRAPH_NODES = 500
+
     def graph(
         self,
         tumbler: Tumbler,
@@ -902,13 +959,20 @@ class Catalog:
         direction: str = "both",
         link_type: str = "",
     ) -> dict:
-        """BFS traversal to given depth. Returns {"nodes": [...], "edges": [...]}."""
+        """BFS traversal to given depth. Returns {"nodes": [...], "edges": [...]}.
+
+        Depth capped at _MAX_GRAPH_DEPTH. Traversal stops at _MAX_GRAPH_NODES visited.
+        """
+        depth = min(depth, self._MAX_GRAPH_DEPTH)
         visited: set[str] = {str(tumbler)}
         seen_edges: set[tuple[str, str, str]] = set()
         all_edges: list[CatalogLink] = []
         queue: deque[tuple[Tumbler, int]] = deque([(tumbler, 0)])
 
         while queue:
+            if len(visited) >= self._MAX_GRAPH_NODES:
+                _log.warning("graph_node_limit", tumbler=str(tumbler), visited=len(visited))
+                break
             current, d = queue.popleft()
             if d >= depth:
                 continue

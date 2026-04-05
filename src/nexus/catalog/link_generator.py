@@ -52,22 +52,32 @@ def generate_citation_links(cat: Catalog) -> int:
     return count
 
 
+_MAX_RDR_MATCHES_PER_CODE = 5
+
+
 def generate_code_rdr_links(cat: Catalog) -> int:
     """Heuristic: match RDR entries to code files by module name in title.
 
     created_by='index_hook' per RF-8. Only matches module names > 3 chars.
+    Capped at _MAX_RDR_MATCHES_PER_CODE matches per code file to prevent saturation.
     """
     entries = _all_entries(cat)
     rdr_entries = [e for e in entries if e.content_type == "rdr"]
     code_entries = [e for e in entries if e.content_type == "code"]
+
+    # Pre-normalize RDR titles once (avoid O(n*m) re-normalization)
+    rdr_normalized: list[tuple[CatalogEntry, str]] = [
+        (rdr, rdr.title.lower().replace("-", "").replace(" ", "").replace("_", ""))
+        for rdr in rdr_entries
+    ]
 
     count = 0
     for code in code_entries:
         module_name = Path(code.file_path).stem.replace("_", "").lower()
         if len(module_name) <= 3:
             continue
-        for rdr in rdr_entries:
-            rdr_title_norm = rdr.title.lower().replace("-", "").replace(" ", "").replace("_", "")
+        matches_for_code = 0
+        for rdr, rdr_title_norm in rdr_normalized:
             if module_name in rdr_title_norm:
                 if cat.link_if_absent(code.tumbler, rdr.tumbler, "implements", created_by="index_hook"):
                     count += 1
@@ -76,5 +86,9 @@ def generate_code_rdr_links(cat: Catalog) -> int:
                         code=str(code.tumbler), rdr=str(rdr.tumbler),
                         module=module_name,
                     )
+                matches_for_code += 1
+                if matches_for_code >= _MAX_RDR_MATCHES_PER_CODE:
+                    _log.warning("code_rdr_link_cap_reached", code=str(code.tumbler), module=module_name)
+                    break
 
     return count

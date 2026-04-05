@@ -23,6 +23,45 @@ def _make_catalog_with_docs(tmp_path: Path) -> tuple[Catalog, Tumbler, Tumbler, 
     return cat, doc_a, doc_b, doc_c
 
 
+class TestDanglingLinkPrevention:
+    def test_link_rejects_dangling_from(self, tmp_path):
+        cat, _, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        with pytest.raises(ValueError, match="from_tumbler.*not found"):
+            cat.link(Tumbler.parse("1.1.99"), doc_b, "cites", created_by="user")
+
+    def test_link_rejects_dangling_to(self, tmp_path):
+        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
+        with pytest.raises(ValueError, match="to_tumbler.*not found"):
+            cat.link(doc_a, Tumbler.parse("1.1.99"), "cites", created_by="user")
+
+    def test_link_allow_dangling_bypasses_check(self, tmp_path):
+        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, Tumbler.parse("1.1.99"), "cites", created_by="user", allow_dangling=True)
+        assert len(cat.links_from(doc_a)) == 1
+
+    def test_link_if_absent_rejects_dangling(self, tmp_path):
+        cat, _, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        with pytest.raises(ValueError, match="not found"):
+            cat.link_if_absent(Tumbler.parse("1.1.99"), doc_b, "cites", created_by="user")
+
+    def test_link_if_absent_allow_dangling(self, tmp_path):
+        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
+        result = cat.link_if_absent(doc_a, Tumbler.parse("1.1.99"), "cites",
+                                    created_by="user", allow_dangling=True)
+        assert result is True
+
+    def test_link_returns_bool_created(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        result = cat.link(doc_a, doc_b, "cites", created_by="user")
+        assert result is True  # new link
+
+    def test_link_returns_bool_merged(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        result = cat.link(doc_a, doc_b, "cites", created_by="other")
+        assert result is False  # merged
+
+
 class TestLinkCreation:
     def test_link_and_lookup(self, tmp_path):
         cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
@@ -377,6 +416,13 @@ class TestGraphTraversal:
         assert len(result["nodes"]) == 1
         assert str(result["nodes"][0].tumbler) == str(doc_a)
         assert result["edges"] == []
+
+    def test_graph_depth_clamped(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        # depth=100 is clamped to _MAX_GRAPH_DEPTH — should not crash
+        result = cat.graph(doc_a, depth=100)
+        assert len(result["nodes"]) >= 1
 
     def test_depth_1(self, tmp_path):
         cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)

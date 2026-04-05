@@ -87,23 +87,7 @@ def list_cmd(owner: str, content_type: str, limit: int, as_json: bool) -> None:
     if owner:
         entries = cat.by_owner(Tumbler.parse(owner))
     else:
-        # List all documents via SQLite
-        rows = cat._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-            "FROM documents LIMIT ?",
-            (limit,),
-        ).fetchall()
-        from nexus.catalog.catalog import CatalogEntry
-        entries = [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-            )
-            for r in rows
-        ]
+        entries = cat.all_documents(limit=limit)
     if content_type:
         entries = [e for e in entries if e.content_type == content_type]
     entries = entries[:limit]
