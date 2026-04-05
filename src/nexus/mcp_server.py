@@ -1046,8 +1046,12 @@ def catalog_search(
             conditions = ["1=1"]
             params: list[str] = []
             if owner:
-                conditions.append("tumbler LIKE ?")
-                params.append(owner + ".%")
+                conditions.append("tumbler >= ?")
+                params.append(owner + ".")
+                conditions.append("tumbler < ?")
+                parts = owner.split(".")
+                parts[-1] = str(int(parts[-1]) + 1)
+                params.append(".".join(parts))
             if corpus:
                 conditions.append("corpus = ?")
                 params.append(corpus)
@@ -1065,7 +1069,7 @@ def catalog_search(
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
                 f"FROM documents WHERE {' AND '.join(conditions)} LIMIT ?"
             )
-            params.append(str(limit))
+            params.append(limit)
             rows = cat._db._conn.execute(sql, params).fetchall()
             from nexus.catalog.catalog import CatalogEntry
             entries = [

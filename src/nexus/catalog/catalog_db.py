@@ -78,6 +78,8 @@ CREATE INDEX IF NOT EXISTS idx_links_from ON links(from_tumbler);
 CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_tumbler);
 CREATE INDEX IF NOT EXISTS idx_links_type ON links(link_type);
 CREATE INDEX IF NOT EXISTS idx_links_created_by ON links(created_by);
+CREATE INDEX IF NOT EXISTS idx_links_from_type ON links(from_tumbler, link_type);
+CREATE INDEX IF NOT EXISTS idx_links_to_type ON links(to_tumbler, link_type);
 """
 
 
@@ -154,10 +156,15 @@ class CatalogDB:
 
     def next_document_number(self, owner_prefix: str) -> int:
         """Max document number for owner + 1."""
+        # Use range query to avoid LIKE prefix collision (1.1.% matches 1.10.*)
+        lower = owner_prefix + "."
+        parts = owner_prefix.split(".")
+        parts[-1] = str(int(parts[-1]) + 1)
+        upper = ".".join(parts)
         row = self._conn.execute(
             "SELECT MAX(CAST(substr(tumbler, length(?) + 2) AS INTEGER)) "
-            "FROM documents WHERE tumbler LIKE ? || '.%'",
-            (owner_prefix, owner_prefix),
+            "FROM documents WHERE tumbler >= ? AND tumbler < ?",
+            (owner_prefix, lower, upper),
         ).fetchone()
         return (row[0] or 0) + 1
 

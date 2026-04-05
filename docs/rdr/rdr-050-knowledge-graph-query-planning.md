@@ -425,3 +425,36 @@ RDR-049 was fully implemented on 2026-04-05 (18 beads, 5 phases, ~180 tests, PR 
 The 8 MCP catalog tools (`catalog_search`, `catalog_show`, `catalog_list`, `catalog_register`, `catalog_update`, `catalog_link`, `catalog_links`, `catalog_resolve`) are the dispatch targets. The query planner needs 3 new plan step types that call these tools. The `/nx:query` skill's operator relay pattern already supports adding new operations — the catalog operations follow the same `T1 scratch → dispatch → harvest` pattern as existing `search`/`extract`/`summarize` steps.
 
 **Key architectural insight:** The catalog's `graph()` method with `depth`, `direction`, and `link_type` parameters maps directly to the `catalog_links` plan operation. No adapter needed — the MCP `catalog_links` tool already exposes this.
+
+### RF-10: Non-Document Knowledge — Facts and Insights in the Catalog (2026-04-05)
+**Classification**: Design Analysis | **Confidence**: HIGH
+
+T3 `knowledge__*` collections store working knowledge (facts, insights, decisions, observations) via `nx store put` — not documents with authors and publication years. The catalog already registers these as entries under a "knowledge" curator owner (via `_catalog_store_hook`), with `content_type="knowledge"` and `meta.doc_id` for dedup. But the catalog's document-centric metadata (author, year, file_path) is a poor fit for atomic facts.
+
+**What already works:**
+- `_catalog_store_hook` registers every `nx store put` with `meta.doc_id` — facts are already in the catalog
+- Ghost elements (`physical_collection=""`, `chunk_count=0`) can represent facts with no T3 backing
+- `meta` dict is arbitrary — can carry `kind`, `source_agent`, `confidence`, `evidence_refs`
+- Links work: `fact → derived_from → paper`, `fact → supports → decision`
+
+**What's needed for seamless integration:**
+- Use `meta.kind` to subdivide knowledge entries: `fact`, `insight`, `decision`, `observation` — avoids proliferating `content_type` values while maintaining queryability via `json_extract(metadata, '$.kind')`
+- New link type `derived_from` for provenance: when an agent produces an insight during `/nx:query`, it links the catalog entry to the source documents that produced it
+- The query planner can then navigate: `fact → derived_from → paper → cites → foundational_paper` — a provenance chain from working knowledge back to primary sources
+
+**Why `meta.kind` not `content_type`:**
+- `content_type` drives physical routing (code → `code__`, prose → `docs__`, etc.) and is a first-class SQL column
+- `meta.kind` is organizational metadata — Nelson's "categories are user business" principle (RF-3)
+- Adding `content_type="fact"` would require updating every hook, CLI filter, and MCP tool that switches on content_type
+- `meta.kind` is queryable via `json_extract` (already used by `by_doc_id`) with zero schema changes
+
+**Integration with Layer 3 (concept nodes):**
+Concept nodes are ghost elements representing abstract topics. Facts are ghost elements representing concrete claims. Both are addressable via tumblers, both carry links. The difference is link semantics: concepts use `about` links (documents are about a concept), facts use `derived_from` and `supports` links (facts are derived from documents, facts support decisions). Same mechanism, different vocabulary — no new infrastructure needed.
+
+**No schema changes required.** The existing catalog API handles this today:
+```python
+# Agent discovers a fact during research
+fact = cat.register(knowledge_owner, "Chase procedure terminates in polynomial time for full TGDs",
+                    content_type="knowledge", meta={"kind": "fact", "confidence": "high"})
+cat.link(fact, paper_tumbler, "derived_from", created_by="query-agent")
+```

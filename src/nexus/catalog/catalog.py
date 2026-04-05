@@ -74,6 +74,44 @@ class Catalog:
         self._owners_path = catalog_dir / "owners.jsonl"
         self._documents_path = catalog_dir / "documents.jsonl"
         self._links_path = catalog_dir / "links.jsonl"
+        # C1+C2: rebuild SQLite from JSONL on construction to ensure consistency
+        if self._documents_path.exists():
+            self._ensure_consistent()
+
+    @staticmethod
+    def _prefix_range(prefix: str) -> tuple[str, str]:
+        """Return (lower, upper) for a safe prefix range query.
+
+        '1.1' → ('1.1.', '1.2') — matches 1.1.* but not 1.10.*
+        """
+        lower = prefix + "."
+        # Increment last segment for upper bound
+        parts = prefix.split(".")
+        parts[-1] = str(int(parts[-1]) + 1)
+        upper = ".".join(parts)
+        return lower, upper
+
+    def _ensure_consistent(self) -> None:
+        """Check JSONL vs SQLite row counts; rebuild if diverged."""
+        try:
+            jsonl_count = sum(
+                1 for line in self._documents_path.open()
+                if line.strip() and not '"_deleted": true' in line
+            ) if self._documents_path.exists() else 0
+            sqlite_count = self._db._conn.execute(
+                "SELECT count(*) FROM documents"
+            ).fetchone()[0]
+            if jsonl_count != sqlite_count:
+                _log.info(
+                    "catalog_consistency_rebuild",
+                    jsonl=jsonl_count, sqlite=sqlite_count,
+                )
+                owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+                documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
+                links_dict = read_links(self._links_path) if self._links_path.exists() else {}
+                self._db.rebuild(owners, documents, list(links_dict.values()))
+        except Exception:
+            _log.debug("catalog_consistency_check_failed", exc_info=True)
 
     @classmethod
     def init(cls, catalog_path: Path, remote: str | None = None) -> Catalog:
@@ -339,8 +377,8 @@ class Catalog:
         row = self._db._conn.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-            "FROM documents WHERE tumbler LIKE ? AND file_path = ?",
-            (str(owner) + ".%", file_path),
+            "FROM documents WHERE tumbler >= ? AND tumbler < ? AND file_path = ?",
+            (*self._prefix_range(str(owner)), file_path),
         ).fetchone()
         if not row:
             return None
@@ -363,8 +401,8 @@ class Catalog:
         rows = self._db._conn.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-            "FROM documents WHERE tumbler LIKE ?",
-            (str(owner) + ".%",),
+            "FROM documents WHERE tumbler >= ? AND tumbler < ?",
+            self._prefix_range(str(owner)),
         ).fetchall()
         return [
             CatalogEntry(

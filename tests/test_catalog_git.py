@@ -120,14 +120,16 @@ class TestPull:
         owner = cat.register_owner("test", "curator")
         doc = cat.register(owner, "paper.pdf", content_type="paper")
 
-        # Create fresh Catalog pointing at same dir with new DB
+        # Fresh Catalog with new DB auto-rebuilds from JSONL on construction
         cat2 = Catalog(tmp_path / "catalog", tmp_path / "catalog" / ".catalog2.db")
-        # Before pull/rebuild, the new DB has no data
-        assert cat2.resolve(doc) is None
-        cat2.pull()
         entry = cat2.resolve(doc)
         assert entry is not None
         assert entry.title == "paper.pdf"
+
+        # pull() also works (triggers rebuild again — idempotent)
+        cat2.pull()
+        entry2 = cat2.resolve(doc)
+        assert entry2 is not None
 
 
 class TestCatalogPath:
