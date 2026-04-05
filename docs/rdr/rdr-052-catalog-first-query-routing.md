@@ -81,25 +81,34 @@ def query(
     # New: catalog routing params
     author: str = "",
     content_type: str = "",
-    follow_links: str = "",  # link type: "cites", "implements", etc.
+    follow_links: str = "",  # any link type string (open set per RDR-050)
     depth: int = 1,
+    subtree: str = "",  # tumbler prefix — scope to all descendants (RF-6/RF-7)
 ) -> str:
 ```
 
 **Routing logic** (deterministic, no LLM):
 
-1. If `author` or `content_type` provided → `catalog_search` first → extract `physical_collection` values → scoped vector search
-2. If `follow_links` provided → for each result, `catalog_links(link_type=follow_links, depth=depth)` → include linked documents in results
-3. If no catalog params → broad vector search (current behavior, unchanged)
+1. If `subtree` provided → `descendants(subtree)` query → extract `physical_collection` values from all documents under that tumbler prefix → scoped vector search. This is the ltree `@>` equivalent. Replaces `catalog_resolve` for owner/repo scoping.
+2. If `author` or `content_type` provided → `catalog_search` first → extract `physical_collection` values → scoped vector search
+3. If `follow_links` provided → for each result, `catalog_links(link_type=follow_links, depth=depth)` → extract `physical_collection` from `result["nodes"]` (post-RDR-051 `{nodes, edges}` response format) → include linked documents in results. Accepts any link type string — the open set from RDR-050.
+4. If no catalog params → broad vector search (current behavior, unchanged)
+
+Routing params combine: `query(question="...", author="Fagin", subtree="1.2")` scopes to Fagin's papers under owner 1.2.
 
 **Collection extraction** moves from skill markdown into Python:
 ```python
+# From catalog_search results:
 collections = {e.physical_collection for e in catalog_entries if e.physical_collection}
+# From catalog_links results (post-RDR-051 format):
+for node in link_result.get("nodes", []):
+    if node.get("physical_collection"):
+        collections.add(node["physical_collection"])
 if collections:
     corpus = ",".join(collections)
 ```
 
-This is 3 lines of Python replacing 15 lines of natural language instructions.
+This is Python replacing 15 lines of natural language instructions.
 
 ### Component 2: Pre-Built Plan Templates
 
@@ -113,7 +122,7 @@ Seed the T2 plan library with deterministic templates for common query patterns.
 | `cross-corpus-compare` | "compare X in A vs B" | `search(corpus=A)` + `search(corpus=B)` → `compare` |
 | `type-scoped-search` | "RDR about", "papers on", "code for" | `catalog_search(content_type=$TYPE)` → `search(scoped)` |
 
-Templates are seeded at `nx catalog setup` time. They have no TTL — they're structural, not cached results.
+Templates are seeded at `nx catalog setup` time via `plan_search` + `plan_save` — check existence first, skip if already present (idempotent). They have no TTL — they're structural, not cached results. Re-running `nx catalog setup` does not duplicate templates.
 
 ### Component 3: Simplified `/nx:query` Skill
 
@@ -121,29 +130,35 @@ The skill becomes a thin dispatcher with three paths:
 
 ```
 Path 1 — Single-tool (80% of queries):
-  Question has catalog handles (author, type, links) →
+  Skill detects catalog handles via explicit params OR catalog_search probe →
   Call enhanced `query` MCP directly → present results → done
 
 Path 2 — Template match (15% of queries):
-  Question matches a pre-built template →
+  Question matches a pre-built template (keyword + structure signals) →
   Execute template steps deterministically (no LLM) → present results → done
 
 Path 3 — Novel analytical pipeline (5% of queries):
   Question requires extract/compare/generate →
-  Dispatch query-planner agent → execute plan → auto-save on success
+  Dispatch query-planner agent → execute plan →
+  Skill calls plan_save on success (auto-cache, no user prompt)
 ```
 
-**Removed**: "Save this plan?" prompt. Successful novel plans auto-save to T2 with `outcome="success"` and TTL 30 days. The plan library is a cache, not a curated collection.
+**Catalog handle detection** (Path 1 routing): The skill uses a two-stage approach:
+1. **Explicit params**: User passes `--author`, `--type`, `--subtree` via the MCP tool directly. Deterministic, zero ambiguity.
+2. **Catalog probe**: For natural-language questions, the skill calls `catalog_search(query=question, limit=1)`. If results are returned with high-confidence title match, route through catalog. If no results, fall through to Path 2/3. This avoids the false-negative problem where "What did Fagin write?" contains no keyword "author" — the catalog probe finds Fagin as an author field match.
+
+**Removed**: "Save this plan?" prompt. The skill's Path 3 calls `plan_save()` after successful planner execution. The plan library is a cache, not a curated collection.
 
 **Removed**: Manual collection extraction logic (15 lines of markdown instructions). Pushed to MCP.
 
 **Removed**: T1 scratch round-trips for single-step queries. The enhanced `query` tool returns results directly.
 
-### Component 4: Auto-Cache for Novel Plans
+### Component 4: Auto-Cache for Novel Plans (Skill Layer)
 
-When the query-planner agent generates a novel plan and execution succeeds:
+Auto-cache lives in the **skill** (Path 3), not the MCP server. The skill calls `plan_save()` — a T2 MCP tool — after the query-planner agent returns a successful plan and execution completes:
 
 ```python
+# In /nx:query skill, Path 3, after successful execution:
 plan_save(
     query=original_question,
     plan_json=plan,
@@ -153,9 +168,11 @@ plan_save(
 )
 ```
 
-No user prompt. No confirmation. Plans are cheap to store and expire naturally.
+No user prompt. No confirmation. Plans are cheap to store and expire naturally. When a cached plan expires after 30 days, the next similar query re-dispatches the planner — a graceful degradation, not a failure. The user sees slightly higher latency (~15s vs ~2s) until the plan is re-cached.
 
 On next similar query, `plan_search` finds the cached plan → skill skips the planner agent → executes cached plan directly. The planner is only called once per novel pattern.
+
+**Why skill, not MCP**: `plan_save()` is a T2 MCP tool callable from conversation/skill context. The MCP server layer has no access to T2 and no knowledge of plan JSON structure. The auto-cache decision (was execution successful?) and the plan JSON both originate in the skill's execution context.
 
 ## Explicitly Deferred
 
@@ -185,38 +202,42 @@ Multi-step analytical pipelines need inter-step state (extract results feed into
 ## Success Criteria
 
 - [ ] `query(question="schema mappings", author="Fagin")` returns scoped results in one MCP call
-- [ ] `query(question="...", follow_links="cites")` enriches results with cited documents
-- [ ] Pre-built templates seeded at `nx catalog setup`
+- [ ] `query(question="...", subtree="1.1")` scopes to all descendants of owner 1.1
+- [ ] `query(question="...", follow_links="cites")` enriches results with cited documents (using `{nodes, edges}` response)
+- [ ] Tumbler index on documents table: `idx_documents_tumbler`
+- [ ] `descendants()`, `ancestors()`, `lca()` helpers implemented and tested
+- [ ] Pre-built templates seeded at `nx catalog setup` (idempotent — no duplicates on re-run)
 - [ ] `/nx:query` routes simple questions to enhanced `query` MCP (no agent dispatch)
 - [ ] `/nx:query` matches template patterns before falling back to planner
-- [ ] Novel plans auto-saved on success (no user prompt)
-- [ ] Cached plans auto-expire after 30 days
+- [ ] Novel plans auto-saved by skill on success (no user prompt) — `plan_save()` in Path 3
+- [ ] Cached plans auto-expire after 30 days (graceful degradation to planner)
 - [ ] Query planner agent dispatched only for multi-step analytical pipelines
+- [ ] Path routing decision verifiable: 5 reference questions correctly routed in tests
 - [ ] End-to-end latency for scoped search: <2s (vs current ~15s with planner)
 
 ## Open Questions
 
-1. **Template matching precision**: Should the skill use keyword signals ("author", "cites") or ask the LLM to classify the question type? Keyword signals are faster but may miss edge cases.
+1. ~~**Template matching precision**~~: **RESOLVED** — Two-stage approach: explicit params for programmatic use, catalog probe (`catalog_search(query=question, limit=1)`) for natural-language questions. Avoids the "Fagin has no keyword author" problem by letting the catalog itself detect metadata matches. See Component 3.
 2. **Auto-cache scope**: Should ALL successful query executions auto-cache, or only planner-generated plans? Auto-caching single-tool queries is wasteful (they're already fast). Proposal: only cache plans with 2+ steps.
 3. **Follow-links result format**: Should `follow_links` results be interleaved with search results or returned in a separate section? Interleaving risks confusing relevance ranking.
-4. **Dynamic link types**: Link types are an open set — the API accepts arbitrary strings, and agents may create types beyond the current 7 (`cites`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`, `implements`). The enhanced `query` tool's `follow_links` param must accept any string, not a fixed enum. Pre-built templates reference specific types (`cites`, `implements`) — should there be a generic "follow any link" template, or should the planner handle novel link types? Concept nodes (deferred Layer 3) would introduce `about` links; `derived_from` is proposed in RDR-050 RF-10. The routing layer must not hardcode link vocabulary.
+4. ~~**Dynamic link types**~~: **RESOLVED** — per RDR-050 resolution: fixed set in CLI (`click.Choice`), arbitrary strings in API. The `follow_links` param accepts any string. Pre-built templates cover common types; the planner handles novel types via Path 3. The routing layer does not hardcode link vocabulary.
 
 ## Implementation Plan
 
 ### Phase 1: MCP Layer (src/nexus/)
 
-1. **Enhance `query` MCP tool** (`mcp_server.py`): add `author`, `content_type`, `follow_links`, `depth` params with internal catalog routing. Internalize collection extraction from catalog results.
-2. **Seed pre-built plan templates** (`commands/catalog.py` setup command): insert 5 templates into T2 plan library at `nx catalog setup` time.
-3. **Auto-cache logic** (`mcp_server.py` or new `query_cache.py`): `plan_save` on successful novel plan execution with TTL 30 days, no user prompt.
-4. **Tests**: unit tests for enhanced `query` routing (catalog-scoped vs broad), template seeding, auto-cache lifecycle.
+1. **Tumbler hierarchy infrastructure** (`catalog/catalog_db.py`): add `CREATE INDEX idx_documents_tumbler ON documents(tumbler)`. Add `descendants(prefix)`, `ancestors(tumbler)`, `lca(t1, t2)` helpers to `catalog.py` or `tumbler.py`.
+2. **Enhance `query` MCP tool** (`mcp_server.py`): add `author`, `content_type`, `follow_links`, `depth`, `subtree` params with internal catalog routing. Internalize collection extraction from catalog results (using post-RDR-051 `{nodes, edges}` response format for `catalog_links`).
+3. **Seed pre-built plan templates** (`commands/catalog.py` setup command): insert 5 templates into T2 plan library at `nx catalog setup` time. Idempotent: `plan_search` before `plan_save`, skip if exists.
+4. **Tests**: unit tests for enhanced `query` routing (catalog-scoped vs broad, subtree scoping), tumbler hierarchy helpers, template seeding idempotency.
 
 ### Phase 2: Plugin Layer (nx/)
 
-5. **Simplify `/nx:query` skill** (`nx/skills/query/SKILL.md`): three-path dispatch (single-tool / template / planner). Remove manual collection extraction instructions. Remove "save plan?" prompt.
+5. **Simplify `/nx:query` skill** (`nx/skills/query/SKILL.md`): three-path dispatch (single-tool / template / planner). Remove manual collection extraction instructions. Remove "save plan?" prompt. Add auto-cache: Path 3 calls `plan_save()` on successful planner execution (TTL 30 days).
 6. **Update query-planner agent** (`nx/agents/query-planner.md`): reduce scope to exception-path. Add note that simple scoped queries go through enhanced `query` MCP directly. Update few-shot examples to emphasize catalog-first patterns.
 7. **Update analytical-operator agent** (`nx/agents/analytical-operator.md`): no functional changes, but update references to the query pipeline flow.
-8. **Update orchestrator agent** (`nx/agents/orchestrator.md`): route simple search questions to enhanced `query` MCP, not `/nx:query` skill.
-9. **Update SubagentStart hook** (`nx/hooks/scripts/subagent-start.sh`): update `query` tool signature in the nx Storage Tools block to show new params (`author`, `content_type`, `follow_links`, `depth`).
+8. **Update orchestrator agent** (`nx/agents/orchestrator.md`): when the task is a simple search question (no extract/compare/generate signals), call enhanced `query` MCP with appropriate params instead of dispatching `/nx:query` skill. Decision: if the question can be answered by a single `query()` call with catalog params, use it directly. If it needs multi-step analysis, dispatch the skill.
+9. **Update SubagentStart hook** (`nx/hooks/scripts/subagent-start.sh`): update `query` tool signature in the nx Storage Tools block to show new params (`author`, `content_type`, `follow_links`, `depth`, `subtree`).
 10. **Update related skills** that reference the query pipeline:
     - `nx/skills/research-synthesis/SKILL.md` — reference enhanced `query` for scoped search
     - `nx/skills/knowledge-tidying/SKILL.md` — reference enhanced `query` for dedup checks
@@ -284,6 +305,8 @@ Full audit of the current query pipeline implementation:
 | Simple scoped search | 13 | 2 | 85% |
 | Citation traversal | 15 | 2 | 87% |
 | Analytical pipeline | 14 | 9-11 | 21-36% |
+
+*Counting: each MCP tool call = 1 crossing, each agent dispatch = 2 (relay out + result back), each T1 scratch round-trip = 2 (write + read). Path 1 (single-tool): user→skill + skill→MCP = 2. Path 3 retains planner + operator dispatches.*
 
 **Feedback loops**: The plan library auto-save is the key missing positive loop — currently broken because the save prompt is always declined (RF-3). Auto-cache repairs this. **Missing feedback**: no routing quality signal. The system cannot distinguish 10 relevant results from 10 tangential results. No user satisfaction signal, no A/B comparison between routing strategies.
 
