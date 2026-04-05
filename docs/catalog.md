@@ -83,13 +83,18 @@ After `nx enrich`, run `nx catalog setup` again (or `nx catalog generate-links`)
 
 ## Agent use
 
-Agents access the catalog through MCP tools. The primary workflow:
+Agents access the catalog through the enhanced `query` MCP tool, which handles catalog routing internally:
 
-1. `catalog_search(query="topic")` — discover which documents and collections are relevant
-2. `catalog_links(tumbler="1.8.14", direction="in", link_type="cites")` — traverse the citation graph
-3. `search(query="topic", corpus="docs__collection-name")` — search the specific collection
+```
+query(question="schema mappings", author="Fagin")           # author-scoped
+query(question="indexing pipeline", content_type="code")     # type-scoped
+query(question="architecture", subtree="1.1")                # subtree-scoped
+query(question="related work", follow_links="cites")         # citation-enriched
+```
 
-The `/nx:query` skill automates this as a multi-step plan: catalog search → link traversal → scoped semantic search → summarize.
+For simple scoped queries, `query()` with catalog params is a single MCP call — no agent dispatch needed. For complex analytical queries (compare, extract, generate), the `/nx:query` skill orchestrates multi-step plans via three-path dispatch: Path 1 (single `query()` call) → Path 2 (template match) → Path 3 (planner agent).
+
+Individual catalog MCP tools (`catalog_search`, `catalog_links`, `catalog_resolve`) are still available for direct metadata inspection and graph traversal.
 
 Agents also create links during their work — the debugger creates `relates` links between findings, the developer creates `implements` links to RDRs, the knowledge-tidier creates `supersedes` links when consolidating documents.
 

@@ -72,7 +72,9 @@ nx catalog show "auth module"  # full entry with all links
 nx catalog links "paper X"     # explore the citation/implementation graph
 ```
 
-The catalog tracks every indexed document and the relationships between them. It's populated automatically when you index repos and PDFs. Run `setup` once to backfill from your existing collections.
+The catalog tracks every indexed document and the relationships between them. It's populated automatically when you index repos and PDFs. Run `setup` once to backfill from your existing collections and seed plan templates.
+
+The enhanced `query` MCP tool uses catalog metadata for scoped search — `query(question="...", author="Fagin")` searches only that author's collections in a single call.
 
 If you use cloud mode (ChromaDB Cloud), add a git remote so the catalog survives disk loss:
 

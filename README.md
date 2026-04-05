@@ -27,7 +27,7 @@ nx memory put --project myapp --title "DB choice"  "Chose Postgres over SQLite f
 nx store put --collection knowledge__myapp "API rate limit is 10k/min per the vendor docs"
 ```
 
-**Analytical queries.** Go beyond simple search with multi-step retrieval and analysis. The `/nx:query` skill decomposes complex questions into plans that search across corpora, extract structured data, compare findings, and generate evidence-grounded summaries.
+**Analytical queries.** The `query` MCP tool handles catalog-aware scoped search in a single call — `query(question="...", author="Fagin")` searches only that author's collections. For complex multi-step analysis (compare, extract, generate), the `/nx:query` skill routes through three paths: direct query, template match, or planner dispatch.
 
 ```bash
 # Filter indexed PDFs by bibliographic metadata

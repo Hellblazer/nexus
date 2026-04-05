@@ -34,7 +34,7 @@ T2 is the persistent local layer that bridges sessions. Notes, project state, an
 - **Developer notes** — hypotheses, findings, decisions-in-progress via `nx memory put`
 - **Project memory** — design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. See [Memory and Tasks](memory-and-tasks.md).
 - **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr-nexus-integration.md).
-- **Plan library** — saved query execution plans with project scoping and FTS5 search. The `/nx:query` skill saves successful multi-step plans for reuse. Access via `plan_save` / `plan_search` MCP tools.
+- **Plan library** — saved query execution plans with project scoping, FTS5 search, and optional TTL. The `/nx:query` skill auto-caches novel multi-step plans (2+ steps) with a 30-day TTL on success — no user prompt. Five builtin templates are seeded at `nx catalog setup` with no TTL (permanent). Access via `plan_save(ttl=30)` / `plan_search` MCP tools.
 - **Agent relay** — context passed between agent invocations
 - **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
 

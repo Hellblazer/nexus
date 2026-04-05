@@ -45,7 +45,7 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 
 **Three storage tiers:**
 - T1: `chromadb.EphemeralClient` (or HTTP server via SessionStart hook) — session scratch (`nx scratch`)
-- T2: SQLite + FTS5 — persistent memory (`nx memory`) + plan library (`plan_save`/`plan_search` MCP tools)
+- T2: SQLite + FTS5 — persistent memory (`nx memory`) + plan library (`plan_save(ttl=30)`/`plan_search` MCP tools, 5 builtin templates seeded at `nx catalog setup`)
 - T3: `chromadb.PersistentClient` + local ONNX embeddings (local mode, zero-config) OR `chromadb.CloudClient` + `VoyageAIEmbeddingFunction` (cloud mode) — permanent knowledge (`nx store`, `nx search`)
 
 **T3 ChromaDB database**: a single `chromadb.CloudClient` database (`CHROMA_DATABASE` value, e.g. `nexus`). All collection prefixes coexist in one database:
@@ -70,7 +70,7 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 - `implements` — manual or by developer agent linking insights to RDRs
 - `created_by` tracks provenance: which agent or user created each link
 
-**Two graph views**: `catalog_links` MCP tool returns live-document links only. `catalog_link_query` returns all links including orphans (for audit). The `/nx:query` skill orchestrates catalog-aware multi-step retrieval (author queries, citation traversal, provenance chains).
+**Two graph views**: `catalog_links` MCP tool returns live-document links only. `catalog_link_query` returns all links including orphans (for audit). The `query` MCP tool has catalog-aware routing (`author`, `content_type`, `subtree`, `follow_links`, `depth` params) for scoped search in a single call. The `/nx:query` skill orchestrates multi-step analytical queries via three-path dispatch (single query → template match → planner).
 
 **T3 expire guard**: always filter `ttl_days > 0 AND expires_at != "" AND expires_at < now` — the `expires_at != ""` guard is mandatory: permanent entries use `expires_at=""` which sorts before ISO timestamps and would be incorrectly deleted by a 2-condition guard.
 
@@ -81,9 +81,9 @@ src/nexus/           # Core package
   cli.py             # Click entry point; registers all command groups
   commands/          # One file per CLI command group (index, search, memory, scratch, store, collection, config, hooks, doctor, enrich, catalog)
   catalog/           # Xanadu-inspired document catalog (JSONL truth + SQLite cache)
-    catalog.py       # Core: link(), link_query(), graph(), delete_document(), link_audit()
-    catalog_db.py    # SQLite schema + FTS5 + UNIQUE link constraint
-    tumbler.py       # Hierarchical addresses + JSONL readers with resilience
+    catalog.py       # Core: link(), link_query(), graph(), delete_document(), link_audit(), descendants(), resolve_chunk()
+    catalog_db.py    # SQLite schema + FTS5 + UNIQUE link constraint + descendants() SQL helper
+    tumbler.py       # Hierarchical addresses (depth, ancestors, lca) + JSONL readers with resilience
     link_generator.py # Auto-generate citation + code-RDR links from metadata
   db/                # t1.py, t2.py, t3.py — tier implementations; local_ef.py — local ONNX embeddings
   indexer.py         # Repo indexing pipeline (classify → chunk → embed → store)
