@@ -128,8 +128,36 @@ def enrich(collection: str, delay: float, limit: int) -> None:
                 year=bib.get("year"),
                 venue=bib.get("venue"),
             )
+            _catalog_enrich_hook(title=title, bib_meta=bib)
 
     click.echo(
         f"Done: enriched {enriched_chunks} chunks across {enriched_titles} titles; "
         f"{skipped_titles} titles had no Semantic Scholar match."
     )
+
+
+def _catalog_enrich_hook(title: str, bib_meta: dict) -> None:
+    """Update catalog entry with bib metadata. Silently skipped if absent."""
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return
+
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        entries = cat.find(title, content_type="paper")
+        if entries:
+            cat.update(
+                entries[0].tumbler,
+                author=bib_meta.get("authors", ""),
+                year=bib_meta.get("year", 0),
+                meta={
+                    "venue": bib_meta.get("venue", ""),
+                    "bib_semantic_scholar_id": bib_meta.get("semantic_scholar_id", ""),
+                    "citation_count": bib_meta.get("citation_count", 0),
+                },
+            )
+    except Exception:
+        pass  # Never propagate

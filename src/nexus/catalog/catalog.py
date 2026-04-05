@@ -379,7 +379,32 @@ class Catalog:
             for r in rows
         ]
 
-    # ── Links ───────────────────────────────────────────────────��──────────
+    def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
+        """Look up catalog entry by T3 doc_id stored in meta.doc_id."""
+        row = self._db._conn.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "FROM documents WHERE json_extract(metadata, '$.doc_id') = ?",
+            (doc_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return CatalogEntry(
+            tumbler=Tumbler.parse(row[0]),
+            title=row[1],
+            author=row[2],
+            year=row[3],
+            content_type=row[4],
+            file_path=row[5],
+            corpus=row[6],
+            physical_collection=row[7],
+            chunk_count=row[8],
+            head_hash=row[9],
+            indexed_at=row[10],
+            meta=json.loads(row[11]) if row[11] else {},
+        )
+
+    # ── Links ──────────────────────────────────────────────────────────────
 
     def link(
         self,
