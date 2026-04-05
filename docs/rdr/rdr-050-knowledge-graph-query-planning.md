@@ -138,7 +138,7 @@ Find catalog entries by metadata. Supports both FTS5 free-text and structured SQ
 ##### catalog_links
 Navigate the link graph from a tumbler. Maps directly to `catalog_links` MCP tool which calls `Catalog.graph()`.
 
-**Required params**: `tumbler` — starting point. **Optional params**: `direction` (`in`/`out`/`both`, default `both`), `type` (link type filter), `depth` (default 1).
+**Required params**: `tumbler` — starting point. **Optional params**: `direction` (`in`/`out`/`both`, default `both`), `link_type` (link type filter), `depth` (default 1).
 
 **Fanout rule**: When `inputs` references a prior step that returned a list (e.g., `catalog_search` results), the skill extracts the **first entry's tumbler** and uses it. If the planner needs to traverse from multiple starting points, it must use separate `catalog_links` steps with explicit `tumbler` params.
 
@@ -146,8 +146,8 @@ Navigate the link graph from a tumbler. Maps directly to `catalog_links` MCP too
 
 **Examples**:
 ```json
-{"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "type": "cites", "depth": 2}}
-{"step": 2, "operation": "catalog_links", "params": {"tumbler": "1.2.5", "direction": "out", "type": "implements"}}
+{"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "link_type": "cites", "depth": 2}}
+{"step": 2, "operation": "catalog_links", "params": {"tumbler": "1.2.5", "direction": "out", "link_type": "implements"}}
 ```
 
 ##### catalog_resolve
@@ -180,7 +180,7 @@ The skill extracts distinct `physical_collection` values from step 1's results a
 ```json
 {"steps": [
   {"step": 1, "operation": "catalog_search", "params": {"query": "Inverting Schema Mappings"}},
-  {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "type": "cites", "depth": 2}},
+  {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "link_type": "cites", "depth": 2}},
   {"step": 3, "operation": "search", "search_query": "novel contribution", "corpus": "$step_2.collections"},
   {"step": 4, "operation": "summarize", "inputs": "$step_3", "params": {"mode": "short"}}
 ]}
@@ -191,8 +191,8 @@ The skill extracts `physical_collection` from the link targets (`to` tumblers re
 ```json
 {"steps": [
   {"step": 1, "operation": "catalog_search", "params": {"file_path": "src/nexus/chunker.py", "owner": "1.1"}},
-  {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "out", "type": "implements"}},
-  {"step": 3, "operation": "catalog_links", "inputs": "$step_2", "params": {"direction": "out", "type": "cites"}},
+  {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "out", "link_type": "implements"}},
+  {"step": 3, "operation": "catalog_links", "inputs": "$step_2", "params": {"direction": "out", "link_type": "cites"}},
   {"step": 4, "operation": "extract", "inputs": "$step_3", "params": {"template": {"title": "", "key_contribution": ""}}}
 ]}
 ```
@@ -347,7 +347,7 @@ Link search designed to be "free" — sublinear scaling via enfilade algorithms.
 ### RF-5: Query Planner Capabilities Audit (2026-04-04)
 **Classification**: Verified — Codebase Analysis | **Confidence**: HIGH
 
-Query planner supports 6 operations (search, extract, summarize, rank, compare, generate). Plans are sequential JSON, dispatched by `/nx:query` skill via T1 scratch. Plan library is T2 FTS5. Adding 3 catalog operations (catalog_search, catalog_traverse, catalog_resolve) is additive — same relay format, same T1 scratch bus, same plan JSON structure.
+Query planner supports 6 operations (search, extract, summarize, rank, compare, generate). Plans are sequential JSON, dispatched by `/nx:query` skill via T1 scratch. Plan library is T2 FTS5. Adding 3 catalog operations (catalog_search, catalog_links, catalog_resolve) is additive — same relay format, same T1 scratch bus, same plan JSON structure.
 
 ### RF-6: FEBE Search Protocol (2026-04-04)
 **Classification**: Verified — Literary Machines Ch. 4 + Java implementation | **Confidence**: HIGH
@@ -423,4 +423,4 @@ RDR-049 was fully implemented on 2026-04-05 (18 beads, 5 phases, ~180 tests, PR 
 **What remains for Layer 2:**
 The 8 MCP catalog tools (`catalog_search`, `catalog_show`, `catalog_list`, `catalog_register`, `catalog_update`, `catalog_link`, `catalog_links`, `catalog_resolve`) are the dispatch targets. The query planner needs 3 new plan step types that call these tools. The `/nx:query` skill's operator relay pattern already supports adding new operations — the catalog operations follow the same `T1 scratch → dispatch → harvest` pattern as existing `search`/`extract`/`summarize` steps.
 
-**Key architectural insight:** The catalog's `graph()` method with `depth`, `direction`, and `link_type` parameters maps directly to the `catalog_traverse` plan operation. No adapter needed — the MCP `catalog_links` tool already exposes this.
+**Key architectural insight:** The catalog's `graph()` method with `depth`, `direction`, and `link_type` parameters maps directly to the `catalog_links` plan operation. No adapter needed — the MCP `catalog_links` tool already exposes this.
