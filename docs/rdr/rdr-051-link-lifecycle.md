@@ -249,15 +249,17 @@ Loses provenance (`created_at`, `created_by`). Links evolve as understanding dee
 Depends on: RDR-049 (closed), RDR-050 (accepted).
 
 Estimated order:
-1. Schema: add UNIQUE constraint + `(created_by, link_type)` composite index + standardize `created`→`created_at`
-2. `link()` idempotent upsert with merge semantics (RF-6, RF-8) + `link_if_absent()` for generators
-3. `link_query()` + `catalog_link_query` MCP + `nx catalog link-query` CLI
-4. `bulk_unlink()` + `catalog_link_bulk` MCP + `nx catalog link-bulk-delete` CLI
-5. `delete_document()` + `nx catalog delete` CLI (RF-9)
-6. `link_audit()` + `catalog_link_audit` MCP + `nx catalog link-audit` CLI
-7. Fix `catalog_links` MCP to return nodes
-8. Update SubagentStart hook + skill references
-9. E2E test suite
+1. **Resilience first**: JSONL reader error handling — try/except + skip + log for malformed lines (GST S2)
+2. **Schema**: UNIQUE constraint on `(from_tumbler, to_tumbler, link_type)` + `(created_by, link_type)` composite index + standardize `created`→`created_at` (RF-5, RF-12)
+3. **Idempotent link()**: upsert with merge semantics (RF-6, RF-8) + `link_if_absent()` for generators + `batch_id` in meta for generator runs (GST S3)
+4. **link_query()** + `catalog_link_query` MCP (with tumbler_or_title params — GST S4) + `nx catalog link-query` CLI
+5. **bulk_unlink()** + `catalog_link_bulk` MCP + `nx catalog link-bulk-delete` CLI (with `--created-at-before` for time-range cleanup)
+6. **delete_document()** + `nx catalog delete` CLI (RF-9)
+7. **link_audit()** + `catalog_link_audit` MCP + `nx catalog link-audit` CLI (include orphans, duplicates, stale spans)
+8. **Fix graph()**: include starting node in results + fix `catalog_links` MCP to return nodes (GST S8)
+9. **MCP parity**: add tumbler_or_title resolution to catalog_link, catalog_unlink MCP tools (GST S4)
+10. Update SubagentStart hook + skill references
+11. E2E test suite
 
 ## Research Findings
 
@@ -370,3 +372,34 @@ The most common audit query `WHERE created_by='bib_enricher' AND link_type='cite
 ```sql
 CREATE INDEX IF NOT EXISTS idx_links_created_by_type ON links(created_by, link_type);
 ```
+
+### RF-13: General Systems Theory Analysis (2026-04-05)
+**Classification**: Verified — Systems Analysis | **Confidence**: HIGH
+
+Full GST analysis covering boundary definition, signal flows, feedback loops, homeostasis, entropy, emergence, hierarchy, and requisite variety. 0 critical, 8 significant, 12 observations.
+
+**Key system findings:**
+
+**Boundaries**: Seven interfaces cross the link system boundary. The MCP→Agent interface is thinner than CLI→Human (inverted hierarchy — agents have fewer capabilities than humans). The storage boundary has a naming inconsistency (`created` vs `created_at`) and dual-write atomicity risk.
+
+**Signal flows**: Creation signal has a gap between JSONL write and SQLite INSERT recoverable by `_ensure_consistent()`. Query signal loses nodes at MCP boundary (Component 10 fix). Deletion signal loses original `created_by` in tombstones. Auto-generation signal has no batch identifier for selective undo.
+
+**Feedback loops**: Positive loop (more links → better queries → more research → more links) is healthy. Negative loop (junk filtering via `created_by` → `bulk_unlink`) exists but is entirely human-triggered. **Missing**: link quality feedback (no signal when an agent follows a link to irrelevant content), generator accuracy feedback (bad links recreated on next run), stale span detection.
+
+**Homeostasis**: System recovers from most perturbations except: (1) corrupt JSONL line crashes entire `read_links()` — no skip/continue error handling; (2) content-divergence without count-divergence goes undetected by `_ensure_consistent()`.
+
+**Entropy**: Link count grows without bound. No TTL, aging, or relevance decay. Generator-created links will dominate. Orphan fraction increases over time. Anti-entropy: compact (file size only), audit (diagnostic only), git history (ultimate undo).
+
+**Emergence**: Implicit document importance from inbound link count (not computed). Title resolution errors propagate through subsequent links. Hub removal disconnects graph.
+
+**Requisite variety**: 4 query dimensions match Nelson's FEBE minus home-set (correctly deferred). Missing: batch/run identifier for generator undo, link migration for tumbler changes on re-index.
+
+**Significant findings to address in implementation:**
+
+| ID | Finding | Impact | Fix |
+|---|---|---|---|
+| S2 | JSONL readers crash on single malformed line | Data loss on corrupt file | try/except + skip + log in `read_links/read_documents/read_owners` |
+| S3 | No batch/run ID on generated links | Cannot selectively undo bad generator run | Add `batch_id` or `created_at` range to meta |
+| S4 | MCP lacks title resolution | Agents need 2+ round trips vs CLI's 1 | Add tumbler_or_title params to link MCP tools |
+| S7 | Unbounded link growth | Graph noise at scale | `last_verified` timestamp; audit flags stale |
+| S8 | graph() excludes starting node | Callers need extra catalog_show | Include starting node in results |
