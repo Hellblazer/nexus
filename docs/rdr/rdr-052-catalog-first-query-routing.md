@@ -2,8 +2,10 @@
 title: "Catalog-First Query Routing — Push Planning into MCP"
 id: RDR-052
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-04-05
+closed_date: 2026-04-05
+close_reason: implemented
 priority: P1
 author: Hal Hildebrand
 reviewed-by: self
@@ -202,25 +204,25 @@ Multi-step analytical pipelines need inter-step state (extract results feed into
 
 ## Success Criteria
 
-- [ ] `query(question="schema mappings", author="Fagin")` returns scoped results in one MCP call
-- [ ] `query(question="...", subtree="1.1")` scopes to all descendants of owner 1.1
-- [ ] `query(question="...", follow_links="cites")` enriches results with cited documents (using `{nodes, edges}` response)
-- [ ] Tumbler index on documents table: `idx_documents_tumbler`
-- [ ] `descendants()`, `ancestors()`, `lca()` helpers implemented and tested
-- [ ] Pre-built templates seeded at `nx catalog setup` (idempotent — no duplicates on re-run)
-- [ ] `/nx:query` routes simple questions to enhanced `query` MCP (no agent dispatch)
-- [ ] `/nx:query` matches template patterns before falling back to planner
-- [ ] Novel plans auto-saved by skill on success (no user prompt) — `plan_save()` in Path 3
-- [ ] Cached plans auto-expire after 30 days (graceful degradation to planner)
-- [ ] Query planner agent dispatched only for multi-step analytical pipelines
-- [ ] Path routing decision verifiable: 5 reference questions correctly routed in tests
-- [ ] End-to-end latency for scoped search: <2s (vs current ~15s with planner)
+- [x] `query(question="schema mappings", author="Fagin")` returns scoped results in one MCP call
+- [x] `query(question="...", subtree="1.1")` scopes to all descendants of owner 1.1
+- [x] `query(question="...", follow_links="cites")` enriches results with cited documents (using `{nodes, edges}` response)
+- [x] Tumbler index on documents table: `idx_documents_tumbler`
+- [x] `descendants()`, `ancestors()`, `lca()` helpers implemented and tested
+- [x] Pre-built templates seeded at `nx catalog setup` (idempotent — no duplicates on re-run)
+- [x] `/nx:query` routes simple questions to enhanced `query` MCP (no agent dispatch)
+- [x] `/nx:query` matches template patterns before falling back to planner
+- [x] Novel plans auto-saved by skill on success (no user prompt) — `plan_save()` in Path 3
+- [x] Cached plans auto-expire after 30 days (graceful degradation to planner)
+- [x] Query planner agent dispatched only for multi-step analytical pipelines
+- [x] Path routing decision verifiable: 5 reference questions correctly routed in tests
+- [x] End-to-end latency for scoped search: <2s (vs current ~15s with planner)
 
 ## Open Questions
 
 1. ~~**Template matching precision**~~: **RESOLVED** — Two-stage approach: explicit params for programmatic use, catalog probe (`catalog_search(query=question, limit=1)`) for natural-language questions. Avoids the "Fagin has no keyword author" problem by letting the catalog itself detect metadata matches. See Component 3.
-2. **Auto-cache scope**: Should ALL successful query executions auto-cache, or only planner-generated plans? Auto-caching single-tool queries is wasteful (they're already fast). Proposal: only cache plans with 2+ steps.
-3. **Follow-links result format**: Should `follow_links` results be interleaved with search results or returned in a separate section? Interleaving risks confusing relevance ranking.
+2. ~~**Auto-cache scope**~~: **RESOLVED** — Only plans with 2+ steps are cached (single-step = Path 1, already fast). Only `outcome="success"` plans are cached — partial failures are not cached to prevent 30-day poison cache.
+3. ~~**Follow-links result format**~~: **RESOLVED** — Interleaved. Linked collections are merged into the target set; results ranked by semantic distance across all collections. Documented in `query()` docstring.
 4. ~~**Dynamic link types**~~: **RESOLVED** — per RDR-050 resolution: fixed set in CLI (`click.Choice`), arbitrary strings in API. The `follow_links` param accepts any string. Pre-built templates cover common types; the planner handles novel types via Path 3. The routing layer does not hardcode link vocabulary.
 
 ## Implementation Plan
