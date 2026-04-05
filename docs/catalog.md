@@ -18,7 +18,7 @@ One command. Creates the catalog, populates it from your existing T3 collections
 
 ```bash
 nx catalog search "schema mappings"     # by title
-nx catalog search --author Fagin         # by author (from bib enrichment)
+nx catalog search "Fagin"               # matches title, author, corpus, file path
 nx catalog list                          # browse all entries
 nx catalog list --type paper             # filter by content type
 ```

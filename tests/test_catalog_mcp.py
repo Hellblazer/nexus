@@ -48,17 +48,23 @@ def _make_test_catalog(tmp_path: Path) -> Catalog:
 
 
 class TestGracefulAbsence:
-    def test_search_without_catalog(self):
+    def test_search_without_catalog(self, monkeypatch):
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
+        _reset_singletons()
         result = catalog_search("anything")
         assert isinstance(result, list)
         assert "error" in result[0]
         assert "not initialized" in result[0]["error"].lower()
 
-    def test_list_without_catalog(self):
+    def test_list_without_catalog(self, monkeypatch):
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
+        _reset_singletons()
         result = catalog_list()
         assert "error" in result[0]
 
-    def test_show_without_catalog(self):
+    def test_show_without_catalog(self, monkeypatch):
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
+        _reset_singletons()
         result = catalog_show(tumbler="1.1.1")
         assert "error" in result
 

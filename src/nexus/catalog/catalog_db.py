@@ -114,7 +114,7 @@ class CatalogDB:
 
             for prefix, o in owners.items():
                 self._conn.execute(
-                    "INSERT INTO owners (tumbler_prefix, name, owner_type, repo_hash, description) "
+                    "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (prefix, o.name, o.owner_type, o.repo_hash, o.description),
                 )

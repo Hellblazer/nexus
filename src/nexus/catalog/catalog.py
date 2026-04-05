@@ -226,7 +226,7 @@ class Catalog:
         try:
             if self._should_compact():
                 _log.info("catalog_auto_defrag")
-                self.defrag()
+                self._defrag_unlocked()
             _run_git(["git", "add", "-A"], cwd=self._dir)
             status = _run_git(["git", "status", "--porcelain"], cwd=self._dir)
             if not status.stdout.strip():
@@ -1143,6 +1143,43 @@ class Catalog:
         finally:
             self._release_lock(dir_fd)
 
+    def _defrag_unlocked(self) -> dict[str, int]:
+        """Core defrag logic — caller must hold the lock."""
+        removed = {}
+        for path in [self._owners_path, self._documents_path, self._links_path]:
+            if not path.exists():
+                continue
+            original_lines = sum(1 for line in path.open() if line.strip())
+            seen: dict[str, str] = {}
+            with path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if "owner" in obj:
+                        key = obj["owner"]
+                    elif "tumbler" in obj:
+                        key = obj["tumbler"]
+                    elif "from_t" in obj:
+                        key = f"{obj['from_t']}|{obj['to_t']}|{obj['link_type']}"
+                    else:
+                        continue
+                    seen[key] = line
+            with path.open("w") as f:
+                for line in seen.values():
+                    f.write(line + "\n")
+            removed[path.name] = original_lines - len(seen)
+            # Rebuild SQLite from defragged JSONL to stay consistent
+        owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+        documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
+        links_dict = read_links(self._links_path) if self._links_path.exists() else {}
+        self._db.rebuild(owners, documents, list(links_dict.values()))
+        return removed
+
     def defrag(self) -> dict[str, int]:
         """Deduplicate JSONL files — keep latest version of each live record.
 
@@ -1153,42 +1190,7 @@ class Catalog:
         """
         dir_fd = self._acquire_lock()
         try:
-            removed = {}
-            for path in [self._owners_path, self._documents_path, self._links_path]:
-                if not path.exists():
-                    continue
-                original_lines = sum(1 for line in path.open() if line.strip())
-                # Read all lines, keep last-write-wins (including tombstones)
-                seen: dict[str, str] = {}  # key → last json line
-                with path.open() as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        # Determine the key for dedup
-                        if "owner" in obj:
-                            key = obj["owner"]
-                        elif "tumbler" in obj:
-                            key = obj["tumbler"]
-                        elif "from_t" in obj:
-                            key = f"{obj['from_t']}|{obj['to_t']}|{obj['link_type']}"
-                        else:
-                            continue
-                        seen[key] = line
-                with path.open("w") as f:
-                    for line in seen.values():
-                        f.write(line + "\n")
-                removed[path.name] = original_lines - len(seen)
-            # Rebuild SQLite from defragged JSONL to stay consistent
-            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-            documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
-            links_dict = read_links(self._links_path) if self._links_path.exists() else {}
-            self._db.rebuild(owners, documents, list(links_dict.values()))
-            return removed
+            return self._defrag_unlocked()
         finally:
             self._release_lock(dir_fd)
 
