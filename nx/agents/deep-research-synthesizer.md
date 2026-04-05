@@ -25,6 +25,9 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
+mcp__plugin_nx_nexus__catalog_search(query="...", content_type="knowledge")
+mcp__plugin_nx_nexus__catalog_links(tumbler="...", direction="both")
+mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="deep-research-synthesizer")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -168,18 +171,21 @@ You will begin every research task by:
 4. Establishing clear success criteria for the research
 5. Define validation checkpoints for fact-checking rounds
 
-### Catalog-First Routing (when applicable)
-When the research question involves specific authors, paper titles, citation chains, provenance,
-or references ("what did Fagin write", "papers about schema mappings", "what research informed X",
-"what references this paper"):
-1. Start with `mcp__plugin_nx_nexus__catalog_search(query="...", author="...", corpus="...")` to scope to relevant collections
-2. Use `mcp__plugin_nx_nexus__catalog_links(tumbler="...", direction="in", link_type="cites")` for citation traversal
-   - Returns `{"nodes": [...], "edges": [...]}` — nodes include physical_collection for T3 resolution
-   - Only returns links to live documents (deleted docs excluded from graph)
-   - Link types: `cites` (citations), `implements-heuristic` (auto code→RDR), `supersedes`, `relates`
-3. Resolve to T3 collections via `mcp__plugin_nx_nexus__catalog_resolve(owner="...", corpus="...")`
-4. Then search those specific collections instead of blind corpus-wide search
-Skip this phase when the question is conceptual or doesn't target specific documents.
+### Catalog Discovery (always — before any T3 search)
+Start every research task by checking what the catalog already knows about the topic:
+
+1. `mcp__plugin_nx_nexus__catalog_search(query="<research topic keywords>")` — discover existing documents on this topic
+2. If results found, check their link graph: `mcp__plugin_nx_nexus__catalog_links(tumbler="<result>", direction="both")` to find related documents, citations, and prior research
+3. Use discovered `physical_collection` values to scope subsequent T3 searches instead of blind corpus-wide search
+
+For author/citation-specific questions ("what did Fagin write", "what cites X"):
+- Use `mcp__plugin_nx_nexus__catalog_search(author="...", corpus="...")` for targeted metadata search
+- Use `mcp__plugin_nx_nexus__catalog_links(tumbler="...", direction="in", link_type="cites")` for citation traversal
+  - Returns `{"nodes": [...], "edges": [...]}` — nodes include physical_collection for T3 resolution
+  - Link types: `cites`, `implements-heuristic`, `supersedes`, `relates`
+- Resolve to T3 collections via `mcp__plugin_nx_nexus__catalog_resolve(owner="...", corpus="...")`
+
+Skip catalog only if tools are not available (not injected by SubagentStart hook).
 
 ### Phase 2: Information Gathering
 You will systematically:
@@ -220,7 +226,11 @@ You will automatically:
    mcp__plugin_nx_nexus__store_put(content="# Research: {topic}\n\n{content}", collection="knowledge", title="research-{topic}-{date}", tags="research,{domain}"
 2. Create new documents in nx store when discovering substantial new topic areas
 3. Update existing documents with new insights while preserving version history
-4. Build knowledge connections by cross-referencing titles in document content
+4. **Create catalog citation links** (if catalog tools available): For each stored research document, create `cites` links to its primary sources:
+   ```
+   mcp__plugin_nx_nexus__catalog_link(from_tumbler="<research-doc-title>", to_tumbler="<source-paper-title>", link_type="cites", created_by="deep-research-synthesizer")
+   ```
+   This enriches the citation graph so future researchers can discover "what was this finding based on?"
 5. Archive outdated information with clear timestamps
 
 ### Phase 5: Quality Check and Synthesis Delivery
