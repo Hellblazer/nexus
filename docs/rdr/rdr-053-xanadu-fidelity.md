@@ -230,6 +230,27 @@ Nelson's `.0.` separator between tumbler fields serves three purposes (LM 4/20-2
 
 **Evidence basis**: Verified — LM 4/20-21 (major divider definition), LM 4/28 (examples with field forking), LM 4/32 (difference tumbler zeroes). Primary source OCR from Mixedbread xanadu store.
 
+**RF-15: Revisiting the Fixed-Depth Decision (2026-04-05)**
+
+The fixed-depth tumbler decision was made in RDR-049 when tumblers were "nice addresses for catalog entries" — before arithmetic was on the roadmap. Now that RDR-053 proposes comparison operators and span overlap detection, the question is whether the fixed-depth design should be revisited.
+
+**Arguments for adopting Nelson's `.0.` dividers:**
+- Nelson's ADD/SUBTRACT algorithm relies on `.0.` to know where field boundaries are. Without dividers, the arithmetic can't distinguish "step to next document" from "step to next owner."
+- Full Nelson arithmetic would come for free — no need to engineer around it with -1 sentinel padding.
+- Future extensibility: sub-owners (e.g., `1.0.1.2.0.42` = store 1, owner 1.2, doc 42) become possible.
+- Difference tumblers (spans) become a natural type rather than an ad-hoc construction.
+
+**Arguments for keeping fixed-depth:**
+- All current use cases (sorting, overlap, ancestors, descendants, LCA) work with tuple comparison + padding. The -1 sentinel spike passes all 10 test cases (RF-12).
+- The codebase has ~30 call sites that parse/construct tumblers. Migration is non-trivial.
+- SQL `LIKE 'prefix.%'` queries work cleanly with dot-separated integers. Zero-dividers would require `LIKE 'prefix.0.%'` everywhere.
+- The simplicity of `int.int.int[.int]` is a significant ergonomic advantage for humans reading catalog output.
+- We have no current consumer for ADD/SUBTRACT — only comparison and overlap.
+
+**Recommendation**: Keep fixed-depth for now. The -1 sentinel padding gives correct comparison for our use cases. If/when we need Nelson's full arithmetic (difference tumblers, span construction via ADD), revisit D1 at that point. The migration cost is bounded: `Tumbler.parse()` and `__str__()` are the only serialization points, and the SQL schema stores tumblers as TEXT.
+
+**Evidence basis**: Analysis of codebase (30 call sites), spike results (RF-12), primary source (LM 4/20-21, 4/33-36).
+
 ---
 
 ## Deviations Register
@@ -240,11 +261,12 @@ Every deliberate departure from Nelson's Xanadu design, with rationale and trace
 
 | | |
 |---|---|
-| **Nelson** | `.0.` between SERVER, USER, DOCUMENT, ELEMENT fields. Required because fields fork to arbitrary depth. |
+| **Nelson** | `.0.` between SERVER, USER, DOCUMENT, ELEMENT fields. Required because fields fork to arbitrary depth. Enables ADD/SUBTRACT to know field boundaries. |
 | **Nexus** | Dot-separated integer segments with no zero dividers. Fields are always exactly one digit. |
-| **Rationale** | Fixed-depth hierarchy makes dividers unnecessary. Position in tuple identifies field. Simpler parsing, simpler SQL (LIKE prefix). |
-| **Consequence** | Cannot support intra-field forking (e.g., sub-servers). Acceptable — nexus has no sub-server concept. |
-| **RF** | RF-14 |
+| **Rationale** | Fixed-depth hierarchy makes dividers unnecessary for parsing. Position in tuple identifies field. Simpler SQL (LIKE prefix), simpler human readability. |
+| **Consequence** | Cannot support intra-field forking. Cannot implement Nelson's full ADD/SUBTRACT (needs field boundaries). Comparison operators work via -1 sentinel padding (RF-12). |
+| **Re-evaluated** | RF-15 (2026-04-05): Revisited after arithmetic entered scope. Decision: keep fixed-depth — comparison suffices for current use cases. Revisit if ADD/SUBTRACT needed. Migration bounded (~30 call sites, TEXT schema). |
+| **RF** | RF-14, RF-15 |
 
 ### D2: No Version Segment
 
