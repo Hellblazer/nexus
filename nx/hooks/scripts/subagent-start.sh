@@ -142,7 +142,7 @@ OPERATORS
 fi
 
 # Catalog awareness — inject only for catalog-relevant tasks
-if echo "$TASK_TEXT" | grep -qiE "author|cit(e|ation|es|ed)|who wrote|what did.*write|papers? (by|about)|provenance|corpus|collection|tumbler|what research|informed by|based on|relationship|links? (from|to)|referenc|follow.on|build.on|what (implements|supersedes)|link (audit|query|graph)|orphan|catalog|rdr.*(close|accept|show|gate|research)|close.*rdr|accept.*rdr|supersed|consolidat|tidy|knowledge|research|synthesiz|archive|store_put|store put"; then
+if echo "$TASK_TEXT" | grep -qiE "author|cit(e|ation|es|ed)|who wrote|what did.*write|papers? (by|about)|provenance|corpus|collection|tumbler|what research|informed by|based on|relationship|links? (from|to)|referenc|follow.on|build.on|what (implements|supersedes)|link (audit|query|graph)|orphan|catalog|rdr.*(close|accept|show|gate|research)|close.*rdr|accept.*rdr|supersed|consolidat|tidy|knowledge|research|synthesiz|archive|store_put|store put|debug.*finding|root.cause|prevention.pattern|architecture.*map|pattern.*catalog|architect.*decision|risk.assess|insight.*developer|analysis.*deep|analyz.*codebas"; then
   CATALOG_PATH="${NEXUS_CATALOG_PATH:-$HOME/.config/nexus/catalog}"
   if [[ -d "$CATALOG_PATH/.git" && -f "$CATALOG_PATH/documents.jsonl" ]]; then
     cat <<'CATALOG'

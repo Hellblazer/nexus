@@ -25,6 +25,8 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
+mcp__plugin_nx_nexus__catalog_search(query="...", content_type="knowledge")
+mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="deep-analyst")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -164,6 +166,11 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Hypothesis Results**: Document with confidence levels
 - **Relationship Maps**: Include as `--tags` in nx store documents
 - **Recommendations**: Include in output as "Recommended Next Step" for caller to dispatch
+- **Catalog Links** (if catalog tools available): After storing analysis findings:
+  1. `mcp__plugin_nx_nexus__catalog_search(query="{component} analysis architecture debug")` — find prior analyses, architecture maps, or debug findings on the same component
+  2. For each related document: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="{this-analysis-title}", to_tumbler="{related-title}", link_type="relates", created_by="deep-analyst")`
+  This connects the analysis graph across agents — deep-analyst findings link to debugger findings and codebase-analyzer architecture maps on the same components.
+  Skip silently if catalog tools not available.
 - **Analysis Chain**: Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for hypothesis-driven investigation of complex behaviors.
 
 **When to Use**: Unexplained system behavior, performance mysteries, multi-component interactions, root cause analysis.
