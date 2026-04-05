@@ -57,7 +57,7 @@ so a worktree and its parent produce identical collection names.
 Additionally, markdown files under RDR paths (default: `docs/rdr/`) are indexed into a
 separate `rdr__<name>-<hash8>` collection via the batch markdown indexer.
 
-**Note**: `voyage-context-3` uses Contextualized Chunk Embeddings (CCE), which require 2+ chunks per batch. Single-chunk files fall back to `voyage-4`. Both models produce 1024-dimensional embeddings, so mixed-model collections stay compatible.
+**Note**: `voyage-context-3` uses Contextualized Chunk Embeddings (CCE). Single-chunk documents are embedded via `contextualized_embed(inputs=[[chunk]])` — no `voyage-4` fallback. Both index and query use `voyage-context-3` for all CCE collections (`docs__*`, `rdr__*`, `knowledge__*`).
 
 ## Code Chunking
 

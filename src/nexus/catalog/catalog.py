@@ -153,18 +153,19 @@ class Catalog:
         git_dir = catalog_path / ".git"
         if remote and not git_dir.exists():
             # Clone from remote if catalog doesn't exist locally (new machine)
-            try:
-                import subprocess
-                result = subprocess.run(
-                    ["git", "clone", remote, str(catalog_path)],
-                    capture_output=True, text=True, timeout=30,
+            import subprocess as _sp
+            result = _sp.run(
+                ["git", "clone", remote, str(catalog_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                _log.info("catalog_cloned_from_remote", remote=remote)
+                db_path = catalog_path / ".catalog.db"
+                return cls(catalog_path, db_path)
+            else:
+                raise RuntimeError(
+                    f"Failed to clone catalog from {remote}: {result.stderr.strip()}"
                 )
-                if result.returncode == 0:
-                    _log.info("catalog_cloned_from_remote", remote=remote)
-                    db_path = catalog_path / ".catalog.db"
-                    return cls(catalog_path, db_path)
-            except Exception:
-                _log.debug("catalog_clone_failed_falling_back_to_init", exc_info=True)
         catalog_path.mkdir(parents=True, exist_ok=True)
         if not git_dir.exists():
             _run_git(["git", "init"], cwd=catalog_path)

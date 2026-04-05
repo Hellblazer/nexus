@@ -52,6 +52,7 @@ if command -v nx &>/dev/null; then
     CATALOG_PATH="${NEXUS_CATALOG_PATH:-$HOME/.config/nexus/catalog}"
     if [[ -d "$CATALOG_PATH/.git" && -f "$CATALOG_PATH/documents.jsonl" ]]; then
         # Check for uncommitted JSONL changes
+        # grep -c exits 1 on zero matches; || echo "0" catches both that and pipe failures
         CATALOG_DIRTY=$(git -C "$CATALOG_PATH" status --porcelain 2>/dev/null | grep -c "\.jsonl" || echo "0")
         if [[ "$CATALOG_DIRTY" -gt 0 ]]; then
             nx catalog sync -m "auto-sync at session close" 2>/dev/null || true

@@ -74,13 +74,14 @@ nx catalog links "paper X"     # explore the citation/implementation graph
 
 The catalog tracks every indexed document and the relationships between them. It's populated automatically when you index repos and PDFs. Run `setup` once to backfill from your existing collections.
 
-If you use cloud mode (ChromaDB Cloud), add a git remote to make the catalog survive disk loss:
+If you use cloud mode (ChromaDB Cloud), add a git remote so the catalog survives disk loss:
 
 ```bash
-cd ~/.config/nexus/catalog
-git remote add origin git@github.com:you/nexus-catalog.git
+cd ~/.config/nexus/catalog && git remote add origin git@github.com:you/nexus-catalog.git
 nx catalog sync
 ```
+
+On a new machine, restore with: `nx catalog setup --remote git@github.com:you/nexus-catalog.git`
 
 See [Document Catalog](catalog.md) for details.
 
