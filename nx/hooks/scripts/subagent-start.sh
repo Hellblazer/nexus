@@ -149,12 +149,18 @@ if echo "$TASK_TEXT" | grep -qiE "author|cit(e|ation|es|ed)|who wrote|papers (by
 
 ## Catalog (RDR-049)
 
-Use `catalog_search` for metadata-first queries (author, corpus, title, file_path).
-Use `catalog_links` for citation/provenance traversal.
-Use `catalog_resolve` to map owner/corpus to T3 collection names.
+Use catalog tools for metadata-first queries (author, corpus, title, citations, provenance).
 The `/nx:query` skill handles full catalog-aware plan execution.
 
-Catalog MCP tools: catalog_search, catalog_show, catalog_list, catalog_links, catalog_resolve, catalog_stats
+  Tool: mcp__plugin_nx_nexus__catalog_search
+    catalog_search(query="...", author="...", corpus="...", owner="...", file_path="...", content_type="...")
+  Tool: mcp__plugin_nx_nexus__catalog_show
+    catalog_show(tumbler="1.2.5")
+  Tool: mcp__plugin_nx_nexus__catalog_links
+    catalog_links(tumbler="1.2.5", direction="in", link_type="cites", depth=2)
+  Tool: mcp__plugin_nx_nexus__catalog_resolve
+    catalog_resolve(owner="1.1", corpus="schema-evolution")
+  Tool: mcp__plugin_nx_nexus__catalog_stats
 CATALOG
   fi
 fi
