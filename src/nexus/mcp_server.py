@@ -198,7 +198,7 @@ def _require_catalog():
     """Return (catalog, None) or (None, error_message)."""
     cat = _get_catalog()
     if cat is None:
-        return None, "Catalog not initialized — run: nx catalog init"
+        return None, "Catalog not initialized — run 'nx catalog setup' to create and populate it"
     return cat, None
 
 
@@ -1071,10 +1071,14 @@ def catalog_search(
     file_path: str = "",
     limit: int = 20,
 ) -> list[dict]:
-    """Search the catalog by title, author, corpus, or file path.
-    Returns catalog entries — NOT content. Use `search` for semantic content search.
-    Structured filters (author, corpus, owner, file_path) are exact SQL matches;
-    query is FTS5 free-text over title/author/corpus/file_path."""
+    """Find documents by metadata (title, author, corpus, file path).
+
+    Returns catalog entries with tumbler, physical_collection, and metadata — NOT document
+    content. Use the `search` tool for semantic content search within collections.
+    Use catalog_search first to discover WHICH collections to search, then search for content.
+
+    Filters: query (free-text), author, corpus, owner, file_path, content_type (exact match).
+    At least one filter required."""
     cat, err = _require_catalog()
     if err:
         return [{"error": err}]
@@ -1140,7 +1144,11 @@ def catalog_show(
     tumbler: str = "",
     title: str = "",
 ) -> dict:
-    """Full catalog entry including links in and out."""
+    """Show a document's full metadata, physical collection, and all links to/from it.
+
+    Pass tumbler (e.g. "1.2.5") or title. Returns all metadata plus links_from and links_to
+    arrays — useful for discovering a document's connections without a separate catalog_links call.
+    """
     cat, err = _require_catalog()
     if err:
         return {"error": err}
@@ -1291,7 +1299,13 @@ def catalog_link(
     from_span: str = "",
     to_span: str = "",
 ) -> dict:
-    """Create a typed link. Accepts tumblers or titles. created_by tracks origin (RF-8)."""
+    """Create a relationship between two documents. Accepts tumblers or titles for both endpoints.
+
+    Link types: cites, implements, implements-heuristic, supersedes, relates, quotes, comments.
+    created_by identifies who/what created this link (e.g. "user", "bib_enricher", "rdr-close").
+    Duplicate links are merged with co_discovered_by tracking. Returns {created: true/false}.
+    Raises error if either endpoint doesn't exist (pass allow_dangling via Python API to bypass).
+    """
     cat, err = _require_catalog()
     if err:
         return {"error": err}
@@ -1343,7 +1357,10 @@ def catalog_unlink(
     to_tumbler: str,
     link_type: str = "",
 ) -> dict:
-    """Remove link(s) between catalog entries. Accepts tumblers or titles. If link_type empty, removes all types."""
+    """Remove a specific link between two documents. Accepts tumblers or titles.
+
+    If link_type is empty, removes ALL link types between the pair. Returns {removed: count}.
+    """
     cat, err = _require_catalog()
     if err:
         return {"error": err}

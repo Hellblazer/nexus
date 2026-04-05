@@ -20,7 +20,9 @@ def _get_catalog() -> Catalog:
 
     path = catalog_path()
     if not Catalog.is_initialized(path):
-        raise click.ClickException("Catalog not initialized — run: nx catalog init")
+        raise click.ClickException(
+            "Catalog not initialized. Run 'nx catalog setup' to create and populate it."
+        )
     return Catalog(path, path / ".catalog.db")
 
 
@@ -64,20 +66,32 @@ def _link_to_dict(link) -> dict:
 
 @click.group()
 def catalog() -> None:
-    """Document catalog — search, browse, and query the knowledge graph.
+    """Document catalog — tracks every indexed document and the links between them.
+
+    The catalog knows what you've indexed (repos, PDFs, papers, RDRs), where
+    each document lives in T3, and how documents relate to each other (citations,
+    implementations, supersedes). Think of it as the index card system for your
+    knowledge base — search by metadata, browse by relationship, trace provenance.
 
     \b
-    Getting started:
-      nx catalog init               # initialize catalog
-      nx catalog setup               # init + populate + generate links
+    First time? Run setup:
+      nx catalog setup              # one command: init + populate + link
+
     \b
-    Daily use:
-      nx catalog search <query>      # find documents
-      nx catalog show <tumbler|title> # full document info + links
-      nx catalog links <tumbler|title> # explore link graph
+    Find documents:
+      nx catalog search auth        # search by title, author, file path
+      nx catalog show "auth module" # full entry with all links
+      nx catalog list               # browse all entries
+
     \b
-    Most link operations are designed for agent use via MCP.
-    Use /nx:query for agent-driven citation and provenance queries.
+    Explore relationships:
+      nx catalog links "paper X"            # what links to/from this?
+      nx catalog links --type cites         # all citation links
+      nx catalog links --created-by bib_enricher  # links by creator
+
+    \b
+    Agents use the catalog via MCP tools (catalog_search, catalog_links,
+    catalog_link). Use /nx:query for multi-step citation and provenance queries.
     """
 
 
@@ -95,7 +109,12 @@ def init_cmd(remote: str) -> None:
 @catalog.command("setup")
 @click.option("--remote", default="", help="Optional git remote URL")
 def setup_cmd(remote: str) -> None:
-    """One-command catalog setup: init + backfill + generate links."""
+    """Get the catalog running in one step.
+
+    Creates the catalog, populates it from your existing T3 collections and
+    repos, then generates citation and code-RDR links from metadata. After
+    this, 'nx catalog search' and 'nx catalog links' work immediately.
+    """
     from nexus.config import catalog_path
 
     path = catalog_path()
@@ -154,7 +173,10 @@ def list_cmd(owner: str, content_type: str, limit: int, as_json: bool) -> None:
 @click.argument("tumbler_or_title")
 @click.option("--json", "as_json", is_flag=True)
 def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
-    """Show full catalog entry. Accepts a tumbler (1.9.14) or title/filename."""
+    """Show everything about a document: metadata, collection, and all links.
+
+    Accepts a tumbler (1.9.14) or a title/filename. Use --json for machine-readable output.
+    """
     cat = _get_catalog()
     t = _resolve_tumbler(cat, tumbler_or_title)
     entry = cat.resolve(t)
@@ -195,7 +217,11 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
 @click.option("--limit", "-n", default=20)
 @click.option("--json", "as_json", is_flag=True)
 def search_cmd(query: str, limit: int, as_json: bool) -> None:
-    """Search catalog by title, author, corpus, or file path."""
+    """Find documents by title, author, corpus, or file path.
+
+    Uses full-text search across document metadata. Faster than T3 semantic
+    search for exact metadata lookups. Returns tumbler, type, and title.
+    """
     cat = _get_catalog()
     results = cat.find(query)[:limit]
     if as_json:
@@ -289,7 +315,12 @@ def update_cmd(
 @click.argument("tumbler_or_title")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
-    """Delete a catalog document. Leaves links intact (orphaned links preserved)."""
+    """Remove a document from the catalog. Links to it are preserved as orphans.
+
+    Accepts a tumbler or title. Prompts for confirmation unless -y is passed.
+    The document is removed from SQLite and tombstoned in JSONL, but existing
+    links remain — use 'nx catalog links --type ...' to find orphaned links.
+    """
     cat = _get_catalog()
     t = _resolve_tumbler(cat, tumbler_or_title)
     entry = cat.resolve(t)
@@ -317,7 +348,12 @@ def link_cmd(
     from_tumbler: str, to_tumbler: str, link_type: str,
     from_span: str, to_span: str,
 ) -> None:
-    """Create a typed link. Arguments accept tumblers or titles."""
+    """Create a typed link between two documents.
+
+    Both FROM and TO accept tumblers (1.1.5) or titles. Link types: cites
+    (citation), implements (code→RDR), supersedes (replacement), relates,
+    quotes, comments. Duplicate links are merged, not duplicated.
+    """
     cat = _get_catalog()
     ft = _resolve_tumbler(cat, from_tumbler)
     tt = _resolve_tumbler(cat, to_tumbler)
@@ -330,7 +366,11 @@ def link_cmd(
 @click.argument("to_tumbler")
 @click.option("--type", "link_type", default="")
 def unlink_cmd(from_tumbler: str, to_tumbler: str, link_type: str) -> None:
-    """Remove link(s). Arguments accept tumblers or titles."""
+    """Remove link(s) between two documents.
+
+    Both FROM and TO accept tumblers or titles. Omit --type to remove all
+    link types between the pair.
+    """
     cat = _get_catalog()
     ft = _resolve_tumbler(cat, from_tumbler)
     tt = _resolve_tumbler(cat, to_tumbler)
