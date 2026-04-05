@@ -436,6 +436,37 @@ class TestResolveChunk:
         assert cat.resolve_chunk(Tumbler.parse("1.1.1.10")) is None
 
 
+class TestLinkAuditStaleSpans:
+    def test_stale_span_detected(self, tmp_path):
+        """Links with spans to re-indexed docs appear in stale_spans."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        # Create link with span, backdate it
+        cat.link(doc_a, doc_b, "quotes", created_by="user", from_span="10-20")
+        cat._db.execute(
+            "UPDATE links SET created_at = '2020-01-01T00:00:00Z' WHERE from_tumbler = ?",
+            (str(doc_a),),
+        )
+        cat._db.commit()
+        # Re-index doc_a (update indexed_at to now)
+        cat.update(doc_a, head_hash="new-hash")
+        audit = cat.link_audit()
+        assert audit["stale_span_count"] >= 1
+        assert any(s["from"] == str(doc_a) for s in audit["stale_spans"])
+
+    def test_no_stale_span_when_fresh(self, tmp_path):
+        """Links created after indexing have no stale spans."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        cat.link(doc_a, doc_b, "quotes", created_by="user", from_span="10-20")
+        audit = cat.link_audit()
+        assert audit["stale_span_count"] == 0
+
+
 class TestRebuild:
     def test_rebuild_from_jsonl(self, tmp_path):
         cat = _make_catalog(tmp_path)

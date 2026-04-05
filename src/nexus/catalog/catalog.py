@@ -103,7 +103,17 @@ def _run_git(
 
 
 class Catalog:
-    """Xanadu-inspired catalog: owners, documents, and links over JSONL + SQLite."""
+    """Xanadu-inspired catalog: owners, documents, and links over JSONL + SQLite.
+
+    Deliberate departures from Nelson's Xanadu:
+    - TTL expiry: entries with ``expires_at`` set are temporary addresses, violating
+      Nelson's "ALL ADDRESSES REMAIN VALID" principle. Tumblers are never reused
+      (high-water mark), but expired entries become unresolvable.
+    - Chunk addressing is position-based (chunk index), not content-addressed.
+      Re-indexing a document may shift which content a chunk span refers to.
+    - No tumbler arithmetic (transfinitesimal ADD/SUBTRACT). Ordering and overlap
+      detection use integer segment comparison, not Nelson's number space.
+    """
 
     def __init__(self, catalog_dir: Path, db_path: Path) -> None:
         self._dir = catalog_dir
@@ -442,8 +452,9 @@ class Catalog:
     def resolve_chunk(self, tumbler: Tumbler) -> dict | None:
         """Resolve a 4-segment chunk tumbler to its document + chunk metadata.
 
-        Chunks are ghost elements — addressable at ``1.1.42.3`` without catalog
-        registration.  Resolution parses the document prefix, verifies the
+        Chunks are implicit addresses — the catalog tracks document-level entries
+        only; chunk sub-addresses are resolved on demand from the document's
+        ``chunk_count``.  Resolution parses the document prefix, verifies the
         document exists, and checks the chunk index is in range.
 
         Returns ``{"document_tumbler", "chunk_index", "physical_collection", ...}``
@@ -1132,6 +1143,20 @@ class Catalog:
         duplicates = [
             {"from": r[0], "to": r[1], "type": r[2], "count": r[3]} for r in dup_rows
         ]
+        # Stale spans: links with spans pointing to documents re-indexed after link creation
+        stale_span_rows = self._db.execute(
+            "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
+            "       d.indexed_at "
+            "FROM links l "
+            "JOIN documents d ON d.tumbler = l.from_tumbler "
+            "WHERE (l.from_span IS NOT NULL AND l.from_span != '') "
+            "  AND l.created_at < d.indexed_at"
+        ).fetchall()
+        stale_spans = [
+            {"from": r[0], "to": r[1], "type": r[2],
+             "link_created": r[3], "doc_reindexed": r[4]}
+            for r in stale_span_rows
+        ]
         return {
             "total": total,
             "by_type": by_type,
@@ -1140,6 +1165,8 @@ class Catalog:
             "orphaned_count": len(orphaned),
             "duplicates": duplicates,
             "duplicate_count": len(duplicates),
+            "stale_spans": stale_spans,
+            "stale_span_count": len(stale_spans),
         }
 
     _MAX_GRAPH_DEPTH = 10
