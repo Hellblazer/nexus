@@ -216,6 +216,100 @@ For code collections: chunk text includes tree-sitter extracted content. The has
 
 **Evidence basis**: Verified — source read of `doc_indexer.py` `_embed_with_fallback()` and `prose_indexer.py`.
 
+**RF-14: Zero-Digit Major Dividers — Purpose and Why Nexus Omits Them (2026-04-05)**
+
+Nelson's `.0.` separator between tumbler fields serves three purposes (LM 4/20-21, 4/28, 4/32):
+
+1. **Parsability**: Fields can fork to arbitrary depth (`1.2368.792.6` is a 4-digit server field). Without `.0.`, there's no way to know where SERVER ends and USER begins. The zero is "lexical punctuation" — it's the only way to parse the flat digit stream into semantic fields.
+
+2. **Arithmetic consistency**: "The zero digit is reserved for that purpose. This peculiar choice turns out to be arithmetically consistent with the rest of tumbler arithmetic, permitting a uniform arithmetic algorithm that passes along the entire tumbler" (LM 4/21). In ADD, leading zeros in the difference tumbler mean "copy corresponding digit from address" — major dividers act as transparent pass-through points.
+
+3. **Address vs difference distinction**: An address tumbler has *at most three* `.0.` dividers. Difference tumblers may have *any number* of zeros (they're subtraction results). This constraint distinguishes address tumblers from difference tumblers syntactically.
+
+**Why nexus omits them**: Nexus fields are fixed at exactly one digit each (store=1 digit, owner=1 digit, document=1 digit, chunk=optional 1 digit). There is no intra-field forking. Position in the tuple unambiguously identifies which field a digit belongs to — segment 0 is always store, segment 1 is always owner, etc. The `.0.` divider is unnecessary when field depths are fixed.
+
+**Evidence basis**: Verified — LM 4/20-21 (major divider definition), LM 4/28 (examples with field forking), LM 4/32 (difference tumbler zeroes). Primary source OCR from Mixedbread xanadu store.
+
+---
+
+## Deviations Register
+
+Every deliberate departure from Nelson's Xanadu design, with rationale and traceability.
+
+### D1: No Zero-Digit Major Dividers
+
+| | |
+|---|---|
+| **Nelson** | `.0.` between SERVER, USER, DOCUMENT, ELEMENT fields. Required because fields fork to arbitrary depth. |
+| **Nexus** | Dot-separated integer segments with no zero dividers. Fields are always exactly one digit. |
+| **Rationale** | Fixed-depth hierarchy makes dividers unnecessary. Position in tuple identifies field. Simpler parsing, simpler SQL (LIKE prefix). |
+| **Consequence** | Cannot support intra-field forking (e.g., sub-servers). Acceptable — nexus has no sub-server concept. |
+| **RF** | RF-14 |
+
+### D2: No Version Segment
+
+| | |
+|---|---|
+| **Nelson** | `N.0.U.0.D.V.0.E` — version (V) between document and element. Each edit creates a new version; all versions permanently addressable. |
+| **Nexus** | `store.owner.document[.chunk]` — no version. Documents re-indexed in place. `head_hash` tracks current version but is not addressable. |
+| **Rationale** | Nexus documents are git-backed source files — git itself is the version history. Version-addressable tumblers would duplicate git's functionality. The catalog tracks the *current* indexed state, not version history. |
+| **Consequence** | Cannot address "the version of indexer.py as of commit abc123" via tumbler. Must use git directly. Links to documents implicitly reference the current version. |
+| **RF** | RF-10 |
+
+### D3: Element Types Not Distinguished in Tumbler Space
+
+| | |
+|---|---|
+| **Nelson** | Element field starts with `1` for bytes, `2` for links. Both live in the same tumbler address space. |
+| **Nexus** | 4th segment is always a chunk index. Links are in a separate SQLite table (`links`), not in tumbler space. |
+| **Rationale** | Links are metadata about relationships, not content. Putting them in the tumbler space would conflate the addressing of content with the addressing of assertions about content. Separate storage enables typed link queries, bulk operations, and provenance tracking that would be awkward in a flat tumbler space. |
+| **Consequence** | Cannot address a specific link by tumbler. Links are identified by `(from_tumbler, to_tumbler, link_type)` tuple. Nelson's "link as addressable content" pattern is lost — a link cannot itself be the target of another link. |
+| **RF** | RF-10 |
+
+### D4: TTL Expiry Violates Address Permanence
+
+| | |
+|---|---|
+| **Nelson** | "ALL ADDRESSES REMAIN VALID" (LM 4/19). Write-once address space. |
+| **Nexus** | Entries with `expires_at` set become unresolvable after TTL. Tumblers are never *reused* (high-water mark), but expired entries are tombstoned. |
+| **Rationale** | Cached query plans (30-day TTL) are not the docuverse — they're operational ephemera. Permanent entries (`expires_at=""`) honor the permanence principle. The TTL system is scoped to T2 plan library, not the catalog itself. |
+| **Consequence** | A tumbler that once resolved may stop resolving. Links to expired entries become orphans (detectable via `link_audit()`). |
+| **RF** | Catalog docstring (RDR-052 Xanadu critique) |
+
+### D5: Position-Based Chunk Spans (Being Addressed by This RDR)
+
+| | |
+|---|---|
+| **Nelson** | "Links between bytes can survive deletions, insertions and rearrangements" (LM 4/43). Byte-level addressing in append-only storage ensures survivability. |
+| **Nexus (current)** | `from_span`/`to_span` encode chunk indices that shift on re-index. |
+| **Nexus (proposed)** | `chash:{chunk_text_hash}` — content-addressed chunk identity. Survives re-indexing when chunk text preserved. |
+| **Rationale** | Nexus doesn't store raw source bytes (vectors + chunk text only). Content hashing is the pragmatic middle path between position-based (fragile) and byte-range (requires raw storage). |
+| **Consequence** | Spans survive re-indexing when chunk boundaries unchanged. When chunking changes, spans degrade to unresolvable (detectable via `link_audit()` stale span warning). |
+| **RF** | RF-3, RF-6, RF-8 |
+
+### D6: No Tumbler Arithmetic (Being Addressed by This RDR)
+
+| | |
+|---|---|
+| **Nelson** | ADD and SUBTRACT on transfinitesimal numbers (LM 4/33-36). Non-commutative. Difference tumblers are themselves tumblers, bound to an address. |
+| **Nexus (current)** | No arithmetic operators on Tumbler. |
+| **Nexus (proposed)** | Comparison operators (`__lt__`, `__le__`, etc.) with -1 sentinel padding. No ADD/SUBTRACT — only ordering and overlap detection. |
+| **Rationale** | Nelson's full arithmetic requires difference tumblers as a separate type (different rules from address tumblers). For nexus's use cases (sorting, span overlap, reranking), comparison operators suffice. ADD/SUBTRACT would require a `DifferenceTumbler` class and binding semantics that have no current consumer. |
+| **Consequence** | Cannot compute span widths or construct spans by tumbler addition. If span-weighted reranking needs span width, it must compute it via segment subtraction at the last differing position (ad-hoc, not general). |
+| **RF** | RF-4, RF-12 |
+
+### D7: Single-Store Flat Hierarchy
+
+| | |
+|---|---|
+| **Nelson** | Server field can fork arbitrarily: `1.2368.792.6` (server 1 → subserver 2368 → sub-sub 792 → leaf 6). The docuverse is a network of servers. |
+| **Nexus** | Store is always `1`. Single catalog instance per nexus installation. |
+| **Rationale** | Nexus is a single-user local tool, not a distributed network. Multi-store support is YAGNI. The `1` prefix exists to match Nelson's convention that "all servers descend from 1" — it could be extended to multi-store later without breaking existing tumblers. |
+| **Consequence** | No federation. All documents live in one address space. Acceptable for the current use case. |
+| **RF** | RF-10 |
+
+---
+
 ## Proposed Solution
 
 ### Approach
