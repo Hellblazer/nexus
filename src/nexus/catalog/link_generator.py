@@ -81,14 +81,15 @@ def generate_code_rdr_links(cat: Catalog) -> int:
         matches_for_code = 0
         for rdr, rdr_title_norm in rdr_normalized:
             if module_name in rdr_title_norm:
-                if cat.link_if_absent(code.tumbler, rdr.tumbler, "implements-heuristic", created_by="index_hook"):
+                created = cat.link_if_absent(code.tumbler, rdr.tumbler, "implements-heuristic", created_by="index_hook")
+                if created:
                     count += 1
+                    matches_for_code += 1
                     _log.debug(
                         "code_rdr_link_created",
                         code=str(code.tumbler), rdr=str(rdr.tumbler),
                         module=module_name,
                     )
-                matches_for_code += 1
                 if matches_for_code >= _MAX_RDR_MATCHES_PER_CODE:
                     _log.warning("code_rdr_link_cap_reached", code=str(code.tumbler), module=module_name)
                     break

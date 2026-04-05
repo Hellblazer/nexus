@@ -207,10 +207,8 @@ def _resolve_tumbler_mcp(
 ) -> "tuple[Tumbler | None, str | None]":
     """Resolve tumbler string OR title/filename. Returns (tumbler, None) or (None, error)."""
     from nexus.catalog.tumbler import Tumbler
-    parsed_tumbler = False
     try:
         t = Tumbler.parse(value)
-        parsed_tumbler = True
         if cat.resolve(t) is not None:
             return t, None
         # Valid tumbler format but document deleted/missing — don't fall through to FTS

@@ -339,6 +339,20 @@ class Catalog:
             if owner_rec:
                 owner_rec.next_seq = new_seq
                 self._append_jsonl(self._owners_path, owner_rec.__dict__)
+            else:
+                # Fallback: owner exists in SQLite but has no JSONL next_seq.
+                # Persist it now so future registrations use the JSONL path.
+                row = self._db.execute(
+                    "SELECT name, owner_type, repo_hash, description FROM owners "
+                    "WHERE tumbler_prefix = ?", (str(owner),)
+                ).fetchone()
+                if row:
+                    fallback_rec = OwnerRecord(
+                        owner=str(owner), name=row[0], owner_type=row[1],
+                        repo_hash=row[2] or "", description=row[3] or "",
+                        next_seq=new_seq,
+                    )
+                    self._append_jsonl(self._owners_path, fallback_rec.__dict__)
             now = datetime.now(UTC).isoformat()
             rec = DocumentRecord(
                 tumbler=str(tumbler),
@@ -998,14 +1012,18 @@ class Catalog:
                 from nexus.db import make_t3
                 t3 = make_t3()
                 col = t3.get_or_create_collection(entry.physical_collection)
+                # Query by chunk_index metadata for deterministic ordering
+                where_filter: dict = {"chunk_index": chunk_idx}
+                if entry.file_path:
+                    where_filter["source_path"] = entry.file_path
                 result = col.get(
-                    where={"source_path": entry.file_path} if entry.file_path else None,
+                    where=where_filter if len(where_filter) == 1 else {"$and": [{k: v} for k, v in where_filter.items()]},
                     include=["documents"],
-                    limit=100,
+                    limit=1,
                 )
                 docs = result.get("documents", [])
-                if chunk_idx < len(docs):
-                    text = docs[chunk_idx]
+                if docs:
+                    text = docs[0]
                     return text[char_start:char_end]
             except Exception:
                 return None
@@ -1150,6 +1168,11 @@ class Catalog:
                     for line in seen.values():
                         f.write(line + "\n")
                 removed[path.name] = original_lines - len(seen)
+            # Rebuild SQLite from defragged JSONL to stay consistent
+            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+            documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
+            links_dict = read_links(self._links_path) if self._links_path.exists() else {}
+            self._db.rebuild(owners, documents, list(links_dict.values()))
             return removed
         finally:
             self._release_lock(dir_fd)
@@ -1178,6 +1201,11 @@ class Catalog:
                         f.write(json.dumps(record.__dict__, default=str) + "\n")
                 new_lines = len(records)
                 removed[path.name] = original_lines - new_lines
+            # Rebuild SQLite from compacted JSONL
+            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+            documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
+            links_dict = read_links(self._links_path) if self._links_path.exists() else {}
+            self._db.rebuild(owners, documents, list(links_dict.values()))
             return removed
         finally:
             self._release_lock(dir_fd)
