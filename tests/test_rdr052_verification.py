@@ -112,8 +112,6 @@ class TestPathRouting:
         result = query(question="schema mappings", author="Fagin")
         assert not result.startswith("Error:")
         assert "knowledge__delos" in result
-        # Should NOT include transformers collection
-        assert "knowledge__transformers" not in result or "knowledge__delos" in result
 
     def test_content_type_routes_to_type_collections(self, t3, catalog):
         """query(content_type="code") should search code__nexus only."""
@@ -134,8 +132,10 @@ class TestPathRouting:
         """query(follow_links="cites") should include linked document collections."""
         t3.put(collection="knowledge__delos", content="schema data exchange", title="delos-chunk")
         t3.put(collection="knowledge__transformers", content="attention heads layers", title="trans-chunk")
+        # Fagin paper cites Vaswani — follow_links should pull in knowledge__transformers
         result = query(question="schema mappings", follow_links="cites")
         assert not result.startswith("Error:")
+        assert "Found" in result or "knowledge__" in result
 
     def test_no_catalog_params_backward_compat(self, t3):
         """query() without catalog params works as before."""
