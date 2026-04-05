@@ -169,7 +169,8 @@ class CatalogDB:
 
         sql = (
             "SELECT d.tumbler, d.title, d.author, d.year, d.content_type, "
-            "d.file_path, d.corpus, d.physical_collection, d.chunk_count "
+            "d.file_path, d.corpus, d.physical_collection, d.chunk_count, "
+            "d.head_hash, d.indexed_at "
             "FROM documents d "
             "JOIN documents_fts f ON d.rowid = f.rowid "
             "WHERE documents_fts MATCH ?"
@@ -182,7 +183,8 @@ class CatalogDB:
 
         rows = self._conn.execute(sql, params).fetchall()
         columns = ["tumbler", "title", "author", "year", "content_type",
-                    "file_path", "corpus", "physical_collection", "chunk_count"]
+                    "file_path", "corpus", "physical_collection", "chunk_count",
+                    "head_hash", "indexed_at"]
         return [dict(zip(columns, row)) for row in rows]
 
     def close(self) -> None:

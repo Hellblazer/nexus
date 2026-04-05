@@ -138,6 +138,8 @@ class TestGraphTraversal:
         # Should not loop — visited set prevents infinite traversal
         node_tumblers = {str(e.tumbler) for e in result["nodes"]}
         assert str(doc_b) in node_tumblers
+        # Edges deduplicated — exactly 2 distinct directed edges
+        assert len(result["edges"]) == 2
 
     def test_type_filter(self, tmp_path):
         cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)

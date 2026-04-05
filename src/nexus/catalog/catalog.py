@@ -258,8 +258,8 @@ class Catalog:
                 corpus=r["corpus"],
                 physical_collection=r["physical_collection"],
                 chunk_count=r["chunk_count"],
-                head_hash="",
-                indexed_at="",
+                head_hash=r["head_hash"] or "",
+                indexed_at=r["indexed_at"] or "",
             )
             for r in rows
         ]
@@ -431,6 +431,7 @@ class Catalog:
     ) -> dict:
         """BFS traversal to given depth. Returns {"nodes": [...], "edges": [...]}."""
         visited: set[str] = {str(tumbler)}
+        seen_edges: set[tuple[str, str, str]] = set()
         all_edges: list[CatalogLink] = []
         queue: deque[tuple[Tumbler, int]] = deque([(tumbler, 0)])
 
@@ -446,7 +447,10 @@ class Catalog:
                 neighbors.extend(self.links_to(current, link_type=link_type))
 
             for edge in neighbors:
-                all_edges.append(edge)
+                edge_key = (str(edge.from_tumbler), str(edge.to_tumbler), edge.link_type)
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    all_edges.append(edge)
                 # Determine the "other" end
                 other = edge.to_tumbler if edge.from_tumbler == current else edge.from_tumbler
                 if str(other) not in visited:
@@ -462,7 +466,12 @@ class Catalog:
     # ── Rebuild ───────────���──────────────────────────��─────────────────────
 
     def rebuild(self) -> None:
-        owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-        documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
-        links_dict = read_links(self._links_path) if self._links_path.exists() else {}
-        self._db.rebuild(owners, documents, list(links_dict.values()))
+        """Rebuild SQLite from JSONL. Called at startup and after git pull."""
+        dir_fd = self._acquire_lock()
+        try:
+            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+            documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
+            links_dict = read_links(self._links_path) if self._links_path.exists() else {}
+            self._db.rebuild(owners, documents, list(links_dict.values()))
+        finally:
+            self._release_lock(dir_fd)

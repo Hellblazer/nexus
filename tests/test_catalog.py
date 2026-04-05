@@ -213,3 +213,21 @@ class TestRebuild:
         entry = cat2.resolve(doc)
         assert entry is not None
         assert entry.title == "a.py"
+
+    def test_rebuild_excludes_tombstoned_documents(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+
+        # Manually write tombstone to documents.jsonl
+        import json
+        tombstone = {"tumbler": str(doc), "_deleted": True, "title": "", "author": "",
+                     "year": 0, "content_type": "", "file_path": "a.py", "corpus": "",
+                     "physical_collection": "", "chunk_count": 0, "head_hash": "",
+                     "indexed_at": "", "meta": {}}
+        with (tmp_path / "catalog" / "documents.jsonl").open("a") as f:
+            f.write(json.dumps(tombstone) + "\n")
+
+        cat2 = Catalog(tmp_path / "catalog", tmp_path / "catalog" / ".catalog.db2")
+        cat2.rebuild()
+        assert cat2.resolve(doc) is None
