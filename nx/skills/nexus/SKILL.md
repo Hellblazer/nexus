@@ -60,7 +60,7 @@ mcp__plugin_nx_nexus__catalog_link_bulk(link_type="cites", dry_run=True  # previ
 ```
 
 **Link types**: `cites` (citation), `implements-heuristic` (auto code→RDR), `supersedes`, `quotes`, `relates`, `comments`, `implements` (manual).
-**Two graph views**: `catalog_links` returns live-document links only. `catalog_link_query` returns all links including orphans.
+**Two graph views**: `mcp__plugin_nx_nexus__catalog_links` returns live-document links only. `mcp__plugin_nx_nexus__catalog_link_query` returns all links including orphans.
 Use catalog for: author queries, citation traversal, provenance chains, corpus-scoped search.
 The `/nx:query` skill handles full catalog-aware plan execution.
 

@@ -152,27 +152,19 @@ if echo "$TASK_TEXT" | grep -qiE "author|cit(e|ation|es|ed)|who wrote|what did.*
 Use catalog tools for metadata-first queries: author, corpus, title, citations, provenance, references.
 The `/nx:query` skill handles full catalog-aware plan execution.
 
-  Tool: mcp__plugin_nx_nexus__catalog_search
-    catalog_search(query="...", author="...", corpus="...", owner="...", file_path="...", content_type="...")
-  Tool: mcp__plugin_nx_nexus__catalog_show
-    catalog_show(tumbler="1.2.5")  — full entry with links_from + links_to
-  Tool: mcp__plugin_nx_nexus__catalog_links
-    catalog_links(tumbler="1.2.5", direction="in", link_type="cites", depth=2)
+  mcp__plugin_nx_nexus__catalog_search(query="...", author="...", corpus="...", owner="...", file_path="...", content_type="...")
+  mcp__plugin_nx_nexus__catalog_show(tumbler="1.2.5")  — full entry with links_from + links_to
+  mcp__plugin_nx_nexus__catalog_links(tumbler="1.2.5", direction="in", link_type="cites", depth=2)
     Returns {"nodes": [CatalogEntry dicts], "edges": [link dicts]}.
-    Only live documents — deleted nodes excluded. Use catalog_link_query for all links.
-  Tool: mcp__plugin_nx_nexus__catalog_link
-    catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="user")
+    Only live documents — deleted nodes excluded. Use mcp__plugin_nx_nexus__catalog_link_query for all links.
+  mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="user")
     Accepts titles or tumblers. Returns {"from", "to", "type", "created": true/false}.
-  Tool: mcp__plugin_nx_nexus__catalog_link_query
-    catalog_link_query(link_type="cites", created_by="bib_enricher", created_at_before="...", limit=50)
+  mcp__plugin_nx_nexus__catalog_link_query(link_type="cites", created_by="bib_enricher", created_at_before="...", limit=50)
     All links including orphans. Admin/audit — not a planner step.
-  Tool: mcp__plugin_nx_nexus__catalog_link_audit
-    catalog_link_audit()  — orphans, stats by type/creator, duplicates.
-  Tool: mcp__plugin_nx_nexus__catalog_link_bulk
-    catalog_link_bulk(link_type="cites", dry_run=True)  — bulk delete preview.
+  mcp__plugin_nx_nexus__catalog_link_audit()  — orphans, stats by type/creator, duplicates.
+  mcp__plugin_nx_nexus__catalog_link_bulk(link_type="cites", dry_run=True)  — bulk delete preview.
     Requires confirm_destructive=True for >10 link deletions.
-  Tool: mcp__plugin_nx_nexus__catalog_resolve
-    catalog_resolve(owner="1.1", corpus="schema-evolution")  — → collection names
+  mcp__plugin_nx_nexus__catalog_resolve(owner="1.1", corpus="schema-evolution")  — → collection names
   Link types: cites, implements-heuristic, supersedes, quotes, relates, comments, implements
 CATALOG
   fi
