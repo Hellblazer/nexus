@@ -1028,7 +1028,8 @@ def _run_index(
     for _, f in prose_files:
         indexed_for_catalog.append((f, "prose", docs_collection))
     # Include RDR files so code→RDR provenance links can be generated
-    if rdr_indexed > 0:
+    # Register regardless of T3 indexing success — catalog tracks existence
+    if rdr_abs_paths:
         from nexus.registry import _rdr_collection_name
         rdr_col = _rdr_collection_name(repo)
         for rdr_dir in rdr_abs_paths:
