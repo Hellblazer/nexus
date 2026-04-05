@@ -23,6 +23,18 @@
           }
         ]
       }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "mcp__plugin_sn_.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/auto-approve-sn-mcp.sh",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
