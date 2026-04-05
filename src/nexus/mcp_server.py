@@ -1336,6 +1336,29 @@ def catalog_resolve(
         return [f"Error: {e}"]
 
 
+@mcp.tool()
+def catalog_stats() -> dict:
+    """Catalog health summary: owner/document/link counts by type."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        db = cat._db
+        return {
+            "owners": db.execute("SELECT count(*) FROM owners").fetchone()[0],
+            "documents": db.execute("SELECT count(*) FROM documents").fetchone()[0],
+            "links": db.execute("SELECT count(*) FROM links").fetchone()[0],
+            "by_type": dict(db.execute(
+                "SELECT content_type, count(*) FROM documents GROUP BY content_type"
+            ).fetchall()),
+            "by_link_type": dict(db.execute(
+                "SELECT link_type, count(*) FROM links GROUP BY link_type"
+            ).fetchall()),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
