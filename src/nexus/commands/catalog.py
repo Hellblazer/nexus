@@ -783,15 +783,24 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
 
         try:
             col = t3.get_or_create_collection(col_name)
-            # Get unique source_path values to discover individual RDR documents
-            result = col.get(include=["metadatas"], limit=200)
-            seen_paths: set[str] = set()
-            for meta in result.get("metadatas", []):
-                path = meta.get("source_path", "")
-                if not path or path in seen_paths:
-                    continue
-                seen_paths.add(path)
-                title = meta.get("source_title", "") or Path(path).stem
+            # Paginate to discover ALL unique source_path values
+            seen_paths: dict[str, str] = {}  # path → title
+            offset = 0
+            while True:
+                result = col.get(include=["metadatas"], limit=200, offset=offset)
+                metas = result.get("metadatas", [])
+                if not metas:
+                    break
+                for meta in metas:
+                    path = meta.get("source_path", "")
+                    if path and path not in seen_paths:
+                        title = meta.get("source_title", "") or Path(path).stem
+                        seen_paths[path] = title
+                if len(metas) < 200:
+                    break
+                offset += 200
+
+            for path, title in seen_paths.items():
                 if dry_run:
                     click.echo(f"  [dry-run] {title} → {col_name}")
                     count += 1
