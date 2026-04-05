@@ -81,6 +81,12 @@ CREATE INDEX IF NOT EXISTS idx_links_type ON links(link_type);
 CREATE INDEX IF NOT EXISTS idx_links_created_by ON links(created_by);
 CREATE INDEX IF NOT EXISTS idx_links_from_type ON links(from_tumbler, link_type);
 CREATE INDEX IF NOT EXISTS idx_links_to_type ON links(to_tumbler, link_type);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique
+    ON links(from_tumbler, to_tumbler, link_type);
+
+CREATE INDEX IF NOT EXISTS idx_links_created_by_type
+    ON links(created_by, link_type);
 """
 
 
@@ -91,7 +97,6 @@ class CatalogDB:
         self._path = db_path
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._lock = threading.Lock()
-        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA_SQL)
 
     def rebuild(
@@ -138,7 +143,7 @@ class CatalogDB:
 
             for lnk in links:
                 self._conn.execute(
-                    "INSERT INTO links "
+                    "INSERT OR IGNORE INTO links "
                     "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
                     "created_by, created_at, metadata) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -149,7 +154,7 @@ class CatalogDB:
                         lnk.from_span,
                         lnk.to_span,
                         lnk.created_by,
-                        lnk.created,
+                        lnk.created_at,
                         json.dumps(lnk.meta),
                     ),
                 )

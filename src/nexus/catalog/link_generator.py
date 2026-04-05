@@ -42,14 +42,12 @@ def generate_citation_links(cat: Catalog) -> int:
 
     count = 0
     for from_tumbler, ref_ids in entries_with_refs:
-        existing_targets = {l.to_tumbler for l in cat.links_from(from_tumbler, link_type="cites")}
         for ref_id in ref_ids:
             to_tumbler = id_to_tumbler.get(ref_id)
-            if to_tumbler and to_tumbler != from_tumbler and to_tumbler not in existing_targets:
-                cat.link(from_tumbler, to_tumbler, "cites", created_by="bib_enricher")
-                existing_targets.add(to_tumbler)
-                count += 1
-                _log.debug("citation_link_created", from_t=str(from_tumbler), to_t=str(to_tumbler))
+            if to_tumbler and to_tumbler != from_tumbler:
+                if cat.link_if_absent(from_tumbler, to_tumbler, "cites", created_by="bib_enricher"):
+                    count += 1
+                    _log.debug("citation_link_created", from_t=str(from_tumbler), to_t=str(to_tumbler))
 
     return count
 
@@ -68,18 +66,15 @@ def generate_code_rdr_links(cat: Catalog) -> int:
         module_name = Path(code.file_path).stem.replace("_", "").lower()
         if len(module_name) <= 3:
             continue
-        existing_targets = {l.to_tumbler for l in cat.links_from(code.tumbler, link_type="implements")}
         for rdr in rdr_entries:
             rdr_title_norm = rdr.title.lower().replace("-", "").replace(" ", "").replace("_", "")
-            if module_name in rdr_title_norm and rdr.tumbler not in existing_targets:
-                # code implements RDR (code → implements → RDR)
-                cat.link(code.tumbler, rdr.tumbler, "implements", created_by="index_hook")
-                existing_targets.add(rdr.tumbler)
-                count += 1
-                _log.debug(
-                    "code_rdr_link_created",
-                    code=str(code.tumbler), rdr=str(rdr.tumbler),
-                    module=module_name,
-                )
+            if module_name in rdr_title_norm:
+                if cat.link_if_absent(code.tumbler, rdr.tumbler, "implements", created_by="index_hook"):
+                    count += 1
+                    _log.debug(
+                        "code_rdr_link_created",
+                        code=str(code.tumbler), rdr=str(rdr.tumbler),
+                        module=module_name,
+                    )
 
     return count

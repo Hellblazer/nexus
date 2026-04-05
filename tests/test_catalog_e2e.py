@@ -326,6 +326,70 @@ class TestLinkGenerationE2E:
         assert link_count >= 0  # May or may not match depending on title heuristic
 
 
+class TestLinkLifecycleE2E:
+    """Full link lifecycle: create → query → audit → delete → regenerate."""
+
+    def _make_linked_catalog(self, tmp_path):
+        catalog_dir = tmp_path / "catalog"
+        cat = Catalog.init(catalog_dir)
+        owner = cat.register_owner("test", "repo", repo_hash="aabb1122")
+        doc_a = cat.register(owner, "paper-a", content_type="paper",
+                             meta={"bib_semantic_scholar_id": "ss-a",
+                                   "references": ["ss-b", "ss-c"]})
+        doc_b = cat.register(owner, "paper-b", content_type="paper",
+                             meta={"bib_semantic_scholar_id": "ss-b"})
+        doc_c = cat.register(owner, "paper-c", content_type="paper",
+                             meta={"bib_semantic_scholar_id": "ss-c"})
+        return cat, doc_a, doc_b, doc_c
+
+    def test_full_link_lifecycle(self, tmp_path):
+        from nexus.catalog.link_generator import generate_citation_links
+
+        cat, doc_a, doc_b, doc_c = self._make_linked_catalog(tmp_path)
+
+        # Generate
+        count = generate_citation_links(cat)
+        assert count == 2  # a→b, a→c
+
+        # Query
+        links = cat.link_query(created_by="bib_enricher")
+        assert len(links) == 2
+
+        # Bulk delete
+        removed = cat.bulk_unlink(created_by="bib_enricher")
+        assert removed == 2
+        assert cat.link_query(created_by="bib_enricher") == []
+
+        # Regenerate (idempotent)
+        count2 = generate_citation_links(cat)
+        assert count2 == 2
+
+        # Audit
+        audit = cat.link_audit()
+        assert audit["orphaned_count"] == 0
+        assert audit["total"] == 2
+
+    def test_delete_document_orphan_preserved(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = self._make_linked_catalog(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.delete_document(doc_a)
+
+        audit = cat.link_audit()
+        assert audit["orphaned_count"] == 1
+        assert cat.resolve(doc_a) is None
+        assert len(cat.links_to(doc_b)) == 1
+
+    def test_link_if_absent_idempotent_generator(self, tmp_path):
+        from nexus.catalog.link_generator import generate_citation_links
+
+        cat, doc_a, doc_b, doc_c = self._make_linked_catalog(tmp_path)
+        count1 = generate_citation_links(cat)
+        count2 = generate_citation_links(cat)
+        assert count1 == 2
+        assert count2 == 0  # all already exist
+        assert len(cat.link_query(link_type="cites")) == 2
+
+
 class TestCatalogRebuildFromJSONL:
     """A fresh Catalog instance rebuilds correctly from JSONL truth."""
 

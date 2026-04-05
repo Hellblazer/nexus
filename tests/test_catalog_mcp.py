@@ -12,12 +12,16 @@ from nexus.mcp_server import (
     _inject_catalog,
     _reset_singletons,
     catalog_link,
+    catalog_link_audit,
+    catalog_link_bulk,
+    catalog_link_query,
     catalog_links,
     catalog_list,
     catalog_register,
     catalog_resolve,
     catalog_search,
     catalog_show,
+    catalog_unlink,
     catalog_update,
 )
 
@@ -165,9 +169,111 @@ class TestCatalogLinks:
         catalog_register(title="A", owner="1.1")
         catalog_register(title="B", owner="1.1")
         result = catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        assert "ok" in result or "from" in result
-        links = catalog_links(tumbler="1.1.1")
-        assert len(links) > 0
+        assert result["from"] == "1.1.1"
+        graph = catalog_links(tumbler="1.1.1")
+        assert "nodes" in graph
+        assert "edges" in graph
+        assert len(graph["edges"]) > 0
+        # Starting node included in nodes
+        node_tumblers = {n["tumbler"] for n in graph["nodes"]}
+        assert "1.1.1" in node_tumblers
+
+
+class TestTitleResolution:
+    def test_catalog_link_by_title(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="auth module", owner="1.1", content_type="code")
+        catalog_register(title="db schema", owner="1.1", content_type="code")
+        result = catalog_link(from_tumbler="auth module", to_tumbler="db schema", link_type="cites")
+        assert "error" not in result
+        assert result["from"] == "1.1.1"
+        assert result["to"] == "1.1.2"
+
+    def test_catalog_link_by_tumbler(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="A", owner="1.1")
+        catalog_register(title="B", owner="1.1")
+        result = catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+        assert "error" not in result
+
+    def test_catalog_link_not_found_returns_error(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        result = catalog_link(from_tumbler="nonexistent", to_tumbler="1.1.1", link_type="cites")
+        assert "error" in result
+        assert "Not found" in result["error"]
+
+    def test_catalog_unlink_by_title(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="auth module", owner="1.1")
+        catalog_register(title="db schema", owner="1.1")
+        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+        result = catalog_unlink(from_tumbler="auth module", to_tumbler="db schema", link_type="cites")
+        assert "error" not in result
+        assert result["removed"] == 1
+
+    def test_catalog_links_by_title(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="auth module", owner="1.1")
+        catalog_register(title="db schema", owner="1.1")
+        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+        result = catalog_links(tumbler="auth module")
+        assert "edges" in result
+        assert len(result["edges"]) >= 1
+
+
+class TestCatalogLinkQuery:
+    def test_catalog_link_query_mcp_by_type(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="A", owner="1.1")
+        catalog_register(title="B", owner="1.1")
+        catalog_register(title="C", owner="1.1")
+        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.3", link_type="implements")
+        results = catalog_link_query(link_type="cites")
+        assert len(results) == 1
+        assert results[0]["type"] == "cites"
+
+    def test_catalog_link_query_mcp_by_created_by(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="A", owner="1.1")
+        catalog_register(title="B", owner="1.1")
+        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites", created_by="bib_enricher")
+        results = catalog_link_query(created_by="bib_enricher")
+        assert len(results) == 1
+
+
+class TestCatalogLinkBulk:
+    def test_catalog_link_bulk_dry_run(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="A", owner="1.1")
+        catalog_register(title="B", owner="1.1")
+        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+        result = catalog_link_bulk(link_type="cites", dry_run=True)
+        assert result["removed"] == 1
+        assert result["dry_run"] is True
+        # Still exists
+        links = catalog_link_query(link_type="cites")
+        assert len(links) == 1
+
+
+class TestCatalogLinkAudit:
+    def test_catalog_link_audit_mcp(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="A", owner="1.1")
+        catalog_register(title="B", owner="1.1")
+        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+        result = catalog_link_audit()
+        assert result["total"] == 1
+        assert result["by_type"]["cites"] == 1
 
 
 class TestCatalogResolve:

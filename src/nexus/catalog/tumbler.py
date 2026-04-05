@@ -7,6 +7,10 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import structlog
+
+_log = structlog.get_logger()
+
 
 @dataclass(frozen=True)
 class Tumbler:
@@ -90,7 +94,7 @@ class LinkRecord:
     from_span: str
     to_span: str
     created_by: str
-    created: str
+    created_at: str
     meta: dict = field(default_factory=dict)
     _deleted: bool = False
 
@@ -105,8 +109,16 @@ def read_owners(path: Path) -> dict[str, OwnerRecord]:
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
-            key = obj["owner"]
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                _log.warning("catalog_jsonl_parse_error", path=str(path), line=line[:80])
+                continue
+            try:
+                key = obj["owner"]
+            except KeyError:
+                _log.warning("catalog_jsonl_missing_key", path=str(path), line=line[:80])
+                continue
             if obj.get("_deleted"):
                 records.pop(key, None)
             else:
@@ -121,8 +133,16 @@ def read_documents(path: Path) -> dict[str, DocumentRecord]:
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
-            key = obj["tumbler"]
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                _log.warning("catalog_jsonl_parse_error", path=str(path), line=line[:80])
+                continue
+            try:
+                key = obj["tumbler"]
+            except KeyError:
+                _log.warning("catalog_jsonl_missing_key", path=str(path), line=line[:80])
+                continue
             if obj.get("_deleted"):
                 records.pop(key, None)
             else:
@@ -137,8 +157,19 @@ def read_links(path: Path) -> dict[tuple[str, str, str], LinkRecord]:
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
-            key = (obj["from_t"], obj["to_t"], obj["link_type"])
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                _log.warning("catalog_jsonl_parse_error", path=str(path), line=line[:80])
+                continue
+            # F2: backward compat — old JSONL uses "created", new uses "created_at"
+            if "created" in obj and "created_at" not in obj:
+                obj["created_at"] = obj.pop("created")
+            try:
+                key = (obj["from_t"], obj["to_t"], obj["link_type"])
+            except KeyError:
+                _log.warning("catalog_jsonl_missing_key", path=str(path), line=line[:80])
+                continue
             if obj.get("_deleted"):
                 records.pop(key, None)
             else:

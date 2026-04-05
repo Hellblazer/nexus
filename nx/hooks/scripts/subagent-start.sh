@@ -158,6 +158,13 @@ The `/nx:query` skill handles full catalog-aware plan execution.
     catalog_show(tumbler="1.2.5")
   Tool: mcp__plugin_nx_nexus__catalog_links
     catalog_links(tumbler="1.2.5", direction="in", link_type="cites", depth=2)
+    Returns {"nodes": [...], "edges": [...]} — use result["edges"] for link list.
+  Tool: mcp__plugin_nx_nexus__catalog_link_query
+    catalog_link_query(from_tumbler="", to_tumbler="", link_type="cites", created_by="bib_enricher", limit=50)
+    Query links by any combination of filters. Admin/audit use — not a planner step.
+  Tool: mcp__plugin_nx_nexus__catalog_link_audit
+    catalog_link_audit()
+    Audit the link graph: total, by_type, by_creator, orphaned links, duplicates.
   Tool: mcp__plugin_nx_nexus__catalog_resolve
     catalog_resolve(owner="1.1", corpus="schema-evolution")
   Tool: mcp__plugin_nx_nexus__catalog_stats

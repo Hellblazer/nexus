@@ -385,6 +385,39 @@ class Catalog:
         finally:
             self._release_lock(dir_fd)
 
+    def delete_document(self, tumbler: Tumbler) -> bool:
+        """Soft-delete a document: tombstone in JSONL, DELETE from SQLite.
+
+        Links to/from this tumbler are preserved (RF-9: orphaned links intentional).
+        Returns True if deleted, False if not found.
+        """
+        dir_fd = self._acquire_lock()
+        try:
+            entry = self.resolve(tumbler)
+            if entry is None:
+                return False
+            tombstone = {
+                "tumbler": str(tumbler),
+                "title": entry.title,
+                "author": entry.author,
+                "year": entry.year,
+                "content_type": entry.content_type,
+                "file_path": entry.file_path,
+                "corpus": entry.corpus,
+                "physical_collection": entry.physical_collection,
+                "chunk_count": entry.chunk_count,
+                "head_hash": entry.head_hash,
+                "indexed_at": entry.indexed_at,
+                "meta": entry.meta,
+                "_deleted": True,
+            }
+            self._append_jsonl(self._documents_path, tombstone)
+            self._db.execute("DELETE FROM documents WHERE tumbler = ?", (str(tumbler),))
+            self._db.commit()
+            return True
+        finally:
+            self._release_lock(dir_fd)
+
     def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
         rows = self._db.search(query, content_type=content_type)
         return [
@@ -516,6 +549,61 @@ class Catalog:
 
     # ── Links ──────────────────────────────────────────────────────────────
 
+    def _link_unlocked(
+        self,
+        from_t: Tumbler,
+        to_t: Tumbler,
+        link_type: str,
+        created_by: str,
+        from_span: str,
+        to_span: str,
+        meta: dict,
+    ) -> bool:
+        """Core link logic — caller must hold the lock. Returns True if new, False if merged."""
+        now = datetime.now(UTC).isoformat()
+        row = self._db.execute(
+            "SELECT id, created_by, metadata, created_at FROM links "
+            "WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
+            (str(from_t), str(to_t), link_type),
+        ).fetchone()
+
+        if row is not None:
+            existing_meta = json.loads(row[2]) if row[2] else {}
+            existing_meta.update(meta)
+            co = existing_meta.get("co_discovered_by", [])
+            if created_by != row[1] and created_by not in co:
+                co.append(created_by)
+            existing_meta["co_discovered_by"] = co
+            self._db.execute(
+                "UPDATE links SET from_span=?, to_span=?, metadata=? WHERE id=?",
+                (from_span, to_span, json.dumps(existing_meta), row[0]),
+            )
+            rec = LinkRecord(
+                from_t=str(from_t), to_t=str(to_t), link_type=link_type,
+                from_span=from_span, to_span=to_span,
+                created_by=row[1], created_at=row[3] or now, meta=existing_meta,
+            )
+            self._append_jsonl(self._links_path, rec.__dict__)
+            self._db.commit()
+            return False
+        else:
+            combined_meta = dict(meta)
+            rec = LinkRecord(
+                from_t=str(from_t), to_t=str(to_t), link_type=link_type,
+                from_span=from_span, to_span=to_span,
+                created_by=created_by, created_at=now, meta=combined_meta,
+            )
+            self._db.execute(
+                "INSERT OR IGNORE INTO links "
+                "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
+                "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(from_t), str(to_t), link_type, from_span, to_span,
+                 created_by, now, json.dumps(combined_meta)),
+            )
+            self._append_jsonl(self._links_path, rec.__dict__)
+            self._db.commit()
+            return True
+
     def link(
         self,
         from_t: Tumbler,
@@ -529,29 +617,36 @@ class Catalog:
     ) -> None:
         dir_fd = self._acquire_lock()
         try:
-            now = datetime.now(UTC).isoformat()
-            rec = LinkRecord(
-                from_t=str(from_t),
-                to_t=str(to_t),
-                link_type=link_type,
-                from_span=from_span,
-                to_span=to_span,
-                created_by=created_by,
-                created=now,
-                meta=dict(meta),
-            )
-            self._append_jsonl(self._links_path, rec.__dict__)
-            self._db.execute(
-                "INSERT INTO links "
-                "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
-                "created_by, created_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(from_t), str(to_t), link_type, from_span, to_span,
-                    created_by, now, json.dumps(dict(meta)),
-                ),
-            )
-            self._db.commit()
+            self._link_unlocked(from_t, to_t, link_type, created_by,
+                                from_span, to_span, dict(meta))
+        finally:
+            self._release_lock(dir_fd)
+
+    def link_if_absent(
+        self,
+        from_t: Tumbler,
+        to_t: Tumbler,
+        link_type: str,
+        created_by: str,
+        *,
+        from_span: str = "",
+        to_span: str = "",
+        **meta: object,
+    ) -> bool:
+        """Create link only if it does not already exist. Returns True=created, False=existed.
+        No JSONL append on the 'already exists' path.
+        """
+        dir_fd = self._acquire_lock()
+        try:
+            row = self._db.execute(
+                "SELECT id FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
+                (str(from_t), str(to_t), link_type),
+            ).fetchone()
+            if row is not None:
+                return False
+            self._link_unlocked(from_t, to_t, link_type, created_by,
+                                from_span, to_span, dict(meta))
+            return True
         finally:
             self._release_lock(dir_fd)
 
@@ -560,16 +655,18 @@ class Catalog:
         try:
             if link_type:
                 rows = self._db.execute(
-                    "SELECT id, link_type FROM links WHERE from_tumbler = ? AND to_tumbler = ? AND link_type = ?",
+                    "SELECT id, link_type, created_by FROM links "
+                    "WHERE from_tumbler = ? AND to_tumbler = ? AND link_type = ?",
                     (str(from_t), str(to_t), link_type),
                 ).fetchall()
             else:
                 rows = self._db.execute(
-                    "SELECT id, link_type FROM links WHERE from_tumbler = ? AND to_tumbler = ?",
+                    "SELECT id, link_type, created_by FROM links "
+                    "WHERE from_tumbler = ? AND to_tumbler = ?",
                     (str(from_t), str(to_t)),
                 ).fetchall()
 
-            for row_id, lt in rows:
+            for row_id, lt, original_created_by in rows:
                 tombstone = {
                     "from_t": str(from_t),
                     "to_t": str(to_t),
@@ -577,8 +674,8 @@ class Catalog:
                     "_deleted": True,
                     "from_span": "",
                     "to_span": "",
-                    "created_by": "",
-                    "created": datetime.now(UTC).isoformat(),
+                    "created_by": original_created_by,
+                    "created_at": datetime.now(UTC).isoformat(),
                     "meta": {},
                 }
                 self._append_jsonl(self._links_path, tombstone)
@@ -623,6 +720,155 @@ class Catalog:
             params.append(link_type)
         return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
 
+    def link_query(
+        self,
+        from_t: str = "",
+        to_t: str = "",
+        link_type: str = "",
+        created_by: str = "",
+        direction: str = "both",
+        tumbler: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[CatalogLink]:
+        """Composable link filter. Returns CatalogLink list with LIMIT/OFFSET."""
+        conditions: list[str] = []
+        params: list[str | int] = []
+
+        if tumbler:
+            if direction == "out":
+                conditions.append("from_tumbler = ?")
+                params.append(tumbler)
+            elif direction == "in":
+                conditions.append("to_tumbler = ?")
+                params.append(tumbler)
+            else:
+                conditions.append("(from_tumbler = ? OR to_tumbler = ?)")
+                params.extend([tumbler, tumbler])
+        if from_t:
+            conditions.append("from_tumbler = ?")
+            params.append(from_t)
+        if to_t:
+            conditions.append("to_tumbler = ?")
+            params.append(to_t)
+        if link_type:
+            conditions.append("link_type = ?")
+            params.append(link_type)
+        if created_by:
+            conditions.append("created_by = ?")
+            params.append(created_by)
+
+        sql = (
+            "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
+            "created_by, created_at, metadata FROM links"
+        )
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([limit if limit > 0 else -1, offset])
+
+        return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
+
+    def bulk_unlink(
+        self,
+        from_t: str = "",
+        to_t: str = "",
+        link_type: str = "",
+        created_by: str = "",
+        created_at_before: str = "",
+        dry_run: bool = False,
+    ) -> int:
+        """Delete links matching filters. Returns count removed.
+
+        Tombstones preserve original created_by for JSONL audit trail.
+        dry_run=True returns count without deleting.
+        """
+        dir_fd = self._acquire_lock()
+        try:
+            matching = self.link_query(
+                from_t=from_t, to_t=to_t, link_type=link_type,
+                created_by=created_by, limit=0,
+            )
+            if created_at_before:
+                matching = [
+                    l for l in matching
+                    if l.created_at and l.created_at < created_at_before
+                ]
+
+            if dry_run:
+                return len(matching)
+
+            for lnk in matching:
+                tombstone = {
+                    "from_t": str(lnk.from_tumbler), "to_t": str(lnk.to_tumbler),
+                    "link_type": lnk.link_type, "_deleted": True,
+                    "from_span": "", "to_span": "",
+                    "created_by": lnk.created_by,
+                    "created_at": datetime.now(UTC).isoformat(), "meta": {},
+                }
+                self._append_jsonl(self._links_path, tombstone)
+                self._db.execute(
+                    "DELETE FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
+                    (str(lnk.from_tumbler), str(lnk.to_tumbler), lnk.link_type),
+                )
+            self._db.commit()
+            return len(matching)
+        finally:
+            self._release_lock(dir_fd)
+
+    def validate_link(
+        self, from_t: Tumbler, to_t: Tumbler, link_type: str
+    ) -> list[str]:
+        """Validate a proposed link. Returns list of error strings (empty = valid)."""
+        errors: list[str] = []
+        if self.resolve(from_t) is None:
+            errors.append(f"from_tumbler {from_t} not found in documents")
+        if self.resolve(to_t) is None:
+            errors.append(f"to_tumbler {to_t} not found in documents")
+        row = self._db.execute(
+            "SELECT id FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
+            (str(from_t), str(to_t), link_type),
+        ).fetchone()
+        if row is not None:
+            errors.append(f"duplicate: link ({from_t}, {to_t}, {link_type!r}) already exists")
+        return errors
+
+    def link_audit(self) -> dict:
+        """Audit the links table. Returns stats + orphan + duplicate lists."""
+        total = self._db.execute("SELECT count(*) FROM links").fetchone()[0]
+        by_type = dict(
+            self._db.execute(
+                "SELECT link_type, count(*) FROM links GROUP BY link_type"
+            ).fetchall()
+        )
+        by_creator = dict(
+            self._db.execute(
+                "SELECT created_by, count(*) FROM links GROUP BY created_by"
+            ).fetchall()
+        )
+        orphan_rows = self._db.execute(
+            "SELECT from_tumbler, to_tumbler, link_type FROM links l "
+            "WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.tumbler = l.from_tumbler) "
+            "   OR NOT EXISTS (SELECT 1 FROM documents d WHERE d.tumbler = l.to_tumbler)"
+        ).fetchall()
+        orphaned = [{"from": r[0], "to": r[1], "type": r[2]} for r in orphan_rows]
+        dup_rows = self._db.execute(
+            "SELECT from_tumbler, to_tumbler, link_type, count(*) AS cnt "
+            "FROM links GROUP BY from_tumbler, to_tumbler, link_type HAVING cnt > 1"
+        ).fetchall()
+        duplicates = [
+            {"from": r[0], "to": r[1], "type": r[2], "count": r[3]} for r in dup_rows
+        ]
+        return {
+            "total": total,
+            "by_type": by_type,
+            "by_creator": by_creator,
+            "orphaned": orphaned,
+            "orphaned_count": len(orphaned),
+            "duplicates": duplicates,
+            "duplicate_count": len(duplicates),
+        }
+
     def graph(
         self,
         tumbler: Tumbler,
@@ -658,8 +904,6 @@ class Catalog:
                     visited.add(str(other))
                     queue.append((other, d + 1))
 
-        # Build node list (exclude the starting node)
-        visited.discard(str(tumbler))
         nodes = [self.resolve(Tumbler.parse(t)) for t in visited]
         nodes = [n for n in nodes if n is not None]
         return {"nodes": nodes, "edges": all_edges}

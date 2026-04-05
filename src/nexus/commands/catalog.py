@@ -40,7 +40,14 @@ def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
     # Try FTS search by title/filename
     results = cat.find(value)
     if results:
-        return results[0].tumbler
+        exact = [r for r in results if r.title == value]
+        if exact:
+            return exact[0].tumbler
+        if len(results) == 1:
+            return results[0].tumbler
+        raise click.ClickException(
+            f"Ambiguous: {len(results)} documents match {value!r} — use tumbler"
+        )
 
     raise click.ClickException(f"Not found: {value}")
 
@@ -243,6 +250,25 @@ def update_cmd(
     click.echo(f"Updated: {t}")
 
 
+@catalog.command("delete")
+@click.argument("tumbler_or_title")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
+    """Delete a catalog document. Leaves links intact (orphaned links preserved)."""
+    cat = _get_catalog()
+    t = _resolve_tumbler(cat, tumbler_or_title)
+    entry = cat.resolve(t)
+    if entry is None:
+        raise click.ClickException(f"Not found: {tumbler_or_title}")
+    if not yes:
+        click.confirm(f"Delete '{entry.title}' ({t})? Links will be preserved.", abort=True)
+    deleted = cat.delete_document(t)
+    if deleted:
+        click.echo(f"Deleted: {t} ({entry.title}). Links preserved.")
+    else:
+        click.echo(f"Not found: {t}")
+
+
 @catalog.command("link")
 @click.argument("from_tumbler")
 @click.argument("to_tumbler")
@@ -298,6 +324,92 @@ def links_cmd(
     else:
         for edge in result["edges"]:
             click.echo(f"{edge.from_tumbler} → {edge.to_tumbler} ({edge.link_type})")
+
+
+@catalog.command("link-query")
+@click.option("--from", "from_t", default="", help="From tumbler or title")
+@click.option("--to", "to_t", default="", help="To tumbler or title")
+@click.option("--tumbler", default="", help="Tumbler or title (with --direction)")
+@click.option("--direction", default="both", type=click.Choice(["in", "out", "both"]))
+@click.option("--type", "link_type", default="")
+@click.option("--created-by", default="")
+@click.option("--limit", "-n", default=50, type=int)
+@click.option("--offset", default=0, type=int)
+@click.option("--json", "as_json", is_flag=True)
+def link_query_cmd(
+    from_t: str, to_t: str, tumbler: str, direction: str,
+    link_type: str, created_by: str,
+    limit: int, offset: int, as_json: bool,
+) -> None:
+    """Query links by any combination of filters."""
+    cat = _get_catalog()
+    resolved_from = str(_resolve_tumbler(cat, from_t)) if from_t else ""
+    resolved_to = str(_resolve_tumbler(cat, to_t)) if to_t else ""
+    resolved_tumbler = str(_resolve_tumbler(cat, tumbler)) if tumbler else ""
+    links = cat.link_query(
+        from_t=resolved_from, to_t=resolved_to,
+        tumbler=resolved_tumbler, direction=direction,
+        link_type=link_type, created_by=created_by,
+        limit=limit, offset=offset,
+    )
+    if as_json:
+        click.echo(json.dumps([_link_to_dict(l) for l in links], indent=2))
+    else:
+        if not links:
+            click.echo("No links found.")
+            return
+        for edge in links:
+            click.echo(f"{edge.from_tumbler} → {edge.to_tumbler} ({edge.link_type}) by {edge.created_by}")
+
+
+@catalog.command("link-bulk-delete")
+@click.option("--from", "from_t", default="", help="From tumbler or title")
+@click.option("--to", "to_t", default="", help="To tumbler or title")
+@click.option("--type", "link_type", default="")
+@click.option("--created-by", default="")
+@click.option("--created-at-before", default="", help="ISO timestamp cutoff")
+@click.option("--dry-run", is_flag=True)
+def link_bulk_delete_cmd(
+    from_t: str, to_t: str, link_type: str, created_by: str,
+    created_at_before: str, dry_run: bool,
+) -> None:
+    """Bulk delete links matching filters."""
+    cat = _get_catalog()
+    resolved_from = str(_resolve_tumbler(cat, from_t)) if from_t else ""
+    resolved_to = str(_resolve_tumbler(cat, to_t)) if to_t else ""
+    count = cat.bulk_unlink(
+        from_t=resolved_from, to_t=resolved_to,
+        link_type=link_type, created_by=created_by,
+        created_at_before=created_at_before, dry_run=dry_run,
+    )
+    mode = "Would remove" if dry_run else "Removed"
+    click.echo(f"{mode} {count} link(s)")
+
+
+@catalog.command("link-audit")
+@click.option("--json", "as_json", is_flag=True)
+def link_audit_cmd(as_json: bool) -> None:
+    """Audit the link graph: stats, orphans, duplicates."""
+    cat = _get_catalog()
+    result = cat.link_audit()
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(f"Total links:     {result['total']}")
+        click.echo(f"Orphaned:        {result['orphaned_count']}")
+        click.echo(f"Duplicates:      {result['duplicate_count']}")
+        if result["by_type"]:
+            click.echo("By type:")
+            for t, c in sorted(result["by_type"].items()):
+                click.echo(f"  {t:<12} {c}")
+        if result["by_creator"]:
+            click.echo("By creator:")
+            for c, n in sorted(result["by_creator"].items()):
+                click.echo(f"  {c:<20} {n}")
+        if result["orphaned"]:
+            click.echo("Orphaned links:")
+            for o in result["orphaned"]:
+                click.echo(f"  {o['from']} → {o['to']} ({o['type']})")
 
 
 @catalog.command("owners")

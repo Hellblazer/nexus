@@ -110,7 +110,241 @@ class TestUnlink:
         assert removed == 0
 
 
+class TestIdempotentLink:
+    def test_link_idempotent_merges_co_discovered_by(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        links = cat.links_from(doc_a, link_type="cites")
+        assert len(links) == 1
+        assert links[0].created_by == "bib_enricher"  # original creator preserved
+        assert links[0].meta.get("co_discovered_by") == ["user"]
+
+    def test_link_idempotent_same_creator_no_co_discovered(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        links = cat.links_from(doc_a, link_type="cites")
+        assert len(links) == 1
+        assert "user" not in links[0].meta.get("co_discovered_by", [])
+
+    def test_link_if_absent_returns_true_on_new(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        result = cat.link_if_absent(doc_a, doc_b, "cites", created_by="user")
+        assert result is True
+        assert len(cat.links_from(doc_a)) == 1
+
+    def test_link_if_absent_returns_false_on_duplicate(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        result = cat.link_if_absent(doc_a, doc_b, "cites", created_by="other")
+        assert result is False
+        assert len(cat.links_from(doc_a)) == 1
+
+    def test_batch_id_roundtrip(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher", batch_id="run-123")
+        link = cat.links_from(doc_a)[0]
+        assert link.meta["batch_id"] == "run-123"
+
+
+class TestUnlinkProvenance:
+    def test_unlink_tombstone_preserves_created_by(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
+        cat.unlink(doc_a, doc_b, "cites")
+        content = (tmp_path / "catalog" / "links.jsonl").read_text()
+        lines = [json.loads(l) for l in content.strip().splitlines()]
+        tombstone = [l for l in lines if l.get("_deleted")][0]
+        assert tombstone["created_by"] == "bib_enricher"
+
+
+class TestLinkQuery:
+    def test_link_query_by_type(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_c, "implements", created_by="user")
+        results = cat.link_query(link_type="cites")
+        assert len(results) == 1
+        assert results[0].link_type == "cites"
+
+    def test_link_query_by_created_by(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
+        cat.link(doc_a, doc_c, "relates", created_by="user")
+        results = cat.link_query(created_by="bib_enricher")
+        assert len(results) == 1
+        assert results[0].created_by == "bib_enricher"
+
+    def test_link_query_combined_filters(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
+        cat.link(doc_a, doc_c, "cites", created_by="user")
+        results = cat.link_query(link_type="cites", created_by="bib_enricher")
+        assert len(results) == 1
+        assert results[0].to_tumbler == doc_b
+
+    def test_link_query_pagination(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_c, "cites", created_by="user")
+        cat.link(doc_b, doc_c, "cites", created_by="user")
+        page1 = cat.link_query(link_type="cites", limit=2, offset=0)
+        page2 = cat.link_query(link_type="cites", limit=2, offset=2)
+        assert len(page1) == 2
+        assert len(page2) == 1
+
+    def test_link_query_empty_returns_empty(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        results = cat.link_query(link_type="nonexistent")
+        assert results == []
+
+    def test_link_query_by_tumbler_both_directions(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_c, doc_a, "relates", created_by="user")
+        results = cat.link_query(tumbler=str(doc_a), direction="both")
+        assert len(results) == 2
+
+    def test_link_query_by_tumbler_out_only(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_c, doc_a, "relates", created_by="user")
+        results = cat.link_query(tumbler=str(doc_a), direction="out")
+        assert len(results) == 1
+        assert results[0].link_type == "cites"
+
+
+class TestBulkUnlink:
+    def test_bulk_unlink_by_created_by(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
+        cat.link(doc_a, doc_c, "cites", created_by="user")
+        removed = cat.bulk_unlink(created_by="bib_enricher")
+        assert removed == 1
+        assert len(cat.link_query(created_by="bib_enricher")) == 0
+        assert len(cat.link_query(created_by="user")) == 1
+
+    def test_bulk_unlink_by_type(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_c, "implements", created_by="user")
+        removed = cat.bulk_unlink(link_type="cites")
+        assert removed == 1
+        assert len(cat.link_query()) == 1
+
+    def test_bulk_unlink_dry_run_no_delete(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        count = cat.bulk_unlink(link_type="cites", dry_run=True)
+        assert count == 1
+        assert len(cat.link_query(link_type="cites")) == 1  # still there
+
+    def test_bulk_unlink_time_range(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_c, "cites", created_by="user")
+        # All links created "now" — a future cutoff should match all
+        removed = cat.bulk_unlink(link_type="cites", created_at_before="2099-01-01T00:00:00")
+        assert removed == 2
+
+    def test_bulk_unlink_tombstones_preserve_created_by(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
+        cat.bulk_unlink(created_by="bib_enricher")
+        content = (tmp_path / "catalog" / "links.jsonl").read_text()
+        lines = [json.loads(l) for l in content.strip().splitlines()]
+        tombstone = [l for l in lines if l.get("_deleted")][0]
+        assert tombstone["created_by"] == "bib_enricher"
+
+
+class TestValidateLink:
+    def test_validate_link_valid_returns_empty(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        errors = cat.validate_link(doc_a, doc_b, "cites")
+        assert errors == []
+
+    def test_validate_link_both_endpoints_missing(self, tmp_path):
+        cat, _, _, _ = _make_catalog_with_docs(tmp_path)
+        from nexus.catalog.tumbler import Tumbler
+        errors = cat.validate_link(Tumbler.parse("1.1.99"), Tumbler.parse("1.1.98"), "cites")
+        assert len(errors) == 2
+        assert any("from_tumbler" in e for e in errors)
+        assert any("to_tumbler" in e for e in errors)
+
+    def test_validate_link_deleted_endpoint(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.delete_document(doc_a)
+        errors = cat.validate_link(doc_a, doc_b, "cites")
+        assert len(errors) == 1
+        assert "from_tumbler" in errors[0]
+
+    def test_validate_link_duplicate(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        errors = cat.validate_link(doc_a, doc_b, "cites")
+        assert len(errors) == 1
+        assert "duplicate" in errors[0]
+
+
+class TestLinkAudit:
+    def test_link_audit_empty_catalog(self, tmp_path):
+        cat, _, _, _ = _make_catalog_with_docs(tmp_path)
+        result = cat.link_audit()
+        assert result["total"] == 0
+        assert result["orphaned_count"] == 0
+        assert result["duplicate_count"] == 0
+
+    def test_link_audit_stats_by_type(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_c, "cites", created_by="user")
+        cat.link(doc_b, doc_c, "relates", created_by="user")
+        result = cat.link_audit()
+        assert result["total"] == 3
+        assert result["by_type"]["cites"] == 2
+        assert result["by_type"]["relates"] == 1
+
+    def test_link_audit_stats_by_creator(self, tmp_path):
+        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
+        cat.link(doc_a, doc_c, "cites", created_by="user")
+        result = cat.link_audit()
+        assert result["by_creator"]["bib_enricher"] == 1
+        assert result["by_creator"]["user"] == 1
+
+    def test_link_audit_orphaned_after_delete_document(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.delete_document(doc_a)
+        result = cat.link_audit()
+        assert result["orphaned_count"] == 1
+        assert result["orphaned"][0]["from"] == str(doc_a)
+
+    def test_link_audit_no_duplicates_with_unique_constraint(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.link(doc_a, doc_b, "cites", created_by="other")  # merge, not duplicate
+        result = cat.link_audit()
+        assert result["duplicate_count"] == 0
+
+
 class TestGraphTraversal:
+    def test_graph_includes_starting_node(self, tmp_path):
+        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        result = cat.graph(doc_a, depth=1)
+        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
+        assert str(doc_a) in node_tumblers
+        assert str(doc_b) in node_tumblers
+
+    def test_graph_isolated_node(self, tmp_path):
+        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
+        result = cat.graph(doc_a, depth=1)
+        assert len(result["nodes"]) == 1
+        assert str(result["nodes"][0].tumbler) == str(doc_a)
+        assert result["edges"] == []
+
     def test_depth_1(self, tmp_path):
         cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
         cat.link(doc_a, doc_b, "cites", created_by="user")

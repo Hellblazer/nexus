@@ -255,7 +255,7 @@ Finds catalog entries by metadata (author, corpus, title, file path). Executed b
 ---
 
 ### catalog_links
-Navigates the catalog link graph from a tumbler. Executed by the skill via the `catalog_links` MCP tool. Returns link dicts with `from`, `to`, `type` fields.
+Navigates the catalog link graph from a tumbler. Executed by the skill via the `catalog_links` MCP tool. Returns `{"nodes": [...], "edges": [...]}` — access edges via `result["edges"]`, starting node via `result["nodes"]`.
 
 **When to use**: When the question asks about citations ("what cites X?"), provenance ("what research informed this code?"), or relationships ("what implements this RDR?"). Use after `catalog_search` to traverse from a found entry.
 
@@ -263,7 +263,7 @@ Navigates the catalog link graph from a tumbler. Executed by the skill via the `
 
 **Fanout rule**: When `inputs` references a prior step that returned a list, the skill extracts the first entry's tumbler.
 
-**Output**: List of link dicts. The skill resolves link target tumblers to `physical_collection` values into `$step_N.collections`.
+**Output**: Dict with `"nodes"` (CatalogEntry dicts) and `"edges"` (link dicts with `from`, `to`, `type`). The skill resolves link target tumblers to `physical_collection` values into `$step_N.collections`.
 
 **Examples**:
 ```json

@@ -55,7 +55,7 @@ def _make_link(
         "from_span": "",
         "to_span": "",
         "created_by": "user",
-        "created": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
         "meta": {},
     }
     defaults.update(kw)
@@ -219,6 +219,52 @@ class TestNextDocumentNumber:
         db.rebuild(owners, docs, [])
         assert db.next_document_number("1.1") == 2
         assert db.next_document_number("1.2") == 3
+
+
+class TestUniqueConstraint:
+    def test_unique_constraint_prevents_duplicate_link_insert(self, tmp_path):
+        db = CatalogDB(tmp_path / ".catalog.db")
+        db._conn.execute(
+            "INSERT INTO links (from_tumbler, to_tumbler, link_type, from_span, to_span, "
+            "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("1.1.1", "1.1.2", "cites", "", "", "user", "2026-01-01", "{}"),
+        )
+        # Second insert with same (from, to, type) should be silently ignored
+        db._conn.execute(
+            "INSERT OR IGNORE INTO links (from_tumbler, to_tumbler, link_type, from_span, to_span, "
+            "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("1.1.1", "1.1.2", "cites", "", "", "other", "2026-02-01", "{}"),
+        )
+        count = db._conn.execute("SELECT count(*) FROM links").fetchone()[0]
+        assert count == 1
+
+    def test_rebuild_deduplicates_links_with_insert_or_ignore(self, tmp_path):
+        db = CatalogDB(tmp_path / ".catalog.db")
+        dup1 = _make_link(from_t="1.1.1", to_t="1.1.2", link_type="cites")
+        dup2 = _make_link(from_t="1.1.1", to_t="1.1.2", link_type="cites", created_by="other")
+        db.rebuild({}, {}, [dup1, dup2])
+        count = db._conn.execute("SELECT count(*) FROM links").fetchone()[0]
+        assert count == 1
+
+    def test_composite_index_created_by_type_exists(self, tmp_path):
+        db = CatalogDB(tmp_path / ".catalog.db")
+        indexes = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_links_created_by_type" in indexes
+
+    def test_unique_index_exists(self, tmp_path):
+        db = CatalogDB(tmp_path / ".catalog.db")
+        indexes = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_links_unique" in indexes
 
 
 class TestClose:

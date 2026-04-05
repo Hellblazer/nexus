@@ -211,6 +211,59 @@ class TestByOwner:
         assert len(entries) == 2
 
 
+class TestDeleteDocument:
+    def test_delete_document_resolve_returns_none(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        assert cat.delete_document(doc) is True
+        assert cat.resolve(doc) is None
+
+    def test_delete_document_links_preserved(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.delete_document(doc_a)
+        # Links should still be queryable (RF-9: orphaned links preserved)
+        links = cat.links_from(doc_a)
+        assert len(links) == 1
+        assert links[0].link_type == "cites"
+
+    def test_delete_document_jsonl_tombstone(self, tmp_path):
+        import json
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        cat.delete_document(doc)
+        content = (tmp_path / "catalog" / "documents.jsonl").read_text()
+        lines = [json.loads(l) for l in content.strip().splitlines()]
+        tombstone = [l for l in lines if l.get("_deleted")]
+        assert len(tombstone) == 1
+        assert tombstone[0]["tumbler"] == str(doc)
+
+    def test_delete_document_rebuild_excludes(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        cat.delete_document(doc)
+        cat.rebuild()
+        assert cat.resolve(doc) is None
+
+    def test_delete_document_not_found_returns_false(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        assert cat.delete_document(Tumbler.parse("1.1.999")) is False
+
+    def test_delete_document_fts_index_updated(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc = cat.register(owner, "authentication module", content_type="code", file_path="auth.py")
+        cat.delete_document(doc)
+        results = cat.find("authentication")
+        assert len(results) == 0
+
+
 class TestRebuild:
     def test_rebuild_from_jsonl(self, tmp_path):
         cat = _make_catalog(tmp_path)

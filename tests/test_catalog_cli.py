@@ -150,6 +150,84 @@ class TestLinkCommands:
         assert "1" in result.output  # removed count
 
 
+class TestLinkQueryCommand:
+    def test_link_query_cli_by_type(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "link-query", "--type", "cites"])
+        assert result.exit_code == 0
+        assert "cites" in result.output
+
+    def test_link_query_cli_json(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "link-query", "--type", "cites", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert len(data) == 1
+
+    def test_link_query_cli_empty(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "link-query", "--type", "nonexistent"])
+        assert result.exit_code == 0
+        assert "No links found." in result.output
+
+
+class TestDeleteCommand:
+    def test_delete_by_tumbler(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        result = runner.invoke(main, ["catalog", "delete", "1.1.1", "-y"])
+        assert result.exit_code == 0
+        assert "Deleted" in result.output
+
+    def test_delete_not_found(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "delete", "1.1.999", "-y"])
+        assert result.exit_code != 0
+
+
+class TestLinkBulkDeleteCommand:
+    def test_link_bulk_delete_dry_run(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, [
+            "catalog", "link-bulk-delete", "--type", "cites", "--dry-run",
+        ])
+        assert result.exit_code == 0
+        assert "would remove" in result.output.lower()
+        assert "1" in result.output
+
+
+class TestLinkAuditCommand:
+    def test_link_audit_cli(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "link-audit"])
+        assert result.exit_code == 0
+        assert "Total links" in result.output
+        assert "cites" in result.output
+
+    def test_link_audit_cli_json(self, initialized_catalog, catalog_env):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "link-audit", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["total"] == 1
+
+
 class TestOwnersCommand:
     def test_owners(self, initialized_catalog, catalog_env):
         runner = CliRunner()

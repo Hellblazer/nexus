@@ -202,6 +202,28 @@ def _require_catalog():
     return cat, None
 
 
+def _resolve_tumbler_mcp(
+    cat: "Catalog", value: str
+) -> "tuple[Tumbler | None, str | None]":
+    """Resolve tumbler string OR title/filename. Returns (tumbler, None) or (None, error)."""
+    from nexus.catalog.tumbler import Tumbler
+    try:
+        t = Tumbler.parse(value)
+        if cat.resolve(t) is not None:
+            return t, None
+    except ValueError:
+        pass
+    results = cat.find(value)
+    if results:
+        exact = [r for r in results if r.title == value]
+        if exact:
+            return exact[0].tumbler, None
+        if len(results) == 1:
+            return results[0].tumbler, None
+        return None, f"Ambiguous: {len(results)} documents match {value!r} — use tumbler"
+    return None, f"Not found: {value!r}"
+
+
 def _reset_singletons():
     """Reset lazy singletons (for tests only)."""
     global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
@@ -1259,19 +1281,19 @@ def catalog_link(
     from_span: str = "",
     to_span: str = "",
 ) -> dict:
-    """Create a typed link. created_by tracks origin for junk filtering (RF-8)."""
+    """Create a typed link. Accepts tumblers or titles. created_by tracks origin (RF-8)."""
     cat, err = _require_catalog()
     if err:
         return {"error": err}
     try:
-        from nexus.catalog.tumbler import Tumbler
-
-        cat.link(
-            Tumbler.parse(from_tumbler), Tumbler.parse(to_tumbler),
-            link_type, created_by,
-            from_span=from_span, to_span=to_span,
-        )
-        return {"from": from_tumbler, "to": to_tumbler, "type": link_type}
+        ft, err = _resolve_tumbler_mcp(cat, from_tumbler)
+        if err:
+            return {"error": err}
+        tt, err = _resolve_tumbler_mcp(cat, to_tumbler)
+        if err:
+            return {"error": err}
+        cat.link(ft, tt, link_type, created_by, from_span=from_span, to_span=to_span)
+        return {"from": str(ft), "to": str(tt), "type": link_type}
     except Exception as e:
         return {"error": str(e)}
 
@@ -1282,21 +1304,25 @@ def catalog_links(
     direction: str = "both",
     link_type: str = "",
     depth: int = 1,
-) -> list[dict]:
-    """Links to/from a catalog entry. depth > 1 traverses the graph."""
+) -> dict:
+    """Links to/from a catalog entry. Accepts tumbler or title. depth > 1 traverses the graph.
+
+    Returns {"nodes": [CatalogEntry dicts], "edges": [CatalogLink dicts]}.
+    """
     cat, err = _require_catalog()
     if err:
-        return [{"error": err}]
+        return {"error": err}
     try:
-        from nexus.catalog.tumbler import Tumbler
-
-        result = cat.graph(
-            Tumbler.parse(tumbler), depth=depth,
-            direction=direction, link_type=link_type,
-        )
-        return [_link_to_dict(e) for e in result["edges"]]
+        t, err = _resolve_tumbler_mcp(cat, tumbler)
+        if err:
+            return {"error": err}
+        result = cat.graph(t, depth=depth, direction=direction, link_type=link_type)
+        return {
+            "nodes": [_entry_to_dict(n) for n in result["nodes"]],
+            "edges": [_link_to_dict(e) for e in result["edges"]],
+        }
     except Exception as e:
-        return [{"error": str(e)}]
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -1305,17 +1331,94 @@ def catalog_unlink(
     to_tumbler: str,
     link_type: str = "",
 ) -> dict:
-    """Remove link(s) between catalog entries. If link_type empty, removes all types."""
+    """Remove link(s) between catalog entries. Accepts tumblers or titles. If link_type empty, removes all types."""
     cat, err = _require_catalog()
     if err:
         return {"error": err}
     try:
-        from nexus.catalog.tumbler import Tumbler
-
-        removed = cat.unlink(Tumbler.parse(from_tumbler), Tumbler.parse(to_tumbler), link_type)
-        return {"removed": removed, "from": from_tumbler, "to": to_tumbler}
+        ft, err = _resolve_tumbler_mcp(cat, from_tumbler)
+        if err:
+            return {"error": err}
+        tt, err = _resolve_tumbler_mcp(cat, to_tumbler)
+        if err:
+            return {"error": err}
+        removed = cat.unlink(ft, tt, link_type)
+        return {"removed": removed, "from": str(ft), "to": str(tt)}
     except Exception as e:
         return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_link_audit() -> dict:
+    """Audit the link graph: counts by type/creator, orphaned links, duplicates.
+
+    Use to verify link health before/after bulk operations.
+    """
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        return cat.link_audit()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_link_bulk(
+    from_tumbler: str = "",
+    to_tumbler: str = "",
+    link_type: str = "",
+    created_by: str = "",
+    created_at_before: str = "",
+    dry_run: bool = False,
+) -> dict:
+    """Bulk delete links by filter. Returns count removed.
+
+    dry_run=True returns count without deleting.
+    created_at_before: ISO timestamp string, e.g. "2026-01-01T00:00:00"
+    """
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    try:
+        count = cat.bulk_unlink(
+            from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
+            created_by=created_by, created_at_before=created_at_before,
+            dry_run=dry_run,
+        )
+        return {"removed": count, "dry_run": dry_run}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def catalog_link_query(
+    from_tumbler: str = "",
+    to_tumbler: str = "",
+    link_type: str = "",
+    created_by: str = "",
+    direction: str = "both",
+    tumbler: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    """Query links by any combination of filters. For admin/audit use.
+
+    NOT a query-planner step — use catalog_links for graph traversal.
+    Use for: audit by creator, find all links of a type, count generator output.
+    """
+    cat, err = _require_catalog()
+    if err:
+        return [{"error": err}]
+    try:
+        links = cat.link_query(
+            from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
+            created_by=created_by, direction=direction, tumbler=tumbler,
+            limit=limit, offset=offset,
+        )
+        return [_link_to_dict(l) for l in links]
+    except Exception as e:
+        return [{"error": str(e)}]
 
 
 @mcp.tool()
