@@ -344,3 +344,30 @@ def lca(t1: str, t2: str) -> str:
 ```
 
 **Impact on RDR-052**: The enhanced `query` tool should support tumbler subtree scoping — `query(question="...", subtree="1.1")` searches all documents under owner 1.1 at any depth. This is the ltree `@>` equivalent and replaces `catalog_resolve` for many use cases. Implementation requires adding the tumbler index + a `descendants()` helper to catalog_db.py.
+
+### RF-7: Revised GST — Tumblers as Coordinate System (2026-04-05)
+**Classification**: Systems Analysis (revised from RF-5) | **Confidence**: HIGH
+
+Re-analysis of query pipeline boundaries with tumblers as navigable hierarchy rather than flat IDs.
+
+**Boundaries that disappear (7→5)**:
+1. **Corpus-to-collection resolution** — currently `catalog_resolve(owner="1.1")` is an MCP call that crosses two boundaries. With tumbler descendants, it's a `WHERE tumbler LIKE '1.1.%'` SQL clause internal to the query tool. The MCP boundary vanishes.
+2. **Owner identity resolution** — given a search result, determining "which repo is this from?" currently requires parsing collection names or making a separate `catalog_show` call. With `ancestors(tumbler)`, it's a string split — the owner IS the tumbler prefix. Weakens from MCP boundary to SQL join.
+
+**New signal paths (4)**:
+1. **Subtree scoping** — `query(subtree="1.1")` → all nexus documents, zero collection name knowledge required
+2. **Ancestor context enrichment** — search results auto-annotated with owner/repo from tumbler prefix
+3. **LCA-based locality** — `lca(result1, result2)` detects whether results are from same repo/owner
+4. **Subtree density routing** — small subtree (few documents) → direct vector search. Large subtree (hundreds) → metadata pre-filter first.
+
+**Variety reduction**: Tumbler hierarchy absorbs ~40-50% of query planner variety by making collection routing, owner resolution, and locality detection deterministic. Plan patterns that become deterministic:
+- "Search in this repo" → `subtree` param (was: LLM decides corpus string)
+- "What repo is this from?" → `ancestors` (was: LLM reads collection name)
+- "Are these related?" → `lca` (was: LLM compares metadata)
+
+**Practical minimum for span-aware search** (not full Xanadu transclusion):
+1. **Span index on links table** — `CREATE INDEX idx_links_from_span ON links(from_tumbler, from_span)` — enables span-filtered link queries
+2. **Span-weighted reranking** — dual signal: embedding similarity + span overlap with link targets. Chunks in a cited span rank higher than uncited chunks of the same document.
+3. **Span data in query output** — when `follow_links` returns results, include the span info so the caller can present focused excerpts.
+
+**Architectural shift**: From tumblers-as-IDs to **tumblers-as-coordinate-system**. The catalog becomes a routing layer with navigable structure orthogonal to semantic embeddings. Two independent axes for finding information: where it IS (tumbler hierarchy) and what it MEANS (vector similarity).
