@@ -107,27 +107,48 @@ Agents also create links during their work — the debugger creates `relates` li
 
 Every link carries `created_by` provenance — you can always tell who asserted a relationship and filter by it.
 
-## Architecture
+## How it's stored
 
-The catalog is a git-backed JSONL append log with a SQLite query cache:
+The catalog lives in its own git repository at `~/.config/nexus/catalog/`. You never need to touch this directory — `nx catalog setup` creates it, and all commands manage it internally.
 
-- **JSONL files** (`owners.jsonl`, `documents.jsonl`, `links.jsonl`) are the source of truth
-- **SQLite** (`.catalog.db`) is rebuilt automatically when JSONL changes — provides FTS5 search and indexed queries
-- **Git** tracks the JSONL history — `nx catalog sync` commits; add a remote for multi-machine sync
+```
+~/.config/nexus/catalog/
+  .git/                  # auto-created, tracks JSONL history
+  owners.jsonl           # registered repos, curators, knowledge sources
+  documents.jsonl        # every indexed document with metadata
+  links.jsonl            # every typed link between documents
+  .catalog.db            # SQLite query cache (gitignored, rebuilt automatically)
+  .gitignore             # excludes .catalog.db
+```
 
-Tumblers are permanent hierarchical addresses (e.g., `1.2.5` = store 1, owner 2, document 5). Once assigned, a tumbler is never reused — even after deletion and compaction.
+**JSONL is the truth.** The three `.jsonl` files are append-only logs. Every registration, update, link creation, and deletion appends a line. SQLite is a disposable query cache — if it disappears, the system rebuilds it from JSONL on the next access.
 
-`defrag()` deduplicates JSONL without erasing deletion history (runs automatically during `sync`). `compact()` is a full purge that removes tombstones (explicit admin action).
+**Git is the history.** `nx catalog sync` commits the current JSONL state. This gives you version history for free — you can always see when a document was registered, when a link was created, or roll back a bad change with standard git tools. If you never call `sync`, the catalog still works — git is the durability layer, not the operational layer.
+
+**SQLite is the speed.** FTS5 full-text search, indexed link queries, and graph traversal all run against SQLite. It's rebuilt automatically whenever JSONL files change (detected by mtime).
+
+### Permanent addressing
+
+Tumblers (e.g., `1.2.5` = store 1, owner 2, document 5) are assigned once and never reused. If you delete document `1.2.5` and compact the catalog, the number 5 is retired — the next document under that owner gets `1.2.6`. This means any external reference to a tumbler remains valid indefinitely.
+
+### Compaction
+
+Over time, JSONL files accumulate overwrites and tombstones. Two compaction modes:
+
+- **`defrag()`** — deduplicates overwrites but keeps tombstones (deletion markers). Runs automatically during `nx catalog sync` when files exceed 3x the live record count. Safe — no history lost.
+- **`compact()`** — removes everything except live records, including tombstones. Explicit admin action via `nx catalog compact`. Erases deletion history from JSONL (though git preserves it).
 
 ## Multi-machine sync (optional)
+
+If you work across machines, the catalog can sync via a git remote:
 
 ```bash
 nx catalog init --remote git@github.com:you/catalog.git
 nx catalog sync                # commit + push
-nx catalog pull                # pull + rebuild
+nx catalog pull                # pull + rebuild SQLite from remote JSONL
 ```
 
-Most users don't need this. The catalog works fine as a local-only store.
+Most users don't need this. Without a remote, `sync` commits locally and `pull` is a no-op. The catalog works fine as a purely local store.
 
 ## Admin commands
 
