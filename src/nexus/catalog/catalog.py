@@ -6,13 +6,13 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import subprocess
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
-
-from collections import deque
 
 from nexus.catalog.catalog_db import CatalogDB
 from nexus.catalog.tumbler import (
@@ -56,6 +56,15 @@ class CatalogLink:
     meta: dict = field(default_factory=dict)
 
 
+def _run_git(
+    args: list[str], cwd: Path, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=30)
+    if check and result.returncode != 0:
+        raise RuntimeError(f"git command failed: {result.stderr.strip()}")
+    return result
+
+
 class Catalog:
     """Xanadu-inspired catalog: owners, documents, and links over JSONL + SQLite."""
 
@@ -65,6 +74,63 @@ class Catalog:
         self._owners_path = catalog_dir / "owners.jsonl"
         self._documents_path = catalog_dir / "documents.jsonl"
         self._links_path = catalog_dir / "links.jsonl"
+
+    @classmethod
+    def init(cls, catalog_path: Path, remote: str | None = None) -> Catalog:
+        """Create catalog git repo with empty JSONL files."""
+        catalog_path.mkdir(parents=True, exist_ok=True)
+        git_dir = catalog_path / ".git"
+        if not git_dir.exists():
+            _run_git(["git", "init"], cwd=catalog_path)
+        # Create empty JSONL files if missing
+        for name in ("documents.jsonl", "owners.jsonl", "links.jsonl"):
+            p = catalog_path / name
+            if not p.exists():
+                p.touch()
+        # Create .gitignore
+        gitignore = catalog_path / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text(".catalog.db\n")
+        # Initial commit if no commits yet
+        result = _run_git(["git", "rev-parse", "HEAD"], cwd=catalog_path, check=False)
+        if result.returncode != 0:
+            _run_git(["git", "add", "-A"], cwd=catalog_path)
+            _run_git(["git", "commit", "-m", "Init catalog"], cwd=catalog_path)
+        if remote:
+            # Only add remote if not already set
+            r = _run_git(["git", "remote"], cwd=catalog_path, check=False)
+            if "origin" not in r.stdout:
+                _run_git(["git", "remote", "add", "origin", remote], cwd=catalog_path)
+        db_path = catalog_path / ".catalog.db"
+        return cls(catalog_path, db_path)
+
+    @staticmethod
+    def is_initialized(catalog_path: Path) -> bool:
+        """Return True if catalog git repo exists at path."""
+        return (
+            (catalog_path / ".git").exists()
+            and (catalog_path / "documents.jsonl").exists()
+        )
+
+    def sync(self, message: str = "catalog update") -> None:
+        """git add -A && git commit && git push (if remote configured)."""
+        _run_git(["git", "add", "-A"], cwd=self._dir)
+        # Check if there's anything to commit
+        status = _run_git(["git", "status", "--porcelain"], cwd=self._dir)
+        if not status.stdout.strip():
+            return
+        _run_git(["git", "commit", "-m", message], cwd=self._dir)
+        # Push only if remote exists
+        remote = _run_git(["git", "remote"], cwd=self._dir, check=False)
+        if remote.stdout.strip():
+            _run_git(["git", "push", "-u", "origin", "HEAD"], cwd=self._dir, check=False)
+
+    def pull(self) -> None:
+        """git pull && rebuild SQLite from JSONL."""
+        remote = _run_git(["git", "remote"], cwd=self._dir, check=False)
+        if remote.stdout.strip():
+            _run_git(["git", "pull"], cwd=self._dir, check=False)
+        self.rebuild()
 
     # ── Locking ────────────────────────────────────────────────────────────
 

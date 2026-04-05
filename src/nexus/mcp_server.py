@@ -146,13 +146,41 @@ def _parse_where_str(where_str: str) -> dict | None:
 
 # ── Test injection ────────────────────────────────────────────────────────────
 
+_catalog_instance = None
+_catalog_lock = threading.Lock()
+
+
+def _get_catalog():
+    """Return Catalog singleton or None if not initialized."""
+    global _catalog_instance
+    if _catalog_instance is None:
+        with _catalog_lock:
+            if _catalog_instance is None:
+                from nexus.catalog import Catalog
+                from nexus.config import catalog_path
+
+                path = catalog_path()
+                if Catalog.is_initialized(path):
+                    _catalog_instance = Catalog(path, path / ".catalog.db")
+    return _catalog_instance
+
+
+def _require_catalog():
+    """Return (catalog, None) or (None, error_message)."""
+    cat = _get_catalog()
+    if cat is None:
+        return None, "Catalog not initialized — run: nx catalog init"
+    return cat, None
+
+
 def _reset_singletons():
     """Reset lazy singletons (for tests only)."""
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
     _collections_cache = ([], 0.0)
+    _catalog_instance = None
 
 
 def _inject_t1(t1, *, isolated: bool = False):
@@ -166,6 +194,12 @@ def _inject_t3(t3):
     """Inject a T3Database for testing."""
     global _t3_instance
     _t3_instance = t3
+
+
+def _inject_catalog(cat):
+    """Inject a Catalog for testing."""
+    global _catalog_instance
+    _catalog_instance = cat
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -952,6 +986,262 @@ def plan_search(query: str, project: str = "", limit: int = 5) -> str:
         return "\n\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
+
+
+# ── Catalog tools ─────────────────────────────────────────────────────────────
+
+
+def _entry_to_dict(entry) -> dict:
+    return {
+        "tumbler": str(entry.tumbler),
+        "title": entry.title,
+        "author": entry.author,
+        "year": entry.year,
+        "content_type": entry.content_type,
+        "file_path": entry.file_path,
+        "corpus": entry.corpus,
+        "physical_collection": entry.physical_collection,
+        "chunk_count": entry.chunk_count,
+        "head_hash": entry.head_hash,
+        "indexed_at": entry.indexed_at,
+        "meta": entry.meta,
+    }
+
+
+def _link_to_dict(link) -> dict:
+    return {
+        "from": str(link.from_tumbler),
+        "to": str(link.to_tumbler),
+        "type": link.link_type,
+        "from_span": link.from_span,
+        "to_span": link.to_span,
+        "created_by": link.created_by,
+        "created_at": link.created_at,
+    }
+
+
+@mcp.tool()
+def catalog_search(
+    query: str,
+    content_type: str = "",
+    limit: int = 20,
+) -> list[dict]:
+    """Search the catalog by title, author, corpus, or file path.
+    Returns catalog entries — NOT content. Use `search` for semantic content search."""
+    cat, err = _require_catalog()
+    if err:
+        return [{"error": err}]
+    results = cat.find(query, content_type=content_type or None)[:limit]
+    return [_entry_to_dict(e) for e in results]
+
+
+@mcp.tool()
+def catalog_show(
+    tumbler: str = "",
+    title: str = "",
+) -> dict:
+    """Full catalog entry including links in and out."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    from nexus.catalog.tumbler import Tumbler
+
+    entry = None
+    if tumbler:
+        entry = cat.resolve(Tumbler.parse(tumbler))
+    elif title:
+        results = cat.find(title)
+        entry = results[0] if results else None
+
+    if entry is None:
+        return {"error": f"Not found: {tumbler or title}"}
+
+    d = _entry_to_dict(entry)
+    d["links_from"] = [_link_to_dict(l) for l in cat.links_from(entry.tumbler)]
+    d["links_to"] = [_link_to_dict(l) for l in cat.links_to(entry.tumbler)]
+    return d
+
+
+@mcp.tool()
+def catalog_list(
+    owner: str = "",
+    content_type: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    """List catalog entries with optional filters."""
+    cat, err = _require_catalog()
+    if err:
+        return [{"error": err}]
+    from nexus.catalog.tumbler import Tumbler
+
+    if owner:
+        entries = cat.by_owner(Tumbler.parse(owner))
+    else:
+        import json as _json
+
+        rows = cat._db._conn.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "FROM documents LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        from nexus.catalog.catalog import CatalogEntry
+
+        entries = [
+            CatalogEntry(
+                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
+                content_type=r[4], file_path=r[5], corpus=r[6],
+                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
+                indexed_at=r[10], meta=_json.loads(r[11]) if r[11] else {},
+            )
+            for r in rows
+        ]
+    if content_type:
+        entries = [e for e in entries if e.content_type == content_type]
+    return [_entry_to_dict(e) for e in entries[:limit]]
+
+
+@mcp.tool()
+def catalog_register(
+    title: str,
+    owner: str,
+    content_type: str = "paper",
+    author: str = "",
+    year: int = 0,
+    file_path: str = "",
+    corpus: str = "",
+    physical_collection: str = "",
+    meta: str = "",
+) -> dict:
+    """Register a document. Assigns tumbler. Ghost elements: physical_collection can be empty."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    import json as _json
+
+    from nexus.catalog.tumbler import Tumbler
+
+    tumbler = cat.register(
+        Tumbler.parse(owner), title,
+        content_type=content_type, file_path=file_path,
+        corpus=corpus, author=author, year=year,
+        physical_collection=physical_collection,
+        meta=_json.loads(meta) if meta else None,
+    )
+    return {"tumbler": str(tumbler), "title": title}
+
+
+@mcp.tool()
+def catalog_update(
+    tumbler: str,
+    title: str = "",
+    author: str = "",
+    year: int = 0,
+    corpus: str = "",
+    physical_collection: str = "",
+    meta: str = "",
+) -> dict:
+    """Update a catalog entry's metadata."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    import json as _json
+
+    from nexus.catalog.tumbler import Tumbler
+
+    fields: dict = {}
+    if title:
+        fields["title"] = title
+    if author:
+        fields["author"] = author
+    if year:
+        fields["year"] = year
+    if corpus:
+        fields["corpus"] = corpus
+    if physical_collection:
+        fields["physical_collection"] = physical_collection
+    if meta:
+        fields["meta"] = _json.loads(meta)
+    cat.update(Tumbler.parse(tumbler), **fields)
+    return {"tumbler": tumbler, "updated": list(fields.keys())}
+
+
+@mcp.tool()
+def catalog_link(
+    from_tumbler: str,
+    to_tumbler: str,
+    link_type: str,
+    created_by: str = "user",
+    from_span: str = "",
+    to_span: str = "",
+) -> dict:
+    """Create a typed link. created_by tracks origin for junk filtering (RF-8)."""
+    cat, err = _require_catalog()
+    if err:
+        return {"error": err}
+    from nexus.catalog.tumbler import Tumbler
+
+    cat.link(
+        Tumbler.parse(from_tumbler), Tumbler.parse(to_tumbler),
+        link_type, created_by,
+        from_span=from_span, to_span=to_span,
+    )
+    return {"from": from_tumbler, "to": to_tumbler, "type": link_type}
+
+
+@mcp.tool()
+def catalog_links(
+    tumbler: str,
+    direction: str = "both",
+    link_type: str = "",
+    depth: int = 1,
+) -> list[dict]:
+    """Links to/from a catalog entry. depth > 1 traverses the graph."""
+    cat, err = _require_catalog()
+    if err:
+        return [{"error": err}]
+    from nexus.catalog.tumbler import Tumbler
+
+    result = cat.graph(
+        Tumbler.parse(tumbler), depth=depth,
+        direction=direction, link_type=link_type,
+    )
+    return [_link_to_dict(e) for e in result["edges"]]
+
+
+@mcp.tool()
+def catalog_resolve(
+    tumbler: str = "",
+    owner: str = "",
+    corpus: str = "",
+) -> list[str]:
+    """Resolve to physical ChromaDB collection names.
+    Returns collection names usable with the `search` tool."""
+    cat, err = _require_catalog()
+    if err:
+        return [f"Error: {err}"]
+    from nexus.catalog.tumbler import Tumbler
+
+    collections: set[str] = set()
+    if tumbler:
+        entry = cat.resolve(Tumbler.parse(tumbler))
+        if entry and entry.physical_collection:
+            collections.add(entry.physical_collection)
+    if owner:
+        entries = cat.by_owner(Tumbler.parse(owner))
+        for e in entries:
+            if e.physical_collection:
+                collections.add(e.physical_collection)
+    if corpus:
+        rows = cat._db._conn.execute(
+            "SELECT DISTINCT physical_collection FROM documents WHERE corpus = ?",
+            (corpus,),
+        ).fetchall()
+        for r in rows:
+            if r[0]:
+                collections.add(r[0])
+    return sorted(collections)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
