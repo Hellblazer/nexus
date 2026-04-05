@@ -91,7 +91,7 @@ class DocumentRecord:
 class LinkRecord:
     from_t: str
     to_t: str
-    link_type: str  # cites, supersedes, quotes, relates, comments, implements
+    link_type: str  # cites, supersedes, quotes, relates, comments, implements, implements-heuristic
     from_span: str
     to_span: str
     created_by: str

@@ -585,7 +585,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool) -> None:
         else:
             lines.append(_check_line(
                 "Catalog", True,
-                "not initialized (optional — run: nx catalog init && nx catalog backfill)",
+                "not initialized (optional — run: nx catalog setup)",
             ))
     except Exception:
         lines.append(_check_line("Catalog", True, "check failed (non-critical)"))
