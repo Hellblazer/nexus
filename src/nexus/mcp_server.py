@@ -395,6 +395,8 @@ def query(
         has_catalog_params = author or content_type or follow_links or subtree
 
         if has_catalog_params:
+            import json
+            from nexus.catalog.catalog import CatalogEntry
             from nexus.catalog.tumbler import Tumbler
             cat = _get_catalog()
             if cat is None:
@@ -409,8 +411,25 @@ def query(
                 seed_entries = [cat.resolve(Tumbler.parse(d["tumbler"])) for d in desc]
                 seed_entries = [e for e in seed_entries if e is not None]
             elif author or content_type:
-                seed_entries = cat.find(author or question, content_type=content_type or None)
-                if author:
+                if content_type and not author:
+                    # content_type-only: SQL query for all docs of that type
+                    rows = cat._db.execute(
+                        "SELECT tumbler, title, author, year, content_type, file_path, "
+                        "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+                        "FROM documents WHERE content_type = ?",
+                        (content_type,),
+                    ).fetchall()
+                    seed_entries = [
+                        CatalogEntry(
+                            tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
+                            content_type=r[4], file_path=r[5], corpus=r[6],
+                            physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
+                            indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
+                        )
+                        for r in rows
+                    ]
+                else:
+                    seed_entries = cat.find(author, content_type=content_type or None)
                     seed_entries = [r for r in seed_entries if author.lower() in (r.author or "").lower()]
                 catalog_collections = {r.physical_collection for r in seed_entries if r.physical_collection}
 
