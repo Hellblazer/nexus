@@ -37,4 +37,4 @@ Structured decision tracking for human-AI collaboration. Read in order:
 
 ## Historical
 
-- [Historical Documents](historical/README.md) — Original spec and implementation plans
+- [Origins and Inspirations](historical.md) — Lineage from mgrep, SeaGOAT, Arcaneum, and key evolution milestones

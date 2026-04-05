@@ -64,7 +64,7 @@ digraph brainstorming {
      before planning implementation."
    - If the lookup fails or returns no result, warn and proceed (fail-open).
    - If no `RDR-\d+` pattern is found, proceed normally.
-7. **Write design doc** — save to `docs/plans/YYYY-MM-DD-<topic>-design.md`
+7. **Write design doc** — save to T2 memory via `memory_put(project="{repo}", title="design-{topic}.md", content="...")`
 8. **Transition** — invoke strategic-planning skill to create implementation plan
 
 ## Key Principles
@@ -96,11 +96,11 @@ When invoking the strategic-planning skill after design approval, use this struc
 
 ### Input Artifacts
 - nx store: [prior art or related decisions from T3, or "none"]
-- nx memory: [session state, e.g. "{repo}_active/design.md", or "none"]
-- Files: docs/plans/YYYY-MM-DD-<topic>-design.md
+- nx memory: [session state, e.g. "{repo}/design-{topic}.md", or "none"]
+- Files: none (design is in T2 memory)
 
 ### Deliverable
-Phased implementation plan saved to `docs/plans/YYYY-MM-DD-<topic>-impl-plan.md`
+Phased implementation plan with beads for task tracking
 
 ### Quality Criteria
 - [ ] Every task has exact file paths and test commands

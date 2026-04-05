@@ -106,4 +106,4 @@ and scoping semantic search to relevant collections instead of searching everyth
 
 Storage (ChromaDB + Voyage AI) and embedding layers are Nexus's own.
 
-For the original verbose architecture document, see [historical/architecture.md](historical/architecture.md).
+For project origins and inspirations, see [historical.md](historical.md).
