@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import subprocess
 from collections import deque
 from dataclasses import dataclass, field
@@ -13,6 +14,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
+
+# Span format: "line_start-line_end" or "chunk_idx:char_start-char_end" or ""
+# Empty string means "the whole document" (no sub-document addressing).
+_SPAN_PATTERN = re.compile(
+    r"^$"                              # empty — whole document
+    r"|^\d+-\d+$"                      # line range: "42-57"
+    r"|^\d+:\d+-\d+$"                  # chunk:char range: "3:100-250"
+)
 
 from nexus.catalog.catalog_db import CatalogDB
 from nexus.catalog.tumbler import (
@@ -201,8 +210,8 @@ class Catalog:
         dir_fd = self._acquire_lock()
         try:
             if self._should_compact():
-                _log.info("catalog_auto_compact")
-                self.compact()
+                _log.info("catalog_auto_defrag")
+                self.defrag()
             _run_git(["git", "add", "-A"], cwd=self._dir)
             status = _run_git(["git", "status", "--porcelain"], cwd=self._dir)
             if not status.stdout.strip():
@@ -301,8 +310,35 @@ class Catalog:
                 if existing is not None:
                     return existing.tumbler
 
-            doc_num = self._db.next_document_number(str(owner))
+            # Idempotency: check by head_hash + title within same owner
+            # (content-addressed dedup for re-indexing the same document)
+            if head_hash and title:
+                prefix_clause, prefix_params = self._prefix_sql(str(owner))
+                row = self._db.execute(
+                    f"SELECT tumbler FROM documents WHERE {prefix_clause} "
+                    f"AND head_hash = ? AND title = ? LIMIT 1",
+                    (*prefix_params, head_hash, title),
+                ).fetchone()
+                if row:
+                    return Tumbler.parse(row[0])
+
+            # Permanent addressing: use owner's high-water mark from JSONL,
+            # not SQLite MAX(). This prevents tumbler reuse after delete+compact.
+            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+            owner_rec = owners.get(str(owner))
+            if owner_rec and owner_rec.next_seq > 0:
+                doc_num = owner_rec.next_seq
+            else:
+                # Fallback for pre-migration owners without next_seq
+                doc_num = self._db.next_document_number(str(owner))
+
             tumbler = Tumbler((*owner.segments, doc_num))
+
+            # Bump and persist the high-water mark
+            new_seq = doc_num + 1
+            if owner_rec:
+                owner_rec.next_seq = new_seq
+                self._append_jsonl(self._owners_path, owner_rec.__dict__)
             now = datetime.now(UTC).isoformat()
             rec = DocumentRecord(
                 tumbler=str(tumbler),
@@ -585,6 +621,13 @@ class Catalog:
         allow_dangling: bool = False,
     ) -> bool:
         """Core link logic — caller must hold the lock. Returns True if new, False if merged."""
+        # Validate span format (Xanadu transclusion addressing)
+        for span, label in [(from_span, "from_span"), (to_span, "to_span")]:
+            if not _SPAN_PATTERN.match(span):
+                raise ValueError(
+                    f"invalid {label}: {span!r} — use 'line_start-line_end', "
+                    f"'chunk_idx:char_start-char_end', or '' for whole document"
+                )
         if not allow_dangling:
             errors = []
             if self.resolve(from_t) is None:
@@ -681,6 +724,13 @@ class Catalog:
         No JSONL append on the 'already exists' path.
         Raises ValueError if either endpoint is missing (unless allow_dangling=True).
         """
+        # Validate span format before acquiring lock
+        for span, label in [(from_span, "from_span"), (to_span, "to_span")]:
+            if not _SPAN_PATTERN.match(span):
+                raise ValueError(
+                    f"invalid {label}: {span!r} — use 'line_start-line_end', "
+                    f"'chunk_idx:char_start-char_end', or '' for whole document"
+                )
         dir_fd = self._acquire_lock()
         try:
             row = self._db.execute(
@@ -913,6 +963,55 @@ class Catalog:
             errors.append(f"duplicate: link ({from_t}, {to_t}, {link_type!r}) already exists")
         return errors
 
+    def resolve_span(self, tumbler: Tumbler, span: str) -> str | None:
+        """Resolve a span to actual text content from T3. Returns None if unavailable.
+
+        Span formats:
+        - "" → returns None (whole document, no sub-addressing)
+        - "42-57" → lines 42-57 from the document's source file
+        - "3:100-250" → characters 100-250 from chunk index 3 in T3
+
+        This is the minimal transclusion read path — given a link with a span,
+        retrieve the exact passage being referenced.
+        """
+        if not span:
+            return None
+        entry = self.resolve(tumbler)
+        if entry is None:
+            return None
+
+        # Line-range span: read from source file
+        m = re.match(r"^(\d+)-(\d+)$", span)
+        if m and entry.file_path:
+            start, end = int(m.group(1)), int(m.group(2))
+            try:
+                lines = Path(entry.file_path).read_text(encoding="utf-8").splitlines()
+                return "\n".join(lines[start - 1:end])
+            except Exception:
+                return None
+
+        # Chunk:char span: read from T3
+        m = re.match(r"^(\d+):(\d+)-(\d+)$", span)
+        if m and entry.physical_collection:
+            chunk_idx, char_start, char_end = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            try:
+                from nexus.db import make_t3
+                t3 = make_t3()
+                col = t3.get_or_create_collection(entry.physical_collection)
+                result = col.get(
+                    where={"source_path": entry.file_path} if entry.file_path else None,
+                    include=["documents"],
+                    limit=100,
+                )
+                docs = result.get("documents", [])
+                if chunk_idx < len(docs):
+                    text = docs[chunk_idx]
+                    return text[char_start:char_end]
+            except Exception:
+                return None
+
+        return None
+
     def link_audit(self) -> dict:
         """Audit the links table. Returns stats + orphan + duplicate lists."""
         total = self._db.execute("SELECT count(*) FROM links").fetchone()[0]
@@ -1011,11 +1110,56 @@ class Catalog:
         finally:
             self._release_lock(dir_fd)
 
-    def compact(self) -> dict[str, int]:
-        """Rewrite JSONL files to contain only current state (last-write-wins).
+    def defrag(self) -> dict[str, int]:
+        """Deduplicate JSONL files — keep latest version of each live record.
 
-        Removes tombstones, duplicate overwrites, and deleted entries.
+        Removes duplicate overwrites but preserves tombstones (deletion markers).
+        This is the safe compaction: no history is lost, deleted tumblers remain
+        reserved, and the version record is intact for forensic purposes.
         Returns count of lines removed per file.
+        """
+        dir_fd = self._acquire_lock()
+        try:
+            removed = {}
+            for path in [self._owners_path, self._documents_path, self._links_path]:
+                if not path.exists():
+                    continue
+                original_lines = sum(1 for line in path.open() if line.strip())
+                # Read all lines, keep last-write-wins (including tombstones)
+                seen: dict[str, str] = {}  # key → last json line
+                with path.open() as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        # Determine the key for dedup
+                        if "owner" in obj:
+                            key = obj["owner"]
+                        elif "tumbler" in obj:
+                            key = obj["tumbler"]
+                        elif "from_t" in obj:
+                            key = f"{obj['from_t']}|{obj['to_t']}|{obj['link_type']}"
+                        else:
+                            continue
+                        seen[key] = line
+                with path.open("w") as f:
+                    for line in seen.values():
+                        f.write(line + "\n")
+                removed[path.name] = original_lines - len(seen)
+            return removed
+        finally:
+            self._release_lock(dir_fd)
+
+    def compact(self) -> dict[str, int]:
+        """Full compaction: deduplicate AND remove tombstones.
+
+        This erases deletion history — tombstoned tumblers are no longer
+        visible in the JSONL (though they remain reserved via owner next_seq).
+        Use defrag() for safe compaction that preserves tombstones.
         """
         dir_fd = self._acquire_lock()
         try:
@@ -1029,7 +1173,6 @@ class Catalog:
                     continue
                 original_lines = sum(1 for line in path.open() if line.strip())
                 records = reader(path)
-                # Rewrite with only current records
                 with path.open("w") as f:
                     for record in records.values():
                         f.write(json.dumps(record.__dict__, default=str) + "\n")

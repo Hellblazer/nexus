@@ -67,6 +67,7 @@ class OwnerRecord:
     owner_type: str  # "repo" | "curator"
     repo_hash: str
     description: str
+    next_seq: int = 1  # high-water mark — next document number to assign (never decreases)
 
 
 @dataclass

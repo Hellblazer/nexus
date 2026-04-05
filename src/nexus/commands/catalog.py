@@ -204,12 +204,25 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
         in_links = cat.links_to(entry.tumbler)
         if out_links:
             click.echo("Links out:")
-            for l in out_links:
-                click.echo(f"  → {l.to_tumbler} ({l.link_type})")
+            for lnk in out_links:
+                span_note = f" [{lnk.to_span}]" if lnk.to_span else ""
+                click.echo(f"  → {lnk.to_tumbler} ({lnk.link_type}){span_note}")
+                if lnk.to_span:
+                    text = cat.resolve_span(lnk.to_tumbler, lnk.to_span)
+                    if text:
+                        preview = text[:120].replace("\n", " ")
+                        click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
         if in_links:
             click.echo("Links in:")
-            for l in in_links:
-                click.echo(f"  ← {l.from_tumbler} ({l.link_type})")
+            for lnk in in_links:
+                span_note = f" [{lnk.from_span}]" if lnk.from_span else ""
+                click.echo(f"  ← {lnk.from_tumbler} ({lnk.link_type}){span_note}")
+                if lnk.from_span:
+                    text = cat.resolve_span(lnk.from_tumbler, lnk.from_span)
+                    if text:
+                        preview = text[:120].replace("\n", " ")
+                        click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
+
 
 
 @catalog.command("search")
@@ -342,8 +355,8 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     "--type", "link_type", required=True,
     type=click.Choice(["cites", "supersedes", "quotes", "relates", "comments", "implements", "implements-heuristic"]),
 )
-@click.option("--from-span", default="")
-@click.option("--to-span", default="")
+@click.option("--from-span", default="", help="Source span: 'line-line' or 'chunk:char-char'")
+@click.option("--to-span", default="", help="Target span: 'line-line' or 'chunk:char-char'")
 def link_cmd(
     from_tumbler: str, to_tumbler: str, link_type: str,
     from_span: str, to_span: str,
@@ -353,6 +366,12 @@ def link_cmd(
     Both FROM and TO accept tumblers (1.1.5) or titles. Link types: cites
     (citation), implements (code→RDR), supersedes (replacement), relates,
     quotes, comments. Duplicate links are merged, not duplicated.
+
+    \b
+    Spans (optional) identify the specific passage being referenced:
+      --from-span "42-57"       lines 42-57 of the source document
+      --to-span "3:100-250"     chars 100-250 of chunk 3 in T3
+    Use 'nx catalog show' to see resolved span text on links.
     """
     cat = _get_catalog()
     ft = _resolve_tumbler(cat, from_tumbler)

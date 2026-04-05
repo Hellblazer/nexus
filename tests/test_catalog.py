@@ -194,6 +194,81 @@ class TestCompactReturn:
         assert removed["documents.jsonl"] >= 1  # at least one overwrite removed
 
 
+class TestTumblerPermanence:
+    def test_deleted_tumbler_not_reused(self, tmp_path):
+        """Tumbler numbers must never be reused after deletion + compact."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc1 = cat.register(owner, "first.py", content_type="code", file_path="first.py")
+        assert str(doc1) == "1.1.1"
+        cat.delete_document(doc1)
+        cat.compact()
+        # After delete+compact, next doc should be 1.1.2, NOT 1.1.1
+        doc2 = cat.register(owner, "second.py", content_type="code", file_path="second.py")
+        assert str(doc2) == "1.1.2"
+
+    def test_defrag_preserves_tombstones(self, tmp_path):
+        """defrag() keeps tombstones; compact() removes them."""
+        import json as _json
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        cat.delete_document(doc)
+        cat.defrag()
+        # Tombstone should still be in JSONL
+        content = (tmp_path / "catalog" / "documents.jsonl").read_text()
+        lines = [_json.loads(l) for l in content.strip().splitlines()]
+        assert any(l.get("_deleted") for l in lines)
+
+    def test_compact_removes_tombstones(self, tmp_path):
+        import json as _json
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        cat.delete_document(doc)
+        cat.compact()
+        content = (tmp_path / "catalog" / "documents.jsonl").read_text()
+        assert content.strip() == ""  # tombstone removed, no live records
+
+    def test_content_hash_dedup(self, tmp_path):
+        """Same owner + title + head_hash → returns existing tumbler."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc1 = cat.register(owner, "paper", content_type="paper", head_hash="deadbeef")
+        doc2 = cat.register(owner, "paper", content_type="paper", head_hash="deadbeef")
+        assert doc1 == doc2  # same tumbler
+
+
+class TestSpanValidation:
+    def test_valid_line_span(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        cat.link(doc_a, doc_b, "quotes", created_by="user", from_span="10-20", to_span="42-57")
+        links = cat.links_from(doc_a)
+        assert links[0].from_span == "10-20"
+        assert links[0].to_span == "42-57"
+
+    def test_valid_chunk_span(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        cat.link(doc_a, doc_b, "quotes", created_by="user", to_span="3:100-250")
+        links = cat.links_from(doc_a)
+        assert links[0].to_span == "3:100-250"
+
+    def test_invalid_span_rejected(self, tmp_path):
+        import pytest
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        with pytest.raises(ValueError, match="invalid from_span"):
+            cat.link(doc_a, doc_b, "quotes", created_by="user", from_span="garbage")
+
+
 class TestFind:
     def test_find_by_title(self, tmp_path):
         cat = _make_catalog(tmp_path)
