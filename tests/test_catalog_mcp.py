@@ -92,8 +92,42 @@ class TestCatalogSearch:
     def test_search_no_results(self, tmp_path):
         cat = _make_test_catalog(tmp_path)
         _inject_catalog(cat)
-        results = catalog_search("nonexistent")
+        results = catalog_search(query="nonexistent")
         assert results == []
+
+    def test_search_by_author(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="Paper A", owner="1.1", author="Fagin")
+        catalog_register(title="Paper B", owner="1.1", author="Bernstein")
+        results = catalog_search(author="Fagin")
+        assert len(results) == 1
+        assert results[0]["author"] == "Fagin"
+
+    def test_search_by_corpus(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        catalog_register(title="A", owner="1.1", corpus="ml")
+        catalog_register(title="B", owner="1.1", corpus="systems")
+        results = catalog_search(corpus="ml")
+        assert len(results) == 1
+        assert results[0]["title"] == "A"
+
+    def test_search_by_owner(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        cat.register_owner("other", "repo", repo_hash="xxxx1234")
+        catalog_register(title="A", owner="1.1")
+        catalog_register(title="B", owner="1.2")
+        results = catalog_search(owner="1.1")
+        assert len(results) == 1
+        assert results[0]["title"] == "A"
+
+    def test_search_requires_some_param(self, tmp_path):
+        cat = _make_test_catalog(tmp_path)
+        _inject_catalog(cat)
+        results = catalog_search()
+        assert "error" in results[0]
 
 
 class TestCatalogList:

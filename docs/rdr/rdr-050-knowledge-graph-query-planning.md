@@ -107,54 +107,125 @@ Nelson says: "Control of incoming links by their origin is a key to eliminating 
 
 ### Layer 2: Catalog-Aware Query Planning (Build Second)
 
-Extend the query planner's vocabulary with three new operations.
+Extend the query planner's vocabulary with three new operations. Each operation maps 1:1 to an existing MCP tool.
 
 #### 2a. New Operations
 
-| Operation | Input | Output | Purpose |
-|---|---|---|---|
-| `catalog_search` | Query string + optional filters | List of catalog entries (tumblers) | Find documents by metadata, not content |
-| `catalog_traverse` | Tumbler + direction + type + depth | Link graph | Navigate relationships |
-| `catalog_resolve` | Tumblers or corpus name | Collection names | Map catalog results to T3 for targeted search |
+| Plan Operation | MCP Tool | Input | Output | Purpose |
+|---|---|---|---|---|
+| `catalog_search` | `catalog_search` | Query string + structured filters | List of catalog entry dicts (each has `tumbler`, `physical_collection`, etc.) | Find documents by metadata, not content |
+| `catalog_links` | `catalog_links` | Tumbler + direction + type + depth | List of link dicts (`from`, `to`, `type`) | Navigate relationships via graph traversal |
+| `catalog_resolve` | `catalog_resolve` | Owner or corpus string | List of collection name strings | Map catalog namespace to T3 collection names |
 
-These are **plan steps**, not MCP tool calls. The `/nx:query` skill dispatches them by calling the catalog MCP tools directly (same pattern as `search` steps today).
+**Design principle**: Plan operation names match MCP tool names exactly — no translation layer in the skill dispatch. The `/nx:query` skill dispatches catalog operations by calling the MCP tools directly (same pattern as `search` steps).
 
-#### 2b. Plan Patterns
+#### 2b. Operation Schemas
 
-**Narrow-then-search** (most common):
+##### catalog_search
+Find catalog entries by metadata. Supports both FTS5 free-text and structured SQL filters.
+
+**Fields**: `query` (FTS5 text), `author`, `corpus`, `owner`, `file_path`, `content_type` — all optional but at least one required. Structured filters (`author`, `corpus`, `owner`, `file_path`) are exact SQL matches; `query` is FTS5 free-text over title/author/corpus/file_path.
+
+**Output**: List of catalog entry dicts. Each dict includes `tumbler`, `title`, `author`, `year`, `content_type`, `file_path`, `corpus`, `physical_collection`, `chunk_count`.
+
+**Examples**:
+```json
+{"step": 1, "operation": "catalog_search", "params": {"author": "Fagin", "corpus": "schema-evolution"}}
+{"step": 1, "operation": "catalog_search", "params": {"query": "Inverting Schema Mappings"}}
+{"step": 1, "operation": "catalog_search", "params": {"file_path": "src/nexus/chunker.py", "owner": "1.1"}}
+```
+
+##### catalog_links
+Navigate the link graph from a tumbler. Maps directly to `catalog_links` MCP tool which calls `Catalog.graph()`.
+
+**Required params**: `tumbler` — starting point. **Optional params**: `direction` (`in`/`out`/`both`, default `both`), `type` (link type filter), `depth` (default 1).
+
+**Fanout rule**: When `inputs` references a prior step that returned a list (e.g., `catalog_search` results), the skill extracts the **first entry's tumbler** and uses it. If the planner needs to traverse from multiple starting points, it must use separate `catalog_links` steps with explicit `tumbler` params.
+
+**Output**: List of link dicts (`from`, `to`, `type`, `from_span`, `to_span`, `created_by`).
+
+**Examples**:
+```json
+{"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "type": "cites", "depth": 2}}
+{"step": 2, "operation": "catalog_links", "params": {"tumbler": "1.2.5", "direction": "out", "type": "implements"}}
+```
+
+##### catalog_resolve
+Map a catalog namespace (owner tumbler or corpus name) to physical T3 collection names. Used before `search` steps to scope the search corpus.
+
+**Params**: `owner` (tumbler prefix) or `corpus` (corpus tag) — at least one required.
+
+**Output**: List of collection name strings (e.g., `["docs__schema-evolution", "docs__data-exchange"]`).
+
+**Note**: Often unnecessary — `catalog_search` results already include `physical_collection`. Use `catalog_resolve` when you need all collections for an owner/corpus without knowing specific documents. The skill can also extract `physical_collection` values directly from a prior `catalog_search` step's output and pass them as the `corpus` for the next `search` step.
+
+**Example**:
+```json
+{"step": 2, "operation": "catalog_resolve", "params": {"corpus": "schema-evolution"}}
+```
+
+#### 2c. Plan Patterns
+
+**Narrow-then-search** (most common): Use `catalog_search` to find entries by metadata, then `search` their collections.
 ```json
 {"steps": [
-  {"operation": "catalog_search", "params": {"author": "Fagin", "corpus": "schema"}},
-  {"operation": "catalog_resolve", "inputs": "$step_1"},
-  {"operation": "search", "inputs": "$step_2", "params": {"query": "chase procedure optimization"}},
-  {"operation": "summarize", "inputs": "$step_3", "params": {"mode": "evidence"}}
+  {"step": 1, "operation": "catalog_search", "params": {"author": "Fagin", "corpus": "schema-evolution"}},
+  {"step": 2, "operation": "search", "search_query": "chase procedure optimization", "corpus": "$step_1.collections"},
+  {"step": 3, "operation": "summarize", "inputs": "$step_2", "params": {"mode": "evidence"}}
+]}
+```
+The skill extracts distinct `physical_collection` values from step 1's results and passes them as the corpus for step 2.
+
+**Citation traversal**: Find a paper, follow its citation graph, then search the cited works.
+```json
+{"steps": [
+  {"step": 1, "operation": "catalog_search", "params": {"query": "Inverting Schema Mappings"}},
+  {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "type": "cites", "depth": 2}},
+  {"step": 3, "operation": "search", "search_query": "novel contribution", "corpus": "$step_2.collections"},
+  {"step": 4, "operation": "summarize", "inputs": "$step_3", "params": {"mode": "short"}}
+]}
+```
+The skill extracts `physical_collection` from the link targets (`to` tumblers resolved via catalog).
+
+**Cross-type provenance**: Follow code → RDR → paper chain.
+```json
+{"steps": [
+  {"step": 1, "operation": "catalog_search", "params": {"file_path": "src/nexus/chunker.py", "owner": "1.1"}},
+  {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "out", "type": "implements"}},
+  {"step": 3, "operation": "catalog_links", "inputs": "$step_2", "params": {"direction": "out", "type": "cites"}},
+  {"step": 4, "operation": "extract", "inputs": "$step_3", "params": {"template": {"title": "", "key_contribution": ""}}}
 ]}
 ```
 
-**Citation traversal**:
+**Corpus-scoped search**: Resolve an entire corpus without knowing specific documents.
 ```json
 {"steps": [
-  {"operation": "catalog_search", "params": {"title": "Inverting Schema Mappings"}},
-  {"operation": "catalog_traverse", "inputs": "$step_1", "params": {"direction": "in", "type": "cites", "depth": 2}},
-  {"operation": "catalog_resolve", "inputs": "$step_2"},
-  {"operation": "search", "inputs": "$step_3", "params": {"query": "novel contribution"}},
-  {"operation": "summarize", "inputs": "$step_4", "params": {"mode": "short"}}
+  {"step": 1, "operation": "catalog_resolve", "params": {"corpus": "distributed-systems"}},
+  {"step": 2, "operation": "search", "search_query": "consensus protocol Byzantine fault", "corpus": "$step_1"},
+  {"step": 3, "operation": "rank", "inputs": "$step_2", "params": {"criterion": "relevance to practical BFT implementations"}}
 ]}
 ```
 
-**Cross-type provenance**:
-```json
-{"steps": [
-  {"operation": "catalog_search", "params": {"file_path": "chunker.py", "owner": "nexus"}},
-  {"operation": "catalog_traverse", "inputs": "$step_1", "params": {"direction": "out", "type": "implements"}},
-  {"operation": "catalog_traverse", "inputs": "$step_2", "params": {"direction": "out", "type": "cites"}},
-  {"operation": "extract", "inputs": "$step_3", "params": {"template": {"title": "", "key_contribution": ""}}}
-]}
-```
+#### 2d. Skill Dispatch Rules
 
-#### 2c. Few-Shot Plan Library
+The `/nx:query` skill handles catalog operations as follows:
 
-Seed the T2 plan library with catalog-aware plan templates. The query planner's existing `few_shot_plans` mechanism reuses these automatically.
+1. **`catalog_search`**: Call `catalog_search` MCP tool with params. Store result list in T1 scratch. Extract distinct `physical_collection` values into `$step_N.collections` for downstream `search` steps.
+2. **`catalog_links`**: If `inputs` references a prior step, extract first entry's `tumbler`. Call `catalog_links` MCP tool. Resolve link target tumblers to `physical_collection` via `catalog_show`. Store collections in `$step_N.collections`.
+3. **`catalog_resolve`**: Call `catalog_resolve` MCP tool. Store collection name list directly — already in the right format for `corpus` parameter of `search` steps.
+4. **`$step_N.collections`**: When a `search` step's `corpus` is `$step_N.collections`, the skill substitutes the comma-separated collection names extracted from step N.
+
+#### 2e. Few-Shot Plan Library
+
+Seed the T2 plan library with catalog-aware plan templates tagged `catalog`. The query planner's existing `few_shot_plans` mechanism surfaces these when the question involves relationship navigation, author filtering, or citation traversal.
+
+Tag convention: all catalog-aware plans saved with `tags="catalog,<operation_types>"` (e.g., `tags="catalog,catalog_search,search"`). The planner's few-shot lookup includes `catalog`-tagged plans when the question mentions authors, citations, relationships, provenance, or specific documents.
+
+#### 2f. Files to Update
+
+- `nx/agents/query-planner.md` — add `catalog_search`, `catalog_links`, `catalog_resolve` to operation list + schemas
+- `nx/skills/query/SKILL.md` — add dispatch rules for catalog operations
+- `src/nexus/mcp_server.py` — `catalog_search` already accepts structured filters (added in this iteration)
 
 ### Layer 3: Concept Nodes (Build When Needed, Not Before)
 
@@ -212,10 +283,12 @@ Embed link type descriptions and do semantic matching for "find related" queries
 - [ ] Link count grows meaningfully after enriching existing paper collections — requires running `nx catalog backfill` then `nx catalog generate-links` on production data
 
 ### Layer 2 (Query Planning)
-- [ ] Query planner generates plans with `catalog_search`, `catalog_traverse`, `catalog_resolve` steps
-- [ ] `/nx:query` skill dispatches catalog operations correctly
-- [ ] "Narrow-then-search" pattern produces better results than blind corpus search
-- [ ] Few-shot plan templates seeded in T2 plan library
+- [ ] Query planner generates valid plans with `catalog_search`, `catalog_links`, `catalog_resolve` steps
+- [ ] `nx/agents/query-planner.md` updated with the three new operation schemas
+- [ ] `/nx:query` skill dispatches catalog operations correctly (dispatch rules §2d)
+- [ ] `$step_N.collections` extraction works: catalog results → collection names → search corpus
+- [ ] On 5 reference queries with known relevant documents, catalog-scoped search retrieves a relevant document in fewer MCP calls than unconstrained search across all corpora
+- [ ] Few-shot plan templates seeded in T2 plan library with `catalog` tag
 - [ ] T1 scratch correctly passes catalog results between steps
 
 ### Layer 3 (Concept Nodes) — future, criteria TBD
@@ -227,7 +300,7 @@ Embed link type descriptions and do semantic matching for "find related" queries
 
 1. ~~**Citation matching precision**~~: **RESOLVED** — RDR-049 uses `bib_semantic_scholar_id` exact cross-matching (audit F2), not fuzzy title matching. No false positives from matching strategy. FTS title search used only for PDF dedup (approximate, acceptable).
 2. ~~**Code ↔ RDR linking heuristic**~~: **RESOLVED** — `generate_code_rdr_links()` matches module names (>3 chars) against RDR titles. `created_by="index_hook"` enables filtering false positives. Accepted tradeoff per RF-8.
-3. **Plan library integration**: Should catalog-aware plans be tagged differently from pure-search plans? Or is the operation type sufficient for the planner to distinguish?
+3. ~~**Plan library integration**~~: **RESOLVED** — Catalog-aware plans tagged with `catalog` plus operation-type tags (e.g., `tags="catalog,catalog_search,search"`). Planner's few-shot lookup filters for `catalog`-tagged plans when question involves relationships, authors, citations, or provenance. No change to planner internal logic needed — tag-based routing is sufficient.
 4. ~~**Link type extensibility**~~: **RESOLVED** — Fixed set (`cites`, `supersedes`, `quotes`, `relates`, `comments`, `implements`) enforced by CLI `click.Choice`. `LinkRecord` accepts arbitrary strings for programmatic use. Extension requires CLI update only.
 5. ~~**Agent link discipline**~~: **RESOLVED** — Trust agent, filter later. `created_by` field is mandatory (no default on `Catalog.link()`). Nelson's junk filtering principle applied: origin-based filtering, not approval gates.
 
@@ -242,9 +315,9 @@ Embed link type descriptions and do semantic matching for "find related" queries
 4. ~~**Manual link creation**~~: `nx catalog link` CLI + `catalog_link` MCP tool
 
 ### Remaining (Layer 2 — Query Planner Integration)
-5. **Query planner extension**: Add `catalog_search`, `catalog_traverse`, `catalog_resolve` operations to plan step vocabulary
-6. **Skill update**: `/nx:query` dispatches catalog operations via existing MCP tools
-7. **Few-shot templates**: Seed T2 plan library with narrow-then-search, citation traversal, cross-type provenance patterns
+5. **Query planner agent update**: Add `catalog_search`, `catalog_links`, `catalog_resolve` to `nx/agents/query-planner.md` operation list with schemas (§2b)
+6. **Skill dispatch update**: `/nx:query` handles catalog operations per dispatch rules (§2d) — collection extraction, fanout, T1 scratch
+7. **Few-shot templates**: Seed T2 plan library with narrow-then-search, citation traversal, cross-type provenance, corpus-scoped patterns (§2c) tagged `catalog`
 
 ### Future (Layer 3 — When Needed)
 8. **Concept nodes**: Ghost elements with `content_type="concept"` + `about` links — build when demonstrated need arises

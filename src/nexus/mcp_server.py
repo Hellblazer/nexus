@@ -1022,17 +1022,70 @@ def _link_to_dict(link) -> dict:
 
 @mcp.tool()
 def catalog_search(
-    query: str,
+    query: str = "",
     content_type: str = "",
+    author: str = "",
+    corpus: str = "",
+    owner: str = "",
+    file_path: str = "",
     limit: int = 20,
 ) -> list[dict]:
     """Search the catalog by title, author, corpus, or file path.
-    Returns catalog entries — NOT content. Use `search` for semantic content search."""
+    Returns catalog entries — NOT content. Use `search` for semantic content search.
+    Structured filters (author, corpus, owner, file_path) are exact SQL matches;
+    query is FTS5 free-text over title/author/corpus/file_path."""
     cat, err = _require_catalog()
     if err:
         return [{"error": err}]
     try:
-        results = cat.find(query, content_type=content_type or None)[:limit]
+        from nexus.catalog.tumbler import Tumbler
+        import json as _json
+
+        # Structured filters via SQL when provided
+        if owner or corpus or file_path or (author and not query):
+            conditions = ["1=1"]
+            params: list[str] = []
+            if owner:
+                conditions.append("tumbler LIKE ?")
+                params.append(owner + ".%")
+            if corpus:
+                conditions.append("corpus = ?")
+                params.append(corpus)
+            if file_path:
+                conditions.append("file_path = ?")
+                params.append(file_path)
+            if author:
+                conditions.append("author LIKE ?")
+                params.append(f"%{author}%")
+            if content_type:
+                conditions.append("content_type = ?")
+                params.append(content_type)
+            sql = (
+                "SELECT tumbler, title, author, year, content_type, file_path, "
+                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+                f"FROM documents WHERE {' AND '.join(conditions)} LIMIT ?"
+            )
+            params.append(str(limit))
+            rows = cat._db._conn.execute(sql, params).fetchall()
+            from nexus.catalog.catalog import CatalogEntry
+            entries = [
+                CatalogEntry(
+                    tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
+                    content_type=r[4], file_path=r[5], corpus=r[6],
+                    physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
+                    indexed_at=r[10], meta=_json.loads(r[11]) if r[11] else {},
+                )
+                for r in rows
+            ]
+            return [_entry_to_dict(e) for e in entries]
+
+        # FTS5 free-text search (append author to query if both provided)
+        fts_query = query
+        if author and query:
+            fts_query = f"{query} {author}"
+        if not fts_query.strip():
+            return [{"error": "query or at least one filter required"}]
+        results = cat.find(fts_query, content_type=content_type or None)[:limit]
         return [_entry_to_dict(e) for e in results]
     except Exception as e:
         return [{"error": str(e)}]
