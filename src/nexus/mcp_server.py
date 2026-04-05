@@ -369,7 +369,9 @@ def query(
     Catalog-aware routing (optional — all require an initialized catalog):
         author: Filter to documents by this author (catalog metadata search)
         content_type: Filter to documents of this type (code, paper, rdr, knowledge)
-        follow_links: Follow links of this type from catalog results (e.g. "cites", "implements")
+        follow_links: Follow links of this type from catalog results (e.g. "cites", "implements").
+            Linked collections are merged (interleaved) with seed collections — results
+            are ranked by semantic distance across all collections, not separated by source.
         depth: BFS depth for follow_links traversal (default 1)
         subtree: Tumbler prefix — search only documents in this subtree (e.g. "1.1")
 
@@ -377,6 +379,8 @@ def query(
         question: Natural-language research question
         corpus: Corpus prefix or full collection name (default: knowledge).
                 Use "all" for all corpora.
+                Note: when catalog params (author, content_type, subtree) are provided,
+                corpus is overridden by the resolved catalog collections.
         where: Metadata filter — KEY=VALUE, comma-separated.
                Example: "bib_year>=2020,tags=arch"
         limit: Maximum documents to return (default 10)
@@ -395,8 +399,6 @@ def query(
         has_catalog_params = author or content_type or follow_links or subtree
 
         if has_catalog_params:
-            import json
-            from nexus.catalog.catalog import CatalogEntry
             from nexus.catalog.tumbler import Tumbler
             cat = _get_catalog()
             if cat is None:
@@ -412,22 +414,7 @@ def query(
                 seed_entries = [e for e in seed_entries if e is not None]
             elif author or content_type:
                 if content_type and not author:
-                    # content_type-only: SQL query for all docs of that type
-                    rows = cat._db.execute(
-                        "SELECT tumbler, title, author, year, content_type, file_path, "
-                        "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-                        "FROM documents WHERE content_type = ?",
-                        (content_type,),
-                    ).fetchall()
-                    seed_entries = [
-                        CatalogEntry(
-                            tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                            content_type=r[4], file_path=r[5], corpus=r[6],
-                            physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                            indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                        )
-                        for r in rows
-                    ]
+                    seed_entries = cat.by_content_type(content_type)
                 else:
                     seed_entries = cat.find(author, content_type=content_type or None)
                     seed_entries = [r for r in seed_entries if author.lower() in (r.author or "").lower()]
@@ -443,15 +430,19 @@ def query(
                             linked_collections.add(node.physical_collection)
                 catalog_collections |= linked_collections
             elif follow_links:
-                # follow_links without other filters: need at least a starting point
-                # Use question as catalog search to find starting documents
+                # follow_links without other filters: use question as catalog seed
                 seed_results = cat.find(question)
-                catalog_collections = set()
-                for r in seed_results[:5]:  # limit seed to avoid explosion
-                    graph = cat.graph(r.tumbler, depth=depth, link_type=follow_links)
-                    for node in graph["nodes"]:
-                        if node.physical_collection:
-                            catalog_collections.add(node.physical_collection)
+                if seed_results:
+                    catalog_collections = set()
+                    for r in seed_results[:5]:  # limit seed to avoid explosion
+                        graph = cat.graph(r.tumbler, depth=depth, link_type=follow_links)
+                        for node in graph["nodes"]:
+                            if node.physical_collection:
+                                catalog_collections.add(node.physical_collection)
+                    # No link-enriched collections found — fall through to broad search
+                    if not catalog_collections:
+                        catalog_collections = None
+                # else: no seeds found — catalog_collections stays None, broad search proceeds
 
             if catalog_collections is not None and not catalog_collections:
                 return f"No documents found matching catalog filters (author={author!r}, content_type={content_type!r}, subtree={subtree!r}, follow_links={follow_links!r})"

@@ -28,13 +28,19 @@ Three-path dispatch for analytical queries over nx knowledge. The skill routes e
 
 ## Three-Path Dispatch
 
-### Path 1: Single-Tool (most questions)
+### Routing Order
+
+**Check analytical signals first.** If the question contains analytical signal words (compare, extract, generate, synthesize, rank, contradictions, differences, "how do X differ"), route to Path 2 or Path 3 — even if the catalog probe would match. Analytical questions need multi-step plans, not single-tool lookups.
+
+If no analytical signals: check catalog → Path 1. If Path 1 returns no results: try Path 2 template match.
+
+### Path 1: Single-Tool (most questions without analytical signals)
 
 The enhanced `query` MCP tool handles catalog-aware routing internally. Use this when the question maps to a single scoped retrieval.
 
-**Detection**: The question has catalog handles (author, content type, subtree, citation/link signals) OR a catalog probe returns a match.
+**Detection**: No analytical signal words AND (the question has explicit catalog handles — author, content type, subtree, citation/link signals — OR a catalog probe returns a match).
 
-**Catalog probe**: Call `mcp__plugin_nx_nexus__catalog_search(query="{question}", limit=1)`. If results are returned, the question has a catalog handle — route through Path 1. This probe is intentionally greedy: FTS5 will match loosely, so most questions against a populated catalog will hit Path 1. This is by design — if Path 1 returns weak results, the user can rephrase with analytical signal words to trigger Path 3.
+**Catalog probe**: Call `mcp__plugin_nx_nexus__catalog_search(query="{question}", limit=1)`. If results are returned, the question has a catalog handle — route through Path 1.
 
 **Execution**: Call `query()` MCP directly with appropriate catalog params:
 
@@ -124,7 +130,7 @@ A JSON execution plan with ordered steps.
 {JSON array of few_shot_plans, or "none"}
 ```
 
-Parse the JSON plan from the response.
+Parse the JSON plan from the response. The planner returns a fenced ` ```json ` block — extract the content between the opening ` ```json ` and closing ` ``` ` fences before calling `json.loads()`.
 
 **Single-step guard**: If the returned plan has only 1 step, it should have been Path 1. Execute it via `query()` MCP directly instead of the full pipeline.
 
@@ -204,6 +210,16 @@ T1 scratch is the cross-dispatch persistence mechanism for Path 3. Every step ou
 Path 1 and Path 2 (single-tool) do **not** use T1 scratch — the query MCP tool returns results directly.
 
 
+## Agent Invocation
+
+Path 3 dispatches two agents via the Agent tool:
+
+1. **query-planner** — receives the question + few-shot plans, returns a JSON execution plan
+2. **analytical-operator** — receives operation + inputs, executes extract/summarize/rank/compare/generate
+
+See Path 3 above for the full relay templates.
+
+
 ## Success Criteria
 
 - [ ] Path 1 questions answered with a single `query()` MCP call
@@ -217,3 +233,9 @@ Path 1 and Path 2 (single-tool) do **not** use T1 scratch — the query MCP tool
 This skill follows the [Shared Context Protocol](../../agents/_shared/CONTEXT_PROTOCOL.md).
 
 T2 memory context is auto-injected by SessionStart and SubagentStart hooks. Use the `plan_search` MCP tool to find similar prior plans.
+
+## Agent-Specific PRODUCE
+
+- **Step outputs**: T1 scratch with `query-step,step-N,{operation}` tags (ephemeral — wiped at session end)
+- **Plan library**: T2 via `plan_save(ttl=30)` — auto-cached on Path 3 success, no user prompt
+- **Final answer**: Presented inline in the conversation; not stored unless the user explicitly requests it

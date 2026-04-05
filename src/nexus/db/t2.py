@@ -525,24 +525,32 @@ class T2Database:
         return cursor.lastrowid  # type: ignore[return-value]
 
     def search_plans(self, query: str, limit: int = 5, project: str = "") -> list[dict[str, Any]]:
-        """FTS5 search over plans (query + tags). Returns plans ordered by rank."""
+        """FTS5 search over plans (query + tags). Returns plans ordered by rank.
+
+        Expired plans (ttl set and created_at + ttl days < now) are excluded.
+        """
         safe = _sanitize_fts5(query)
+        ttl_filter = (
+            "AND (p.ttl IS NULL OR julianday('now') - julianday(p.created_at) <= p.ttl)"
+        )
         if project:
-            sql = """
+            sql = f"""
                 SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
                 FROM plans p
                 JOIN plans_fts ON plans_fts.rowid = p.id
                 WHERE plans_fts MATCH ? AND p.project = ?
+                {ttl_filter}
                 ORDER BY rank
                 LIMIT ?
             """
             params: tuple = (safe, project, limit)
         else:
-            sql = """
+            sql = f"""
                 SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
                 FROM plans p
                 JOIN plans_fts ON plans_fts.rowid = p.id
                 WHERE plans_fts MATCH ?
+                {ttl_filter}
                 ORDER BY rank
                 LIMIT ?
             """
@@ -555,17 +563,18 @@ class T2Database:
         return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
 
     def list_plans(self, limit: int = 20, project: str = "") -> list[dict[str, Any]]:
-        """Return most recent plans ordered by created_at DESC."""
+        """Return most recent non-expired plans ordered by created_at DESC."""
+        ttl_filter = "(ttl IS NULL OR julianday('now') - julianday(created_at) <= ttl)"
         if project:
-            sql = """
+            sql = f"""
                 SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
-                FROM plans WHERE project = ? ORDER BY created_at DESC LIMIT ?
+                FROM plans WHERE project = ? AND {ttl_filter} ORDER BY created_at DESC LIMIT ?
             """
             params_l: tuple = (project, limit)
         else:
-            sql = """
+            sql = f"""
                 SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
-                FROM plans ORDER BY created_at DESC LIMIT ?
+                FROM plans WHERE {ttl_filter} ORDER BY created_at DESC LIMIT ?
             """
             params_l = (limit,)
         with self._lock:

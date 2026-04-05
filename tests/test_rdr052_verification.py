@@ -274,6 +274,105 @@ class TestPlanTTL:
 # ── Tumbler Hierarchy Verification ───────────────────────────────────────────
 
 
+class TestFollowLinksFallback:
+    """Verify follow_links falls back to broad search when no catalog seeds found."""
+
+    def test_follow_links_no_seed_falls_back(self, t3, catalog):
+        """query(follow_links=...) with no FTS match should not error — falls back to broad search."""
+        t3.put(collection="knowledge__delos", content="schema data exchange", title="fb-chunk")
+        result = query(question="xyzzy_nonexistent_topic_12345", follow_links="cites", corpus="knowledge__delos")
+        # Should fall back to broad search on knowledge__delos, not return an error
+        assert "No documents found matching catalog filters" not in result
+
+
+class TestPlanTTLEnforcement:
+    """Verify expired plans are excluded from search and list results."""
+
+    def test_expired_plan_excluded_from_search(self, tmp_path):
+        db = T2Database(tmp_path / "t2.db")
+        row_id = db.save_plan(query="old cached plan", plan_json='{}', ttl=1)
+        # Backdate created_at to 10 days ago
+        db.conn.execute(
+            "UPDATE plans SET created_at = datetime('now', '-10 days') WHERE id = ?",
+            (row_id,),
+        )
+        db.conn.commit()
+        results = db.search_plans("old cached plan")
+        assert len(results) == 0
+
+    def test_expired_plan_excluded_from_list(self, tmp_path):
+        db = T2Database(tmp_path / "t2.db")
+        row_id = db.save_plan(query="expired listed plan", plan_json='{}', ttl=1)
+        db.conn.execute(
+            "UPDATE plans SET created_at = datetime('now', '-10 days') WHERE id = ?",
+            (row_id,),
+        )
+        db.conn.commit()
+        results = db.list_plans()
+        assert len(results) == 0
+
+    def test_permanent_plan_never_expires(self, tmp_path):
+        db = T2Database(tmp_path / "t2.db")
+        db.save_plan(query="permanent plan", plan_json='{}')  # ttl=None
+        db.conn.execute(
+            "UPDATE plans SET created_at = datetime('now', '-365 days') WHERE id = 1"
+        )
+        db.conn.commit()
+        results = db.list_plans()
+        assert len(results) == 1
+
+    def test_fresh_plan_with_ttl_included(self, tmp_path):
+        db = T2Database(tmp_path / "t2.db")
+        db.save_plan(query="fresh cached plan", plan_json='{}', ttl=30)
+        results = db.search_plans("fresh cached plan")
+        assert len(results) == 1
+
+
+class TestTemplateRetrieval:
+    """Verify Path 2 template matching at the MCP/T2 level."""
+
+    def test_builtin_template_retrievable_by_query(self, tmp_path, monkeypatch):
+        """Seeded templates are findable via plan_search by natural question."""
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        from nexus.commands.catalog import _seed_plan_templates
+        _seed_plan_templates()
+        db = T2Database(db_path)
+        results = db.search_plans("find documents by author")
+        builtin = [r for r in results if "builtin-template" in r.get("tags", "")]
+        assert len(builtin) >= 1
+        plan = json.loads(builtin[0]["plan_json"])
+        assert "steps" in plan
+        db.close()
+
+    def test_template_plan_json_structure(self, tmp_path, monkeypatch):
+        """Template plan_json has expected structure (steps with op and params)."""
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        from nexus.commands.catalog import _seed_plan_templates
+        _seed_plan_templates()
+        db = T2Database(db_path)
+        results = db.search_plans("citation chain")
+        builtin = [r for r in results if "builtin-template" in r.get("tags", "")]
+        assert len(builtin) >= 1
+        plan = json.loads(builtin[0]["plan_json"])
+        assert "steps" in plan
+        assert any("op" in step for step in plan["steps"])
+        db.close()
+
+    def test_all_five_templates_searchable(self, tmp_path, monkeypatch):
+        """Each of the 5 templates is retrievable by its query string."""
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        from nexus.commands.catalog import _seed_plan_templates, _PLAN_TEMPLATES
+        _seed_plan_templates()
+        db = T2Database(db_path)
+        for tmpl in _PLAN_TEMPLATES:
+            results = db.search_plans(tmpl["query"])
+            assert len(results) >= 1, f"Template not found: {tmpl['query']}"
+        db.close()
+
+
 class TestTumblerHierarchyVerification:
     """Cross-check tumbler hierarchy helpers match RDR-052 spec."""
 
@@ -296,6 +395,11 @@ class TestTumblerHierarchyVerification:
     def test_lca_no_common_prefix(self):
         a = Tumbler.parse("1.1.1")
         b = Tumbler.parse("2.1.1")
+        assert Tumbler.lca(a, b) is None
+
+    def test_lca_fully_disjoint(self):
+        a = Tumbler.parse("1.1")
+        b = Tumbler.parse("2.2")
         assert Tumbler.lca(a, b) is None
 
     def test_resolve_chunk_ghost_element(self, tmp_path):
