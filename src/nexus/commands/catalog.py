@@ -503,6 +503,34 @@ def _backfill_papers(cat: Catalog, t3: object, dry_run: bool) -> int:
     return count
 
 
+@catalog.command("consolidate")
+@click.argument("corpus")
+@click.option("--dry-run", is_flag=True, help="Show what would be merged without writing")
+def consolidate_cmd(corpus: str, dry_run: bool) -> None:
+    """Merge per-paper collections into a corpus-level collection."""
+    cat = _get_catalog()
+
+    if dry_run:
+        entries = cat.by_corpus(corpus)
+        if not entries:
+            raise click.ClickException(f"No entries with corpus={corpus!r}")
+        target = f"docs__{corpus}"
+        click.echo(f"[dry-run] Would merge {len(entries)} collections into {target}:")
+        for e in entries:
+            click.echo(f"  {e.physical_collection} ({e.chunk_count} chunks) → {target}")
+        return
+
+    from nexus.catalog.consolidation import merge_corpus
+
+    t3 = _make_t3()
+    result = merge_corpus(cat, t3, corpus)
+
+    if result["errors"]:
+        for err in result["errors"]:
+            click.echo(f"  ERROR: {err}", err=True)
+    click.echo(f"Consolidation complete: {result['merged']} merged, {len(result['errors'])} errors")
+
+
 @catalog.command("generate-links")
 @click.option("--citations/--no-citations", default=True, help="Generate citation links from bib metadata")
 @click.option("--code-rdr/--no-code-rdr", default=True, help="Generate code-RDR links by heuristic")

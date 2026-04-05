@@ -384,6 +384,24 @@ class Catalog:
             for r in rows
         ]
 
+    def by_corpus(self, corpus: str) -> list[CatalogEntry]:
+        """List all entries with the given corpus tag."""
+        rows = self._db._conn.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "FROM documents WHERE corpus = ?",
+            (corpus,),
+        ).fetchall()
+        return [
+            CatalogEntry(
+                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
+                content_type=r[4], file_path=r[5], corpus=r[6],
+                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
+                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
+            )
+            for r in rows
+        ]
+
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         """Look up catalog entry by T3 doc_id stored in meta.doc_id."""
         row = self._db._conn.execute(
