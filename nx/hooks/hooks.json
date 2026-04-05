@@ -88,6 +88,18 @@
         ]
       }
     ],
-    "PostToolUse": []
+    "PostToolUse": [],
+    "PermissionRequest": [
+      {
+        "matcher": "mcp__plugin_nx_nexus__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/auto-approve-nx-mcp.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }
