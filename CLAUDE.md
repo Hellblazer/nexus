@@ -60,6 +60,10 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 
 **Session propagation (T1)**: The `SessionStart` hook starts a per-session ChromaDB HTTP server, writes its address to `~/.config/nexus/sessions/{ppid}.session`. Child agents walk the OS PPID chain to find the nearest ancestor session file and share T1 scratch across the agent tree. Falls back to `EphemeralClient` when the server cannot start.
 
+**Catalog (T3 metadata layer)**: Git-backed JSONL + SQLite document registry with typed link graph. Tumblers (Xanadu-inspired hierarchical addresses like `1.2.5`) identify documents. Links (`cites`, `supersedes`, `implements-heuristic`) connect documents. Setup: `nx catalog setup`. Query via MCP: `catalog_search`, `catalog_show`, `catalog_links`. Links auto-generated on `nx index repo` via `_catalog_hook`. The `/nx:query` skill orchestrates catalog-aware multi-step retrieval.
+
+**Link types**: `cites` (citation, from bib metadata), `implements-heuristic` (code→RDR, substring match), `supersedes`, `quotes`, `relates`, `comments`, `implements` (manual). `created_by` tracks provenance: `bib_enricher` for citations, `index_hook` for code-RDR heuristic, `user` for manual.
+
 **T3 expire guard**: always filter `ttl_days > 0 AND expires_at != "" AND expires_at < now` — the `expires_at != ""` guard is mandatory: permanent entries use `expires_at=""` which sorts before ISO timestamps and would be incorrectly deleted by a 2-condition guard.
 
 ## Source Layout
@@ -67,7 +71,12 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 ```
 src/nexus/           # Core package
   cli.py             # Click entry point; registers all command groups
-  commands/          # One file per CLI command group (index, search, memory, scratch, store, collection, config, hooks, doctor, enrich)
+  commands/          # One file per CLI command group (index, search, memory, scratch, store, collection, config, hooks, doctor, enrich, catalog)
+  catalog/           # Xanadu-inspired document catalog (JSONL truth + SQLite cache)
+    catalog.py       # Core: link(), link_query(), graph(), delete_document(), link_audit()
+    catalog_db.py    # SQLite schema + FTS5 + UNIQUE link constraint
+    tumbler.py       # Hierarchical addresses + JSONL readers with resilience
+    link_generator.py # Auto-generate citation + code-RDR links from metadata
   db/                # t1.py, t2.py, t3.py — tier implementations; local_ef.py — local ONNX embeddings
   indexer.py         # Repo indexing pipeline (classify → chunk → embed → store)
   classifier.py      # File classification: CODE / PROSE / PDF / SKIP

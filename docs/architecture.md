@@ -26,6 +26,13 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     ├── Search: query → retrieve → rerank → format
     │     semantic, hybrid (+ frecency + ripgrep)
     │
+    ├── Catalog: JSONL truth → SQLite cache → typed link graph
+    │     documents: tumbler addressing (1.owner.doc), FTS5 search
+    │     links: cites, implements-heuristic, supersedes, relates
+    │     auto-generate: citation links (bib metadata), code-RDR (heuristic)
+    │     MCP: catalog_search, catalog_show, catalog_links, catalog_link, catalog_link_query, catalog_link_audit
+    │     CLI: nx catalog setup/search/show/links/link/unlink/stats
+    │
     └── Storage tiers
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
           T2: SQLite + FTS5 (persistent memory, project context)
@@ -46,6 +53,7 @@ Data flows upward (T1 → T2 → T3).
 | Area | Files | What they do |
 |------|-------|-------------|
 | **Entry** | `cli.py`, `commands/` | Click CLI, one file per command group |
+| **Catalog** | `catalog/catalog.py`, `catalog_db.py`, `tumbler.py`, `link_generator.py` | Git-backed document registry + typed link graph (JSONL + SQLite). Tumbler addressing, idempotent link upsert, composable query, bulk ops, audit |
 | **Storage** | `db/t1.py`, `db/t2.py`, `db/t3.py` | Tier implementations |
 | **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py`, `pipeline_buffer.py`, `pipeline_stages.py`, `checkpoint.py` | Repo indexing pipeline (decomposed per RDR-032). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` auto-detects math-heavy PDFs via FormulaItem counting and routes to MinerU (optional `conexus[mineru]` extra) for superior LaTeX extraction, falling back through enriched Docling to PyMuPDF normalized. MinerU processes large PDFs in 5-page subprocess batches for memory isolation (prevents OOM on formula-dense documents). Chunk metadata includes `has_formulas` boolean. `pipeline_buffer.py` provides a WAL-mode SQLite buffer for the three-stage streaming pipeline (RDR-048); `pipeline_stages.py` implements the concurrent extractor/chunker/uploader stages and orchestrator; `checkpoint.py` handles batch-path crash recovery for smaller documents (RDR-047) |
 | **Export** | `exporter.py` | Collection export/import for T3 backup and migration (.nxexp format) |

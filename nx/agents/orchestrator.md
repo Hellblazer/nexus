@@ -107,7 +107,7 @@ You are a meta-agent responsible for analyzing requests, selecting appropriate s
 - **Architecture/Design**: System design needed -> architect-planner or strategic-planner
 - **Bug/Issue**: Something is broken -> debugger
 - **Review**: Work needs validation -> code-review-expert, plan-auditor, or substantive-critic
-- **Catalog Query**: Question about specific authors, papers, citations, provenance, corpus, "who wrote", "what did X write", "what research", "papers by/about", or relationships between documents -> `/nx:query` skill (catalog-aware retrieval). Trigger on proper nouns + academic context (e.g., "Fagin", "Bernstein", "schema mappings").
+- **Catalog Query**: Question about specific authors, papers, citations, provenance, references, corpus, "who wrote", "what did X write", "what research", "papers by/about", "what references/cites X", "what implements this", or relationships between documents -> `/nx:query` skill (catalog-aware retrieval). Trigger on proper nouns + academic context (e.g., "Fagin", "Bernstein", "schema mappings").
 - **Research**: General information gathering -> deep-research-synthesizer
 - **Analysis**: Understanding needed -> deep-analyst or codebase-deep-analyzer
 

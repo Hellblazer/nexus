@@ -36,18 +36,31 @@ mcp__plugin_nx_nexus__scratch(action="put", content="working note"
 mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>"       # auto-promote to T2 at session end
 ```
 
-## Catalog (T3 metadata — document registry + link graph)
+## Catalog (T3 metadata — document registry + typed link graph)
 
 ```
-# Search by metadata (author, corpus, title, file_path)
+# Search/browse
 mcp__plugin_nx_nexus__catalog_search(query="schema mappings", author="Fagin", corpus="schema-evolution"
 mcp__plugin_nx_nexus__catalog_show(tumbler="1.9.14"                    # full entry with links
-mcp__plugin_nx_nexus__catalog_links(tumbler="1.9.14", direction="in", link_type="cites", depth=2
 mcp__plugin_nx_nexus__catalog_resolve(owner="1.1", corpus="schema-evolution"  # → collection names
 mcp__plugin_nx_nexus__catalog_stats                                    # health summary
+
+# Link graph — live documents only (deleted nodes excluded)
+mcp__plugin_nx_nexus__catalog_links(tumbler="1.9.14", direction="in", link_type="cites", depth=2
+  Returns {"nodes": [...], "edges": [...]}
+
+# Link CRUD
 mcp__plugin_nx_nexus__catalog_link(from_tumbler="1.1.1", to_tumbler="1.2.5", link_type="cites", created_by="user"
+  Returns {"from": ..., "to": ..., "type": ..., "created": true/false}
+
+# Admin/audit — includes orphaned links (all links, not just live)
+mcp__plugin_nx_nexus__catalog_link_query(link_type="cites", created_by="bib_enricher", limit=50
+mcp__plugin_nx_nexus__catalog_link_audit()                             # orphans, stats, duplicates
+mcp__plugin_nx_nexus__catalog_link_bulk(link_type="cites", dry_run=True  # preview before delete
 ```
 
+**Link types**: `cites` (citation), `implements-heuristic` (auto code→RDR), `supersedes`, `quotes`, `relates`, `comments`, `implements` (manual).
+**Two graph views**: `catalog_links` returns live-document links only. `catalog_link_query` returns all links including orphans.
 Use catalog for: author queries, citation traversal, provenance chains, corpus-scoped search.
 The `/nx:query` skill handles full catalog-aware plan execution.
 

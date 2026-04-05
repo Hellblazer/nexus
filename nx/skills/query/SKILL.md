@@ -34,7 +34,7 @@ Capture the user's natural-language analytical question. This is the `query` tha
 
 ### Step 1: Plan Library Lookup
 
-**Auto-trigger when the query contains any of**: author, cite, citation, cites, cited by, relationship, provenance, implements, links from, links to, relates to, corpus, collection, papers by, papers about, who wrote, what did, what research, informed by, based on, building on, schema mapping, data exchange.
+**Auto-trigger when the query contains any of**: author, cite, citation, cites, cited by, relationship, provenance, implements, links from, links to, relates to, corpus, collection, papers by, papers about, who wrote, what did, what research, informed by, based on, building on, reference, follow-on, schema mapping, data exchange, catalog.
 
 **Also trigger when** the user explicitly requests plan reuse ("reuse a similar plan", "check if we've done this before").
 
@@ -120,7 +120,7 @@ Write results to T1 scratch:
 mcp__plugin_nx_nexus__scratch(action="put", content="{link results as text}", tags="query-step,step-{N},catalog_links")
 ```
 
-**Extract collections**: For each unique `to` tumbler in the link results, call `mcp__plugin_nx_nexus__catalog_show(tumbler="{to}")` and collect `physical_collection`. Filter out empty strings (ghost elements with no T3 backing). Store as `$step_N.collections`.
+**Extract collections**: `catalog_links` returns `{"nodes": [...], "edges": [...]}`. Nodes include CatalogEntry dicts with `physical_collection`. For each node, collect `physical_collection`. Filter out empty strings (ghost elements with no T3 backing). Store as `$step_N.collections`. Note: only links to live documents are returned — deleted documents are excluded from the graph.
 
 #### If `step["operation"] == "catalog_resolve"`:
 
