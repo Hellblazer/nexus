@@ -510,6 +510,12 @@ def store_put(
             tags=tags,
             ttl_days=ttl_days,
         )
+        # Register in catalog (same hook the CLI uses)
+        try:
+            from nexus.commands.store import _catalog_store_hook
+            _catalog_store_hook(title=title, doc_id=doc_id, collection_name=col_name)
+        except Exception:
+            pass  # catalog registration is non-fatal
         return f"Stored: {doc_id} -> {col_name}"
     except Exception as e:
         return f"Error: {e}"

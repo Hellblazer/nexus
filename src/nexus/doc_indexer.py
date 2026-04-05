@@ -686,6 +686,21 @@ def index_pdf(
                 }
             return count
 
+    # Catalog registration helper for batch paths (streaming has its own hook)
+    def _register_in_catalog(meta_list: list[dict], chunk_count: int) -> None:
+        try:
+            from nexus.pipeline_stages import _catalog_pdf_hook
+            _catalog_pdf_hook(
+                pdf_path, col_name,
+                title=meta_list[0].get("source_title", "") if meta_list else "",
+                author=meta_list[0].get("source_author", "") if meta_list else "",
+                year=int(meta_list[0].get("year", 0)) if meta_list else 0,
+                corpus=corpus,
+                chunk_count=chunk_count,
+            )
+        except Exception:
+            pass  # catalog registration is non-fatal
+
     # Extract and chunk the entire document
     now_iso = datetime.now(UTC).isoformat()
     chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor)
@@ -699,8 +714,9 @@ def index_pdf(
             pdf_path, corpus, prepared, content_hash, col_name, db,
             embed_fn=embed_fn, on_progress=on_progress,
         )
+        metadatas = [p[2] for p in prepared]
+        _register_in_catalog(metadatas, len(metadatas))
         if return_metadata:
-            metadatas = [p[2] for p in prepared]
             return {
                 "chunks": len(metadatas),
                 "pages": sorted({m.get("page_number", 0) for m in metadatas}),
@@ -748,6 +764,8 @@ def index_pdf(
     if stale_ids:
         _chroma_with_retry(col.delete, ids=stale_ids)
 
+    _register_in_catalog(metadatas_list, len(metadatas_list))
+
     if return_metadata:
         return {
             "chunks": len(metadatas_list),
@@ -756,6 +774,51 @@ def index_pdf(
             "author": metadatas_list[0].get("source_author", "") if metadatas_list else "",
         }
     return len(prepared)
+
+
+def _catalog_markdown_hook(
+    md_path: Path, collection_name: str, content_type: str, corpus: str, chunk_count: int,
+) -> None:
+    """Register markdown document in catalog after indexing. Silently skipped if absent."""
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return
+
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+
+        # Derive title from frontmatter or filename
+        title = md_path.stem
+        try:
+            text = md_path.read_text(encoding="utf-8")
+            if text.startswith("---"):
+                import re
+                m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
+                if m:
+                    title = m.group(1).strip().strip('"').strip("'")
+        except Exception:
+            pass
+
+        owner_name = corpus if corpus else "standalone-docs"
+        rows = cat._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+        ).fetchone()
+        if rows:
+            from nexus.catalog.tumbler import Tumbler
+            owner = Tumbler.parse(rows[0])
+        else:
+            owner = cat.register_owner(owner_name, "curator")
+
+        cat.register(
+            owner=owner, title=title, content_type=content_type,
+            file_path=str(md_path), physical_collection=collection_name,
+            chunk_count=chunk_count,
+        )
+    except Exception:
+        _log.debug("catalog_markdown_hook_failed", exc_info=True)
 
 
 def index_markdown(
@@ -768,6 +831,7 @@ def index_markdown(
     force: bool = False,
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
+    content_type: str = "prose",
 ) -> int | dict:
     """Index *md_path* into a T3 collection.
 
@@ -790,6 +854,7 @@ def index_markdown(
     *sections* is the count of chunks with a non-empty ``section_title``
     (i.e. produced under a heading).  Default False preserves existing int behavior.
     """
+    col_name = collection_name if collection_name is not None else f"docs__{corpus}"
     raw = _index_document(
         md_path, corpus, _markdown_chunks, t3=t3,
         collection_name=collection_name, embed_fn=embed_fn,
@@ -797,11 +862,16 @@ def index_markdown(
     )
     if not return_metadata:
         assert isinstance(raw, int)
-        return raw
+        count = raw
+        if count > 0:
+            _catalog_markdown_hook(md_path, col_name, content_type, corpus, count)
+        return count
     if not isinstance(raw, list):
         return {"chunks": 0, "sections": 0}
     metadatas: list[dict] = raw
     sections = sum(1 for m in metadatas if m.get("section_title", ""))
+    if metadatas:
+        _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas))
     return {"chunks": len(metadatas), "sections": sections}
 
 
@@ -847,6 +917,7 @@ def batch_index_markdowns(
     t3: Any = None,
     *,
     collection_name: str | None = None,
+    content_type: str = "prose",
     force: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
 ) -> dict[str, str]:
@@ -854,6 +925,9 @@ def batch_index_markdowns(
 
     Pass *collection_name* to override the default ``docs__{corpus}`` target
     (used for RDR collections).
+
+    Pass *content_type* to set the catalog content type (default: "prose",
+    use "rdr" for RDR documents).
 
     Returns dict mapping ``str(path)`` -> ``"indexed"`` | ``"skipped"`` | ``"failed"``.
     Failures are logged and do not abort the remaining paths.
@@ -869,7 +943,8 @@ def batch_index_markdowns(
         count: int = 0
         t0 = time.monotonic()
         try:
-            raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name, force=force)
+            raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name,
+                                 content_type=content_type, force=force)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:

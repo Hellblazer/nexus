@@ -165,32 +165,44 @@ def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") 
 
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
-        # Prefer exact physical_collection lookup over FTS title search
+        # Look up by collection + title jointly for precision
         entry = None
         if collection_name:
+            from nexus.catalog.tumbler import Tumbler
             row = cat._db.execute(
-                "SELECT tumbler FROM documents WHERE physical_collection = ? LIMIT 1",
-                (collection_name,),
+                "SELECT tumbler FROM documents WHERE physical_collection = ? AND title = ? LIMIT 1",
+                (collection_name, title),
             ).fetchone()
             if row:
-                from nexus.catalog.tumbler import Tumbler
                 entry = cat.resolve(Tumbler.parse(row[0]))
+            if entry is None:
+                # Fallback: collection-only (for renamed/enriched titles)
+                row = cat._db.execute(
+                    "SELECT tumbler FROM documents WHERE physical_collection = ? LIMIT 1",
+                    (collection_name,),
+                ).fetchone()
+                if row:
+                    entry = cat.resolve(Tumbler.parse(row[0]))
 
-        # Fallback to FTS title search
+        # Fallback to FTS title search (no collection context)
         if entry is None:
             entries = cat.find(title, content_type="paper")
             entry = entries[0] if entries else None
 
         if entry:
+            meta_update: dict = {
+                "venue": bib_meta.get("venue", ""),
+                "bib_semantic_scholar_id": bib_meta.get("semantic_scholar_id", ""),
+                "citation_count": bib_meta.get("citation_count", 0),
+            }
+            refs = bib_meta.get("references", [])
+            if refs:
+                meta_update["references"] = refs
             cat.update(
                 entry.tumbler,
                 author=bib_meta.get("authors", ""),
                 year=bib_meta.get("year", 0),
-                meta={
-                    "venue": bib_meta.get("venue", ""),
-                    "bib_semantic_scholar_id": bib_meta.get("semantic_scholar_id", ""),
-                    "citation_count": bib_meta.get("citation_count", 0),
-                },
+                meta=meta_update,
             )
     except Exception:
         _log.debug("catalog_enrich_hook_failed", exc_info=True)

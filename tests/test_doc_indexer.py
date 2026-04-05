@@ -1296,7 +1296,7 @@ def test_batch_index_markdowns_marks_failed_on_error(tmp_path, monkeypatch):
 
     mock_t3 = MagicMock()
 
-    def _side_effect(path, corpus, t3=None, *, collection_name=None, force=False):
+    def _side_effect(path, corpus, t3=None, *, collection_name=None, content_type="prose", force=False):
         if "bad" in str(path):
             raise RuntimeError("markdown parsing failed")
         return 2
