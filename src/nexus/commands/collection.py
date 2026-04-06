@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import hashlib
+import sys
+from collections.abc import Callable
 
 import click
 
@@ -251,8 +253,16 @@ def verify_cmd(name: str, deep: bool) -> None:
 _BACKFILL_BATCH = 300
 
 
-def _backfill_chunk_text_hash(col) -> tuple[int, int, int]:
-    """Add chunk_text_hash to chunks that are missing it. Returns (updated, skipped, total)."""
+def _backfill_chunk_text_hash(
+    col,
+    on_progress: Callable[[int, int, int], None] | None = None,
+) -> tuple[int, int, int]:
+    """Add chunk_text_hash to chunks that are missing it. Returns (updated, skipped, total).
+
+    Args:
+        col: ChromaDB collection.
+        on_progress: Optional callback(updated, skipped, total) called after each batch.
+    """
     updated = 0
     skipped = 0
     total = 0
@@ -277,6 +287,8 @@ def _backfill_chunk_text_hash(col) -> tuple[int, int, int]:
             col.update(ids=update_ids, metadatas=update_metas)
             updated += len(update_ids)
         offset += len(ids)
+        if on_progress:
+            on_progress(updated, skipped, total)
     return updated, skipped, total
 
 
@@ -306,17 +318,26 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
         targets = [name]
 
     grand_updated = 0
-    for col_name in sorted(targets):
+    for i, col_name in enumerate(sorted(targets), 1):
         try:
             col = db._client.get_collection(col_name)
         except Exception:
-            click.echo(f"  {col_name}: not found, skipping", err=True)
+            click.echo(f"  [{i}/{len(targets)}] {col_name}: not found, skipping", err=True)
             continue
-        updated, skipped, total_count = _backfill_chunk_text_hash(col)
+
+        def _progress(updated: int, skipped: int, total: int) -> None:
+            msg = f"\r  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} skipped, {total} scanned..."
+            sys.stderr.write(msg)
+            sys.stderr.flush()
+
+        updated, skipped, total_count = _backfill_chunk_text_hash(col, on_progress=_progress)
         grand_updated += updated
+        # Clear the progress line
+        sys.stderr.write("\r" + " " * 120 + "\r")
+        sys.stderr.flush()
         if updated:
-            click.echo(f"  {col_name}: {updated} updated, {skipped} already had hash ({total_count} total)")
+            click.echo(f"  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} already had hash ({total_count} total)")
         else:
-            click.echo(f"  {col_name}: all {total_count} chunks already have hash")
+            click.echo(f"  [{i}/{len(targets)}] {col_name}: all {total_count} chunks already have hash")
 
     click.echo(f"Done: {grand_updated} chunks updated across {len(targets)} collection(s)")
