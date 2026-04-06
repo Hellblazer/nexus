@@ -2,12 +2,12 @@
 title: "Xanadu Fidelity — Tumbler Arithmetic and Content-Addressed Spans"
 id: RDR-053
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-05
-accepted_date:
+accepted_date: 2026-04-05
 related_issues: [nexus-zr3u]
 ---
 
