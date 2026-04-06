@@ -65,6 +65,36 @@ class Tumbler:
     def __str__(self) -> str:
         return ".".join(str(s) for s in self.segments)
 
+    def __lt__(self, other: object) -> bool:
+        """Segment-by-segment integer comparison with -1 sentinel padding.
+
+        Shorter tumblers sort before longer ones with identical prefixes
+        (parent < child). This is simplified lexicographic ordering over
+        integer segments — not Nelson's transfinitesimal arithmetic — per
+        RDR-053 deviation D6.
+        """
+        if not isinstance(other, Tumbler):
+            return NotImplemented
+        max_len = max(len(self.segments), len(other.segments))
+        a = self.segments + (-1,) * (max_len - len(self.segments))
+        b = other.segments + (-1,) * (max_len - len(other.segments))
+        return a < b
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, Tumbler):
+            return NotImplemented
+        return self == other or self < other
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, Tumbler):
+            return NotImplemented
+        return not self <= other
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, Tumbler):
+            return NotImplemented
+        return not self < other
+
     @classmethod
     def parse(cls, s: str) -> Tumbler:
         if not s:

@@ -161,6 +161,49 @@ class TestTumblerAncestors:
         ]
 
 
+class TestTumblerComparison:
+    def test_lt_integer_not_lexicographic(self):
+        assert Tumbler.parse("1.1.3") < Tumbler.parse("1.1.10")
+
+    def test_lt_owner_segment_differs(self):
+        assert Tumbler.parse("1.1.3") < Tumbler.parse("1.2.1")
+
+    def test_lt_parent_less_than_child_zero_chunk(self):
+        # RF-5: parent < child with zero-segment chunk
+        assert Tumbler.parse("1.1.3") < Tumbler.parse("1.1.3.0")
+
+    def test_gt_child_greater_than_parent(self):
+        assert Tumbler.parse("1.1.3.0") > Tumbler.parse("1.1.3")
+
+    def test_le_equal(self):
+        assert Tumbler.parse("1.1.3") <= Tumbler.parse("1.1.3")
+
+    def test_ge_equal(self):
+        assert Tumbler.parse("1.1.3") >= Tumbler.parse("1.1.3")
+
+    def test_sorted_order(self):
+        tumblers = [
+            Tumbler.parse("1.1.10"),
+            Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.3.0"),
+        ]
+        result = sorted(tumblers)
+        assert result == [
+            Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.3.0"),
+            Tumbler.parse("1.1.10"),
+        ]
+
+    def test_lt_store_segment_differs(self):
+        assert Tumbler.parse("1.2.1") < Tumbler.parse("2.1.1")
+
+    def test_not_lt_equal(self):
+        assert not (Tumbler.parse("1.1.3") < Tumbler.parse("1.1.3"))
+
+    def test_not_gt_equal(self):
+        assert not (Tumbler.parse("1.1.3") > Tumbler.parse("1.1.3"))
+
+
 class TestTumblerLCA:
     def test_same_tumbler(self):
         t = Tumbler.parse("1.2.42")
