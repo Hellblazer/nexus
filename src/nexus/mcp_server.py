@@ -162,6 +162,28 @@ def _max_jsonl_mtime(cat) -> float:
     return mtime
 
 
+def _catalog_auto_link(doc_id: str) -> int:
+    """Create catalog links from T1 link-context to the just-stored document.
+
+    Reads link-context entries from T1 scratch, resolves the stored doc's
+    tumbler via doc_id, and creates links. Returns count of links created.
+    """
+    cat = _get_catalog()
+    if cat is None:
+        return 0
+    t1, _ = _get_t1()
+    entries = t1.list_entries()
+    link_entries = [e for e in entries if "link-context" in (e.get("tags") or "")]
+    if not link_entries:
+        return 0
+    entry = cat.by_doc_id(doc_id)
+    if entry is None:
+        return 0
+    from nexus.catalog.auto_linker import auto_link, read_link_contexts
+    contexts = read_link_contexts(link_entries)
+    return auto_link(cat, entry.tumbler, contexts)
+
+
 def _get_catalog():
     """Return Catalog singleton or None if not initialized.
 
@@ -608,6 +630,11 @@ def store_put(
             _catalog_store_hook(title=title, doc_id=doc_id, collection_name=col_name)
         except Exception:
             pass  # catalog registration is non-fatal
+        # Auto-link from T1 scratch link-context
+        try:
+            _catalog_auto_link(doc_id)
+        except Exception:
+            pass  # auto-linking is non-fatal
         return f"Stored: {doc_id} -> {col_name}"
     except Exception as e:
         return f"Error: {e}"

@@ -133,3 +133,90 @@ class TestAutoLink:
         assert len(links) == 2
         for link in links:
             assert link.created_by == "auto-linker"
+
+
+class TestCatalogAutoLinkIntegration:
+    """Integration test: _catalog_auto_link wired through store_put path."""
+
+    def test_store_put_creates_link_from_scratch_context(self, tmp_path):
+        """Full pipeline: T1 scratch link-context + store_put → catalog link."""
+        import json
+        from nexus.db.t1 import T1Database
+        from nexus.mcp_server import (
+            _catalog_auto_link,
+            _inject_catalog,
+            _inject_t1,
+            _reset_singletons,
+        )
+
+        _reset_singletons()
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("knowledge", "curator")
+        target_t = cat.register(owner, "Target RDR", content_type="rdr")
+
+        # Register a source doc (simulating what _catalog_store_hook does)
+        source_t = cat.register(
+            owner, "Agent Finding", content_type="knowledge",
+            meta={"doc_id": "test-doc-001"},
+        )
+
+        _inject_catalog(cat)
+
+        t1 = T1Database(session_id="test-auto-link-session")
+        _inject_t1(t1)
+
+        # Seed link-context in T1 scratch
+        t1.put(
+            content=json.dumps({
+                "targets": [{"target_tumbler": str(target_t), "link_type": "relates"}],
+                "source_agent": "developer",
+            }),
+            tags="link-context",
+        )
+
+        count = _catalog_auto_link("test-doc-001")
+
+        assert count == 1
+        links = cat.links_from(source_t, link_type="relates")
+        assert len(links) == 1
+        assert links[0].created_by == "auto-linker"
+
+        _reset_singletons()
+
+    def test_store_put_no_crash_without_context(self, tmp_path):
+        """_catalog_auto_link with no link-context in scratch → 0, no crash."""
+        from nexus.db.t1 import T1Database
+        from nexus.mcp_server import (
+            _catalog_auto_link,
+            _inject_catalog,
+            _inject_t1,
+            _reset_singletons,
+        )
+
+        _reset_singletons()
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("knowledge", "curator")
+        cat.register(
+            owner, "Some Doc", content_type="knowledge",
+            meta={"doc_id": "test-doc-002"},
+        )
+
+        _inject_catalog(cat)
+        t1 = T1Database(session_id="test-no-context-session")
+        _inject_t1(t1)
+
+        count = _catalog_auto_link("test-doc-002")
+        assert count == 0
+
+        _reset_singletons()
+
+    def test_store_put_no_catalog_returns_zero(self):
+        """_catalog_auto_link with no catalog → 0."""
+        from nexus.mcp_server import _catalog_auto_link, _reset_singletons
+
+        _reset_singletons()
+        count = _catalog_auto_link("nonexistent-doc")
+        assert count == 0
+        _reset_singletons()
