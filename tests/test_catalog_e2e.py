@@ -635,12 +635,14 @@ class TestChashSpanPipelineE2E:
              patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
             index_repository(catalog_repo, registry)
 
-        # Find a code collection and verify chunk_text_hash is present
-        collections = local_t3._client.list_collections()
-        code_cols = [c for c in collections if c.name.startswith("code__")]
-        assert code_cols, "Indexing should create at least one code__ collection"
-
-        col = code_cols[0]
+        # Find a code collection via catalog and verify chunk_text_hash is present
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        row = cat._db.execute(
+            "SELECT physical_collection FROM documents "
+            "WHERE content_type = 'code' LIMIT 1"
+        ).fetchone()
+        assert row, "Indexing should create at least one code document"
+        col = local_t3._client.get_collection(row[0])
         result = col.get(limit=5, include=["documents", "metadatas"])
         assert result["ids"], "Collection should have chunks"
 

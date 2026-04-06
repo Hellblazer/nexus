@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `catalog_link_audit` MCP tool now performs content-hash span verification against T3 automatically
+- Agents creating links can use `chash:<sha256hex>` spans for content-addressed chunk references (preferred over positional spans)
+
 ## [3.0.0] - 2026-04-05
 
 ### Added

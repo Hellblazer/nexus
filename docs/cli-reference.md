@@ -200,7 +200,9 @@ With a positional tumbler/title: BFS graph traversal. Without: flat filter query
 nx catalog link FROM TO --type TYPE [--from-span SPAN] [--to-span SPAN]
 ```
 
-Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`. Span format: `line-line` or `chunk:char-char`.
+Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`.
+
+Span formats: `line-line` (positional), `chunk:char-char` (positional), or `chash:<sha256hex>` (content-addressed, preferred). Content-hash spans survive re-indexing; positional spans may become stale.
 
 ### nx catalog unlink
 

@@ -67,6 +67,15 @@ and scoping semantic search to relevant collections instead of searching everyth
 - `relates` — created by agents (debugger, deep-analyst, codebase-analyzer) linking related findings
 - `implements`, `quotes`, `comments` — available for manual use
 
+**Span formats** for sub-document link references:
+- `42-57` — line range (positional, may become stale on re-index)
+- `3:100-250` — chunk:char range (positional)
+- `chash:<sha256hex>` — content-addressed chunk identity (preferred, survives re-indexing)
+
+Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of stored chunk text). All 4 indexers emit `chunk_text_hash` alongside the existing file-level `content_hash`. `link_audit()` verifies chash spans resolve in T3.
+
+**Tumbler ordering**: Comparison operators (`<`, `<=`, `>`, `>=`) use -1 sentinel padding for cross-depth ordering — parent tumblers sort before their children. `Tumbler.spans_overlap()` detects positional span overlap using these operators.
+
 **Two graph views**: `catalog_links` returns only links between live documents (deleted nodes excluded).
 `catalog_link_query` returns all links including orphans — useful for admin/audit.
 

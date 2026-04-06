@@ -64,7 +64,13 @@ Links can point to specific passages:
 nx catalog link "Paper A" "Paper B" --type quotes --from-span "100-105" --to-span "42-57"
 ```
 
-Span formats: `42-57` (line range) or `3:100-250` (chunk 3, characters 100-250). `nx catalog show` resolves span text inline when available.
+Span formats:
+
+- `42-57` — line range (positional)
+- `3:100-250` — chunk 3, characters 100-250 (positional)
+- `chash:<sha256hex>` — content-addressed chunk identity (64-char SHA-256 hex, preferred)
+
+Content-hash spans (`chash:`) survive re-indexing when chunk boundaries are unchanged. Position-based spans may become stale after re-indexing — `nx catalog link-audit` detects this. `nx catalog show` resolves span text inline when available.
 
 ## How it gets populated
 

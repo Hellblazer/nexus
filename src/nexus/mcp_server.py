@@ -1474,15 +1474,17 @@ def catalog_unlink(
 
 @mcp.tool()
 def catalog_link_audit() -> dict:
-    """Audit the link graph: counts by type/creator, orphaned links, duplicates.
+    """Audit the link graph: counts by type/creator, orphaned links, duplicates, stale chash spans.
 
-    Use to verify link health before/after bulk operations.
+    When T3 is available, verifies each content-hash (chash:) span resolves
+    to an actual chunk in ChromaDB. Unresolvable spans appear in stale_chash.
     """
     cat, err = _require_catalog()
     if err:
         return {"error": err}
     try:
-        return cat.link_audit()
+        t3 = _get_t3()
+        return cat.link_audit(t3=t3._client)
     except Exception as e:
         return {"error": str(e)}
 

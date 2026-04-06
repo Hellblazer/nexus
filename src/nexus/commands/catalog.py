@@ -490,8 +490,8 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     "--type", "link_type", required=True,
     type=click.Choice(["cites", "supersedes", "quotes", "relates", "comments", "implements", "implements-heuristic"]),
 )
-@click.option("--from-span", default="", help="Source span: 'line-line' or 'chunk:char-char'")
-@click.option("--to-span", default="", help="Target span: 'line-line' or 'chunk:char-char'")
+@click.option("--from-span", default="", help="Source span: 'line-line', 'chunk:char-char', or 'chash:<sha256hex>'")
+@click.option("--to-span", default="", help="Target span: 'line-line', 'chunk:char-char', or 'chash:<sha256hex>'")
 def link_cmd(
     from_tumbler: str, to_tumbler: str, link_type: str,
     from_span: str, to_span: str,
@@ -504,9 +504,10 @@ def link_cmd(
 
     \b
     Spans (optional) identify the specific passage being referenced:
-      --from-span "42-57"       lines 42-57 of the source document
-      --to-span "3:100-250"     chars 100-250 of chunk 3 in T3
-    Use 'nx catalog show' to see resolved span text on links.
+      --from-span "42-57"              lines 42-57 of the source document
+      --to-span "3:100-250"            chars 100-250 of chunk 3 in T3
+      --from-span "chash:<sha256hex>"  content-addressed chunk identity (preferred)
+    Content-hash spans survive re-indexing. Use 'nx catalog show' to see resolved span text.
     """
     cat = _get_catalog()
     ft = _resolve_tumbler(cat, from_tumbler)
