@@ -772,12 +772,33 @@ class Catalog:
                 )
         if not allow_dangling:
             errors = []
-            if self.resolve(from_t) is None:
+            from_entry = self.resolve(from_t)
+            to_entry = self.resolve(to_t)
+            if from_entry is None:
                 errors.append(f"from_tumbler {from_t} not found")
-            if self.resolve(to_t) is None:
+            if to_entry is None:
                 errors.append(f"to_tumbler {to_t} not found")
             if errors:
                 raise ValueError(f"dangling link: {'; '.join(errors)}")
+            # Validate chash: spans resolve in their document's collection
+            for span, entry, label in [
+                (from_span, from_entry, "from_span"),
+                (to_span, to_entry, "to_span"),
+            ]:
+                if span.startswith("chash:") and entry and entry.physical_collection:
+                    try:
+                        from nexus.db import make_t3
+                        t3 = make_t3()
+                        result = self.resolve_span(span, entry.physical_collection, t3._client)
+                        if result is None:
+                            errors.append(
+                                f"{label} {span!r} does not resolve in "
+                                f"collection {entry.physical_collection}"
+                            )
+                    except Exception:
+                        pass  # T3 unavailable — skip validation
+            if errors:
+                raise ValueError(f"unresolvable span: {'; '.join(errors)}")
         now = datetime.now(UTC).isoformat()
         row = self._db.execute(
             "SELECT id, created_by, metadata, created_at FROM links "
@@ -888,12 +909,32 @@ class Catalog:
                 return False
             if not allow_dangling:
                 errors = []
-                if self.resolve(from_t) is None:
+                from_entry = self.resolve(from_t)
+                to_entry = self.resolve(to_t)
+                if from_entry is None:
                     errors.append(f"from_tumbler {from_t} not found")
-                if self.resolve(to_t) is None:
+                if to_entry is None:
                     errors.append(f"to_tumbler {to_t} not found")
                 if errors:
                     raise ValueError(f"dangling link: {'; '.join(errors)}")
+                for span, entry, label in [
+                    (from_span, from_entry, "from_span"),
+                    (to_span, to_entry, "to_span"),
+                ]:
+                    if span.startswith("chash:") and entry and entry.physical_collection:
+                        try:
+                            from nexus.db import make_t3
+                            t3 = make_t3()
+                            result = self.resolve_span(span, entry.physical_collection, t3._client)
+                            if result is None:
+                                errors.append(
+                                    f"{label} {span!r} does not resolve in "
+                                    f"collection {entry.physical_collection}"
+                                )
+                        except Exception:
+                            pass
+                if errors:
+                    raise ValueError(f"unresolvable span: {'; '.join(errors)}")
             now = datetime.now(UTC).isoformat()
             combined_meta = dict(meta)
             rec = LinkRecord(

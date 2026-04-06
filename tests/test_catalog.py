@@ -659,3 +659,63 @@ class TestLinkChashSpans:
         doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
         created = cat.link(doc_a, doc_b, "cites", "test-agent")
         assert created is True
+
+
+class TestLinkChashValidation:
+    """chash: spans are validated against T3 at link creation time."""
+
+    def test_link_rejects_unresolvable_chash_span(self, tmp_path):
+        """A chash: span that doesn't exist in the collection is rejected."""
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__val_{tmp_path.name}"
+        t3.create_collection(col_name)  # empty — hash won't resolve
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py",
+                             physical_collection=col_name)
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py",
+                             physical_collection=col_name)
+
+        from unittest.mock import patch, MagicMock
+        mock_t3 = MagicMock()
+        mock_t3._client = t3
+        with patch("nexus.db.make_t3", return_value=mock_t3):
+            with pytest.raises(ValueError, match="unresolvable span"):
+                cat.link(doc_a, doc_b, "cites", "test-agent",
+                         from_span="chash:" + "a" * 64)
+
+    def test_link_accepts_resolvable_chash_span(self, tmp_path):
+        """A chash: span pointing to an existing chunk is accepted."""
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__val_{tmp_path.name}"
+        col = t3.create_collection(col_name)
+        chunk_hash = "b" * 64
+        col.add(ids=["c1"], documents=["some code"],
+                metadatas=[{"chunk_text_hash": chunk_hash}])
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py",
+                             physical_collection=col_name)
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py",
+                             physical_collection=col_name)
+
+        from unittest.mock import patch, MagicMock
+        mock_t3 = MagicMock()
+        mock_t3._client = t3
+        with patch("nexus.db.make_t3", return_value=mock_t3):
+            created = cat.link(doc_a, doc_b, "cites", "test-agent",
+                               from_span=f"chash:{chunk_hash}")
+        assert created is True
+
+    def test_link_allows_dangling_skips_chash_validation(self, tmp_path):
+        """allow_dangling=True skips chash validation too."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        # No mock_t3 needed — allow_dangling skips all validation
+        created = cat.link(doc_a, doc_b, "cites", "test-agent",
+                           from_span="chash:" + "a" * 64, allow_dangling=True)
+        assert created is True
