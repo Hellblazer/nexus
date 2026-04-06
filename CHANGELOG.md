@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-04-06
+
+### Added
+- **chash: span validation at link creation** — `link()` and `link_if_absent()` now verify that `chash:` spans resolve to actual chunks in the document's physical collection before accepting the link. Raises `ValueError` with collection name if the hash doesn't exist. Skipped when `allow_dangling=True`.
+
+### Fixed
+- **`backfill-hash` live progress** — per-batch progress on stderr with carriage-return updates. Previously silent until completion.
+- **`backfill-hash` ChromaDB quota handling** — chunks with 32+ metadata keys hit the `NumMetadataKeys` quota on update. Now caught per-batch and counted as skipped instead of crashing the entire run.
+
 ## [3.1.0] - 2026-04-06
 
 ### Added
