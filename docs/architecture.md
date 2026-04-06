@@ -72,7 +72,7 @@ and scoping semantic search to relevant collections instead of searching everyth
 - `3:100-250` — chunk:char range (positional)
 - `chash:<sha256hex>` — content-addressed chunk identity (preferred, survives re-indexing)
 
-Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of stored chunk text). All 4 indexers emit `chunk_text_hash` alongside the existing file-level `content_hash`. `link_audit()` verifies chash spans resolve in T3.
+Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of stored chunk text). All 5 indexers (code, prose, doc PDF, doc markdown, streaming PDF pipeline) emit `chunk_text_hash` alongside the existing file-level `content_hash`. For existing collections, `nx catalog setup` or `nx collection backfill-hash` adds the field without re-embedding. `link_audit()` verifies chash spans resolve in T3.
 
 **Tumbler ordering**: Comparison operators (`<`, `<=`, `>`, `>=`) use -1 sentinel padding for cross-depth ordering — parent tumblers sort before their children. `Tumbler.spans_overlap()` detects positional span overlap using these operators.
 

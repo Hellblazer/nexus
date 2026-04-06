@@ -10,7 +10,7 @@ While T3 stores document *content* as vector embeddings, the catalog stores docu
 nx catalog setup
 ```
 
-One command. Creates the catalog, populates it from your existing T3 collections and repos, and generates links from metadata. After this, `search`, `show`, and `links` work immediately.
+One command. Creates the catalog, populates it from your existing T3 collections and repos, backfills `chunk_text_hash` metadata on any chunks missing it, and generates links from metadata. After this, `search`, `show`, `links`, and content-hash spans all work immediately.
 
 `nx doctor` will remind you if the catalog isn't set up yet. It's optional — everything else works without it.
 
@@ -61,6 +61,11 @@ Duplicate links are merged — the second creator is recorded in `co_discovered_
 Links can point to specific passages:
 
 ```bash
+# Content-addressed span (preferred — survives re-indexing):
+nx catalog link "Paper A" "Paper B" --type quotes \
+  --from-span "chash:a1b2c3d4e5f6...64hexchars"
+
+# Positional spans (legacy):
 nx catalog link "Paper A" "Paper B" --type quotes --from-span "100-105" --to-span "42-57"
 ```
 
@@ -184,7 +189,8 @@ nx catalog pull                # pull from remote + rebuild SQLite
 These are hidden from `--help` but available:
 
 ```bash
-nx catalog link-audit          # orphan detection, stats by type/creator
+nx catalog link-audit          # orphan detection, stale spans, chash verification
 nx catalog link-bulk-delete    # bulk delete with dry-run preview
-nx catalog backfill            # re-populate from T3 (like setup, but without init)
+nx catalog backfill            # re-populate from T3 + backfill chunk_text_hash
+nx collection backfill-hash    # backfill chunk_text_hash on a single collection (or --all)
 ```
