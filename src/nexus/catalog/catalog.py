@@ -1157,8 +1157,18 @@ class Catalog:
 
         return None
 
-    def link_audit(self) -> dict:
-        """Audit the links table. Returns stats + orphan + duplicate lists."""
+    def link_audit(self, *, t3: Any = None) -> dict:
+        """Audit the links table. Returns stats + orphan + duplicate + chash lists.
+
+        When ``t3`` is provided, verifies each ``chash:`` span resolves to a
+        chunk in the corresponding ChromaDB collection. Unresolvable spans
+        appear in ``stale_chash``.
+
+        The ``t3`` parameter is accepted via injection rather than resolved
+        internally (e.g. via ``make_t3()``) to keep the method testable with
+        ``EphemeralClient`` in unit tests. Production callers pass the live T3
+        client; tests pass their own ephemeral instance.
+        """
         total = self._db.execute("SELECT count(*) FROM links").fetchone()[0]
         by_type = dict(
             self._db.execute(
@@ -1197,6 +1207,43 @@ class Catalog:
              "link_created": r[3], "doc_reindexed": r[4]}
             for r in stale_span_rows
         ]
+        # chash verification: check each chash: span resolves in T3
+        stale_chash: list[dict] = []
+        if t3 is not None:
+            chash_rows = self._db.execute(
+                "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span "
+                "FROM links WHERE from_span LIKE 'chash:%' OR to_span LIKE 'chash:%'"
+            ).fetchall()
+            for row in chash_rows:
+                from_t, to_t, lt, from_span, to_span = row
+                for span, tumbler_str in [(from_span, from_t), (to_span, to_t)]:
+                    if not span.startswith("chash:"):
+                        continue
+                    chunk_hash = span[len("chash:"):]
+                    entry = self.resolve(Tumbler.parse(tumbler_str))
+                    if entry is None:
+                        stale_chash.append(
+                            {"from": from_t, "to": to_t, "type": lt, "span": span}
+                        )
+                        continue
+                    try:
+                        col = t3.get_collection(entry.physical_collection)
+                        result = col.get(
+                            where={"chunk_text_hash": chunk_hash}, include=[]
+                        )
+                        if not result["ids"]:
+                            stale_chash.append(
+                                {"from": from_t, "to": to_t, "type": lt, "span": span}
+                            )
+                    except Exception:
+                        _log.warning(
+                            "link_audit_chash_error",
+                            tumbler=tumbler_str, span=span,
+                        )
+                        stale_chash.append(
+                            {"from": from_t, "to": to_t, "type": lt, "span": span}
+                        )
+
         return {
             "total": total,
             "by_type": by_type,
@@ -1207,6 +1254,8 @@ class Catalog:
             "duplicate_count": len(duplicates),
             "stale_spans": stale_spans,
             "stale_span_count": len(stale_spans),
+            "stale_chash": stale_chash,
+            "stale_chash_count": len(stale_chash),
         }
 
     _MAX_GRAPH_DEPTH = 10
