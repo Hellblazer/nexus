@@ -107,3 +107,90 @@ class TestLinkAuditChashVerification:
         result = cat.link_audit(t3=None)
         assert result["stale_chash_count"] == 0
         assert result["stale_chash"] == []
+
+    def test_chash_span_not_in_stale_spans_after_reindex(self, tmp_path):
+        """chash: spans are excluded from stale_spans — they survive re-indexing."""
+        col_name = _col_name(tmp_path)
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col = t3.get_or_create_collection(col_name)
+        col.add(
+            ids=["chunk-1"],
+            documents=["some chunk text"],
+            metadatas=[{"chunk_text_hash": HASH_A}],
+        )
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(
+            owner, "a.py", content_type="code", file_path="a.py",
+            physical_collection=col_name,
+        )
+        doc_b = cat.register(
+            owner, "b.py", content_type="code", file_path="b.py",
+            physical_collection=col_name,
+        )
+        cat.link(doc_a, doc_b, "quotes", "test-agent", from_span=f"chash:{HASH_A}")
+
+        # Backdate the link so it's older than the document's indexed_at
+        cat._db.execute(
+            "UPDATE links SET created_at = '2020-01-01T00:00:00Z' WHERE from_tumbler = ?",
+            (str(doc_a),),
+        )
+        cat._db.commit()
+        # Re-index (update indexed_at to now)
+        cat.update(doc_a, head_hash="new-hash")
+
+        result = cat.link_audit(t3=t3)
+        # chash span should NOT appear in stale_spans (it survives re-indexing)
+        assert result["stale_span_count"] == 0, \
+            f"chash spans should be excluded from stale_spans: {result['stale_spans']}"
+        # chash span should still resolve (not stale_chash either)
+        assert result["stale_chash_count"] == 0
+
+
+class TestResolveSpanText:
+    def test_resolve_span_text_chash(self, tmp_path):
+        """resolve_span_text() returns chunk text for chash: spans."""
+        col_name = _col_name(tmp_path)
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col = t3.get_or_create_collection(col_name)
+        chunk_text = "def hello(): pass"
+        col.add(
+            ids=["chunk-1"],
+            documents=[chunk_text],
+            metadatas=[{"chunk_text_hash": HASH_A}],
+        )
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc = cat.register(
+            owner, "a.py", content_type="code", file_path="a.py",
+            physical_collection=col_name,
+        )
+
+        from unittest.mock import patch, MagicMock
+        mock_t3 = MagicMock()
+        mock_t3._client = t3
+        with patch("nexus.db.make_t3", return_value=mock_t3):
+            result = cat.resolve_span_text(doc, f"chash:{HASH_A}")
+        assert result == chunk_text
+
+    def test_resolve_span_text_chash_not_found(self, tmp_path):
+        """resolve_span_text() returns None for missing chash: span."""
+        col_name = _col_name(tmp_path)
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        t3.get_or_create_collection(col_name)
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc = cat.register(
+            owner, "a.py", content_type="code", file_path="a.py",
+            physical_collection=col_name,
+        )
+
+        from unittest.mock import patch, MagicMock
+        mock_t3 = MagicMock()
+        mock_t3._client = t3
+        with patch("nexus.db.make_t3", return_value=mock_t3):
+            result = cat.resolve_span_text(doc, f"chash:{HASH_B}")
+        assert result is None

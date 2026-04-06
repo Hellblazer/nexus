@@ -1113,6 +1113,7 @@ class Catalog:
         - "" → returns None (whole document, no sub-addressing)
         - "42-57" → lines 42-57 from the document's source file
         - "3:100-250" → characters 100-250 from chunk index 3 in T3
+        - "chash:<sha256hex>" → content-addressed chunk from T3
 
         This is the minimal transclusion read path — given a link with a span,
         retrieve the exact passage being referenced.
@@ -1122,6 +1123,16 @@ class Catalog:
         entry = self.resolve(tumbler)
         if entry is None:
             return None
+
+        # Content-hash span: look up by chunk_text_hash in T3
+        if span.startswith("chash:") and entry.physical_collection:
+            try:
+                from nexus.db import make_t3
+                t3 = make_t3()
+                result = self.resolve_span(span, entry.physical_collection, t3._client)
+                return result["chunk_text"] if result else None
+            except Exception:
+                return None
 
         # Line-range span: read from source file
         m = re.match(r"^(\d+)-(\d+)$", span)
@@ -1195,13 +1206,16 @@ class Catalog:
         duplicates = [
             {"from": r[0], "to": r[1], "type": r[2], "count": r[3]} for r in dup_rows
         ]
-        # Stale spans: links with spans pointing to documents re-indexed after link creation
+        # Stale spans: positional spans pointing to documents re-indexed after link creation.
+        # Content-hash spans (chash:) are excluded — they survive re-indexing by design
+        # (RDR-053). Stale chash spans are detected separately via T3 verification below.
         stale_span_rows = self._db.execute(
             "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
             "       d.indexed_at "
             "FROM links l "
             "JOIN documents d ON d.tumbler = l.from_tumbler "
             "WHERE (l.from_span IS NOT NULL AND l.from_span != '') "
+            "  AND l.from_span NOT LIKE 'chash:%' "
             "  AND l.created_at < d.indexed_at"
         ).fetchall()
         stale_spans = [
