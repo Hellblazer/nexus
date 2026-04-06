@@ -259,8 +259,8 @@ def _backfill_chunk_text_hash(col) -> tuple[int, int, int]:
     offset = 0
     while True:
         batch = col.get(limit=_BACKFILL_BATCH, offset=offset, include=["documents", "metadatas"])
-        ids = batch["ids"]
-        if not ids:
+        ids = batch.get("ids") if isinstance(batch, dict) else []
+        if not ids or not isinstance(ids, list):
             break
         update_ids: list[str] = []
         update_metas: list[dict] = []
