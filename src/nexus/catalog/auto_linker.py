@@ -30,6 +30,10 @@ def read_link_contexts(entries: list[dict[str, Any]]) -> list[LinkContext]:
 
     Each entry may contain a ``targets`` array with multiple items.
     Flattens: one entry with N targets → N LinkContext objects.
+
+    Accepts both ``"target_tumbler"`` (canonical) and ``"tumbler"``
+    (shorthand used by skill SKILL.md templates). ``link_type`` defaults
+    to ``"relates"`` when omitted.
     """
     contexts: list[LinkContext] = []
     for entry in entries:
@@ -43,6 +47,7 @@ def read_link_contexts(entries: list[dict[str, Any]]) -> list[LinkContext]:
 
         targets = raw.get("targets", [])
         for item in targets:
+            # "tumbler" is the skill-authored shorthand; "target_tumbler" is canonical
             tumbler = item.get("target_tumbler") or item.get("tumbler", "")
             link_type = item.get("link_type", "relates")
             if tumbler:
@@ -78,12 +83,14 @@ def auto_link(
                 ctx.link_type,
                 created_by="auto-linker",
             )
-        except ValueError:
-            # Endpoint not found in catalog — skip gracefully
+        except ValueError as exc:
+            # link_if_absent raises ValueError for missing endpoints;
+            # log the message to distinguish from unexpected ValueErrors
             _log.debug(
                 "auto_link_skip_missing_endpoint",
                 source=str(source_tumbler),
                 target=str(target),
+                reason=str(exc),
             )
             continue
 

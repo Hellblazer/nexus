@@ -100,6 +100,30 @@ class TestAutoLink:
         assert contexts[1].target_tumbler == "1.1.2"
         assert contexts[1].link_type == "implements"
 
+    def test_content_wrapper_parsing(self):
+        """read_link_contexts() unwraps T1 scratch 'content' string format."""
+        import json
+        entries = [
+            {
+                "content": json.dumps({
+                    "targets": [{"tumbler": "1.3.1", "link_type": "cites"}],
+                    "source_agent": "researcher",
+                }),
+                "tags": "link-context",
+            }
+        ]
+        contexts = read_link_contexts(entries)
+        assert len(contexts) == 1
+        assert contexts[0].target_tumbler == "1.3.1"
+        assert contexts[0].link_type == "cites"
+
+    def test_default_link_type_is_relates(self):
+        """Omitting link_type defaults to 'relates'."""
+        entries = [{"targets": [{"tumbler": "1.1.1"}]}]
+        contexts = read_link_contexts(entries)
+        assert len(contexts) == 1
+        assert contexts[0].link_type == "relates"
+
     def test_idempotent_no_duplicate(self, tmp_path):
         """Calling auto_link twice with the same inputs creates only one link."""
         cat = _make_catalog(tmp_path)
@@ -219,4 +243,53 @@ class TestCatalogAutoLinkIntegration:
         _reset_singletons()
         count = _catalog_auto_link("nonexistent-doc")
         assert count == 0
+        _reset_singletons()
+
+    def test_link_context_persists_across_stores(self, tmp_path):
+        """Link-context entries apply to every store_put in the session (by design)."""
+        import json
+        from nexus.db.t1 import T1Database
+        from nexus.mcp_server import (
+            _catalog_auto_link,
+            _inject_catalog,
+            _inject_t1,
+            _reset_singletons,
+        )
+
+        _reset_singletons()
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("knowledge", "curator")
+        target_t = cat.register(owner, "Target RDR", content_type="rdr")
+        doc1_t = cat.register(
+            owner, "Finding One", content_type="knowledge",
+            meta={"doc_id": "multi-doc-001"},
+        )
+        doc2_t = cat.register(
+            owner, "Finding Two", content_type="knowledge",
+            meta={"doc_id": "multi-doc-002"},
+        )
+
+        _inject_catalog(cat)
+        t1 = T1Database(session_id="test-multi-store-session")
+        _inject_t1(t1)
+
+        # Seed once
+        t1.put(
+            content=json.dumps({
+                "targets": [{"target_tumbler": str(target_t), "link_type": "relates"}],
+                "source_agent": "developer",
+            }),
+            tags="link-context",
+        )
+
+        # Two stores in the same session both get linked
+        count1 = _catalog_auto_link("multi-doc-001")
+        count2 = _catalog_auto_link("multi-doc-002")
+
+        assert count1 == 1
+        assert count2 == 1
+        assert len(cat.links_from(doc1_t, link_type="relates")) == 1
+        assert len(cat.links_from(doc2_t, link_type="relates")) == 1
+
         _reset_singletons()

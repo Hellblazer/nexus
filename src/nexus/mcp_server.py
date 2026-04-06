@@ -166,18 +166,28 @@ def _catalog_auto_link(doc_id: str) -> int:
     """Create catalog links from T1 link-context to the just-stored document.
 
     Reads link-context entries from T1 scratch, resolves the stored doc's
-    tumbler via doc_id, and creates links. Returns count of links created.
+    tumbler via doc_id, and creates links. Link-context entries persist for
+    the session — every store_put in the session links to the seeded targets.
+    Returns count of links created.
     """
+    import structlog
+    _al_log = structlog.get_logger()
+
     cat = _get_catalog()
     if cat is None:
         return 0
     t1, _ = _get_t1()
     entries = t1.list_entries()
-    link_entries = [e for e in entries if "link-context" in (e.get("tags") or "")]
+    # Exact tag match — avoid substring hits on e.g. "pre-link-context"
+    link_entries = [
+        e for e in entries
+        if "link-context" in {t.strip() for t in (e.get("tags") or "").split(",")}
+    ]
     if not link_entries:
         return 0
     entry = cat.by_doc_id(doc_id)
     if entry is None:
+        _al_log.debug("auto_link_skip_doc_not_in_catalog", doc_id=doc_id)
         return 0
     from nexus.catalog.auto_linker import auto_link, read_link_contexts
     contexts = read_link_contexts(link_entries)
@@ -632,7 +642,10 @@ def store_put(
             pass  # catalog registration is non-fatal
         # Auto-link from T1 scratch link-context
         try:
-            _catalog_auto_link(doc_id)
+            n = _catalog_auto_link(doc_id)
+            if n:
+                import structlog
+                structlog.get_logger().debug("store_put_auto_linked", doc_id=doc_id, link_count=n)
         except Exception:
             pass  # auto-linking is non-fatal
         return f"Stored: {doc_id} -> {col_name}"
