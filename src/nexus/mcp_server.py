@@ -452,8 +452,8 @@ def query(
                 return f"No documents found matching catalog filters (author={author!r}, content_type={content_type!r}, subtree={subtree!r}, follow_links={follow_links!r})"
 
         routing_note = ""
+        # Exactly one branch sets `target` — catalog routing or corpus-based routing
         if catalog_collections is not None:
-            # Catalog routing overrides corpus param
             target = [c for c in catalog_collections if c]
             parts = []
             if author:
@@ -1474,10 +1474,14 @@ def catalog_unlink(
 
 @mcp.tool()
 def catalog_link_audit() -> dict:
-    """Audit the link graph: counts by type/creator, orphaned links, duplicates, stale chash spans.
+    """Audit the link graph for health issues.
 
-    When T3 is available, verifies each content-hash (chash:) span resolves
-    to an actual chunk in ChromaDB. Unresolvable spans appear in stale_chash.
+    Returns: total, by_type, by_creator, orphaned (+ count), duplicates (+ count),
+    stale_spans (+ count, positional spans on re-indexed docs),
+    stale_chash (+ count, content-hash spans that no longer resolve in T3).
+
+    Each stale_chash entry includes a ``reason`` field: ``"missing"`` (chunk deleted),
+    ``"document_deleted"``, or ``"error"`` (with ``error`` type name).
     """
     cat, err = _require_catalog()
     if err:

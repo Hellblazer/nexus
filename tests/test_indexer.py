@@ -2265,8 +2265,8 @@ def test_prose_indexer_non_markdown_chunk_text_hash(tmp_path: Path) -> None:
         )
 
 
-def test_prose_indexer_chunk_text_hash_differs_from_content_hash(tmp_path: Path) -> None:
-    """Plain prose chunk_text_hash must differ from file-level content_hash."""
+def test_prose_indexer_non_markdown_chunk_text_hash_is_valid_sha256(tmp_path: Path) -> None:
+    """Plain prose chunk_text_hash must be a valid SHA-256 hex digest."""
     from nexus.indexer import _index_prose_file
 
     repo = tmp_path / "repo"
@@ -2295,9 +2295,7 @@ def test_prose_indexer_chunk_text_hash_differs_from_content_hash(tmp_path: Path)
 
     assert captured_metadatas
     meta = captured_metadatas[0]
-    # File content "Line one\n" != chunk text (which may be the same here, but hashes are different objects)
-    # The key invariant: chunk_text_hash != content_hash for any file with a non-trivial chunk boundary
-    # For a single-chunk file, chunk text == file content only if there's no prefix/suffix difference
-    # We verify the field is present and is a valid sha256 hex string
+    # For a single-chunk file, chunk text may equal file content — so we only
+    # verify the field is present and is a valid sha256 hex string
     assert "chunk_text_hash" in meta
     assert len(meta["chunk_text_hash"]) == 64, "chunk_text_hash must be a sha256 hex digest (64 chars)"

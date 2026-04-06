@@ -559,31 +559,21 @@ class TestSpanPattern:
 # ── nexus-l8hp: resolve_span() ───────────────────────────────────────────────
 
 
-_EPHEMERAL_T3 = chromadb.EphemeralClient()
-_COL_COUNTER = 0
-
-
-def _fresh_collection(name_prefix: str = "code__span"):
-    global _COL_COUNTER
-    _COL_COUNTER += 1
-    col_name = f"{name_prefix}_{_COL_COUNTER}"
-    col = _EPHEMERAL_T3.create_collection(col_name)
-    return col_name, col
-
-
 class TestResolveSpan:
     """resolve_span() resolves chash: spans via ChromaDB metadata query."""
 
     def test_resolve_chash_found(self, tmp_path):
         cat = _make_catalog(tmp_path)
-        col_name, col = _fresh_collection()
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        col = t3.create_collection(col_name)
         chunk_hash = "a" * 64
         col.add(
             ids=["id1"],
             documents=["hello world"],
             metadatas=[{"chunk_text_hash": chunk_hash, "source": "test.py"}],
         )
-        result = cat.resolve_span(f"chash:{chunk_hash}", col_name, _EPHEMERAL_T3)
+        result = cat.resolve_span(f"chash:{chunk_hash}", col_name, t3)
         assert result is not None
         assert result["chunk_text"] == "hello world"
         assert result["chunk_hash"] == chunk_hash
@@ -591,20 +581,26 @@ class TestResolveSpan:
 
     def test_resolve_chash_not_found(self, tmp_path):
         cat = _make_catalog(tmp_path)
-        col_name, _ = _fresh_collection()
-        result = cat.resolve_span("chash:" + "b" * 64, col_name, _EPHEMERAL_T3)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        t3.create_collection(col_name)
+        result = cat.resolve_span("chash:" + "b" * 64, col_name, t3)
         assert result is None
 
     def test_resolve_empty_span_returns_none(self, tmp_path):
         cat = _make_catalog(tmp_path)
-        col_name, _ = _fresh_collection()
-        result = cat.resolve_span("", col_name, _EPHEMERAL_T3)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        t3.create_collection(col_name)
+        result = cat.resolve_span("", col_name, t3)
         assert result is None
 
     def test_resolve_legacy_span_returns_none(self, tmp_path):
         cat = _make_catalog(tmp_path)
-        col_name, _ = _fresh_collection()
-        result = cat.resolve_span("42-57", col_name, _EPHEMERAL_T3)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        t3.create_collection(col_name)
+        result = cat.resolve_span("42-57", col_name, t3)
         assert result is None
 
 

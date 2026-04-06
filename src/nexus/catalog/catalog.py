@@ -486,6 +486,7 @@ class Catalog:
         if entry is None:
             return None
         chunk_idx = tumbler.chunk
+        # chunk_count of 0 or None means count is not yet known — skip bounds check
         if entry.chunk_count and chunk_idx >= entry.chunk_count:
             return None
         return {
