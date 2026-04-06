@@ -1,7 +1,0 @@
-[
-  {"pattern": "curl -LsSf", "audio_time": 6.6, "note": "VOICE ends, SCREEN starts: install uv"},
-  {"pattern": "uv tool install", "audio_time": 14.5, "note": "after pause, SCREEN: install conexus"},
-  {"pattern": "nx --version", "audio_time": 15.8, "note": "VOICE: Let's verify"},
-  {"pattern": "nx doctor", "audio_time": 17.3, "note": "VOICE: Now the health check"},
-  {"pattern": "nx --help", "audio_time": 30.2, "note": "VOICE: Here's what nx can do"}
-]
