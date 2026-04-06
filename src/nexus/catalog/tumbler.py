@@ -95,6 +95,22 @@ class Tumbler:
             return NotImplemented
         return not self < other
 
+    @staticmethod
+    def spans_overlap(
+        a_start: Tumbler, a_end: Tumbler,
+        b_start: Tumbler, b_end: Tumbler,
+    ) -> bool:
+        """True if positional span [a_start, a_end] overlaps [b_start, b_end].
+
+        Standard interval overlap: a_start <= b_end and b_start <= a_end.
+        Inclusive bounds (endpoints touching = overlapping).
+
+        Applies only to positional (index-based) spans. Content-hash spans
+        (chash: format) carry no ordering — overlap is undefined for them and
+        this method must not be called with chash: span arguments.
+        """
+        return a_start <= b_end and b_start <= a_end
+
     @classmethod
     def parse(cls, s: str) -> Tumbler:
         if not s:

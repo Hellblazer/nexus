@@ -204,6 +204,46 @@ class TestTumblerComparison:
         assert not (Tumbler.parse("1.1.3") > Tumbler.parse("1.1.3"))
 
 
+class TestTumblerSpansOverlap:
+    def test_overlapping(self):
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7"),
+            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.10"),
+        )
+
+    def test_non_overlapping(self):
+        assert not Tumbler.spans_overlap(
+            Tumbler.parse("1.1.1"), Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.7"),
+        )
+
+    def test_adjacent_touching(self):
+        # Inclusive bounds — endpoints touching = overlapping
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.1"), Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.5"),
+        )
+
+    def test_contained(self):
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.10"),
+            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.7"),
+        )
+
+    def test_identical(self):
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7"),
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7"),
+        )
+
+    def test_cross_depth(self):
+        # Uses -1 sentinel padding from comparison operators
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.3.5"),
+            Tumbler.parse("1.1.3.2"), Tumbler.parse("1.1.4"),
+        )
+
+
 class TestTumblerLCA:
     def test_same_tumbler(self):
         t = Tumbler.parse("1.2.42")
