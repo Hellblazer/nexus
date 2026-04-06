@@ -204,6 +204,32 @@ class TestResolveSpanText:
             result = cat.resolve_span_text(doc, f"chash:{HASH_A}")
         assert result == chunk_text
 
+    def test_resolve_span_text_chash_with_range(self, tmp_path):
+        """resolve_span_text() returns sliced text for chash: span with char range."""
+        col_name = _col_name(tmp_path)
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col = t3.get_or_create_collection(col_name)
+        chunk_text = "def hello(): pass"
+        col.add(
+            ids=["chunk-1"],
+            documents=[chunk_text],
+            metadatas=[{"chunk_text_hash": HASH_A}],
+        )
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc = cat.register(
+            owner, "a.py", content_type="code", file_path="a.py",
+            physical_collection=col_name,
+        )
+
+        from unittest.mock import patch, MagicMock
+        mock_t3 = MagicMock()
+        mock_t3._client = t3
+        with patch("nexus.db.make_t3", return_value=mock_t3):
+            result = cat.resolve_span_text(doc, f"chash:4-9:{HASH_A}")
+        assert result == "hello"
+
     def test_resolve_span_text_chash_not_found(self, tmp_path):
         """resolve_span_text() returns None for missing chash: span."""
         col_name = _col_name(tmp_path)

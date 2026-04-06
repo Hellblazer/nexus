@@ -546,6 +546,18 @@ class TestSpanPattern:
     def test_chash_non_hex_rejected(self):
         assert _SPAN_PATTERN.match("chash:" + "g" * 64) is None
 
+    def test_chash_with_char_range(self):
+        assert _SPAN_PATTERN.match("chash:100-250:" + "a" * 64) is not None
+
+    def test_chash_with_char_range_single_char(self):
+        assert _SPAN_PATTERN.match("chash:0-0:" + "b" * 64) is not None
+
+    def test_chash_with_char_range_bad_hash(self):
+        assert _SPAN_PATTERN.match("chash:100-250:" + "g" * 64) is None
+
+    def test_chash_with_char_range_missing_range(self):
+        assert _SPAN_PATTERN.match("chash::" + "a" * 64) is None
+
     def test_legacy_empty_still_matches(self):
         assert _SPAN_PATTERN.match("") is not None
 
@@ -578,6 +590,39 @@ class TestResolveSpan:
         assert result["chunk_text"] == "hello world"
         assert result["chunk_hash"] == chunk_hash
         assert result["metadata"]["source"] == "test.py"
+
+    def test_resolve_chash_with_char_range(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        col = t3.create_collection(col_name)
+        chunk_hash = "c" * 64
+        col.add(
+            ids=["id1"],
+            documents=["def hello(): return 'world'"],
+            metadatas=[{"chunk_text_hash": chunk_hash}],
+        )
+        result = cat.resolve_span(f"chash:4-9:{chunk_hash}", col_name, t3)
+        assert result is not None
+        assert result["chunk_text"] == "hello"
+        assert result["chunk_hash"] == chunk_hash
+        assert result["char_range"] == (4, 9)
+
+    def test_resolve_chash_range_out_of_bounds(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        col = t3.create_collection(col_name)
+        chunk_hash = "d" * 64
+        col.add(
+            ids=["id1"],
+            documents=["short"],
+            metadatas=[{"chunk_text_hash": chunk_hash}],
+        )
+        # Range extends past content — returns what's available, no error
+        result = cat.resolve_span(f"chash:2-999:{chunk_hash}", col_name, t3)
+        assert result is not None
+        assert result["chunk_text"] == "ort"
 
     def test_resolve_chash_not_found(self, tmp_path):
         cat = _make_catalog(tmp_path)

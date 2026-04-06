@@ -26,6 +26,7 @@ _SPAN_PATTERN = re.compile(
     r"|^\d+-\d+$"                      # line range: "42-57"
     r"|^\d+:\d+-\d+$"                  # chunk:char range: "3:100-250"
     r"|^chash:[0-9a-f]{64}$"           # content-hash: chash:<sha256hex>
+    r"|^chash:\d+-\d+:[0-9a-f]{64}$"  # content-hash + char range: chash:<start>-<end>:<sha256hex>
 )
 
 from nexus.catalog.catalog_db import CatalogDB
@@ -127,6 +128,7 @@ class Catalog:
         - ``"N-N"`` — line range (positional, legacy)
         - ``"N:N-N"`` — chunk:char range (positional, legacy)
         - ``"chash:<sha256hex>"`` — content-addressed chunk identity (preferred)
+        - ``"chash:<start>-<end>:<sha256hex>"`` — character range within a content-addressed chunk
 
         Content-hash spans survive re-indexing when chunk boundaries are unchanged
         (RDR-053 D5, RF-3, RF-8). Position-based spans degrade on re-index and are
@@ -500,24 +502,39 @@ class Catalog:
     def resolve_span(self, span: str, physical_collection: str, t3: "ClientAPI") -> dict | None:
         """Resolve a span string to its chunk content.
 
-        Handles two span formats:
-        - chash:{sha256hex}: content-addressed — queries ChromaDB by chunk_text_hash metadata.
+        Handles three span formats:
+        - chash:<sha256hex>: whole chunk by content hash.
+        - chash:<start>-<end>:<sha256hex>: character range within a content-addressed chunk.
         - Legacy positional (digit ranges): returns None.
         """
         if not span.startswith("chash:"):
             return None
-        chunk_hash = span[len("chash:"):]
-        if not re.fullmatch(r"[0-9a-f]{64}", chunk_hash):
+        # Parse: chash:<hash> or chash:<start>-<end>:<hash>
+        body = span[len("chash:"):]
+        char_range = None
+        m = re.match(r"^(\d+)-(\d+):([0-9a-f]{64})$", body)
+        if m:
+            char_range = (int(m.group(1)), int(m.group(2)))
+            chunk_hash = m.group(3)
+        elif re.fullmatch(r"[0-9a-f]{64}", body):
+            chunk_hash = body
+        else:
             raise ValueError(f"malformed chash span: {span!r}")
         col = t3.get_collection(physical_collection)
         result = col.get(where={"chunk_text_hash": chunk_hash}, include=["documents", "metadatas"])
         if not result["ids"]:
             return None
-        return {
-            "chunk_text": result["documents"][0],
+        text = result["documents"][0]
+        if char_range:
+            text = text[char_range[0]:char_range[1]]
+        out: dict = {
+            "chunk_text": text,
             "metadata": result["metadatas"][0],
             "chunk_hash": chunk_hash,
         }
+        if char_range:
+            out["char_range"] = char_range
+        return out
 
     def update(self, tumbler: Tumbler, **fields: object) -> None:
         dir_fd = self._acquire_lock()
@@ -768,7 +785,7 @@ class Catalog:
             if not _SPAN_PATTERN.match(span):
                 raise ValueError(
                     f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', or '' for whole document"
+                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', 'chash:<start>-<end>:<sha256hex>', or '' for whole document"
                 )
         if not allow_dangling:
             errors = []
@@ -897,7 +914,7 @@ class Catalog:
             if not _SPAN_PATTERN.match(span):
                 raise ValueError(
                     f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', or '' for whole document"
+                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', 'chash:<start>-<end>:<sha256hex>', or '' for whole document"
                 )
         dir_fd = self._acquire_lock()
         try:
@@ -1293,7 +1310,10 @@ class Catalog:
                 for span, tumbler_str in [(from_span, from_t), (to_span, to_t)]:
                     if not span.startswith("chash:"):
                         continue
-                    chunk_hash = span[len("chash:"):]
+                    # Extract hash from chash:<hash> or chash:<start>-<end>:<hash>
+                    body = span[len("chash:"):]
+                    m_range = re.match(r"^\d+-\d+:([0-9a-f]{64})$", body)
+                    chunk_hash = m_range.group(1) if m_range else body
                     entry = self.resolve(Tumbler.parse(tumbler_str))
                     if entry is None:
                         stale_chash.append(

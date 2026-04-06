@@ -71,6 +71,7 @@ and scoping semantic search to relevant collections instead of searching everyth
 - `42-57` — line range (positional, may become stale on re-index)
 - `3:100-250` — chunk:char range (positional)
 - `chash:<sha256hex>` — content-addressed chunk identity (preferred, survives re-indexing)
+- `chash:<start>-<end>:<sha256hex>` — character range within a content-addressed chunk
 
 Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of stored chunk text). All 5 indexers (code, prose, doc PDF, doc markdown, streaming PDF pipeline) emit `chunk_text_hash` alongside the existing file-level `content_hash`. For existing collections, `nx catalog setup` or `nx collection backfill-hash` adds the field without re-embedding. `link_audit()` verifies chash spans resolve in T3.
 

@@ -62,7 +62,7 @@ Nexus doesn't implement full transclusion, but it does implement span-addressed 
 
 **Positional spans** (`42-57` for line ranges, `3:100-250` for chunk character ranges) are simple and human-readable, but they break when the document is re-indexed. If the content shifts, the line numbers point to the wrong text.
 
-**Content-addressed spans** (`chash:<sha256hex>`) identify a passage by the hash of its text. They survive re-indexing as long as the content doesn't change. Use these for any reference that needs to last. Existing collections can be [backfilled](cli-reference.md#nx-collection) without re-embedding.
+**Content-addressed spans** (`chash:<sha256hex>`) identify a passage by the hash of its text. They survive re-indexing as long as the content doesn't change. Use these for any reference that needs to last. For sub-chunk precision, `chash:<start>-<end>:<sha256hex>` references a character range within the hashed chunk. The hash pins which chunk; the range pins where within it. Existing collections can be [backfilled](cli-reference.md#nx-collection) without re-embedding.
 
 The [link audit](catalog.md#link-health) system tracks both: positional spans that may have gone stale after re-indexing, and content-hash spans that no longer resolve. Content-addressed spans are validated when created. A hash that doesn't resolve in the collection is rejected immediately.
 

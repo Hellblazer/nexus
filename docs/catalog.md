@@ -74,6 +74,7 @@ Span formats:
 - `42-57` — line range (positional)
 - `3:100-250` — chunk 3, characters 100-250 (positional)
 - `chash:<sha256hex>` — content-addressed chunk identity (64-char SHA-256 hex, preferred)
+- `chash:<start>-<end>:<sha256hex>` — character range within a content-addressed chunk
 
 Content-hash spans (`chash:`) survive re-indexing when chunk boundaries are unchanged. Position-based spans may become stale after re-indexing — `nx catalog link-audit` detects this. `nx catalog show` resolves span text inline when available.
 
@@ -139,6 +140,7 @@ Spans identify specific passages within documents. The three formats have differ
 | `42-57` (line range) | No — line numbers shift if file content changes | Quick references to source files you control |
 | `3:100-250` (chunk:char) | No — chunk boundaries shift on re-indexing | Rare; prefer chash: instead |
 | `chash:<sha256hex>` | Yes, if chunk text is unchanged | Preferred for all durable references |
+| `chash:<start>-<end>:<sha256hex>` | Yes, if chunk text is unchanged | Character range within a content-addressed chunk |
 
 **What happens when spans go stale:** If you re-index a document, positional spans (`42-57`, `3:100-250`) may point to the wrong text. Content-hash spans (`chash:`) continue to resolve correctly as long as the chunk text hasn't changed.
 
