@@ -22,11 +22,15 @@ Nelson's tumblers were far more ambitious: variable-depth addresses with transfi
 
 ### Typed links between documents
 
-Nelson envisioned a universal link graph where every connection between documents is typed, bidirectional, and permanent. Nexus implements a practical subset: seven link types (`cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`, `quotes`, `comments`) that capture the relationships AI agents actually create during their work.
+Nelson envisioned a universal link graph where every connection between documents is typed, bidirectional, and permanent. Nexus ships with seven built-in link types — five that agents create automatically (`cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`) and two for human annotation (`quotes`, `comments`). The link type field is a free-form string at the API level, so custom types can be added without code changes; the CLI offers the seven built-in types as a convenience.
 
 A debugger agent creates `relates` links between a root cause analysis and prior findings about the same subsystem. A developer agent creates `implements` links between code and the design document it realizes. The knowledge tidier creates `supersedes` links when consolidating duplicate findings. Citation links are auto-generated from Semantic Scholar metadata during enrichment.
 
-Every link carries `created_by` provenance, so you can always distinguish auto-generated links from manual ones, and filter by creator. Links are stored as append-only JSONL with SQLite as a query cache — the same architecture as the document registry itself.
+Every link carries `created_by` provenance, so you can always distinguish auto-generated links from manual ones, and filter by creator.
+
+### Append-only storage
+
+Nelson's docuverse was explicitly append-only — bytes are never truly deleted (Literary Machines 4/42). Nexus follows this principle: both the document registry and link graph are stored as append-only JSONL files, with SQLite as a disposable query cache rebuilt automatically from the JSONL truth. Git tracks the JSONL history, giving version control for free. Tombstones mark deletions without erasing the original record. This is why tumbler permanence works — even after deletion and compaction, the append log preserves the fact that an address was once assigned.
 
 ### Span transclusion
 
@@ -46,11 +50,15 @@ The `link_audit()` system distinguishes between the two: positional spans that m
 
 Nelson's Xanadu was a complete alternative to the file system. Nexus is a catalog that sits alongside existing storage. The deliberate departures are documented in RDR-053's deviations register:
 
-**No tumbler arithmetic.** Nelson's system could insert new addresses between existing ones using transfinitesimal ADD and SUBTRACT operations. We use simple integer comparison with -1 sentinel padding for cross-depth ordering. This means `1.1.3` sorts before `1.1.3.0` (parent before child), and `sorted()` on a list of tumblers produces the correct document ordering. If we ever need insertion between existing addresses, the migration path is known but costs approximately 30 call sites.
+**No tumbler arithmetic.** Nelson's system could insert new addresses between existing ones using transfinitesimal ADD and SUBTRACT operations. We use simple integer comparison with -1 sentinel padding for cross-depth ordering. This means `1.1.3` sorts before `1.1.3.0` (parent before child), and `sorted()` on a list of tumblers produces the correct document ordering. The consequence is that span widths cannot be computed by tumbler subtraction; if span-weighted reranking is needed later, it will require ad-hoc arithmetic at the segment level. The migration path to full arithmetic is known but costs approximately 30 call sites.
 
 **No byte-level addressing.** Nelson's spans could reference arbitrary byte ranges within any document version. Our spans reference chunks — the semantic units produced by the indexing pipeline. This is coarser but matches how the system actually stores and retrieves content.
 
 **No version tracking.** Xanadu preserved every version of every document. Nexus tracks the current state via content hashes and detects when documents change (for staleness detection), but does not store historical versions. Git handles version history for source files; the catalog tracks the current indexed state.
+
+**No meta-links.** Nelson's links lived in the tumbler address space alongside documents — you could annotate a link, cite a link, or create trust provenance on a citation. In Nexus, links are a separate relation table, not addressable entities. This forecloses annotations on annotations — a pattern Nelson cared about deeply — but keeps the link schema simple.
+
+**No federation.** Nelson's docuverse was inherently distributed — multiple stores cooperating across a network. Nexus is single-user, single-machine. The catalog is a local git repository; T3 can be local (ONNX) or cloud (ChromaDB Cloud), but there is no multi-user catalog federation. The tumbler's store segment (always `1` today) exists to leave the door open, but no federation protocol is implemented.
 
 **TTL expiry.** Nelson insisted that all addresses remain valid forever. Nexus supports time-to-live expiry on knowledge entries — an expired tumbler becomes unresolvable. The tumbler number is still retired (never reused), but the content is gone. This is a pragmatic concession for managing knowledge base growth.
 
@@ -58,11 +66,11 @@ Nelson's Xanadu was a complete alternative to the file system. Nexus is a catalo
 
 The catalog is not a standalone system — it's the connective tissue between Nexus's storage tiers and the AI agents that use them.
 
-**Agents create links as they work.** Seven agent types are wired to create catalog links with content-addressed spans. When a developer agent implements a design doc, it creates an `implements` link with a `chash:` span pointing to the specific code chunk. When a research synthesizer cites a source, it creates a `cites` link with span references to both the claim and the evidence.
+**Agents create links as they work.** Seven core agent types and all RDR lifecycle skills are wired to create catalog links. Their tool signatures include `from_span`/`to_span` parameters with `chash:` support; agents create spans when they have chunk references available from search results. Most links today are document-to-document (no span), but the infrastructure supports chunk-level precision when needed. When a developer agent implements a design doc, it creates an `implements` link. When a research synthesizer cites a source, it creates a `cites` link. The debugger, deep-analyst, codebase-analyzer, and architect-planner create `relates` and `cites` links between findings.
 
 **The query system uses the catalog for routing.** The `query()` MCP tool accepts catalog parameters — `author`, `content_type`, `subtree`, `follow_links` — that scope semantic search to relevant collections before the vector query runs. Asking for papers by a specific author first resolves matching documents in the catalog, then searches only their physical collections. This is faster and more precise than searching everything.
 
-**Link audit maintains graph health.** `catalog_link_audit` verifies every content-hash span resolves in T3, detects orphaned links to deleted documents, and flags positional spans that may have gone stale. The `backfill-hash` command adds content hashes to existing chunks without re-embedding, making the entire knowledge base span-addressable retroactively.
+**Link audit maintains graph health.** `nx catalog link-audit` verifies every content-hash span resolves in T3, detects orphaned links to deleted documents, and flags positional spans that may have gone stale. For retroactive span support, `nx collection backfill-hash` adds content hashes to existing chunk metadata without re-embedding, and `nx catalog backfill` does the same across all collections as part of a full catalog re-population.
 
 **Tumbler ordering enables span overlap detection.** The comparison operators on tumblers power `spans_overlap()`, which detects when two positional span references cover the same passage. This is the foundation for future conflict detection in the link graph.
 
