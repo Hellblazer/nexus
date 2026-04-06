@@ -12,9 +12,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from chromadb.api import ClientAPI
 
 # Span format: "line_start-line_end" or "chunk_idx:char_start-char_end" or
 # "chash:<sha256hex>" or "".  Empty string means "the whole document".
@@ -493,7 +496,7 @@ class Catalog:
             "content_type": entry.content_type,
         }
 
-    def resolve_span(self, span: str, physical_collection: str, t3: Any) -> dict | None:
+    def resolve_span(self, span: str, physical_collection: str, t3: "ClientAPI") -> dict | None:
         """Resolve a span string to its chunk content.
 
         Handles two span formats:
@@ -1170,17 +1173,18 @@ class Catalog:
 
         return None
 
-    def link_audit(self, *, t3: Any = None) -> dict:
+    def link_audit(self, *, t3: "ClientAPI | None" = None) -> dict:
         """Audit the links table. Returns stats + orphan + duplicate + chash lists.
 
         When ``t3`` is provided, verifies each ``chash:`` span resolves to a
         chunk in the corresponding ChromaDB collection. Unresolvable spans
         appear in ``stale_chash``.
 
-        The ``t3`` parameter is accepted via injection rather than resolved
-        internally (e.g. via ``make_t3()``) to keep the method testable with
-        ``EphemeralClient`` in unit tests. Production callers pass the live T3
-        client; tests pass their own ephemeral instance.
+        Args:
+            t3: Raw ChromaDB client (``chromadb.ClientAPI``), not a ``T3Database``.
+                Production callers pass ``t3_db._client``; tests pass an
+                ``EphemeralClient`` directly. Injection keeps the method testable
+                without ``make_t3()``.
         """
         total = self._db.execute("SELECT count(*) FROM links").fetchone()[0]
         by_type = dict(
@@ -1209,18 +1213,27 @@ class Catalog:
         # Stale spans: positional spans pointing to documents re-indexed after link creation.
         # Content-hash spans (chash:) are excluded — they survive re-indexing by design
         # (RDR-053). Stale chash spans are detected separately via T3 verification below.
+        # Checks both from_span (joined on from_tumbler) and to_span (joined on to_tumbler).
         stale_span_rows = self._db.execute(
             "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
-            "       d.indexed_at "
+            "       d.indexed_at, 'from' AS side "
             "FROM links l "
             "JOIN documents d ON d.tumbler = l.from_tumbler "
             "WHERE (l.from_span IS NOT NULL AND l.from_span != '') "
             "  AND l.from_span NOT LIKE 'chash:%' "
+            "  AND l.created_at < d.indexed_at "
+            "UNION ALL "
+            "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
+            "       d.indexed_at, 'to' AS side "
+            "FROM links l "
+            "JOIN documents d ON d.tumbler = l.to_tumbler "
+            "WHERE (l.to_span IS NOT NULL AND l.to_span != '') "
+            "  AND l.to_span NOT LIKE 'chash:%' "
             "  AND l.created_at < d.indexed_at"
         ).fetchall()
         stale_spans = [
             {"from": r[0], "to": r[1], "type": r[2],
-             "link_created": r[3], "doc_reindexed": r[4]}
+             "link_created": r[3], "doc_reindexed": r[4], "side": r[5]}
             for r in stale_span_rows
         ]
         # chash verification: check each chash: span resolves in T3
@@ -1239,7 +1252,8 @@ class Catalog:
                     entry = self.resolve(Tumbler.parse(tumbler_str))
                     if entry is None:
                         stale_chash.append(
-                            {"from": from_t, "to": to_t, "type": lt, "span": span}
+                            {"from": from_t, "to": to_t, "type": lt, "span": span,
+                             "reason": "document_deleted"}
                         )
                         continue
                     try:
@@ -1249,16 +1263,18 @@ class Catalog:
                         )
                         if not result["ids"]:
                             stale_chash.append(
-                                {"from": from_t, "to": to_t, "type": lt, "span": span}
+                                {"from": from_t, "to": to_t, "type": lt, "span": span,
+                                 "reason": "missing"}
                             )
-                    except Exception:
+                    except Exception as exc:
                         _log.warning(
                             "link_audit_chash_error",
                             tumbler=tumbler_str, span=span,
                             exc_info=True,
                         )
                         stale_chash.append(
-                            {"from": from_t, "to": to_t, "type": lt, "span": span}
+                            {"from": from_t, "to": to_t, "type": lt, "span": span,
+                             "reason": "error", "error": type(exc).__name__}
                         )
 
         return {

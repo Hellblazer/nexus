@@ -56,7 +56,7 @@ class TestLinkAuditChashVerification:
         assert result["stale_chash"] == []
 
     def test_chash_span_unresolvable(self, tmp_path):
-        """chash span pointing to a missing chunk → stale."""
+        """chash span pointing to a missing chunk → stale with reason='missing'."""
         col_name = _col_name(tmp_path)
         cat = _make_catalog(tmp_path)
         t3 = chromadb.EphemeralClient()
@@ -76,6 +76,7 @@ class TestLinkAuditChashVerification:
         result = cat.link_audit(t3=t3)
         assert result["stale_chash_count"] == 1
         assert result["stale_chash"][0]["span"] == f"chash:{HASH_A}"
+        assert result["stale_chash"][0]["reason"] == "missing"
 
     def test_backward_compat_no_t3(self, tmp_path):
         """link_audit() without t3 returns all original keys + stale_chash=[]."""
@@ -146,6 +147,34 @@ class TestLinkAuditChashVerification:
             f"chash spans should be excluded from stale_spans: {result['stale_spans']}"
         # chash span should still resolve (not stale_chash either)
         assert result["stale_chash_count"] == 0
+
+
+class TestStaleSpanToSide:
+    def test_to_span_stale_detected(self, tmp_path):
+        """Stale positional to_span is detected after re-indexing the target document."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(
+            owner, "a.py", content_type="code", file_path="a.py",
+        )
+        doc_b = cat.register(
+            owner, "b.py", content_type="code", file_path="b.py",
+        )
+        cat.link(doc_a, doc_b, "quotes", "test-agent", to_span="10-20")
+
+        # Backdate the link
+        cat._db.execute(
+            "UPDATE links SET created_at = '2020-01-01T00:00:00Z' "
+            "WHERE from_tumbler = ?", (str(doc_a),),
+        )
+        cat._db.commit()
+        # Re-index doc_b (the target)
+        cat.update(doc_b, head_hash="new-hash")
+
+        result = cat.link_audit()
+        assert result["stale_span_count"] >= 1
+        sides = [s["side"] for s in result["stale_spans"]]
+        assert "to" in sides, f"to_span staleness should be detected: {result['stale_spans']}"
 
 
 class TestResolveSpanText:
