@@ -259,6 +259,18 @@ def setup_cmd(remote: str) -> None:
     except Exception as exc:
         click.echo(f"  Backfill incomplete ({type(exc).__name__}: {exc})")
 
+    click.echo("Backfilling chunk_text_hash...")
+    from nexus.commands.collection import _backfill_chunk_text_hash
+    hash_updated = 0
+    try:
+        for col_info in t3.list_collections():
+            col = t3._client.get_collection(col_info["name"])
+            updated, _, _ = _backfill_chunk_text_hash(col)
+            hash_updated += updated
+    except Exception as exc:
+        click.echo(f"  Hash backfill partial ({type(exc).__name__}: {exc})")
+    click.echo(f"  {hash_updated} chunks updated")
+
     click.echo("Generating links...")
     from nexus.catalog.link_generator import generate_citation_links, generate_code_rdr_links
     cites = generate_citation_links(cat)
@@ -1052,8 +1064,19 @@ def backfill_cmd(dry_run: bool) -> None:
     click.echo("Pass 3: Knowledge collections...")
     knowledge_count = _backfill_knowledge(cat, t3, dry_run)
 
+    hash_updated = 0
+    if not dry_run:
+        click.echo("Pass 4: chunk_text_hash backfill...")
+        from nexus.commands.collection import _backfill_chunk_text_hash
+        for col_info in t3.list_collections():
+            col = t3._client.get_collection(col_info["name"])
+            updated, _, _ = _backfill_chunk_text_hash(col)
+            hash_updated += updated
+
     mode = "dry-run" if dry_run else "registered"
     click.echo(f"\nBackfill complete ({mode}):")
     click.echo(f"  Repos:     {repo_count}")
     click.echo(f"  Papers:    {paper_count}")
     click.echo(f"  Knowledge: {knowledge_count}")
+    if not dry_run:
+        click.echo(f"  Hash:      {hash_updated} chunks updated")
