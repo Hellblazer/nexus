@@ -503,6 +503,8 @@ class Catalog:
         if not span.startswith("chash:"):
             return None
         chunk_hash = span[len("chash:"):]
+        if not re.fullmatch(r"[0-9a-f]{64}", chunk_hash):
+            raise ValueError(f"malformed chash span: {span!r}")
         col = t3.get_collection(physical_collection)
         result = col.get(where={"chunk_text_hash": chunk_hash}, include=["documents", "metadatas"])
         if not result["ids"]:
@@ -1239,6 +1241,7 @@ class Catalog:
                         _log.warning(
                             "link_audit_chash_error",
                             tumbler=tumbler_str, span=span,
+                            exc_info=True,
                         )
                         stale_chash.append(
                             {"from": from_t, "to": to_t, "type": lt, "span": span}
