@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import hashlib
+
 import click
 
 from nexus.commands.store import _t3
@@ -244,3 +246,77 @@ def verify_cmd(name: str, deep: bool) -> None:
             err=True,
         )
         raise click.exceptions.Exit(1)
+
+
+_BACKFILL_BATCH = 300
+
+
+def _backfill_chunk_text_hash(col) -> tuple[int, int, int]:
+    """Add chunk_text_hash to chunks that are missing it. Returns (updated, skipped, total)."""
+    updated = 0
+    skipped = 0
+    total = 0
+    offset = 0
+    while True:
+        batch = col.get(limit=_BACKFILL_BATCH, offset=offset, include=["documents", "metadatas"])
+        ids = batch["ids"]
+        if not ids:
+            break
+        update_ids: list[str] = []
+        update_metas: list[dict] = []
+        for chunk_id, doc, meta in zip(ids, batch["documents"], batch["metadatas"]):
+            total += 1
+            if meta and meta.get("chunk_text_hash"):
+                skipped += 1
+                continue
+            new_meta = dict(meta) if meta else {}
+            new_meta["chunk_text_hash"] = hashlib.sha256(doc.encode()).hexdigest()
+            update_ids.append(chunk_id)
+            update_metas.append(new_meta)
+        if update_ids:
+            col.update(ids=update_ids, metadatas=update_metas)
+            updated += len(update_ids)
+        offset += len(ids)
+    return updated, skipped, total
+
+
+@collection.command("backfill-hash")
+@click.argument("name", required=False, default=None)
+@click.option("--all", "all_collections", is_flag=True, help="Backfill all collections")
+def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
+    """Add chunk_text_hash to chunks missing it (no re-embedding).
+
+    Reads each chunk's stored text from ChromaDB and computes
+    sha256(text.encode()).hexdigest(). Updates metadata in-place —
+    embeddings and documents are untouched.
+
+    \\b
+    Examples:
+      nx collection backfill-hash code__myrepo   # single collection
+      nx collection backfill-hash --all           # all collections
+    """
+    if not name and not all_collections:
+        raise click.ClickException("specify a collection name or use --all")
+
+    db = _t3()
+
+    if all_collections:
+        targets = [c["name"] for c in db.list_collections()]
+    else:
+        targets = [name]
+
+    grand_updated = 0
+    for col_name in sorted(targets):
+        try:
+            col = db._client.get_collection(col_name)
+        except Exception:
+            click.echo(f"  {col_name}: not found, skipping", err=True)
+            continue
+        updated, skipped, total_count = _backfill_chunk_text_hash(col)
+        grand_updated += updated
+        if updated:
+            click.echo(f"  {col_name}: {updated} updated, {skipped} already had hash ({total_count} total)")
+        else:
+            click.echo(f"  {col_name}: all {total_count} chunks already have hash")
+
+    click.echo(f"Done: {grand_updated} chunks updated across {len(targets)} collection(s)")
