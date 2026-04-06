@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-04-06
+
+### Added
+- 5 dispatching skills (development, debugging, research-synthesis, deep-analysis, architecture) now seed T1 scratch with `link-context` before agent dispatch, enabling automatic catalog link creation at storage boundaries.
+
 ## [3.1.2] - 2026-04-06
 
 ### Added

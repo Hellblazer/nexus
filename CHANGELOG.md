@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-04-06
+
+### Added
+- **Auto-linker** — automatic catalog link creation at storage boundaries. When agents store findings via `store_put`, link-context entries seeded in T1 scratch by dispatching skills are read and catalog links are created automatically via `link_if_absent`. `created_by="auto-linker"` distinguishes mechanical links from agent-created and heuristic links.
+- New module `src/nexus/catalog/auto_linker.py` with `auto_link()`, `read_link_contexts()`, and `LinkContext` dataclass.
+- `_catalog_auto_link()` helper in MCP server, wired after `_catalog_store_hook` in `store_put`.
+
 ## [3.1.2] - 2026-04-06
 
 ### Added
