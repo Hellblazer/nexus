@@ -12,15 +12,17 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
 
-# Span format: "line_start-line_end" or "chunk_idx:char_start-char_end" or ""
-# Empty string means "the whole document" (no sub-document addressing).
+# Span format: "line_start-line_end" or "chunk_idx:char_start-char_end" or
+# "chash:<sha256hex>" or "".  Empty string means "the whole document".
 _SPAN_PATTERN = re.compile(
     r"^$"                              # empty — whole document
     r"|^\d+-\d+$"                      # line range: "42-57"
     r"|^\d+:\d+-\d+$"                  # chunk:char range: "3:100-250"
+    r"|^chash:[0-9a-f]{64}$"           # content-hash: chash:<sha256hex>
 )
 
 from nexus.catalog.catalog_db import CatalogDB
@@ -478,6 +480,26 @@ class Catalog:
             "content_type": entry.content_type,
         }
 
+    def resolve_span(self, span: str, physical_collection: str, t3: Any) -> dict | None:
+        """Resolve a span string to its chunk content.
+
+        Handles two span formats:
+        - chash:{sha256hex}: content-addressed — queries ChromaDB by chunk_text_hash metadata.
+        - Legacy positional (digit ranges): returns None.
+        """
+        if not span.startswith("chash:"):
+            return None
+        chunk_hash = span[len("chash:"):]
+        col = t3.get_collection(physical_collection)
+        result = col.get(where={"chunk_text_hash": chunk_hash}, include=["documents", "metadatas"])
+        if not result["ids"]:
+            return None
+        return {
+            "chunk_text": result["documents"][0],
+            "metadata": result["metadatas"][0],
+            "chunk_hash": chunk_hash,
+        }
+
     def update(self, tumbler: Tumbler, **fields: object) -> None:
         dir_fd = self._acquire_lock()
         try:
@@ -727,7 +749,7 @@ class Catalog:
             if not _SPAN_PATTERN.match(span):
                 raise ValueError(
                     f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', or '' for whole document"
+                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', or '' for whole document"
                 )
         if not allow_dangling:
             errors = []
@@ -830,7 +852,7 @@ class Catalog:
             if not _SPAN_PATTERN.match(span):
                 raise ValueError(
                     f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', or '' for whole document"
+                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', or '' for whole document"
                 )
         dir_fd = self._acquire_lock()
         try:
@@ -1064,8 +1086,8 @@ class Catalog:
             errors.append(f"duplicate: link ({from_t}, {to_t}, {link_type!r}) already exists")
         return errors
 
-    def resolve_span(self, tumbler: Tumbler, span: str) -> str | None:
-        """Resolve a span to actual text content from T3. Returns None if unavailable.
+    def resolve_span_text(self, tumbler: Tumbler, span: str) -> str | None:
+        """Resolve a span to actual text content. Returns None if unavailable.
 
         Span formats:
         - "" → returns None (whole document, no sub-addressing)

@@ -343,7 +343,7 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
                 span_note = f" [{lnk.to_span}]" if lnk.to_span else ""
                 click.echo(f"  → {lnk.to_tumbler} ({lnk.link_type}){span_note}")
                 if lnk.to_span:
-                    text = cat.resolve_span(lnk.to_tumbler, lnk.to_span)
+                    text = cat.resolve_span_text(lnk.to_tumbler, lnk.to_span)
                     if text:
                         preview = text[:120].replace("\n", " ")
                         click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
@@ -353,7 +353,7 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
                 span_note = f" [{lnk.from_span}]" if lnk.from_span else ""
                 click.echo(f"  ← {lnk.from_tumbler} ({lnk.link_type}){span_note}")
                 if lnk.from_span:
-                    text = cat.resolve_span(lnk.from_tumbler, lnk.from_span)
+                    text = cat.resolve_span_text(lnk.from_tumbler, lnk.from_span)
                     if text:
                         preview = text[:120].replace("\n", " ")
                         click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")

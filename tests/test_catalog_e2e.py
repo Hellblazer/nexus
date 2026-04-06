@@ -568,7 +568,7 @@ class TestSpanTransclusionE2E:
                  from_span="2-4", to_span="")
 
         # Resolve the span — should return the actual text
-        text = cat.resolve_span(doc_a, "2-4")
+        text = cat.resolve_span_text(doc_a, "2-4")
         assert text == "line2\nline3\nline4"
 
 

@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog, CatalogEntry
+import chromadb
+
+from nexus.catalog.catalog import Catalog, CatalogEntry, _SPAN_PATTERN
 from nexus.catalog.tumbler import Tumbler
 
 
@@ -521,3 +523,86 @@ class TestEnsureConsistentDegradedFlag:
             cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
 
         assert cat.degraded is True
+
+
+# ── nexus-l8hp: _SPAN_PATTERN chash support ─────────────────────────────────
+
+
+class TestSpanPattern:
+    """_SPAN_PATTERN must accept chash:<sha256hex> in addition to legacy formats."""
+
+    def test_chash_valid(self):
+        assert _SPAN_PATTERN.match("chash:" + "a" * 64) is not None
+
+    def test_chash_too_short(self):
+        assert _SPAN_PATTERN.match("chash:" + "a" * 63) is None
+
+    def test_chash_too_long(self):
+        assert _SPAN_PATTERN.match("chash:" + "a" * 65) is None
+
+    def test_chash_uppercase_rejected(self):
+        assert _SPAN_PATTERN.match("chash:" + "A" * 64) is None
+
+    def test_chash_non_hex_rejected(self):
+        assert _SPAN_PATTERN.match("chash:" + "g" * 64) is None
+
+    def test_legacy_empty_still_matches(self):
+        assert _SPAN_PATTERN.match("") is not None
+
+    def test_legacy_line_range_still_matches(self):
+        assert _SPAN_PATTERN.match("42-57") is not None
+
+    def test_legacy_chunk_char_range_still_matches(self):
+        assert _SPAN_PATTERN.match("3:100-250") is not None
+
+
+# ── nexus-l8hp: resolve_span() ───────────────────────────────────────────────
+
+
+_EPHEMERAL_T3 = chromadb.EphemeralClient()
+_COL_COUNTER = 0
+
+
+def _fresh_collection(name_prefix: str = "code__span"):
+    global _COL_COUNTER
+    _COL_COUNTER += 1
+    col_name = f"{name_prefix}_{_COL_COUNTER}"
+    col = _EPHEMERAL_T3.create_collection(col_name)
+    return col_name, col
+
+
+class TestResolveSpan:
+    """resolve_span() resolves chash: spans via ChromaDB metadata query."""
+
+    def test_resolve_chash_found(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        col_name, col = _fresh_collection()
+        chunk_hash = "a" * 64
+        col.add(
+            ids=["id1"],
+            documents=["hello world"],
+            metadatas=[{"chunk_text_hash": chunk_hash, "source": "test.py"}],
+        )
+        result = cat.resolve_span(f"chash:{chunk_hash}", col_name, _EPHEMERAL_T3)
+        assert result is not None
+        assert result["chunk_text"] == "hello world"
+        assert result["chunk_hash"] == chunk_hash
+        assert result["metadata"]["source"] == "test.py"
+
+    def test_resolve_chash_not_found(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        col_name, _ = _fresh_collection()
+        result = cat.resolve_span("chash:" + "b" * 64, col_name, _EPHEMERAL_T3)
+        assert result is None
+
+    def test_resolve_empty_span_returns_none(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        col_name, _ = _fresh_collection()
+        result = cat.resolve_span("", col_name, _EPHEMERAL_T3)
+        assert result is None
+
+    def test_resolve_legacy_span_returns_none(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        col_name, _ = _fresh_collection()
+        result = cat.resolve_span("42-57", col_name, _EPHEMERAL_T3)
+        assert result is None
