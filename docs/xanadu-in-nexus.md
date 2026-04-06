@@ -6,11 +6,19 @@ To be clear: this is a linking system, not an attempt to build Xanadu. We needed
 
 This document explains what we took, what we deliberately left out, and how the result works in practice. The full design rationale is in [RDR-053: Xanadu Fidelity](rdr/rdr-053-xanadu-fidelity.md), with its [post-mortem](rdr/post-mortem/053-xanadu-fidelity.md) documenting lessons learned during implementation.
 
-## The problem Xanadu solves for us
+## The problem: cross-document linkage in a vector database
 
-Semantic search finds relevant content. But it can't answer questions like: "What paper does this code implement?" or "Has this finding been superseded?" or "Which specific passage in that design doc led to this architecture decision?"
+Vector databases are good at one thing: finding chunks that are semantically similar to a query. But a chunked, embedded corpus has no structure beyond similarity. There is no way to express that a code chunk *implements* a design described in a prose chunk three collections away. There is no way to say that a research finding *supersedes* an earlier one. There is no way to follow a chain of citations from a paper through the code that applies its ideas.
 
-These are relationship questions. They require knowing which documents exist, how they connect, and — critically — being able to point at specific passages that survive when documents are re-indexed. Nelson's Xanadu addressed all three of these problems in the 1960s. We address them today with a narrower, more pragmatic system.
+This is the cross-document linkage problem. It shows up everywhere in Nexus, but the RDR process makes it acute: every design decision has a prose RDR document, code that implements it, research papers that informed it, and post-mortems that evaluate it. These live in different collections (`rdr__`, `code__`, `knowledge__`, `docs__`) with different embedding models (`voyage-code-3` for code, `voyage-context-3` for prose). Semantic search can find each piece individually, but it cannot connect them — a code chunk about `Tumbler.__lt__` does not embed anywhere near the RDR prose that specifies the `-1` sentinel padding it implements.
+
+Taxonomies and collection-level metadata help, but they operate at the wrong granularity. Knowing that `code__nexus` contains code and `rdr__nexus` contains design docs doesn't tell you *which* code implements *which* design. You need chunk-to-chunk linkage across collection boundaries.
+
+The link graph provides this. Every typed link (`implements`, `cites`, `supersedes`, `relates`) is an edge between two documents — and optionally between two specific chunks via content-addressed spans. The graph gives the [query planner](querying-guide.md) structure it can traverse: "find this RDR, follow `implements` links to the code, search those code collections for the user's question." This is not keyword matching or taxonomy lookup — it is plan-driven graph traversal over an embedded corpus.
+
+The result is agentic search that is better than either semantic search alone or taxonomy-based filtering. The [three-path dispatch](querying-guide.md) uses the link graph to scope, route, and compose queries: Path 1 uses catalog metadata to scope a single query. Path 2 matches pre-built [plan templates](querying-guide.md#nxquery-skill-analytical-queries) that encode common graph traversal patterns (citation chains, provenance traces, cross-corpus comparisons). Path 3 generates novel multi-step plans that combine graph traversal with analytical operations (extract, compare, summarize). Each path produces better results than blind vector search because it knows *which* chunks are related before it searches, rather than hoping the embedding space puts them close together.
+
+This is the role Xanadu fills in Nexus. Not a hypertext system — a linking substrate that gives structure to an otherwise flat vector store.
 
 ## What we borrowed
 
