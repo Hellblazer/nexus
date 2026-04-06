@@ -20,6 +20,16 @@ The result is search that knows structure before it runs. The [query planner](qu
 
 This is the role Xanadu fills in Nexus. Not a hypertext system — a linking substrate that gives structure to an otherwise flat vector store.
 
+## How the suite leverages it
+
+The catalog is not a standalone system — it's the connective tissue between Nexus's [storage tiers](storage-tiers.md) and the AI agents that use them.
+
+**Agents create links as they work.** When a developer agent implements a design doc, it creates an `implements` link. When a research synthesizer cites a source, it creates a `cites` link. Debugger and analyst agents create `relates` links between findings. Agents can link at the chunk level when search results provide specific passages, but most links today are document-to-document.
+
+**The query system uses the catalog for routing.** The [`query()` MCP tool](querying-guide.md) accepts catalog parameters — `author`, `content_type`, `subtree`, `follow_links` — that scope semantic search to relevant collections before the vector query runs. Asking for papers by a specific author first resolves matching documents in the catalog, then searches only their collections. This is faster and more precise than searching everything.
+
+**Link audit maintains graph health.** [`nx catalog link-audit`](catalog.md#link-health) verifies that content-hash spans resolve, detects orphaned links to deleted documents, and flags positional spans that may have gone stale. Existing collections can be backfilled with content hashes without re-embedding.
+
 ## What we borrowed
 
 ### Tumbler addressing
@@ -69,18 +79,6 @@ Nelson's Xanadu was a complete alternative to the file system. Nexus is a catalo
 **No federation.** Nelson's docuverse was inherently distributed — multiple stores cooperating across a network. Nexus is single-user, single-machine. The catalog is a local git repository; the vector store can be local or cloud, but there is no multi-user catalog federation. The tumbler's store segment (always `1` today) leaves the door open.
 
 **TTL expiry.** Nelson insisted that all addresses remain valid forever. Nexus supports time-to-live expiry on knowledge entries — an expired tumbler becomes unresolvable. The tumbler number is still retired (never reused), but the content is gone. A pragmatic concession for managing growth.
-
-## How the suite leverages it
-
-The catalog is not a standalone system — it's the connective tissue between Nexus's [storage tiers](storage-tiers.md) and the AI agents that use them.
-
-**Agents create links as they work.** When a developer agent implements a design doc, it creates an `implements` link. When a research synthesizer cites a source, it creates a `cites` link. Debugger and analyst agents create `relates` links between findings. Agents can link at the chunk level when search results provide specific passages, but most links today are document-to-document.
-
-**The query system uses the catalog for routing.** The [`query()` MCP tool](querying-guide.md) accepts catalog parameters — `author`, `content_type`, `subtree`, `follow_links` — that scope semantic search to relevant collections before the vector query runs. Asking for papers by a specific author first resolves matching documents in the catalog, then searches only their collections. This is faster and more precise than searching everything.
-
-**Link audit maintains graph health.** [`nx catalog link-audit`](catalog.md#link-health) verifies that content-hash spans resolve, detects orphaned links to deleted documents, and flags positional spans that may have gone stale. Existing collections can be backfilled with content hashes without re-embedding.
-
-The result is a system where every indexed document has a permanent address, every relationship between documents is typed and traceable, and every reference to a specific passage can be verified against the actual content. It's not Nelson's Xanadu — it's smaller, simpler, and built for AI agents rather than human hypertext — but the core ideas are the same ones Nelson articulated sixty years ago.
 
 ## Further reading
 
