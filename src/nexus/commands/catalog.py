@@ -503,7 +503,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
 @click.argument("to_tumbler")
 @click.option(
     "--type", "link_type", required=True,
-    type=click.Choice(["cites", "supersedes", "quotes", "relates", "comments", "implements", "implements-heuristic"]),
+    help="Link type (e.g. cites, implements, supersedes, relates, quotes, comments, or any custom type)",
 )
 @click.option("--from-span", default="", help="Source span: 'line-line', 'chunk:char-char', or 'chash:<sha256hex>'")
 @click.option("--to-span", default="", help="Target span: 'line-line', 'chunk:char-char', or 'chash:<sha256hex>'")
@@ -513,9 +513,9 @@ def link_cmd(
 ) -> None:
     """Create a typed link between two documents.
 
-    Both FROM and TO accept tumblers (1.1.5) or titles. Link types: cites
-    (citation), implements (code→RDR), supersedes (replacement), relates,
-    quotes, comments. Duplicate links are merged, not duplicated.
+    Both FROM and TO accept tumblers (1.1.5) or titles. Built-in link types:
+    cites, implements, implements-heuristic, supersedes, relates, quotes,
+    comments. Custom types are also accepted. Duplicate links are merged.
 
     \b
     Spans (optional) identify the specific passage being referenced:

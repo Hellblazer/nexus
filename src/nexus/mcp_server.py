@@ -1396,8 +1396,8 @@ def catalog_link(
 ) -> dict:
     """Create a relationship between two documents. Accepts tumblers or titles for both endpoints.
 
-    Link types: cites, implements, implements-heuristic, supersedes, relates, quotes, comments.
-    created_by identifies who/what created this link (e.g. "user", "bib_enricher", "rdr-close").
+    Built-in link types: cites, implements, implements-heuristic, supersedes, relates, quotes, comments.
+    Custom types are also accepted. created_by identifies who/what created this link.
     Duplicate links are merged with co_discovered_by tracking. Returns {created: true/false}.
     Raises error if either endpoint doesn't exist (pass allow_dangling via Python API to bypass).
     """
