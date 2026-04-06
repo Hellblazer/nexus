@@ -29,6 +29,10 @@ Structured decision tracking for human-AI collaboration. Read in order:
 - [nx Plugin](../nx/README.md) — Agents, skills, session hooks, MCP servers, slash commands
 - [sn Plugin](../sn/README.md) — Serena + Context7 MCP servers with subagent guidance injection
 
+## Search and Analysis
+
+- [Querying Guide](querying-guide.md) — When to use `nx search` vs `query()` MCP vs `/nx:query` skill, catalog-aware routing, analytical query examples
+
 ## Reference
 
 - [CLI Reference](cli-reference.md) — Every command, every flag

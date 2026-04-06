@@ -111,17 +111,44 @@ Agents also create links during their work — the debugger creates `relates` li
 
 ## Link types
 
-| Type | Meaning | Created by |
-|------|---------|------------|
-| `cites` | Citation relationship | `nx enrich` (from Semantic Scholar), agents, manual |
-| `implements-heuristic` | Code→RDR (substring title match) | Indexer hook (automatic) |
-| `implements` | Code→RDR (confirmed) | Developer agent, manual |
-| `supersedes` | Replacement | RDR close, knowledge-tidier, manual |
-| `relates` | Related documents | Debugger, deep-analyst, codebase-analyzer, manual |
-| `quotes` | Direct quotation (with spans) | Manual |
-| `comments` | Commentary | Manual |
+| Type | Meaning | When to use | Created by |
+|------|---------|-------------|------------|
+| `cites` | Citation reference | Paper A references Paper B | `nx enrich` (auto), agents, manual |
+| `implements-heuristic` | Code→RDR (auto-detected) | Indexer found title substring match | Indexer hook (automatic) |
+| `implements` | Code→RDR (confirmed) | Code intentionally realizes a design doc | Developer agent, manual |
+| `supersedes` | Document replaced by another | Retiring old doc, consolidating duplicates | RDR close, knowledge-tidier, manual |
+| `relates` | Related findings | Cross-cutting concerns, similar topics | Debugger, deep-analyst, manual |
+| `quotes` | Direct quotation with spans | Citing a specific passage as evidence | Manual |
+| `comments` | Commentary or annotation | Metadata notes about a document | Manual |
 
-Every link carries `created_by` provenance — you can always tell who asserted a relationship and filter by it.
+**Choosing the right type:** Use `cites` for bibliographic references. Use `implements` when code directly realizes a design (not just mentions it — that's `relates`). Use `supersedes` when one document fully replaces another. Use `quotes` when you need to pin a specific passage with a span reference.
+
+Every link carries `created_by` provenance — you can always tell who asserted a relationship and filter by it:
+
+```bash
+nx catalog links --created-by bib_enricher    # all auto-generated citation links
+nx catalog links --created-by user            # all manually created links
+```
+
+## Span lifecycle and staleness
+
+Spans identify specific passages within documents. The three formats have different durability characteristics:
+
+| Format | Survives re-indexing? | When to use |
+|--------|----------------------|-------------|
+| `42-57` (line range) | No — line numbers shift if file content changes | Quick references to source files you control |
+| `3:100-250` (chunk:char) | No — chunk boundaries shift on re-indexing | Rare; prefer chash: instead |
+| `chash:<sha256hex>` | Yes, if chunk text is unchanged | Preferred for all durable references |
+
+**What happens when spans go stale:** If you re-index a document, positional spans (`42-57`, `3:100-250`) may point to the wrong text. Content-hash spans (`chash:`) continue to resolve correctly as long as the chunk text hasn't changed.
+
+**Detecting stale spans:** Run `nx catalog link-audit` (or use the `catalog_link_audit` MCP tool). The audit reports:
+- `stale_spans` — positional spans on documents that were re-indexed after the link was created
+- `stale_chash` — content-hash spans that no longer resolve to any chunk in T3 (chunk was deleted or text changed)
+
+Each `stale_chash` entry includes a `reason` field: `missing` (chunk deleted), `document_deleted`, or `error` (infrastructure issue).
+
+**Recommendation:** Use `chash:` spans for any link you expect to survive re-indexing. For existing positional spans, they continue to work — `link-audit` will flag them if the underlying document changes.
 
 ## How it's stored
 
@@ -143,9 +170,25 @@ The catalog lives in its own git repository at `~/.config/nexus/catalog/`. You n
 
 **SQLite is the speed.** FTS5 full-text search, indexed link queries, and graph traversal all run against SQLite. It's rebuilt automatically whenever JSONL files change (detected by mtime).
 
-### Permanent addressing
+### Tumbler addressing
 
-Tumblers (e.g., `1.2.5` = store 1, owner 2, document 5) are assigned once and never reused. If you delete document `1.2.5` and compact the catalog, the number 5 is retired — the next document under that owner gets `1.2.6`. This means any external reference to a tumbler remains valid indefinitely.
+Every document gets a permanent hierarchical address called a **tumbler**. The format is `store.owner.document[.chunk]`:
+
+| Segment | Meaning | Example |
+|---------|---------|---------|
+| Store | Installation (always `1` for a single nexus instance) | `1` |
+| Owner | Repository or knowledge source (auto-assigned per repo) | `1.2` |
+| Document | Sequential number within the owner (monotonically increasing) | `1.2.5` |
+| Chunk | Optional — specific chunk within the document | `1.2.5.3` |
+
+**Examples:**
+- `1.1.42` — Document 42 from owner 1 (e.g., your main repo)
+- `1.2.5.3` — Chunk 3 of document 5 from owner 2 (e.g., a paper collection)
+- `1.1` — Owner-level address (refers to all documents under that owner)
+
+Tumblers are assigned once and never reused. If you delete document `1.2.5` and compact the catalog, the number 5 is retired — the next document under that owner gets `1.2.6`. This means any external reference to a tumbler remains valid indefinitely.
+
+Tumbler comparison uses integer ordering with parent-before-child semantics: `1.1.3 < 1.1.3.0 < 1.1.10`. The `sorted()` function produces correct document ordering.
 
 ### Compaction
 
@@ -184,13 +227,43 @@ nx catalog pull                # pull from remote + rebuild SQLite
 
 **CI/ephemeral environments**: configure `NEXUS_CATALOG_PATH` to point at a persistent volume, or use `init --remote` on each run to clone from the remote. The catalog rebuilds SQLite from JSONL in milliseconds.
 
-## Admin commands
+## Admin and maintenance
 
-These are hidden from `--help` but available:
+### Link health
 
 ```bash
-nx catalog link-audit          # orphan detection, stale spans, chash verification
-nx catalog link-bulk-delete    # bulk delete with dry-run preview
-nx catalog backfill            # re-populate from T3 + backfill chunk_text_hash
-nx collection backfill-hash    # backfill chunk_text_hash on a single collection (or --all)
+nx catalog link-audit
 ```
+
+Reports link graph health: total counts by type and creator, orphaned links (pointing to deleted documents), duplicate links, stale positional spans, and stale content-hash spans. When T3 is available, verifies each `chash:` span resolves to an actual chunk.
+
+Orphaned links are kept as historical record — they are not auto-deleted. Use `link-bulk-delete` to clean them up if needed.
+
+### Backfill and recovery
+
+```bash
+nx catalog backfill            # re-populate catalog from T3 + backfill chunk_text_hash
+nx collection backfill-hash    # backfill chunk_text_hash on one collection (or --all)
+```
+
+`backfill` re-discovers documents from existing T3 collections and registered repos without re-indexing. Also adds `chunk_text_hash` metadata to any chunks missing it. Use after data recovery or if the catalog gets out of sync with T3.
+
+`backfill-hash` is the targeted version — updates metadata on a single collection without touching embeddings or documents.
+
+### Bulk operations
+
+```bash
+nx catalog link-bulk-delete --type implements-heuristic --created-by indexer --dry-run
+```
+
+Preview and bulk-delete links by type and/or creator. Always use `--dry-run` first.
+
+### Troubleshooting
+
+**SQLite cache disappeared:** Delete `.catalog.db` (or let it be deleted). The system rebuilds it from JSONL on next access — no data lost.
+
+**JSONL and SQLite disagree:** Delete `.catalog.db` and let it rebuild. JSONL is always the source of truth.
+
+**Links point to deleted documents:** Run `nx catalog link-audit` to find orphans. Decide whether to keep them (historical record) or delete with `link-bulk-delete`.
+
+**Spans show wrong text after re-indexing:** Positional spans (`42-57`) become stale when file content changes. Run `link-audit` to identify stale spans. Prefer `chash:` spans for durable references.
