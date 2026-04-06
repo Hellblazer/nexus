@@ -32,6 +32,7 @@ Structured decision tracking for human-AI collaboration. Read in order:
 ## Search and Analysis
 
 - [Querying Guide](querying-guide.md) — When to use `nx search` vs `query()` MCP vs `/nx:query` skill, catalog-aware routing, analytical query examples
+- [Xanadu in Nexus](xanadu-in-nexus.md) — What we borrowed from Ted Nelson's Project Xanadu: tumbler addressing, typed links, span transclusion, and what we deliberately left out
 
 ## Reference
 
