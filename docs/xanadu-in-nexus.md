@@ -2,7 +2,9 @@
 
 Nexus borrows ideas from Ted Nelson's Project Xanadu — the original vision of a universal, interconnected document system — and adapts them for a practical problem: helping AI agents understand not just what documents say, but how they relate to each other and where specific claims come from.
 
-This document explains what we took from Xanadu, what we deliberately left out, and how the result works in practice. The full design rationale is in [RDR-053: Xanadu Fidelity](rdr/rdr-053-xanadu-fidelity.md), with its [post-mortem](rdr/post-mortem/053-xanadu-fidelity.md) documenting lessons learned during implementation.
+To be clear: this is a linking system, not an attempt to build Xanadu. We needed permanent document addresses, typed relationships, and durable sub-document references — and Nelson's model provided all three in a form that was simple, well-studied, and easy to implement. We could have used RDF triples, property graphs, or ad-hoc foreign keys. We chose tumblers and typed links because they map cleanly onto the problems our RDR process and agent suite actually face: tracing where a decision came from, what code implements a design, and which findings have been superseded. The Xanadu lineage gives us a coherent vocabulary and a set of proven design principles without requiring us to build the full docuverse.
+
+This document explains what we took, what we deliberately left out, and how the result works in practice. The full design rationale is in [RDR-053: Xanadu Fidelity](rdr/rdr-053-xanadu-fidelity.md), with its [post-mortem](rdr/post-mortem/053-xanadu-fidelity.md) documenting lessons learned during implementation.
 
 ## The problem Xanadu solves for us
 
