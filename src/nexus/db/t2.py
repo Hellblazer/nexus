@@ -227,10 +227,8 @@ class T2Database:
 
     def _migrate_plans_ttl_if_needed(self) -> None:
         """Add 'ttl' column to plans table if missing."""
-        row = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='plans'"
-        ).fetchone()
-        if row is None or "ttl" in row[0]:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(plans)").fetchall()}
+        if not cols or "ttl" in cols:
             return
         _log.info("Migrating plans table to add ttl column")
         self.conn.execute("ALTER TABLE plans ADD COLUMN ttl INTEGER")

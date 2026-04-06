@@ -1135,6 +1135,8 @@ class Catalog:
                 result = self.resolve_span(span, entry.physical_collection, t3._client)
                 return result["chunk_text"] if result else None
             except Exception:
+                _log.warning("resolve_span_text_failed", span=span,
+                             collection=entry.physical_collection, exc_info=True)
                 return None
 
         # Line-range span: read from source file
@@ -1214,6 +1216,7 @@ class Catalog:
         # Content-hash spans (chash:) are excluded — they survive re-indexing by design
         # (RDR-053). Stale chash spans are detected separately via T3 verification below.
         # Checks both from_span (joined on from_tumbler) and to_span (joined on to_tumbler).
+        # datetime() wraps ensure correct comparison regardless of ISO-8601 padding.
         stale_span_rows = self._db.execute(
             "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
             "       d.indexed_at, 'from' AS side "
@@ -1221,7 +1224,7 @@ class Catalog:
             "JOIN documents d ON d.tumbler = l.from_tumbler "
             "WHERE (l.from_span IS NOT NULL AND l.from_span != '') "
             "  AND l.from_span NOT LIKE 'chash:%' "
-            "  AND l.created_at < d.indexed_at "
+            "  AND datetime(l.created_at) < datetime(d.indexed_at) "
             "UNION ALL "
             "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
             "       d.indexed_at, 'to' AS side "
@@ -1229,7 +1232,7 @@ class Catalog:
             "JOIN documents d ON d.tumbler = l.to_tumbler "
             "WHERE (l.to_span IS NOT NULL AND l.to_span != '') "
             "  AND l.to_span NOT LIKE 'chash:%' "
-            "  AND l.created_at < d.indexed_at"
+            "  AND datetime(l.created_at) < datetime(d.indexed_at)"
         ).fetchall()
         stale_spans = [
             {"from": r[0], "to": r[1], "type": r[2],

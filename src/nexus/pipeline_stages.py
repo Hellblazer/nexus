@@ -16,6 +16,7 @@ After all three stages complete, the orchestrator runs post-passes to:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
 import threading
@@ -151,6 +152,7 @@ def _build_chunk_metadata(
         "embedding_model": embedding_model,
         "indexed_at": now_iso,
         "content_hash": content_hash,
+        "chunk_text_hash": hashlib.sha256(chunk.text.encode()).hexdigest(),
         "pdf_subject": "",        # post-pass
         "pdf_keywords": "",       # post-pass
         "is_image_pdf": False,    # post-pass

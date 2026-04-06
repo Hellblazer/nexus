@@ -90,8 +90,11 @@ def _seed_plan_templates() -> int:
     seeded = 0
     with T2Database(default_db_path()) as db:
         for tmpl in _PLAN_TEMPLATES:
-            existing = db.search_plans(tmpl["query"])
-            if any(p["query"] == tmpl["query"] and "builtin-template" in p.get("tags", "") for p in existing):
+            exists = db.conn.execute(
+                "SELECT 1 FROM plans WHERE query = ? AND tags LIKE '%builtin-template%' LIMIT 1",
+                (tmpl["query"],),
+            ).fetchone()
+            if exists:
                 continue
             db.save_plan(
                 query=tmpl["query"],

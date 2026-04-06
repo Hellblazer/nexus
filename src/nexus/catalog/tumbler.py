@@ -45,7 +45,7 @@ class Tumbler:
 
     @staticmethod
     def lca(a: Tumbler, b: Tumbler) -> Tumbler | None:
-        """Longest common ancestor. Returns None if no segments match."""
+        """Least common ancestor. Returns None if no segments match."""
         common: list[int] = []
         for sa, sb in zip(a.segments, b.segments):
             if sa != sb:
