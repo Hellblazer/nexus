@@ -16,6 +16,18 @@ Delegates to the **deep-research-synthesizer** agent. See [registry.yaml](../../
 - Questions requiring synthesis from multiple sources
 - When nx T3 search returns insufficient context for a decision
 
+## Pre-Dispatch: Seed Link Context
+
+Before dispatching the deep-research-synthesizer agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
+
+1. If the task references an RDR (pattern `RDR-\d+`) or a known document, resolve it: `mcp__plugin_nx_nexus__catalog_search(query="RDR-NNN or document title")`
+2. Check T1 scratch for `rdr-planning-context`
+3. Write link context to scratch:
+   ```
+   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}', tags="link-context")
+   ```
+4. If no RDR/document reference found, skip seeding (the auto-linker handles empty context gracefully)
+
 ## Agent Invocation
 
 Use the Agent tool to invoke **deep-research-synthesizer**:

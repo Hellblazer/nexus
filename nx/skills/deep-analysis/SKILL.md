@@ -17,6 +17,18 @@ Delegates to the **deep-analyst** agent (model: opus).
 - When root cause analysis requires deep investigation
 - After debugger if issue is cross-cutting
 
+## Pre-Dispatch: Seed Link Context
+
+Before dispatching the deep-analyst agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
+
+1. If the task references an RDR (pattern `RDR-\d+`) or a known document, resolve it: `mcp__plugin_nx_nexus__catalog_search(query="RDR-NNN or document title")`
+2. Check T1 scratch for `rdr-planning-context`
+3. Write link context to scratch:
+   ```
+   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "relates"}], "source_agent": "deep-analyst"}', tags="link-context")
+   ```
+4. If no RDR/document reference found, skip seeding (the auto-linker handles empty context gracefully)
+
 ## Agent Invocation
 
 Use the Agent tool to invoke **deep-analyst**:

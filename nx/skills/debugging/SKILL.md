@@ -35,6 +35,18 @@ Delegates to the **debugger** agent (model: opus).
 - Performance issues requiring systematic investigation
 - Any bug where the root cause is not immediately obvious
 
+## Pre-Dispatch: Seed Link Context
+
+Before dispatching the debugger agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
+
+1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_nx_nexus__catalog_search(query="RDR-NNN")`
+2. Check T1 scratch for `rdr-planning-context`
+3. Write link context to scratch:
+   ```
+   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "relates"}], "source_agent": "debugger"}', tags="link-context")
+   ```
+4. If no RDR/document reference found, skip seeding (the auto-linker handles empty context gracefully)
+
 ## Agent Invocation
 
 Use the Agent tool to invoke **debugger**:
