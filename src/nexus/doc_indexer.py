@@ -527,6 +527,7 @@ def _pdf_chunks(
             "bib_authors": bib.get("authors", ""),
             "bib_citation_count": bib.get("citation_count", 0),
             "bib_semantic_scholar_id": bib.get("semantic_scholar_id", ""),
+            "chunk_text_hash": hashlib.sha256(chunk.text.encode()).hexdigest(),
         }
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -574,6 +575,7 @@ def _markdown_chunks(
             "embedding_model": target_model,
             "indexed_at": now_iso,
             "content_hash": content_hash,
+            "chunk_text_hash": hashlib.sha256(chunk.text.encode()).hexdigest(),
         }
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
