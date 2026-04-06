@@ -32,6 +32,10 @@ class TestTumblerParse:
         with pytest.raises(ValueError):
             Tumbler.parse("")
 
+    def test_parse_negative_segment(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            Tumbler.parse("1.-1.42")
+
 
 class TestTumblerRoundtrip:
     def test_roundtrip_three(self):
@@ -120,3 +124,158 @@ class TestTumblerEquality:
         t = Tumbler.parse("1.2.3")
         d = {t: "val"}
         assert d[Tumbler.parse("1.2.3")] == "val"
+
+
+class TestTumblerDepth:
+    def test_single_segment(self):
+        assert Tumbler.parse("5").depth == 1
+
+    def test_three_segments(self):
+        assert Tumbler.parse("1.2.42").depth == 3
+
+    def test_four_segments(self):
+        assert Tumbler.parse("1.2.42.7").depth == 4
+
+
+class TestTumblerAncestors:
+    def test_three_segment(self):
+        t = Tumbler.parse("1.2.42")
+        anc = t.ancestors()
+        assert anc == [
+            Tumbler.parse("1"),
+            Tumbler.parse("1.2"),
+            Tumbler.parse("1.2.42"),
+        ]
+
+    def test_single_segment(self):
+        t = Tumbler.parse("5")
+        assert t.ancestors() == [Tumbler.parse("5")]
+
+    def test_four_segment(self):
+        t = Tumbler.parse("1.1.42.3")
+        assert t.ancestors() == [
+            Tumbler.parse("1"),
+            Tumbler.parse("1.1"),
+            Tumbler.parse("1.1.42"),
+            Tumbler.parse("1.1.42.3"),
+        ]
+
+
+class TestTumblerComparison:
+    def test_lt_integer_not_lexicographic(self):
+        assert Tumbler.parse("1.1.3") < Tumbler.parse("1.1.10")
+
+    def test_lt_owner_segment_differs(self):
+        assert Tumbler.parse("1.1.3") < Tumbler.parse("1.2.1")
+
+    def test_lt_parent_less_than_child_zero_chunk(self):
+        # RF-5: parent < child with zero-segment chunk
+        assert Tumbler.parse("1.1.3") < Tumbler.parse("1.1.3.0")
+
+    def test_gt_child_greater_than_parent(self):
+        assert Tumbler.parse("1.1.3.0") > Tumbler.parse("1.1.3")
+
+    def test_le_equal(self):
+        assert Tumbler.parse("1.1.3") <= Tumbler.parse("1.1.3")
+
+    def test_ge_equal(self):
+        assert Tumbler.parse("1.1.3") >= Tumbler.parse("1.1.3")
+
+    def test_sorted_order(self):
+        tumblers = [
+            Tumbler.parse("1.1.10"),
+            Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.3.0"),
+        ]
+        result = sorted(tumblers)
+        assert result == [
+            Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.3.0"),
+            Tumbler.parse("1.1.10"),
+        ]
+
+    def test_lt_store_segment_differs(self):
+        assert Tumbler.parse("1.2.1") < Tumbler.parse("2.1.1")
+
+    def test_not_lt_equal(self):
+        assert not (Tumbler.parse("1.1.3") < Tumbler.parse("1.1.3"))
+
+    def test_not_gt_equal(self):
+        assert not (Tumbler.parse("1.1.3") > Tumbler.parse("1.1.3"))
+
+
+class TestTumblerSpansOverlap:
+    def test_overlapping(self):
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7"),
+            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.10"),
+        )
+
+    def test_non_overlapping(self):
+        assert not Tumbler.spans_overlap(
+            Tumbler.parse("1.1.1"), Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.7"),
+        )
+
+    def test_adjacent_touching(self):
+        # Inclusive bounds — endpoints touching = overlapping
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.1"), Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.5"),
+        )
+
+    def test_contained(self):
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.10"),
+            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.7"),
+        )
+
+    def test_identical(self):
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7"),
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7"),
+        )
+
+    def test_cross_depth(self):
+        # Uses -1 sentinel padding from comparison operators (D6, RF-5)
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.3.5"),
+            Tumbler.parse("1.1.3.2"), Tumbler.parse("1.1.4"),
+        )
+
+    def test_commutative(self):
+        # Overlap is symmetric: spans_overlap(a, b) == spans_overlap(b, a)
+        a_s, a_e = Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7")
+        b_s, b_e = Tumbler.parse("1.1.5"), Tumbler.parse("1.1.10")
+        assert Tumbler.spans_overlap(a_s, a_e, b_s, b_e) == Tumbler.spans_overlap(b_s, b_e, a_s, a_e)
+
+
+class TestTumblerLCA:
+    def test_same_tumbler(self):
+        t = Tumbler.parse("1.2.42")
+        assert Tumbler.lca(t, t) == t
+
+    def test_sibling_documents(self):
+        a = Tumbler.parse("1.1.10")
+        b = Tumbler.parse("1.1.20")
+        assert Tumbler.lca(a, b) == Tumbler.parse("1.1")
+
+    def test_different_owners(self):
+        a = Tumbler.parse("1.1.10")
+        b = Tumbler.parse("1.2.5")
+        assert Tumbler.lca(a, b) == Tumbler.parse("1")
+
+    def test_chunk_and_document(self):
+        a = Tumbler.parse("1.1.42.3")
+        b = Tumbler.parse("1.1.42")
+        assert Tumbler.lca(a, b) == Tumbler.parse("1.1.42")
+
+    def test_no_common_prefix(self):
+        a = Tumbler.parse("1.1.1")
+        b = Tumbler.parse("2.1.1")
+        assert Tumbler.lca(a, b) is None
+
+    def test_partial_overlap(self):
+        a = Tumbler.parse("1.1.42.3")
+        b = Tumbler.parse("1.1.43.7")
+        assert Tumbler.lca(a, b) == Tumbler.parse("1.1")

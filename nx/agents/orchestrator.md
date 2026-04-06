@@ -23,10 +23,19 @@ nx MCP tools use the full prefix `mcp__plugin_nx_nexus__`. Examples:
 
 ```
 mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
-mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
+mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5,
+      author="", content_type="", follow_links="cites", depth=1, subtree="1.1")
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
 ```
+
+### query() routing
+
+The `/nx:query` skill is the **single routing authority** for all natural-language search and retrieval questions. It handles three-path dispatch internally (direct query → template → planner).
+
+**Always dispatch `/nx:query` for NL questions** — do not attempt to classify or route queries yourself. The skill has catalog probe logic and analytical signal detection that the orchestrator should not duplicate.
+
+**Direct `query()` MCP is appropriate only when** the caller (not the orchestrator) supplies explicit catalog params — e.g., another agent or skill that already knows `author="Fagin"` or `subtree="1.1"`.
 
 See SubagentStart hook output for full tool reference.
 

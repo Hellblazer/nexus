@@ -24,7 +24,8 @@ nx MCP tools use the full prefix `mcp__plugin_nx_nexus__`. Examples:
 
 ```
 mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
-mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
+mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5,
+      author="", content_type="", follow_links="cites", depth=1, subtree="1.1")
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
 ```
@@ -79,7 +80,7 @@ Use the retrieved content as the input for this operation.
 
 T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
-**Dispatch constraint**: This agent is dispatched by the `/nx:query` skill or directly via the Agent tool. It does not spawn sub-agents.
+**Dispatch constraint**: This agent is dispatched by the `/nx:query` skill (Path 3 — novel analytical pipelines) or directly via the Agent tool. It does not spawn sub-agents. Simple scoped queries are handled by the enhanced `query` MCP tool directly — the operator is only needed for extract/summarize/rank/compare/generate operations.
 
 
 ## Operation Definitions

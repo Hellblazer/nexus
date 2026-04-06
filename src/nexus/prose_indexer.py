@@ -92,6 +92,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 "corpus": ctx.corpus,
                 "embedding_model": ctx.embedding_model,
                 "content_hash": content_hash,
+                "chunk_text_hash": _hl.sha256(chunk.text.encode()).hexdigest(),
                 **ctx.git_meta,
             }
             ids.append(doc_id)
@@ -136,6 +137,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 "corpus": ctx.corpus,
                 "embedding_model": ctx.embedding_model,
                 "content_hash": content_hash,
+                "chunk_text_hash": _hl.sha256(text.encode()).hexdigest(),
                 **ctx.git_meta,
             }
             ids.append(doc_id)

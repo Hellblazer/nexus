@@ -33,13 +33,18 @@ effort: low|medium|high
 ### Skill Types in nx
 
 **Agent-delegating skills** (majority): Invoke a specific agent via Agent tool relay.
-Required sections:
-- `## When This Skill Activates`
-- `## Agent Invocation` with cross-reference to RELAY_TEMPLATE.md
+CI-enforced required sections (`test_plugin_structure.py` will fail without these):
+- **Agent Invocation** heading (or **Relay Template** heading) — cross-reference to RELAY_TEMPLATE.md
 - `## Success Criteria`
-- `## Agent-Specific PRODUCE` (T1/T2/T3 outputs)
+- `## Agent-Specific PRODUCE` — T1/T2/T3 outputs
+- Mention of `scratch` (T1 scratch tier acknowledgment)
 
-**Standalone skills** (nexus, serena-code-nav, cli-controller): Provide guidance directly without agent delegation.
+Also expected:
+- `## When This Skill Activates`
+
+**Hybrid skills** (e.g., query): Do significant direct work AND dispatch agents. These are still classified as agent-delegating — they must have all four CI-enforced sections above. If a skill dispatches agents at any point, it is agent-delegating.
+
+**Standalone skills** (nexus, serena-code-nav, cli-controller, brainstorming-gate, using-nx-skills, writing-nx-skills): Provide guidance directly without agent delegation. Listed in `_STANDALONE_SKILLS` in `tests/test_plugin_structure.py`.
 Required sections:
 - `## When This Skill Activates`
 - `## Success Criteria` (optional for pure reference)
@@ -108,17 +113,26 @@ This applies to `--description`, `--notes`, `--design`, and any flag that accept
 
 ## Quality Checklist
 
-- [ ] Frontmatter has `name`, `description`, and `effort`
+**CI-enforced (tests will break):**
+- [ ] Frontmatter has `name`, `description`, and `effort` — only these three fields
 - [ ] Description starts with "Use when"
-- [ ] Description has no workflow summary
+- [ ] Description has no workflow keywords (first, then, step, next, finally, after, before, workflow, process, pipeline)
+- [ ] No YAML comments in frontmatter
+- [ ] Agent-delegating: has **Agent Invocation** heading (or Relay Template heading)
+- [ ] Agent-delegating: has `## Agent-Specific PRODUCE` section
+- [ ] Agent-delegating: mentions `scratch` somewhere in text
+- [ ] Has `## Success Criteria` section
+- [ ] All `../../agents/_shared/` cross-references resolve to existing files
+
+**Convention (not CI-enforced but expected):**
 - [ ] `effort` matches skill type (low=reference, medium=workflow, high=analysis)
-- [ ] Agent-delegating: has Agent Invocation cross-reference
-- [ ] Agent-delegating: has Agent-Specific PRODUCE section
-- [ ] Agent-delegating: mentions nx scratch (T1)
-- [ ] Has Success Criteria section
-- [ ] Added to registry.yaml (including model_summary for agent skills)
-- [ ] Added to using-nx-skills routing tree
-- [ ] Tests pass: `pytest tests/test_plugin_structure.py -v`
+- [ ] Added to `nx/registry.yaml` (including `model_summary` for agent skills)
+- [ ] Added to `using-nx-skills` routing tree
+
+**Verify before committing:**
+```bash
+uv run pytest tests/test_plugin_structure.py -k "skill_name" -v
+```
 
 ## Testing Skills
 

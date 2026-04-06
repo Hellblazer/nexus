@@ -97,7 +97,11 @@ T3 knowledge — permanent, semantic search:
   Tool: mcp__plugin_nx_nexus__search
     search(query="...", corpus="knowledge", limit=10, offset=0, where="bib_year>=2023")
   Tool: mcp__plugin_nx_nexus__query
-    query(question="...", corpus="knowledge", where="bib_year>=2020", limit=10)  → document-level results
+    query(question="...", corpus="knowledge", where="bib_year>=2020", limit=10,
+          author="", content_type="", follow_links="cites", depth=1, subtree="1.1")
+    → document-level results; catalog params scope search before vector query
+    → subtree: all descendants of tumbler prefix (e.g. "1.1" = all nexus docs)
+    → follow_links: enrich results with linked docs (any link type)
   Tool: mcp__plugin_nx_nexus__store_list
     store_list(collection="knowledge", limit=20, offset=0)
     store_list(collection="knowledge__art", docs=true)   → document-level view
@@ -115,7 +119,7 @@ Plan library (T2):
   Tool: mcp__plugin_nx_nexus__plan_search
     plan_search(query="...", project="...", limit=5)
   Tool: mcp__plugin_nx_nexus__plan_save
-    plan_save(query="...", plan_json="...", project="...", tags="...")
+    plan_save(query="...", plan_json="...", project="...", tags="...", ttl=30)
 
 Routing: T1 for sibling sharing → T2 for project persistence → T3 for semantic knowledge.
 NXTOOLS
@@ -157,11 +161,16 @@ The `/nx:query` skill handles full catalog-aware plan execution.
   mcp__plugin_nx_nexus__catalog_links(tumbler="1.2.5", direction="in", link_type="cites", depth=2)
     Returns {"nodes": [CatalogEntry dicts], "edges": [link dicts]}.
     Only live documents — deleted nodes excluded. Use mcp__plugin_nx_nexus__catalog_link_query for all links.
-  mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="user")
+  mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="agent-name",
+    from_span="chash:<sha256hex>", to_span="chash:<sha256hex>")
     Accepts titles or tumblers. Returns {"from", "to", "type", "created": true/false}.
+    SPAN FORMAT (preferred): "chash:<64-char-hex>" — content-addressed, survives re-indexing.
+    Get chunk hashes from search result metadata: each chunk has chunk_text_hash field.
+    Fallback spans: "42-57" (line range) or "3:100-250" (chunk:char) — positional, may go stale.
   mcp__plugin_nx_nexus__catalog_link_query(link_type="cites", created_by="bib_enricher", created_at_before="...", limit=50)
     All links including orphans. Admin/audit — not a planner step.
-  mcp__plugin_nx_nexus__catalog_link_audit()  — orphans, stats by type/creator, duplicates.
+  mcp__plugin_nx_nexus__catalog_link_audit()  — orphans, stale positional spans, stale chash spans.
+    Each stale_chash entry has reason: "missing", "document_deleted", or "error".
   mcp__plugin_nx_nexus__catalog_link_bulk(link_type="cites", dry_run=True)  — bulk delete preview.
     Requires confirm_destructive=True for >10 link deletions.
   mcp__plugin_nx_nexus__catalog_resolve(owner="1.1", corpus="schema-evolution")  — → collection names

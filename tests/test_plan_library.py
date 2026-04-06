@@ -141,3 +141,37 @@ def test_list_plans_project_filter(plan_db: T2Database) -> None:
     results = plan_db.list_plans(project="nexus")
     assert len(results) == 2
     assert all(r["project"] == "nexus" for r in results)
+
+
+def test_save_plan_with_ttl(plan_db: T2Database) -> None:
+    """save_plan() stores the ttl field correctly."""
+    row_id = plan_db.save_plan(
+        query="cached author search",
+        plan_json='{"steps":[]}',
+        ttl=30,
+    )
+    row = plan_db.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
+    assert row[0] == 30
+
+
+def test_save_plan_ttl_none_by_default(plan_db: T2Database) -> None:
+    """save_plan() without ttl stores NULL (permanent)."""
+    row_id = plan_db.save_plan(query="permanent plan", plan_json='{}')
+    row = plan_db.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
+    assert row[0] is None
+
+
+def test_search_plans_includes_ttl(plan_db: T2Database) -> None:
+    """search_plans() results include the ttl field."""
+    plan_db.save_plan(query="search with ttl", plan_json='{}', ttl=7)
+    results = plan_db.search_plans("search")
+    assert len(results) == 1
+    assert results[0]["ttl"] == 7
+
+
+def test_list_plans_includes_ttl(plan_db: T2Database) -> None:
+    """list_plans() results include the ttl field."""
+    plan_db.save_plan(query="plan with ttl", plan_json='{}', ttl=14)
+    results = plan_db.list_plans()
+    assert len(results) == 1
+    assert results[0]["ttl"] == 14

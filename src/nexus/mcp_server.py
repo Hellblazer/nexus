@@ -351,6 +351,11 @@ def query(
     corpus: str = "knowledge",
     where: str = "",
     limit: int = 10,
+    author: str = "",
+    content_type: str = "",
+    follow_links: str = "",
+    depth: int = 1,
+    subtree: str = "",
 ) -> str:
     """Document-level semantic search for analytical questions.
 
@@ -361,31 +366,119 @@ def query(
     Use this for research questions where you need to know WHICH documents match,
     not just which text fragments. The calling agent handles analysis/synthesis.
 
+    Catalog-aware routing (optional — all require an initialized catalog):
+        author: Filter to documents by this author (catalog metadata search)
+        content_type: Filter to documents of this type (code, paper, rdr, knowledge)
+        follow_links: Follow links of this type from catalog results (e.g. "cites", "implements").
+            Linked collections are merged (interleaved) with seed collections — results
+            are ranked by semantic distance across all collections, not separated by source.
+        depth: BFS depth for follow_links traversal (default 1)
+        subtree: Tumbler prefix — search only documents in this subtree (e.g. "1.1")
+
     Args:
         question: Natural-language research question
         corpus: Corpus prefix or full collection name (default: knowledge).
                 Use "all" for all corpora.
+                Note: when catalog params (author, content_type, subtree) are provided,
+                corpus is overridden by the resolved catalog collections.
         where: Metadata filter — KEY=VALUE, comma-separated.
                Example: "bib_year>=2020,tags=arch"
         limit: Maximum documents to return (default 10)
+        author: Filter by author (catalog metadata)
+        content_type: Filter by content type (catalog metadata)
+        follow_links: Follow link type from matched documents (catalog graph)
+        depth: BFS depth for follow_links (default 1)
+        subtree: Tumbler prefix to scope search to a subtree
     """
     try:
         from nexus.search_engine import search_cross_corpus
         t3 = _get_t3()
 
-        if corpus == "all":
-            corpus = "knowledge,code,docs,rdr"
+        # Catalog-aware routing: derive target collections from catalog metadata
+        catalog_collections: set[str] | None = None
+        has_catalog_params = author or content_type or follow_links or subtree
 
-        target: list[str] = []
-        all_names = _get_collection_names()
-        for part in corpus.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "__" in part:
-                target.append(part)
-            else:
-                target.extend(resolve_corpus(part, all_names))
+        if has_catalog_params:
+            from nexus.catalog.tumbler import Tumbler
+            cat = _get_catalog()
+            if cat is None:
+                return "Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'"
+
+            # Resolve seed entries for catalog routing
+            seed_entries: list = []
+            if subtree:
+                # Depth check: document-level (3+ segments) has no descendants in the catalog
+                subtree_depth = len(subtree.split("."))
+                if subtree_depth >= 3:
+                    return f"Error: subtree '{subtree}' is a document-level address — use an owner prefix (e.g., '{'.'.join(subtree.split('.')[:2])}') to search a subtree"
+                # Use descendants() directly — NOT catalog_search(owner=) which has depth-equality bug
+                desc = cat.descendants(subtree)
+                catalog_collections = {d["physical_collection"] for d in desc if d.get("physical_collection")}
+                seed_entries = [cat.resolve(Tumbler.parse(d["tumbler"])) for d in desc]
+                seed_entries = [e for e in seed_entries if e is not None]
+            elif author or content_type:
+                if content_type and not author:
+                    seed_entries = cat.by_content_type(content_type)
+                else:
+                    seed_entries = cat.find(author, content_type=content_type or None)
+                    seed_entries = [r for r in seed_entries if author.lower() in (r.author or "").lower()]
+                catalog_collections = {r.physical_collection for r in seed_entries if r.physical_collection}
+
+            if follow_links and catalog_collections is not None:
+                # Expand via link graph from already-resolved seed entries
+                linked_collections: set[str] = set()
+                for entry in seed_entries:
+                    graph = cat.graph(entry.tumbler, depth=depth, link_type=follow_links)
+                    for node in graph["nodes"]:
+                        if node.physical_collection:
+                            linked_collections.add(node.physical_collection)
+                catalog_collections |= linked_collections
+            elif follow_links:
+                # follow_links without other filters: use question as catalog seed
+                seed_results = cat.find(question)
+                if seed_results:
+                    catalog_collections = set()
+                    for r in seed_results[:5]:  # limit seed to avoid explosion
+                        graph = cat.graph(r.tumbler, depth=depth, link_type=follow_links)
+                        for node in graph["nodes"]:
+                            if node.physical_collection:
+                                catalog_collections.add(node.physical_collection)
+                    # No link-enriched collections found — fall through to broad search
+                    if not catalog_collections:
+                        catalog_collections = None
+                # else: no seeds found — catalog_collections stays None, broad search proceeds
+
+            if catalog_collections is not None and not catalog_collections:
+                return f"No documents found matching catalog filters (author={author!r}, content_type={content_type!r}, subtree={subtree!r}, follow_links={follow_links!r})"
+
+        routing_note = ""
+        # Exactly one branch sets `target` — catalog routing or corpus-based routing
+        if catalog_collections is not None:
+            target = [c for c in catalog_collections if c]
+            parts = []
+            if author:
+                parts.append(f"author={author!r}")
+            if content_type:
+                parts.append(f"content_type={content_type!r}")
+            if subtree:
+                parts.append(f"subtree={subtree!r}")
+            if follow_links:
+                parts.append(f"follow_links={follow_links!r}")
+            routing_note = f"[Catalog routing: {', '.join(parts)} -> {len(target)} collections]"
+        else:
+            if corpus == "all":
+                corpus = "knowledge,code,docs,rdr"
+
+            target: list[str] = []
+            all_names = _get_collection_names()
+            for part in corpus.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "__" in part:
+                    target.append(part)
+                else:
+                    target.extend(resolve_corpus(part, all_names))
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -435,7 +528,8 @@ def query(
         # Sort by best match distance, limit
         sorted_docs = sorted(docs.values(), key=lambda d: d["distance"])[:limit]
 
-        lines: list[str] = [f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"]
+        header = f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"
+        lines: list[str] = [f"{routing_note}\n{header}" if routing_note else header]
         lines.append("")
         for i, d in enumerate(sorted_docs, 1):
             dist = f"{d['distance']:.4f}"
@@ -992,6 +1086,7 @@ def plan_save(
     project: str = "",
     outcome: str = "success",
     tags: str = "",
+    ttl: int | None = None,
 ) -> str:
     """Save a query execution plan to the T2 plan library.
 
@@ -1004,6 +1099,7 @@ def plan_save(
         project: Project namespace for scoping (e.g. "nexus")
         outcome: Plan outcome — "success" or "partial"
         tags: Comma-separated tags (e.g. operation types used)
+        ttl: Time-to-live in days. None means permanent (no expiry).
     """
     try:
         if not query or not plan_json:
@@ -1015,6 +1111,7 @@ def plan_save(
                 outcome=outcome,
                 tags=tags,
                 project=project,
+                ttl=ttl,
             )
         return f"Saved plan: [{row_id}] {query[:80]}"
     except Exception as e:
@@ -1377,15 +1474,21 @@ def catalog_unlink(
 
 @mcp.tool()
 def catalog_link_audit() -> dict:
-    """Audit the link graph: counts by type/creator, orphaned links, duplicates.
+    """Audit the link graph for health issues.
 
-    Use to verify link health before/after bulk operations.
+    Returns: total, by_type, by_creator, orphaned (+ count), duplicates (+ count),
+    stale_spans (+ count, positional spans on re-indexed docs),
+    stale_chash (+ count, content-hash spans that no longer resolve in T3).
+
+    Each stale_chash entry includes a ``reason`` field: ``"missing"`` (chunk deleted),
+    ``"document_deleted"``, or ``"error"`` (with ``error`` type name).
     """
     cat, err = _require_catalog()
     if err:
         return {"error": err}
     try:
-        return cat.link_audit()
+        t3 = _get_t3()
+        return cat.link_audit(t3=t3._client)
     except Exception as e:
         return {"error": str(e)}
 

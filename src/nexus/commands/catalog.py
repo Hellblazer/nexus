@@ -14,6 +14,96 @@ from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger(__name__)
 
+# -- Pre-built plan templates (seeded at `nx catalog setup`) --
+
+_PLAN_TEMPLATES: list[dict[str, str]] = [
+    {
+        "query": "find documents by author",
+        "plan_json": json.dumps({
+            "query": "find documents by {author_name}",
+            "steps": [
+                {"step": 1, "operation": "catalog_search", "params": {"author": "{author_name}"}},
+                {"step": 2, "operation": "search", "search_query": "{author_name} research contributions", "corpus": "$step_1.collections"},
+                {"step": 3, "operation": "summarize", "inputs": "$step_2", "params": {"mode": "short"}},
+            ],
+        }),
+        "tags": "builtin-template,catalog,author",
+    },
+    {
+        "query": "trace citation chain from document",
+        "plan_json": json.dumps({
+            "query": "what cites {document_title}",
+            "steps": [
+                {"step": 1, "operation": "catalog_search", "params": {"query": "{document_title}"}},
+                {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "link_type": "cites", "depth": 2}},
+                {"step": 3, "operation": "search", "search_query": "{document_title} contributions", "corpus": "$step_2.collections"},
+                {"step": 4, "operation": "summarize", "inputs": "$step_3", "params": {"mode": "evidence"}},
+            ],
+        }),
+        "tags": "builtin-template,catalog,citation",
+    },
+    {
+        "query": "trace provenance chain for document",
+        "plan_json": json.dumps({
+            "query": "what research informed {document_title}",
+            "steps": [
+                {"step": 1, "operation": "catalog_search", "params": {"query": "{document_title}"}},
+                {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "both", "depth": 2}},
+                {"step": 3, "operation": "search", "search_query": "provenance origins influence", "corpus": "$step_2.collections"},
+                {"step": 4, "operation": "summarize", "inputs": "$step_3", "params": {"mode": "evidence"}},
+            ],
+        }),
+        "tags": "builtin-template,catalog,provenance",
+    },
+    {
+        "query": "compare documents across corpora",
+        "plan_json": json.dumps({
+            "query": "compare {topic} across {corpus_a} and {corpus_b}",
+            "steps": [
+                {"step": 1, "operation": "search", "search_query": "{topic}", "corpus": "{corpus_a}"},
+                {"step": 2, "operation": "search", "search_query": "{topic}", "corpus": "{corpus_b}"},
+                {"step": 3, "operation": "compare", "inputs": ["$step_1", "$step_2"], "params": {"criterion": "{topic}"}},
+            ],
+        }),
+        "tags": "builtin-template,catalog,cross-corpus",
+    },
+    {
+        "query": "search within content type",
+        "plan_json": json.dumps({
+            "query": "{question} in {type} documents",
+            "steps": [
+                {"step": 1, "operation": "catalog_search", "params": {"content_type": "{type}"}},
+                {"step": 2, "operation": "search", "search_query": "{question}", "corpus": "$step_1.collections"},
+                {"step": 3, "operation": "summarize", "inputs": "$step_2", "params": {"mode": "short"}},
+            ],
+        }),
+        "tags": "builtin-template,catalog,type-scoped",
+    },
+]
+
+
+def _seed_plan_templates() -> int:
+    """Seed pre-built plan templates into T2. Idempotent — skips existing."""
+    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path
+
+    seeded = 0
+    with T2Database(default_db_path()) as db:
+        for tmpl in _PLAN_TEMPLATES:
+            exists = db.conn.execute(
+                "SELECT 1 FROM plans WHERE query = ? AND tags LIKE '%builtin-template%' LIMIT 1",
+                (tmpl["query"],),
+            ).fetchone()
+            if exists:
+                continue
+            db.save_plan(
+                query=tmpl["query"],
+                plan_json=tmpl["plan_json"],
+                tags=tmpl["tags"],
+            )
+            seeded += 1
+    return seeded
+
 
 def _get_catalog() -> Catalog:
     from nexus.config import catalog_path
@@ -169,11 +259,27 @@ def setup_cmd(remote: str) -> None:
     except Exception as exc:
         click.echo(f"  Backfill incomplete ({type(exc).__name__}: {exc})")
 
+    click.echo("Backfilling chunk_text_hash...")
+    from nexus.commands.collection import _backfill_chunk_text_hash
+    hash_updated = 0
+    try:
+        for col_info in t3.list_collections():
+            col = t3._client.get_collection(col_info["name"])
+            updated, _, _ = _backfill_chunk_text_hash(col)
+            hash_updated += updated
+    except Exception as exc:
+        click.echo(f"  Hash backfill partial ({type(exc).__name__}: {exc})")
+    click.echo(f"  {hash_updated} chunks updated")
+
     click.echo("Generating links...")
     from nexus.catalog.link_generator import generate_citation_links, generate_code_rdr_links
     cites = generate_citation_links(cat)
     code_rdr = generate_code_rdr_links(cat)
     click.echo(f"  Citations: {cites}  Code-RDR: {code_rdr}")
+
+    click.echo("Seeding plan templates...")
+    seeded = _seed_plan_templates()
+    click.echo(f"  {seeded} templates seeded")
 
     # Check if a remote is configured for durability
     import subprocess
@@ -252,7 +358,7 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
                 span_note = f" [{lnk.to_span}]" if lnk.to_span else ""
                 click.echo(f"  → {lnk.to_tumbler} ({lnk.link_type}){span_note}")
                 if lnk.to_span:
-                    text = cat.resolve_span(lnk.to_tumbler, lnk.to_span)
+                    text = cat.resolve_span_text(lnk.to_tumbler, lnk.to_span)
                     if text:
                         preview = text[:120].replace("\n", " ")
                         click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
@@ -262,7 +368,7 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
                 span_note = f" [{lnk.from_span}]" if lnk.from_span else ""
                 click.echo(f"  ← {lnk.from_tumbler} ({lnk.link_type}){span_note}")
                 if lnk.from_span:
-                    text = cat.resolve_span(lnk.from_tumbler, lnk.from_span)
+                    text = cat.resolve_span_text(lnk.from_tumbler, lnk.from_span)
                     if text:
                         preview = text[:120].replace("\n", " ")
                         click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
@@ -399,8 +505,8 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     "--type", "link_type", required=True,
     type=click.Choice(["cites", "supersedes", "quotes", "relates", "comments", "implements", "implements-heuristic"]),
 )
-@click.option("--from-span", default="", help="Source span: 'line-line' or 'chunk:char-char'")
-@click.option("--to-span", default="", help="Target span: 'line-line' or 'chunk:char-char'")
+@click.option("--from-span", default="", help="Source span: 'line-line', 'chunk:char-char', or 'chash:<sha256hex>'")
+@click.option("--to-span", default="", help="Target span: 'line-line', 'chunk:char-char', or 'chash:<sha256hex>'")
 def link_cmd(
     from_tumbler: str, to_tumbler: str, link_type: str,
     from_span: str, to_span: str,
@@ -413,9 +519,10 @@ def link_cmd(
 
     \b
     Spans (optional) identify the specific passage being referenced:
-      --from-span "42-57"       lines 42-57 of the source document
-      --to-span "3:100-250"     chars 100-250 of chunk 3 in T3
-    Use 'nx catalog show' to see resolved span text on links.
+      --from-span "42-57"              lines 42-57 of the source document
+      --to-span "3:100-250"            chars 100-250 of chunk 3 in T3
+      --from-span "chash:<sha256hex>"  content-addressed chunk identity (preferred)
+    Content-hash spans survive re-indexing. Use 'nx catalog show' to see resolved span text.
     """
     cat = _get_catalog()
     ft = _resolve_tumbler(cat, from_tumbler)
@@ -957,8 +1064,19 @@ def backfill_cmd(dry_run: bool) -> None:
     click.echo("Pass 3: Knowledge collections...")
     knowledge_count = _backfill_knowledge(cat, t3, dry_run)
 
+    hash_updated = 0
+    if not dry_run:
+        click.echo("Pass 4: chunk_text_hash backfill...")
+        from nexus.commands.collection import _backfill_chunk_text_hash
+        for col_info in t3.list_collections():
+            col = t3._client.get_collection(col_info["name"])
+            updated, _, _ = _backfill_chunk_text_hash(col)
+            hash_updated += updated
+
     mode = "dry-run" if dry_run else "registered"
     click.echo(f"\nBackfill complete ({mode}):")
     click.echo(f"  Repos:     {repo_count}")
     click.echo(f"  Papers:    {paper_count}")
     click.echo(f"  Knowledge: {knowledge_count}")
+    if not dry_run:
+        click.echo(f"  Hash:      {hash_updated} chunks updated")

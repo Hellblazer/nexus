@@ -12,15 +12,20 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
-# Span format: "line_start-line_end" or "chunk_idx:char_start-char_end" or ""
-# Empty string means "the whole document" (no sub-document addressing).
+if TYPE_CHECKING:
+    from chromadb.api import ClientAPI
+
+# Span format: "line_start-line_end" or "chunk_idx:char_start-char_end" or
+# "chash:<sha256hex>" or "".  Empty string means "the whole document".
 _SPAN_PATTERN = re.compile(
     r"^$"                              # empty — whole document
     r"|^\d+-\d+$"                      # line range: "42-57"
     r"|^\d+:\d+-\d+$"                  # chunk:char range: "3:100-250"
+    r"|^chash:[0-9a-f]{64}$"           # content-hash: chash:<sha256hex>
 )
 
 from nexus.catalog.catalog_db import CatalogDB
@@ -103,7 +108,30 @@ def _run_git(
 
 
 class Catalog:
-    """Xanadu-inspired catalog: owners, documents, and links over JSONL + SQLite."""
+    """Xanadu-inspired catalog: owners, documents, and links over JSONL + SQLite.
+
+    Deliberate departures from Nelson's Xanadu:
+    - TTL expiry: entries with ``expires_at`` set are temporary addresses, violating
+      Nelson's "ALL ADDRESSES REMAIN VALID" principle. Tumblers are never reused
+      (high-water mark), but expired entries become unresolvable.
+    - Chunk addressing is position-based (chunk index), not content-addressed.
+      Re-indexing a document may shift which content a chunk span refers to.
+    - No tumbler arithmetic (transfinitesimal ADD/SUBTRACT). Ordering and overlap
+      detection use integer segment comparison, not Nelson's number space.
+
+    Span Policy (RDR-053):
+        Spans are optional on all link types. Accepted formats (validated by
+        ``_SPAN_PATTERN``):
+
+        - ``""`` — whole document (no sub-document addressing)
+        - ``"N-N"`` — line range (positional, legacy)
+        - ``"N:N-N"`` — chunk:char range (positional, legacy)
+        - ``"chash:<sha256hex>"`` — content-addressed chunk identity (preferred)
+
+        Content-hash spans survive re-indexing when chunk boundaries are unchanged
+        (RDR-053 D5, RF-3, RF-8). Position-based spans degrade on re-index and are
+        detectable via ``link_audit()``.
+    """
 
     def __init__(self, catalog_dir: Path, db_path: Path) -> None:
         self._dir = catalog_dir
@@ -431,6 +459,66 @@ class Catalog:
             meta=json.loads(row[11]) if row[11] else {},
         )
 
+    def descendants(self, prefix: str) -> list[dict]:
+        """All documents whose tumbler starts with *prefix* (any depth).
+
+        Unlike ``by_owner`` which returns only direct children, this returns
+        the full subtree.  The prefix itself is excluded.
+        """
+        return self._db.descendants(prefix)
+
+    def resolve_chunk(self, tumbler: Tumbler) -> dict | None:
+        """Resolve a 4-segment chunk tumbler to its document + chunk metadata.
+
+        Chunks are implicit addresses — the catalog tracks document-level entries
+        only; chunk sub-addresses are resolved on demand from the document's
+        ``chunk_count``.  Resolution parses the document prefix, verifies the
+        document exists, and checks the chunk index is in range.
+
+        Returns ``{"document_tumbler", "chunk_index", "physical_collection", ...}``
+        or None if the tumbler is not a chunk address or the document/chunk is
+        missing.
+        """
+        if tumbler.chunk is None:
+            return None
+        doc_tumbler = tumbler.document_address()
+        entry = self.resolve(doc_tumbler)
+        if entry is None:
+            return None
+        chunk_idx = tumbler.chunk
+        # chunk_count of 0 or None means count is not yet known — skip bounds check
+        if entry.chunk_count and chunk_idx >= entry.chunk_count:
+            return None
+        return {
+            "document_tumbler": str(doc_tumbler),
+            "chunk_index": chunk_idx,
+            "physical_collection": entry.physical_collection,
+            "title": entry.title,
+            "content_type": entry.content_type,
+        }
+
+    def resolve_span(self, span: str, physical_collection: str, t3: "ClientAPI") -> dict | None:
+        """Resolve a span string to its chunk content.
+
+        Handles two span formats:
+        - chash:{sha256hex}: content-addressed — queries ChromaDB by chunk_text_hash metadata.
+        - Legacy positional (digit ranges): returns None.
+        """
+        if not span.startswith("chash:"):
+            return None
+        chunk_hash = span[len("chash:"):]
+        if not re.fullmatch(r"[0-9a-f]{64}", chunk_hash):
+            raise ValueError(f"malformed chash span: {span!r}")
+        col = t3.get_collection(physical_collection)
+        result = col.get(where={"chunk_text_hash": chunk_hash}, include=["documents", "metadatas"])
+        if not result["ids"]:
+            return None
+        return {
+            "chunk_text": result["documents"][0],
+            "metadata": result["metadatas"][0],
+            "chunk_hash": chunk_hash,
+        }
+
     def update(self, tumbler: Tumbler, **fields: object) -> None:
         dir_fd = self._acquire_lock()
         try:
@@ -579,6 +667,24 @@ class Catalog:
             for r in rows
         ]
 
+    def by_content_type(self, content_type: str) -> list[CatalogEntry]:
+        """List all entries with the given content type (code, paper, rdr, knowledge)."""
+        rows = self._db.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "FROM documents WHERE content_type = ?",
+            (content_type,),
+        ).fetchall()
+        return [
+            CatalogEntry(
+                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
+                content_type=r[4], file_path=r[5], corpus=r[6],
+                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
+                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
+            )
+            for r in rows
+        ]
+
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
         """List all entries with the given corpus tag."""
         rows = self._db.execute(
@@ -662,7 +768,7 @@ class Catalog:
             if not _SPAN_PATTERN.match(span):
                 raise ValueError(
                     f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', or '' for whole document"
+                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', or '' for whole document"
                 )
         if not allow_dangling:
             errors = []
@@ -730,7 +836,12 @@ class Catalog:
     ) -> bool:
         """Create or merge a link. Returns True if new, False if merged.
 
-        Raises ValueError if either endpoint is missing (unless allow_dangling=True).
+        Spans accept ``chash:<sha256hex>`` for content-addressed chunk identity
+        (preferred) or legacy positional formats. See class docstring for full
+        span policy.
+
+        Raises ValueError if either endpoint is missing (unless allow_dangling=True)
+        or if a span string does not match ``_SPAN_PATTERN``.
         """
         dir_fd = self._acquire_lock()
         try:
@@ -765,7 +876,7 @@ class Catalog:
             if not _SPAN_PATTERN.match(span):
                 raise ValueError(
                     f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', or '' for whole document"
+                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', or '' for whole document"
                 )
         dir_fd = self._acquire_lock()
         try:
@@ -999,13 +1110,14 @@ class Catalog:
             errors.append(f"duplicate: link ({from_t}, {to_t}, {link_type!r}) already exists")
         return errors
 
-    def resolve_span(self, tumbler: Tumbler, span: str) -> str | None:
-        """Resolve a span to actual text content from T3. Returns None if unavailable.
+    def resolve_span_text(self, tumbler: Tumbler, span: str) -> str | None:
+        """Resolve a span to actual text content. Returns None if unavailable.
 
         Span formats:
         - "" → returns None (whole document, no sub-addressing)
         - "42-57" → lines 42-57 from the document's source file
         - "3:100-250" → characters 100-250 from chunk index 3 in T3
+        - "chash:<sha256hex>" → content-addressed chunk from T3
 
         This is the minimal transclusion read path — given a link with a span,
         retrieve the exact passage being referenced.
@@ -1015,6 +1127,18 @@ class Catalog:
         entry = self.resolve(tumbler)
         if entry is None:
             return None
+
+        # Content-hash span: look up by chunk_text_hash in T3
+        if span.startswith("chash:") and entry.physical_collection:
+            try:
+                from nexus.db import make_t3
+                t3 = make_t3()
+                result = self.resolve_span(span, entry.physical_collection, t3._client)
+                return result["chunk_text"] if result else None
+            except Exception:
+                _log.warning("resolve_span_text_failed", span=span,
+                             collection=entry.physical_collection, exc_info=True)
+                return None
 
         # Line-range span: read from source file
         m = re.match(r"^(\d+)-(\d+)$", span)
@@ -1052,8 +1176,19 @@ class Catalog:
 
         return None
 
-    def link_audit(self) -> dict:
-        """Audit the links table. Returns stats + orphan + duplicate lists."""
+    def link_audit(self, *, t3: "ClientAPI | None" = None) -> dict:
+        """Audit the links table. Returns stats + orphan + duplicate + chash lists.
+
+        When ``t3`` is provided, verifies each ``chash:`` span resolves to a
+        chunk in the corresponding ChromaDB collection. Unresolvable spans
+        appear in ``stale_chash``.
+
+        Args:
+            t3: Raw ChromaDB client (``chromadb.ClientAPI``), not a ``T3Database``.
+                Production callers pass ``t3_db._client``; tests pass an
+                ``EphemeralClient`` directly. Injection keeps the method testable
+                without ``make_t3()``.
+        """
         total = self._db.execute("SELECT count(*) FROM links").fetchone()[0]
         by_type = dict(
             self._db.execute(
@@ -1078,6 +1213,74 @@ class Catalog:
         duplicates = [
             {"from": r[0], "to": r[1], "type": r[2], "count": r[3]} for r in dup_rows
         ]
+        # Stale spans: positional spans pointing to documents re-indexed after link creation.
+        # Content-hash spans (chash:) are excluded — they survive re-indexing by design
+        # (RDR-053). Stale chash spans are detected separately via T3 verification below.
+        # Checks both from_span (joined on from_tumbler) and to_span (joined on to_tumbler).
+        # datetime() wraps ensure correct comparison regardless of ISO-8601 padding.
+        stale_span_rows = self._db.execute(
+            "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
+            "       d.indexed_at, 'from' AS side "
+            "FROM links l "
+            "JOIN documents d ON d.tumbler = l.from_tumbler "
+            "WHERE (l.from_span IS NOT NULL AND l.from_span != '') "
+            "  AND l.from_span NOT LIKE 'chash:%' "
+            "  AND datetime(l.created_at) < datetime(d.indexed_at) "
+            "UNION ALL "
+            "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
+            "       d.indexed_at, 'to' AS side "
+            "FROM links l "
+            "JOIN documents d ON d.tumbler = l.to_tumbler "
+            "WHERE (l.to_span IS NOT NULL AND l.to_span != '') "
+            "  AND l.to_span NOT LIKE 'chash:%' "
+            "  AND datetime(l.created_at) < datetime(d.indexed_at)"
+        ).fetchall()
+        stale_spans = [
+            {"from": r[0], "to": r[1], "type": r[2],
+             "link_created": r[3], "doc_reindexed": r[4], "side": r[5]}
+            for r in stale_span_rows
+        ]
+        # chash verification: check each chash: span resolves in T3
+        stale_chash: list[dict] = []
+        if t3 is not None:
+            chash_rows = self._db.execute(
+                "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span "
+                "FROM links WHERE from_span LIKE 'chash:%' OR to_span LIKE 'chash:%'"
+            ).fetchall()
+            for row in chash_rows:
+                from_t, to_t, lt, from_span, to_span = row
+                for span, tumbler_str in [(from_span, from_t), (to_span, to_t)]:
+                    if not span.startswith("chash:"):
+                        continue
+                    chunk_hash = span[len("chash:"):]
+                    entry = self.resolve(Tumbler.parse(tumbler_str))
+                    if entry is None:
+                        stale_chash.append(
+                            {"from": from_t, "to": to_t, "type": lt, "span": span,
+                             "reason": "document_deleted"}
+                        )
+                        continue
+                    try:
+                        col = t3.get_collection(entry.physical_collection)
+                        result = col.get(
+                            where={"chunk_text_hash": chunk_hash}, include=[]
+                        )
+                        if not result["ids"]:
+                            stale_chash.append(
+                                {"from": from_t, "to": to_t, "type": lt, "span": span,
+                                 "reason": "missing"}
+                            )
+                    except Exception as exc:
+                        _log.warning(
+                            "link_audit_chash_error",
+                            tumbler=tumbler_str, span=span,
+                            exc_info=True,
+                        )
+                        stale_chash.append(
+                            {"from": from_t, "to": to_t, "type": lt, "span": span,
+                             "reason": "error", "error": type(exc).__name__}
+                        )
+
         return {
             "total": total,
             "by_type": by_type,
@@ -1086,6 +1289,10 @@ class Catalog:
             "orphaned_count": len(orphaned),
             "duplicates": duplicates,
             "duplicate_count": len(duplicates),
+            "stale_spans": stale_spans,
+            "stale_span_count": len(stale_spans),
+            "stale_chash": stale_chash,
+            "stale_chash_count": len(stale_chash),
         }
 
     _MAX_GRAPH_DEPTH = 10

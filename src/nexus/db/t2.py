@@ -94,7 +94,8 @@ CREATE TABLE IF NOT EXISTS plans (
     plan_json  TEXT NOT NULL,
     outcome    TEXT DEFAULT 'success',
     tags       TEXT DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    ttl        INTEGER
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
@@ -122,7 +123,7 @@ END;
 """
 
 _COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl")
-_PLAN_COLUMNS = ("id", "project", "query", "plan_json", "outcome", "tags", "created_at")
+_PLAN_COLUMNS = ("id", "project", "query", "plan_json", "outcome", "tags", "created_at", "ttl")
 
 # ── FTS5 rebuild SQL (used for migration from old schema lacking 'title') ─────
 # These statements recreate only the FTS5 virtual table and its triggers after
@@ -180,6 +181,7 @@ class T2Database:
                 _log.warning("WAL mode not available", actual_mode=result[0])
             self._migrate_fts_if_needed()
             self._migrate_plans_if_needed()
+            self._migrate_plans_ttl_if_needed()
 
     def _migrate_plans_if_needed(self) -> None:
         """Add 'project' column to plans table if missing (v2.8.0 schema change).
@@ -222,6 +224,16 @@ class T2Database:
         self.conn.execute("INSERT INTO plans_fts(plans_fts) VALUES('rebuild')")
         self.conn.commit()
         _log.info("plans migration complete (added project column)")
+
+    def _migrate_plans_ttl_if_needed(self) -> None:
+        """Add 'ttl' column to plans table if missing."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(plans)").fetchall()}
+        if not cols or "ttl" in cols:
+            return
+        _log.info("Migrating plans table to add ttl column")
+        self.conn.execute("ALTER TABLE plans ADD COLUMN ttl INTEGER")
+        self.conn.commit()
+        _log.info("plans ttl migration complete")
 
     def _migrate_fts_if_needed(self) -> None:
         """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.
@@ -491,39 +503,52 @@ class T2Database:
         outcome: str = "success",
         tags: str = "",
         project: str = "",
+        ttl: int | None = None,
     ) -> int:
-        """Insert a plan record. Returns the new row ID."""
+        """Insert a plan record. Returns the new row ID.
+
+        Args:
+            ttl: Time-to-live in days. None means permanent (no expiry).
+        """
         created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._lock:
             cursor = self.conn.execute(
                 """
-                INSERT INTO plans (project, query, plan_json, outcome, tags, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO plans (project, query, plan_json, outcome, tags, created_at, ttl)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (project, query, plan_json, outcome, tags, created_at),
+                (project, query, plan_json, outcome, tags, created_at, ttl),
             )
             self.conn.commit()
         return cursor.lastrowid  # type: ignore[return-value]
 
     def search_plans(self, query: str, limit: int = 5, project: str = "") -> list[dict[str, Any]]:
-        """FTS5 search over plans (query + tags). Returns plans ordered by rank."""
+        """FTS5 search over plans (query + tags). Returns plans ordered by rank.
+
+        Expired plans (ttl set and created_at + ttl days < now) are excluded.
+        """
         safe = _sanitize_fts5(query)
+        ttl_filter = (
+            "AND (p.ttl IS NULL OR julianday('now') - julianday(p.created_at) <= p.ttl)"
+        )
         if project:
-            sql = """
-                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at
+            sql = f"""
+                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
                 FROM plans p
                 JOIN plans_fts ON plans_fts.rowid = p.id
                 WHERE plans_fts MATCH ? AND p.project = ?
+                {ttl_filter}
                 ORDER BY rank
                 LIMIT ?
             """
             params: tuple = (safe, project, limit)
         else:
-            sql = """
-                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at
+            sql = f"""
+                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
                 FROM plans p
                 JOIN plans_fts ON plans_fts.rowid = p.id
                 WHERE plans_fts MATCH ?
+                {ttl_filter}
                 ORDER BY rank
                 LIMIT ?
             """
@@ -536,17 +561,18 @@ class T2Database:
         return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
 
     def list_plans(self, limit: int = 20, project: str = "") -> list[dict[str, Any]]:
-        """Return most recent plans ordered by created_at DESC."""
+        """Return most recent non-expired plans ordered by created_at DESC."""
+        ttl_filter = "(ttl IS NULL OR julianday('now') - julianday(created_at) <= ttl)"
         if project:
-            sql = """
-                SELECT id, project, query, plan_json, outcome, tags, created_at
-                FROM plans WHERE project = ? ORDER BY created_at DESC LIMIT ?
+            sql = f"""
+                SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
+                FROM plans WHERE project = ? AND {ttl_filter} ORDER BY created_at DESC LIMIT ?
             """
             params_l: tuple = (project, limit)
         else:
-            sql = """
-                SELECT id, project, query, plan_json, outcome, tags, created_at
-                FROM plans ORDER BY created_at DESC LIMIT ?
+            sql = f"""
+                SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
+                FROM plans WHERE {ttl_filter} ORDER BY created_at DESC LIMIT ?
             """
             params_l = (limit,)
         with self._lock:

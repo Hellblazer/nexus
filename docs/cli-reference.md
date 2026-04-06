@@ -200,7 +200,9 @@ With a positional tumbler/title: BFS graph traversal. Without: flat filter query
 nx catalog link FROM TO --type TYPE [--from-span SPAN] [--to-span SPAN]
 ```
 
-Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`. Span format: `line-line` or `chunk:char-char`.
+Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`.
+
+Span formats: `line-line` (positional), `chunk:char-char` (positional), or `chash:<sha256hex>` (content-addressed, preferred). Content-hash spans survive re-indexing; positional spans may become stale.
 
 ### nx catalog unlink
 
@@ -377,6 +379,7 @@ nx collection list
 | `info NAME` | Details for one collection |
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
+| `backfill-hash [NAME]` | Add `chunk_text_hash` metadata to chunks missing it (no re-embedding) |
 | `delete NAME` | Delete collection (irreversible) |
 
 **`verify` flags:**
@@ -392,6 +395,14 @@ nx collection list
 | `--force` | Skip the pre-delete safety check (which verifies the source documents are still present before wiping the collection) |
 
 The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`code__`, `docs__`, `rdr__`, `knowledge__`) to the appropriate indexer.
+
+**`backfill-hash` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Backfill all collections instead of a single named one |
+
+Reads each chunk's stored text from ChromaDB and computes `sha256(text.encode()).hexdigest()`, updating metadata in-place. Embeddings and documents are untouched — no API keys or re-embedding needed. Idempotent: chunks that already have `chunk_text_hash` are skipped. Also runs automatically during `nx catalog setup`.
 
 **`delete` flags:**
 

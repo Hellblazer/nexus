@@ -73,7 +73,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-049](rdr-049-git-backed-catalog.md) | Git-Backed Xanadu-Inspired Catalog for T3 | Architecture | Closed | 2026-04-05 |
 | [RDR-050](rdr-050-knowledge-graph-query-planning.md) | Knowledge Graph and Catalog-Aware Query Planning | Architecture | Closed | 2026-04-05 |
 | [RDR-051](rdr-051-link-lifecycle.md) | Link Lifecycle: Full CRUD, Queryable Links, Bulk Operations | Architecture | Closed | 2026-04-05 |
-| [RDR-052](rdr-052-catalog-first-query-routing.md) | Catalog-First Query Routing — Push Planning into MCP | Architecture | Accepted | 2026-04-05 |
+| [RDR-052](rdr-052-catalog-first-query-routing.md) | Catalog-First Query Routing — Push Planning into MCP | Architecture | Closed | 2026-04-05 |
+| [RDR-053](rdr-053-xanadu-fidelity.md) | Xanadu Fidelity — Tumbler Arithmetic and Content-Addressed Spans | Architecture | Closed | 2026-04-05 |
 
 ---
 

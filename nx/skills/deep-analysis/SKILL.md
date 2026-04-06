@@ -46,7 +46,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 The deep-analyst uses `mcp__sequential-thinking__sequentialthinking`:
 1. Form initial hypothesis about the problem
 2. Identify evidence needed to validate/refute
-3. Gather evidence systematically (code, logs, metrics)
+3. Gather evidence systematically — use `query(question=..., subtree=..., follow_links="cites")` for citation-aware evidence gathering, or `query(question=..., content_type=...)` for type-scoped retrieval
 4. Evaluate hypothesis against evidence
 5. If refuted, branch to new hypothesis; iterate until root cause found
 6. Synthesize findings and provide actionable recommendations

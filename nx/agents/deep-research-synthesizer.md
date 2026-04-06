@@ -27,7 +27,7 @@ mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
 mcp__plugin_nx_nexus__catalog_search(query="...", content_type="knowledge")
 mcp__plugin_nx_nexus__catalog_links(tumbler="...", direction="both")
-mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="deep-research-synthesizer")
+mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="deep-research-synthesizer", from_span="chash:...", to_span="chash:...")
 ```
 
 See SubagentStart hook output for full tool reference.

@@ -568,7 +568,7 @@ class TestSpanTransclusionE2E:
                  from_span="2-4", to_span="")
 
         # Resolve the span — should return the actual text
-        text = cat.resolve_span(doc_a, "2-4")
+        text = cat.resolve_span_text(doc_a, "2-4")
         assert text == "line2\nline3\nline4"
 
 
@@ -617,6 +617,165 @@ class TestCatalogCompactE2E:
         cat2 = Catalog(catalog_env, fresh_db)
         doc_count_after = cat2._db.execute("SELECT count(*) FROM documents").fetchone()[0]
         assert doc_count_after == doc_count_before, "Compact + rebuild should preserve all documents"
+
+
+class TestChashSpanPipelineE2E:
+    """RDR-053: Full pipeline — index → chunk_text_hash → chash: link → audit → resolve."""
+
+    def test_index_produces_chunk_text_hash(
+        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
+    ):
+        """Indexing real code files produces chunk_text_hash in ChromaDB metadata."""
+        import hashlib
+
+        from nexus.indexer import index_repository
+
+        monkeypatch.setenv("NX_LOCAL", "1")
+        with patch("nexus.db.make_t3", return_value=local_t3), \
+             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+            index_repository(catalog_repo, registry)
+
+        # Find a code collection via catalog and verify chunk_text_hash is present
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        row = cat._db.execute(
+            "SELECT physical_collection FROM documents "
+            "WHERE content_type = 'code' LIMIT 1"
+        ).fetchone()
+        assert row, "Indexing should create at least one code document"
+        col = local_t3._client.get_collection(row[0])
+        result = col.get(limit=5, include=["documents", "metadatas"])
+        assert result["ids"], "Collection should have chunks"
+
+        for doc_text, meta in zip(result["documents"], result["metadatas"]):
+            assert "chunk_text_hash" in meta, "chunk_text_hash must be in metadata"
+            assert "content_hash" in meta, "content_hash (file-level) must still exist"
+            expected_hash = hashlib.sha256(doc_text.encode()).hexdigest()
+            assert meta["chunk_text_hash"] == expected_hash, \
+                "chunk_text_hash must equal sha256 of stored document text"
+            assert meta["chunk_text_hash"] != meta["content_hash"], \
+                "chunk-level hash must differ from file-level hash"
+
+    def test_chash_link_audit_and_resolve_roundtrip(
+        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
+    ):
+        """Create a chash: link from real indexed data, audit it, and resolve the span."""
+        from nexus.indexer import index_repository
+
+        monkeypatch.setenv("NX_LOCAL", "1")
+        with patch("nexus.db.make_t3", return_value=local_t3), \
+             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+            index_repository(catalog_repo, registry)
+
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+
+        # Pick two documents from the catalog
+        docs = cat._db.execute(
+            "SELECT tumbler, physical_collection FROM documents LIMIT 2"
+        ).fetchall()
+        assert len(docs) >= 2, "Need at least 2 documents for link test"
+        from_tumbler_str, from_collection = docs[0]
+        to_tumbler_str, _ = docs[1]
+
+        # Get a real chunk_text_hash from ChromaDB
+        col = local_t3._client.get_collection(from_collection)
+        chunk_result = col.get(limit=1, include=["documents", "metadatas"])
+        assert chunk_result["ids"], "Collection should have at least one chunk"
+        real_hash = chunk_result["metadatas"][0]["chunk_text_hash"]
+        real_text = chunk_result["documents"][0]
+
+        from nexus.catalog.tumbler import Tumbler
+        from_t = Tumbler.parse(from_tumbler_str)
+        to_t = Tumbler.parse(to_tumbler_str)
+
+        # Create a chash: link
+        created = cat.link(from_t, to_t, "quotes", "e2e-test",
+                           from_span=f"chash:{real_hash}")
+        assert created is True
+
+        # Audit — the chash span should be resolvable (not stale)
+        audit = cat.link_audit(t3=local_t3._client)
+        assert audit["stale_chash_count"] == 0, \
+            f"Real chash span should resolve. Stale: {audit['stale_chash']}"
+
+        # Resolve the span back to chunk content
+        resolved = cat.resolve_span(f"chash:{real_hash}", from_collection, local_t3._client)
+        assert resolved is not None, "resolve_span should find the chunk"
+        assert resolved["chunk_text"] == real_text
+        assert resolved["chunk_hash"] == real_hash
+
+    def test_chash_link_audit_detects_bogus_hash(
+        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
+    ):
+        """link_audit detects a chash: span pointing to a non-existent chunk."""
+        from nexus.indexer import index_repository
+
+        monkeypatch.setenv("NX_LOCAL", "1")
+        with patch("nexus.db.make_t3", return_value=local_t3), \
+             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+            index_repository(catalog_repo, registry)
+
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+
+        docs = cat._db.execute(
+            "SELECT tumbler FROM documents LIMIT 2"
+        ).fetchall()
+        assert len(docs) >= 2
+
+        from nexus.catalog.tumbler import Tumbler
+        from_t = Tumbler.parse(docs[0][0])
+        to_t = Tumbler.parse(docs[1][0])
+
+        # Create a link with a fabricated hash that doesn't exist in ChromaDB
+        bogus_hash = "f" * 64
+        cat.link(from_t, to_t, "quotes", "e2e-test",
+                 from_span=f"chash:{bogus_hash}")
+
+        audit = cat.link_audit(t3=local_t3._client)
+        assert audit["stale_chash_count"] >= 1, \
+            "Bogus chash span should be detected as stale"
+        stale_spans = [s["span"] for s in audit["stale_chash"]]
+        assert f"chash:{bogus_hash}" in stale_spans
+
+    def test_tumbler_comparison_sorted_order(self):
+        """Tumbler comparison operators produce correct sorted order."""
+        from nexus.catalog.tumbler import Tumbler
+
+        tumblers = [
+            Tumbler.parse("1.1.10"),
+            Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.3.0"),
+            Tumbler.parse("2.1.1"),
+            Tumbler.parse("1.2.1"),
+        ]
+        result = sorted(tumblers)
+        expected = [
+            Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.3.0"),
+            Tumbler.parse("1.1.10"),
+            Tumbler.parse("1.2.1"),
+            Tumbler.parse("2.1.1"),
+        ]
+        assert result == expected
+
+    def test_spans_overlap_with_real_tumblers(self):
+        """spans_overlap uses comparison operators correctly."""
+        from nexus.catalog.tumbler import Tumbler
+
+        # Overlapping spans
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7"),
+            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.10"),
+        )
+        # Non-overlapping
+        assert not Tumbler.spans_overlap(
+            Tumbler.parse("1.1.1"), Tumbler.parse("1.1.3"),
+            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.7"),
+        )
+        # Cross-depth overlap
+        assert Tumbler.spans_overlap(
+            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.3.5"),
+            Tumbler.parse("1.1.3.2"), Tumbler.parse("1.1.4"),
+        )
 
 
 class TestPlanTemplatesSeeded:

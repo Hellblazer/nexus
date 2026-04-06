@@ -34,6 +34,25 @@ class Tumbler:
     def chunk(self) -> int | None:
         return self.segments[3] if len(self.segments) > 3 else None
 
+    @property
+    def depth(self) -> int:
+        """Number of segments (dot count + 1)."""
+        return len(self.segments)
+
+    def ancestors(self) -> list[Tumbler]:
+        """All tumbler prefixes including self: 1.1.42 → [1, 1.1, 1.1.42]."""
+        return [Tumbler(self.segments[: i + 1]) for i in range(len(self.segments))]
+
+    @staticmethod
+    def lca(a: Tumbler, b: Tumbler) -> Tumbler | None:
+        """Least common ancestor. Returns None if no segments match."""
+        common: list[int] = []
+        for sa, sb in zip(a.segments, b.segments):
+            if sa != sb:
+                break
+            common.append(sa)
+        return Tumbler(tuple(common)) if common else None
+
     def is_prefix_of(self, other: Tumbler) -> bool:
         return other.segments[: len(self.segments)] == self.segments
 
@@ -46,11 +65,63 @@ class Tumbler:
     def __str__(self) -> str:
         return ".".join(str(s) for s in self.segments)
 
+    def __lt__(self, other: object) -> bool:
+        """Segment-by-segment integer comparison with -1 sentinel padding.
+
+        Shorter tumblers sort before longer ones with identical prefixes
+        (parent < child). This is simplified lexicographic ordering over
+        integer segments — not Nelson's transfinitesimal arithmetic — per
+        RDR-053 deviation D6.
+        """
+        if not isinstance(other, Tumbler):
+            return NotImplemented
+        max_len = max(len(self.segments), len(other.segments))
+        a = self.segments + (-1,) * (max_len - len(self.segments))
+        b = other.segments + (-1,) * (max_len - len(other.segments))
+        return a < b
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, Tumbler):
+            return NotImplemented
+        return self == other or self < other
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, Tumbler):
+            return NotImplemented
+        return not self <= other
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, Tumbler):
+            return NotImplemented
+        return not self < other
+
+    @staticmethod
+    def spans_overlap(
+        a_start: Tumbler, a_end: Tumbler,
+        b_start: Tumbler, b_end: Tumbler,
+    ) -> bool:
+        """True if positional span [a_start, a_end] overlaps [b_start, b_end].
+
+        Standard interval overlap: a_start <= b_end and b_start <= a_end.
+        Inclusive bounds (endpoints touching = overlapping).
+
+        Callers must ensure a_start <= a_end and b_start <= b_end (ordered
+        bounds). Reversed spans produce silently wrong results.
+
+        Applies only to positional (index-based) spans. Content-hash spans
+        (chash: format) carry no ordering — overlap is undefined for them and
+        this method must not be called with chash: span arguments.
+        """
+        return a_start <= b_end and b_start <= a_end
+
     @classmethod
     def parse(cls, s: str) -> Tumbler:
         if not s:
             raise ValueError("empty tumbler string")
-        return cls(tuple(int(x) for x in s.split(".")))
+        segs = tuple(int(x) for x in s.split("."))
+        if any(x < 0 for x in segs):
+            raise ValueError(f"tumbler segments must be non-negative: {s!r}")
+        return cls(segs)
 
 
 def _filter_fields(cls: type, obj: dict) -> dict:

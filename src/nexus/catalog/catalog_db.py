@@ -87,6 +87,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique
 
 CREATE INDEX IF NOT EXISTS idx_links_created_by_type
     ON links(created_by, link_type);
+
+CREATE INDEX IF NOT EXISTS idx_documents_tumbler
+    ON documents(tumbler);
 """
 
 
@@ -203,6 +206,27 @@ class CatalogDB:
                         "file_path", "corpus", "physical_collection", "chunk_count",
                         "head_hash", "indexed_at", "metadata"]
             return [dict(zip(columns, row)) for row in rows]
+
+    def descendants(self, prefix: str) -> list[dict]:
+        """All documents whose tumbler starts with prefix (any depth).
+
+        Uses LIKE 'prefix.%' so prefix itself is excluded — only strict
+        descendants are returned.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT tumbler, title, author, year, content_type, "
+                "file_path, corpus, physical_collection, chunk_count, "
+                "head_hash, indexed_at, metadata "
+                "FROM documents WHERE tumbler LIKE ?",
+                (prefix + ".%",),
+            ).fetchall()
+        columns = [
+            "tumbler", "title", "author", "year", "content_type",
+            "file_path", "corpus", "physical_collection", "chunk_count",
+            "head_hash", "indexed_at", "metadata",
+        ]
+        return [dict(zip(columns, row)) for row in rows]
 
     def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
         """Thread-safe execute wrapper. Acquires _lock before executing."""

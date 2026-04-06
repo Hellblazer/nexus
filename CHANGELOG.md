@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Tumbler comparison operators** (RDR-053) — `__lt__`, `__le__`, `__gt__`, `__ge__` with -1 sentinel padding for cross-depth ordering. Parent tumblers sort before their children (e.g., `1.1.3 < 1.1.3.0`).
+- **`Tumbler.spans_overlap()`** — static method for positional span overlap detection using the comparison operators.
+- **Content-addressed spans** (RDR-053) — `chunk_text_hash` (SHA-256 of chunk text) added to ChromaDB metadata in all 5 indexers (code, prose markdown, prose non-markdown, doc PDF/markdown, streaming PDF pipeline). Distinct from file-level `content_hash`.
+- **`chash:<sha256hex>` span format** — `_SPAN_PATTERN` and all link creation APIs accept content-hash spans alongside legacy positional formats. Content-hash spans survive re-indexing when chunk boundaries are unchanged.
+- **`Catalog.resolve_span()`** — resolves `chash:` spans to chunk content via ChromaDB metadata query.
+- **`link_audit()` chash verification** — optional `t3` parameter verifies each `chash:` span resolves to an actual chunk in ChromaDB. MCP `catalog_link_audit` tool now performs chash verification automatically.
+- **`nx collection backfill-hash`** — backfill `chunk_text_hash` metadata on existing chunks without re-embedding. Also integrated into `nx catalog setup` and `nx catalog backfill` for automatic backfill during onboarding.
+
 ## [3.0.0] - 2026-04-05
 
 ### Added

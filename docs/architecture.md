@@ -67,6 +67,15 @@ and scoping semantic search to relevant collections instead of searching everyth
 - `relates` — created by agents (debugger, deep-analyst, codebase-analyzer) linking related findings
 - `implements`, `quotes`, `comments` — available for manual use
 
+**Span formats** for sub-document link references:
+- `42-57` — line range (positional, may become stale on re-index)
+- `3:100-250` — chunk:char range (positional)
+- `chash:<sha256hex>` — content-addressed chunk identity (preferred, survives re-indexing)
+
+Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of stored chunk text). All 5 indexers (code, prose, doc PDF, doc markdown, streaming PDF pipeline) emit `chunk_text_hash` alongside the existing file-level `content_hash`. For existing collections, `nx catalog setup` or `nx collection backfill-hash` adds the field without re-embedding. `link_audit()` verifies chash spans resolve in T3.
+
+**Tumbler ordering**: Comparison operators (`<`, `<=`, `>`, `>=`) use -1 sentinel padding for cross-depth ordering — parent tumblers sort before their children. `Tumbler.spans_overlap()` detects positional span overlap using these operators.
+
 **Two graph views**: `catalog_links` returns only links between live documents (deleted nodes excluded).
 `catalog_link_query` returns all links including orphans — useful for admin/audit.
 
@@ -77,14 +86,14 @@ and scoping semantic search to relevant collections instead of searching everyth
 | Area | Files | What they do |
 |------|-------|-------------|
 | **Entry** | `cli.py`, `commands/` | Click CLI, one file per command group |
-| **Catalog** | `catalog/catalog.py`, `catalog_db.py`, `tumbler.py`, `link_generator.py` | Git-backed document registry + typed link graph (JSONL + SQLite). Tumbler addressing, idempotent link upsert, composable query, bulk ops, audit |
-| **Storage** | `db/t1.py`, `db/t2.py`, `db/t3.py` | Tier implementations |
+| **Catalog** | `catalog/catalog.py`, `catalog_db.py`, `tumbler.py`, `link_generator.py` | Git-backed document registry + typed link graph (JSONL + SQLite). Tumbler addressing, `descendants()`/`ancestors()`/`lca()` hierarchy helpers, `resolve_chunk()` ghost element resolution, idempotent link upsert, composable query, bulk ops, audit |
+| **Storage** | `db/t1.py`, `db/t2.py`, `db/t3.py` | Tier implementations. Plans table has `ttl` column for auto-expiry |
 | **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py`, `pipeline_buffer.py`, `pipeline_stages.py`, `checkpoint.py` | Repo indexing pipeline (decomposed per RDR-032). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` auto-detects math-heavy PDFs via FormulaItem counting and routes to MinerU (optional `conexus[mineru]` extra) for superior LaTeX extraction, falling back through enriched Docling to PyMuPDF normalized. MinerU processes large PDFs in 5-page subprocess batches for memory isolation (prevents OOM on formula-dense documents). Chunk metadata includes `has_formulas` boolean. `pipeline_buffer.py` provides a WAL-mode SQLite buffer for the three-stage streaming pipeline (RDR-048); `pipeline_stages.py` implements the concurrent extractor/chunker/uploader stages and orchestrator; `checkpoint.py` handles batch-path crash recovery for smaller documents (RDR-047) |
 | **Export** | `exporter.py` | Collection export/import for T3 backup and migration (.nxexp format) |
 | **Search** | `search_engine.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py` | Query, rank, rerank |
 | **Hooks** | `commands/hooks.py` | Git hook install/uninstall/status, sentinel-bounded stanza management |
 | **Verification** | `config.py` (verification section), `nx/hooks/scripts/stop_verification_hook.sh`, `nx/hooks/scripts/pre_close_verification_hook.sh`, `nx/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Configuration — Verification](configuration.md#verification) |
-| **MCP Server** | `mcp_server.py` | FastMCP server: T1/T2/T3 storage APIs + catalog tools. Storage: `search`, `store_put`, `store_list`, `memory_*`, `scratch_*`, `collection_*`, `plan_*`. Catalog: `catalog_search`, `catalog_show`, `catalog_links`, `catalog_link`, `catalog_unlink`, `catalog_link_query`, `catalog_link_audit`, `catalog_link_bulk`, `catalog_resolve` |
+| **MCP Server** | `mcp_server.py` | FastMCP server: T1/T2/T3 storage APIs + catalog tools. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth). Storage: `search`, `store_put`, `store_list`, `memory_*`, `scratch_*`, `collection_*`, `plan_*`. Catalog: `catalog_search`, `catalog_show`, `catalog_links`, `catalog_link`, `catalog_unlink`, `catalog_link_query`, `catalog_link_audit`, `catalog_link_bulk`, `catalog_resolve` |
 | **Enrichment** | `bib_enricher.py`, `commands/enrich.py` | Semantic Scholar bibliographic metadata lookup + `nx enrich` CLI backfill command |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py` | Configuration, naming, formatting, session lifecycle, transient-error retry |
 
@@ -106,4 +115,4 @@ and scoping semantic search to relevant collections instead of searching everyth
 
 Storage (ChromaDB + Voyage AI) and embedding layers are Nexus's own.
 
-For the original verbose architecture document, see [historical/architecture.md](historical/architecture.md).
+For project origins and inspirations, see [historical.md](historical.md).

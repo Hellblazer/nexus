@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog, CatalogEntry
+import chromadb
+
+from nexus.catalog.catalog import Catalog, CatalogEntry, _SPAN_PATTERN
 from nexus.catalog.tumbler import Tumbler
 
 
@@ -369,6 +371,104 @@ class TestDeleteDocument:
         assert len(results) == 0
 
 
+class TestDescendants:
+    def test_descendants_of_owner(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        results = cat.descendants("1.1")
+        assert len(results) == 2
+
+    def test_descendants_excludes_prefix_itself(self, tmp_path):
+        """The prefix owner '1.1' should not appear in its own descendants."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        tumblers = [r["tumbler"] for r in cat.descendants("1.1")]
+        assert "1.1" not in tumblers
+
+    def test_descendants_of_store(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        o1 = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        o2 = cat.register_owner("arcaneum", "repo", repo_hash="aabb1122")
+        cat.register(o1, "a.py", content_type="code", file_path="a.py")
+        cat.register(o2, "b.py", content_type="code", file_path="b.py")
+        results = cat.descendants("1")
+        assert len(results) == 2
+
+    def test_descendants_empty(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        results = cat.descendants("1.1")
+        assert results == []
+
+
+class TestResolveChunk:
+    def test_resolve_chunk_parses_document_prefix(self, tmp_path):
+        """resolve_chunk extracts doc tumbler + chunk index from 4-segment address."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py",
+                     physical_collection="code__nexus", chunk_count=5)
+        result = cat.resolve_chunk(Tumbler.parse("1.1.1.3"))
+        assert result is not None
+        assert result["document_tumbler"] == "1.1.1"
+        assert result["chunk_index"] == 3
+        assert result["physical_collection"] == "code__nexus"
+
+    def test_resolve_chunk_not_a_chunk(self, tmp_path):
+        """3-segment tumbler is a document, not a chunk — returns None."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        assert cat.resolve_chunk(Tumbler.parse("1.1.1")) is None
+
+    def test_resolve_chunk_document_not_found(self, tmp_path):
+        """Chunk of a non-existent document returns None."""
+        cat = _make_catalog(tmp_path)
+        assert cat.resolve_chunk(Tumbler.parse("1.1.999.3")) is None
+
+    def test_resolve_chunk_out_of_range(self, tmp_path):
+        """Chunk index beyond chunk_count returns None."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        cat.register(owner, "a.py", content_type="code", file_path="a.py",
+                     physical_collection="code__nexus", chunk_count=5)
+        assert cat.resolve_chunk(Tumbler.parse("1.1.1.10")) is None
+
+
+class TestLinkAuditStaleSpans:
+    def test_stale_span_detected(self, tmp_path):
+        """Links with spans to re-indexed docs appear in stale_spans."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        # Create link with span, backdate it
+        cat.link(doc_a, doc_b, "quotes", created_by="user", from_span="10-20")
+        cat._db.execute(
+            "UPDATE links SET created_at = '2020-01-01T00:00:00Z' WHERE from_tumbler = ?",
+            (str(doc_a),),
+        )
+        cat._db.commit()
+        # Re-index doc_a (update indexed_at to now)
+        cat.update(doc_a, head_hash="new-hash")
+        audit = cat.link_audit()
+        assert audit["stale_span_count"] >= 1
+        assert any(s["from"] == str(doc_a) for s in audit["stale_spans"])
+
+    def test_no_stale_span_when_fresh(self, tmp_path):
+        """Links created after indexing have no stale spans."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        cat.link(doc_a, doc_b, "quotes", created_by="user", from_span="10-20")
+        audit = cat.link_audit()
+        assert audit["stale_span_count"] == 0
+
+
 class TestRebuild:
     def test_rebuild_from_jsonl(self, tmp_path):
         cat = _make_catalog(tmp_path)
@@ -423,3 +523,139 @@ class TestEnsureConsistentDegradedFlag:
             cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
 
         assert cat.degraded is True
+
+
+# ── nexus-l8hp: _SPAN_PATTERN chash support ─────────────────────────────────
+
+
+class TestSpanPattern:
+    """_SPAN_PATTERN must accept chash:<sha256hex> in addition to legacy formats."""
+
+    def test_chash_valid(self):
+        assert _SPAN_PATTERN.match("chash:" + "a" * 64) is not None
+
+    def test_chash_too_short(self):
+        assert _SPAN_PATTERN.match("chash:" + "a" * 63) is None
+
+    def test_chash_too_long(self):
+        assert _SPAN_PATTERN.match("chash:" + "a" * 65) is None
+
+    def test_chash_uppercase_rejected(self):
+        assert _SPAN_PATTERN.match("chash:" + "A" * 64) is None
+
+    def test_chash_non_hex_rejected(self):
+        assert _SPAN_PATTERN.match("chash:" + "g" * 64) is None
+
+    def test_legacy_empty_still_matches(self):
+        assert _SPAN_PATTERN.match("") is not None
+
+    def test_legacy_line_range_still_matches(self):
+        assert _SPAN_PATTERN.match("42-57") is not None
+
+    def test_legacy_chunk_char_range_still_matches(self):
+        assert _SPAN_PATTERN.match("3:100-250") is not None
+
+
+# ── nexus-l8hp: resolve_span() ───────────────────────────────────────────────
+
+
+class TestResolveSpan:
+    """resolve_span() resolves chash: spans via ChromaDB metadata query."""
+
+    def test_resolve_chash_found(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        col = t3.create_collection(col_name)
+        chunk_hash = "a" * 64
+        col.add(
+            ids=["id1"],
+            documents=["hello world"],
+            metadatas=[{"chunk_text_hash": chunk_hash, "source": "test.py"}],
+        )
+        result = cat.resolve_span(f"chash:{chunk_hash}", col_name, t3)
+        assert result is not None
+        assert result["chunk_text"] == "hello world"
+        assert result["chunk_hash"] == chunk_hash
+        assert result["metadata"]["source"] == "test.py"
+
+    def test_resolve_chash_not_found(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        t3.create_collection(col_name)
+        result = cat.resolve_span("chash:" + "b" * 64, col_name, t3)
+        assert result is None
+
+    def test_resolve_empty_span_returns_none(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        t3.create_collection(col_name)
+        result = cat.resolve_span("", col_name, t3)
+        assert result is None
+
+    def test_resolve_legacy_span_returns_none(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        t3 = chromadb.EphemeralClient()
+        col_name = f"code__span_{tmp_path.name}"
+        t3.create_collection(col_name)
+        result = cat.resolve_span("42-57", col_name, t3)
+        assert result is None
+
+
+# ── nexus-4v96: link() with chash: spans ─────────────────────────────────────
+
+
+class TestLinkChashSpans:
+    def test_link_with_chash_from_span(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        created = cat.link(doc_a, doc_b, "cites", "test-agent", from_span="chash:" + "a" * 64)
+        assert created is True
+
+    def test_link_with_chash_to_span(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        created = cat.link(doc_a, doc_b, "cites", "test-agent", to_span="chash:" + "b" * 64)
+        assert created is True
+
+    def test_link_with_chash_both_spans(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        created = cat.link(
+            doc_a, doc_b, "cites", "test-agent",
+            from_span="chash:" + "a" * 64, to_span="chash:" + "b" * 64,
+        )
+        assert created is True
+
+    def test_link_rejects_invalid_chash_non_hex(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        with pytest.raises(ValueError, match="invalid"):
+            cat.link(doc_a, doc_b, "cites", "test-agent", from_span="chash:" + "z" * 64)
+
+    def test_link_rejects_invalid_chash_too_short(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        with pytest.raises(ValueError, match="invalid"):
+            cat.link(doc_a, doc_b, "cites", "test-agent", from_span="chash:" + "a" * 63)
+
+    def test_link_empty_spans_still_works(self, tmp_path):
+        """Regression: document-to-document links with empty spans."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        created = cat.link(doc_a, doc_b, "cites", "test-agent")
+        assert created is True
