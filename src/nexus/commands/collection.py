@@ -284,8 +284,15 @@ def _backfill_chunk_text_hash(
             update_ids.append(chunk_id)
             update_metas.append(new_meta)
         if update_ids:
-            col.update(ids=update_ids, metadatas=update_metas)
-            updated += len(update_ids)
+            try:
+                col.update(ids=update_ids, metadatas=update_metas)
+                updated += len(update_ids)
+            except Exception as exc:
+                exc_msg = str(exc)
+                if "Quota exceeded" in exc_msg or "NumMetadataKeys" in exc_msg:
+                    skipped += len(update_ids)  # count as skipped — too many metadata keys
+                else:
+                    raise
         offset += len(ids)
         if on_progress:
             on_progress(updated, skipped, total)
@@ -321,8 +328,8 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     for i, col_name in enumerate(sorted(targets), 1):
         try:
             col = db._client.get_collection(col_name)
-        except Exception:
-            click.echo(f"  [{i}/{len(targets)}] {col_name}: not found, skipping", err=True)
+        except Exception as exc:
+            click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
             continue
 
         def _progress(updated: int, skipped: int, total: int) -> None:
