@@ -115,6 +115,19 @@ class Catalog:
       Re-indexing a document may shift which content a chunk span refers to.
     - No tumbler arithmetic (transfinitesimal ADD/SUBTRACT). Ordering and overlap
       detection use integer segment comparison, not Nelson's number space.
+
+    Span Policy (RDR-053):
+        Spans are optional on all link types. Accepted formats (validated by
+        ``_SPAN_PATTERN``):
+
+        - ``""`` — whole document (no sub-document addressing)
+        - ``"N-N"`` — line range (positional, legacy)
+        - ``"N:N-N"`` — chunk:char range (positional, legacy)
+        - ``"chash:<sha256hex>"`` — content-addressed chunk identity (preferred)
+
+        Content-hash spans survive re-indexing when chunk boundaries are unchanged
+        (RDR-053 D5, RF-3, RF-8). Position-based spans degrade on re-index and are
+        detectable via ``link_audit()``.
     """
 
     def __init__(self, catalog_dir: Path, db_path: Path) -> None:
@@ -817,7 +830,12 @@ class Catalog:
     ) -> bool:
         """Create or merge a link. Returns True if new, False if merged.
 
-        Raises ValueError if either endpoint is missing (unless allow_dangling=True).
+        Spans accept ``chash:<sha256hex>`` for content-addressed chunk identity
+        (preferred) or legacy positional formats. See class docstring for full
+        span policy.
+
+        Raises ValueError if either endpoint is missing (unless allow_dangling=True)
+        or if a span string does not match ``_SPAN_PATTERN``.
         """
         dir_fd = self._acquire_lock()
         try:

@@ -606,3 +606,60 @@ class TestResolveSpan:
         col_name, _ = _fresh_collection()
         result = cat.resolve_span("42-57", col_name, _EPHEMERAL_T3)
         assert result is None
+
+
+# ── nexus-4v96: link() with chash: spans ─────────────────────────────────────
+
+
+class TestLinkChashSpans:
+    def test_link_with_chash_from_span(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        created = cat.link(doc_a, doc_b, "cites", "test-agent", from_span="chash:" + "a" * 64)
+        assert created is True
+
+    def test_link_with_chash_to_span(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        created = cat.link(doc_a, doc_b, "cites", "test-agent", to_span="chash:" + "b" * 64)
+        assert created is True
+
+    def test_link_with_chash_both_spans(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        created = cat.link(
+            doc_a, doc_b, "cites", "test-agent",
+            from_span="chash:" + "a" * 64, to_span="chash:" + "b" * 64,
+        )
+        assert created is True
+
+    def test_link_rejects_invalid_chash_non_hex(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        with pytest.raises(ValueError, match="invalid"):
+            cat.link(doc_a, doc_b, "cites", "test-agent", from_span="chash:" + "z" * 64)
+
+    def test_link_rejects_invalid_chash_too_short(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        with pytest.raises(ValueError, match="invalid"):
+            cat.link(doc_a, doc_b, "cites", "test-agent", from_span="chash:" + "a" * 63)
+
+    def test_link_empty_spans_still_works(self, tmp_path):
+        """Regression: document-to-document links with empty spans."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        doc_b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        created = cat.link(doc_a, doc_b, "cites", "test-agent")
+        assert created is True
