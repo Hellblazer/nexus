@@ -505,8 +505,8 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     "--type", "link_type", required=True,
     help="Link type (e.g. cites, implements, supersedes, relates, quotes, comments, or any custom type)",
 )
-@click.option("--from-span", default="", help="Span: 'line-line', 'chunk:char-char', 'chash:<hex>', or 'chash:<start>-<end>:<hex>'")
-@click.option("--to-span", default="", help="Span: 'line-line', 'chunk:char-char', 'chash:<hex>', or 'chash:<start>-<end>:<hex>'")
+@click.option("--from-span", default="", help="Span: 'line-line', 'chunk:char-char', 'chash:<hex>', or 'chash:<hex>:<start>-<end>'")
+@click.option("--to-span", default="", help="Span: 'line-line', 'chunk:char-char', 'chash:<hex>', or 'chash:<hex>:<start>-<end>'")
 def link_cmd(
     from_tumbler: str, to_tumbler: str, link_type: str,
     from_span: str, to_span: str,
@@ -522,7 +522,7 @@ def link_cmd(
       --from-span "42-57"              lines 42-57 of the source document
       --to-span "3:100-250"            chars 100-250 of chunk 3 in T3
       --from-span "chash:<sha256hex>"  content-addressed chunk (preferred)
-      --from-span "chash:100-250:<sha256hex>"  character range within a chunk
+      --from-span "chash:<sha256hex>:100-250"  character range within a chunk
     Content-hash spans survive re-indexing. Use 'nx catalog show' to see resolved span text.
     """
     cat = _get_catalog()

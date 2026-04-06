@@ -547,16 +547,16 @@ class TestSpanPattern:
         assert _SPAN_PATTERN.match("chash:" + "g" * 64) is None
 
     def test_chash_with_char_range(self):
-        assert _SPAN_PATTERN.match("chash:100-250:" + "a" * 64) is not None
+        assert _SPAN_PATTERN.match("chash:" + "a" * 64 + ":100-250") is not None
 
     def test_chash_with_char_range_single_char(self):
-        assert _SPAN_PATTERN.match("chash:0-0:" + "b" * 64) is not None
+        assert _SPAN_PATTERN.match("chash:" + "b" * 64 + ":0-0") is not None
 
     def test_chash_with_char_range_bad_hash(self):
-        assert _SPAN_PATTERN.match("chash:100-250:" + "g" * 64) is None
+        assert _SPAN_PATTERN.match("chash:" + "g" * 64 + ":100-250") is None
 
     def test_chash_with_char_range_missing_range(self):
-        assert _SPAN_PATTERN.match("chash::" + "a" * 64) is None
+        assert _SPAN_PATTERN.match("chash:" + "a" * 64 + ":") is None
 
     def test_legacy_empty_still_matches(self):
         assert _SPAN_PATTERN.match("") is not None
@@ -602,7 +602,7 @@ class TestResolveSpan:
             documents=["def hello(): return 'world'"],
             metadatas=[{"chunk_text_hash": chunk_hash}],
         )
-        result = cat.resolve_span(f"chash:4-9:{chunk_hash}", col_name, t3)
+        result = cat.resolve_span(f"chash:{chunk_hash}:4-9", col_name, t3)
         assert result is not None
         assert result["chunk_text"] == "hello"
         assert result["chunk_hash"] == chunk_hash
@@ -620,7 +620,7 @@ class TestResolveSpan:
             metadatas=[{"chunk_text_hash": chunk_hash}],
         )
         # Range extends past content — returns what's available, no error
-        result = cat.resolve_span(f"chash:2-999:{chunk_hash}", col_name, t3)
+        result = cat.resolve_span(f"chash:{chunk_hash}:2-999", col_name, t3)
         assert result is not None
         assert result["chunk_text"] == "ort"
 

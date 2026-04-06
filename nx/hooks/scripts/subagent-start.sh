@@ -165,7 +165,7 @@ The `/nx:query` skill handles full catalog-aware plan execution.
     from_span="chash:<sha256hex>", to_span="chash:<sha256hex>")
     Accepts titles or tumblers. Returns {"from", "to", "type", "created": true/false}.
     SPAN FORMAT (preferred): "chash:<64-char-hex>" — content-addressed, survives re-indexing.
-    Sub-chunk precision: "chash:<start>-<end>:<64-char-hex>" — character range within a chunk.
+    Sub-chunk precision: "chash:<64-char-hex>:<start>-<end>" — character range within a chunk.
     Get chunk hashes from search result metadata: each chunk has chunk_text_hash field.
     Fallback spans: "42-57" (line range) or "3:100-250" (chunk:char) — positional, may go stale.
   mcp__plugin_nx_nexus__catalog_link_query(link_type="cites", created_by="bib_enricher", created_at_before="...", limit=50)

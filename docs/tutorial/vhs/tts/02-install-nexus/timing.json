@@ -1,0 +1,78 @@
+{
+  "source": "../02-install-nexus.md",
+  "voice": "en-US-BrianNeural",
+  "rate": "+5%",
+  "total_duration": 37.28,
+  "segments": [
+    {
+      "index": 0,
+      "type": "voice",
+      "text": "The package name is \"conexus.\" The command is \"nx.\" One command to install.",
+      "over_screen": false,
+      "start": 0.0,
+      "end": 6.576,
+      "duration": 6.576
+    },
+    {
+      "index": 1,
+      "type": "voice",
+      "text": "uv creates an isolated environment and installs everything. No virtualenv to manage.",
+      "over_screen": true,
+      "start": 6.576,
+      "end": 12.504,
+      "duration": 5.928
+    },
+    {
+      "index": 2,
+      "type": "pause",
+      "start": 12.504,
+      "end": 14.504,
+      "duration": 2.0
+    },
+    {
+      "index": 3,
+      "type": "voice",
+      "text": "Let's verify.",
+      "over_screen": true,
+      "start": 14.504,
+      "end": 15.824,
+      "duration": 1.32
+    },
+    {
+      "index": 4,
+      "type": "voice",
+      "text": "Now the health check.",
+      "over_screen": false,
+      "start": 15.824,
+      "end": 17.336,
+      "duration": 1.512
+    },
+    {
+      "index": 5,
+      "type": "voice",
+      "text": "Checkmarks for things that are ready. X marks for things not configured. The cloud credentials show X  \u2014  that's fine. We're using local mode. Zero API keys needed.",
+      "over_screen": true,
+      "start": 17.336,
+      "end": 28.375999999999998,
+      "duration": 11.04
+    },
+    {
+      "index": 6,
+      "type": "voice",
+      "text": "Here's what nx can do.",
+      "over_screen": false,
+      "start": 28.375999999999998,
+      "end": 30.247999999999998,
+      "duration": 1.872
+    },
+    {
+      "index": 7,
+      "type": "voice",
+      "text": "The main commands: search, index, memory, and scratch. We'll cover each one next.",
+      "over_screen": true,
+      "start": 30.247999999999998,
+      "end": 37.28,
+      "duration": 7.032
+    }
+  ]
+}

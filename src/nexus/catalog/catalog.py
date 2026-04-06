@@ -26,7 +26,7 @@ _SPAN_PATTERN = re.compile(
     r"|^\d+-\d+$"                      # line range: "42-57"
     r"|^\d+:\d+-\d+$"                  # chunk:char range: "3:100-250"
     r"|^chash:[0-9a-f]{64}$"           # content-hash: chash:<sha256hex>
-    r"|^chash:\d+-\d+:[0-9a-f]{64}$"  # content-hash + char range: chash:<start>-<end>:<sha256hex>
+    r"|^chash:[0-9a-f]{64}:\d+-\d+$"  # content-hash + char range: chash:<sha256hex>:<start>-<end>
 )
 
 from nexus.catalog.catalog_db import CatalogDB
@@ -128,7 +128,7 @@ class Catalog:
         - ``"N-N"`` — line range (positional, legacy)
         - ``"N:N-N"`` — chunk:char range (positional, legacy)
         - ``"chash:<sha256hex>"`` — content-addressed chunk identity (preferred)
-        - ``"chash:<start>-<end>:<sha256hex>"`` — character range within a content-addressed chunk
+        - ``"chash:<sha256hex>:<start>-<end>"`` — character range within a content-addressed chunk
 
         Content-hash spans survive re-indexing when chunk boundaries are unchanged
         (RDR-053 D5, RF-3, RF-8). Position-based spans degrade on re-index and are
@@ -504,18 +504,18 @@ class Catalog:
 
         Handles three span formats:
         - chash:<sha256hex>: whole chunk by content hash.
-        - chash:<start>-<end>:<sha256hex>: character range within a content-addressed chunk.
+        - chash:<sha256hex>:<start>-<end>: character range within a content-addressed chunk.
         - Legacy positional (digit ranges): returns None.
         """
         if not span.startswith("chash:"):
             return None
-        # Parse: chash:<hash> or chash:<start>-<end>:<hash>
+        # Parse: chash:<hash> or chash:<hash>:<start>-<end>
         body = span[len("chash:"):]
         char_range = None
-        m = re.match(r"^(\d+)-(\d+):([0-9a-f]{64})$", body)
+        m = re.match(r"^([0-9a-f]{64}):(\d+)-(\d+)$", body)
         if m:
-            char_range = (int(m.group(1)), int(m.group(2)))
-            chunk_hash = m.group(3)
+            chunk_hash = m.group(1)
+            char_range = (int(m.group(2)), int(m.group(3)))
         elif re.fullmatch(r"[0-9a-f]{64}", body):
             chunk_hash = body
         else:
@@ -1310,9 +1310,9 @@ class Catalog:
                 for span, tumbler_str in [(from_span, from_t), (to_span, to_t)]:
                     if not span.startswith("chash:"):
                         continue
-                    # Extract hash from chash:<hash> or chash:<start>-<end>:<hash>
+                    # Extract hash from chash:<hash> or chash:<hash>:<start>-<end>
                     body = span[len("chash:"):]
-                    m_range = re.match(r"^\d+-\d+:([0-9a-f]{64})$", body)
+                    m_range = re.match(r"^([0-9a-f]{64}):\d+-\d+$", body)
                     chunk_hash = m_range.group(1) if m_range else body
                     entry = self.resolve(Tumbler.parse(tumbler_str))
                     if entry is None:

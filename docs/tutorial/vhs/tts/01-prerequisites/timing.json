@@ -1,0 +1,60 @@
+{
+  "source": "../01-prerequisites.md",
+  "voice": "en-US-BrianNeural",
+  "rate": "+5%",
+  "total_duration": 32.92,
+  "segments": [
+    {
+      "index": 0,
+      "type": "voice",
+      "text": "We need four things: uv, Python, git, and Claude Code. If you have all of these, skip to section two.\n\nLet's check.",
+      "over_screen": false,
+      "start": 0.0,
+      "end": 7.344,
+      "duration": 7.344
+    },
+    {
+      "index": 1,
+      "type": "voice",
+      "text": "We need Python 3.12 or 3.13. If you're on 3.14 or newer, nexus won't install yet. If you're on 3.11 or older, you'll need to upgrade.\n\nDon't worry  \u2014  uv handles Python versions for you.",
+      "over_screen": false,
+      "start": 7.344,
+      "end": 21.816,
+      "duration": 14.472
+    },
+    {
+      "index": 2,
+      "type": "pause",
+      "start": 21.816,
+      "end": 22.816,
+      "duration": 1.0
+    },
+    {
+      "index": 3,
+      "type": "voice",
+      "text": "Now let's install uv.",
+      "over_screen": false,
+      "start": 22.816,
+      "end": 24.784,
+      "duration": 1.968
+    },
+    {
+      "index": 4,
+      "type": "voice",
+      "text": "If you need a specific Python version, uv can install it.",
+      "over_screen": false,
+      "start": 24.784,
+      "end": 28.48,
+      "duration": 3.696
+    },
+    {
+      "index": 5,
+      "type": "voice",
+      "text": "Last thing  \u2014  Claude Code. You probably already have it. If not:",
+      "over_screen": false,
+      "start": 28.48,
+      "end": 32.92,
+      "duration": 4.44
+    }
+  ]
+}

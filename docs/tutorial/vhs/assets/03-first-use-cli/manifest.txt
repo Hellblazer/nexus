@@ -1,0 +1,61 @@
+# 03-first-use-cli — Assembly Guide
+
+ 1. VOICE           6.2s  audio/01-voice-lets-use-nexus-for-real-ever.mp3
+    "Let's use nexus for real. Everything here runs locally. No accounts, no API keys..."
+
+ 2. VOICE          13.2s  audio/02-voice-memory-is-nexuss-notepad-sto.mp3
+    "Memory is nexus's notepad. Store things by project. They survive across sessions..."
+
+ 3. SCREEN         11.2s  video/01-nx-memory-put-auth-uses-jwt-t.mp4
+    Commands: nx memory put "Auth uses JWT tokens with 24-hour expiry" --project demo-repo --title auth-notes --ttl permanent && nx memory list --project demo-repo && nx memory get --project demo-repo --title auth-notes && nx memory search "JWT"
+
+ 4. VOICE OVER      4.4s  audio/03-voiceover-store-list-retrieve-search.mp3
+    "Store, list, retrieve, search. That's the whole model...."
+
+ 5. PAUSE         1.0s
+
+ 6. VOICE           7.4s  audio/04-voice-scratch-is-like-memory-but-te.mp3
+    "Scratch is like memory, but temporary. It lasts one session. Good for working no..."
+
+ 7. SCREEN         78.3s  video/02-nx-scratch-put-hypothesis-th.mp4
+    Commands: nx scratch put "hypothesis: the bug is in the retry logic" && nx scratch list && nx scratch search "retry"
+
+ 8. VOICE           2.4s  audio/05-voice-when-the-session-ends-scratch.mp3
+    "When the session ends, scratch is gone...."
+
+ 9. PAUSE         1.0s
+
+10. VOICE           9.7s  audio/06-voice-now-the-main-event-semantic-s.mp3
+    "Now the main event. Semantic search. Regular search matches exact words. Nexus m..."
+
+11. SCREEN          8.0s  video/03-nx-index-repo.mp4
+    Commands: nx index repo .
+
+12. VOICE OVER      6.5s  audio/07-voiceover-that-analyzed-every-file-c.mp3
+    "That analyzed every file  —  code, docs, everything  —  and made it all searchab..."
+
+13. PAUSE         2.0s
+
+14. VOICE OVER      1.3s  audio/08-voiceover-now-lets-search.mp3
+    "Now let's search...."
+
+15. SCREEN         13.9s  video/04-nx-search-how-does-authentica.mp4
+    Commands: nx search "how does authentication work" && nx search "error handling" --corpus code && nx search "getting started" --corpus docs && nx search "retry logic" -c
+
+16. VOICE OVER      8.8s  audio/09-voiceover-the-results-found-relevant-cod.mp3
+    "The results found relevant code even when the exact words didn't match. That's s..."
+
+17. PAUSE         2.0s
+
+18. VOICE           4.1s  audio/10-voice-quick-tip-you-can-re-index.mp3
+    "Quick tip  —  you can re-index automatically after every commit...."
+
+19. SCREEN          5.0s  video/05-nx-hooks-install.mp4
+    Commands: nx hooks install
+
+20. VOICE           4.1s  audio/11-voice-set-it-up-once-every-commit-k.mp3
+    "Set it up once. Every commit keeps your search index fresh...."
+
+21. OVERLAY       (add title in FCP)
+    "**CLI Quick Reference**
+- `nx memory put "text" -p project -t title` — save a no..."

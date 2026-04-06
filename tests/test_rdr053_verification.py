@@ -227,7 +227,7 @@ class TestResolveSpanText:
         mock_t3 = MagicMock()
         mock_t3._client = t3
         with patch("nexus.db.make_t3", return_value=mock_t3):
-            result = cat.resolve_span_text(doc, f"chash:4-9:{HASH_A}")
+            result = cat.resolve_span_text(doc, f"chash:{HASH_A}:4-9")
         assert result == "hello"
 
     def test_resolve_span_text_chash_not_found(self, tmp_path):
