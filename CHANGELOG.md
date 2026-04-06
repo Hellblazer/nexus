@@ -6,13 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.1.2] - 2026-04-06
+
 ### Added
 - **Sub-chunk character ranges** — `chash:<sha256hex>:<start>-<end>` references a character range within a content-addressed chunk. The hash pins the chunk; the range pins the passage within it. Character offsets are inherently stable because the hash guarantees the content hasn't changed.
 - **Custom link types** — the CLI `--type` flag now accepts any string, not just the seven built-in types.
 
 ### Docs
-- **[Xanadu in Nexus](docs/xanadu-in-nexus.md)** — new document explaining the Xanadu lineage, cross-document linkage problem, and how the link graph enables plan-driven agentic search.
+- **[Xanadu in Nexus](docs/xanadu-in-nexus.md)** — Xanadu lineage, cross-document linkage problem, and how the link graph enables plan-driven agentic search.
 - **[Querying Guide](docs/querying-guide.md)** — `nx search` vs `query()` MCP vs `/nx:query` skill with catalog-aware routing and analytical query examples.
+- Expanded catalog guide with tumbler addressing, link type guidance, span lifecycle, admin operations, and troubleshooting.
 
 ## [3.1.1] - 2026-04-06
 
