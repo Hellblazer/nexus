@@ -105,6 +105,9 @@ class Tumbler:
         Standard interval overlap: a_start <= b_end and b_start <= a_end.
         Inclusive bounds (endpoints touching = overlapping).
 
+        Callers must ensure a_start <= a_end and b_start <= b_end (ordered
+        bounds). Reversed spans produce silently wrong results.
+
         Applies only to positional (index-based) spans. Content-hash spans
         (chash: format) carry no ordering — overlap is undefined for them and
         this method must not be called with chash: span arguments.

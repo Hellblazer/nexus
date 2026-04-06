@@ -237,11 +237,17 @@ class TestTumblerSpansOverlap:
         )
 
     def test_cross_depth(self):
-        # Uses -1 sentinel padding from comparison operators
+        # Uses -1 sentinel padding from comparison operators (D6, RF-5)
         assert Tumbler.spans_overlap(
             Tumbler.parse("1.1.3"), Tumbler.parse("1.1.3.5"),
             Tumbler.parse("1.1.3.2"), Tumbler.parse("1.1.4"),
         )
+
+    def test_commutative(self):
+        # Overlap is symmetric: spans_overlap(a, b) == spans_overlap(b, a)
+        a_s, a_e = Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7")
+        b_s, b_e = Tumbler.parse("1.1.5"), Tumbler.parse("1.1.10")
+        assert Tumbler.spans_overlap(a_s, a_e, b_s, b_e) == Tumbler.spans_overlap(b_s, b_e, a_s, a_e)
 
 
 class TestTumblerLCA:
