@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-04-06
+
 ### Added
 - **Tumbler comparison operators** (RDR-053) — `__lt__`, `__le__`, `__gt__`, `__ge__` with -1 sentinel padding for cross-depth ordering. Parent tumblers sort before their children (e.g., `1.1.3 < 1.1.3.0`).
 - **`Tumbler.spans_overlap()`** — static method for positional span overlap detection using the comparison operators.
@@ -14,6 +16,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`Catalog.resolve_span()`** — resolves `chash:` spans to chunk content via ChromaDB metadata query.
 - **`link_audit()` chash verification** — optional `t3` parameter verifies each `chash:` span resolves to an actual chunk in ChromaDB. MCP `catalog_link_audit` tool now performs chash verification automatically.
 - **`nx collection backfill-hash`** — backfill `chunk_text_hash` metadata on existing chunks without re-embedding. Also integrated into `nx catalog setup` and `nx catalog backfill` for automatic backfill during onboarding.
+- **Querying guide** — new `docs/querying-guide.md` documenting `nx search` vs `query()` MCP vs `/nx:query` skill, catalog-aware routing, three-path dispatch, and analytical query examples.
+
+### Fixed
+- `resolve_span_text()` now handles `chash:` spans (was silently returning None for the preferred format).
+- `stale_spans` audit excludes `chash:` spans (they survive re-indexing by design) and checks both `from_span` and `to_span`.
+- `stale_chash` entries include `reason` field (`missing`, `document_deleted`, `error`) for actionable diagnostics.
+- Plan template seeding uses direct SQL instead of fragile FTS search for idempotency.
+- TTL migration detection uses `PRAGMA table_info` instead of DDL substring match.
+- Stale-span timestamp comparison uses `datetime()` wrapping for safe ISO-8601 comparison.
+
+### Changed
+- CI runs only on PRs to main (not every push to every branch), with `concurrency: cancel-in-progress` to prevent run pile-ups. 10-minute job timeout added.
+
+### Docs
+- Expanded `docs/catalog.md` with tumbler addressing, link type guidance, span lifecycle, admin operations, and troubleshooting.
+- Updated all 7 link-creating agents with `chash:` span format in tool signatures.
+- Updated SubagentStart hook, session_start_hook, and CONTEXT_PROTOCOL with catalog-aware guidance.
 
 ## [3.0.0] - 2026-04-05
 

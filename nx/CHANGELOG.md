@@ -6,9 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-04-06
+
 ### Added
 - `catalog_link_audit` MCP tool now performs content-hash span verification against T3 automatically
 - Agents creating links can use `chash:<sha256hex>` spans for content-addressed chunk references (preferred over positional spans)
+- All 7 link-creating agent tool signatures include `from_span`/`to_span` with chash: format
+- SubagentStart hook injects chash: span guidance alongside catalog tools
+- CONTEXT_PROTOCOL updated with Catalog tier in storage table and catalog-aware search options
+- Session start hook surfaces `chunk_text_hash` and catalog routing params
 
 ## [3.0.0] - 2026-04-05
 
