@@ -159,6 +159,114 @@ class TestCodeRdrLinkCap:
         assert len(links) == _MAX_RDR_MATCHES_PER_CODE
 
 
+class TestRdrFilePathLinks:
+    """Test generate_rdr_filepath_links — extract file paths from RDR content."""
+
+    def test_backtick_path_creates_link(self, tmp_path):
+        from nexus.catalog.link_generator import generate_rdr_filepath_links
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
+        code_t = cat.register(
+            owner, "catalog.py", content_type="code",
+            file_path="src/nexus/catalog/catalog.py",
+        )
+        rdr_path = tmp_path / "rdr.md"
+        rdr_path.write_text("We modified `src/nexus/catalog/catalog.py` to fix the bug.")
+        rdr_t = cat.register(
+            owner, "Fix Catalog Bug", content_type="rdr",
+            file_path=str(rdr_path),
+        )
+        count = generate_rdr_filepath_links(cat)
+        assert count == 1
+        links = cat.links_from(rdr_t, link_type="implements")
+        assert len(links) == 1
+        assert links[0].created_by == "filepath_extractor"
+
+    def test_bare_path_creates_link(self, tmp_path):
+        from nexus.catalog.link_generator import generate_rdr_filepath_links
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
+        cat.register(
+            owner, "indexer.py", content_type="code",
+            file_path="src/nexus/indexer.py",
+        )
+        rdr_path = tmp_path / "rdr.md"
+        rdr_path.write_text("Changes go into src/nexus/indexer.py for the pipeline.")
+        rdr_t = cat.register(
+            owner, "Pipeline Design", content_type="rdr",
+            file_path=str(rdr_path),
+        )
+        count = generate_rdr_filepath_links(cat)
+        assert count == 1
+
+    def test_multiple_paths_in_one_rdr(self, tmp_path):
+        from nexus.catalog.link_generator import generate_rdr_filepath_links
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
+        cat.register(owner, "a.py", content_type="code", file_path="src/a.py")
+        cat.register(owner, "b.py", content_type="code", file_path="src/b.py")
+        rdr_path = tmp_path / "rdr.md"
+        rdr_path.write_text("Modify `src/a.py` and `src/b.py` together.")
+        cat.register(owner, "Multi-file RDR", content_type="rdr", file_path=str(rdr_path))
+        count = generate_rdr_filepath_links(cat)
+        assert count == 2
+
+    def test_no_link_for_unindexed_path(self, tmp_path):
+        from nexus.catalog.link_generator import generate_rdr_filepath_links
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
+        rdr_path = tmp_path / "rdr.md"
+        rdr_path.write_text("See `src/nexus/missing_file.py` for details.")
+        cat.register(owner, "Dangling Ref", content_type="rdr", file_path=str(rdr_path))
+        count = generate_rdr_filepath_links(cat)
+        assert count == 0
+
+    def test_no_duplicate_on_rerun(self, tmp_path):
+        from nexus.catalog.link_generator import generate_rdr_filepath_links
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
+        cat.register(owner, "catalog.py", content_type="code", file_path="src/catalog.py")
+        rdr_path = tmp_path / "rdr.md"
+        rdr_path.write_text("Edit `src/catalog.py`.")
+        cat.register(owner, "Catalog Work", content_type="rdr", file_path=str(rdr_path))
+        generate_rdr_filepath_links(cat)
+        count2 = generate_rdr_filepath_links(cat)
+        assert count2 == 0
+
+    def test_rdr_without_file_on_disk_skipped(self, tmp_path):
+        from nexus.catalog.link_generator import generate_rdr_filepath_links
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
+        cat.register(owner, "ghost.py", content_type="code", file_path="src/ghost.py")
+        cat.register(
+            owner, "Ghost RDR", content_type="rdr",
+            file_path="/nonexistent/path/rdr.md",
+        )
+        count = generate_rdr_filepath_links(cat)
+        assert count == 0  # RDR file doesn't exist, skip gracefully
+
+    def test_test_file_paths_matched(self, tmp_path):
+        from nexus.catalog.link_generator import generate_rdr_filepath_links
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
+        cat.register(
+            owner, "test_catalog.py", content_type="code",
+            file_path="tests/test_catalog.py",
+        )
+        rdr_path = tmp_path / "rdr.md"
+        rdr_path.write_text("Run `tests/test_catalog.py` to verify.")
+        cat.register(owner, "Test Coverage", content_type="rdr", file_path=str(rdr_path))
+        count = generate_rdr_filepath_links(cat)
+        assert count == 1
+
+
 class TestCreatedByTracking:
     def test_all_auto_links_have_machine_created_by(self, tmp_path):
         from nexus.catalog.link_generator import (

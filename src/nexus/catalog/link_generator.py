@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import structlog
@@ -48,6 +49,68 @@ def generate_citation_links(cat: Catalog) -> int:
                 if cat.link_if_absent(from_tumbler, to_tumbler, "cites", created_by="bib_enricher"):
                     count += 1
                     _log.debug("citation_link_created", from_t=str(from_tumbler), to_t=str(to_tumbler))
+
+    return count
+
+
+_FILE_PATH_RE = re.compile(
+    r"(?:src|tests|lib|pkg|cmd|internal|app)/"  # must start with a source root
+    r"[\w/.-]+"                                  # path chars
+    r"\.(?:py|java|go|rs|ts|tsx|js|jsx|c|cpp|h|rb|php|swift|kt|scala)"  # source extension
+)
+
+
+def generate_rdr_filepath_links(cat: Catalog) -> int:
+    """Extract file paths from RDR content and link to matching code entries.
+
+    Scans each RDR's file on disk for source file paths (e.g.,
+    ``src/nexus/catalog/catalog.py``). Matches against catalog code entries
+    by file_path. Creates ``implements`` links (RDR → code).
+    created_by='filepath_extractor'.
+    """
+    entries = _all_entries(cat)
+    rdr_entries = [e for e in entries if e.content_type == "rdr" and e.file_path]
+    code_entries = [e for e in entries if e.content_type == "code" and e.file_path]
+
+    # Index: file_path → tumbler (code entries)
+    path_to_code: dict[str, Tumbler] = {}
+    for code in code_entries:
+        path_to_code[code.file_path] = code.tumbler
+
+    count = 0
+    for rdr in rdr_entries:
+        rdr_path = Path(rdr.file_path)
+        if not rdr_path.is_file():
+            continue
+        try:
+            text = rdr_path.read_text(errors="replace")
+        except OSError:
+            continue
+
+        # Find all file paths in the RDR text
+        seen_targets: set[str] = set()
+        for match in _FILE_PATH_RE.finditer(text):
+            fpath = match.group(0)
+            if fpath in seen_targets:
+                continue
+            seen_targets.add(fpath)
+            code_tumbler = path_to_code.get(fpath)
+            if code_tumbler is None:
+                continue
+            try:
+                created = cat.link_if_absent(
+                    rdr.tumbler, code_tumbler, "implements",
+                    created_by="filepath_extractor",
+                )
+            except ValueError:
+                continue
+            if created:
+                count += 1
+                _log.debug(
+                    "rdr_filepath_link_created",
+                    rdr=str(rdr.tumbler), code=str(code_tumbler),
+                    path=fpath,
+                )
 
     return count
 
