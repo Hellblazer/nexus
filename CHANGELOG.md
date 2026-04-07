@@ -6,6 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Chunk boundary overlap** (RDR-054) — wired dead `overlap_chars` into `SemanticMarkdownChunker._split_large_section`, which previously had zero overlap between sub-chunks. Bumped `PDFChunker` default overlap from 15% to 20% (225 → 300 chars). Fixed header duplication bug when overlap exceeds emitted content length. Guarded Python `[-0:]` edge case.
+
 ## [3.2.3] - 2026-04-07
 
 ### Fixed
