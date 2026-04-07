@@ -944,6 +944,9 @@ def scratch(
 ) -> str:
     """T1 session scratch pad — ephemeral within-session storage.
 
+    For ``search`` and ``list``, results are capped at ``limit``. A footer
+    indicates when more entries exist.
+
     Args:
         action: One of "put", "search", "list", "get", "delete"
         content: Content to store (for "put")
@@ -972,17 +975,23 @@ def scratch(
             for r in results:
                 snippet = r["content"][:200].replace("\n", " ")
                 lines.append(f"{prefix}[{r['id'][:12]}] {snippet}")
+            if len(results) >= limit:
+                lines.append(f"\n--- showing {len(results)} results (limit={limit}). Increase limit to see more.")
             return "\n".join(lines)
 
         elif action == "list":
             entries = t1.list_entries()
             if not entries:
                 return f"{prefix}No scratch entries."
+            total = len(entries)
+            entries = entries[:limit]
             lines = []
             for e in entries:
                 snippet = e["content"][:80].replace("\n", " ")
                 tags_str = f"  [{e.get('tags', '')}]" if e.get("tags") else ""
                 lines.append(f"{prefix}[{e['id'][:12]}] {snippet}{tags_str}")
+            if total > limit:
+                lines.append(f"\n--- showing {limit} of {total} entries. Increase limit to see all.")
             return "\n".join(lines)
 
         elif action == "get":
