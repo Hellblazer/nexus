@@ -281,6 +281,7 @@ _DEFAULTS: dict[str, Any] = {
     },
     "search": {
         "hybrid_default": False,
+        "hnsw_ef": 256,
     },
     "voyageai": {
         "read_timeout_seconds": 120,

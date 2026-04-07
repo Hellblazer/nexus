@@ -1129,6 +1129,8 @@ def collection_verify(name: str) -> str:
         ]
         if result.distance is not None:
             lines.append(f"Probe distance: {result.distance:.4f} ({result.metric})")
+        if result.probe_hit_rate is not None:
+            lines.append(f"Probe hit rate: {result.probe_hit_rate:.0%}")
         if result.probe_doc_id:
             lines.append(f"Probe doc: {result.probe_doc_id}")
         return "\n".join(lines)

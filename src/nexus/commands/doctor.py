@@ -258,8 +258,26 @@ def _check_chroma_pagination(lines: list[str], client: object, db_name: str) -> 
     default=False,
     help="Delete orphaned PDF pipeline buffer entries (stale or missing source PDF).",
 )
-def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool) -> None:
+@click.option(
+    "--fix",
+    is_flag=True,
+    default=False,
+    help="Apply HNSW ef tuning to all local collections (local mode only).",
+)
+def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool) -> None:
     """Verify that all required services and credentials are available."""
+    if fix:
+        from nexus.config import is_local_mode, _default_local_path
+        from nexus.db.t3 import T3Database, apply_hnsw_ef
+        if not is_local_mode():
+            click.echo("SPANN defaults adequate — no HNSW tuning needed (cloud mode)")
+            return
+        local_path = _default_local_path()
+        db = T3Database(local_mode=True, local_path=str(local_path))
+        count = apply_hnsw_ef(db)
+        click.echo(f"Updated HNSW search_ef on {count} collection(s).")
+        return
+
     if clean_checkpoints:
         from nexus.checkpoint import scan_orphaned_checkpoints
         deleted = scan_orphaned_checkpoints(delete=True)
