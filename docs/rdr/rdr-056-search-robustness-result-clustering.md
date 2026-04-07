@@ -2,7 +2,9 @@
 title: "Search Robustness and Result Clustering"
 id: RDR-056
 type: Feature
-status: draft
+status: accepted
+accepted_date: 2026-04-07
+reviewed-by: self
 priority: high
 author: Hal Hildebrand
 created: 2026-04-07
@@ -146,17 +148,45 @@ All collections default to L2 distance (`hnsw:space="l2"`). No distance threshol
 
 Three entry points: MCP `search` (flat chunks), MCP `query` (already groups by document), CLI `search` (hybrid scoring + reranking). Cleanest integration: new `src/nexus/search_clusterer.py` module called optionally from `search_engine.py` with `cluster_by` parameter. MCP `query()` already groups by document — semantic clustering is complementary, not replacement.
 
-### RF-16: Code Search Broken — Embedding Model Mismatch (Bug Discovery)
+### RF-16: Code Search Was Broken — Embedding Model Mismatch (FIXED in RDR-059 / v3.2.5)
 
-**Source**: Codebase audit + RF-13 empirical falsification → **RDR-059 (critical bug)**
+**Source**: Codebase audit + RF-13 empirical falsification → **RDR-059 (fixed)**
 
-code__ indexed with voyage-code-3 but queried with voyage-4 `input_type=None`. Produces random noise (0.038 spread). `corpus.py:52` claim "compatible enough" is empirically falsified. See RDR-059 for fix options.
+code__ was indexed with voyage-code-3 but queried with voyage-4. Fixed in v3.2.5: query model now matches index model. Code search distances dropped from 0.86-0.93 (noise) to 0.28-0.29 (relevant). See RF-18.
+
+### RF-18: Post-Fix Code Search Validation (v3.2.5 Live Measurement)
+
+
+**Source**: Live `nx search` against `code__nexus` after RDR-059 fix deployed
+
+Before: distances 0.858-0.931, spread 0.038 (random noise, GPU shaders for NL queries).
+After: distances 0.287-0.289, spread 0.002 (tight cluster of relevant verify_collection_deep code).
+
+**Impact on RF-13 baseline**: Code corpus data invalidated — distances are now comparable to knowledge/docs (~0.28-0.45). The "corpus-specific thresholds" recommendation may simplify to a single universal threshold (~0.55) now that all corpora have coherent embedding spaces. Knowledge/docs long-tail and bimodal findings remain valid.
 
 ### RF-17: SPANN Behavior — Immutable, Hybrid Architecture, Potentially More Robust (ChromaDB Research)
 
 **Source**: ChromaDB official docs, Cookbook, Rust source analysis, Robustness paper cross-reference
 
 SPANN defaults: ef_search=200, search_nprobe=64. **Params immutable after creation** — modify() silently ignored. SPANN is IVF+HNSW hybrid (centroid layer is HNSW, posting lists hold embeddings). Partition-based indexes have 3.4-7.6x fewer zero-recall than pure HNSW. Cloud mode may be more robust than local for tail failures. Small collections (<1K docs) run near-brute-force regardless. Existing collections at server defaults with no introspection API.
+
+### RF-21: Post-Fix Baseline — Per-Corpus Thresholds Validated (v3.2.5 Measurement)
+
+**Source**: 10 queries × 20 results, all corpora, post-RDR-059
+
+Code: mean 0.34 (was 0.89), 0% >0.7 (was 100%). Now best corpus. Cross-corpus: mean 0.43 (was 0.62), 0% >0.7 (was 20%). Knowledge/docs: modest improvement, still bimodal — top ~5 relevant (0.41-0.59), rest noise (0.67+). Universal threshold does NOT work. Per-corpus: code 0.45, knowledge/docs 0.65, cross-corpus 0.55. Alternative two-tier: <0.50 high confidence, 0.50-0.65 relevant, >0.65 noise.
+
+### RF-19: SPANN Defaults Are Adequate — Tuning Not Worth the Constraint
+
+**Source**: Robustness paper §5.4.2 + RF-17 SPANN defaults cross-analysis
+
+SPANN defaults (`ef_search=200`, `search_nprobe=64`) are already 2x the HNSW default. The Robustness paper shows partition-based indexes reach Robustness-0.3@10=0.998 at nprobe=100, with diminishing returns after 50-100. SPANN's nprobe=64 is in the sweet spot. Partition-based failures are graceful (vectors still in top-100) vs HNSW catastrophic (91% outside top-100). **Recommendation**: Do not tune SPANN. Focus HNSW tuning on local mode only.
+
+### RF-20: Agent Benefit from Clustered Output Is Assumed, Not Measured (Speculative)
+
+**Source**: HoldUp/Memory paper extrapolation
+
+HoldUp proves 20-30% accuracy improvement from clustering for LLM classification of tabular records. Transfer to "agent consuming search result chunks" is plausible but unproven. Key difference: HoldUp processes ALL records; agents typically stop at top-5. **Recommendation**: Ship clustering as optional (`cluster_by` parameter). A/B test on 3-5 research-synthesizer tasks before making default. Phase 1 (HNSW tuning, multi-probe, thresholds) is independently justified — don't block on clustering validation.
 
 ## Proposed Design
 
@@ -171,33 +201,47 @@ SPANN defaults: ef_search=200, search_nprobe=64. **Params immutable after creati
 - **Existing collections**: `col.modify(configuration={"hnsw": {"ef_search": 256}})` — instant, non-destructive (RF-11 confirmed mutable).
 - Default search_ef=100 is the single highest-leverage parameter for tail robustness.
 
-**Cloud mode** (CloudClient, SPANN index — RF-12, RF-17):
-- **SPANN params are IMMUTABLE after creation** (RF-17). Official docs: "If you set these values they will be ignored by the server." `modify()` is silently ignored.
-- **Existing collections**: Running at server defaults (`ef_search=200`, `search_nprobe=64`). Cannot be changed. No introspection API.
-- **New collections**: Pass `configuration={"spann": {"ef_search": 256, "search_nprobe": 128}}` at creation time. **This is the only opportunity to tune.**
-- **Good news (RF-17)**: SPANN is IVF+HNSW hybrid. Partition-based indexes have 3.4-7.6x fewer zero-recall than pure HNSW (Robustness paper). Cloud mode may already be more robust than local HNSW for tail failures. Small collections (<1K docs) effectively run brute-force regardless.
-- **Latent bug**: `t3.py:841` reads `meta.get("hnsw:space", "l2")` — HNSW legacy key that SPANN collections don't populate. Falls back to "l2" which is coincidentally correct but fragile.
+**Cloud mode** (CloudClient, SPANN index — RF-12, RF-17, RF-19):
+- **No tuning needed** (RF-19). SPANN defaults (`ef_search=200`, `search_nprobe=64`) are already in the robust operating range — 2x the HNSW default, within the Robustness paper's optimal nprobe zone. Partition-based failures are graceful (vectors still in top-100) vs HNSW catastrophic (91% outside top-100).
+- SPANN params are immutable after creation. Tuning would require collection recreation for marginal gain over already-good defaults. Not recommended.
+- **Latent bug**: `t3.py:841` reads `meta.get("hnsw:space", "l2")` — HNSW legacy key that SPANN collections don't populate. Falls back to "l2" which is coincidentally correct but fragile. Fix to detect index type.
 
-Detection: `T3Database._local_mode` already distinguishes modes.
+**Detection and `nx doctor --fix` path**: `T3Database._local_mode` distinguishes modes. `nx doctor --fix` iterates `t3.list_collections()`, and for each: if `_local_mode`, calls `col.modify(configuration={"hnsw": {"ef_search": 256}})`. In cloud mode, skip HNSW tuning (SPANN defaults adequate per RF-19). The `hnsw:space` latent bug fix: in cloud mode, return the known SPANN default (`"l2"`) rather than reading the absent HNSW metadata key.
 
 **1b. Multi-probe verify_collection_deep()**
 
 Use `col.peek(limit=5)` instead of 1 document. Query each, report fraction recovered as `probe_hit_rate` in VerifyResult. Gives crude Robustness-δ@K proxy at δ=1.0.
 
-**1c. Corpus-specific distance thresholds (RF-13)**
+**1c. Per-corpus distance thresholds (RF-21 — post-fix baseline validated)**
 
-Add post-search filtering in `search_cross_corpus()` or the MCP `search` tool. Drop results exceeding corpus-specific distance thresholds:
-- `knowledge__*`, `docs__*`, `rdr__*`: 0.55 (aggressive, retains only clearly relevant)
-- `code__*`: 0.85 (or disable NL→code entirely when query is natural language)
-- Cross-corpus default: 0.65
+Post-fix baseline (v3.2.5) confirms a **single universal threshold does NOT work**. Knowledge/docs show bimodal distributions (relevant at 0.41-0.59, noise at 0.67+) while code is tight (all <0.43). Per-corpus thresholds:
 
-Configurable via `.nexus.yml` (`search.distance_threshold`). Log dropped results count at debug level for monitoring.
+| Corpus | Threshold | Rationale |
+|--------|-----------|-----------|
+| `code__*` | 0.45 | All relevant hits <0.43, clear separation |
+| `knowledge__*`, `docs__*`, `rdr__*` | 0.65 | Captures relevant cluster, avoids noise tail starting at ~0.67 |
+| Cross-corpus default | 0.55 | 93% of results below in post-fix measurement |
+
+Alternative: two-tier confidence (`<0.50` = high, `0.50-0.65` = relevant, `>0.65` = noise).
+
+Apply thresholds per-collection by examining `result.collection` prefix post-merge in `search_cross_corpus()`. Configurable via `.nexus.yml` (`search.distance_threshold.<prefix>`). Log dropped results count at debug level.
+
+**Note**: The code threshold (0.45) is functionally inert under current distributions (all code results <0.43) — its value is guarding against future model changes.
+
+**RDR-055 interaction**: When E2 quality-weighted reranking (RDR-055) is active for a collection, these thresholds apply *post-rerank*, not pre-rerank. A chunk with high distance but high citation count should survive threshold filtering if E2 elevates it. If E2 is not yet implemented, thresholds apply to raw distance. Re-validate thresholds after RDR-055 E1 re-indexing (section-type filtering may shift distance distributions).
 
 ### Phase 2: Cluster-Aware Search Results (days)
 
+**Pipeline ordering** (resolves RF-8 cost concern):
+1. Over-fetch 4x candidates per corpus
+2. Apply Phase 1c distance thresholds (per-corpus, pre-rerank)
+3. Send top-2x surviving candidates to Voyage reranker (not full 4x — RF-8 cost mitigation)
+4. Cluster reranked output (post-rerank, so clusters contain quality-sorted results)
+5. Return clusters to agent, each sorted by reranked score
+
 **2a. Cluster pre-pass in search_engine.py**
 
-When search returns >15 chunks, run k-means (k=3-5) on the already-computed embedding vectors. Group results by cluster with centroid-label descriptions. Return clustered format to agents.
+When reranked results exceed 15 chunks, cluster via Ward linkage. Clustering is **optional and disabled by default** (RF-20 — benefit is speculative). Enabled per-call via `cluster_by="semantic"` parameter or globally via `.nexus.yml` (`search.cluster_by: semantic`). Agents that want clustering opt in; others get the existing flat ranked list.
 
 **Note (RF-6, RF-10)**: Embeddings are not returned by `t3.search()`. Post-fetch via `col.get(ids=..., include=["embeddings"])` is the recommended approach — one extra ~50-100ms call, no impact on normal search path. Query-to-result distances CANNOT reconstruct inter-result distances (RF-10) — embeddings are required.
 
@@ -235,9 +279,9 @@ In `search_cross_corpus()`, differentiate by corpus type:
 
 When `where=` contains high-selectivity predicates (bib_year, specific tags), pre-fetch matching IDs from catalog SQLite and convert to ChromaDB `{"$and": [{"id": {"$in": ids}}, ...]}` filter. Avoids HNSW stalling in predicate-sparse regions.
 
-### Phase 4: FTS5 Shadow Index (medium-term)
+### Phase 4: FTS5 Shadow Index (medium-term — consider separate RDR)
 
-Add lightweight SQLite FTS5 table in T2 indexing chunk titles, tags, and first 200 chars from knowledge__ collections. When vector search returns distance >0.7, consult FTS5 as safety net. Provides partition-based robustness floor.
+Add lightweight SQLite FTS5 table in a T3-adjacent database (`~/.config/nexus/shadow_fts.db`) indexing chunk titles, tags, and first 200 chars from all CCE collections (`knowledge__*`, `docs__*`, `rdr__*`). Trigger: when vector search returns no results above the per-corpus threshold (Phase 1c), fall back to FTS5. Scope: all CCE collections (not code — code search works well post-fix). This phase may warrant its own RDR given its medium-term timeline and separate storage concerns.
 
 ## Risks and Mitigations
 
@@ -245,7 +289,7 @@ Add lightweight SQLite FTS5 table in T2 indexing chunk titles, tags, and first 2
 |------|------------|
 | Clustering dependency | scipy available via docling (RF-10); numpy-only fallback for safety. No new deps needed |
 | Cloud SPANN is immutable | Confirmed (RF-17). modify() silently ignored. Tuning only at collection-creation. Existing collections stuck at server defaults |
-| Code search broken | RDR-059 (critical). voyage-code-3 index / voyage-4 query mismatch. Fix independently before RDR-056 work |
+| ~~Code search broken~~ | RESOLVED (RDR-059, v3.2.5). Distances dropped from 0.86→0.29. RF-13 code baseline invalidated. |
 | hnsw:space fallback fragile | t3.py:841 reads HNSW key for cloud SPANN collections. Works by coincidence (both default L2). Fix to detect index type |
 | Cluster labels require LLM call | Optional — can return clusters without labels initially; agents can infer from chunk content |
 | hnsw:search_ef=256 reduces throughput | Benchmark before/after; tunable via .nexus.yml |
@@ -253,7 +297,18 @@ Add lightweight SQLite FTS5 table in T2 indexing chunk titles, tags, and first 2
 
 ## Success Criteria
 
-- [ ] verify_collection_deep() reports multi-probe hit rate
-- [ ] Search results for >15 chunks show cluster groupings
-- [ ] Measurable reduction in high-distance (>0.7) results in agent workflows
-- [ ] nx doctor reports per-collection robustness proxy
+**Phase 1:**
+- [ ] verify_collection_deep() reports multi-probe hit rate (5-probe)
+- [ ] Per-corpus distance thresholds applied; measurable reduction in >0.65 results for knowledge/docs
+- [ ] nx doctor reports per-collection robustness proxy and applies HNSW ef fix for local collections
+- [ ] Local HNSW collections run at search_ef=256
+
+**Phase 2:**
+- [ ] Clustering available via `cluster_by="semantic"` parameter (disabled by default, per RF-20)
+- [ ] A/B comparison on 3-5 research-synthesizer tasks before making clustering default
+
+**Phase 3:**
+- [ ] Pre-filtered catalog queries return results for selectivity <5% without HNSW stalling
+
+**Phase 4:**
+- [ ] FTS5 fallback returns ≥1 result for queries where vector search returns 0 results above threshold
