@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-04-07
+
+### Changed
+- **Nexus reference skill** — `search` tool docs updated with `cluster_by` param, `section_type` filter example, automatic quality features note. `collection_verify` updated to multi-probe description.
+- **Session start hook** — search capability line includes `cluster_by` and `section_type` hints.
+- **Subagent start hook** — search tool signature includes `cluster_by` param and section_type filter hint.
+
+### Docs
+- RDR-056 closed (implemented).
+
 ## [3.2.5] - 2026-04-07
 
 ### Fixed

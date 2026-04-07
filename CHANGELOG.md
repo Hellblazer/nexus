@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-04-07
+
+### Added
+- **Per-corpus distance thresholds** (RDR-056) — automatic noise filtering calibrated for Voyage AI embeddings. `code=0.45`, `knowledge/docs/rdr=0.65`, `default=0.55`. Configurable via `.nexus.yml` `search.distance_threshold.*`.
+- **Multi-probe collection verification** (RDR-056) — `verify --deep` probes 5 documents (was 1), reports `probe_hit_rate`, new `degraded` status for partial failures.
+- **HNSW ef tuning** (RDR-056) — local-mode collections created with `hnsw:search_ef=256`. Retroactive fix via `nx doctor --fix`. Cloud SPANN unaffected.
+- **Corpus-specific over-fetch** (RDR-056) — knowledge/docs/rdr fetch 4x candidates before threshold filtering (was uniform 2x). Code stays at 2x.
+- **Ward hierarchical clustering** (RDR-056) — new `search_clusterer.py` module. Opt-in via `cluster_by="semantic"` on MCP `search()` tool or `search.cluster_by` config key. Deterministic scipy Ward with numpy k-means fallback.
+- **Catalog-scoped pre-filtering** (RDR-056) — high-selectivity metadata predicates (<5% match) route through catalog SQLite as `source_path $in` filter, avoiding HNSW/SPANN stalling.
+- **Section-type metadata** (RDR-055) — markdown chunks carry `section_type` (abstract, introduction, methods, results, discussion, conclusion, references, acknowledgements, appendix). Filter with `--where section_type!=references`.
+- **`T3Database.get_embeddings()`** — embedding post-fetch for clustering pipeline.
+- **`Catalog.doc_count()`** — document count for selectivity calculation.
+
+### Fixed
+- **`hnsw:space` latent bug** — cloud SPANN collections don't populate `hnsw:space` metadata; `verify_collection_deep` now returns `cosine` directly in cloud mode instead of reading the absent key.
+- **Broken status message** — `collection verify --deep` message updated from singular "probe chunk" to multi-probe semantics.
+
+### Changed
+- **`search_cross_corpus()` signature** — gains `cluster_by`, `catalog` parameters (both optional, backward compatible).
+- **MCP `search()` tool** — gains `cluster_by` parameter.
+
+### Docs
+- Updated cli-reference.md, configuration.md, querying-guide.md with all new features.
+- New "Search quality features" section in querying-guide.md.
+- Plugin skill reference, session hooks, and subagent hooks updated for `cluster_by` and `section_type`.
+- CLAUDE.md source layout updated.
+- RDR-056 closed (implemented, Phases 1-3).
+
 ## [3.2.5] - 2026-04-07
 
 ### Fixed
