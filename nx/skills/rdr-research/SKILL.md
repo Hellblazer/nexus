@@ -80,6 +80,17 @@ When the user asks to *investigate* something (not just record a finding):
 - **External research** ("what embedding models support CCE?"): Dispatch `deep-research-synthesizer` agent, then record the finding
 - **Simple recording**: No agent needed — just write the T2 record and update markdown
 
+### Pre-Dispatch: Seed Link Context
+
+Before dispatching an agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
+
+1. Resolve the RDR's tumbler: `mcp__plugin_nx_nexus__catalog_search(query="RDR-NNN", content_type="rdr")`
+2. Write link context to scratch:
+   ```
+   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "cites"}], "source_agent": "rdr-research"}', tag="link-context")
+   ```
+3. If catalog search returns no result, skip seeding (the auto-linker handles empty context gracefully)
+
 ## Relay Template (Use This Format)
 
 When dispatching agents (deep-research-synthesizer or codebase-deep-analyzer) via Agent tool, use this exact structure:

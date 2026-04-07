@@ -117,16 +117,18 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 ### On Pass
 
 1. Write gate result to T2: mcp__plugin_nx_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nsummary: One-sentence summary", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"
-2. Append gate findings to the RDR's Revision History section
-3. Print: `> Run '/nx:rdr-accept <id>' to accept this RDR.`
+2. Store gate critique to T3: mcp__plugin_nx_nexus__store_put(content="# Gate: RDR NNN\n\n{critique}", collection="knowledge", title="gate-rdr-NNN-{date}", tags="rdr,gate,critique")
+3. Append gate findings to the RDR's Revision History section
+4. Print: `> Run '/nx:rdr-accept <id>' to accept this RDR.`
 
 Status remains **Draft** until the author explicitly accepts via `/nx:rdr-accept`.
 
 ### On Fail
 
 1. Write gate result to T2 (same format, `outcome: "BLOCKED"`)
-2. Display the critique with specific sections to address
-3. Status remains Draft
+2. Store gate critique to T3: mcp__plugin_nx_nexus__store_put(content="# Gate BLOCKED: RDR NNN\n\n{critique}", collection="knowledge", title="gate-rdr-NNN-{date}", tags="rdr,gate,critique,blocked")
+3. Display the critique with specific sections to address
+4. Status remains Draft
 
 ## Relay Template (Use This Format)
 
