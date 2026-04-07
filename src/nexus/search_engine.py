@@ -14,6 +14,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "search_cross_corpus",
+    "_overfetch_multiplier",
 ]
 
 # Known collection prefixes mapped to their threshold config key.
@@ -36,6 +37,18 @@ def _threshold_for_collection(name: str, cfg: dict) -> float | None:
     return thresholds.get("default")
 
 
+def _overfetch_multiplier(collection_name: str) -> int:
+    """Return the over-fetch multiplier for *collection_name*.
+
+    4x for knowledge/docs/rdr (high noise ratio that benefits from a larger
+    candidate pool before threshold filtering); 2x for code and everything else.
+    """
+    for prefix in ("knowledge__", "docs__", "rdr__"):
+        if collection_name.startswith(prefix):
+            return 4
+    return 2
+
+
 # ── Cross-corpus search ───────────────────────────────────────────────────────
 
 def search_cross_corpus(
@@ -47,8 +60,11 @@ def search_cross_corpus(
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
-    Per-corpus over-fetch: max(5, (n_results // num_corpora) * 2).
-    Results exceeding per-corpus distance thresholds are filtered out.
+    Per-corpus over-fetch: each collection fetches ``max(5, n_results * mult)``
+    candidates where *mult* is ``_overfetch_multiplier(collection)`` — 4x for
+    knowledge/docs/rdr, 2x for code.  The larger pool compensates for the
+    distance-threshold filtering that follows, ensuring enough survivors reach
+    the caller's reranker.
 
     *where* is an optional ChromaDB metadata filter forwarded to every collection.
     """
@@ -56,11 +72,11 @@ def search_cross_corpus(
     # Thresholds are calibrated for Voyage AI embeddings.
     # Skip filtering when Voyage is not in use (local mode, test injection).
     apply_thresholds = getattr(t3, "_voyage_client", None) is not None
-    num = len(collections) or 1
-    per_k = max(5, (n_results // num) * 2)
 
     all_results: list[SearchResult] = []
     for col in collections:
+        mult = _overfetch_multiplier(col)
+        per_k = max(5, n_results * mult)
         threshold = _threshold_for_collection(col, cfg) if apply_thresholds else None
         raw = t3.search(query, [col], n_results=per_k, where=where)
         dropped = 0
