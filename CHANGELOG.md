@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.2] - 2026-04-07
+
+### Fixed
+- **Plugin audit compliance** — added `nx/.claude-plugin/plugin.json` manifest; fixed 9 agents using non-standard `color` values (only `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` are valid per Claude Code docs).
+- **PermissionRequest hooks** — added `sequential-thinking` to nx MCP auto-approve list (was causing CI failure); explicit matchers in hooks.json reverted to wildcard routing (decision logic stays explicit in shell scripts).
+
 ## [3.2.1] - 2026-04-07
 
 ### Added

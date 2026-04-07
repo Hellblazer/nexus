@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.2] - 2026-04-07
+
+### Fixed
+- Added `nx/.claude-plugin/plugin.json` manifest
+- Fixed 9 agents with non-standard color values (amber, teal, mint, gold, coral, emerald, indigo, lime)
+- Added `sequential-thinking` to MCP auto-approve hook
+
 ## [3.2.1] - 2026-04-07
 
 ### Fixed
