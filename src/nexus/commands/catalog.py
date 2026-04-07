@@ -300,23 +300,27 @@ def setup_cmd(remote: str) -> None:
 @click.option("--owner", default="")
 @click.option("--type", "content_type", default="")
 @click.option("--limit", "-n", default=50)
+@click.option("--offset", default=0)
 @click.option("--json", "as_json", is_flag=True)
-def list_cmd(owner: str, content_type: str, limit: int, as_json: bool) -> None:
+def list_cmd(owner: str, content_type: str, limit: int, offset: int, as_json: bool) -> None:
     """List catalog entries."""
     cat = _get_catalog()
     if owner:
         entries = cat.by_owner(Tumbler.parse(owner))
     else:
-        entries = cat.all_documents(limit=limit)
+        entries = cat.all_documents(limit=limit + offset + 1)
     if content_type:
         entries = [e for e in entries if e.content_type == content_type]
-    entries = entries[:limit]
+    total = len(entries)
+    entries = entries[offset:offset + limit]
 
     if as_json:
         click.echo(json.dumps([_entry_to_dict(e) for e in entries], indent=2))
     else:
         for e in entries:
             click.echo(f"{str(e.tumbler):<12} {e.content_type:<10} {e.title}")
+        if offset + limit < total:
+            click.echo(f"\n  Next page: --offset {offset + limit}")
 
 
 @catalog.command("show")
@@ -378,15 +382,18 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
 @catalog.command("search")
 @click.argument("query")
 @click.option("--limit", "-n", default=20)
+@click.option("--offset", default=0)
 @click.option("--json", "as_json", is_flag=True)
-def search_cmd(query: str, limit: int, as_json: bool) -> None:
+def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
     """Find documents by title, author, corpus, or file path.
 
     Uses full-text search across document metadata. Faster than T3 semantic
     search for exact metadata lookups. Returns tumbler, type, and title.
     """
     cat = _get_catalog()
-    results = cat.find(query)[:limit]
+    all_results = cat.find(query)
+    total = len(all_results)
+    results = all_results[offset:offset + limit]
     if as_json:
         click.echo(json.dumps([_entry_to_dict(e) for e in results], indent=2))
     else:
@@ -395,6 +402,8 @@ def search_cmd(query: str, limit: int, as_json: bool) -> None:
             return
         for e in results:
             click.echo(f"{str(e.tumbler):<12} {e.content_type:<10} {e.title}")
+        if offset + limit < total:
+            click.echo(f"\n  Next page: --offset {offset + limit}")
 
 
 @catalog.command("register", hidden=True)
@@ -599,8 +608,10 @@ def links_cmd(
     links = cat.link_query(
         from_t=resolved_from, to_t=resolved_to,
         link_type=link_type, created_by=created_by,
-        limit=limit, offset=offset,
+        limit=limit + 1, offset=offset,
     )
+    has_more = len(links) > limit
+    links = links[:limit]
     if as_json:
         click.echo(json.dumps([_link_to_dict(lnk) for lnk in links], indent=2))
     else:
@@ -609,6 +620,8 @@ def links_cmd(
             return
         for edge in links:
             click.echo(f"{edge.from_tumbler} → {edge.to_tumbler} ({edge.link_type}) by {edge.created_by}")
+        if has_more:
+            click.echo(f"\n  Next page: --offset {offset + limit}")
 
 
 @catalog.command("link-bulk-delete", hidden=True)

@@ -391,6 +391,9 @@ def query(
 ) -> str:
     """Document-level semantic search for analytical questions.
 
+    Results are capped at ``limit``. When more documents match, a footer line shows
+    the total count. Increase ``limit`` to see more.
+
     Unlike ``search`` which returns individual chunks, ``query`` groups results
     by source document and returns the best-matching snippet per document along
     with full metadata (title, year, citations, page count, extraction method).
@@ -558,7 +561,9 @@ def query(
                 docs[doc_key]["snippet"] = r.content[:300].replace("\n", " ")
 
         # Sort by best match distance, limit
-        sorted_docs = sorted(docs.values(), key=lambda d: d["distance"])[:limit]
+        all_docs = sorted(docs.values(), key=lambda d: d["distance"])
+        sorted_docs = all_docs[:limit]
+        total = len(all_docs)
 
         header = f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"
         lines: list[str] = [f"{routing_note}\n{header}" if routing_note else header]
@@ -597,6 +602,9 @@ def query(
             lines.append(f"   {d['collection']}")
             lines.append(f"   {d['snippet']}")
             lines.append("")
+
+        if total > limit:
+            lines.append(f"\n--- showing 1-{len(sorted_docs)} of {total} documents. Results are capped at limit={limit}.")
 
         return "\n".join(lines)
     except Exception as e:
@@ -1159,17 +1167,25 @@ def plan_save(
 
 
 @mcp.tool()
-def plan_search(query: str, project: str = "", limit: int = 5) -> str:
+def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) -> str:
     """Search the T2 plan library for similar query plans.
+
+    Results are paged. Response footer shows ``offset=N`` for next page.
 
     Args:
         query: Search query (matched against plan query text and tags)
         project: Optional project filter (e.g. "nexus")
-        limit: Maximum results to return
+        limit: Maximum results to return (default 5)
+        offset: Skip this many results (default 0). Use for pagination.
     """
     try:
         with _t2_ctx() as db:
-            results = db.search_plans(query, limit=limit, project=project)
+            # Over-fetch by 1 to detect if there are more
+            results = db.search_plans(query, limit=limit + 1, project=project)
+        if offset:
+            results = results[offset:]
+        has_more = len(results) > limit
+        results = results[:limit]
         if not results:
             return "No matching plans."
         lines: list[str] = []
@@ -1180,6 +1196,9 @@ def plan_search(query: str, project: str = "", limit: int = 5) -> str:
                 f"  outcome={r['outcome']}  tags={r['tags']}\n"
                 f"  plan: {plan_preview}..."
             )
+        shown_end = offset + len(results)
+        if has_more:
+            lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
         return "\n\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
@@ -1205,11 +1224,15 @@ def catalog_search(
     owner: str = "",
     file_path: str = "",
     limit: int = 20,
+    offset: int = 0,
 ) -> list[dict]:
     """Find documents by metadata (title, author, corpus, file path).
 
+    Results are paged. When results are truncated, a ``_pagination`` entry appears
+    at the end with ``next_offset``. Pass that value as ``offset`` to get the next page.
+
     Returns catalog entries with tumbler, physical_collection, and metadata — NOT document
-    content. Use the `search` tool for semantic content search within collections.
+    content. Use the ``search`` tool for semantic content search within collections.
     Use catalog_search first to discover WHICH collections to search, then search for content.
 
     Filters: query (free-text), author, corpus, owner, file_path, content_type (exact match).
@@ -1246,9 +1269,9 @@ def catalog_search(
             sql = (
                 "SELECT tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-                f"FROM documents WHERE {' AND '.join(conditions)} LIMIT ?"
+                f"FROM documents WHERE {' AND '.join(conditions)} LIMIT ? OFFSET ?"
             )
-            params.append(limit)
+            params.extend([limit + 1, offset])
             rows = cat._db.execute(sql, params).fetchall()
             from nexus.catalog.catalog import CatalogEntry
             entries = [
@@ -1260,7 +1283,12 @@ def catalog_search(
                 )
                 for r in rows
             ]
-            return [_entry_to_dict(e) for e in entries]
+            has_more = len(entries) > limit
+            entries = entries[:limit]
+            result = [_entry_to_dict(e) for e in entries]
+            if has_more:
+                result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
+            return result
 
         # FTS5 free-text search (append author to query if both provided)
         fts_query = query
@@ -1268,8 +1296,12 @@ def catalog_search(
             fts_query = f"{query} {author}"
         if not fts_query.strip():
             return [{"error": "query or at least one filter required"}]
-        results = cat.find(fts_query, content_type=content_type or None)[:limit]
-        return [_entry_to_dict(e) for e in results]
+        all_results = cat.find(fts_query, content_type=content_type or None)
+        page = all_results[offset:offset + limit]
+        result = [_entry_to_dict(e) for e in page]
+        if offset + limit < len(all_results):
+            result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
+        return result
     except Exception as e:
         return [{"error": str(e)}]
 
@@ -1315,7 +1347,10 @@ def catalog_list(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
-    """List catalog entries with optional filters."""
+    """List catalog entries with optional filters.
+
+    Results are paged. When truncated, a ``_pagination`` entry appears at the end
+    with ``next_offset``. Pass that as ``offset`` to get the next page."""
     cat, err = _require_catalog()
     if err:
         return [{"error": err}]
@@ -1347,7 +1382,11 @@ def catalog_list(
             ]
         if content_type:
             entries = [e for e in entries if e.content_type == content_type]
-        return [_entry_to_dict(e) for e in entries[:limit]]
+        page = entries[:limit]
+        result = [_entry_to_dict(e) for e in page]
+        if len(entries) > limit:
+            result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
+        return result
     except Exception as e:
         return [{"error": str(e)}]
 
@@ -1592,6 +1631,9 @@ def catalog_link_query(
 ) -> list[dict]:
     """Query links by any combination of filters. For admin/audit use.
 
+    Results are paged. When truncated, a ``_pagination`` entry appears at the end
+    with ``next_offset``. Pass that as ``offset`` to get the next page.
+
     NOT a query-planner step — use catalog_links for graph traversal.
     Use for: audit by creator, find all links of a type, count generator output.
     created_at_before: ISO timestamp — only links created before this time.
@@ -1606,9 +1648,14 @@ def catalog_link_query(
             from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
             created_by=created_by, direction=direction, tumbler=tumbler,
             created_at_before=created_at_before,
-            limit=limit, offset=offset,
+            limit=limit + 1, offset=offset,
         )
-        return [_link_to_dict(l) for l in links]
+        has_more = len(links) > limit
+        links = links[:limit]
+        result = [_link_to_dict(l) for l in links]
+        if has_more:
+            result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
+        return result
     except Exception as e:
         return [{"error": str(e)}]
 
