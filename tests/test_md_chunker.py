@@ -279,3 +279,48 @@ def test_md_chunker_byte_cap_no_code_fence() -> None:
         assert len(c.text.encode()) <= SAFE_CHUNK_BYTES, (
             f"Chunk exceeds SAFE_CHUNK_BYTES: {len(c.text.encode())} bytes (limit {SAFE_CHUNK_BYTES})"
         )
+
+
+# ── nexus-je5o: _split_large_section must carry overlap into next chunk ──────
+
+
+def test_split_large_section_overlap():
+    """Tail of chunk[i] text must appear verbatim at start of chunk[i+1] text.
+
+    Uses small chunk_size=50 / chunk_overlap=10 so the fixture stays compact.
+    max_chars = int(50 * 3.3) = 165, overlap_chars = int(10 * 3.3) = 33.
+    """
+    chunker = SemanticMarkdownChunker(chunk_size=50, chunk_overlap=10)
+    overlap_chars = chunker.overlap_chars  # 33
+
+    # Each paragraph is ~60 chars — 3 paragraphs total ~180 chars > max_chars (165),
+    # so _split_large_section must split at least once.
+    para = "Alpha bravo charlie delta echo foxtrot golf hotel. "  # 52 chars
+    section = {
+        "level": 2,
+        "header": "Test",
+        "header_path": ["Test"],
+        "content_parts": [
+            {"type": "text", "content": para + "One.", "is_code_block": False},
+            {"type": "text", "content": para + "Two.", "is_code_block": False},
+            {"type": "text", "content": para + "Three.", "is_code_block": False},
+        ],
+    }
+    chunks = chunker._split_large_section(section, {}, start_index=0)
+
+    assert len(chunks) >= 2, (
+        f"Expected ≥2 chunks from section exceeding max_chars, got {len(chunks)}"
+    )
+
+    # The overlap_chars tail of chunk[i] must appear in chunk[i+1]
+    for i in range(len(chunks) - 1):
+        tail = chunks[i].text[-overlap_chars:]
+        next_text = chunks[i + 1].text
+        # Strip the repeated header line (e.g. "## Test\n\n") to find the overlap body
+        body_start = next_text.find("\n\n")
+        next_body = next_text[body_start + 2:] if body_start != -1 else next_text
+        assert tail in next_body, (
+            f"Chunk {i} tail not found in chunk {i+1} body.\n"
+            f"  tail ({overlap_chars} chars): {tail!r}\n"
+            f"  next body: {next_body!r}"
+        )
