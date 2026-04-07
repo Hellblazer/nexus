@@ -138,6 +138,8 @@ Incorporate or explicitly refute prior findings in Thought 1. When T3 is empty t
 
 
 
+You MUST call store_put to persist your analysis findings to T3 before returning.
+
 ## Recommended Next Step (conditional output)
 
 When your investigation reveals issues requiring planned remediation, your final output MUST include a next-step recommendation for the caller to dispatch `strategic-planner`. Skip if findings are informational only.

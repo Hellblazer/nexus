@@ -123,6 +123,8 @@ If your project uses beads for task tracking, consider linking research findings
 
 
 
+You MUST call store_put to persist your research findings to T3 before returning.
+
 ## Recommended Next Step (MANDATORY output)
 
 Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `knowledge-tidier`.

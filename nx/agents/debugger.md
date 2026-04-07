@@ -154,6 +154,8 @@ Pattern: Form hypothesis -> Use search tool to gather evidence -> Validate with 
 
 
 
+You MUST call store_put to persist your debugging findings to T3 before returning.
+
 ## Recommended Next Step (MANDATORY output)
 
 Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `developer`.

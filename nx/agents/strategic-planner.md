@@ -192,6 +192,8 @@ Each bead must contain sufficient context for autonomous execution:
 
 
 
+You MUST call store_put to persist your key decisions to T3 before returning.
+
 ## Recommended Next Step (MANDATORY output)
 
 Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `plan-auditor`.

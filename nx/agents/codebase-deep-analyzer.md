@@ -160,6 +160,8 @@ When analyzing a codebase, check for `docs/rdr/` directory. If present:
 - RDR documents contain architectural decisions, trade-offs, and research — valuable context for codebase understanding
 
 
+You MUST call store_put to persist your analysis findings to T3 before returning.
+
 ## Recommended Next Step (conditional output)
 
 When your analysis reveals work that needs to be planned (e.g., refactoring, new features, debt remediation), your final output MUST include a next-step recommendation for the caller to dispatch `strategic-planner`. Skip if analysis is informational only.
