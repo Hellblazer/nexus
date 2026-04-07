@@ -293,6 +293,7 @@ _DEFAULTS: dict[str, Any] = {
             "rdr": 0.65,
             "default": 0.55,
         },
+        "cluster_by": None,
     },
     "voyageai": {
         "read_timeout_seconds": 120,

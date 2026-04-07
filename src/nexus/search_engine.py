@@ -57,6 +57,7 @@ def search_cross_corpus(
     n_results: int,
     t3: Any,
     where: dict | None = None,
+    cluster_by: str | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -66,9 +67,17 @@ def search_cross_corpus(
     distance-threshold filtering that follows, ensuring enough survivors reach
     the caller's reranker.
 
+    When *cluster_by* is ``"semantic"``, results are grouped by Ward
+    hierarchical clustering and each result gets a ``_cluster_label`` metadata
+    key.  Requires one extra ``get_embeddings`` call per collection.
+    Disabled by default (``None``).
+
     *where* is an optional ChromaDB metadata filter forwarded to every collection.
     """
     cfg = load_config()
+    if cluster_by is None:
+        cluster_by = cfg.get("search", {}).get("cluster_by")
+
     # Thresholds are calibrated for Voyage AI embeddings.
     # Skip filtering when Voyage is not in use (local mode, test injection).
     apply_thresholds = getattr(t3, "_voyage_client", None) is not None
@@ -104,4 +113,55 @@ def search_cross_corpus(
                 dropped=dropped,
                 threshold=threshold,
             )
+
+    if cluster_by == "semantic" and all_results:
+        all_results = _apply_clustering(all_results, t3)
+
     return all_results
+
+
+def _apply_clustering(results: list[SearchResult], t3: Any) -> list[SearchResult]:
+    """Post-fetch embeddings and cluster results, returning flat list with labels."""
+    import numpy as np
+
+    from nexus.search_clusterer import cluster_results
+
+    # Group result indices by collection for batched embedding fetch
+    col_groups: dict[str, list[int]] = {}
+    for idx, r in enumerate(results):
+        col_groups.setdefault(r.collection, []).append(idx)
+
+    # Fetch embeddings per collection, assemble in result order
+    embeddings = np.zeros((len(results), 0), dtype=np.float32)
+    for col, indices in col_groups.items():
+        ids = [results[i].id for i in indices]
+        col_emb = t3.get_embeddings(col, ids)
+        if embeddings.shape[1] == 0:
+            embeddings = np.zeros((len(results), col_emb.shape[1]), dtype=np.float32)
+        for local_idx, global_idx in enumerate(indices):
+            embeddings[global_idx] = col_emb[local_idx]
+
+    # Convert SearchResults to dicts for cluster_results API
+    result_dicts = [
+        {"id": r.id, "content": r.content, "distance": r.distance,
+         "collection": r.collection, "metadata": dict(r.metadata)}
+        for r in results
+    ]
+
+    clusters = cluster_results(result_dicts, embeddings)
+
+    # Flatten clusters back to SearchResult list, preserving cluster labels
+    out: list[SearchResult] = []
+    for cluster in clusters:
+        for rd in cluster:
+            meta = rd.get("metadata", {})
+            if "_cluster_label" in rd:
+                meta["_cluster_label"] = rd["_cluster_label"]
+            out.append(SearchResult(
+                id=rd["id"],
+                content=rd["content"],
+                distance=rd["distance"],
+                collection=rd["collection"],
+                metadata=meta,
+            ))
+    return out

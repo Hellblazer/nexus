@@ -333,6 +333,21 @@ class T3Database:
             name, **kwargs,
         )
 
+    def get_embeddings(self, collection_name: str, ids: list[str]) -> "np.ndarray":
+        """Fetch embeddings for specific document IDs.
+
+        Returns an ``(N, D)`` float32 ndarray, one row per ID (in order).
+        Used by the clustering pipeline to avoid including embeddings in
+        every search response.
+        """
+        import numpy as np
+
+        col = _chroma_with_retry(
+            self._client_for(collection_name).get_collection, collection_name,
+        )
+        result = _chroma_with_retry(col.get, ids=ids, include=["embeddings"])
+        return np.array(result["embeddings"], dtype=np.float32)
+
     # ── Write ─────────────────────────────────────────────────────────────────
 
     def put(
