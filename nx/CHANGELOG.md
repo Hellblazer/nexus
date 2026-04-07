@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-04-07
+
+### Fixed
+- MCP auto-approve hook uses explicit full tool names (28 tools) instead of wildcard
+- 5 agents self-seed link-context from task prompt when dispatched without a skill
+- Mandatory T3 store_put with HARD-GATE enforcement in 5 analysis/research agents
+- rdr-gate stores critique to T3 on both pass and fail
+- rdr-research seeds link-context before agent dispatch
+
 ## [3.2.0] - 2026-04-06
 
 ### Added

@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-04-07
+
+### Added
+- **File-path extraction linker** — `generate_rdr_filepath_links()` scans RDR content for source file paths and creates `implements` links to matching catalog code entries. `created_by="filepath_extractor"`. Wired into the indexer alongside the existing heuristic linker.
+
+### Fixed
+- **MCP auto-approve hooks** — replaced wildcard glob patterns with explicit full tool name lists in both nx (28 tools) and sn (27 tools) PermissionRequest hooks.
+- **Agent self-seeding** — 5 analysis/research agents now self-seed T1 scratch with `link-context` when dispatched without a skill, so the auto-linker fires regardless of dispatch path.
+- **Mandatory T3 persistence** — added `<HARD-GATE>` and Stop Criteria enforcement for `store_put` in deep-research-synthesizer, deep-analyst, debugger, architect-planner, and codebase-deep-analyzer.
+
 ## [3.2.0] - 2026-04-06
 
 ### Added
