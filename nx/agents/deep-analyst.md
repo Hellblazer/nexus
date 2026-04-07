@@ -138,6 +138,19 @@ Incorporate or explicitly refute prior findings in Thought 1. When T3 is empty t
 
 
 
+## T3 Persistence (MANDATORY before returning)
+
+You MUST store your analysis findings to T3 knowledge BEFORE returning. The auto-linker creates catalog links at storage time — those links are lost if you skip this step.
+
+```
+mcp__plugin_nx_nexus__store_put(
+    content="# Analysis: {topic}\n\n{findings}",
+    collection="knowledge",
+    title="analysis-deep-{topic}-{date}",
+    tags="analysis,deep-analyst,{domain}"
+)
+```
+
 ## Recommended Next Step (conditional output)
 
 When your investigation reveals issues requiring planned remediation, your final output MUST include a next-step recommendation for the caller to dispatch `strategic-planner`. Skip if findings are informational only.

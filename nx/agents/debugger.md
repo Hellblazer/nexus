@@ -154,6 +154,19 @@ Pattern: Form hypothesis -> Use search tool to gather evidence -> Validate with 
 
 
 
+## T3 Persistence (MANDATORY before returning)
+
+You MUST store your debugging findings to T3 knowledge BEFORE returning. The auto-linker creates catalog links at storage time — those links are lost if you skip this step.
+
+```
+mcp__plugin_nx_nexus__store_put(
+    content="# Debug: {issue}\n\n{findings}",
+    collection="knowledge",
+    title="debug-{issue}-{date}",
+    tags="debug,debugger,{domain}"
+)
+```
+
 ## Recommended Next Step (MANDATORY output)
 
 Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `developer`.

@@ -123,12 +123,27 @@ If your project uses beads for task tracking, consider linking research findings
 
 
 
+## T3 Persistence (MANDATORY before returning)
+
+You MUST store your research findings to T3 knowledge BEFORE returning. Do not defer this to knowledge-tidier — the auto-linker creates catalog links at storage time, and those links are lost if you skip this step.
+
+```
+mcp__plugin_nx_nexus__store_put(
+    content="# Research: {topic}\n\n{findings}",
+    collection="knowledge",
+    title="research-{agent}-{topic}-{date}",
+    tags="research,{domain}"
+)
+```
+
+This is not optional. Store first, then recommend knowledge-tidier for consolidation.
+
 ## Recommended Next Step (MANDATORY output)
 
 Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `knowledge-tidier`.
 
 **Condition**: ALWAYS after research completion
-**Rationale**: Research findings must be persisted to nx T3 store
+**Rationale**: Knowledge-tidier consolidates and deduplicates stored findings
 **Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
 
 ```

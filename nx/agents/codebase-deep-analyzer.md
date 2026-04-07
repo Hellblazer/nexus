@@ -160,6 +160,19 @@ When analyzing a codebase, check for `docs/rdr/` directory. If present:
 - RDR documents contain architectural decisions, trade-offs, and research — valuable context for codebase understanding
 
 
+## T3 Persistence (MANDATORY before returning)
+
+You MUST store your analysis findings to T3 knowledge BEFORE returning. The auto-linker creates catalog links at storage time — those links are lost if you skip this step.
+
+```
+mcp__plugin_nx_nexus__store_put(
+    content="# Codebase Analysis: {topic}\n\n{findings}",
+    collection="knowledge",
+    title="analysis-codebase-{topic}-{date}",
+    tags="analysis,codebase-deep-analyzer,{domain}"
+)
+```
+
 ## Recommended Next Step (conditional output)
 
 When your analysis reveals work that needs to be planned (e.g., refactoring, new features, debt remediation), your final output MUST include a next-step recommendation for the caller to dispatch `strategic-planner`. Skip if analysis is informational only.

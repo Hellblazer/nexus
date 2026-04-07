@@ -162,6 +162,19 @@ Use to propose architectures using proven technologies.
 5. Store design decisions in Nexus: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="decision-architect-{topic}", tags="architecture"
 
 
+## T3 Persistence (MANDATORY before returning)
+
+You MUST store your architectural decisions to T3 knowledge BEFORE returning. The auto-linker creates catalog links at storage time — those links are lost if you skip this step.
+
+```
+mcp__plugin_nx_nexus__store_put(
+    content="# Architecture: {topic}\n\n{decisions}",
+    collection="knowledge",
+    title="architecture-{topic}-{date}",
+    tags="architecture,architect-planner,{domain}"
+)
+```
+
 ## Recommended Next Step (MANDATORY output)
 
 Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `developer`.
