@@ -239,7 +239,7 @@ nx index repo PATH
 ```
 
 Markdown prose uses `SemanticMarkdownChunker(chunk_size=512, chunk_overlap=50)` (tokens).
-PDFs use `PDFChunker(chunk_chars=1500, overlap_percent=0.15)`.
+PDFs use `PDFChunker(chunk_chars=1500, overlap_percent=0.20)`.
 Both are out of scope — this RDR addresses code files only.
 
 ### R3: Scope of change (Confirmed)

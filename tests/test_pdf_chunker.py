@@ -72,3 +72,14 @@ def test_pdf_chunker_byte_cap_enforced() -> None:
         assert len(c.text.encode()) <= SAFE_CHUNK_BYTES, (
             f"PDF chunk exceeds SAFE_CHUNK_BYTES: {len(c.text.encode())} bytes (limit {SAFE_CHUNK_BYTES})"
         )
+
+
+# ── nexus-nd3e: default overlap must be 300 chars (20% of 1500) ─────────────
+
+
+def test_pdf_chunker_default_overlap_is_300_chars():
+    """Default PDFChunker overlap must be 300 chars (20% of 1500-char default)."""
+    chunker = PDFChunker()
+    assert chunker.overlap_chars == 300, (
+        f"Expected overlap_chars=300 (0.20 * 1500), got {chunker.overlap_chars}"
+    )

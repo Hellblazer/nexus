@@ -311,7 +311,7 @@ Three concurrent threads need coordinated shutdown when any stage fails. Standar
 **Current pipeline memory for 771-page CMRB book**:
 - Extraction: `md_parts` list — 771 page strings, ~2-5 MB total
 - `"\n".join(md_parts)` — creates a second copy, ~2-5 MB
-- `PDFChunker.chunk()` — returns ~2000 `TextChunk` objects, each holding a copy of its text. Total: ~3-5 MB (overlapping chunks mean ~15% extra text)
+- `PDFChunker.chunk()` — returns ~2000 `TextChunk` objects, each holding a copy of its text. Total: ~3-5 MB (overlapping chunks mean ~20% extra text)
 - `_embed_with_fallback` — embedding vectors: 2000 × 1024 floats × 4 bytes = ~8 MB
 - `_index_document` / `_index_pdf_incremental` — IDs, documents, metadatas lists: ~5-10 MB
 - **Peak concurrent**: ~20-30 MB for the 771-page book (extraction + chunks + embeddings all in memory simultaneously before the first upsert)

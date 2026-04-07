@@ -2,7 +2,9 @@
 title: "Chunk Boundary Equation Splitting — Information Loss at Chunk Boundaries"
 id: RDR-054
 type: Bug
-status: accepted
+status: closed
+close_reason: implemented
+closed_date: 2026-04-07
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
