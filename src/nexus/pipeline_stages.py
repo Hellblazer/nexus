@@ -142,6 +142,7 @@ def _build_chunk_metadata(
         "page_count": 0,          # post-pass: from ExtractionResult
         "page_number": chunk.metadata.get("page_number", 0),
         "section_title": "",
+        "section_type": "",
         "format": "",             # post-pass: from ExtractionResult
         "extraction_method": "",  # post-pass: from ExtractionResult
         "chunk_type": chunk.metadata.get("chunk_type", "text"),

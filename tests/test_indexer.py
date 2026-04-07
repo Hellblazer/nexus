@@ -2299,3 +2299,70 @@ def test_prose_indexer_non_markdown_chunk_text_hash_is_valid_sha256(tmp_path: Pa
     # verify the field is present and is a valid sha256 hex string
     assert "chunk_text_hash" in meta
     assert len(meta["chunk_text_hash"]) == 64, "chunk_text_hash must be a sha256 hex digest (64 chars)"
+
+
+# ── nexus-xbco: section_type in prose indexer paths ─────────────────────────
+
+
+def test_prose_indexer_markdown_has_section_type(tmp_path: Path) -> None:
+    """Markdown prose chunks must include section_type in metadata."""
+    from nexus.indexer import _index_prose_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "notes.md"
+    file_.write_text("# Abstract\n\nSome content here.\n\n# Methods\n\nMore content.\n")
+
+    captured_metadatas: list[dict] = []
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    def capture_upsert(collection_name, ids, documents, embeddings, metadatas):
+        captured_metadatas.extend(metadatas)
+
+    mock_db.upsert_chunks_with_embeddings.side_effect = capture_upsert
+    mock_embed_result = ([[0.1] * 3, [0.2] * 3], "voyage-context-3")
+
+    with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+        _index_prose_file(
+            file_, repo, "docs__repo", "voyage-context-3",
+            mock_col, mock_db, "fake-key",
+            git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+        )
+
+    assert captured_metadatas, "Expected at least one chunk"
+    for meta in captured_metadatas:
+        assert "section_type" in meta, "section_type missing from markdown prose chunk"
+
+
+def test_prose_indexer_non_markdown_has_section_type(tmp_path: Path) -> None:
+    """Non-markdown prose chunks must include section_type: '' in metadata."""
+    from nexus.indexer import _index_prose_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_ = repo / "notes.txt"
+    file_.write_text("Line one\nLine two\n")
+
+    captured_metadatas: list[dict] = []
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    mock_db = MagicMock()
+
+    def capture_upsert(collection_name, ids, documents, embeddings, metadatas):
+        captured_metadatas.extend(metadatas)
+
+    mock_db.upsert_chunks_with_embeddings.side_effect = capture_upsert
+    mock_embed_result = ([[0.1] * 3], "voyage-context-3")
+
+    with patch("nexus.doc_indexer._embed_with_fallback", return_value=mock_embed_result):
+        _index_prose_file(
+            file_, repo, "docs__repo", "voyage-context-3",
+            mock_col, mock_db, "fake-key",
+            git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+        )
+
+    assert captured_metadatas, "Expected at least one chunk"
+    for meta in captured_metadatas:
+        assert meta.get("section_type") == "", "Non-markdown prose should have section_type=''"

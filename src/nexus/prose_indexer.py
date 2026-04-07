@@ -86,6 +86,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 "chunk_start_char": chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
                 "chunk_end_char": chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
                 "section_title": chunk.metadata.get("header_path", ""),
+                "section_type": chunk.metadata.get("section_type", ""),
                 "frecency_score": float(ctx.score),
                 "chunk_index": chunk.chunk_index,
                 "chunk_count": len(chunks),
@@ -138,6 +139,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 "embedding_model": ctx.embedding_model,
                 "content_hash": content_hash,
                 "chunk_text_hash": _hl.sha256(text.encode()).hexdigest(),
+                "section_type": "",
                 **ctx.git_meta,
             }
             ids.append(doc_id)

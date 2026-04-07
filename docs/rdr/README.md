@@ -76,8 +76,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-052](rdr-052-catalog-first-query-routing.md) | Catalog-First Query Routing — Push Planning into MCP | Architecture | Closed | 2026-04-05 |
 | [RDR-053](rdr-053-xanadu-fidelity.md) | Xanadu Fidelity — Tumbler Arithmetic and Content-Addressed Spans | Architecture | Closed | 2026-04-05 |
 | [RDR-054](rdr-054-chunk-boundary-equation-splitting.md) | Chunk Boundary Equation Splitting — Information Loss at Chunk Boundaries | Bug | Closed | 2026-04-07 |
-| [RDR-055](rdr-055-section-type-metadata-quality-scoring.md) | Section-Type Metadata and Quality Scoring for Knowledge Collections | Feature | Accepted | 2026-04-07 |
-| [RDR-056](rdr-056-search-robustness-result-clustering.md) | Search Robustness and Result Clustering | Feature | Draft | 2026-04-07 |
+| [RDR-055](rdr-055-section-type-metadata-quality-scoring.md) | Section-Type Metadata and Quality Scoring for Knowledge Collections | Feature | Closed | 2026-04-07 |
+| [RDR-056](rdr-056-search-robustness-result-clustering.md) | Search Robustness and Result Clustering | Feature | Accepted | 2026-04-07 |
 | [RDR-057](rdr-057-progressive-formalization-memory-tiers.md) | Progressive Formalization Across Memory Tiers | Feature | Draft | 2026-04-07 |
 | [RDR-058](rdr-058-pipeline-orchestration-plan-reuse.md) | Pipeline Orchestration and Plan Reuse | Feature | Draft | 2026-04-07 |
 | [RDR-059](rdr-059-code-search-embedding-mismatch.md) | Code Search Embedding Model Mismatch | Bug | Draft | 2026-04-07 |

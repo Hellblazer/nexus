@@ -1,6 +1,8 @@
 """AC4–AC5: SemanticMarkdownChunker — headings, frontmatter, naive fallback."""
+import pytest
+
 import nexus.md_chunker as md_mod
-from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
+from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter
 
 
 # ── parse_frontmatter ─────────────────────────────────────────────────────────
@@ -351,6 +353,130 @@ def test_split_large_section_overlap_no_header_duplication():
         assert header_count <= 1, (
             f"Header duplicated {header_count} times in chunk: {chunk.text!r}"
         )
+
+
+# ── nexus-zg3p: classify_section_type ────────────────────────────────────────
+
+
+class TestClassifySectionType:
+    """Unit tests for classify_section_type(header_path)."""
+
+    def test_empty_header_path(self):
+        assert classify_section_type([]) == ""
+
+    def test_abstract(self):
+        assert classify_section_type(["Abstract"]) == "abstract"
+
+    def test_abstract_all_caps(self):
+        assert classify_section_type(["ABSTRACT"]) == "abstract"
+
+    def test_abstract_lowercase(self):
+        assert classify_section_type(["abstract"]) == "abstract"
+
+    def test_introduction_with_number(self):
+        assert classify_section_type(["1. Introduction"]) == "introduction"
+
+    def test_introduction_plain(self):
+        assert classify_section_type(["Introduction"]) == "introduction"
+
+    def test_methods(self):
+        assert classify_section_type(["Methods"]) == "methods"
+
+    def test_materials_and_methods(self):
+        assert classify_section_type(["Materials and Methods"]) == "methods"
+
+    def test_methodology(self):
+        assert classify_section_type(["Methodology"]) == "methods"
+
+    def test_results(self):
+        assert classify_section_type(["Results"]) == "results"
+
+    def test_results_and_discussion(self):
+        assert classify_section_type(["Results and Discussion"]) == "results"
+
+    def test_discussion(self):
+        assert classify_section_type(["Discussion"]) == "discussion"
+
+    def test_conclusion(self):
+        assert classify_section_type(["Conclusion"]) == "conclusion"
+
+    def test_conclusions_plural(self):
+        assert classify_section_type(["Conclusions"]) == "conclusion"
+
+    def test_references(self):
+        assert classify_section_type(["References"]) == "references"
+
+    def test_reference_singular(self):
+        assert classify_section_type(["Reference"]) == "references"
+
+    def test_acknowledgements(self):
+        assert classify_section_type(["Acknowledgements"]) == "acknowledgements"
+
+    def test_acknowledgments_us_spelling(self):
+        assert classify_section_type(["Acknowledgments"]) == "acknowledgements"
+
+    def test_appendix(self):
+        assert classify_section_type(["Appendix A"]) == "appendix"
+
+    def test_appendices(self):
+        assert classify_section_type(["Appendices"]) == "appendix"
+
+    def test_methods_with_number(self):
+        assert classify_section_type(["3. Methods"]) == "methods"
+
+    def test_results_with_number(self):
+        assert classify_section_type(["4. Results"]) == "results"
+
+    def test_discussion_with_number(self):
+        assert classify_section_type(["5. Discussion"]) == "discussion"
+
+    def test_conclusion_with_number(self):
+        assert classify_section_type(["6. Conclusion"]) == "conclusion"
+
+    def test_unrecognised_heading_returns_other(self):
+        assert classify_section_type(["Related Work"]) == "other"
+
+    def test_outer_heading_used_when_inner_unrecognised(self):
+        """Falls through to outer heading when innermost doesn't match."""
+        assert classify_section_type(["Introduction", "Background"]) == "introduction"
+
+    def test_innermost_heading_matches(self):
+        """Outer heading matched when innermost doesn't match."""
+        assert classify_section_type(["References", "Cited Works"]) == "references"
+
+
+class TestSectionTypeInMetadata:
+    """Integration: section_type key is present in chunk metadata."""
+
+    def test_make_chunk_with_header(self):
+        chunker = SemanticMarkdownChunker(chunk_size=512)
+        chunk = chunker._make_chunk("text", 0, {}, ["Abstract"])
+        assert chunk.metadata["section_type"] == "abstract"
+
+    def test_make_chunk_no_header(self):
+        chunker = SemanticMarkdownChunker(chunk_size=512)
+        chunk = chunker._make_chunk("text", 0, {}, [])
+        assert chunk.metadata["section_type"] == ""
+
+    def test_make_chunk_unrecognised_header(self):
+        chunker = SemanticMarkdownChunker(chunk_size=512)
+        chunk = chunker._make_chunk("text", 0, {}, ["Related Work"])
+        assert chunk.metadata["section_type"] == "other"
+
+    def test_full_chunk_pipeline_has_section_type(self):
+        chunker = SemanticMarkdownChunker(chunk_size=512)
+        text = "# Abstract\n\nThis paper presents...\n\n# References\n\n[1] Foo et al."
+        chunks = chunker.chunk(text, {})
+        for c in chunks:
+            assert "section_type" in c.metadata
+
+    def test_naive_fallback_has_section_type(self, monkeypatch):
+        monkeypatch.setattr(md_mod, "MARKDOWN_IT_AVAILABLE", False)
+        chunker = SemanticMarkdownChunker(chunk_size=50)
+        chunker.md = None
+        chunks = chunker.chunk("Some content here.\n\nMore content.", {})
+        for c in chunks:
+            assert c.metadata.get("section_type") == ""
 
 
 def test_split_large_section_truncation_with_overlap():
