@@ -2,12 +2,10 @@
 title: "Search Robustness and Result Clustering"
 id: RDR-056
 type: Feature
-status: closed
+status: accepted
 priority: high
 author: Hal Hildebrand
 created: 2026-04-07
-closed: 2026-04-07
-close_reason: implemented
 related_issues: [RDR-052, RDR-053, RDR-055]
 pr: "https://github.com/Hellblazer/nexus/pull/131"
 ---
