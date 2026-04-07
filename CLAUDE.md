@@ -98,7 +98,8 @@ src/nexus/           # Core package
   pipeline_buffer.py # SQLite WAL buffer for streaming PDF pipeline (RDR-048)
   pipeline_stages.py # Concurrent extractor/chunker/uploader stages + orchestrator
   checkpoint.py      # Batch-path crash recovery (RDR-047)
-  search_engine.py   # Semantic + hybrid search
+  search_engine.py   # Cross-corpus search with over-fetch, thresholds, and catalog pre-filtering
+  search_clusterer.py # Ward hierarchical clustering for search results (opt-in)
   frecency.py        # Git frecency scoring
   scoring.py         # Reranking
   ripgrep_cache.py   # ripgrep integration for hybrid search

@@ -95,7 +95,8 @@ T2 memory — project-scoped, persistent:
 
 T3 knowledge — permanent, semantic search:
   Tool: mcp__plugin_nx_nexus__search
-    search(query="...", corpus="knowledge", limit=10, offset=0, where="bib_year>=2023")
+    search(query="...", corpus="knowledge", limit=10, offset=0, where="bib_year>=2023", cluster_by="")
+    → where: section_type!=references filters noise. cluster_by="semantic" groups results
   Tool: mcp__plugin_nx_nexus__query
     query(question="...", corpus="knowledge", where="bib_year>=2020", limit=10,
           author="", content_type="", follow_links="cites", depth=1, subtree="1.1")
