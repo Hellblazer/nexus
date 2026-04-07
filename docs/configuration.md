@@ -57,8 +57,23 @@ Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.co
 | `client.host` | `NX_CLIENT_HOST` | `localhost` | Override ChromaDB host URL |
 | `pdf.extractor` | — | `auto` | PDF extraction backend: `auto`, `docling`, or `mineru`. Set globally with `nx config set pdf.extractor=mineru` |
 | `voyageai.read_timeout_seconds` | `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` | `120` | Request timeout (seconds) for Voyage AI API calls. Increase for large PDF indexing |
+| `search.hnsw_ef` | — | `256` | HNSW `search_ef` parameter for local-mode collections. Higher values improve tail recall at the cost of query latency. Ignored in cloud mode (SPANN) |
+| `search.distance_threshold.code` | — | `0.45` | Maximum distance for code corpus results. Results above this are filtered as noise |
+| `search.distance_threshold.knowledge` | — | `0.65` | Maximum distance for knowledge corpus results |
+| `search.distance_threshold.docs` | — | `0.65` | Maximum distance for docs corpus results |
+| `search.distance_threshold.rdr` | — | `0.65` | Maximum distance for RDR corpus results |
+| `search.distance_threshold.default` | — | `0.55` | Maximum distance for unknown corpus types |
+| `search.cluster_by` | — | `null` | Set to `semantic` to group search results by Ward hierarchical clustering. Disabled by default |
 
 Embedding models are selected automatically based on collection type (see [Storage Tiers](storage-tiers.md)): `voyage-code-3` for code, `voyage-context-3` (CCE) for docs/rdr/knowledge. All collections use the same model for both index and query.
+
+**Distance thresholds** filter noise from search results automatically. Thresholds are calibrated for Voyage AI embeddings and only apply in cloud mode. Override per corpus in `.nexus.yml`:
+
+```yaml
+search:
+  distance_threshold:
+    knowledge: 0.60   # tighter threshold for knowledge collections
+```
 
 ## Per-Repo Overrides (.nexus.yml)
 

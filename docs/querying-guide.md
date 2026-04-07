@@ -30,6 +30,35 @@ See [CLI Reference](cli-reference.md#nx-search) for all flags.
 
 ---
 
+## search() MCP tool
+
+The `search()` MCP tool provides chunk-level semantic search from agents — equivalent to `nx search` but accessible via MCP.
+
+```python
+# Basic search
+search(query="authentication middleware")
+
+# Search specific corpora
+search(query="caching", corpus="knowledge,docs")
+
+# With metadata filter
+search(query="schema design", where="bib_year>=2024")
+
+# With semantic clustering
+search(query="error handling patterns", cluster_by="semantic")
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | string | (required) | Search query text |
+| `corpus` | string | `knowledge,code,docs` | Comma-separated corpus prefixes or full names. `all` searches everything |
+| `limit` | int | `10` | Page size |
+| `offset` | int | `0` | Skip this many results (pagination) |
+| `where` | string | `""` | Metadata filter (`KEY=VALUE` format, comma-separated) |
+| `cluster_by` | string | `""` | Set to `semantic` to group results by Ward clustering |
+
+---
+
 ## query() MCP tool
 
 The `query()` MCP tool is the primary interface for agents. It combines semantic search with catalog-aware routing — scoping results by author, content type, document subtree, or citation links before searching.
@@ -147,3 +176,43 @@ User or Agent
 ```
 
 All three paths ultimately query the same T3 collections — the difference is how they scope, route, and compose the search.
+
+---
+
+## Search quality features
+
+Several features work automatically to improve result quality across all search interfaces.
+
+### Distance thresholds (automatic noise filtering)
+
+Results exceeding per-corpus distance thresholds are filtered before reaching the caller. This removes the "noise tail" — irrelevant chunks that pad the bottom of result lists. Thresholds are calibrated for Voyage AI embeddings (cloud mode only) and configurable via `.nexus.yml`.
+
+| Corpus | Threshold | Effect |
+|--------|-----------|--------|
+| `code__*` | 0.45 | Functionally inert post-RDR-059 (all relevant code <0.43) — guards future model changes |
+| `knowledge__*`, `docs__*`, `rdr__*` | 0.65 | Relevant results end ~0.59, noise starts ~0.67 |
+| Cross-corpus default | 0.55 | 93% of relevant results below this threshold |
+
+### Section-type metadata filtering
+
+Markdown chunks carry `section_type` metadata (abstract, introduction, methods, results, discussion, conclusion, references, acknowledgements, appendix). Use `--where section_type!=references` to exclude reference sections, which account for ~76% of noise in knowledge collections.
+
+```bash
+nx search "caching strategy" --where section_type!=references
+```
+
+### Corpus-specific over-fetch
+
+Knowledge, docs, and RDR collections fetch 4x the requested result count before filtering (vs 2x for code). This compensates for the higher noise ratio in prose collections, ensuring enough quality results survive threshold filtering.
+
+### Semantic clustering (opt-in)
+
+When `cluster_by="semantic"` is passed to the MCP `search()` tool, results are grouped by Ward hierarchical clustering. Each result gets a `_cluster_label` metadata key identifying its thematic group. Disabled by default — enable globally via `search.cluster_by: semantic` in `.nexus.yml`.
+
+### Catalog pre-filtering
+
+When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog SQLite database and passes them as a `source_path` filter to ChromaDB. This avoids HNSW/SPANN stalling in predicate-sparse graph regions. Happens automatically when a catalog is available — no configuration needed.
+
+### Multi-probe collection health
+
+`nx collection verify --deep` probes up to 5 documents per collection and reports a hit rate. A hit rate below 100% indicates degraded retrieval quality — run `nx doctor --fix` (local mode) or re-index the collection.
