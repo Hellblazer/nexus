@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.3] - 2026-04-07
+
+### Fixed
+- **Pagination completeness** — all list-returning MCP tools and CLI commands now include pagination footers when results are truncated. Tools fixed: `query`, `scratch` (search/list), `plan_search`, `catalog_search`, `catalog_list`, `catalog_link_query`. CLI commands fixed: `nx catalog list`, `nx catalog search`, `nx catalog links`. Docstrings updated to document pagination behavior.
+
 ## [3.2.2] - 2026-04-07
 
 ### Fixed
