@@ -55,6 +55,24 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
+### Link Context (before starting work)
+
+Check T1 scratch for existing `link-context` entries:
+```
+mcp__plugin_nx_nexus__scratch(action="list")
+```
+If no `link-context` tag is present, seed it yourself:
+
+1. Extract RDR references (`RDR-\d+`), document titles, or topic keywords from your task prompt
+2. Resolve to tumblers: `mcp__plugin_nx_nexus__catalog_search(query="<reference>")`
+3. If found, seed scratch:
+   ```
+   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}', tags="link-context")
+   ```
+4. If nothing resolves, skip — the auto-linker handles empty context
+
+This ensures your `store_put` calls create catalog links regardless of how you were dispatched.
+
 ## PDF Processing Protocol
 
 1. **First, check if it is already indexed** by searching nx store for the document

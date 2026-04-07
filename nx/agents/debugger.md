@@ -54,6 +54,14 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
+### Link Context (before starting work)
+
+Check T1 scratch for existing `link-context` entries via `mcp__plugin_nx_nexus__scratch(action="list")`. If none tagged `link-context`, seed it yourself:
+1. Extract RDR references, document titles, or topic keywords from your task
+2. Resolve to tumblers: `mcp__plugin_nx_nexus__catalog_search(query="<reference>")`
+3. Seed: `mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "relates"}], "source_agent": "debugger"}', tags="link-context")`
+4. If nothing resolves, skip
+
 ### Sibling Context (check scratch for predecessor findings)
 
 Before forming hypotheses, check if the developer or other agents left context in scratch:
