@@ -306,7 +306,11 @@ class SemanticMarkdownChunker:
                     chunk_index += 1
                     section_start_char = current_end_char
                     if self.overlap_chars > 0:
-                        overlap_tail = emitted_text[-self.overlap_chars:]
+                        # Compute overlap from content only (skip header) to
+                        # avoid duplicating the header when emitted_text is
+                        # shorter than overlap_chars.
+                        content_text = "\n\n".join(current_parts[1:]) if header_text else emitted_text
+                        overlap_tail = content_text[-self.overlap_chars:] if content_text else ""
                         if header_text:
                             current_parts = [header_text, overlap_tail, part_text]
                         else:
