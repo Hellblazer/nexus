@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.5] - 2026-04-07
+
+### Fixed
+- **voyage-4 eradication** — removed from rdr-close skill, E2E test harness, and all user-facing docs.
+
+### Docs
+- RDR-056, RDR-057, RDR-058, RDR-059 added to RDR index.
+
 ## [3.2.4] - 2026-04-07
 
 Plugin version aligned with Nexus CLI 3.2.4. No plugin-level functional changes.

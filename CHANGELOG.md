@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.5] - 2026-04-07
+
+### Fixed
+- **Code search embedding mismatch** (RDR-059) — `code__*` collections were indexed with `voyage-code-3` but queried with `voyage-4`, producing random noise (0.038 distance spread). Query model now matches index model for all collection types. No reindexing required.
+- **Flaky test determinism** — `_init_git_repo` in hook integration tests now disables GPG signing, eliminating SSH agent warmup race condition.
+- **Stop hook pipefail** — replaced `printf | python3` pipe with `sys.argv` argument passing to avoid `set -eo pipefail` race.
+
+### Changed
+- **Embedding model routing** — `_embedding_fn()` in `t3.py` now routes via `embedding_model_for_collection()` instead of hardcoding `voyage-4`. Enforces index/query model match invariant.
+- **Default fallback model** — unknown collection prefixes now default to `voyage-code-3` (was `voyage-4`) for both index and query.
+
+### Removed
+- **voyage-4 from all active code paths** — eradicated from `corpus.py`, `db/t3.py`, and all user-facing documentation. Only remains in historical changelog/RDR/postmortem references and one deliberate stale-data test fixture.
+- **Superpowers plugin references** — removed from E2E test harness (`run.sh`, `00_debug_load.sh`).
+
+### Docs
+- **RDR-056**: Search Robustness and Result Clustering (17 research findings, 3 rounds)
+- **RDR-057**: Progressive Formalization Across Memory Tiers
+- **RDR-058**: Pipeline Orchestration and Plan Reuse
+- **RDR-059**: Code Search Embedding Model Mismatch (critical bug, fixed)
+- Updated CLAUDE.md, architecture.md, storage-tiers.md, repo-indexing.md, configuration.md — all voyage-4 references corrected.
+
 ## [3.2.4] - 2026-04-07
 
 ### Fixed

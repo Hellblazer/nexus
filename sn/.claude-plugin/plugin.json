@@ -1,5 +1,5 @@
 {
   "name": "sn",
-  "version": "3.2.4",
+  "version": "3.2.5",
   "description": "Injects Serena and Context7 MCP tool usage guidance into subagents via SubagentStart hook."
 }
