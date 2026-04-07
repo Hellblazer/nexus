@@ -24,6 +24,37 @@ except ImportError:
 
 _CHARS_PER_TOKEN = 3.3
 
+# ── E1: section-type classifier (RDR-055) ─────────────────────────────────────
+
+_NUM = r"(\d+\.?\s*)?"  # optional numbered-section prefix ("3. ", "3 ", "3.")
+
+SECTION_PATTERNS: dict[str, re.Pattern] = {
+    "abstract":         re.compile(r"^abstract$", re.IGNORECASE),
+    "introduction":     re.compile(rf"^{_NUM}introduction", re.IGNORECASE),
+    "methods":          re.compile(rf"^{_NUM}(methods?|materials?\s*(and|&)\s*methods?|methodology)", re.IGNORECASE),
+    "results":          re.compile(rf"^{_NUM}results?(\s*(and|&)\s*discussion)?$", re.IGNORECASE),
+    "discussion":       re.compile(rf"^{_NUM}discussion", re.IGNORECASE),
+    "conclusion":       re.compile(rf"^{_NUM}conclusions?", re.IGNORECASE),
+    "references":       re.compile(r"^references?$", re.IGNORECASE),
+    "acknowledgements": re.compile(rf"^{_NUM}acknowledg", re.IGNORECASE),
+    "appendix":         re.compile(rf"^{_NUM}appendi", re.IGNORECASE),
+}
+
+
+def classify_section_type(header_path: list[str]) -> str:
+    """Return section type for the innermost matching heading, or ``'other'``.
+
+    Returns ``""`` when *header_path* is empty (no heading context available).
+    """
+    if not header_path:
+        return ""
+    for heading in reversed(header_path):
+        for section_type, pattern in SECTION_PATTERNS.items():
+            if pattern.match(heading.strip()):
+                return section_type
+    return "other"
+
+
 # Block-level open/close tokens that carry .map but no .content.
 # Their .map fallback in _token_content() would duplicate the text already
 # produced by the inline child tokens.  Filter them at the caller site in
@@ -351,6 +382,7 @@ class SemanticMarkdownChunker:
             "chunk_start_char": chunk_start_char,
             "chunk_end_char": chunk_end_char,
             "has_code_blocks": bool(re.search(r"^```", text, re.MULTILINE)),
+            "section_type": classify_section_type(header_path),
         }
         return MarkdownChunk(
             text=text,
@@ -377,7 +409,7 @@ class SemanticMarkdownChunker:
 
             chunk_text = text[start:end].strip()
             if chunk_text:
-                meta = {**metadata, "chunk_index": chunk_index, "chunk_start_char": start, "chunk_end_char": end, "header_path": ""}
+                meta = {**metadata, "chunk_index": chunk_index, "chunk_start_char": start, "chunk_end_char": end, "header_path": "", "section_type": ""}
                 chunks.append(MarkdownChunk(text=chunk_text, chunk_index=chunk_index, metadata=meta, header_path=[]))
                 chunk_index += 1
 
