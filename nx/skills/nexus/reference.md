@@ -24,6 +24,7 @@ Semantic search across T3 knowledge collections.
 | `limit` | int | `10` | Page size (results per page) |
 | `offset` | int | `0` | Skip this many results. Footer shows `next: offset=N` for next page |
 | `where` | str | `""` | Metadata filter: `KEY=VALUE` or `KEY>=VALUE`, comma-separated. Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Numeric fields auto-coerced: `bib_year`, `bib_citation_count`, `page_count` |
+| `cluster_by` | str | `""` | Set to `"semantic"` to group results by Ward hierarchical clustering. Each result gets `_cluster_label` metadata |
 
 ```
 mcp__plugin_nx_nexus__search(query="query"                                  # knowledge + code + docs (default)
@@ -31,8 +32,11 @@ mcp__plugin_nx_nexus__search(query="query", corpus="all"                    # al
 mcp__plugin_nx_nexus__search(query="query", corpus="code"                   # code collections only
 mcp__plugin_nx_nexus__search(query="query", corpus="knowledge__art", limit=15  # specific collection
 mcp__plugin_nx_nexus__search(query="query", where="bib_year>=2023"          # filter by year
-mcp__plugin_nx_nexus__search(query="query", where="tags=arch,bib_year>=2020" # multiple filters
+mcp__plugin_nx_nexus__search(query="query", where="section_type!=references" # exclude reference sections
+mcp__plugin_nx_nexus__search(query="query", cluster_by="semantic"           # group results by topic
 ```
+
+**Automatic quality features**: Results are automatically filtered by per-corpus distance thresholds (cloud/Voyage only), knowledge/docs/rdr collections over-fetch at 4x, and high-selectivity metadata filters route through the catalog for faster retrieval.
 
 ### query
 
@@ -255,7 +259,7 @@ Verify a collection's retrieval health via known-document probe.
 |-----------|------|---------|-------------|
 | `name` | str | required | Full collection name to verify |
 
-Embeds a known document from the collection and queries it back, reporting the retrieval distance. A distance near 0 indicates healthy embedding round-trips; high distances indicate a model mismatch or corrupted index.
+Probes up to 5 documents from the collection, queries each back, and reports a probe hit rate. Status: `healthy` (100%), `degraded` (partial hits), `broken` (0%). Also reports distance and metric for the last successful probe.
 
 ```
 Use collection_verify tool: name="knowledge__notes"

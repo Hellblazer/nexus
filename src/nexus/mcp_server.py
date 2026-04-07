@@ -300,6 +300,7 @@ def search(
     limit: int = 10,
     offset: int = 0,
     where: str = "",
+    cluster_by: str = "",
 ) -> str:
     """Semantic search across T3 knowledge collections.
 
@@ -315,6 +316,8 @@ def search(
                Operators: =, >=, <=, >, <, !=
                Numeric fields auto-coerced: bib_year, bib_citation_count, page_count.
                Example: "bib_year>=2023,tags=arch"
+        cluster_by: Clustering mode. "semantic" groups results by Ward linkage.
+                    Empty string (default) returns flat ranked list.
     """
     try:
         from nexus.search_engine import search_cross_corpus
@@ -343,6 +346,8 @@ def search(
         fetch_n = offset + limit
         results = search_cross_corpus(
             query, target, n_results=fetch_n, t3=t3, where=where_dict,
+            cluster_by=cluster_by or None,
+            catalog=_get_catalog(),
         )
         results.sort(key=lambda r: r.distance)
         if not results:
@@ -1129,6 +1134,8 @@ def collection_verify(name: str) -> str:
         ]
         if result.distance is not None:
             lines.append(f"Probe distance: {result.distance:.4f} ({result.metric})")
+        if result.probe_hit_rate is not None:
+            lines.append(f"Probe hit rate: {result.probe_hit_rate:.0%}")
         if result.probe_doc_id:
             lines.append(f"Probe doc: {result.probe_doc_id}")
         return "\n".join(lines)

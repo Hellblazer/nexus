@@ -334,7 +334,7 @@ def test_search_default_multi_corpus():
 
     captured: list[list[str]] = []
 
-    def fake_search(query, collections, n_results, t3, where=None):
+    def fake_search(query, collections, n_results, t3, where=None, **kwargs):
         captured.append(list(collections))
         return []
 
@@ -360,7 +360,7 @@ def test_search_single_corpus_backward_compat():
 
     captured: list[list[str]] = []
 
-    def fake_search(query, collections, n_results, t3, where=None):
+    def fake_search(query, collections, n_results, t3, where=None, **kwargs):
         captured.append(list(collections))
         return []
 
@@ -387,7 +387,7 @@ def test_search_all_alias():
 
     captured: list[list[str]] = []
 
-    def fake_search(query, collections, n_results, t3, where=None):
+    def fake_search(query, collections, n_results, t3, where=None, **kwargs):
         captured.append(list(collections))
         return []
 
@@ -414,7 +414,7 @@ def test_search_fully_qualified_collection():
 
     captured: list[list[str]] = []
 
-    def fake_search(query, collections, n_results, t3, where=None):
+    def fake_search(query, collections, n_results, t3, where=None, **kwargs):
         captured.append(list(collections))
         return []
 

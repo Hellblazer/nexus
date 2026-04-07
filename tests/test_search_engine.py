@@ -117,18 +117,20 @@ def test_round_robin_interleave_no_rerank():
 
 
 def test_cross_corpus_overfetch():
-    """search_cross_corpus fetches max(5, (n // num_corpora) * 2) per corpus."""
+    """search_cross_corpus over-fetches per corpus: 2x code, 4x docs."""
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
-    # 2 corpora, n=10 → per_corpus_k = max(5, (10//2)*2) = max(5, 10) = 10
+    # code__r → 2x (20), docs__d → 4x (40)
     search_cross_corpus(
         query="test", collections=["code__r", "docs__d"],
         n_results=10, t3=mock_t3
     )
     calls = mock_t3.search.call_args_list
     assert len(calls) == 2
-    for c in calls:
-        assert c.kwargs.get("n_results") == 10 or c.args[2] == 10
+    code_call = [c for c in calls if c.args[1] == ["code__r"]][0]
+    docs_call = [c for c in calls if c.args[1] == ["docs__d"]][0]
+    assert code_call.kwargs.get("n_results") == 20   # 10 * 2
+    assert docs_call.kwargs.get("n_results") == 40   # 10 * 4
 
 
 

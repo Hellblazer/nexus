@@ -19,7 +19,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
 | `--hybrid` | Augment semantic results with frecency-weighted ranking and ripgrep keyword matches (0.7*vector + 0.3*frecency). Requires ripgrep |
 | `--no-rerank` | Disable cross-corpus reranking (use round-robin instead) |
-| `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`) are auto-coerced to int. Example: `--where bib_year>=2024 --where chunk_type=table_page` |
+| `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`) are auto-coerced to int. Example: `--where bib_year>=2024 --where section_type!=references` |
 | `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |
 | `-m` / `--n` / `--max-results NUM` | Max results (default 10) |
 | `-A N` | Show N lines of context after each matching line (within chunk) |
@@ -386,7 +386,7 @@ nx collection list
 
 | Flag | Description |
 |------|-------------|
-| `--deep` | Known-document probe: embeds a document already in the collection, queries it back, and reports the retrieval distance. Distance near 0 is healthy; high distance indicates model mismatch or index corruption |
+| `--deep` | Multi-probe health check: embeds up to 5 documents already in the collection, queries each back, and reports the probe hit rate. Status: `healthy` (100%), `degraded` (partial hits), `broken` (0%). Shows distance of last successful probe and the metric used |
 
 **`reindex` flags:**
 
@@ -468,4 +468,7 @@ Checks: ChromaDB API key, ChromaDB tenant, T3 database (`CHROMA_DATABASE`), Voya
 ```
 nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files
 nx doctor --clean-pipelines     # Delete orphaned pipeline buffer entries
+nx doctor --fix                 # Apply HNSW search_ef=256 to local collections
 ```
+
+The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.

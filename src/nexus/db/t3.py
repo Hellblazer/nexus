@@ -314,13 +314,39 @@ class T3Database:
     # ── Collection access ─────────────────────────────────────────────────────
 
     def get_or_create_collection(self, name: str) -> chromadb.Collection:
-        """Get or create a T3 collection with the appropriate embedding function."""
+        """Get or create a T3 collection with the appropriate embedding function.
+
+        In local mode, the collection is created with ``hnsw:search_ef`` set to
+        the configured value (default 256) so HNSW query recall is tuned at
+        collection-creation time.  Cloud SPANN collections do not use this key.
+        """
         from nexus.corpus import validate_collection_name
         validate_collection_name(name)
+        kwargs: dict = {"embedding_function": self._embedding_fn(name)}
+        if self._local_mode:
+            from nexus.config import load_config
+            cfg = load_config()
+            hnsw_ef = cfg.get("search", {}).get("hnsw_ef", 256)
+            kwargs["metadata"] = {"hnsw:search_ef": hnsw_ef}
         return _chroma_with_retry(
             self._client_for(name).get_or_create_collection,
-            name, embedding_function=self._embedding_fn(name),
+            name, **kwargs,
         )
+
+    def get_embeddings(self, collection_name: str, ids: list[str]) -> "np.ndarray":
+        """Fetch embeddings for specific document IDs.
+
+        Returns an ``(N, D)`` float32 ndarray, one row per ID (in order).
+        Used by the clustering pipeline to avoid including embeddings in
+        every search response.
+        """
+        import numpy as np
+
+        col = _chroma_with_retry(
+            self._client_for(collection_name).get_collection, collection_name,
+        )
+        result = _chroma_with_retry(col.get, ids=ids, include=["embeddings"])
+        return np.array(result["embeddings"], dtype=np.float32)
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -801,13 +827,15 @@ class VerifyResult:
     probe_doc_id: str | None = None
     distance: float | None = None
     metric: str = "unknown"
+    probe_hit_rate: float | None = None
 
 
 def verify_collection_deep(db: "T3Database", collection_name: str) -> VerifyResult:
-    """Verify retrieval health by probing with a known document.
+    """Verify retrieval health by probing up to 5 known documents.
 
-    Fetches the first stored document, extracts key terms, queries the
-    collection, and checks if the original document appears in results.
+    Peeks at up to 5 stored documents, queries each, and checks if the
+    original document appears in top-10 results.  Reports ``probe_hit_rate``
+    as a crude Robustness-delta@K proxy.
 
     Raises KeyError if the collection does not exist.
     """
@@ -819,41 +847,78 @@ def verify_collection_deep(db: "T3Database", collection_name: str) -> VerifyResu
 
     client = db._client_for(collection_name)
     col = client.get_collection(collection_name)
-    peek = col.peek(limit=1)
+    peek = col.peek(limit=5)
 
     if not peek["ids"]:
         return VerifyResult(status="skipped", doc_count=0)
 
-    probe_id = peek["ids"][0]
-    probe_content = peek["documents"][0] if peek.get("documents") else ""
-
-    words = probe_content.split()[:50]
-    query = " ".join(words)
-
-    if not query.strip():
-        return VerifyResult(status="skipped", doc_count=count, probe_doc_id=probe_id)
-
-    results = db.search(query=query, collection_names=[collection_name], n_results=10)
+    probe_ids = peek["ids"]
+    probe_docs = peek.get("documents") or [""] * len(probe_ids)
 
     meta = col.metadata or {}
-    metric = meta.get("hnsw:space", "l2")
-
-    found = [r for r in results if r["id"] == probe_id]
-
-    if found:
-        distance = found[0]["distance"]
-        return VerifyResult(
-            status="healthy",
-            doc_count=count,
-            probe_doc_id=probe_id,
-            distance=distance,
-            metric=metric,
-        )
+    if db._local_mode:
+        metric = meta.get("hnsw:space", "l2")
     else:
-        return VerifyResult(
-            status="broken",
-            doc_count=count,
-            probe_doc_id=probe_id,
-            distance=None,
-            metric=metric,
-        )
+        metric = "cosine"  # Cloud SPANN; hnsw:space not populated
+
+    found_count = 0
+    last_distance: float | None = None
+    probed_count = 0
+
+    for pid, pdoc in zip(probe_ids, probe_docs):
+        words = pdoc.split()[:50]
+        query = " ".join(words).strip()
+        if not query:
+            continue
+        probed_count += 1
+        results = db.search(query=query, collection_names=[collection_name], n_results=10)
+        found = [r for r in results if r["id"] == pid]
+        if found:
+            found_count += 1
+            last_distance = found[0]["distance"]
+
+    if probed_count == 0:
+        return VerifyResult(status="skipped", doc_count=count, probe_doc_id=probe_ids[0])
+
+    probe_hit_rate = found_count / probed_count
+    first_probe_id = probe_ids[0]
+
+    if probe_hit_rate == 1.0:
+        status = "healthy"
+    elif probe_hit_rate > 0:
+        status = "degraded"
+    else:
+        status = "broken"
+
+    return VerifyResult(
+        status=status,
+        doc_count=count,
+        probe_doc_id=first_probe_id,
+        distance=last_distance,
+        metric=metric,
+        probe_hit_rate=probe_hit_rate,
+    )
+
+
+def apply_hnsw_ef(db: "T3Database") -> int:
+    """Apply HNSW search_ef tuning to all local-mode collections.
+
+    Iterates all collections in *db* and calls ``col.modify()`` to set
+    ``hnsw:search_ef`` to the value from config (default 256).
+
+    Returns the number of collections updated, or 0 if *db* is in cloud mode
+    (SPANN does not use HNSW tuning parameters).
+    """
+    if not db._local_mode:
+        return 0
+
+    from nexus.config import load_config
+    cfg = load_config()
+    hnsw_ef: int = cfg.get("search", {}).get("hnsw_ef", 256)
+
+    collections = _chroma_with_retry(db._client.list_collections)
+    count = 0
+    for col in collections:
+        _chroma_with_retry(col.modify, metadata={"hnsw:search_ef": hnsw_ef})
+        count += 1
+    return count

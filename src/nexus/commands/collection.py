@@ -240,11 +240,21 @@ def verify_cmd(name: str, deep: bool) -> None:
         if result.distance is not None
         else ""
     )
+    if result.probe_hit_rate is not None:
+        hit_str = f" [{result.probe_hit_rate:.0%} probe hit rate]"
+    else:
+        hit_str = ""
     if result.status == "healthy":
-        click.echo(f"Collection '{name}': {result.doc_count} chunks — embedding health OK{dist_str}")
+        click.echo(f"Collection '{name}': {result.doc_count} chunks — embedding health OK{dist_str}{hit_str}")
+    elif result.status == "degraded":
+        click.echo(
+            f"Collection '{name}': {result.doc_count} chunks — DEGRADED: {result.probe_hit_rate:.0%} probe hit rate{dist_str}",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
     elif result.status == "broken":
         click.echo(
-            f"Collection '{name}': {result.doc_count} chunks — BROKEN: probe chunk not in top-10{dist_str}",
+            f"Collection '{name}': {result.doc_count} chunks — BROKEN: 0% probe hit rate (no probes found in top-10){dist_str}",
             err=True,
         )
         raise click.exceptions.Exit(1)

@@ -281,6 +281,19 @@ _DEFAULTS: dict[str, Any] = {
     },
     "search": {
         "hybrid_default": False,
+        "hnsw_ef": 256,
+        # Post-RDR-059 recalibrated thresholds (Voyage embedding fix).
+        # code=0.45 is intentionally inert (all code results <0.43) — guards
+        # future model changes.  knowledge/docs/rdr=0.65 per RF-21 empirical
+        # measurement: relevant cluster ends ~0.59, noise starts ~0.67.
+        "distance_threshold": {
+            "code": 0.45,
+            "knowledge": 0.65,
+            "docs": 0.65,
+            "rdr": 0.65,
+            "default": 0.55,
+        },
+        "cluster_by": None,
     },
     "voyageai": {
         "read_timeout_seconds": 120,
