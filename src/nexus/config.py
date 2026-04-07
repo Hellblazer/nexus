@@ -282,6 +282,13 @@ _DEFAULTS: dict[str, Any] = {
     "search": {
         "hybrid_default": False,
         "hnsw_ef": 256,
+        "distance_threshold": {
+            "code": 0.45,
+            "knowledge": 0.65,
+            "docs": 0.65,
+            "rdr": 0.65,
+            "default": 0.55,
+        },
     },
     "voyageai": {
         "read_timeout_seconds": 120,
