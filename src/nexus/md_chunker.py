@@ -284,10 +284,18 @@ class SemanticMarkdownChunker:
                 current_tokens += part_tokens
                 current_end_char = part_end_char
             else:
+                is_code = part.get("is_code_block", False)
+                if self.preserve_code_blocks and is_code:
+                    # Emit code blocks atomically — never truncate, even if oversized.
+                    pass
+                elif len(part_text) > self.max_chars:
+                    # Truncate oversized non-code parts to prevent unbounded chunk sizes.
+                    part_text = part_text[: self.max_chars]
                 if current_parts:
+                    emitted_text = "\n\n".join(current_parts)
                     chunks.append(
                         self._make_chunk(
-                            "\n\n".join(current_parts),
+                            emitted_text,
                             chunk_index,
                             base_metadata,
                             section["header_path"],
@@ -297,16 +305,17 @@ class SemanticMarkdownChunker:
                     )
                     chunk_index += 1
                     section_start_char = current_end_char
-                is_code = part.get("is_code_block", False)
-                if self.preserve_code_blocks and is_code:
-                    # Emit code blocks atomically — never truncate, even if oversized.
-                    pass
-                elif len(part_text) > self.max_chars:
-                    # Truncate oversized non-code parts to prevent unbounded chunk sizes.
-                    part_text = part_text[: self.max_chars]
-                header_tokens = len(header_text) / _CHARS_PER_TOKEN if header_text else 0.0
-                current_parts = [header_text, part_text] if header_text else [part_text]
-                current_tokens = header_tokens + len(part_text) / _CHARS_PER_TOKEN
+                    if self.overlap_chars > 0:
+                        overlap_tail = emitted_text[-self.overlap_chars:]
+                        if header_text:
+                            current_parts = [header_text, overlap_tail, part_text]
+                        else:
+                            current_parts = [overlap_tail, part_text]
+                    else:
+                        current_parts = [header_text, part_text] if header_text else [part_text]
+                else:
+                    current_parts = [header_text, part_text] if header_text else [part_text]
+                current_tokens = sum(len(p) for p in current_parts) / _CHARS_PER_TOKEN
                 current_end_char = part_end_char
 
         if current_parts:

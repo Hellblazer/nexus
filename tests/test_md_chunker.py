@@ -151,7 +151,7 @@ def test_semantic_chunk_end_char_greater_than_start():
 
 def test_split_large_section_truncates_oversized_part():
     """A content part larger than max_chars is truncated to max_chars."""
-    chunker = SemanticMarkdownChunker(chunk_size=10)  # max_chars ≈ 33 chars
+    chunker = SemanticMarkdownChunker(chunk_size=10, chunk_overlap=0)  # max_chars ≈ 33 chars
 
     # Build a section with one part that vastly exceeds max_chars
     oversized = "x" * 10000  # 10000 chars >> max_chars (≈33)
