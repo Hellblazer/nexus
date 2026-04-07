@@ -254,7 +254,7 @@ def verify_cmd(name: str, deep: bool) -> None:
         raise click.exceptions.Exit(1)
     elif result.status == "broken":
         click.echo(
-            f"Collection '{name}': {result.doc_count} chunks — BROKEN: probe chunk not in top-10{dist_str}",
+            f"Collection '{name}': {result.doc_count} chunks — BROKEN: 0% probe hit rate (no probes found in top-10){dist_str}",
             err=True,
         )
         raise click.exceptions.Exit(1)
