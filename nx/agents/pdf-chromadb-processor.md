@@ -3,7 +3,7 @@ name: pdf-chromadb-processor
 version: "3.0"
 description: Indexes PDF files into nx T3 store for semantic search by delegating to nx index pdf. Use for any PDF that needs to be extracted and made semantically searchable.
 model: haiku
-color: coral
+color: orange
 effort: low
 maxTurns: 30
 ---

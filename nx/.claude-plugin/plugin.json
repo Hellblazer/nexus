@@ -1,0 +1,11 @@
+{
+  "name": "nx",
+  "version": "3.2.1",
+  "description": "Self-hosted three-tier knowledge management with specialized agents, analytical query pipelines, semantic search, and RDR decision tracking for Claude Code.",
+  "author": {
+    "name": "Hal Hildebrand",
+    "url": "https://github.com/Hellblazer"
+  },
+  "repository": "https://github.com/Hellblazer/nexus",
+  "license": "AGPL-3.0-or-later"
+}

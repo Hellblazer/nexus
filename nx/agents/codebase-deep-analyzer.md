@@ -3,7 +3,7 @@ name: codebase-deep-analyzer
 version: "2.0"
 description: Performs comprehensive codebase analysis including architecture patterns, dependencies, and technical debt. Use when onboarding to projects, before major refactoring, or for system-wide understanding.
 model: sonnet
-color: amber
+color: yellow
 effort: medium
 ---
 

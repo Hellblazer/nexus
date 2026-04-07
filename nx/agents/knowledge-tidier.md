@@ -3,7 +3,7 @@ name: knowledge-tidier
 version: "2.0"
 description: Reviews and consolidates nx T3 knowledge and T2 memory for accuracy and consistency. Use after major research tasks or when contradicting information is discovered across documents.
 model: haiku
-color: mint
+color: green
 effort: medium
 maxTurns: 20
 ---
