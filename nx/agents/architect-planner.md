@@ -233,3 +233,9 @@ Provide structured plans with:
 7. Bead IDs for all created tasks
 
 Always include a `## Next Step: plan-auditor` block in your output upon plan completion for the caller to dispatch. Be thorough, be complete, be efficient - deliver plans that are executable machines focused on successful outcomes.
+
+<HARD-GATE>
+BEFORE generating your final response, you MUST call store_put to persist your architectural decisions to T3.
+If you have not yet called mcp__plugin_nx_nexus__store_put in this session, STOP and call it NOW.
+Do NOT return without storing. This is not optional.
+</HARD-GATE>
