@@ -458,13 +458,13 @@ def test_smart_index_embedding_model_metadata(
         f"Code chunks should use voyage-code-3; got: {code_models}"
     )
 
-    # Check docs collection — CCE uses voyage-context-3, fallback uses voyage-4
+    # Check docs collection — all docs use voyage-context-3 (CCE)
     docs_col = local_t3.get_or_create_collection(info["docs_collection"])
     docs_result = docs_col.get(include=["metadatas"])
     docs_models = {m.get("embedding_model", "") for m in docs_result["metadatas"]}
-    allowed = {"voyage-context-3", "voyage-4"}
+    allowed = {"voyage-context-3"}
     assert docs_models <= allowed, (
-        f"Docs chunks should use voyage-context-3 or voyage-4; got: {docs_models}"
+        f"Docs chunks should use voyage-context-3; got: {docs_models}"
     )
     assert len(docs_models) > 0, "Expected at least one embedding model in docs chunks"
 

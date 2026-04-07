@@ -445,7 +445,7 @@ def test_collection_list_returns_names_and_counts():
     assert "100" in result
     # Models should appear
     assert "voyage-context-3" in result  # knowledge__ model
-    assert "voyage-4" in result  # code__ query model
+    assert "voyage-code-3" in result  # code__ model
 
 
 def test_collection_list_empty():
@@ -502,8 +502,7 @@ def test_collection_info_shows_both_models():
     _inject_t3(mock_t3)
 
     result = collection_info("code__myrepo")
-    assert "voyage-code-3" in result   # index model
-    assert "voyage-4" in result        # query model
+    assert "voyage-code-3" in result   # both index and query model
 
 
 def test_collection_info_not_found():

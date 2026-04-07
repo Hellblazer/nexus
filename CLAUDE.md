@@ -49,14 +49,14 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 - T3: `chromadb.PersistentClient` + local ONNX embeddings (local mode, zero-config) OR `chromadb.CloudClient` + `VoyageAIEmbeddingFunction` (cloud mode) — permanent knowledge (`nx store`, `nx search`)
 
 **T3 ChromaDB database**: a single `chromadb.CloudClient` database (`CHROMA_DATABASE` value, e.g. `nexus`). All collection prefixes coexist in one database:
-- `code__*` collections — `voyage-code-3` for index, `voyage-4` for query
+- `code__*` collections — `voyage-code-3` for both index and query
 - `docs__*` collections — `voyage-context-3` (CCE) index + query
 - `rdr__*` collections — `voyage-context-3`
 - `knowledge__*` collections — `voyage-context-3`
 
 **Collection naming**: always `__` as separator — `code__myrepo`, `docs__corpus`, `knowledge__topic` (colons are invalid in ChromaDB collection names).
 
-**Single-chunk CCE**: Documents with only 1 chunk in CCE collections (`docs__*`, `knowledge__*`, `rdr__*`) are embedded via `contextualized_embed()` with `inputs=[[chunk]]`. The previous `voyage-4` fallback for single-chunk documents was removed — it caused a model mismatch between index and query vectors (see post-mortem: cce-query-model-mismatch).
+**Single-chunk CCE**: Documents with only 1 chunk in CCE collections (`docs__*`, `knowledge__*`, `rdr__*`) are embedded via `contextualized_embed()` with `inputs=[[chunk]]`.
 
 **Session propagation (T1)**: The `SessionStart` hook starts a per-session ChromaDB HTTP server, writes its address to `~/.config/nexus/sessions/{ppid}.session`. Child agents walk the OS PPID chain to find the nearest ancestor session file and share T1 scratch across the agent tree. Falls back to `EphemeralClient` when the server cannot start.
 

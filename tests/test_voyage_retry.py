@@ -189,10 +189,10 @@ def test_embed_with_fallback_standard_path_retries_api_connection_error() -> Non
 
     with patch("voyageai.Client", return_value=mock_client), \
          patch("nexus.retry.time.sleep"):
-        embeddings, model = _embed_with_fallback(["one chunk"], "voyage-4", "test-key")
+        embeddings, model = _embed_with_fallback(["one chunk"], "voyage-code-3", "test-key")
 
     assert mock_client.embed.call_count == 2
-    assert model == "voyage-4"
+    assert model == "voyage-code-3"
 
 
 def test_index_code_file_embed_retries_api_connection_error(tmp_path) -> None:
@@ -307,7 +307,7 @@ def test_embed_with_fallback_standard_path_propagates_after_retry_exhaustion() -
     with patch("voyageai.Client", return_value=mock_client), \
          patch("nexus.retry.time.sleep"), \
          pytest.raises(_ve.APIConnectionError):
-        _embed_with_fallback(["one chunk"], "voyage-4", "test-key")
+        _embed_with_fallback(["one chunk"], "voyage-code-3", "test-key")
 
     assert mock_client.embed.call_count == 3
 
@@ -321,5 +321,5 @@ def test_client_constructed_with_config_timeout() -> None:
 
     with patch("voyageai.Client", return_value=mock_client) as mock_ctor, \
          patch("nexus.retry.time.sleep"):
-        _embed_with_fallback(["chunk"], "voyage-4", "test-key", timeout=60.0)
+        _embed_with_fallback(["chunk"], "voyage-code-3", "test-key", timeout=60.0)
         mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=3)

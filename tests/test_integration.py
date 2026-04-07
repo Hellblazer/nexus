@@ -321,20 +321,20 @@ def test_nx_search_knowledge_corpus(runner: CliRunner) -> None:
     )
 
 
-# ── Cross-model compatibility: voyage-code-3 index + voyage-4 query ──────────
+# ── Code search: voyage-code-3 index + voyage-code-3 query ───────────────────
 
 @pytest.mark.integration
 @requires_t3
 def test_voyage4_query_retrieves_voyage_code3_indexed_content() -> None:
-    """voyage-4 queries retrieve semantically relevant results from voyage-code-3-indexed vectors.
+    """voyage-code-3 queries retrieve results from voyage-code-3-indexed vectors.
 
-    Validates the core design assumption: voyage-4 is a compatible universal
-    query model for code__ collections indexed with voyage-code-3.
+    Validates that code__ collections use the same model for index and query
+    (RDR-059 fix: was broken with voyage-4 query against voyage-code-3 index).
 
     Method:
     - Embed a code snippet directly via voyageai SDK with model=voyage-code-3
     - Store it using upsert_chunks_with_embeddings (bypasses collection EF)
-    - Query via db.search (uses collection EF = voyage-4)
+    - Query via db.search (uses collection EF = voyage-code-3)
     - Assert the indexed chunk is returned
     """
     import voyageai
@@ -383,9 +383,9 @@ def test_voyage4_query_retrieves_voyage_code3_indexed_content() -> None:
             collection_names=[collection],
             n_results=3,
         )
-        assert results, "voyage-4 query returned no results from voyage-code-3-indexed collection"
+        assert results, "voyage-code-3 query returned no results from voyage-code-3-indexed collection"
         assert any(uid in r.get("content", "") for r in results), (
-            "voyage-4 query did not retrieve the voyage-code-3-indexed code chunk"
+            "voyage-code-3 query did not retrieve the indexed code chunk"
         )
     finally:
         try:

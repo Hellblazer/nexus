@@ -269,7 +269,7 @@ def test_index_code_file_retries_on_connect_error(tmp_path) -> None:
             file=src,
             repo=tmp_path,
             collection_name="code__myrepo",
-            target_model="voyage-4",
+            target_model="voyage-code-3",
             col=mock_col,
             db=mock_db,
             voyage_client=mock_voyage,

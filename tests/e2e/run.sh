@@ -87,38 +87,7 @@ fi
 #   ~/.claude/settings.json                  — enabledPlugins + permissions
 NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 
-# Locate locally-cached superpowers — pick highest semver, no network needed.
-SUPERPOWERS_CACHE="$HOME/.claude/plugins/cache/claude-plugins-official/superpowers"
-SUPERPOWERS_DIR=""
-if [[ -d "$SUPERPOWERS_CACHE" ]]; then
-    SUPERPOWERS_DIR=$(find "$SUPERPOWERS_CACHE" -maxdepth 1 -mindepth 1 -type d \
-        | sort -V | tail -1)
-fi
-
-if [[ -n "$SUPERPOWERS_DIR" ]]; then
-    SUPERPOWERS_VERSION="$(basename "$SUPERPOWERS_DIR")"
-    echo "superpowers found: $SUPERPOWERS_DIR (v$SUPERPOWERS_VERSION)"
-else
-    echo "WARNING: superpowers plugin not found under $SUPERPOWERS_CACHE"
-    echo "  nx skills that reference superpowers:* will not be exercised."
-    echo "  Install with: /plugin marketplace add anthropics/claude-plugins-official"
-fi
-
-# Build installed_plugins.json — always includes nx; adds superpowers if found.
-SUPERPOWERS_ENTRY=""
-if [[ -n "$SUPERPOWERS_DIR" ]]; then
-    SUPERPOWERS_ENTRY=",
-    \"superpowers@claude-plugins-official\": [
-      {
-        \"scope\": \"user\",
-        \"installPath\": \"$SUPERPOWERS_DIR\",
-        \"version\": \"$SUPERPOWERS_VERSION\",
-        \"installedAt\": \"$NOW\",
-        \"lastUpdated\": \"$NOW\"
-      }
-    ]"
-fi
-
+# Build installed_plugins.json — nx only.
 cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" << PLUGINS_EOF
 {
   "version": 2,
@@ -131,24 +100,17 @@ cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" << PLUGINS_EOF
         "installedAt": "$NOW",
         "lastUpdated": "$NOW"
       }
-    ]${SUPERPOWERS_ENTRY}
+    ]
   }
 }
 PLUGINS_EOF
 
-# Build settings.json — enable nx; conditionally enable superpowers.
-SUPERPOWERS_ENABLED=""
-if [[ -n "$SUPERPOWERS_DIR" ]]; then
-    SUPERPOWERS_ENABLED=',
-    "superpowers@claude-plugins-official": true'
-fi
-
-# Write settings.json: enable plugins and skip the "dangerous mode" confirmation
+# Write settings.json: enable nx plugin and skip the "dangerous mode" confirmation
 # dialog so claude_start doesn't need to navigate it.
 cat > "$TEST_HOME/.claude/settings.json" << SETTINGS_EOF
 {
   "enabledPlugins": {
-    "nx@nexus-plugins": true${SUPERPOWERS_ENABLED}
+    "nx@nexus-plugins": true
   },
   "skipDangerousModePermissionPrompt": true
 }

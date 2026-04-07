@@ -55,6 +55,10 @@ def _init_git_repo(path: Path) -> None:
         ["git", "-C", str(path), "config", "user.name", "Test"],
         capture_output=True, check=True,
     )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "commit.gpgsign", "false"],
+        capture_output=True, check=True,
+    )
     (path / "README.md").write_text("init\n")
     subprocess.run(["git", "-C", str(path), "add", "."], capture_output=True, check=True)
     subprocess.run(
@@ -181,7 +185,8 @@ class TestStopHookPipeline:
         env = mock_plugin_root({"on_stop": True})
         payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": False})
         result = _run_hook(STOP_HOOK, payload, env_overrides=env, cwd=tmp_path)
-        assert result.returncode == 0
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout.strip(), f"empty stdout, stderr: {result.stderr}"
         assert json.loads(result.stdout)["decision"] == "approve"
 
     def test_warns_on_uncommitted_changes(self, tmp_path, mock_plugin_root) -> None:

@@ -455,7 +455,7 @@ class TestCorpusLocalModels:
         from nexus.corpus import index_model_for_collection, embedding_model_for_collection
         assert index_model_for_collection("code__test") == "voyage-code-3"
         assert index_model_for_collection("docs__test") == "voyage-context-3"
-        assert embedding_model_for_collection("code__test") == "voyage-4"
+        assert embedding_model_for_collection("code__test") == "voyage-code-3"
         assert embedding_model_for_collection("docs__test") == "voyage-context-3"
 
 

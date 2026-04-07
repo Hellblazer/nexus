@@ -69,13 +69,13 @@ Collections are namespaced by corpus type using `__` (double underscore) as sepa
 
 | Pattern | Contents | Cloud index model | Cloud query model |
 |---------|----------|-------------------|-------------------|
-| `code__<repo>-<hash>` | Indexed source code | voyage-code-3 | voyage-4 |
+| `code__<repo>-<hash>` | Indexed source code | voyage-code-3 | voyage-code-3 |
 | `docs__<repo>-<hash>` | Indexed prose files | voyage-context-3 (CCE) | voyage-context-3 |
 | `rdr__<repo>-<hash>` | Indexed RDR documents | voyage-context-3 (CCE) | voyage-context-3 |
 | `docs__<corpus>` | Indexed PDFs and markdown | voyage-context-3 (CCE) | voyage-context-3 |
 | `knowledge__<topic>` | Stored agent outputs and notes | voyage-context-3 (CCE) | voyage-context-3 |
 
-CCE collections must be queried with `voyage-context-3` to stay in the same vector space — `voyage-4` is not compatible. Only `code__*` collections use `voyage-4` for queries.
+All collections use the same embedding model for both index and query. Mixing models across vector spaces produces near-random similarity scores.
 
 In local mode, all collections use the active local model for both index and query.
 

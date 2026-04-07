@@ -38,7 +38,7 @@ CLI (cli.py)            MCP Server (mcp_server.py)
           T2: SQLite + FTS5 (persistent memory, project context)
           T3: ChromaDB PersistentClient + ONNX (local, zero-config)
               OR ChromaDB Cloud + Voyage AI (cloud, higher quality)
-                code__*       voyage-code-3 index / voyage-4 query
+                code__*       voyage-code-3 index + query
                 docs__*       voyage-context-3 (CCE) index + query
                 rdr__*        voyage-context-3 (CCE) index + query
                 knowledge__*  voyage-context-3 (CCE) index + query
@@ -80,7 +80,7 @@ Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of st
 **Two graph views**: `catalog_links` returns only links between live documents (deleted nodes excluded).
 `catalog_link_query` returns all links including orphans — useful for admin/audit.
 
-**CCE single-chunk note**: For CCE collections (`docs__*`, `rdr__*`, `knowledge__*`), documents with only one chunk are embedded via `contextualized_embed(inputs=[[chunk]])`. The previous fallback that used the `voyage-4` query model for single-chunk documents was removed — it caused model mismatch between index and query vectors (see post-mortem: cce-query-model-mismatch).
+**CCE single-chunk note**: For CCE collections (`docs__*`, `rdr__*`, `knowledge__*`), documents with only one chunk are embedded via `contextualized_embed(inputs=[[chunk]])`.
 
 ## Module Map
 

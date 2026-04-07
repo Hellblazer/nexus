@@ -959,7 +959,7 @@ def test_index_pdf_rerenders_when_model_changes(sample_pdf, monkeypatch):
     # Existing entry: same hash but old model
     mock_col.get.side_effect = [
         # First call: staleness check
-        {"ids": ["old_id"], "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-4"}]},
+        {"ids": ["old_id"], "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-code-3"}]},
         # Second call: prune stale check
         {"ids": ["old_id"]},
     ]
@@ -1100,7 +1100,7 @@ def test_embed_standard_path_batches_over_128_chunks(monkeypatch):
     with patch("voyageai.Client", return_value=mock_client):
         embeddings, actual_model = _embed_with_fallback(
             chunks=chunks,
-            model="voyage-4",
+            model="voyage-code-3",
             api_key="vk_test",
         )
 
@@ -1109,7 +1109,7 @@ def test_embed_standard_path_batches_over_128_chunks(monkeypatch):
         f"got {embed_call_count[0]}"
     )
     assert len(embeddings) == 200
-    assert actual_model == "voyage-4"
+    assert actual_model == "voyage-code-3"
 
 
 # ── C2: CCE batch chunk-count cap ────────────────────────────────────────────
@@ -1179,7 +1179,7 @@ def test_embed_with_fallback_warns_at_exactly_limit(monkeypatch):
             with patch("nexus.doc_indexer._CCE_MAX_TOTAL_CHUNKS", 2):
                 _embed_with_fallback(
                     chunks=["a", "b"],
-                    model="voyage-4",
+                    model="voyage-code-3",
                     api_key="vk_test",
                 )
             mock_log.warning.assert_called_once()
@@ -1400,7 +1400,7 @@ def test_embed_with_fallback_warns_on_excessive_chunks(monkeypatch):
             with patch("nexus.doc_indexer._CCE_MAX_TOTAL_CHUNKS", 1):
                 _embed_with_fallback(
                     chunks=["a", "b"],
-                    model="voyage-4",
+                    model="voyage-code-3",
                     api_key="vk_test",
                 )
             mock_log.warning.assert_called_once()
@@ -1443,7 +1443,7 @@ def test_embed_with_fallback_filters_empty_strings(monkeypatch):
     with patch("voyageai.Client", return_value=mock_client):
         embeddings, _ = _embed_with_fallback(
             chunks=["", "   ", "real content", "\t\n"],
-            model="voyage-4",
+            model="voyage-code-3",
             api_key="vk_test",
         )
 
@@ -1466,7 +1466,7 @@ def test_embed_with_fallback_all_empty_strings():
     with patch("voyageai.Client", return_value=mock_client):
         embeddings, model = _embed_with_fallback(
             chunks=["", "   ", "\n"],
-            model="voyage-4",
+            model="voyage-code-3",
             api_key="vk_test",
         )
 
@@ -1874,7 +1874,7 @@ def test_embed_progress_callback_fires():
     with patch("voyageai.Client", return_value=mock_client):
         _embed_with_fallback(
             ["chunk one", "chunk two", "chunk three"],
-            "voyage-4", "test-key",
+            "voyage-code-3", "test-key",
             on_progress=on_progress,
         )
 
@@ -1896,7 +1896,7 @@ def test_embed_progress_callback_none_is_noop():
     with patch("voyageai.Client", return_value=mock_client):
         # Should not raise
         _embed_with_fallback(
-            ["chunk one"], "voyage-4", "test-key",
+            ["chunk one"], "voyage-code-3", "test-key",
             on_progress=None,
         )
 

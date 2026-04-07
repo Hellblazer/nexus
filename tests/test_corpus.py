@@ -13,7 +13,7 @@ from nexus.corpus import (
 # ── Embedding model selection ─────────────────────────────────────────────────
 
 def test_embedding_model_code_collection() -> None:
-    assert embedding_model_for_collection("code__myrepo") == "voyage-4"
+    assert embedding_model_for_collection("code__myrepo") == "voyage-code-3"
 
 
 def test_embedding_model_docs_collection() -> None:
@@ -28,8 +28,8 @@ def test_embedding_model_rdr_collection() -> None:
     assert embedding_model_for_collection("rdr__myrepo-abcdef12") == "voyage-context-3"
 
 
-def test_embedding_model_unknown_prefix_defaults_voyage4() -> None:
-    assert embedding_model_for_collection("other__collection") == "voyage-4"
+def test_embedding_model_unknown_prefix_defaults_voyage_code3() -> None:
+    assert embedding_model_for_collection("other__collection") == "voyage-code-3"
 
 
 # ── Collection name resolution from --collection arg ─────────────────────────
@@ -129,30 +129,30 @@ def test_index_model_rdr_collection() -> None:
     assert index_model_for_collection("rdr__myrepo-abcdef12") == "voyage-context-3"
 
 
-def test_index_model_scratch_collection_defaults_voyage4() -> None:
-    """Unrecognized prefix defaults to voyage-4 at index time."""
-    assert index_model_for_collection("scratch__anything") == "voyage-4"
+def test_index_model_scratch_collection_defaults_voyage_code3() -> None:
+    """Unrecognized prefix defaults to voyage-code-3 at index time."""
+    assert index_model_for_collection("scratch__anything") == "voyage-code-3"
 
 
-def test_index_model_bare_name_defaults_voyage4() -> None:
-    """Name with no __ separator defaults to voyage-4 at index time."""
-    assert index_model_for_collection("bare_name") == "voyage-4"
+def test_index_model_bare_name_defaults_voyage_code3() -> None:
+    """Name with no __ separator defaults to voyage-code-3 at index time."""
+    assert index_model_for_collection("bare_name") == "voyage-code-3"
 
 
 def test_embedding_model_for_collection_regression() -> None:
-    """CCE collections use voyage-context-3 at query time; others use voyage-4.
+    """Query model must match index model for each collection type.
 
-    voyage-4 and voyage-context-3 are incompatible vector spaces.
-    CCE collections (docs__, knowledge__, rdr__) were indexed with
-    voyage-context-3 and must be queried with the same model.
+    Mismatched models produce random noise (cosine sim ≈ 0.05).
+    See RDR-059: code__ was queried with voyage-4 against voyage-code-3 index.
     """
     # CCE collections → voyage-context-3
     assert embedding_model_for_collection("docs__papers") == "voyage-context-3"
     assert embedding_model_for_collection("knowledge__security") == "voyage-context-3"
     assert embedding_model_for_collection("rdr__myrepo-abcdef12") == "voyage-context-3"
-    # Standard collections → voyage-4
-    assert embedding_model_for_collection("code__myrepo") == "voyage-4"
-    assert embedding_model_for_collection("other__collection") == "voyage-4"
+    # Code collections → voyage-code-3 (matches index model)
+    assert embedding_model_for_collection("code__myrepo") == "voyage-code-3"
+    # Unknown prefix → voyage-code-3 (safe default)
+    assert embedding_model_for_collection("other__collection") == "voyage-code-3"
 
 
 # ── corpus resolution for RDR ────────────────────────────────────────────────
@@ -272,11 +272,12 @@ def test_cce_index_query_model_invariant() -> None:
                 f"got query={qry}. See post-mortem: cce-query-model-mismatch"
             )
 
-    # Non-CCE prefixes should NOT have this constraint
+    # Non-CCE prefixes: query model must match index model (RDR-059 fix)
     non_cce = ("code__repo", "scratch__temp")
     for prefix in non_cce:
         idx = index_model_for_collection(prefix)
         qry = embedding_model_for_collection(prefix)
-        # code__ has different index/query models — that's expected
-        # Just verify they don't accidentally claim to be CCE
-        assert idx != "voyage-context-3" or qry == "voyage-context-3"
+        assert idx == qry, (
+            f"{prefix}: index model ({idx}) must match query model ({qry}). "
+            f"Mismatched models produce random noise. See RDR-059."
+        )

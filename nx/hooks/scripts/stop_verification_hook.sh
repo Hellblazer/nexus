@@ -28,7 +28,7 @@ approve() {
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)}"
 CONFIG=$(python3 "$PLUGIN_ROOT/hooks/scripts/read_verification_config.py" 2>/dev/null || echo '{}')
 
-ON_STOP=$(printf '%s' "$CONFIG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('on_stop', False))" 2>/dev/null || echo "False")
+ON_STOP=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('on_stop', False))" "$CONFIG" 2>/dev/null || echo "False")
 if [[ "$ON_STOP" != "True" ]]; then
     approve
 fi

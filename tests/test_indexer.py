@@ -299,7 +299,7 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path: Path) -> Non
     }
 
     mock_col = MagicMock()
-    # Same content_hash but stale embedding model (voyage-4 from old collection-EF path)
+    # Same content_hash but stale embedding model (voyage-4 from pre-RDR-059 bug)
     mock_col.get.return_value = {
         "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-4"}],
         "ids": [],

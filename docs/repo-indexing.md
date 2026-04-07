@@ -45,7 +45,7 @@ Each indexed repository produces two T3 collections (local ONNX or cloud Voyage 
 
 | Collection | Cloud Index Model | Cloud Query Model | Contents |
 |---|---|---|---|
-| `code__<name>-<hash8>` | `voyage-code-3` | `voyage-4` | Code files |
+| `code__<name>-<hash8>` | `voyage-code-3` | `voyage-code-3` | Code files |
 | `docs__<name>-<hash8>` | `voyage-context-3` (CCE) | `voyage-context-3` | Prose + PDF files |
 
 `<name>` is the repository basename; `<hash8>` is the first 8 hex characters of the
@@ -57,7 +57,7 @@ so a worktree and its parent produce identical collection names.
 Additionally, markdown files under RDR paths (default: `docs/rdr/`) are indexed into a
 separate `rdr__<name>-<hash8>` collection via the batch markdown indexer.
 
-**Note**: `voyage-context-3` uses Contextualized Chunk Embeddings (CCE). Single-chunk documents are embedded via `contextualized_embed(inputs=[[chunk]])` — no `voyage-4` fallback. Both index and query use `voyage-context-3` for all CCE collections (`docs__*`, `rdr__*`, `knowledge__*`).
+**Note**: All collections use the same embedding model for both index and query. Mixing models produces random noise. `voyage-context-3` uses Contextualized Chunk Embeddings (CCE) for `docs__*`, `rdr__*`, `knowledge__*`. Single-chunk documents are embedded via `contextualized_embed(inputs=[[chunk]])`.
 
 ## Code Chunking
 
@@ -271,4 +271,4 @@ nx search "query" --corpus code --hybrid --no-rerank  # hybrid without cross-cor
 `--corpus` resolves as a prefix: `code` matches all `code__*` collections, `docs` matches
 all `docs__*` collections. A fully-qualified name (containing `__`) matches exactly.
 
-`code__*` collections are queried with `voyage-4`. CCE collections (`docs__*`, `rdr__*`, `knowledge__*`) are queried with `voyage-context-3` — the same model used at index time. Mixing models across CCE vector spaces produces near-random similarity scores.
+All collections are queried with the same model used at index time: `voyage-code-3` for `code__*`, `voyage-context-3` for CCE collections (`docs__*`, `rdr__*`, `knowledge__*`). Mixing models produces near-random similarity scores.

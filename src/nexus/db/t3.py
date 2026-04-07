@@ -150,24 +150,22 @@ class T3Database:
         return self._client
 
     def _embedding_fn(self, collection_name: str):
-        """Return a VoyageAI EF (always voyage-4) for collection creation.
+        """Return a VoyageAI EF for collection creation and non-CCE queries.
 
-        The voyage-4 EF is attached to collections for structural compatibility
-        but is NOT called for CCE collections at write or query time:
-        - Write: ``upsert_chunks_with_embeddings()`` passes pre-computed CCE
-          embeddings; ``put()`` calls ``_cce_embed()`` directly and passes
-          ``embeddings=`` to bypass the EF.
-        - Query: ``search()`` calls ``_cce_embed()`` and passes
-          ``query_embeddings=`` to bypass the EF.
+        The model is chosen by ``embedding_model_for_collection()`` so that
+        the query-time model matches the index-time model.  For CCE collections
+        this EF is structural only (bypassed via ``_cce_embed()``).
+
         Caching is per-collection-name to match the existing test contract.
         """
         if self._ef_override is not None:
             return self._ef_override
         with self._ef_lock:
             if collection_name not in self._ef_cache:
+                model = embedding_model_for_collection(collection_name)
                 self._ef_cache[collection_name] = (
                     chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
-                        model_name="voyage-4", api_key=self._voyage_api_key
+                        model_name=model, api_key=self._voyage_api_key
                     )
                 )
             return self._ef_cache[collection_name]
@@ -382,7 +380,7 @@ class T3Database:
             "indexed_at": now_iso,
             "expires_at": expires_at,
             "ttl_days": ttl_days,
-            "embedding_model": "voyage-context-3" if is_cce else "voyage-4",
+            "embedding_model": index_model_for_collection(collection),
         }
 
         col = self.get_or_create_collection(collection)
@@ -477,8 +475,8 @@ class T3Database:
         results: list[dict] = []
         for name in collection_names:
             # CCE collections must be queried with voyage-context-3 via
-            # contextualized_embed(); using query_texts would invoke the voyage-4
-            # EF, producing vectors in an incompatible space (cosine sim ≈ 0.05).
+            # contextualized_embed(); using query_texts would invoke the
+            # collection EF, which is not CCE-aware.
             # Skip CCE path in local mode or when voyage_api_key is absent.
             is_cce = (
                 not self._local_mode
