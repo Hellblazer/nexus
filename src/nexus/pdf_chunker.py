@@ -9,7 +9,7 @@ from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
 _log = structlog.get_logger()
 
 _DEFAULT_CHUNK_CHARS = 1500   # ~450 tokens at 3.3 chars/token
-_DEFAULT_OVERLAP = 0.15
+_DEFAULT_OVERLAP = 0.20
 
 
 @dataclass
