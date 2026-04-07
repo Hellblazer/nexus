@@ -720,6 +720,11 @@ class Catalog:
             for r in rows
         ]
 
+    def doc_count(self) -> int:
+        """Return the total number of documents in the catalog."""
+        row = self._db.execute("SELECT COUNT(*) FROM documents").fetchone()
+        return row[0] if row else 0
+
     def all_documents(self, limit: int = 0) -> list[CatalogEntry]:
         """Return all catalog entries. limit=0 means unlimited."""
         sql = (

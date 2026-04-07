@@ -3,6 +3,7 @@
 """Search engine: cross-corpus orchestration."""
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 import structlog
@@ -16,6 +17,12 @@ __all__ = [
     "search_cross_corpus",
     "_overfetch_multiplier",
 ]
+
+# Maximum ID-set size for ChromaDB $in filter — cap to avoid payload bloat.
+_MAX_PREFILTER_IDS = 500
+
+# Selectivity threshold — only pre-filter when <5% of docs match.
+_SELECTIVITY_THRESHOLD = 0.05
 
 # Known collection prefixes mapped to their threshold config key.
 _PREFIX_TO_KEY: list[tuple[str, str]] = [
@@ -49,6 +56,93 @@ def _overfetch_multiplier(collection_name: str) -> int:
     return 2
 
 
+# ── Catalog pre-filtering (Compass, RF-3) ────────────────────────────────────
+
+# ChromaDB where-clause operators mapped to SQL operators.
+_OP_MAP = {"$eq": "=", "$gte": ">=", "$lte": "<=", "$gt": ">", "$lt": "<", "$ne": "!="}
+
+# Predicates we can route to catalog SQLite for pre-filtering.
+_PREDICATE_TO_COLUMN = {"bib_year": "year", "bib_citation_count": "year"}  # citation_count not in catalog
+
+
+def _catalog_ids_for_predicates(db: sqlite3.Connection, predicates: dict) -> list[str]:
+    """Query catalog SQLite for file_paths matching *predicates*.
+
+    Only handles predicates that map to catalog columns (bib_year → year).
+    Returns file_path list (used as source_path filter in ChromaDB).
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    for key, value in predicates.items():
+        col = _PREDICATE_TO_COLUMN.get(key)
+        if col is None:
+            return []  # unsupported predicate — can't pre-filter
+        if isinstance(value, dict):
+            for op_key, op_val in value.items():
+                sql_op = _OP_MAP.get(op_key)
+                if sql_op is None:
+                    return []
+                clauses.append(f"{col} {sql_op} ?")
+                params.append(op_val)
+        else:
+            clauses.append(f"{col} = ?")
+            params.append(value)
+
+    if not clauses:
+        return []
+
+    where = " AND ".join(clauses)
+    rows = db.execute(
+        f"SELECT file_path FROM documents WHERE {where} AND file_path IS NOT NULL",
+        params,
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _prefilter_from_catalog(
+    where: dict | None, catalog: Any | None,
+) -> dict | None:
+    """Build a ChromaDB source_path pre-filter from catalog when selectivity is high.
+
+    Returns a ChromaDB ``where`` dict with ``source_path $in`` if the catalog
+    match set is small enough (<5% of total docs, ≤500 IDs).  Returns ``None``
+    to fall through to standard post-filtering otherwise.
+    """
+    if not where or catalog is None:
+        return None
+
+    db = getattr(catalog, "_db", None)
+    if db is None:
+        return None
+
+    # Only attempt pre-filter for predicates we can map to catalog columns
+    mappable = {k: v for k, v in where.items() if k in _PREDICATE_TO_COLUMN}
+    if not mappable:
+        return None
+
+    try:
+        # Get the raw sqlite3 connection from CatalogDB wrapper
+        conn = getattr(db, "_conn", db)
+        paths = _catalog_ids_for_predicates(conn, mappable)
+    except Exception:
+        _log.debug("catalog_prefilter_failed", exc_info=True)
+        return None
+
+    if not paths:
+        return None
+    if len(paths) > _MAX_PREFILTER_IDS:
+        _log.debug("catalog_prefilter_too_many", count=len(paths))
+        return None
+
+    # Selectivity check
+    total = catalog.doc_count() if hasattr(catalog, "doc_count") else 0
+    if total > 0 and len(paths) / total > _SELECTIVITY_THRESHOLD:
+        return None
+
+    return {"source_path": {"$in": paths}}
+
+
 # ── Cross-corpus search ───────────────────────────────────────────────────────
 
 def search_cross_corpus(
@@ -58,6 +152,7 @@ def search_cross_corpus(
     t3: Any,
     where: dict | None = None,
     cluster_by: str | None = None,
+    catalog: Any | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -82,12 +177,23 @@ def search_cross_corpus(
     # Skip filtering when Voyage is not in use (local mode, test injection).
     apply_thresholds = getattr(t3, "_voyage_client", None) is not None
 
+    # Catalog pre-filter: for high-selectivity predicates, narrow the search
+    # space via source_path $in filter (Compass, RF-3).
+    prefilter = _prefilter_from_catalog(where, catalog)
+    if prefilter is not None:
+        # Merge pre-filter with original where — pre-filter uses source_path,
+        # original where keeps the metadata predicates for ChromaDB post-filter.
+        effective_where: dict | None = {"$and": [prefilter, where]} if where else prefilter
+        _log.debug("catalog_prefilter_applied", paths=len(prefilter.get("source_path", {}).get("$in", [])))
+    else:
+        effective_where = where
+
     all_results: list[SearchResult] = []
     for col in collections:
         mult = _overfetch_multiplier(col)
         per_k = max(5, n_results * mult)
         threshold = _threshold_for_collection(col, cfg) if apply_thresholds else None
-        raw = t3.search(query, [col], n_results=per_k, where=where)
+        raw = t3.search(query, [col], n_results=per_k, where=effective_where)
         dropped = 0
         for r in raw:
             distance = r["distance"]

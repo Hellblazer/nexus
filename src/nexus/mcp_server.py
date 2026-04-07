@@ -347,6 +347,7 @@ def search(
         results = search_cross_corpus(
             query, target, n_results=fetch_n, t3=t3, where=where_dict,
             cluster_by=cluster_by or None,
+            catalog=_get_catalog(),
         )
         results.sort(key=lambda r: r.distance)
         if not results:
