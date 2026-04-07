@@ -109,6 +109,9 @@ T3 knowledge — permanent, semantic search:
     store_get(doc_id="...", collection="knowledge")
   Tool: mcp__plugin_nx_nexus__store_put
     store_put(content="...", collection="knowledge", title="...", tags="...")
+    AUTO-LINKING: store_put checks T1 scratch for link-context (tag: "link-context") and auto-creates catalog links.
+    If no link-context in scratch, self-seed: catalog_search your task references → scratch put with targets.
+    You MUST call store_put before returning — findings not stored are findings lost.
   Tool: mcp__plugin_nx_nexus__store_delete
     store_delete(doc_id="...", collection="knowledge")
   Tool: mcp__plugin_nx_nexus__collection_list

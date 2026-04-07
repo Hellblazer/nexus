@@ -192,21 +192,6 @@ Each bead must contain sufficient context for autonomous execution:
 
 
 
-## T3 Persistence (MANDATORY before returning)
-
-You MUST store key architectural decisions to T3 knowledge BEFORE returning. Plans go to T2 memory (per Completion Protocol), but validated decisions belong in T3 so the auto-linker can create catalog links.
-
-```
-mcp__plugin_nx_nexus__store_put(
-    content="# Decision: {topic}\n\n{rationale}",
-    collection="knowledge",
-    title="decision-planner-{topic}-{date}",
-    tags="decision,planning,{domain}"
-)
-```
-
-Skip only if the plan contains no architectural decisions (pure task decomposition).
-
 ## Recommended Next Step (MANDATORY output)
 
 Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `plan-auditor`.
