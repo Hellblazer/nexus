@@ -36,7 +36,8 @@ case "$TOOL_NAME" in
   mcp__plugin_nx_nexus__catalog_link_bulk|\
   mcp__plugin_nx_nexus__catalog_link_query|\
   mcp__plugin_nx_nexus__catalog_resolve|\
-  mcp__plugin_nx_nexus__catalog_stats)
+  mcp__plugin_nx_nexus__catalog_stats|\
+  mcp__plugin_nx_sequential-thinking__sequentialthinking)
     python3 -c "
 import json
 print(json.dumps({
