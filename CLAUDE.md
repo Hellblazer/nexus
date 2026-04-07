@@ -62,15 +62,33 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 
 **Catalog (T3 metadata layer)**: Git-backed document registry that tracks *what* is indexed and *how documents relate*. JSONL files are the source of truth; SQLite + FTS5 is the query cache (rebuilt automatically on mtime change). Tumblers (hierarchical addresses like `1.2.5`) identify documents. Every indexing pathway (`index repo`, `index pdf`, `index rdr`, MCP `store_put`) auto-registers entries. `nx catalog setup` creates and populates the catalog in one step.
 
-**Link graph**: Typed edges between documents — agents create these during their work:
-- `cites` — citation (auto from `nx enrich` via Semantic Scholar, or by research agents)
-- `implements-heuristic` — code→RDR (auto from indexer, title substring match)
-- `supersedes` — replacement (by rdr-close, knowledge-tidier)
-- `relates` — related findings (by debugger, deep-analyst, codebase-analyzer, architect-planner)
-- `implements` — manual or by developer agent linking insights to RDRs
-- `created_by` tracks provenance: which agent or user created each link
+**Link graph**: Typed edges between documents. Three creation paths:
+
+1. **Post-hoc generators** (batch, after indexing):
+   - `generate_citation_links()` — `cites` from Semantic Scholar ID cross-matching (`created_by='bib_enricher'`)
+   - `generate_code_rdr_links()` — `implements-heuristic` from title substring match (`created_by='index_hook'`)
+   - `generate_rdr_filepath_links()` — `implements` from file paths mentioned in RDR text (`created_by='filepath_extractor'`)
+
+2. **Auto-linker** (at storage boundaries, `src/nexus/catalog/auto_linker.py`):
+   - Fires on every `store_put` MCP call
+   - Reads `link-context` entries from T1 scratch (tag: `link-context`)
+   - Creates links from the stored document to seeded targets via `link_if_absent`
+   - `created_by='auto-linker'`
+   - Link-context format: `{"targets": [{"tumbler": "1.2.5", "link_type": "relates"}], "source_agent": "agent-name"}`
+   - Seeded by dispatching skills before agent dispatch, or by agents themselves (self-seeding from task prompt)
+
+3. **Agent-created** (direct `catalog_link` MCP calls during work):
+   - `cites` — by research agents citing source papers
+   - `supersedes` — by rdr-close, knowledge-tidier
+   - `relates` — by debugger, deep-analyst, codebase-analyzer, architect-planner
+   - `implements` — by developer agent linking code to RDRs
+   - `created_by` tracks which agent or user created each link
+
+**Link types**: `cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`. Custom types accepted.
 
 **Two graph views**: `catalog_links` MCP tool returns live-document links only. `catalog_link_query` returns all links including orphans (for audit). The `query` MCP tool has catalog-aware routing (`author`, `content_type`, `subtree`, `follow_links`, `depth` params) for scoped search in a single call. The `/nx:query` skill orchestrates multi-step analytical queries via three-path dispatch (single query → template match → planner).
+
+**Pagination**: All list-returning MCP tools include pagination footers when truncated. String-returning tools show `--- showing 1-N of M. next: offset=N`. Dict/list-returning tools append `{"_pagination": {"next_offset": N, "limit": L}}`. CLI commands show `Next page: --offset N`.
 
 **T3 expire guard**: always filter `ttl_days > 0 AND expires_at != "" AND expires_at < now` — the `expires_at != ""` guard is mandatory: permanent entries use `expires_at=""` which sorts before ISO timestamps and would be incorrectly deleted by a 2-condition guard.
 
@@ -84,7 +102,8 @@ src/nexus/           # Core package
     catalog.py       # Core: link(), link_query(), graph(), delete_document(), link_audit(), descendants(), resolve_chunk()
     catalog_db.py    # SQLite schema + FTS5 + UNIQUE link constraint + descendants() SQL helper
     tumbler.py       # Hierarchical addresses (depth, ancestors, lca) + JSONL readers with resilience
-    link_generator.py # Auto-generate citation + code-RDR links from metadata
+    auto_linker.py    # Storage-boundary auto-linking from T1 scratch link-context
+    link_generator.py # Post-hoc batch linkers: citation, code-RDR heuristic, RDR file-path
   db/                # t1.py, t2.py, t3.py — tier implementations; local_ef.py — local ONNX embeddings
   indexer.py         # Repo indexing pipeline (classify → chunk → embed → store)
   classifier.py      # File classification: CODE / PROSE / PDF / SKIP
