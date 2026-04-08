@@ -72,6 +72,22 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 
 **Pagination**: All list-returning tools include footers when truncated — `offset=N` for next page.
 
+## Catalog Link Graph
+
+When researching a file's design intent, use the link graph:
+
+```bash
+nx catalog links-for-file src/nexus/catalog/catalog.py   # linked RDRs/code
+nx catalog session-summary                                 # recently modified files + links
+nx catalog coverage                                        # link coverage by content type
+nx catalog orphans --no-links                              # unlinked entries
+```
+
+In the `query` MCP tool, use `follow_links=True` to traverse the link graph:
+```
+query("how does path resolution work", follow_links=True, subtree="1.1")
+```
+
 **T3 expire guard**: always filter `ttl_days > 0 AND expires_at != "" AND expires_at < now` — the `expires_at != ""` guard is mandatory: permanent entries use `expires_at=""` which sorts before ISO timestamps and would be incorrectly deleted by a 2-condition guard.
 
 ## Source Layout

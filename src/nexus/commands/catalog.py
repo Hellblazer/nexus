@@ -787,6 +787,114 @@ def orphans_cmd(no_links: bool) -> None:
         click.echo(f"  {tumbler:<12} {content_type:<10} {title}{loc}")
 
 
+@catalog.command("links-for-file")
+@click.argument("file_path")
+def links_for_file_cmd(file_path: str) -> None:
+    """Show catalog entries linked to a specific file.
+
+    \b
+    Examples:
+      nx catalog links-for-file src/nexus/catalog/catalog.py
+      nx catalog links-for-file docs/rdr/rdr-060.md
+    """
+    cat = _get_catalog()
+    db = cat._db
+
+    row = db.execute(
+        "SELECT tumbler, title, content_type FROM documents WHERE file_path = ?",
+        (file_path,),
+    ).fetchone()
+    if not row:
+        click.echo(f"No catalog entry for: {file_path}")
+        return
+
+    tumbler_str, title, content_type = row
+    click.echo(f"{tumbler_str} {content_type}: {title}")
+
+    link_rows = db.execute(
+        """SELECT d.tumbler, d.title, d.content_type, l.link_type,
+                  CASE WHEN l.from_tumbler = ? THEN 'outgoing' ELSE 'incoming' END as direction
+           FROM links l
+           JOIN documents d ON (d.tumbler = l.to_tumbler AND l.from_tumbler = ?)
+                            OR (d.tumbler = l.from_tumbler AND l.to_tumbler = ?)
+           ORDER BY l.link_type, d.content_type""",
+        (tumbler_str, tumbler_str, tumbler_str),
+    ).fetchall()
+
+    if not link_rows:
+        click.echo("  No links.")
+        return
+
+    for t, t_title, t_type, l_type, direction in link_rows:
+        arrow = "→" if direction == "outgoing" else "←"
+        click.echo(f"  {arrow} [{l_type}] {t} {t_type}: {t_title}")
+
+
+@catalog.command("session-summary")
+@click.option("--since", default=24, type=int, help="Hours to look back for git changes")
+def session_summary_cmd(since: int) -> None:
+    """Show link graph summary for recently modified files.
+
+    \b
+    Examples:
+      nx catalog session-summary            # files modified in last 24 hours
+      nx catalog session-summary --since 48 # last 48 hours
+    """
+    import subprocess
+
+    try:
+        cat = _get_catalog()
+    except click.ClickException:
+        click.echo("Catalog not initialized — skipping session summary.")
+        return
+
+    try:
+        result = subprocess.run(
+            [
+                "git", "log",
+                f"--since={since} hours ago",
+                "--name-only",
+                "--pretty=format:",
+                "--diff-filter=ACMR",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        files = {f.strip() for f in result.stdout.splitlines() if f.strip()}
+    except Exception:
+        click.echo("Could not determine recent file changes.")
+        return
+
+    if not files:
+        click.echo(f"No files modified in the last {since} hours.")
+    else:
+        db = cat._db
+        found_any = False
+        for fp in sorted(files):
+            row = db.execute(
+                "SELECT tumbler FROM documents WHERE file_path = ?", (fp,)
+            ).fetchone()
+            if not row:
+                continue
+            tumbler_str = row[0]
+            link_rows = db.execute(
+                """SELECT DISTINCT d.title FROM links l
+                   JOIN documents d ON (d.tumbler = l.to_tumbler AND l.from_tumbler = ?)
+                                    OR (d.tumbler = l.from_tumbler AND l.to_tumbler = ?)
+                   WHERE d.content_type = 'rdr'""",
+                (tumbler_str, tumbler_str),
+            ).fetchall()
+            if link_rows:
+                rdrs = ", ".join(r[0] for r in link_rows)
+                click.echo(f"  {fp} — {len(link_rows)} RDR(s): {rdrs}")
+                found_any = True
+
+        if not found_any:
+            click.echo("No linked RDRs found for recently modified files.")
+
+    total = cat._db.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+    click.echo(f"\nLink graph: {total} links active.")
+
+
 @catalog.command("gc")
 @click.option("--dry-run", is_flag=True, default=False, help="Show what would be deleted without deleting.")
 def gc_cmd(dry_run: bool) -> None:

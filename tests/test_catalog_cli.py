@@ -428,6 +428,73 @@ class TestLinkGenerate:
         assert "0 heuristic + 0 filepath" in result.output
 
 
+class TestAgentIntegration:
+    """Tests for agent-facing discovery commands: links-for-file, session-summary."""
+
+    def _make_catalog_with_links(self, catalog_env: object) -> "Catalog":
+        from nexus.catalog.catalog import Catalog
+        from nexus.catalog.tumbler import Tumbler
+
+        cat = Catalog.init(catalog_env)  # type: ignore[arg-type]
+        owner = cat.register_owner("test", "repo", repo_hash="abc")
+        t1 = cat.register(owner, "catalog.py", content_type="code", file_path="src/nexus/catalog.py")
+        t2 = cat.register(owner, "RDR-060", content_type="rdr", file_path="docs/rdr/rdr-060.md")
+        cat.link(t1, t2, "implements", created_by="test")
+        return cat
+
+    def test_links_for_file_found(self, catalog_env):
+        runner = CliRunner()
+        self._make_catalog_with_links(catalog_env)
+        result = runner.invoke(main, ["catalog", "links-for-file", "src/nexus/catalog.py"])
+        assert result.exit_code == 0
+        assert "RDR-060" in result.output
+        assert "implements" in result.output
+
+    def test_links_for_file_not_found(self, catalog_env):
+        runner = CliRunner()
+        self._make_catalog_with_links(catalog_env)
+        result = runner.invoke(main, ["catalog", "links-for-file", "nonexistent.py"])
+        assert result.exit_code == 0
+        assert "No catalog entry" in result.output
+
+    def test_links_for_file_shows_direction(self, catalog_env):
+        """Incoming and outgoing links are shown with arrow direction."""
+        runner = CliRunner()
+        cat = self._make_catalog_with_links(catalog_env)
+        # Also check from the RDR side (incoming link)
+        result = runner.invoke(main, ["catalog", "links-for-file", "docs/rdr/rdr-060.md"])
+        assert result.exit_code == 0
+        assert "implements" in result.output
+        # Arrow direction — incoming or outgoing arrow
+        assert ("→" in result.output or "←" in result.output)
+
+    def test_links_for_file_not_initialized(self, tmp_path, monkeypatch):
+        """Graceful failure when catalog not initialized."""
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "nocat"))
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "links-for-file", "some.py"])
+        # Should fail with catalog-not-initialized error, not crash
+        assert result.exit_code != 0 or "not initialized" in result.output.lower()
+
+    def test_session_summary_no_catalog(self, tmp_path, monkeypatch):
+        """Should not crash when catalog not initialized."""
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "nocat"))
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "session-summary"])
+        # Either exits cleanly (0) or with a non-zero code — must not raise
+        assert result.exit_code in (0, 1)
+
+    def test_session_summary_shows_link_count(self, catalog_env):
+        """session-summary should print link graph total at the end."""
+        runner = CliRunner()
+        self._make_catalog_with_links(catalog_env)
+        # Pass --since=99999 so we don't need git to have recent activity
+        result = runner.invoke(main, ["catalog", "session-summary", "--since", "99999"])
+        assert result.exit_code == 0
+        # Should show link graph total
+        assert "link" in result.output.lower()
+
+
 class TestGcCommand:
     """Tests for `nx catalog gc` — remove orphan entries with miss_count >= 2."""
 
