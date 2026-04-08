@@ -24,6 +24,10 @@ def _s2_headers() -> dict[str, str]:
     return {"x-api-key": key} if key else {}
 
 
+_MAX_RETRIES = 3
+_BACKOFF_BASE = 5.0  # seconds; doubles on each retry
+
+
 def enrich(title: str) -> dict[str, Any]:
     """Query Semantic Scholar for bibliographic metadata.
 
@@ -31,34 +35,44 @@ def enrich(title: str) -> dict[str, Any]:
     semantic_scholar_id — or an empty dict on any failure (timeout, HTTP
     error, network error, or no matching results).
 
+    Retries up to 3 times with exponential backoff on 429 rate-limit.
     Set ``S2_API_KEY`` env var for higher rate limits (100 req/s).
     """
-    try:
-        resp = httpx.get(
-            _BASE_URL,
-            params={"query": title, "fields": _FIELDS, "limit": 1},
-            headers=_s2_headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-        if not data:
+    import time
+
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            resp = httpx.get(
+                _BASE_URL,
+                params={"query": title, "fields": _FIELDS, "limit": 1},
+                headers=_s2_headers(),
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code == 429 and attempt < _MAX_RETRIES:
+                wait = _BACKOFF_BASE * (2 ** attempt)
+                _log.debug("bib_enricher_rate_limited", title=title, retry_in=wait)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            if not data:
+                return {}
+            paper = data[0]
+            refs = [
+                r.get("paperId", "") for r in paper.get("references", [])
+                if r and r.get("paperId")
+            ]
+            return {
+                "year": paper.get("year", 0) or 0,
+                "venue": paper.get("venue", "") or "",
+                "authors": ", ".join(
+                    a.get("name", "") for a in paper.get("authors", [])[:5]
+                ),
+                "citation_count": paper.get("citationCount", 0) or 0,
+                "semantic_scholar_id": paper.get("paperId", "") or "",
+                "references": refs,
+            }
+        except (httpx.HTTPError, httpx.TimeoutException, httpx.ConnectError, ValueError) as exc:
+            _log.debug("bib_enricher_lookup_failed", title=title, error=str(exc))
             return {}
-        paper = data[0]
-        refs = [
-            r.get("paperId", "") for r in paper.get("references", [])
-            if r and r.get("paperId")
-        ]
-        return {
-            "year": paper.get("year", 0) or 0,
-            "venue": paper.get("venue", "") or "",
-            "authors": ", ".join(
-                a.get("name", "") for a in paper.get("authors", [])[:5]
-            ),
-            "citation_count": paper.get("citationCount", 0) or 0,
-            "semantic_scholar_id": paper.get("paperId", "") or "",
-            "references": refs,
-        }
-    except (httpx.HTTPError, httpx.TimeoutException, httpx.ConnectError, ValueError) as exc:
-        _log.debug("bib_enricher_lookup_failed", title=title, error=str(exc))
-        return {}
+    return {}
