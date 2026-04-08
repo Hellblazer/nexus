@@ -128,25 +128,27 @@ Skills that provide guidance directly without delegating to an agent.
 | using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring nx plugin skills |
 
-## Agents (14)
+## Agents (16)
 
 See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, predecessors/successors).
 
 | Agent | Skill | Command | Model | Purpose |
 |-------|-------|---------|-------|---------|
+| analytical-operator | query | *(dispatched)* | sonnet | Structured extraction, summarization, ranking, comparison |
+| architect-planner | architecture | `/nx:architecture` | opus | Software architecture design, execution plans |
 | code-review-expert | code-review | `/nx:review-code` | sonnet | Code quality, security, best practices |
 | codebase-deep-analyzer | codebase-analysis | `/nx:analyze-code` | sonnet | Architecture, patterns, dependency mapping |
-| deep-analyst | deep-analysis | `/nx:deep-analysis` | opus | Complex problem investigation, root cause |
-| substantive-critic | substantive-critique | `/nx:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
-| deep-research-synthesizer | research-synthesis | `/nx:research` | sonnet | Multi-source research with synthesis |
-| architect-planner | architecture | `/nx:architecture` | opus | Software architecture design, execution plans |
 | debugger | debugging | `/nx:debug` | opus | Hypothesis-driven debugging |
+| deep-analyst | deep-analysis | `/nx:deep-analysis` | opus | Complex problem investigation, root cause |
+| deep-research-synthesizer | research-synthesis | `/nx:research` | sonnet | Multi-source research with synthesis |
 | developer | development | `/nx:implement` | sonnet | TDD implementation, test-first methodology |
 | knowledge-tidier | knowledge-tidying | `/nx:knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
 | pdf-chromadb-processor | pdf-processing | `/nx:pdf-process` | haiku | Index PDFs into nx store for semantic search |
 | plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution |
-| plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context — file paths, patterns, constraints, test commands |
+| plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context |
+| query-planner | query | *(dispatched)* | sonnet | Decompose analytical questions into execution plans |
 | strategic-planner | strategic-planning | `/nx:create-plan` | opus | Implementation planning, task decomposition |
+| substantive-critic | substantive-critique | `/nx:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
 | test-validator | test-validation | `/nx:test-validate` | sonnet | Test coverage and quality validation |
 
 ## Standard Pipelines
@@ -198,12 +200,12 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | T1/T2/T3 storage tier access for agents (RDR-034) | `search`, `store_put`, `store_list`, `memory_put`, `memory_get`, `memory_search`, `scratch`, `scratch_manage`, `collection_list`, `collection_info`, `collection_verify`, `plan_save`, `plan_search` |
+| `nexus` | T1/T2/T3 storage + catalog access (RDR-034) | `search`, `query`, `store_put`, `store_get`, `store_list`, `store_delete`, `memory_put`, `memory_get`, `memory_search`, `memory_delete`, `scratch`, `scratch_manage`, `collection_list`, `collection_info`, `collection_verify`, `plan_save`, `plan_search`, `catalog_search`, `catalog_show`, `catalog_list`, `catalog_register`, `catalog_update`, `catalog_link`, `catalog_links`, `catalog_unlink`, `catalog_link_audit`, `catalog_link_bulk`, `catalog_link_query`, `catalog_resolve`, `catalog_stats` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
 ### Nexus MCP Server (`nx-mcp`)
 
-The nexus server exposes 14 structured MCP tools that give agents direct access to all three storage tiers without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus server exposes 30 MCP tools that give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 

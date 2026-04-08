@@ -55,12 +55,12 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-031](rdr-031-collection-portability.md) | Collection Portability — Export/Import for T3 Backup and Migration | Feature | Closed | 2026-03-08 |
 | [RDR-032](rdr-032-indexer-decomposition.md) | Indexer Module Decomposition and Configuration Externalization | Technical Debt | Closed | 2026-03-08 |
 | [RDR-033](rdr-033-pdf-agent-nx-index-alignment.md) | PDF Processing Agent Should Delegate to nx index pdf | Architecture | Closed | 2026-03-08 |
-| [RDR-034](rdr-034-mcp-server-agent-storage.md) | MCP Server for Agent Storage Operations | Architecture | Accepted | 2026-03-11 |
+| [RDR-034](rdr-034-mcp-server-agent-storage.md) | MCP Server for Agent Storage Operations | Architecture | Closed | 2026-03-11 |
 | [RDR-035](rdr-035-plugin-agent-mcp-tool-access.md) | Fix Plugin Agent MCP Tool Access | Bugfix | Closed | 2026-03-12 |
-| [RDR-036](rdr-036-post-accept-planning-workflow.md) | Post-Accept Planning Workflow | Enhancement | Accepted | 2026-03-12 |
-| [RDR-037](rdr-037-t3-database-consolidation.md) | T3 Database Consolidation | Enhancement | Accepted | 2026-03-14 |
-| [RDR-038](rdr-038-local-t3-backend.md) | Local T3 Backend | Architecture | Accepted | 2026-03-14 |
-| [RDR-039](rdr-039-claude-code-framework-alignment.md) | Claude Code Framework Alignment (v2.1.72–v2.1.81) | Technical Debt | Accepted | 2026-03-21 |
+| [RDR-036](rdr-036-post-accept-planning-workflow.md) | Post-Accept Planning Workflow | Enhancement | Closed | 2026-03-12 |
+| [RDR-037](rdr-037-t3-database-consolidation.md) | T3 Database Consolidation | Enhancement | Closed | 2026-03-14 |
+| [RDR-038](rdr-038-local-t3-backend.md) | Local T3 Backend | Architecture | Closed | 2026-03-14 |
+| [RDR-039](rdr-039-claude-code-framework-alignment.md) | Claude Code Framework Alignment (v2.1.72–v2.1.81) | Technical Debt | Closed | 2026-03-21 |
 | [RDR-040](rdr-040-developer-agent-circuit-breaker.md) | Developer Agent Circuit Breaker for Test Failure Escalation | Architecture | Closed | 2026-03-25 |
 | [RDR-041](rdr-041-t1-scratch-inter-agent-context.md) | T1 Scratch Inter-Agent Context Sharing | Architecture | Closed | 2026-03-26 |
 | [RDR-042](rdr-042-agenticscholar-enhancements.md) | AgenticScholar-Inspired Enhancements | Architecture | Closed | 2026-03-29 |
@@ -76,7 +76,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-052](rdr-052-catalog-first-query-routing.md) | Catalog-First Query Routing — Push Planning into MCP | Architecture | Closed | 2026-04-05 |
 | [RDR-053](rdr-053-xanadu-fidelity.md) | Xanadu Fidelity — Tumbler Arithmetic and Content-Addressed Spans | Architecture | Closed | 2026-04-05 |
 | [RDR-054](rdr-054-chunk-boundary-equation-splitting.md) | Chunk Boundary Equation Splitting — Information Loss at Chunk Boundaries | Bug | Closed | 2026-04-07 |
-| [RDR-055](rdr-055-section-type-metadata-quality-scoring.md) | Section-Type Metadata and Quality Scoring for Knowledge Collections | Feature | Accepted | 2026-04-07 |
+| [RDR-055](rdr-055-section-type-metadata-quality-scoring.md) | Section-Type Metadata and Quality Scoring for Knowledge Collections | Feature | Closed | 2026-04-07 |
 | [RDR-056](rdr-056-search-robustness-result-clustering.md) | Search Robustness and Result Clustering | Feature | Closed | 2026-04-07 |
 | [RDR-057](rdr-057-progressive-formalization-memory-tiers.md) | Progressive Formalization Across Memory Tiers | Feature | Draft | 2026-04-07 |
 | [RDR-058](rdr-058-pipeline-orchestration-plan-reuse.md) | Pipeline Orchestration and Plan Reuse | Feature | Accepted | 2026-04-07 |

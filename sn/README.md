@@ -10,6 +10,7 @@ Subagents spawned by Claude Code don't see your CLAUDE.md instructions. They hav
 
 1. **Bundling MCP servers** — installs Serena (LSP-backed code intelligence) and Context7 (live library documentation) as MCP servers
 2. **Injecting usage guidance** — a `SubagentStart` hook injects tool routing tables, parameter signatures, and workflows into every subagent's context
+3. **Auto-approving MCP tools** — a `PermissionRequest` hook auto-approves all `mcp__plugin_sn_serena__*` and `mcp__plugin_sn_context7__*` tools so agents never hit permission prompts
 
 ## Install
 
