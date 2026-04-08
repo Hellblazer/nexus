@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-04-08
+
+### Added
+- **`nx:catalog` skill** — agent-friendly catalog manipulation: resolve tumblers, create links, seed auto-linker context, discover unlinked entries.
+- **Ambient catalog context** — subagent-start hook extracts file paths from task text and shows linked RDRs automatically.
+- **Link-context seeding** across all T3-storing skills (15 total): code-review, codebase-analysis, plan-validation, substantive-critique, rdr-gate, knowledge-tidying, strategic-planning, rdr-close + the 6 previously seeding skills.
+
 ### Changed
 - **Link-boosted query results** — `query` MCP tool now automatically boosts results from documents with `implements` links. No agent changes needed.
 - **CONTEXT_PROTOCOL** — added catalog link graph as search source #4 for proactive agents.
