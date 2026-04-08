@@ -79,11 +79,11 @@ def generate_rdr_filepath_links(cat: Catalog) -> int:
 
     count = 0
     for rdr in rdr_entries:
-        rdr_path = Path(rdr.file_path)
-        if not rdr_path.is_file():
+        resolved = cat.resolve_path(rdr.tumbler)
+        if resolved is None or not resolved.is_file():
             continue
         try:
-            text = rdr_path.read_text(errors="replace")
+            text = resolved.read_text(errors="replace")
         except OSError:
             continue
 

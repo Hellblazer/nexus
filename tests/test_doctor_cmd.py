@@ -314,3 +314,100 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     assert result.exit_code == 0
     assert "1 collections" in result.output
     assert "on disk" in result.output
+
+
+# ── doctor --fix-paths ─────────────────────────────────────────────────────
+
+
+class TestFixPaths:
+    """doctor --fix-paths migration tests."""
+
+    def _make_catalog_with_entries(self, tmp_path, entries):
+        """Create catalog with specified entries.
+
+        entries: list of (owner_type, repo_hash, repo_root, file_path, collection).
+        """
+        from nexus.catalog.catalog import Catalog
+
+        cat_dir = tmp_path / "catalog"
+        cat = Catalog.init(cat_dir)
+        for owner_type, repo_hash, repo_root, file_path, collection in entries:
+            owner = cat.register_owner(
+                f"test-{repo_hash or 'curator'}",
+                owner_type,
+                repo_hash=repo_hash,
+                repo_root=repo_root,
+            )
+            cat.register(
+                owner,
+                "test-doc",
+                content_type="code",
+                file_path=file_path,
+                physical_collection=collection,
+            )
+        return cat, cat_dir
+
+    def test_fix_paths_dry_run(self, tmp_path, runner):
+        cat, cat_dir = self._make_catalog_with_entries(tmp_path, [
+            ("repo", "abc12345", str(tmp_path / "repo"),
+             str(tmp_path / "repo" / "src" / "foo.py"), "code__test"),
+        ])
+        mock_t3 = MagicMock()
+        with (
+            patch("nexus.config.catalog_path", return_value=cat_dir),
+            patch("nexus.db.make_t3", return_value=mock_t3),
+        ):
+            result = runner.invoke(main, ["doctor", "--fix-paths", "--dry-run"])
+        assert result.exit_code == 0
+        assert "[dry-run]" in result.output
+        assert "src/foo.py" in result.output
+        # Verify nothing was actually changed
+        row = cat._db.execute("SELECT file_path FROM documents").fetchone()
+        assert row[0].startswith("/")  # still absolute
+
+    def test_fix_paths_writes_relative(self, tmp_path, runner):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        cat, cat_dir = self._make_catalog_with_entries(tmp_path, [
+            ("repo", "abc12345", str(repo_dir),
+             str(repo_dir / "src" / "foo.py"), "code__test"),
+        ])
+        mock_t3 = MagicMock()
+        mock_t3.update_source_path.return_value = 5
+        with (
+            patch("nexus.config.catalog_path", return_value=cat_dir),
+            patch("nexus.db.make_t3", return_value=mock_t3),
+        ):
+            result = runner.invoke(main, ["doctor", "--fix-paths"])
+        assert result.exit_code == 0
+        assert "Fixed 1" in result.output
+        row = cat._db.execute("SELECT file_path FROM documents").fetchone()
+        assert row[0] == "src/foo.py"
+        mock_t3.update_source_path.assert_called_once()
+
+    def test_fix_paths_skips_curator(self, tmp_path, runner):
+        cat, cat_dir = self._make_catalog_with_entries(tmp_path, [
+            ("curator", "", "", "/abs/path/paper.pdf", "docs__papers"),
+        ])
+        mock_t3 = MagicMock()
+        with (
+            patch("nexus.config.catalog_path", return_value=cat_dir),
+            patch("nexus.db.make_t3", return_value=mock_t3),
+        ):
+            result = runner.invoke(main, ["doctor", "--fix-paths"])
+        assert result.exit_code == 0
+        mock_t3.update_source_path.assert_not_called()
+
+    def test_fix_paths_idempotent(self, tmp_path, runner):
+        cat, cat_dir = self._make_catalog_with_entries(tmp_path, [
+            ("repo", "abc12345", str(tmp_path / "repo"),
+             "src/foo.py", "code__test"),  # already relative
+        ])
+        mock_t3 = MagicMock()
+        with (
+            patch("nexus.config.catalog_path", return_value=cat_dir),
+            patch("nexus.db.make_t3", return_value=mock_t3),
+        ):
+            result = runner.invoke(main, ["doctor", "--fix-paths"])
+        assert result.exit_code == 0
+        assert "No absolute" in result.output
