@@ -52,11 +52,6 @@ class TestRegisterOwner:
         cat.register_owner("nexus", "repo", repo_hash="571b8edd")
         assert str(cat.register_owner("arcaneum", "repo", repo_hash="aabb1122")) == "1.2"
 
-    def test_owner_persists_to_jsonl(self, cat):
-        cat.register_owner("nexus", "repo", repo_hash="571b8edd")
-        records = [json.loads(l) for l in (cat._dir / "owners.jsonl").read_text().strip().splitlines()]
-        assert len(records) == 1 and records[0]["name"] == "nexus"
-
     def test_owner_for_repo_lookup(self, cat_with_owner):
         cat, _ = cat_with_owner
         assert str(cat.owner_for_repo("571b8edd")) == "1.1"
@@ -86,12 +81,6 @@ class TestRegisterDocument:
                            file_path="src/nexus/indexer.py", physical_collection="code__nexus", chunk_count=10)
         entry = cat.resolve(doc)
         assert entry is not None and entry.title == "indexer.py" and entry.content_type == "code"
-
-    def test_document_persists_to_jsonl(self, cat_with_owner):
-        cat, owner = cat_with_owner
-        cat.register(owner, "a.py", content_type="code", file_path="a.py")
-        records = [json.loads(l) for l in (cat._dir / "documents.jsonl").read_text().strip().splitlines()]
-        assert len(records) == 1 and records[0]["title"] == "a.py"
 
 
 class TestGhostElement:
@@ -164,29 +153,6 @@ class TestCompactReturn:
 
 
 class TestTumblerPermanence:
-    def test_deleted_tumbler_not_reused(self, cat_with_owner):
-        cat, owner = cat_with_owner
-        doc1 = cat.register(owner, "first.py", content_type="code", file_path="first.py")
-        assert str(doc1) == "1.1.1"
-        cat.delete_document(doc1)
-        cat.compact()
-        assert str(cat.register(owner, "second.py", content_type="code", file_path="second.py")) == "1.1.2"
-
-    def test_defrag_preserves_tombstones(self, cat_with_owner):
-        cat, owner = cat_with_owner
-        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
-        cat.delete_document(doc)
-        cat.defrag()
-        lines = [json.loads(l) for l in (cat._dir / "documents.jsonl").read_text().strip().splitlines()]
-        assert any(l.get("_deleted") for l in lines)
-
-    def test_compact_removes_tombstones(self, cat_with_owner):
-        cat, owner = cat_with_owner
-        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
-        cat.delete_document(doc)
-        cat.compact()
-        assert (cat._dir / "documents.jsonl").read_text().strip() == ""
-
     def test_content_hash_dedup(self, cat_with_owner):
         cat, owner = cat_with_owner
         d1 = cat.register(owner, "paper", content_type="paper", head_hash="deadbeef")

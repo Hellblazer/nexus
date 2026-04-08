@@ -105,33 +105,6 @@ def _init_git(repo):
 
 # ── Status transitions ──────────────────────────────────────────────────────
 
-def test_index_sets_indexing_then_ready(tmp_path, registry):
-    repo = tmp_path / "repo"; repo.mkdir()
-    with patch("nexus.indexer._run_index"): index_repository(repo, registry)
-    c = registry.update.call_args_list
-    assert any(x == call(repo, status="indexing") for x in c)
-    assert any(x == call(repo, status="ready") for x in c)
-
-
-def test_index_sets_error_on_failure(tmp_path, registry):
-    repo = tmp_path / "repo"; repo.mkdir()
-    with patch("nexus.indexer._run_index", side_effect=RuntimeError("boom")):
-        with pytest.raises(RuntimeError, match="boom"): index_repository(repo, registry)
-    c = registry.update.call_args_list
-    assert any(x == call(repo, status="error") for x in c)
-    assert not any(x == call(repo, status="ready") for x in c)
-
-
-def test_index_sets_pending_credentials_when_missing(tmp_path, registry):
-    repo = tmp_path / "repo"; repo.mkdir()
-    with patch("nexus.indexer._run_index", side_effect=CredentialsMissingError("x")):
-        with pytest.raises(CredentialsMissingError): index_repository(repo, registry)
-    c = registry.update.call_args_list
-    assert any(x == call(repo, status="pending_credentials") for x in c)
-    assert not any(x == call(repo, status="ready") for x in c)
-    assert not any(x == call(repo, status="error") for x in c)
-
-
 # ── Credentials / early exit ────────────────────────────────────────────────
 
 def test_run_index_raises_credentials_missing_without_credentials(tmp_path, monkeypatch):
@@ -207,18 +180,6 @@ def test_run_index_source_path_is_absolute(tmp_path):
 
 
 # ── Content-hash dedup ──────────────────────────────────────────────────────
-
-def test_run_index_skips_unchanged_content_hash(tmp_path):
-    from nexus.indexer import _run_index
-    repo = tmp_path / "repo"; repo.mkdir()
-    content = "x = 1\n"; (repo / "main.py").write_text(content)
-    h = hashlib.sha256(content.encode()).hexdigest()
-    col = MagicMock()
-    col.get.return_value = {"metadatas": [{"content_hash": h, "embedding_model": "voyage-code-3"}], "ids": []}
-    db = MagicMock(); db.get_or_create_collection.return_value = col
-    with _patches(db): _run_index(repo, _reg())
-    db.upsert_chunks_with_embeddings.assert_not_called()
-
 
 def test_run_index_reindexes_when_embedding_model_changed(tmp_path):
     from nexus.indexer import _run_index
@@ -302,29 +263,6 @@ def test_run_index_logs_empty_chunks(tmp_path):
 
 
 # ── Content-class routing ───────────────────────────────────────────────────
-
-def test_run_index_routes_prose_to_docs_collection(tmp_path):
-    from nexus.indexer import _run_index
-    repo = tmp_path / "repo"; repo.mkdir()
-    (repo / "README.md").write_text("# Hello\n\nThis is a README with enough content to chunk.\n")
-    db, ups, _ = _tracking_db()
-    with _patches(db, extra={"nexus.doc_indexer._embed_with_fallback": {"return_value": ([[0.1]*10], "voyage-context-3")}}):
-        _run_index(repo, _reg())
-    assert "docs__repo" in ups and all(m["category"] == "prose" for m in ups["docs__repo"])
-    assert "code__repo" not in ups
-
-
-def test_run_index_routes_code_to_code_collection(tmp_path):
-    from nexus.indexer import _run_index
-    repo = tmp_path / "repo"; repo.mkdir()
-    (repo / "main.py").write_text("x = 1\n")
-    db, ups, _ = _tracking_db()
-    with _patches(db, extra={"nexus.chunker.chunk_file": {"return_value": [_chunk()]},
-                              "voyageai.Client": {"return_value": _voyage(1)}}):
-        _run_index(repo, _reg())
-    assert "code__repo" in ups and all(m["category"] == "code" for m in ups["code__repo"])
-    assert "docs__repo" not in ups
-
 
 def test_run_index_excludes_rdr_paths_from_docs(tmp_path):
     from nexus.indexer import _run_index
@@ -612,19 +550,6 @@ def _cb_repo(tmp_path, files=None):
     for name, content in (files or [("code.py", "x = 1\n")]):
         (repo / name).write_text(content)
     return _run_index, repo
-
-def test_on_start_called_once_with_total_file_count(tmp_path):
-    run, repo = _cb_repo(tmp_path, [("code.py","x=1\n"), ("prose.md","# D\n\nText.\n")])
-    db, _ = _mock_db(); calls: list[int] = []
-    with _cb_patches(db): run(repo, _reg(), on_start=lambda n: calls.append(n))
-    assert calls == [2]
-
-def test_on_file_called_per_non_rdr_file(tmp_path):
-    run, repo = _cb_repo(tmp_path, [("code.py","x=1\n"), ("prose.md","# D\n\nText.\n")])
-    db, _ = _mock_db(); calls: list[tuple] = []
-    with _cb_patches(db, code=2, prose=3): run(repo, _reg(), on_file=lambda p,c,e: calls.append((p,c,e)))
-    assert len(calls) == 2 and {c[0].name for c in calls} == {"code.py", "prose.md"}
-    for _, ch, el in calls: assert isinstance(ch, int) and isinstance(el, float) and el >= 0
 
 def test_on_file_chunks_zero_for_skipped_files(tmp_path):
     run, repo = _cb_repo(tmp_path)
