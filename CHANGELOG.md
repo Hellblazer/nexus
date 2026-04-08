@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.5.2] - 2026-04-08
+
+### Fixed
+- **Batched ChromaDB deletes** — `--force` reindex failed with quota error when >300 stale chunks needed pruning. All delete paths now batch in 300-record pages.
+
+### Added
+- **`S2_API_KEY` support** — Semantic Scholar enrichment (`nx enrich`) now sends `x-api-key` header when set. Authenticated rate: 100 req/s vs 100/5min unauthenticated (50x speedup). Free key at https://www.semanticscholar.org/product/api#api-key
+
 ## [3.5.1] - 2026-04-08
 
 ### Fixed
