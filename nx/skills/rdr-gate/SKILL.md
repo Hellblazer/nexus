@@ -71,6 +71,11 @@ If assumed findings remain:
 
 ### Layer 3 — AI Critique (substantive-critic agent)
 
+Before dispatch, seed link-context so the gate critique auto-links to the RDR:
+```
+mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<rdr-tumbler>", "link_type": "relates"}], "source_agent": "rdr-gate"}', tags="link-context")
+```
+
 Dispatch the `substantive-critic` agent via Agent tool with this relay:
 
 ```markdown

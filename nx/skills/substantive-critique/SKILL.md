@@ -18,6 +18,10 @@ Delegates to the **substantive-critic** agent. See [registry.yaml](../../registr
 - When verifying claims against evidence
 - Before major milestones or releases
 
+## Pre-Dispatch: Seed Link Context (optional)
+
+If the critique targets an RDR or architectural artifact, seed link-context so critique findings stored to T3 auto-link. See `/nx:catalog` for details.
+
 ## Agent Invocation
 
 Use the Agent tool to invoke **substantive-critic**:

@@ -16,6 +16,10 @@ Delegates to the **codebase-deep-analyzer** agent (model: sonnet).
 - Before undertaking major refactoring
 - Mapping dependencies between components or modules
 
+## Pre-Dispatch: Seed Link Context (optional)
+
+If the analysis is for a specific RDR or architectural decision, seed link-context so findings stored to T3 auto-link. See `/nx:catalog` for details. Skip for general exploration.
+
 ## Agent Invocation
 
 Use the Agent tool to invoke **codebase-deep-analyzer**:

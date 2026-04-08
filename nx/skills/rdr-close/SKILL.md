@@ -100,7 +100,7 @@ After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to cap
 3. **RDR→research links**: If research findings reference indexed papers, create `cites` links:
    - Read T2 research findings for this RDR
    - For each finding with a URL or paper title as source, search catalog: `mcp__plugin_nx_nexus__catalog_search(query="<source>")`
-   - If found, create: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="<rdr-title>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
+   - If found, resolve the RDR tumbler (`catalog_search(query="RDR-NNN")`), then: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
 
 Skip all catalog steps silently if catalog is not initialized. The T2 record and markdown are the authorities — catalog links are supplementary graph enrichment.
 
