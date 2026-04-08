@@ -52,6 +52,12 @@ mcp__plugin_nx_nexus__catalog_links(tumbler="<tumbler>", direction="both")
 
 This shows which RDRs discuss the file, what other code it's linked to, and through what link types.
 
+**To retrieve linked RDR *content*** (not just the graph structure), use query with link traversal:
+```
+mcp__plugin_nx_nexus__query(question="<topic>", follow_links="implements", subtree="<owner>")
+```
+This returns document content from linked RDRs ranked by relevance — typically more useful than raw graph metadata.
+
 ## Link: Connect Two Documents
 
 Create a typed link between documents. Accepts tumblers or titles.

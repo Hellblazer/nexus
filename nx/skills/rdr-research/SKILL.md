@@ -87,7 +87,7 @@ Before dispatching an agent, seed T1 scratch with link targets so the auto-linke
 1. Resolve the RDR's tumbler: `mcp__plugin_nx_nexus__catalog_search(query="RDR-NNN", content_type="rdr")`
 2. Write link context to scratch:
    ```
-   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "cites"}], "source_agent": "rdr-research"}', tag="link-context")
+   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "cites"}], "source_agent": "rdr-research"}', tags="link-context")
    ```
 3. If catalog search returns no result, skip seeding (the auto-linker handles empty context gracefully)
 

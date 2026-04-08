@@ -83,9 +83,9 @@ nx catalog coverage                                        # link coverage by co
 nx catalog orphans --no-links                              # unlinked entries
 ```
 
-In the `query` MCP tool, use `follow_links=True` to traverse the link graph:
+In the `query` MCP tool, use `follow_links` with a link type to traverse the graph:
 ```
-query("how does path resolution work", follow_links=True, subtree="1.1")
+query("how does path resolution work", follow_links="implements", subtree="1.1")
 ```
 
 **T3 expire guard**: always filter `ttl_days > 0 AND expires_at != "" AND expires_at < now` — the `expires_at != ""` guard is mandatory: permanent entries use `expires_at=""` which sorts before ISO timestamps and would be incorrectly deleted by a 2-condition guard.

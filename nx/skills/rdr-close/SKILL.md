@@ -110,6 +110,11 @@ The main RDR is already semantically indexed by Step 4's `nx index rdr` (CCE emb
 
 If a post-mortem exists, archive it to a separate collection (using the exact file path from Step 2, not a glob): mcp__plugin_nx_nexus__store_put(content=(contents of $RDR_DIR/post-mortem/NNN-kebab-title.md), collection="knowledge__rdr_postmortem__{repo}", title="PREFIX-NNN Title (post-mortem)", tags="rdr,post-mortem,{drift-categories}"
 
+Before dispatching the knowledge-tidier, seed link-context so the post-mortem auto-links to the RDR:
+```
+mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<rdr-tumbler>", "link_type": "relates"}], "source_agent": "rdr-close"}', tags="link-context")
+```
+
 Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem contains substantial divergence analysis that benefits from knowledge organization.
 
 ## Flow: Reverted or Abandoned
