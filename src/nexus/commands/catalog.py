@@ -787,6 +787,51 @@ def orphans_cmd(no_links: bool) -> None:
         click.echo(f"  {tumbler:<12} {content_type:<10} {title}{loc}")
 
 
+@catalog.command("gc")
+@click.option("--dry-run", is_flag=True, default=False, help="Show what would be deleted without deleting.")
+def gc_cmd(dry_run: bool) -> None:
+    """Remove orphan catalog entries that have miss_count >= 2.
+
+    \b
+    Orphans are entries that were absent in two or more consecutive index runs.
+    Use --dry-run to preview deletions without applying them.
+
+    \b
+    Examples:
+      nx catalog gc              # delete orphan entries
+      nx catalog gc --dry-run   # preview without deleting
+    """
+    cat = _get_catalog()
+
+    rows = cat._db.execute(
+        "SELECT tumbler, title, file_path, metadata FROM documents"
+    ).fetchall()
+
+    orphans: list[tuple[str, str, str]] = []
+    for tumbler_str, title, file_path, meta_json in rows:
+        meta = json.loads(meta_json) if meta_json else {}
+        if int(meta.get("miss_count", 0)) >= 2:
+            orphans.append((tumbler_str, title or "", file_path or ""))
+
+    if not orphans:
+        click.echo("No orphan entries found.")
+        return
+
+    click.echo(f"Found {len(orphans)} orphan {'entry' if len(orphans) == 1 else 'entries'} (miss_count >= 2):")
+    for tumbler_str, title, file_path in orphans:
+        loc = f" ({file_path})" if file_path else ""
+        if dry_run:
+            click.echo(f"  [dry-run] would delete {tumbler_str}: {title}{loc}")
+        else:
+            cat.delete_document(Tumbler.parse(tumbler_str))
+            click.echo(f"  deleted {tumbler_str}: {title}{loc}")
+
+    if dry_run:
+        click.echo(f"\n{len(orphans)} {'entry' if len(orphans) == 1 else 'entries'} would be deleted. Run without --dry-run to apply.")
+    else:
+        click.echo(f"\nDeleted {len(orphans)} orphan {'entry' if len(orphans) == 1 else 'entries'}.")
+
+
 @catalog.command("coverage")
 @click.option("--owner", "owner_prefix", default="", help="Filter by tumbler prefix (e.g. '1.1')")
 def coverage_cmd(owner_prefix: str) -> None:

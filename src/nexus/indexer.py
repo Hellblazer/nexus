@@ -45,6 +45,8 @@ from nexus.code_indexer import (  # noqa: F401
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
+    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.tumbler import Tumbler
     from nexus.registry import RepoRegistry
 
 DEFAULT_IGNORE: list[str] = [
@@ -282,8 +284,54 @@ def _catalog_hook(
                 _log.info("catalog_links_generated", heuristic=link_count, filepath=fp_count, repo=repo_name)
         except Exception:
             _log.debug("catalog_link_generation_failed", exc_info=True)
+
+        # Housekeeping: detect and evict orphaned catalog entries
+        indexed_set = {str(abs_path.relative_to(repo)) for abs_path, _, _ in indexed_files}
+        _run_housekeeping(cat, owner, indexed_set)
     except Exception:
         _log.debug("catalog_hook_failed", exc_info=True)
+
+
+def _run_housekeeping(
+    cat: "Catalog",
+    owner: "Tumbler",
+    indexed_set: set[str],
+) -> None:
+    """Orphan detection with miss_count tracking.
+
+    For each catalog entry owned by *owner*:
+    - If the file is present in *indexed_set*, reset miss_count to 0.
+    - If absent, increment miss_count. Delete at threshold >= 2.
+    """
+    owner_entries = cat.by_owner(owner)
+    for entry in owner_entries:
+        if entry.file_path in indexed_set:
+            meta = entry.meta or {}
+            if int(meta.get("miss_count", 0)) > 0:
+                meta = dict(meta)
+                meta["miss_count"] = 0
+                cat.update(entry.tumbler, meta=meta)
+            continue
+
+        # File not in this index run — increment miss_count
+        meta = dict(entry.meta or {})
+        miss_count = int(meta.get("miss_count", 0)) + 1
+
+        if miss_count >= 2:
+            cat.delete_document(entry.tumbler)
+            _log.info(
+                "housekeeping_orphan_deleted",
+                tumbler=str(entry.tumbler),
+                file_path=entry.file_path,
+            )
+        else:
+            meta["miss_count"] = miss_count
+            cat.update(entry.tumbler, meta=meta)
+            _log.debug(
+                "housekeeping_miss_count_incremented",
+                tumbler=str(entry.tumbler),
+                miss_count=miss_count,
+            )
 
 
 def index_repository(
