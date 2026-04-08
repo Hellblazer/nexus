@@ -163,57 +163,150 @@ Six boundaries where signals cross in the formalization system:
 
 ## Proposed Design
 
-### The Formalization Flywheel
+### Architecture: Closed-Loop Formalization
+
+The system operates at six boundaries (RF-12). Each boundary has a **forward path** (data flows
+toward higher formalization) and a **feedback path** (signals flow back to inform earlier tiers).
+Cheap transforms happen at write time; expensive transforms happen at query time (RF-11 hybrid).
 
 ```
-T1 scratch (L0 raw)
-  → heat-based promotion + LLM summarization
-    → T2 memory (L1 annotated)
-      → consolidation + entity linking
-        → T3 knowledge (L1→L2 structured claims)
-          → community detection + graph-based RAG
-            → Catalog links with claim annotations (L2)
-              → cross-validation against sources
+                          ┌─── feedback: consolidation report ───┐
+                          │                                      │
+T1 scratch (L0)           ▼                                      │
+  ──write──► access tracking ──promote──► T2 memory (L1)         │
+                                           │                     │
+                          ┌── feedback: contradiction flag ──┐   │
+                          │                                  │   │
+                          ▼                                  │   │
+               T2 ──store_put──► T3 knowledge ──────────────►│   │
+                                   │                         │   │
+                     ┌─ retrieval ──┘                         │   │
+                     │  + contradiction check (JIT)          │   │
+                     ▼                                       │   │
+                   Agent ◄── confidence/staleness signal ────┘   │
+                     │                                           │
+                     └── next write to T1 ───────────────────────┘
 ```
+
+### Design Principle: Derive, Don't Declare
+
+Formalization level is **computed from content structure**, not assigned as a static label.
+Following the `section_type` pattern (RDR-055), which derives type from heading text:
+
+| Level | Detection Rule | Example |
+|-------|---------------|---------|
+| L0 | Raw text, no structural markup | T1 scratch entries |
+| L1 | Has extracted entities or section_type annotations | Markdown chunks with `section_type != ""` |
+| L2 | Has subject-predicate-object triples or claim spans | Entries with `formalizes` links to L0 sources |
+| L3 | Has validated claims with provenance chain | Entries with `formalizes` links + contradiction-free status |
+
+`formalization_level` is recomputed on read (or cached and invalidated when links change),
+not stamped at index time. This means it's always current — a chunk that gains a `formalizes`
+link automatically moves from L0 to L2 without re-indexing.
 
 ### Phase 1: Foundation (hours-days)
 
 **1a. `formalizes` link type**
 
-Add to valid link types in `catalog.py`. Update link_generator.py docs. ~10 LOC.
+Link types are free-form TEXT — zero schema changes. Just use `formalizes` in `catalog.link()`
+calls. The unique constraint `(from_tumbler, to_tumbler, link_type)` allows the same document
+pair to have both `cites` and `formalizes` links. ~10 LOC.
 
-**1b. `formalization_level` metadata field**
+**1b. Derived `formalization_level` function**
 
-Add `formalization_level` (int, 0-3) as recognized key in `CatalogEntry.meta`. Seed `formalization_level=0` for all existing entries via one-time catalog update.
+Add `formalization_level(entry: CatalogEntry, catalog: Catalog) -> int` to `catalog.py`:
+```python
+def formalization_level(entry: CatalogEntry, catalog: Catalog) -> int:
+    """Derive formalization level from content structure and link graph."""
+    formalizes_links = catalog.links_from(entry.tumbler, link_type="formalizes")
+    if formalizes_links:
+        # Has validated claims? Check for contradiction-free status
+        return 3 if entry.meta.get("contradiction_free") else 2
+    if entry.meta.get("section_type") or entry.meta.get("entities"):
+        return 1
+    return 0
+```
+No static metadata field. Queryable via a helper that computes on demand or via a catalog
+view that caches levels (invalidated on link changes).
 
 **1c. T1 access tracking**
 
-Add `access_count INTEGER DEFAULT 0` and `last_accessed TEXT` to T1 schema. Increment on every `get()` and `search()` that returns the entry.
+T1 is ChromaDB EphemeralClient — metadata is schemaless. Add `access_count` and `last_accessed`
+as metadata keys. Increment in `get()` and `search()` via `col.update()`. No schema migration.
 
-### Phase 2: Tier Boundary Transformations (weeks)
+**1d. Boundary feedback: promote() returns report**
 
-**2a. Summarization on T1→T2 promotion**
+Change `T1Database.promote()` return type from `None` to a `PromotionReport`:
+```python
+@dataclass
+class PromotionReport:
+    action: str          # "new", "merged", "conflicting"
+    existing_title: str | None  # title of the entry it merged with or conflicts with
+    merged: bool
+```
+Before upserting to T2, FTS5-search the target project for overlap. If found, report it.
+The agent decides whether to proceed, merge, or abort.
 
-In `T1Database.promote()`, run LLM summarization pass before storing to T2. The summary (not raw text) persists. Keep original in T1 until session close.
+### Phase 2: Consolidation and Boundary Transforms (weeks)
 
-**2b. T2 consolidation on put()**
+**2a. T2 consolidation on put()**
 
-Before upserting, run FTS5 `search()` against same project. If similarity > threshold, append/merge rather than replace. Add `consolidated_from` list to tags.
+Before upserting, FTS5 search same project for semantic overlap (RF-7 feasibility analysis):
+```sql
+SELECT id, title, rank FROM memory m
+JOIN memory_fts ON memory_fts.rowid = m.id
+WHERE memory_fts MATCH ? AND m.project = ?
+ORDER BY rank LIMIT 3
+```
+BM25 `rank` is query-length-dependent — use relative ranking (top-1 rank < 0.7 × top-2 rank)
+rather than a fixed threshold. When overlap detected, return a `ConsolidationReport` to the
+caller. Append `consolidated_from` to tags on merge.
+
+**2b. Boundary feedback: store_put() returns contradiction flag**
+
+In `store_put` MCP handler, after upserting to T3, embed the new content and search existing
+T3 entries in the same collection. If any result has distance < 0.3 (very similar) but
+content diverges (edit distance > 50%), flag as potential contradiction:
+```python
+return f"Stored. ⚠ Potential contradiction with: {conflicting_title} (distance: {d:.3f})"
+```
+The agent sees this in the MCP response and can investigate. No automatic resolution —
+Bayesian update principle (RF-9): single contradiction = flag, multi-agent convergence = reinforce.
 
 **2c. Relevance-decay expiry for T2**
 
-Add `access_count` to T2 schema. Track in `get()` and `search()`. Modify `expire()`:
+`ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0` (non-breaking, instant).
+Track in `get()` and `search()`. Modify `expire()`:
 ```python
 effective_ttl = base_ttl / (1 + math.log(access_count + 1))
 ```
 
-### Phase 3: Claim-Level Links (weeks)
+**2d. Summarization on T1→T2 promotion (optional)**
 
-**3a. Claim annotation on catalog links**
+In `promote()`, optionally run LLM summarization before storing to T2. Make async via
+session-close hook. The summary persists; original stays in T1 until session end.
 
-Extend `catalog_db.py` link schema with `claim TEXT DEFAULT ""` column. Update `auto_link()` to store claiming passage from `link-context` scratch. Update `catalog_link` MCP tool to accept `claim` parameter.
+### Phase 3: Retrieval-Time Contradiction Detection (weeks)
 
-**3b. Edge-type weights in follow_links**
+**3a. JIT contradiction check in search results** (RF-11 + RF-12 correction 3)
+
+In `search_cross_corpus()`, after threshold filtering and optional clustering, check
+returned results for pairwise contradiction. Cheap approach: if two results from the same
+collection have distance < 0.3 to each other but different `source_agent` provenance,
+add `_contradiction_flag: true` to their metadata. The agent sees the flag and can
+investigate. Cost: O(N²) distance check for N results — ~2ms for N=10, negligible.
+
+More expensive (Phase 3b): extract key claims from top-K results via LLM, compare
+pairwise. Only trigger when `_contradiction_flag` is set from the cheap check.
+
+**3b. Claim annotation on catalog links**
+
+Use existing `metadata JSON` column on links table — no schema change needed. Store
+claiming passage via `json_extract(metadata, '$.claim')`. Update `auto_link()` to store
+claim text from `link-context` scratch. Update `catalog_link` MCP tool docs to show
+the `claim` metadata key.
+
+**3c. Edge-type weights in follow_links**
 
 Add per-link-type weights to result scoring in catalog-aware search:
 - `formalizes`: 1.0 (exact semantic content at different formalization level)
@@ -223,21 +316,30 @@ Add per-link-type weights to result scoring in catalog-aware search:
 
 ### Phase 4: Community Detection (medium-term)
 
-Add `generate_community_links()` to `link_generator.py`. Fetch document embeddings, k-means cluster, create synthetic catalog entries per community. Enable two-stage retrieval: community summary → drill into members.
+Wire existing `search_clusterer.py` (RDR-056 P2b) into `link_generator.py` as
+`generate_community_links()`. Fetch document embeddings via `T3Database.get_embeddings()`
+(RDR-056 P2c). Create synthetic catalog entries per community. Enable two-stage retrieval:
+community summary → drill into members. All infrastructure exists — this is integration work.
 
 ## Risks and Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| LLM summarization adds latency to T1→T2 promotion | Make async; queue summarization for session-close hook |
-| FTS5 consolidation may false-positive merge distinct entries | Conservative threshold; log consolidations for review |
-| Schema migration for access_count columns | SQLite ALTER TABLE ADD COLUMN is non-breaking |
-| Seed formalization_level=0 for existing entries | Batch catalog update script; idempotent |
+| LLM summarization adds latency to T1→T2 promotion | Make async; queue for session-close hook. Phase 2d is optional. |
+| FTS5 consolidation false-positives | Relative BM25 ranking (not fixed threshold); log consolidations for review |
+| Schema migration for T2 access_count | SQLite ALTER TABLE ADD COLUMN is non-breaking, instant |
+| Derived formalization_level is expensive to compute | Cache in catalog JSON metadata; invalidate on link changes |
+| JIT contradiction check adds query latency | O(N²) for N=10 is ~2ms. LLM claim extraction (Phase 3b) only triggers on flag |
+| Feedback signals overwhelm agents | Reports are informational, not blocking. Agent decides action. |
 
 ## Success Criteria
 
 - [ ] `formalizes` link type accepted by catalog
-- [ ] `formalization_level` field queryable via `where=` in search/query
+- [ ] `formalization_level()` function returns correct level based on content structure + links
+- [ ] `promote()` returns `PromotionReport` with action (new/merged/conflicting)
+- [ ] `store_put` MCP returns contradiction flag when similar-but-divergent content detected
 - [ ] T1 entries with access_count > 3 auto-promoted at session close
-- [ ] T2 put() detects and merges semantically overlapping entries
+- [ ] T2 `put()` detects and reports semantically overlapping entries
+- [ ] Search results carry `_contradiction_flag` when conflicting entries co-occur
 - [ ] Catalog links carry claim annotations (at least for auto-linker path)
+- [ ] Phase 4 community detection uses existing `search_clusterer.py` module
