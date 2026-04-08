@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-04-08
+
+### Fixed
+- **Subagent hook catalog context** — linked RDRs now shown for all agent types, including code-nav and review agents.
+
 ## [3.6.0] - 2026-04-08
 
 ### Added
