@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 import structlog
 
@@ -183,6 +184,85 @@ def apply_quality_boost(
             except (ValueError, TypeError):
                 pass
         r.hybrid_score += boost_weight * quality_score(count, age_days=age_days)
+    return results
+
+
+# ── Link-aware boost (RDR-060 E3) ───────────────────────────────────────────
+
+_LINK_BOOST_WEIGHTS: dict[str, float] = {
+    "implements": 1.0,
+    "implements-heuristic": 0.0,
+    "relates": 0.5,
+    "cites": 0.5,
+    "supersedes": 0.0,
+}
+_DEFAULT_LINK_BOOST_WEIGHT: float = 0.15
+
+
+def apply_link_boost(
+    results: list[SearchResult],
+    catalog: Any,
+    boost_weight: float = _DEFAULT_LINK_BOOST_WEIGHT,
+    type_weights: dict[str, float] | None = None,
+) -> list[SearchResult]:
+    """Boost hybrid_score for results whose source documents have outgoing links.
+
+    Looks up each result's source_path in the catalog, finds outgoing links,
+    and computes a link signal from type weights. Additive:
+    ``score += boost_weight * min(signal, 1.0)``.
+
+    Only processes results that have ``source_path`` metadata and a matching
+    catalog entry. Results without catalog matches are untouched.
+    """
+    if not catalog:
+        return results
+    tw = type_weights if type_weights is not None else _LINK_BOOST_WEIGHTS
+
+    # Collect unique source_paths from results
+    source_paths: set[str] = set()
+    for r in results:
+        sp = r.metadata.get("source_path", "")
+        if sp:
+            source_paths.add(sp)
+
+    if not source_paths:
+        return results
+
+    # Batch query: find all tumblers for these source_paths
+    placeholders = ",".join("?" for _ in source_paths)
+    rows = catalog._db.execute(
+        f"SELECT file_path, tumbler FROM documents WHERE file_path IN ({placeholders})",
+        list(source_paths),
+    ).fetchall()
+    path_to_tumbler: dict[str, str] = {row[0]: row[1] for row in rows}
+
+    if not path_to_tumbler:
+        return results
+
+    # Batch query: get all outgoing links for these tumblers
+    tumbler_strs = list(path_to_tumbler.values())
+    placeholders2 = ",".join("?" for _ in tumbler_strs)
+    link_rows = catalog._db.execute(
+        f"SELECT from_tumbler, link_type FROM links WHERE from_tumbler IN ({placeholders2})",
+        tumbler_strs,
+    ).fetchall()
+
+    # Aggregate: tumbler -> total weighted signal
+    tumbler_signal: dict[str, float] = {}
+    for from_t, link_type in link_rows:
+        w = tw.get(link_type, 0.0)
+        tumbler_signal[from_t] = tumbler_signal.get(from_t, 0.0) + w
+
+    # Apply boost
+    for r in results:
+        sp = r.metadata.get("source_path", "")
+        t_str = path_to_tumbler.get(sp)
+        if not t_str:
+            continue
+        signal = min(tumbler_signal.get(t_str, 0.0), 1.0)
+        if signal > 0:
+            r.hybrid_score += boost_weight * signal
+
     return results
 
 

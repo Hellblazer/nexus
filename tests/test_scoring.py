@@ -9,6 +9,7 @@ import pytest
 from nexus.scoring import (
     _file_size_factor,
     apply_hybrid_scoring,
+    apply_link_boost,
     apply_quality_boost,
     min_max_normalize,
     quality_score,
@@ -218,3 +219,95 @@ def test_format_json_no_metadata_shadow():
                      metadata={"id": "EVIL", "content": "EVIL"})
     parsed = _json.loads(format_json([r]))
     assert parsed[0]["id"] == "real" and parsed[0]["content"] == "real"
+
+
+# ── link boost (RDR-060 E3) ─────────────────────────────────────────────────
+
+class TestLinkBoost:
+    """apply_link_boost() scoring tests."""
+
+    def _make_catalog(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        (cat_dir / "owners.jsonl").touch()
+        (cat_dir / "documents.jsonl").touch()
+        (cat_dir / "links.jsonl").touch()
+        return Catalog(cat_dir, cat_dir / ".catalog.db")
+
+    def _make_result(self, source_path="src/foo.py", score=0.5, collection="code__test"):
+        return SearchResult(
+            id="r1", content="text", distance=0.3, collection=collection,
+            metadata={"source_path": source_path}, hybrid_score=score,
+        )
+
+    def test_implements_link_boosts_score(self, tmp_path):
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
+        t1 = cat.register(owner, "foo.py", content_type="code", file_path="src/foo.py")
+        t2 = cat.register(owner, "bar.py", content_type="code", file_path="src/bar.py")
+        cat.link(t1, t2, "implements", created_by="test")
+
+        r = self._make_result(source_path="src/foo.py", score=0.5)
+        apply_link_boost([r], cat)
+        assert r.hybrid_score > 0.5  # boosted
+
+    def test_heuristic_link_no_boost(self, tmp_path):
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
+        t1 = cat.register(owner, "foo.py", content_type="code", file_path="src/foo.py")
+        t2 = cat.register(owner, "bar.py", content_type="code", file_path="src/bar.py")
+        cat.link(t1, t2, "implements-heuristic", created_by="test")
+
+        r = self._make_result(source_path="src/foo.py", score=0.5)
+        apply_link_boost([r], cat)
+        assert r.hybrid_score == 0.5  # unchanged
+
+    def test_no_catalog_returns_unchanged(self):
+        r = self._make_result(score=0.5)
+        apply_link_boost([r], None)
+        assert r.hybrid_score == 0.5
+
+    def test_no_matching_entry_unchanged(self, tmp_path):
+        cat = self._make_catalog(tmp_path)
+        r = self._make_result(source_path="nonexistent.py", score=0.5)
+        apply_link_boost([r], cat)
+        assert r.hybrid_score == 0.5
+
+    def test_signal_capped_at_one(self, tmp_path):
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
+        t1 = cat.register(owner, "foo.py", content_type="code", file_path="src/foo.py")
+        # Create 10 implements links
+        for i in range(10):
+            t_target = cat.register(owner, f"bar{i}.py", content_type="code", file_path=f"src/bar{i}.py")
+            cat.link(t1, t_target, "implements", created_by="test")
+
+        r = self._make_result(source_path="src/foo.py", score=0.5)
+        apply_link_boost([r], cat, boost_weight=0.15)
+        # signal capped at 1.0, so max boost is 0.15
+        assert r.hybrid_score == pytest.approx(0.65, abs=0.01)
+
+    def test_relates_link_half_boost(self, tmp_path):
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
+        t1 = cat.register(owner, "foo.py", content_type="code", file_path="src/foo.py")
+        t2 = cat.register(owner, "bar.py", content_type="code", file_path="src/bar.py")
+        cat.link(t1, t2, "relates", created_by="test")
+
+        r = self._make_result(source_path="src/foo.py", score=0.5)
+        apply_link_boost([r], cat, boost_weight=0.15)
+        # relates = 0.5 weight, so boost = 0.15 * 0.5 = 0.075
+        assert r.hybrid_score == pytest.approx(0.575, abs=0.01)
+
+    def test_custom_type_weights(self, tmp_path):
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
+        t1 = cat.register(owner, "foo.py", content_type="code", file_path="src/foo.py")
+        t2 = cat.register(owner, "bar.py", content_type="code", file_path="src/bar.py")
+        cat.link(t1, t2, "implements", created_by="test")
+
+        r = self._make_result(source_path="src/foo.py", score=0.5)
+        apply_link_boost([r], cat, boost_weight=0.2, type_weights={"implements": 0.5})
+        # 0.2 * 0.5 = 0.1
+        assert r.hybrid_score == pytest.approx(0.6, abs=0.01)

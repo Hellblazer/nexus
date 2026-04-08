@@ -153,6 +153,7 @@ def search_cross_corpus(
     where: dict | None = None,
     cluster_by: str | None = None,
     catalog: Any | None = None,
+    link_boost: bool = False,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -217,6 +218,11 @@ def search_cross_corpus(
                 dropped=dropped,
                 threshold=threshold,
             )
+
+    # Link-aware boost (RDR-060 E3)
+    if link_boost and catalog and all_results:
+        from nexus.scoring import apply_link_boost
+        all_results = apply_link_boost(all_results, catalog)
 
     if cluster_by == "semantic" and all_results:
         all_results = _apply_clustering(all_results, t3)

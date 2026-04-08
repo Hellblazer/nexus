@@ -87,6 +87,7 @@ def search(
             query, target, n_results=fetch_n, t3=t3, where=where_dict,
             cluster_by=cluster_by or None,
             catalog=_get_catalog(),
+            link_boost=False,
         )
         # Only sort by distance for flat (non-clustered) results.
         # Clustered results arrive in cluster-grouped order from search_engine.
@@ -279,6 +280,8 @@ def query(
         fetch_n = limit * 10
         results = search_cross_corpus(
             question, target, n_results=fetch_n, t3=t3, where=where_dict,
+            catalog=_get_catalog(),
+            link_boost=True,
         )
         results.sort(key=lambda r: r.distance)
         if not results:
