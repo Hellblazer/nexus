@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-04-08
+
+Plugin version aligned with Nexus CLI 3.5.0. No plugin-level functional changes.
+
+### Fixed
+- **Advisory hooks hardened** — removed `set -euo pipefail` from stop and close verification hooks.
+- **Hook stdout leak** — `nx catalog sync` output redirected to `/dev/null` in stop hook.
+
 ## [3.4.0] - 2026-04-08
 
 ### Removed

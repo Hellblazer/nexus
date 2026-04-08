@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-04-08
+
+### Added
+- **Quality-score reranking** (RDR-055 E2) — `quality_score()` and `apply_quality_boost()` in `scoring.py`. Log-scaled citation signal + exponential age decay, wired into CLI search after hybrid scoring. Dormant until `nx enrich` populates `bib_citation_count` metadata.
+- **Shared where-filter module** (`nexus.filters`) — canonical `parse_where()` / `parse_where_str()` replacing duplicated parsers in MCP server and CLI. Strict mode for CLI validation, lenient for MCP.
+- **Shared tumbler resolver** (`nexus.catalog.resolve_tumbler`) — canonical implementation replacing duplicated resolvers in MCP server and CLI catalog commands.
+- **MCP infrastructure module** (`nexus.mcp_infra`) — singletons, caching, and test injection extracted from `mcp_server.py` (1752 → 1490 lines).
+- **`PDFConfig` dataclass** in `config.py` — replaces 4 individual getter functions with a single structured config loader.
+
+### Fixed
+- **MCP cluster output** (RDR-056) — `search()` with `cluster_by="semantic"` now preserves cluster-grouped order and renders `── label ──` headers. Previously re-sorted by distance, destroying cluster grouping.
+- **Flaky hook test** — `nx catalog sync` wrote "Catalog synced." to stdout, corrupting JSON output in `stop_verification_hook.sh`. Redirected to `/dev/null`.
+- **Flaky integration test** — search by UID without metadata filter returned stale documents from prior runs. Added `--where title=` filter.
+- **Advisory hooks hardened** — removed `set -euo pipefail` from `stop_verification_hook.sh` and `pre_close_verification_hook.sh` (advisory hooks must never fail).
+
+### Changed
+- **Test suite consolidated** — 44,243 → 30,799 lines (30% reduction). `@pytest.mark.parametrize` for redundant variants, 8 files deleted, 50+ files rewritten. All coverage preserved.
+- **Corpus model selection** — `embedding_model_for_collection()` and `index_model_for_collection()` consolidated into single `voyage_model_for_collection()` with backward-compatible aliases.
+- **Removed trivial wrappers** — `_entry_to_dict()` / `_link_to_dict()` replaced with direct `.to_dict()` calls (21 call sites).
+
 ## [3.4.0] - 2026-04-08
 
 ### Changed
