@@ -246,6 +246,7 @@ def _catalog_hook(
                 name=repo_name,
                 owner_type="repo",
                 repo_hash=repo_hash,
+                repo_root=str(repo),
                 description=f"Git repository: {repo_name}",
             )
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
@@ -286,8 +287,8 @@ def _catalog_hook(
         # Auto-generate links after registration (incremental: only new entries)
         try:
             from nexus.catalog.link_generator import generate_code_rdr_links, generate_rdr_filepath_links
-            link_count = generate_code_rdr_links(cat, new_tumblers=new_tumblers if new_tumblers else None)
-            fp_count = generate_rdr_filepath_links(cat, new_tumblers=new_tumblers if new_tumblers else None)
+            link_count = generate_code_rdr_links(cat, new_tumblers=new_tumblers)
+            fp_count = generate_rdr_filepath_links(cat, new_tumblers=new_tumblers)
             total = link_count + fp_count
             if total:
                 _log.info("catalog_links_generated", heuristic=link_count, filepath=fp_count, repo=repo_name)

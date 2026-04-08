@@ -62,7 +62,7 @@ def _overfetch_multiplier(collection_name: str) -> int:
 _OP_MAP = {"$eq": "=", "$gte": ">=", "$lte": "<=", "$gt": ">", "$lt": "<", "$ne": "!="}
 
 # Predicates we can route to catalog SQLite for pre-filtering.
-_PREDICATE_TO_COLUMN = {"bib_year": "year", "bib_citation_count": "year"}  # citation_count not in catalog
+_PREDICATE_TO_COLUMN = {"bib_year": "year"}
 
 
 def _catalog_ids_for_predicates(db: sqlite3.Connection, predicates: dict) -> list[str]:

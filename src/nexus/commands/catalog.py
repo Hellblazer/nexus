@@ -1145,6 +1145,7 @@ def _backfill_repos(
         if owner is None:
             owner = cat.register_owner(
                 repo_name, "repo", repo_hash=path_hash,
+                repo_root=str(repo_path),
                 description=f"Git repository: {repo_name}",
             )
 
