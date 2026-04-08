@@ -302,7 +302,7 @@ class Catalog:
     # ── Owners ─────────────────────────────────────────────────────────────
 
     def register_owner(
-        self, name: str, owner_type: str, *, repo_hash: str = "", description: str = ""
+        self, name: str, owner_type: str, *, repo_hash: str = "", description: str = "", repo_root: str = ""
     ) -> Tumbler:
         dir_fd = self._acquire_lock()
         try:
@@ -318,13 +318,14 @@ class Catalog:
                 owner_type=owner_type,
                 repo_hash=repo_hash,
                 description=description,
+                repo_root=repo_root,
             )
             self._append_jsonl(self._owners_path, rec.__dict__)
             # Upsert SQLite
             self._db.execute(
-                "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (prefix, name, owner_type, repo_hash, description),
+                "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (prefix, name, owner_type, repo_hash, description, repo_root),
             )
             self._db.commit()
             return Tumbler.parse(prefix)

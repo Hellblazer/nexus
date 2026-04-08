@@ -17,6 +17,7 @@ def _make_owner(*, owner: str = "1.1", name: str = "test-repo", **kw) -> OwnerRe
         "owner_type": "repo",
         "repo_hash": "abcd1234",
         "description": "test repo",
+        "repo_root": "",
     }
     defaults.update(kw)
     return OwnerRecord(**defaults)

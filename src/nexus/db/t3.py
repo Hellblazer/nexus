@@ -715,6 +715,52 @@ class T3Database:
             self._delete_batch(col, collection_name, ids)
         return len(ids)
 
+    def update_source_path(
+        self, collection_name: str, old_path: str, new_path: str
+    ) -> int:
+        """Rewrite source_path metadata for all chunks matching old_path.
+
+        Paginates via col.get() to respect Cloud's 300-record batch limit.
+        Returns count of chunks updated. Idempotent.
+        """
+        try:
+            col = self._client_for(collection_name).get_collection(collection_name)
+        except _ChromaNotFoundError:
+            return 0
+        ids: list[str] = []
+        metadatas: list[dict] = []
+        offset = 0
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        while True:
+            result = _chroma_with_retry(
+                col.get,
+                where={"source_path": old_path},
+                include=["metadatas"],
+                limit=page_limit,
+                offset=offset,
+            )
+            page_ids = result["ids"]
+            page_metas = result["metadatas"]
+            for i, mid in enumerate(page_ids):
+                ids.append(mid)
+                updated = dict(page_metas[i])
+                updated["source_path"] = new_path
+                metadatas.append(updated)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+        if not ids:
+            return 0
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        with self._write_sem(collection_name):
+            for start in range(0, len(ids), size):
+                _chroma_with_retry(
+                    col.update,
+                    ids=ids[start:start + size],
+                    metadatas=metadatas[start:start + size],
+                )
+        return len(ids)
+
     def get_by_id(self, collection: str, doc_id: str) -> dict | None:
         """Retrieve a single entry by its exact document ID.
 

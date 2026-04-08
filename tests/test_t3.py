@@ -541,6 +541,86 @@ def test_delete_by_source_nonexistent_collection_returns_zero(mock_chromadb):
     assert db.delete_by_source("code__nonexistent", "src/file.py") == 0
 
 
+# ── update_source_path ─────────────────────────────────────────────────────
+
+
+def test_update_source_path_basic(mock_db):
+    db, mock_col, _ = mock_db
+    mock_col.get.return_value = {
+        "ids": ["c1", "c2"],
+        "metadatas": [
+            {"source_path": "/abs/path/f.py", "title": "f.py:1-5"},
+            {"source_path": "/abs/path/f.py", "title": "f.py:6-10"},
+        ],
+    }
+    result = db.update_source_path("code__myrepo", "/abs/path/f.py", "src/f.py")
+    assert result == 2
+    mock_col.update.assert_called_once()
+    call_kwargs = mock_col.update.call_args.kwargs
+    assert call_kwargs["ids"] == ["c1", "c2"]
+    assert call_kwargs["metadatas"][0]["source_path"] == "src/f.py"
+    assert call_kwargs["metadatas"][0]["title"] == "f.py:1-5"  # preserved
+    assert call_kwargs["metadatas"][1]["source_path"] == "src/f.py"
+
+
+def test_update_source_path_empty_result(mock_db):
+    db, mock_col, _ = mock_db
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    result = db.update_source_path("code__myrepo", "/nonexistent", "relative/f.py")
+    assert result == 0
+    mock_col.update.assert_not_called()
+
+
+def test_update_source_path_missing_collection(mock_chromadb):
+    _, mock_client = mock_chromadb
+    mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("not found")
+    db = T3Database(tenant="t", database="d", api_key="k")
+    assert db.update_source_path("code__nonexistent", "/old", "new") == 0
+
+
+def test_update_source_path_preserves_other_metadata(mock_db):
+    db, mock_col, _ = mock_db
+    mock_col.get.return_value = {
+        "ids": ["c1"],
+        "metadatas": [{
+            "source_path": "/abs/file.py",
+            "title": "file.py:1-10",
+            "tags": "python",
+            "category": "code",
+            "frecency_score": 0.5,
+            "start_line": 1,
+            "end_line": 10,
+        }],
+    }
+    db.update_source_path("code__myrepo", "/abs/file.py", "src/file.py")
+    meta = mock_col.update.call_args.kwargs["metadatas"][0]
+    assert meta["source_path"] == "src/file.py"
+    assert meta["title"] == "file.py:1-10"
+    assert meta["tags"] == "python"
+    assert meta["frecency_score"] == 0.5
+    assert meta["start_line"] == 1
+
+
+def test_update_source_path_pagination(mock_db):
+    """Verify pagination works for >300 chunks."""
+    db, mock_col, _ = mock_db
+    # First page: 300 results (full page)
+    page1_ids = [f"c{i}" for i in range(300)]
+    page1_metas = [{"source_path": "/old/f.py"} for _ in range(300)]
+    # Second page: 5 results (short page = last)
+    page2_ids = [f"c{i}" for i in range(300, 305)]
+    page2_metas = [{"source_path": "/old/f.py"} for _ in range(5)]
+
+    mock_col.get.side_effect = [
+        {"ids": page1_ids, "metadatas": page1_metas},
+        {"ids": page2_ids, "metadatas": page2_metas},
+    ]
+    result = db.update_source_path("code__myrepo", "/old/f.py", "src/f.py")
+    assert result == 305
+    # Should be called twice (two batches of ≤300)
+    assert mock_col.update.call_count == 2
+
+
 # ── collection_metadata ─────────────────────────────────────────────────────
 
 
