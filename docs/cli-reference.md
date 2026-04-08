@@ -472,3 +472,37 @@ nx doctor --fix                 # Apply HNSW search_ef=256 to local collections
 ```
 
 The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
+
+---
+
+## nx mineru
+
+MinerU server lifecycle management for PDF extraction. Requires `conexus[mineru]` extra.
+
+### nx mineru start
+
+```
+nx mineru start [--port PORT]
+```
+
+Start a persistent `mineru-api` FastAPI process for PDF extraction. Stores PID file at `~/.config/nexus/mineru.pid`.
+
+| Flag | Description |
+|------|-------------|
+| `--port PORT` | Port for mineru-api (default: 0 = auto-assign) |
+
+### nx mineru stop
+
+```
+nx mineru stop
+```
+
+Stop the running MinerU server. Sends SIGTERM, waits up to 10s.
+
+### nx mineru status
+
+```
+nx mineru status
+```
+
+Show server status: running/stopped, PID, port, uptime.

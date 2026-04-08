@@ -79,7 +79,7 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 ```
 src/nexus/           # Core package
   cli.py             # Click entry point; registers all command groups
-  commands/          # One file per CLI command group (index, search, memory, scratch, store, collection, config, hooks, doctor, enrich, catalog)
+  commands/          # One file per CLI command group (index, search, memory, scratch, store, collection, config, hooks, doctor, enrich, catalog, mineru)
   catalog/           # Xanadu-inspired document catalog (JSONL truth + SQLite cache)
     catalog.py       # Core: link(), link_query(), graph(), delete_document(), link_audit(), descendants(), resolve_chunk()
     catalog_db.py    # SQLite schema + FTS5 + UNIQUE link constraint + descendants() SQL helper
@@ -101,7 +101,8 @@ src/nexus/           # Core package
   search_engine.py   # Cross-corpus search with over-fetch, thresholds, and catalog pre-filtering
   search_clusterer.py # Ward hierarchical clustering for search results (opt-in)
   frecency.py        # Git frecency scoring
-  scoring.py         # Reranking
+  scoring.py         # Reranking + quality_score (RDR-055 E2)
+  filters.py         # Shared where-filter parsing (MCP + CLI)
   ripgrep_cache.py   # ripgrep integration for hybrid search
   session.py         # Session lifecycle (T1 server start/connect)
   config.py          # Config hierarchy + .nexus.yml
@@ -113,6 +114,7 @@ src/nexus/           # Core package
   retry.py           # Transient-error retry logic
   ttl.py             # TTL / expiry helpers
   hooks.py           # Git hook stanza management
+  mcp_infra.py       # MCP server infrastructure (singletons, caching, injection)
 nx/                  # Claude Code plugin (skills, agents, hooks, slash commands)
 tests/               # pytest suite (unit + integration + e2e/)
 docs/                # Documentation (architecture.md is the module map)
