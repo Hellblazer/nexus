@@ -61,7 +61,7 @@ def _capture_ctx(collections: list[str] | None = None):
     mock = _mock_t3(collections)
     captured: list[dict | None] = []
 
-    def fake(query, cols, n_results, t3, where=None):
+    def fake(query, cols, n_results, t3, where=None, **kwargs):
         captured.append(where)
         return []
 

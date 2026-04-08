@@ -434,6 +434,16 @@ standalone_skills:
       - "REPL sessions"
     tools: [Bash, Read, Write]
 
+  catalog:
+    description: "Catalog manipulation — resolve tumblers, create links, seed auto-linker context, file link context"
+    triggers:
+      - "working with catalog entries"
+      - "creating or viewing links"
+      - "resolving tumblers"
+      - "seeding link context before store_put"
+      - "understanding what RDRs relate to a file"
+    tools: [Bash, Read]
+
   nexus:
     description: "Nexus CLI reference for nx search, nx store, nx memory"
     triggers:

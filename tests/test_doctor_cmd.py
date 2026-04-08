@@ -322,6 +322,13 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
 class TestFixPaths:
     """doctor --fix-paths migration tests."""
 
+    @pytest.fixture(autouse=True)
+    def _git_identity(self, monkeypatch):
+        monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
+        monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+        monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+
     def _make_catalog_with_entries(self, tmp_path, entries):
         """Create catalog with specified entries.
 
