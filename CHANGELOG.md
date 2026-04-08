@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.3.1] - 2026-04-07
+
+### Fixed
+- **RDR-055 code missing from v3.3.0** — `section_type` metadata (classify_section_type, 9 patterns, all 5 indexing paths) was lost during squash merge of PR #131. Cherry-picked from feature branch. `--where section_type!=references` now works.
+- **CI failure on Python 3.13** — HNSW ef tests used `_local_db()` without EF override, causing VoyageAI key error on CI.
+
 ## [3.3.0] - 2026-04-07
 
 ### Added
