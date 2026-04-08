@@ -54,6 +54,34 @@ if command -v bd &> /dev/null; then
   fi
 fi
 
+# Catalog link context for files mentioned in the task
+if command -v nx &> /dev/null && [[ $SKIP_STORAGE_DOCS -eq 0 ]]; then
+  # Extract file paths from the task text and show linked RDRs
+  FILE_PATHS=$(python3 -c "
+import re, sys
+text = sys.argv[1] if len(sys.argv) > 1 else ''
+# Match patterns like src/nexus/foo.py or docs/rdr/bar.md
+paths = re.findall(r'(?:src|tests|docs|nx)/[\w/.-]+\.\w+', text)
+for p in set(paths[:5]):  # cap at 5 to keep it fast
+    print(p)
+" "$TASK_TEXT" 2>/dev/null)
+
+  if [[ -n "$FILE_PATHS" ]]; then
+    LINK_OUT=""
+    while IFS= read -r fp; do
+      LINKS=$(nx catalog links-for-file "$fp" 2>/dev/null | grep -E '^\s+[←→]')
+      if [[ -n "$LINKS" ]]; then
+        LINK_OUT+="  $fp:"$'\n'"$LINKS"$'\n'
+      fi
+    done <<< "$FILE_PATHS"
+    if [[ -n "$LINK_OUT" ]]; then
+      echo ""
+      echo "## Linked RDRs (files in task)"
+      echo "$LINK_OUT"
+    fi
+  fi
+fi
+
 # Relay template (required fields only)
 RELAY_TEMPLATE="$CLAUDE_PLUGIN_ROOT/agents/_shared/RELAY_TEMPLATE.md"
 if [[ -f "$RELAY_TEMPLATE" ]]; then

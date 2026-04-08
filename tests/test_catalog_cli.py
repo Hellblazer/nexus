@@ -290,3 +290,275 @@ class TestStatsCommand:
         result = runner.invoke(main, ["catalog", "stats"])
         assert result.exit_code == 0
         assert "1" in result.output  # at least 1 document
+
+
+class TestDiscoveryTools:
+    def test_orphans_no_links(self, initialized_catalog, catalog_env):
+        """Entries with no links are reported as orphans."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "Orphan Doc", "--owner", "1.1", "--type", "code"])
+        result = runner.invoke(main, ["catalog", "orphans", "--no-links"])
+        assert result.exit_code == 0
+        assert "Orphan Doc" in result.output
+
+    def test_orphans_all_linked(self, initialized_catalog, catalog_env):
+        """When all entries have links, report zero orphans."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "orphans", "--no-links"])
+        assert result.exit_code == 0
+        assert "No orphan" in result.output
+
+    def test_orphans_empty_catalog(self, initialized_catalog, catalog_env):
+        """Empty catalog handles gracefully."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "orphans", "--no-links"])
+        assert result.exit_code == 0
+        assert "No orphan" in result.output
+
+    def test_coverage_report(self, initialized_catalog, catalog_env):
+        """Coverage shows linked vs total count per content type."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1", "--type", "code"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1", "--type", "code"])
+        runner.invoke(main, ["catalog", "register", "--title", "C", "--owner", "1.1", "--type", "paper"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "coverage"])
+        assert result.exit_code == 0
+        assert "code" in result.output
+        assert "%" in result.output
+
+    def test_coverage_empty_catalog(self, initialized_catalog, catalog_env):
+        """Empty catalog shows a graceful message."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "coverage"])
+        assert result.exit_code == 0
+        assert "No documents" in result.output
+
+    def test_coverage_with_owner_filter(self, initialized_catalog, catalog_env):
+        """--owner filters by tumbler prefix."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1", "--type", "code"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1", "--type", "paper"])
+        result = runner.invoke(main, ["catalog", "coverage", "--owner", "1.1"])
+        assert result.exit_code == 0
+        assert "%" in result.output
+
+    def test_suggest_links_no_candidates(self, initialized_catalog, catalog_env):
+        """When no code-RDR pairs match, report zero suggestions."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "something", "--owner", "1.1", "--type", "code"])
+        result = runner.invoke(main, ["catalog", "suggest-links"])
+        assert result.exit_code == 0
+        assert "0" in result.output or "No suggestions" in result.output
+
+    def test_suggest_links_finds_unlinked_pair(self, initialized_catalog, catalog_env):
+        """Finds a code-RDR pair by module name overlap that has no existing link."""
+        runner = CliRunner()
+        # Register code entry with a file path so stem extraction works
+        cat = initialized_catalog
+        from nexus.catalog.tumbler import Tumbler
+        owner = Tumbler.parse("1.1")
+        cat.register(owner, "chunker module", content_type="code", file_path="src/nexus/chunker.py")
+        cat.register(owner, "RDR-027 chunker improvements", content_type="rdr", file_path="docs/rdr/rdr-027.md")
+        result = runner.invoke(main, ["catalog", "suggest-links"])
+        assert result.exit_code == 0
+        # Should find the chunker → RDR pair
+        assert "chunker" in result.output.lower()
+
+    def test_suggest_links_skips_already_linked(self, initialized_catalog, catalog_env):
+        """Already-linked pairs are not suggested again."""
+        runner = CliRunner()
+        cat = initialized_catalog
+        from nexus.catalog.tumbler import Tumbler
+        owner = Tumbler.parse("1.1")
+        code_t = cat.register(owner, "chunker module", content_type="code", file_path="src/nexus/chunker.py")
+        rdr_t = cat.register(owner, "RDR-027 chunker improvements", content_type="rdr", file_path="docs/rdr/rdr-027.md")
+        cat.link(code_t, rdr_t, "implements-heuristic", created_by="index_hook")
+        result = runner.invoke(main, ["catalog", "suggest-links"])
+        assert result.exit_code == 0
+        # The pair is already linked — should not appear
+        assert "chunker" not in result.output.lower() or "0" in result.output
+
+
+class TestLinkGenerate:
+    """Tests for `nx catalog link-generate` command."""
+
+    def test_link_generate_dry_run(self, initialized_catalog, catalog_env):
+        """--dry-run outputs a message and exits cleanly without writing."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "link-generate", "--dry-run"])
+        assert result.exit_code == 0
+        assert "dry-run" in result.output.lower()
+
+    def test_link_generate_empty_catalog(self, initialized_catalog, catalog_env):
+        """Running on a catalog with no entries produces 0 links."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "link-generate"])
+        assert result.exit_code == 0
+        assert "0" in result.output
+
+    def test_link_generate_creates_heuristic_links(self, initialized_catalog, catalog_env):
+        """Command creates heuristic links for matching code-RDR pairs."""
+        runner = CliRunner()
+        cat = initialized_catalog
+        from nexus.catalog.tumbler import Tumbler
+        owner = Tumbler.parse("1.1")
+        cat.register(owner, "catalog module", content_type="code", file_path="src/nexus/catalog.py")
+        cat.register(owner, "RDR-001 catalog improvements", content_type="rdr", file_path="docs/rdr/rdr-001.md")
+        result = runner.invoke(main, ["catalog", "link-generate"])
+        assert result.exit_code == 0
+        # Output should show non-zero heuristic links
+        assert "1" in result.output
+
+    def test_link_generate_idempotent(self, initialized_catalog, catalog_env):
+        """Running twice produces 0 new links the second time."""
+        runner = CliRunner()
+        cat = initialized_catalog
+        from nexus.catalog.tumbler import Tumbler
+        owner = Tumbler.parse("1.1")
+        cat.register(owner, "catalog module", content_type="code", file_path="src/nexus/catalog.py")
+        cat.register(owner, "RDR-001 catalog improvements", content_type="rdr", file_path="docs/rdr/rdr-001.md")
+        runner.invoke(main, ["catalog", "link-generate"])
+        result = runner.invoke(main, ["catalog", "link-generate"])
+        assert result.exit_code == 0
+        # Second run should generate 0 new links
+        assert "0 heuristic + 0 filepath" in result.output
+
+
+class TestAgentIntegration:
+    """Tests for agent-facing discovery commands: links-for-file, session-summary."""
+
+    def _make_catalog_with_links(self, catalog_env: object) -> "Catalog":
+        from nexus.catalog.catalog import Catalog
+        from nexus.catalog.tumbler import Tumbler
+
+        cat = Catalog.init(catalog_env)  # type: ignore[arg-type]
+        owner = cat.register_owner("test", "repo", repo_hash="abc")
+        t1 = cat.register(owner, "catalog.py", content_type="code", file_path="src/nexus/catalog.py")
+        t2 = cat.register(owner, "RDR-060", content_type="rdr", file_path="docs/rdr/rdr-060.md")
+        cat.link(t1, t2, "implements", created_by="test")
+        return cat
+
+    def test_links_for_file_found(self, catalog_env):
+        runner = CliRunner()
+        self._make_catalog_with_links(catalog_env)
+        result = runner.invoke(main, ["catalog", "links-for-file", "src/nexus/catalog.py"])
+        assert result.exit_code == 0
+        assert "RDR-060" in result.output
+        assert "implements" in result.output
+
+    def test_links_for_file_not_found(self, catalog_env):
+        runner = CliRunner()
+        self._make_catalog_with_links(catalog_env)
+        result = runner.invoke(main, ["catalog", "links-for-file", "nonexistent.py"])
+        assert result.exit_code == 0
+        assert "No catalog entry" in result.output
+
+    def test_links_for_file_shows_direction(self, catalog_env):
+        """Incoming and outgoing links are shown with arrow direction."""
+        runner = CliRunner()
+        cat = self._make_catalog_with_links(catalog_env)
+        # Also check from the RDR side (incoming link)
+        result = runner.invoke(main, ["catalog", "links-for-file", "docs/rdr/rdr-060.md"])
+        assert result.exit_code == 0
+        assert "implements" in result.output
+        # Arrow direction — incoming or outgoing arrow
+        assert ("→" in result.output or "←" in result.output)
+
+    def test_links_for_file_not_initialized(self, tmp_path, monkeypatch):
+        """Graceful failure when catalog not initialized."""
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "nocat"))
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "links-for-file", "some.py"])
+        # Should fail with catalog-not-initialized error, not crash
+        assert result.exit_code != 0 or "not initialized" in result.output.lower()
+
+    def test_session_summary_no_catalog(self, tmp_path, monkeypatch):
+        """Should not crash when catalog not initialized."""
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "nocat"))
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "session-summary"])
+        # Either exits cleanly (0) or with a non-zero code — must not raise
+        assert result.exit_code in (0, 1)
+
+    def test_session_summary_shows_link_count(self, catalog_env):
+        """session-summary should print link graph total at the end."""
+        runner = CliRunner()
+        self._make_catalog_with_links(catalog_env)
+        # Pass --since=99999 so we don't need git to have recent activity
+        result = runner.invoke(main, ["catalog", "session-summary", "--since", "99999"])
+        assert result.exit_code == 0
+        # Should show link graph total
+        assert "link" in result.output.lower()
+
+
+class TestGcCommand:
+    """Tests for `nx catalog gc` — remove orphan entries with miss_count >= 2."""
+
+    def _make_cat(self, catalog_env: object) -> "Catalog":
+        from nexus.catalog.catalog import Catalog
+        cat = Catalog.init(catalog_env)  # type: ignore[arg-type]
+        return cat
+
+    def test_gc_no_orphans(self, catalog_env):
+        runner = CliRunner()
+        cat = self._make_cat(catalog_env)
+        owner = cat.register_owner("repo", "repo", repo_hash="abc")
+        cat.register(owner, "current.py", content_type="code", file_path="src/current.py")
+        # miss_count is 0 by default — not an orphan
+        result = runner.invoke(main, ["catalog", "gc"])
+        assert result.exit_code == 0
+        assert "No orphan" in result.output
+
+    def test_gc_dry_run_does_not_delete(self, catalog_env):
+        runner = CliRunner()
+        cat = self._make_cat(catalog_env)
+        owner = cat.register_owner("repo", "repo", repo_hash="abc")
+        t = cat.register(owner, "old.py", content_type="code", file_path="src/old.py")
+        cat.update(t, meta={"miss_count": 2})
+        result = runner.invoke(main, ["catalog", "gc", "--dry-run"])
+        assert result.exit_code == 0
+        assert "[dry-run]" in result.output
+        # Entry still exists after dry run
+        assert cat.resolve(t) is not None
+
+    def test_gc_deletes_orphans(self, catalog_env):
+        runner = CliRunner()
+        cat = self._make_cat(catalog_env)
+        owner = cat.register_owner("repo", "repo", repo_hash="abc")
+        t = cat.register(owner, "old.py", content_type="code", file_path="src/old.py")
+        cat.update(t, meta={"miss_count": 2})
+        result = runner.invoke(main, ["catalog", "gc"])
+        assert result.exit_code == 0
+        assert "Deleted 1" in result.output
+        # Entry gone from catalog
+        assert cat.resolve(t) is None
+
+    def test_gc_skips_low_miss_count(self, catalog_env):
+        """Entries with miss_count < 2 must NOT be deleted."""
+        runner = CliRunner()
+        cat = self._make_cat(catalog_env)
+        owner = cat.register_owner("repo", "repo", repo_hash="abc")
+        t = cat.register(owner, "maybe.py", content_type="code", file_path="src/maybe.py")
+        cat.update(t, meta={"miss_count": 1})
+        result = runner.invoke(main, ["catalog", "gc"])
+        assert result.exit_code == 0
+        assert "No orphan" in result.output
+        assert cat.resolve(t) is not None
+
+    def test_gc_mixed_entries(self, catalog_env):
+        """Only entries with miss_count >= 2 are deleted; others survive."""
+        runner = CliRunner()
+        cat = self._make_cat(catalog_env)
+        owner = cat.register_owner("repo", "repo", repo_hash="abc")
+        t_keep = cat.register(owner, "keep.py", content_type="code", file_path="src/keep.py")
+        t_del = cat.register(owner, "del.py", content_type="code", file_path="src/del.py")
+        cat.update(t_del, meta={"miss_count": 3})
+        result = runner.invoke(main, ["catalog", "gc"])
+        assert result.exit_code == 0
+        assert "Deleted 1" in result.output
+        assert cat.resolve(t_keep) is not None
+        assert cat.resolve(t_del) is None

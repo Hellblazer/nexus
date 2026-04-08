@@ -207,7 +207,7 @@ def search_cmd(
         hybrid = config.get("search", {}).get("hybrid_default", False)
 
     def _retrieve(q: str) -> list[SearchResult]:
-        raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter)
+        raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter, link_boost=False)
         if hybrid:
             # Scope ripgrep to matching caches when a single corpus is targeted
             rg_corpus = target_collections[0] if len(target_collections) == 1 else None

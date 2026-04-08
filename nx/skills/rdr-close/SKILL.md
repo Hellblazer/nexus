@@ -90,7 +90,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to capture implementation provenance:
 
-1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically — no action needed here.
+1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically. Review with `nx catalog links <rdr-tumbler> --type implements-heuristic` — promote high-confidence ones to `implements` via `catalog_link` for link-boost scoring benefit (heuristic links have zero search boost weight).
 
 2. **RDR→prior-RDR links**: If the RDR's T2 record has a `supersedes` field, create the catalog link:
    ```
@@ -100,7 +100,7 @@ After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to cap
 3. **RDR→research links**: If research findings reference indexed papers, create `cites` links:
    - Read T2 research findings for this RDR
    - For each finding with a URL or paper title as source, search catalog: `mcp__plugin_nx_nexus__catalog_search(query="<source>")`
-   - If found, create: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="<rdr-title>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
+   - If found, resolve the RDR tumbler (`catalog_search(query="RDR-NNN")`), then: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
 
 Skip all catalog steps silently if catalog is not initialized. The T2 record and markdown are the authorities — catalog links are supplementary graph enrichment.
 
@@ -109,6 +109,11 @@ Skip all catalog steps silently if catalog is not initialized. The T2 record and
 The main RDR is already semantically indexed by Step 4's `nx index rdr` (CCE embeddings, section-level chunks). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
 
 If a post-mortem exists, archive it to a separate collection (using the exact file path from Step 2, not a glob): mcp__plugin_nx_nexus__store_put(content=(contents of $RDR_DIR/post-mortem/NNN-kebab-title.md), collection="knowledge__rdr_postmortem__{repo}", title="PREFIX-NNN Title (post-mortem)", tags="rdr,post-mortem,{drift-categories}"
+
+Before dispatching the knowledge-tidier, seed link-context so the post-mortem auto-links to the RDR:
+```
+mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<rdr-tumbler>", "link_type": "relates"}], "source_agent": "rdr-close"}', tags="link-context")
+```
 
 Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem contains substantial divergence analysis that benefits from knowledge organization.
 

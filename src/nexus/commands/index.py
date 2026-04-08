@@ -471,7 +471,8 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
                 click.echo(line)
 
     results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
-                                    content_type="rdr", force=force, on_file=on_file)
+                                    content_type="rdr", force=force, on_file=on_file,
+                                    base_path=path)
     bar.close()
     indexed = sum(1 for s in results.values() if s == "indexed")
     result_label = "Force re-indexed" if force else "Indexed"

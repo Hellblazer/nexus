@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS owners (
     name TEXT NOT NULL UNIQUE,
     owner_type TEXT NOT NULL,
     repo_hash TEXT,
-    description TEXT
+    description TEXT,
+    repo_root TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -101,6 +102,12 @@ class CatalogDB:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._lock = threading.Lock()
         self._conn.executescript(_SCHEMA_SQL)
+        # Migration: add repo_root column if missing (pre-RDR-060 databases)
+        try:
+            self._conn.execute("SELECT repo_root FROM owners LIMIT 0")
+        except sqlite3.OperationalError:
+            with self._conn:
+                self._conn.execute("ALTER TABLE owners ADD COLUMN repo_root TEXT DEFAULT ''")
 
     def rebuild(
         self,
@@ -117,9 +124,9 @@ class CatalogDB:
 
             for prefix, o in owners.items():
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (prefix, o.name, o.owner_type, o.repo_hash, o.description),
+                    "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (prefix, o.name, o.owner_type, o.repo_hash, o.description, o.repo_root),
                 )
 
             for tumbler, d in documents.items():

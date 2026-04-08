@@ -31,7 +31,7 @@ _STANDALONE_SKILLS = {
     "using-nx-skills", "writing-nx-skills",
     "rdr-list", "rdr-show", "rdr-create",
     "sequential-thinking",
-    "serena-code-nav",
+    "serena-code-nav", "catalog",
     "receiving-review", "git-worktrees", "finishing-branch",
 }
 

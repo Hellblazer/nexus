@@ -113,6 +113,19 @@ query(question="database design", follow_links="cites", depth=1)
 
 This means `query(question="X", author="Fagin")` is faster and more precise than `query(question="X")` because it searches fewer collections.
 
+### Link-aware scoring
+
+The `query()` tool automatically boosts results from documents that have outgoing `implements` links in the catalog. This means code files linked to RDRs rank higher than unlinked code at similar semantic distance. The boost is additive (+0.15 × link signal) and uses per-type weights:
+
+| Link type | Weight | Rationale |
+|-----------|--------|-----------|
+| `implements` | 1.0 | Precise — manually created or filepath-extracted |
+| `relates` / `cites` | 0.5 | Moderate signal |
+| `implements-heuristic` | 0.0 | Too noisy (87% of links, substring-matched) |
+| `supersedes` | 0.0 | Historical, not relevance signal |
+
+The `search()` tool does **not** apply link boost — it returns raw distance-ranked results. Use `query()` when you want the link graph to influence ranking.
+
 ---
 
 ## /nx:query skill (analytical queries)

@@ -45,6 +45,8 @@ from nexus.code_indexer import (  # noqa: F401
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
+    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.tumbler import Tumbler
     from nexus.registry import RepoRegistry
 
 DEFAULT_IGNORE: list[str] = [
@@ -244,44 +246,140 @@ def _catalog_hook(
                 name=repo_name,
                 owner_type="repo",
                 repo_hash=repo_hash,
+                repo_root=str(repo),
                 description=f"Git repository: {repo_name}",
             )
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
 
+        new_tumblers = []
         for abs_path, content_type, collection_name in indexed_files:
             try:
                 rel_path = str(abs_path.relative_to(repo))
             except ValueError:
                 rel_path = abs_path.name
 
+            # Per-file content hash for rename detection (RDR-060 E7)
+            import hashlib as _hl
+            try:
+                file_hash = _hl.sha256(abs_path.read_bytes()).hexdigest()
+            except OSError:
+                file_hash = ""
+
             existing = cat.by_file_path(owner, rel_path)
             if existing is None:
-                cat.register(
+                tumbler = cat.register(
                     owner=owner,
                     title=abs_path.name,
                     content_type=content_type,
                     file_path=rel_path,
                     physical_collection=collection_name,
                     head_hash=head_hash,
+                    meta={"content_hash": file_hash} if file_hash else None,
                 )
+                new_tumblers.append(tumbler)
             else:
                 cat.update(
                     existing.tumbler,
                     head_hash=head_hash,
                     physical_collection=collection_name,
+                    meta={"content_hash": file_hash} if file_hash else None,
                 )
-        # Auto-generate links after registration
+        # Auto-generate links after registration (incremental: only new entries)
         try:
             from nexus.catalog.link_generator import generate_code_rdr_links, generate_rdr_filepath_links
-            link_count = generate_code_rdr_links(cat)
-            fp_count = generate_rdr_filepath_links(cat)
+            link_count = generate_code_rdr_links(cat, new_tumblers=new_tumblers)
+            fp_count = generate_rdr_filepath_links(cat, new_tumblers=new_tumblers)
             total = link_count + fp_count
             if total:
                 _log.info("catalog_links_generated", heuristic=link_count, filepath=fp_count, repo=repo_name)
         except Exception:
             _log.debug("catalog_link_generation_failed", exc_info=True)
+
+        # Housekeeping: detect and evict orphaned catalog entries
+        indexed_set = {str(abs_path.relative_to(repo)) for abs_path, _, _ in indexed_files}
+        _run_housekeeping(cat, owner, indexed_set)
     except Exception:
         _log.debug("catalog_hook_failed", exc_info=True)
+
+
+def _run_housekeeping(
+    cat: "Catalog",
+    owner: "Tumbler",
+    indexed_set: set[str],
+) -> None:
+    """Orphan detection with miss_count tracking and rename detection.
+
+    For each catalog entry owned by *owner*:
+    - If the file is present in *indexed_set*, reset miss_count to 0.
+    - If absent and a content_hash match exists at a new path, treat as rename:
+      transfer links to the new entry and delete the old one.
+    - If absent with no rename match, increment miss_count. Delete at threshold >= 2.
+    """
+    owner_entries = cat.by_owner(owner)
+
+    # Build content_hash → entry map for rename detection
+    hash_to_entry: dict[str, object] = {}
+    for e in owner_entries:
+        ch = (e.meta or {}).get("content_hash", "")
+        if ch and e.file_path in indexed_set:
+            hash_to_entry[ch] = e
+
+    for entry in owner_entries:
+        if entry.file_path in indexed_set:
+            meta = entry.meta or {}
+            if int(meta.get("miss_count", 0)) > 0:
+                meta = dict(meta)
+                meta["miss_count"] = 0
+                cat.update(entry.tumbler, meta=meta)
+            continue
+
+        # Check for rename: orphan's content_hash matches a newly-indexed entry
+        orphan_hash = (entry.meta or {}).get("content_hash", "")
+        if orphan_hash and orphan_hash in hash_to_entry:
+            new_entry = hash_to_entry[orphan_hash]
+            # Transfer links from old entry to new entry
+            old_links = cat.links_from(entry.tumbler)
+            for lnk in old_links:
+                cat.link_if_absent(
+                    new_entry.tumbler, lnk.to_tumbler, lnk.link_type,
+                    created_by=lnk.created_by,
+                )
+            # Also transfer incoming links
+            incoming = cat.links_to(entry.tumbler)
+            for lnk in incoming:
+                cat.link_if_absent(
+                    lnk.from_tumbler, new_entry.tumbler, lnk.link_type,
+                    created_by=lnk.created_by,
+                )
+            cat.delete_document(entry.tumbler)
+            _log.info(
+                "housekeeping_rename_detected",
+                old_path=entry.file_path,
+                new_path=new_entry.file_path,
+                old_tumbler=str(entry.tumbler),
+                new_tumbler=str(new_entry.tumbler),
+            )
+            continue
+
+        # File not in this index run — increment miss_count
+        meta = dict(entry.meta or {})
+        miss_count = int(meta.get("miss_count", 0)) + 1
+
+        if miss_count >= 2:
+            cat.delete_document(entry.tumbler)
+            _log.info(
+                "housekeeping_orphan_deleted",
+                tumbler=str(entry.tumbler),
+                file_path=entry.file_path,
+            )
+        else:
+            meta["miss_count"] = miss_count
+            cat.update(entry.tumbler, meta=meta)
+            _log.debug(
+                "housekeeping_miss_count_incremented",
+                tumbler=str(entry.tumbler),
+                miss_count=miss_count,
+            )
 
 
 def index_repository(

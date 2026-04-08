@@ -162,3 +162,145 @@ class TestCatalogHookErrorSafe:
             indexed_files=[(Path("/nonexistent/repo/file.py"), "code", "code__test")],
         )
         # Should not raise — errors are caught internally
+
+
+class TestRunHousekeeping:
+    """Tests for _run_housekeeping() — orphan detection with miss_count tracking."""
+
+    def _make_cat(self, tmp_path: Path) -> tuple[Path, "Catalog"]:
+        return _make_catalog(tmp_path)
+
+    def test_miss_count_incremented_for_missing_file(self, tmp_path, monkeypatch):
+        """Entry not in indexed_set → miss_count goes from 0 to 1, not deleted."""
+        from nexus.indexer import _run_housekeeping
+        from nexus.catalog.tumbler import Tumbler
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="aaa111")
+        owner_t = cat.owner_for_repo("aaa111")
+        t = cat.register(owner_t, "missing.py", content_type="code", file_path="src/missing.py")
+
+        _run_housekeeping(cat, owner_t, indexed_set=set())
+
+        entry = cat.resolve(t)
+        assert entry is not None  # not deleted yet
+        assert entry.meta.get("miss_count") == 1
+
+    def test_miss_count_reset_when_file_seen(self, tmp_path, monkeypatch):
+        """Entry in indexed_set with miss_count=1 → reset to 0."""
+        from nexus.indexer import _run_housekeeping
+        from nexus.catalog.tumbler import Tumbler
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="bbb222")
+        owner_t = cat.owner_for_repo("bbb222")
+        t = cat.register(owner_t, "present.py", content_type="code", file_path="src/present.py")
+        # Simulate a prior miss
+        cat.update(t, meta={"miss_count": 1})
+
+        _run_housekeeping(cat, owner_t, indexed_set={"src/present.py"})
+
+        entry = cat.resolve(t)
+        assert entry is not None
+        assert entry.meta.get("miss_count", 0) == 0
+
+    def test_orphan_deleted_at_threshold(self, tmp_path, monkeypatch):
+        """Entry with miss_count=1, not in indexed_set → increments to 2 → deleted."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="ccc333")
+        owner_t = cat.owner_for_repo("ccc333")
+        t = cat.register(owner_t, "stale.py", content_type="code", file_path="src/stale.py")
+        cat.update(t, meta={"miss_count": 1})
+
+        _run_housekeeping(cat, owner_t, indexed_set=set())
+
+        # Should be deleted after reaching threshold of 2
+        assert cat.resolve(t) is None
+
+    def test_already_at_threshold_gets_deleted(self, tmp_path, monkeypatch):
+        """Entry with miss_count already >= 2 and not in indexed_set is deleted."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="ddd444")
+        owner_t = cat.owner_for_repo("ddd444")
+        t = cat.register(owner_t, "dead.py", content_type="code", file_path="src/dead.py")
+        cat.update(t, meta={"miss_count": 2})
+
+        _run_housekeeping(cat, owner_t, indexed_set=set())
+
+        assert cat.resolve(t) is None
+
+    def test_present_files_not_affected(self, tmp_path, monkeypatch):
+        """Files in indexed_set are never modified (miss_count stays at 0 if already 0)."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="eee555")
+        owner_t = cat.owner_for_repo("eee555")
+        t = cat.register(owner_t, "ok.py", content_type="code", file_path="src/ok.py")
+
+        _run_housekeeping(cat, owner_t, indexed_set={"src/ok.py"})
+
+        entry = cat.resolve(t)
+        assert entry is not None
+        assert entry.meta.get("miss_count", 0) == 0
+
+    def test_rename_detected_by_content_hash(self, tmp_path, monkeypatch):
+        """File renamed: orphan with matching content_hash gets file_path updated, links preserved."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="fff666")
+        owner_t = cat.owner_for_repo("fff666")
+        # Old entry at old path with a content hash
+        old_t = cat.register(owner_t, "old_name.py", content_type="code", file_path="src/old_name.py",
+                             meta={"content_hash": "deadbeef1234"})
+        # Create a link from old entry to another doc
+        other_t = cat.register(owner_t, "rdr-1", content_type="rdr", file_path="docs/rdr/rdr-1.md")
+        cat.link(old_t, other_t, "implements", created_by="test")
+
+        # New entry already registered at new path with same content hash
+        new_t = cat.register(owner_t, "new_name.py", content_type="code", file_path="src/new_name.py",
+                             meta={"content_hash": "deadbeef1234"})
+
+        # indexed_set has new path but not old
+        _run_housekeeping(cat, owner_t, indexed_set={"src/new_name.py", "docs/rdr/rdr-1.md"})
+
+        # Old entry should be deleted (rename transfers links, then deletes)
+        assert cat.resolve(old_t) is None
+        # Links should be transferred to the new entry
+        links = cat.links_from(new_t)
+        assert any(str(l.to_tumbler) == str(other_t) for l in links)
+
+    def test_rename_not_triggered_without_content_hash(self, tmp_path, monkeypatch):
+        """Orphan without content_hash follows normal miss_count path, not rename."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="ggg777")
+        owner_t = cat.owner_for_repo("ggg777")
+        # No content_hash in meta
+        t = cat.register(owner_t, "no_hash.py", content_type="code", file_path="src/no_hash.py")
+
+        _run_housekeeping(cat, owner_t, indexed_set=set())
+
+        entry = cat.resolve(t)
+        assert entry is not None  # not renamed, just incremented
+        assert entry.meta.get("miss_count") == 1

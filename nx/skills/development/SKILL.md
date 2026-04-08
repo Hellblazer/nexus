@@ -37,15 +37,12 @@ Delegates to the **developer** agent (sonnet). See [registry.yaml](../../registr
 
 ## Pre-Dispatch: Seed Link Context
 
-Before dispatching the developer agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
+Before dispatching the developer agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings. See `/nx:catalog` skill for full reference.
 
 1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_nx_nexus__catalog_search(query="RDR-NNN")`
 2. Check T1 scratch for `rdr-planning-context` (set by strategic-planner for RDR-driven beads)
-3. Write link context to scratch — use `"implements"` when working on an RDR-driven bead, `"relates"` otherwise:
-   ```
-   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "implements"}], "source_agent": "developer"}', tags="link-context")
-   ```
-4. If no RDR/document reference found, skip seeding (the auto-linker handles empty context gracefully)
+3. Seed: `mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "implements"}], "source_agent": "developer"}', tags="link-context")`
+4. If no RDR/document reference found, skip seeding (auto-linker handles empty context gracefully)
 
 ## Agent Invocation
 

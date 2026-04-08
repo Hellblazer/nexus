@@ -34,6 +34,10 @@ digraph review_flow {
 }
 ```
 
+## Pre-Dispatch: Seed Link Context (optional)
+
+If the review references an RDR or bead, seed link-context so any patterns the agent stores to T3 auto-link. See `/nx:catalog` for details. Skip if the review is purely ad-hoc.
+
 ## Agent Invocation
 
 Use the Agent tool to invoke **code-review-expert**:

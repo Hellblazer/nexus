@@ -101,6 +101,7 @@ Plan reuse is opportunistic — the skill functions normally when the plan libra
 - Tests written? → `/nx:test-validate`
 
 **Research and knowledge:**
+- Analytical question over nx knowledge (compare, extract, synthesize) → `/nx:query`
 - Unfamiliar topic or technology comparison → `/nx:research`
 - 3+ validated findings worth keeping → `/nx:knowledge-tidy`
 - PDF to index → `/nx:pdf-process`
@@ -112,6 +113,10 @@ Plan reuse is opportunistic — the skill functions normally when the plan libra
 - Need workspace isolation? → `/nx:git-worktrees`
 - Implementation done, ready to merge/PR? → `/nx:finishing-branch`
 - Receiving review feedback? → `/nx:receiving-review` (verify before implementing)
+
+**Catalog and linking:**
+- Working with catalog entries, links, or tumblers → `/nx:catalog`
+- Seeding link context before `store_put` → `/nx:catalog` (Seed section)
 
 **Reference skills (invoke when relevant, no agent dispatch):**
 - Symbol navigation (definitions, callers, renames) → `/nx:serena-code-nav`
@@ -146,6 +151,7 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 |-------|---------|----------------|
 | codebase-analysis | `/nx:analyze-code` | Exploring unfamiliar codebase or understanding module structure before changes |
 | deep-analysis | `/nx:deep-analysis` | Surface-level analysis is insufficient; hypothesis-driven investigation needed |
+| query | `/nx:query` | Analytical questions over nx knowledge — compare, extract, synthesize across corpora with link-aware boosting |
 | research-synthesis | `/nx:research` | Researching unfamiliar topics or comparing technology approaches |
 | architecture | `/nx:architecture` | Complex features need architectural design before implementation |
 | development | `/nx:implement` | Plan approved; implementation work ready to begin |
@@ -178,6 +184,7 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 | knowledge-tidying | `/nx:knowledge-tidy` | 3+ validated findings or decisions need persisting to T3 for cross-session reuse |
 | orchestration | `/nx:orchestrate` | Unsure which agent fits — consult [routing reference](../orchestration/reference.md) |
 | pdf-processing | `/nx:pdf-process` | PDF documents need indexing into nx store for semantic search |
+| catalog | `/nx:catalog` | Working with catalog entries, resolving tumblers, creating links, seeding auto-linker context |
 | nexus | `/nx:nexus` | Running nx commands or unsure which nx subcommand to use |
 | serena-code-nav | `/nx:serena-code-nav` | Navigating code by symbol — finding definitions, callers, type hierarchies, or safe renames |
 | cli-controller | `/nx:cli-controller` | Controlling interactive CLI apps, REPLs, pdb, gdb, or spawning Claude Code instances |

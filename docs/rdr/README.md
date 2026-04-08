@@ -81,7 +81,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-057](rdr-057-progressive-formalization-memory-tiers.md) | Progressive Formalization Across Memory Tiers | Feature | Draft | 2026-04-07 |
 | [RDR-058](rdr-058-pipeline-orchestration-plan-reuse.md) | Pipeline Orchestration and Plan Reuse | Feature | Accepted | 2026-04-07 |
 | [RDR-059](rdr-059-code-search-embedding-mismatch.md) | Code Search Embedding Model Mismatch | Bug | Closed | 2026-04-07 |
-| [RDR-060](rdr-060-catalog-path-rationalization-link-usability.md) | Catalog Path Rationalization and Link Graph Usability | Feature | Draft | 2026-04-08 |
+| [RDR-060](rdr-060-catalog-path-rationalization-link-usability.md) | Catalog Path Rationalization and Link Graph Usability | Feature | Accepted | 2026-04-08 |
 
 ---
 

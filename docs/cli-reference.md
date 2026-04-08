@@ -221,6 +221,62 @@ nx catalog pull                  # pull from remote + rebuild SQLite
 
 `sync` is called automatically at session close (via the Stop hook) when JSONL files have changed. Manual use is rarely needed.
 
+### nx catalog orphans
+
+```
+nx catalog orphans --no-links
+```
+
+Find catalog entries with zero incoming and outgoing links. Useful for identifying documents that need linking or cleanup.
+
+### nx catalog coverage
+
+```
+nx catalog coverage [--owner OWNER_PREFIX]
+```
+
+Per content-type report showing what percentage of catalog entries have at least one link. Use `--owner 1.1` to scope to a specific repo.
+
+### nx catalog suggest-links
+
+```
+nx catalog suggest-links [--limit N]
+```
+
+Find unlinked code-RDR pairs by module name overlap. Read-only — shows potential links without creating them.
+
+### nx catalog links-for-file
+
+```
+nx catalog links-for-file FILE_PATH
+```
+
+Show all linked documents for a specific file (by relative path). Displays link type and direction.
+
+### nx catalog session-summary
+
+```
+nx catalog session-summary [--since HOURS]
+```
+
+Show linked RDRs for recently git-modified files. Default: last 24 hours. Useful for understanding design context of files you're working on.
+
+### nx catalog link-generate
+
+```
+nx catalog link-generate [--dry-run]
+```
+
+Run all link generators over the full catalog (batch O(n×m) scan). Use for initial setup or after bulk imports. Normal index runs are incremental.
+
+### nx catalog gc
+
+```
+nx catalog gc [--dry-run]
+```
+
+Remove orphan catalog entries (entries with `miss_count >= 2` — missed in 2 consecutive index runs). Use `--dry-run` to preview.
+
 ### nx catalog list / stats / owners / delete
 
 Standard catalog management. Run `nx catalog COMMAND --help` for details.
@@ -469,6 +525,8 @@ Checks: ChromaDB API key, ChromaDB tenant, T3 database (`CHROMA_DATABASE`), Voya
 nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files
 nx doctor --clean-pipelines     # Delete orphaned pipeline buffer entries
 nx doctor --fix                 # Apply HNSW search_ef=256 to local collections
+nx doctor --fix-paths           # Migrate absolute file_path entries to relative (catalog + T3)
+nx doctor --fix-paths --dry-run # Preview migration without applying
 ```
 
 The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.

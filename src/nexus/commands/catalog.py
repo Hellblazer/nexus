@@ -391,10 +391,26 @@ def register_cmd(
     content_type: str, file_path: str, corpus: str,
 ) -> None:
     """Register a document in the catalog."""
+    from nexus.catalog.catalog import make_relative
+
     cat = _get_catalog()
+    # Relativize absolute file_path if under a known repo (RDR-060)
+    fp = file_path
+    if fp and Path(fp).is_absolute():
+        from nexus.catalog.catalog import _default_registry_path
+        from nexus.registry import RepoRegistry
+
+        reg_path = _default_registry_path()
+        if reg_path.exists():
+            for repo_path_str in RepoRegistry(reg_path).all_info():
+                rel = make_relative(fp, Path(repo_path_str))
+                if rel != fp:
+                    fp = rel
+                    break
+
     tumbler = cat.register(
         Tumbler.parse(owner), title,
-        content_type=content_type, file_path=file_path,
+        content_type=content_type, file_path=fp,
         corpus=corpus, author=author, year=year,
     )
     click.echo(f"Registered: {tumbler}")
@@ -737,6 +753,324 @@ def compact_cmd() -> None:
         click.echo("Run 'nx catalog sync' to commit the compacted files.")
 
 
+@catalog.command("orphans")
+@click.option("--no-links", "no_links", is_flag=True, help="Show entries with zero incoming and outgoing links")
+def orphans_cmd(no_links: bool) -> None:
+    """Find catalog entries that are not connected to anything.
+
+    \b
+    Examples:
+      nx catalog orphans --no-links    # entries with no links at all
+    """
+    if not no_links:
+        raise click.UsageError("Specify a mode: --no-links")
+
+    cat = _get_catalog()
+    db = cat._db
+    rows = db.execute(
+        """
+        SELECT tumbler, title, content_type, file_path
+        FROM documents
+        WHERE tumbler NOT IN (SELECT from_tumbler FROM links)
+          AND tumbler NOT IN (SELECT to_tumbler FROM links)
+        ORDER BY content_type, tumbler
+        """
+    ).fetchall()
+
+    if not rows:
+        click.echo("No orphan entries (all documents have at least one link).")
+        return
+
+    click.echo(f"Orphan entries ({len(rows)} with no links):")
+    for tumbler, title, content_type, file_path in rows:
+        loc = f"  [{file_path}]" if file_path else ""
+        click.echo(f"  {tumbler:<12} {content_type:<10} {title}{loc}")
+
+
+@catalog.command("links-for-file")
+@click.argument("file_path")
+def links_for_file_cmd(file_path: str) -> None:
+    """Show catalog entries linked to a specific file.
+
+    \b
+    Examples:
+      nx catalog links-for-file src/nexus/catalog/catalog.py
+      nx catalog links-for-file docs/rdr/rdr-060.md
+    """
+    cat = _get_catalog()
+    db = cat._db
+
+    row = db.execute(
+        "SELECT tumbler, title, content_type FROM documents WHERE file_path = ?",
+        (file_path,),
+    ).fetchone()
+    if not row:
+        click.echo(f"No catalog entry for: {file_path}")
+        return
+
+    tumbler_str, title, content_type = row
+    click.echo(f"{tumbler_str} {content_type}: {title}")
+
+    link_rows = db.execute(
+        """SELECT d.tumbler, d.title, d.content_type, l.link_type,
+                  CASE WHEN l.from_tumbler = ? THEN 'outgoing' ELSE 'incoming' END as direction
+           FROM links l
+           JOIN documents d ON (d.tumbler = l.to_tumbler AND l.from_tumbler = ?)
+                            OR (d.tumbler = l.from_tumbler AND l.to_tumbler = ?)
+           ORDER BY l.link_type, d.content_type""",
+        (tumbler_str, tumbler_str, tumbler_str),
+    ).fetchall()
+
+    if not link_rows:
+        click.echo("  No links.")
+        return
+
+    for t, t_title, t_type, l_type, direction in link_rows:
+        arrow = "→" if direction == "outgoing" else "←"
+        click.echo(f"  {arrow} [{l_type}] {t} {t_type}: {t_title}")
+
+
+@catalog.command("session-summary")
+@click.option("--since", default=24, type=int, help="Hours to look back for git changes")
+def session_summary_cmd(since: int) -> None:
+    """Show link graph summary for recently modified files.
+
+    \b
+    Examples:
+      nx catalog session-summary            # files modified in last 24 hours
+      nx catalog session-summary --since 48 # last 48 hours
+    """
+    import subprocess
+
+    try:
+        cat = _get_catalog()
+    except click.ClickException:
+        click.echo("Catalog not initialized — skipping session summary.")
+        return
+
+    try:
+        result = subprocess.run(
+            [
+                "git", "log",
+                f"--since={since} hours ago",
+                "--name-only",
+                "--pretty=format:",
+                "--diff-filter=ACMR",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        files = {f.strip() for f in result.stdout.splitlines() if f.strip()}
+    except Exception:
+        click.echo("Could not determine recent file changes.")
+        return
+
+    if not files:
+        click.echo(f"No files modified in the last {since} hours.")
+    else:
+        db = cat._db
+        found_any = False
+        for fp in sorted(files):
+            row = db.execute(
+                "SELECT tumbler FROM documents WHERE file_path = ?", (fp,)
+            ).fetchone()
+            if not row:
+                continue
+            tumbler_str = row[0]
+            link_rows = db.execute(
+                """SELECT DISTINCT d.title FROM links l
+                   JOIN documents d ON (d.tumbler = l.to_tumbler AND l.from_tumbler = ?)
+                                    OR (d.tumbler = l.from_tumbler AND l.to_tumbler = ?)
+                   WHERE d.content_type = 'rdr'""",
+                (tumbler_str, tumbler_str),
+            ).fetchall()
+            if link_rows:
+                rdrs = ", ".join(r[0] for r in link_rows)
+                click.echo(f"  {fp} — {len(link_rows)} RDR(s): {rdrs}")
+                found_any = True
+
+        if not found_any:
+            click.echo("No linked RDRs found for recently modified files.")
+
+    total = cat._db.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+    click.echo(f"\nLink graph: {total} links active.")
+
+
+@catalog.command("gc")
+@click.option("--dry-run", is_flag=True, default=False, help="Show what would be deleted without deleting.")
+def gc_cmd(dry_run: bool) -> None:
+    """Remove orphan catalog entries that have miss_count >= 2.
+
+    \b
+    Orphans are entries that were absent in two or more consecutive index runs.
+    Use --dry-run to preview deletions without applying them.
+
+    \b
+    Examples:
+      nx catalog gc              # delete orphan entries
+      nx catalog gc --dry-run   # preview without deleting
+    """
+    cat = _get_catalog()
+
+    rows = cat._db.execute(
+        "SELECT tumbler, title, file_path, metadata FROM documents"
+    ).fetchall()
+
+    orphans: list[tuple[str, str, str]] = []
+    for tumbler_str, title, file_path, meta_json in rows:
+        meta = json.loads(meta_json) if meta_json else {}
+        if int(meta.get("miss_count", 0)) >= 2:
+            orphans.append((tumbler_str, title or "", file_path or ""))
+
+    if not orphans:
+        click.echo("No orphan entries found.")
+        return
+
+    click.echo(f"Found {len(orphans)} orphan {'entry' if len(orphans) == 1 else 'entries'} (miss_count >= 2):")
+    for tumbler_str, title, file_path in orphans:
+        loc = f" ({file_path})" if file_path else ""
+        if dry_run:
+            click.echo(f"  [dry-run] would delete {tumbler_str}: {title}{loc}")
+        else:
+            cat.delete_document(Tumbler.parse(tumbler_str))
+            click.echo(f"  deleted {tumbler_str}: {title}{loc}")
+
+    if dry_run:
+        click.echo(f"\n{len(orphans)} {'entry' if len(orphans) == 1 else 'entries'} would be deleted. Run without --dry-run to apply.")
+    else:
+        click.echo(f"\nDeleted {len(orphans)} orphan {'entry' if len(orphans) == 1 else 'entries'}.")
+
+
+@catalog.command("coverage")
+@click.option("--owner", "owner_prefix", default="", help="Filter by tumbler prefix (e.g. '1.1')")
+def coverage_cmd(owner_prefix: str) -> None:
+    """Show what percentage of catalog entries have at least one link, by content type.
+
+    \b
+    Examples:
+      nx catalog coverage                # all types
+      nx catalog coverage --owner 1.1   # only entries under owner 1.1
+    """
+    cat = _get_catalog()
+    db = cat._db
+
+    # Fetch all distinct content types under filter
+    if owner_prefix:
+        like_pat = owner_prefix.rstrip(".") + ".%"
+        type_rows = db.execute(
+            "SELECT DISTINCT content_type FROM documents WHERE tumbler LIKE ? OR tumbler = ?",
+            (like_pat, owner_prefix),
+        ).fetchall()
+    else:
+        type_rows = db.execute("SELECT DISTINCT content_type FROM documents").fetchall()
+
+    content_types = [r[0] for r in type_rows]
+    if not content_types:
+        click.echo("No documents in catalog.")
+        return
+
+    click.echo("Link coverage by content type:")
+    for ct in sorted(content_types):
+        if owner_prefix:
+            like_pat = owner_prefix.rstrip(".") + ".%"
+            total = db.execute(
+                "SELECT COUNT(*) FROM documents WHERE content_type = ? AND (tumbler LIKE ? OR tumbler = ?)",
+                (ct, like_pat, owner_prefix),
+            ).fetchone()[0]
+            linked = db.execute(
+                """
+                SELECT COUNT(DISTINCT d.tumbler)
+                FROM documents d
+                JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
+                WHERE d.content_type = ?
+                  AND (d.tumbler LIKE ? OR d.tumbler = ?)
+                """,
+                (ct, like_pat, owner_prefix),
+            ).fetchone()[0]
+        else:
+            total = db.execute(
+                "SELECT COUNT(*) FROM documents WHERE content_type = ?",
+                (ct,),
+            ).fetchone()[0]
+            linked = db.execute(
+                """
+                SELECT COUNT(DISTINCT d.tumbler)
+                FROM documents d
+                JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
+                WHERE d.content_type = ?
+                """,
+                (ct,),
+            ).fetchone()[0]
+
+        pct = (linked / total * 100) if total else 0.0
+        click.echo(f"  {ct:<12} {linked:>4}/{total:<4} = {pct:5.1f}%")
+
+
+@catalog.command("suggest-links")
+@click.option("--limit", "-n", default=50, type=int, help="Max suggestions to show")
+@click.option("--threshold", default=0.0, type=float, help="Reserved for future similarity threshold (unused)")
+def suggest_links_cmd(limit: int, threshold: float) -> None:
+    """Suggest unlinked code-RDR pairs by module-name overlap.
+
+    Finds code entries whose filename stem appears in an RDR title, where no
+    link yet exists between the pair. Same heuristic as 'generate-links' but
+    read-only — shows what would be created.
+
+    \b
+    Examples:
+      nx catalog suggest-links
+      nx catalog suggest-links --limit 20
+    """
+    from pathlib import Path as _Path
+
+    cat = _get_catalog()
+    entries = cat.all_documents(limit=10_000)
+    rdr_entries = [e for e in entries if e.content_type == "rdr"]
+    code_entries = [e for e in entries if e.content_type == "code" and e.file_path]
+
+    if not rdr_entries or not code_entries:
+        click.echo("0 suggestions (no code or RDR entries to match).")
+        return
+
+    # Pre-normalize RDR titles
+    rdr_normalized = [
+        (rdr, rdr.title.lower().replace("-", "").replace(" ", "").replace("_", ""))
+        for rdr in rdr_entries
+    ]
+
+    suggestions: list[tuple[str, str, str, str]] = []  # (code_t, rdr_t, module, rdr_title)
+    for code in code_entries:
+        module_name = _Path(code.file_path).stem.replace("_", "").lower()
+        if len(module_name) <= 3:
+            continue
+        for rdr, rdr_title_norm in rdr_normalized:
+            if module_name not in rdr_title_norm:
+                continue
+            # Check if link already exists in either direction
+            existing = cat.link_query(
+                from_t=str(code.tumbler), to_t=str(rdr.tumbler),
+                link_type="", limit=1,
+            ) or cat.link_query(
+                from_t=str(rdr.tumbler), to_t=str(code.tumbler),
+                link_type="", limit=1,
+            )
+            if not existing:
+                suggestions.append((
+                    str(code.tumbler), str(rdr.tumbler),
+                    module_name, rdr.title,
+                ))
+        if len(suggestions) >= limit:
+            break
+
+    suggestions = suggestions[:limit]
+    if not suggestions:
+        click.echo("0 suggestions (all matching pairs are already linked).")
+        return
+
+    click.echo(f"{len(suggestions)} suggestion(s):")
+    for code_t, rdr_t, module, rdr_title in suggestions:
+        click.echo(f"  {code_t} → {rdr_t}  [{module}] {rdr_title}")
+
+
 # ── Backfill helpers ──────────────────────────────────────────────────────────
 
 
@@ -811,6 +1145,7 @@ def _backfill_repos(
         if owner is None:
             owner = cat.register_owner(
                 repo_name, "repo", repo_hash=path_hash,
+                repo_root=str(repo_path),
                 description=f"Git repository: {repo_name}",
             )
 
@@ -891,16 +1226,35 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
                     break
                 offset += 200
 
+            # Derive repo root from registry for relativization (RDR-060)
+            repo_root: Path | None = None
+            try:
+                import hashlib
+
+                from nexus.catalog.catalog import _default_registry_path, make_relative
+                from nexus.registry import RepoRegistry
+
+                reg_path = _default_registry_path()
+                if reg_path.exists():
+                    for repo_path_str in RepoRegistry(reg_path).all_info():
+                        h = hashlib.sha256(repo_path_str.encode()).hexdigest()[:8]
+                        if col_name.endswith(h):
+                            repo_root = Path(repo_path_str)
+                            break
+            except Exception:
+                pass  # non-fatal — store as-is
+
             for path, title in seen_paths.items():
                 if dry_run:
                     click.echo(f"  [dry-run] {title} → {col_name}")
                     count += 1
                     continue
-                existing = [e for e in cat.by_owner(curator) if e.file_path == path]
+                fp = make_relative(path, repo_root) if repo_root else path
+                existing = [e for e in cat.by_owner(curator) if e.file_path in (path, fp)]
                 if not existing:
                     cat.register(
                         owner=curator, title=title, content_type="rdr",
-                        file_path=path, physical_collection=col_name,
+                        file_path=fp, physical_collection=col_name,
                     )
                     count += 1
         except Exception as exc:
@@ -995,11 +1349,16 @@ def consolidate_cmd(corpus: str, dry_run: bool) -> None:
 @catalog.command("generate-links")
 @click.option("--citations/--no-citations", default=True, help="Generate citation links from bib metadata")
 @click.option("--code-rdr/--no-code-rdr", default=True, help="Generate code-RDR links by heuristic")
+@click.option("--filepath/--no-filepath", default=True, help="Generate RDR filepath links")
 @click.option("--dry-run", is_flag=True, help="Show what would be created without writing")
-def generate_links_cmd(citations: bool, code_rdr: bool, dry_run: bool) -> None:
+def generate_links_cmd(citations: bool, code_rdr: bool, filepath: bool, dry_run: bool) -> None:
     """Auto-generate typed links from metadata cross-matching."""
     cat = _get_catalog()
-    from nexus.catalog.link_generator import generate_citation_links, generate_code_rdr_links
+    from nexus.catalog.link_generator import (
+        generate_citation_links,
+        generate_code_rdr_links,
+        generate_rdr_filepath_links,
+    )
 
     total = 0
     if citations:
@@ -1018,8 +1377,30 @@ def generate_links_cmd(citations: bool, code_rdr: bool, dry_run: bool) -> None:
             click.echo(f"Code-RDR links created: {count}")
             total += count
 
+    if filepath:
+        if dry_run:
+            click.echo("Would generate RDR filepath links (dry-run mode not yet supported for link preview)")
+        else:
+            count = generate_rdr_filepath_links(cat)
+            click.echo(f"RDR filepath links created: {count}")
+            total += count
+
     if not dry_run:
         click.echo(f"Total links generated: {total}")
+
+
+@catalog.command("link-generate")
+@click.option("--dry-run", is_flag=True, default=False, help="Show what would be done without writing")
+def link_generate_cmd(dry_run: bool) -> None:
+    """Run all link generators over the full catalog (batch scan)."""
+    cat = _get_catalog()
+    if dry_run:
+        click.echo("[dry-run] Would run full link generation scan")
+        return
+    from nexus.catalog.link_generator import generate_code_rdr_links, generate_rdr_filepath_links
+    count1 = generate_code_rdr_links(cat)
+    count2 = generate_rdr_filepath_links(cat)
+    click.echo(f"Generated {count1} heuristic + {count2} filepath links.")
 
 
 def _make_t3():

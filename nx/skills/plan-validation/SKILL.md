@@ -16,6 +16,10 @@ Delegates to the **plan-auditor** agent (sonnet). See [registry.yaml](../../regi
 - When validating that a plan aligns with the codebase
 - Before committing significant effort to a plan
 
+## Pre-Dispatch: Seed Link Context (optional)
+
+If the plan is RDR-driven, seed link-context so audit findings stored to T3 auto-link. See `/nx:catalog` for details.
+
 ## Agent Invocation
 
 Use the Agent tool to invoke **plan-auditor**:

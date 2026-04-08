@@ -43,6 +43,19 @@ from nexus.catalog.tumbler import (
 _log = structlog.get_logger()
 
 
+def _default_registry_path() -> Path:
+    """Return the default path to the repo registry JSON file."""
+    return Path.home() / ".config" / "nexus" / "repos.json"
+
+
+def make_relative(abs_path: str | Path, repo_root: Path) -> str:
+    """Return path relative to repo_root, or original if not under repo_root."""
+    try:
+        return str(Path(abs_path).relative_to(repo_root))
+    except ValueError:
+        return str(abs_path)
+
+
 @dataclass
 class CatalogEntry:
     tumbler: Tumbler
@@ -302,8 +315,10 @@ class Catalog:
     # ── Owners ─────────────────────────────────────────────────────────────
 
     def register_owner(
-        self, name: str, owner_type: str, *, repo_hash: str = "", description: str = ""
+        self, name: str, owner_type: str, *, repo_hash: str = "", description: str = "", repo_root: str = ""
     ) -> Tumbler:
+        if repo_root and not Path(repo_root).is_absolute():
+            raise ValueError(f"repo_root must be an absolute path: {repo_root!r}")
         dir_fd = self._acquire_lock()
         try:
             # Read existing owners to find next number
@@ -318,13 +333,14 @@ class Catalog:
                 owner_type=owner_type,
                 repo_hash=repo_hash,
                 description=description,
+                repo_root=repo_root,
             )
             self._append_jsonl(self._owners_path, rec.__dict__)
             # Upsert SQLite
             self._db.execute(
-                "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (prefix, name, owner_type, repo_hash, description),
+                "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (prefix, name, owner_type, repo_hash, description, repo_root),
             )
             self._db.commit()
             return Tumbler.parse(prefix)
@@ -460,6 +476,63 @@ class Catalog:
             indexed_at=row[10],
             meta=json.loads(row[11]) if row[11] else {},
         )
+
+    def resolve_path(self, tumbler: Tumbler) -> Path | None:
+        """Return absolute path for the document's file_path.
+
+        Resolution order:
+        1. Look up entry via self.resolve(tumbler)
+        2. If entry not found: return None
+        3. Find owner: tumbler.owner_address() -> str, look up in JSONL
+        4. If owner not found or owner.owner_type == "curator": return None
+        5. If entry.file_path is already absolute: return Path(entry.file_path)
+        6. If owner.repo_root is non-empty: return Path(owner.repo_root) / entry.file_path
+        7. Fallback: iterate registry to find path matching owner.repo_hash
+        8. If fallback found: return Path(repo_path) / entry.file_path
+        9. Otherwise: return None
+        """
+        import hashlib
+
+        from nexus.registry import RepoRegistry
+
+        entry = self.resolve(tumbler)
+        if not entry:
+            return None
+
+        # Find owner via SQLite (avoids re-reading JSONL on every call)
+        owner_prefix = str(tumbler.owner_address())
+        row = self._db.execute(
+            "SELECT owner_type, repo_root, repo_hash FROM owners WHERE tumbler_prefix = ?",
+            (owner_prefix,),
+        ).fetchone()
+        if not row:
+            return None
+        owner_type, repo_root, repo_hash = row[0], row[1], row[2]
+
+        # Curators (PDFs, standalone docs) are not resolvable
+        if owner_type == "curator":
+            return None
+
+        # If file_path is already absolute, return it directly
+        fp = Path(entry.file_path)
+        if fp.is_absolute():
+            return fp
+
+        # Primary: use repo_root from owner
+        if repo_root:
+            return Path(repo_root) / entry.file_path
+
+        # Fallback: find repo_root from registry by matching repo_hash
+        if repo_hash:
+            registry_path = _default_registry_path()
+            if registry_path.exists():
+                reg = RepoRegistry(registry_path)
+                for path_str in reg.all_info():
+                    path_hash = hashlib.sha256(path_str.encode()).hexdigest()[:8]
+                    if path_hash == repo_hash:
+                        return Path(path_str) / entry.file_path
+
+        return None
 
     def descendants(self, prefix: str) -> list[dict]:
         """All documents whose tumbler starts with *prefix* (any depth).

@@ -138,6 +138,7 @@ class OwnerRecord:
     owner_type: str  # "repo" | "curator"
     repo_hash: str
     description: str
+    repo_root: str = ""  # absolute path to repo working tree (RDR-060)
     next_seq: int = 1  # high-water mark — next document number to assign (never decreases)
 
 

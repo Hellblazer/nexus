@@ -54,6 +54,18 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr("nexus.hooks.SESSIONS_DIR", sessions)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect NEXUS_CATALOG_PATH so tests never pollute the real user catalog.
+
+    Without this, integration tests that trigger _catalog_hook() (via index_repo
+    or similar) register documents in the user's live catalog at ~/.config/nexus/.
+    This creates thousands of junk entries from pytest temp dirs that accumulate
+    across test runs.
+    """
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "test-catalog"))
+
+
 def set_credentials(monkeypatch) -> None:
     """Set required T3/Voyage credential env vars for tests that call _has_credentials().
 
