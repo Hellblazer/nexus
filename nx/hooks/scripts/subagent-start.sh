@@ -54,8 +54,8 @@ if command -v bd &> /dev/null; then
   fi
 fi
 
-# Catalog link context for files mentioned in the task
-if command -v nx &> /dev/null && [[ $SKIP_STORAGE_DOCS -eq 0 ]]; then
+# Catalog link context for files mentioned in the task (always, even for code-nav agents)
+if command -v nx &> /dev/null; then
   # Extract file paths from the task text and show linked RDRs
   FILE_PATHS=$(python3 -c "
 import re, sys
