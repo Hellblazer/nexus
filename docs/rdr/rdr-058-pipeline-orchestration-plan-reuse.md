@@ -2,8 +2,10 @@
 title: "Pipeline Orchestration and Plan Reuse"
 id: RDR-058
 type: Feature
-status: draft
+status: accepted
+accepted_date: 2026-04-07
 priority: medium
+reviewed-by: self
 author: Hal Hildebrand
 created: 2026-04-07
 related_issues: [RDR-040, RDR-056, RDR-057]
