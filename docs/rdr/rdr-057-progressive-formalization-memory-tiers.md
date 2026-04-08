@@ -138,6 +138,29 @@ The real gap is **semantic consistency**: agent A writes "caching uses Redis" wh
 
 Proposes JIT compilation instead of transform-at-boundary: keep raw data in a page-store (Memorizer), compute formalization at query time (Researcher agent). Achieves >90% accuracy on RULER Multi-Hop Tracing vs. <60% for transform-at-write approaches. This is the design tension RDR-057 must resolve: eager formalization (transform at tier boundary) vs. lazy formalization (transform at query time). Nexus's `query()` MCP tool with catalog routing is already partially lazy — it composes search scopes at query time rather than pre-computing them. The right answer may be hybrid: cheap transforms (section_type, dedup) at write time, expensive transforms (claim extraction, contradiction detection) at query time.
 
+### RF-12: GST System/Boundary Analysis
+
+**Source**: General Systems Theory critique of proposed design
+
+Six boundaries where signals cross in the formalization system:
+
+| Boundary | Direction | Current Signal | Gap |
+|----------|-----------|---------------|-----|
+| Agent → T1 | write | tags, persist flag | No heat signal — agent doesn't know what's frequently retrieved |
+| T1 → T2 | promote | verbatim copy | No transformation, no feedback ("this duplicates existing T2 entry X") |
+| T2 → T3 | store_put | raw upsert | No consolidation check, no contradiction check against existing T3 |
+| T3 → Agent | search/query | ranked chunks | No confidence/staleness/contradiction signal on returned results |
+| Agent → Agent | shared T3 | source_agent metadata | No mutual awareness of concurrent writes (RF-10 semantic gap) |
+| Catalog → Search | pre-filter | source_path routing | No formalization-level signal in routing decisions |
+
+**Three GST findings**:
+
+1. **The flywheel is open-loop.** No feedback from later tiers to earlier ones. An agent writing to T1 never learns "this was promoted and became valuable" or "this contradicted existing knowledge." Every boundary crossing needs a feedback channel for the system to self-correct. Minimum viable feedback: `promote()` returns a consolidation report (merged/new/conflicting), `store_put` returns a contradiction flag.
+
+2. **`formalization_level` should be derived, not assigned.** A static label set at index time is a declaration, not a measurement. The level should emerge from content structure: does it have extracted entities (L1)? Subject-predicate-object triples (L2)? Validated claims with provenance (L3)? `section_type` (RDR-055) is the right pattern — it's derived from content, not declared.
+
+3. **Contradiction detection belongs at retrieval too, not just write.** The proposed design checks for contradictions only at the T2→T3 write boundary. But two contradictory entries may both enter T3 via different paths (direct indexing, different agents). The retrieval boundary (search/query) should flag when contradictory entries appear together in results — aligning with RF-11's JIT formalization. Cost: one embedding similarity check between returned chunks, ~2ms for N=10.
+
 ## Proposed Design
 
 ### The Formalization Flywheel
