@@ -753,6 +753,171 @@ def compact_cmd() -> None:
         click.echo("Run 'nx catalog sync' to commit the compacted files.")
 
 
+@catalog.command("orphans")
+@click.option("--no-links", "no_links", is_flag=True, help="Show entries with zero incoming and outgoing links")
+def orphans_cmd(no_links: bool) -> None:
+    """Find catalog entries that are not connected to anything.
+
+    \b
+    Examples:
+      nx catalog orphans --no-links    # entries with no links at all
+    """
+    if not no_links:
+        raise click.UsageError("Specify a mode: --no-links")
+
+    cat = _get_catalog()
+    db = cat._db
+    rows = db.execute(
+        """
+        SELECT tumbler, title, content_type, file_path
+        FROM documents
+        WHERE tumbler NOT IN (SELECT from_tumbler FROM links)
+          AND tumbler NOT IN (SELECT to_tumbler FROM links)
+        ORDER BY content_type, tumbler
+        """
+    ).fetchall()
+
+    if not rows:
+        click.echo("No orphan entries (all documents have at least one link).")
+        return
+
+    click.echo(f"Orphan entries ({len(rows)} with no links):")
+    for tumbler, title, content_type, file_path in rows:
+        loc = f"  [{file_path}]" if file_path else ""
+        click.echo(f"  {tumbler:<12} {content_type:<10} {title}{loc}")
+
+
+@catalog.command("coverage")
+@click.option("--owner", "owner_prefix", default="", help="Filter by tumbler prefix (e.g. '1.1')")
+def coverage_cmd(owner_prefix: str) -> None:
+    """Show what percentage of catalog entries have at least one link, by content type.
+
+    \b
+    Examples:
+      nx catalog coverage                # all types
+      nx catalog coverage --owner 1.1   # only entries under owner 1.1
+    """
+    cat = _get_catalog()
+    db = cat._db
+
+    # Fetch all distinct content types under filter
+    if owner_prefix:
+        like_pat = owner_prefix.rstrip(".") + ".%"
+        type_rows = db.execute(
+            "SELECT DISTINCT content_type FROM documents WHERE tumbler LIKE ? OR tumbler = ?",
+            (like_pat, owner_prefix),
+        ).fetchall()
+    else:
+        type_rows = db.execute("SELECT DISTINCT content_type FROM documents").fetchall()
+
+    content_types = [r[0] for r in type_rows]
+    if not content_types:
+        click.echo("No documents in catalog.")
+        return
+
+    click.echo("Link coverage by content type:")
+    for ct in sorted(content_types):
+        if owner_prefix:
+            like_pat = owner_prefix.rstrip(".") + ".%"
+            total = db.execute(
+                "SELECT COUNT(*) FROM documents WHERE content_type = ? AND (tumbler LIKE ? OR tumbler = ?)",
+                (ct, like_pat, owner_prefix),
+            ).fetchone()[0]
+            linked = db.execute(
+                """
+                SELECT COUNT(DISTINCT d.tumbler)
+                FROM documents d
+                JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
+                WHERE d.content_type = ?
+                  AND (d.tumbler LIKE ? OR d.tumbler = ?)
+                """,
+                (ct, like_pat, owner_prefix),
+            ).fetchone()[0]
+        else:
+            total = db.execute(
+                "SELECT COUNT(*) FROM documents WHERE content_type = ?",
+                (ct,),
+            ).fetchone()[0]
+            linked = db.execute(
+                """
+                SELECT COUNT(DISTINCT d.tumbler)
+                FROM documents d
+                JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
+                WHERE d.content_type = ?
+                """,
+                (ct,),
+            ).fetchone()[0]
+
+        pct = (linked / total * 100) if total else 0.0
+        click.echo(f"  {ct:<12} {linked:>4}/{total:<4} = {pct:5.1f}%")
+
+
+@catalog.command("suggest-links")
+@click.option("--limit", "-n", default=50, type=int, help="Max suggestions to show")
+@click.option("--threshold", default=0.0, type=float, help="Reserved for future similarity threshold (unused)")
+def suggest_links_cmd(limit: int, threshold: float) -> None:
+    """Suggest unlinked code-RDR pairs by module-name overlap.
+
+    Finds code entries whose filename stem appears in an RDR title, where no
+    link yet exists between the pair. Same heuristic as 'generate-links' but
+    read-only — shows what would be created.
+
+    \b
+    Examples:
+      nx catalog suggest-links
+      nx catalog suggest-links --limit 20
+    """
+    from pathlib import Path as _Path
+
+    cat = _get_catalog()
+    entries = cat.all_documents(limit=10_000)
+    rdr_entries = [e for e in entries if e.content_type == "rdr"]
+    code_entries = [e for e in entries if e.content_type == "code" and e.file_path]
+
+    if not rdr_entries or not code_entries:
+        click.echo("0 suggestions (no code or RDR entries to match).")
+        return
+
+    # Pre-normalize RDR titles
+    rdr_normalized = [
+        (rdr, rdr.title.lower().replace("-", "").replace(" ", "").replace("_", ""))
+        for rdr in rdr_entries
+    ]
+
+    suggestions: list[tuple[str, str, str, str]] = []  # (code_t, rdr_t, module, rdr_title)
+    for code in code_entries:
+        module_name = _Path(code.file_path).stem.replace("_", "").lower()
+        if len(module_name) <= 3:
+            continue
+        for rdr, rdr_title_norm in rdr_normalized:
+            if module_name not in rdr_title_norm:
+                continue
+            # Check if link already exists in either direction
+            existing = cat.link_query(
+                from_t=str(code.tumbler), to_t=str(rdr.tumbler),
+                link_type="", limit=1,
+            ) or cat.link_query(
+                from_t=str(rdr.tumbler), to_t=str(code.tumbler),
+                link_type="", limit=1,
+            )
+            if not existing:
+                suggestions.append((
+                    str(code.tumbler), str(rdr.tumbler),
+                    module_name, rdr.title,
+                ))
+        if len(suggestions) >= limit:
+            break
+
+    suggestions = suggestions[:limit]
+    if not suggestions:
+        click.echo("0 suggestions (all matching pairs are already linked).")
+        return
+
+    click.echo(f"{len(suggestions)} suggestion(s):")
+    for code_t, rdr_t, module, rdr_title in suggestions:
+        click.echo(f"  {code_t} → {rdr_t}  [{module}] {rdr_title}")
+
+
 # ── Backfill helpers ──────────────────────────────────────────────────────────
 
 

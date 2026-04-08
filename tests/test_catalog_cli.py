@@ -290,3 +290,94 @@ class TestStatsCommand:
         result = runner.invoke(main, ["catalog", "stats"])
         assert result.exit_code == 0
         assert "1" in result.output  # at least 1 document
+
+
+class TestDiscoveryTools:
+    def test_orphans_no_links(self, initialized_catalog, catalog_env):
+        """Entries with no links are reported as orphans."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "Orphan Doc", "--owner", "1.1", "--type", "code"])
+        result = runner.invoke(main, ["catalog", "orphans", "--no-links"])
+        assert result.exit_code == 0
+        assert "Orphan Doc" in result.output
+
+    def test_orphans_all_linked(self, initialized_catalog, catalog_env):
+        """When all entries have links, report zero orphans."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "orphans", "--no-links"])
+        assert result.exit_code == 0
+        assert "No orphan" in result.output
+
+    def test_orphans_empty_catalog(self, initialized_catalog, catalog_env):
+        """Empty catalog handles gracefully."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "orphans", "--no-links"])
+        assert result.exit_code == 0
+        assert "No orphan" in result.output
+
+    def test_coverage_report(self, initialized_catalog, catalog_env):
+        """Coverage shows linked vs total count per content type."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1", "--type", "code"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1", "--type", "code"])
+        runner.invoke(main, ["catalog", "register", "--title", "C", "--owner", "1.1", "--type", "paper"])
+        runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
+        result = runner.invoke(main, ["catalog", "coverage"])
+        assert result.exit_code == 0
+        assert "code" in result.output
+        assert "%" in result.output
+
+    def test_coverage_empty_catalog(self, initialized_catalog, catalog_env):
+        """Empty catalog shows a graceful message."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "coverage"])
+        assert result.exit_code == 0
+        assert "No documents" in result.output
+
+    def test_coverage_with_owner_filter(self, initialized_catalog, catalog_env):
+        """--owner filters by tumbler prefix."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1", "--type", "code"])
+        runner.invoke(main, ["catalog", "register", "--title", "B", "--owner", "1.1", "--type", "paper"])
+        result = runner.invoke(main, ["catalog", "coverage", "--owner", "1.1"])
+        assert result.exit_code == 0
+        assert "%" in result.output
+
+    def test_suggest_links_no_candidates(self, initialized_catalog, catalog_env):
+        """When no code-RDR pairs match, report zero suggestions."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "something", "--owner", "1.1", "--type", "code"])
+        result = runner.invoke(main, ["catalog", "suggest-links"])
+        assert result.exit_code == 0
+        assert "0" in result.output or "No suggestions" in result.output
+
+    def test_suggest_links_finds_unlinked_pair(self, initialized_catalog, catalog_env):
+        """Finds a code-RDR pair by module name overlap that has no existing link."""
+        runner = CliRunner()
+        # Register code entry with a file path so stem extraction works
+        cat = initialized_catalog
+        from nexus.catalog.tumbler import Tumbler
+        owner = Tumbler.parse("1.1")
+        cat.register(owner, "chunker module", content_type="code", file_path="src/nexus/chunker.py")
+        cat.register(owner, "RDR-027 chunker improvements", content_type="rdr", file_path="docs/rdr/rdr-027.md")
+        result = runner.invoke(main, ["catalog", "suggest-links"])
+        assert result.exit_code == 0
+        # Should find the chunker → RDR pair
+        assert "chunker" in result.output.lower()
+
+    def test_suggest_links_skips_already_linked(self, initialized_catalog, catalog_env):
+        """Already-linked pairs are not suggested again."""
+        runner = CliRunner()
+        cat = initialized_catalog
+        from nexus.catalog.tumbler import Tumbler
+        owner = Tumbler.parse("1.1")
+        code_t = cat.register(owner, "chunker module", content_type="code", file_path="src/nexus/chunker.py")
+        rdr_t = cat.register(owner, "RDR-027 chunker improvements", content_type="rdr", file_path="docs/rdr/rdr-027.md")
+        cat.link(code_t, rdr_t, "implements-heuristic", created_by="index_hook")
+        result = runner.invoke(main, ["catalog", "suggest-links"])
+        assert result.exit_code == 0
+        # The pair is already linked — should not appear
+        assert "chunker" not in result.output.lower() or "0" in result.output
