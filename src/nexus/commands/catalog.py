@@ -1195,11 +1195,16 @@ def consolidate_cmd(corpus: str, dry_run: bool) -> None:
 @catalog.command("generate-links")
 @click.option("--citations/--no-citations", default=True, help="Generate citation links from bib metadata")
 @click.option("--code-rdr/--no-code-rdr", default=True, help="Generate code-RDR links by heuristic")
+@click.option("--filepath/--no-filepath", default=True, help="Generate RDR filepath links")
 @click.option("--dry-run", is_flag=True, help="Show what would be created without writing")
-def generate_links_cmd(citations: bool, code_rdr: bool, dry_run: bool) -> None:
+def generate_links_cmd(citations: bool, code_rdr: bool, filepath: bool, dry_run: bool) -> None:
     """Auto-generate typed links from metadata cross-matching."""
     cat = _get_catalog()
-    from nexus.catalog.link_generator import generate_citation_links, generate_code_rdr_links
+    from nexus.catalog.link_generator import (
+        generate_citation_links,
+        generate_code_rdr_links,
+        generate_rdr_filepath_links,
+    )
 
     total = 0
     if citations:
@@ -1218,8 +1223,30 @@ def generate_links_cmd(citations: bool, code_rdr: bool, dry_run: bool) -> None:
             click.echo(f"Code-RDR links created: {count}")
             total += count
 
+    if filepath:
+        if dry_run:
+            click.echo("Would generate RDR filepath links (dry-run mode not yet supported for link preview)")
+        else:
+            count = generate_rdr_filepath_links(cat)
+            click.echo(f"RDR filepath links created: {count}")
+            total += count
+
     if not dry_run:
         click.echo(f"Total links generated: {total}")
+
+
+@catalog.command("link-generate")
+@click.option("--dry-run", is_flag=True, default=False, help="Show what would be done without writing")
+def link_generate_cmd(dry_run: bool) -> None:
+    """Run all link generators over the full catalog (batch scan)."""
+    cat = _get_catalog()
+    if dry_run:
+        click.echo("[dry-run] Would run full link generation scan")
+        return
+    from nexus.catalog.link_generator import generate_code_rdr_links, generate_rdr_filepath_links
+    count1 = generate_code_rdr_links(cat)
+    count2 = generate_rdr_filepath_links(cat)
+    click.echo(f"Generated {count1} heuristic + {count2} filepath links.")
 
 
 def _make_t3():

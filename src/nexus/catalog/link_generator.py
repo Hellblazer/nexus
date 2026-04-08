@@ -60,17 +60,27 @@ _FILE_PATH_RE = re.compile(
 )
 
 
-def generate_rdr_filepath_links(cat: Catalog) -> int:
+def generate_rdr_filepath_links(cat: Catalog, *, new_tumblers: list[Tumbler] | None = None) -> int:
     """Extract file paths from RDR content and link to matching code entries.
 
     Scans each RDR's file on disk for source file paths (e.g.,
     ``src/nexus/catalog/catalog.py``). Matches against catalog code entries
     by file_path. Creates ``implements`` links (RDR → code).
     created_by='filepath_extractor'.
+
+    When *new_tumblers* is provided, only those entries are scanned (incremental
+    mode). Pass ``None`` (default) for the full-scan behavior.
     """
+    if new_tumblers is not None and len(new_tumblers) == 0:
+        return 0
+
     entries = _all_entries(cat)
     rdr_entries = [e for e in entries if e.content_type == "rdr" and e.file_path]
     code_entries = [e for e in entries if e.content_type == "code" and e.file_path]
+
+    if new_tumblers is not None:
+        new_set = {str(t) for t in new_tumblers}
+        rdr_entries = [e for e in rdr_entries if str(e.tumbler) in new_set]
 
     # Index: file_path → tumbler (code entries)
     path_to_code: dict[str, Tumbler] = {}
@@ -118,14 +128,23 @@ def generate_rdr_filepath_links(cat: Catalog) -> int:
 _MAX_RDR_MATCHES_PER_CODE = 5
 
 
-def generate_code_rdr_links(cat: Catalog) -> int:
+def generate_code_rdr_links(cat: Catalog, *, new_tumblers: list[Tumbler] | None = None) -> int:
     """Heuristic: match RDR entries to code files by module name in title.
 
     Uses link_type='implements-heuristic' (not 'implements') to distinguish
     these substring-matched links from manually created or API-backed links.
     created_by='index_hook' per RF-8. Only matches module names > 3 chars.
     Capped at _MAX_RDR_MATCHES_PER_CODE matches per code file to prevent saturation.
+
+    When *new_tumblers* is provided (incremental mode), only newly added entries
+    are evaluated:
+    - New code entries × all RDRs
+    - All code entries × new RDR entries
+    Pass ``None`` (default) for the full-scan behavior.
     """
+    if new_tumblers is not None and len(new_tumblers) == 0:
+        return 0
+
     entries = _all_entries(cat)
     rdr_entries = [e for e in entries if e.content_type == "rdr"]
     code_entries = [e for e in entries if e.content_type == "code"]
@@ -136,13 +155,33 @@ def generate_code_rdr_links(cat: Catalog) -> int:
         for rdr in rdr_entries
     ]
 
+    if new_tumblers is not None:
+        new_set = {str(t) for t in new_tumblers}
+        new_code = [e for e in code_entries if str(e.tumbler) in new_set]
+        new_rdrs_normalized = [(rdr, norm) for rdr, norm in rdr_normalized if str(rdr.tumbler) in new_set]
+
+        # Determine which (code, rdr) pairs to evaluate:
+        # 1. new code × all RDRs
+        # 2. all code × new RDRs  (minus pairs already covered by #1 to avoid double-count)
+        pairs: list[tuple[CatalogEntry, list[tuple[CatalogEntry, str]]]] = []
+        if new_code:
+            pairs.extend((c, rdr_normalized) for c in new_code)
+        if new_rdrs_normalized:
+            new_rdr_set = {str(rdr.tumbler) for rdr, _ in new_rdrs_normalized}
+            for code in code_entries:
+                if str(code.tumbler) in new_set:
+                    continue  # already covered in #1
+                pairs.append((code, new_rdrs_normalized))
+    else:
+        pairs = [(code, rdr_normalized) for code in code_entries]
+
     count = 0
-    for code in code_entries:
+    for code, rdrs_to_check in pairs:
         module_name = Path(code.file_path).stem.replace("_", "").lower()
         if len(module_name) <= 3:
             continue
         matches_for_code = 0
-        for rdr, rdr_title_norm in rdr_normalized:
+        for rdr, rdr_title_norm in rdrs_to_check:
             if module_name in rdr_title_norm:
                 created = cat.link_if_absent(code.tumbler, rdr.tumbler, "implements-heuristic", created_by="index_hook")
                 if created:

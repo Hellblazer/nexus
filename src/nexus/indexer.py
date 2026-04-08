@@ -248,6 +248,7 @@ def _catalog_hook(
             )
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
 
+        new_tumblers = []
         for abs_path, content_type, collection_name in indexed_files:
             try:
                 rel_path = str(abs_path.relative_to(repo))
@@ -256,7 +257,7 @@ def _catalog_hook(
 
             existing = cat.by_file_path(owner, rel_path)
             if existing is None:
-                cat.register(
+                tumbler = cat.register(
                     owner=owner,
                     title=abs_path.name,
                     content_type=content_type,
@@ -264,17 +265,18 @@ def _catalog_hook(
                     physical_collection=collection_name,
                     head_hash=head_hash,
                 )
+                new_tumblers.append(tumbler)
             else:
                 cat.update(
                     existing.tumbler,
                     head_hash=head_hash,
                     physical_collection=collection_name,
                 )
-        # Auto-generate links after registration
+        # Auto-generate links after registration (incremental: only new entries)
         try:
             from nexus.catalog.link_generator import generate_code_rdr_links, generate_rdr_filepath_links
-            link_count = generate_code_rdr_links(cat)
-            fp_count = generate_rdr_filepath_links(cat)
+            link_count = generate_code_rdr_links(cat, new_tumblers=new_tumblers if new_tumblers else None)
+            fp_count = generate_rdr_filepath_links(cat, new_tumblers=new_tumblers if new_tumblers else None)
             total = link_count + fp_count
             if total:
                 _log.info("catalog_links_generated", heuristic=link_count, filepath=fp_count, repo=repo_name)

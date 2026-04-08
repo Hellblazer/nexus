@@ -381,3 +381,48 @@ class TestDiscoveryTools:
         assert result.exit_code == 0
         # The pair is already linked — should not appear
         assert "chunker" not in result.output.lower() or "0" in result.output
+
+
+class TestLinkGenerate:
+    """Tests for `nx catalog link-generate` command."""
+
+    def test_link_generate_dry_run(self, initialized_catalog, catalog_env):
+        """--dry-run outputs a message and exits cleanly without writing."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "link-generate", "--dry-run"])
+        assert result.exit_code == 0
+        assert "dry-run" in result.output.lower()
+
+    def test_link_generate_empty_catalog(self, initialized_catalog, catalog_env):
+        """Running on a catalog with no entries produces 0 links."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "link-generate"])
+        assert result.exit_code == 0
+        assert "0" in result.output
+
+    def test_link_generate_creates_heuristic_links(self, initialized_catalog, catalog_env):
+        """Command creates heuristic links for matching code-RDR pairs."""
+        runner = CliRunner()
+        cat = initialized_catalog
+        from nexus.catalog.tumbler import Tumbler
+        owner = Tumbler.parse("1.1")
+        cat.register(owner, "catalog module", content_type="code", file_path="src/nexus/catalog.py")
+        cat.register(owner, "RDR-001 catalog improvements", content_type="rdr", file_path="docs/rdr/rdr-001.md")
+        result = runner.invoke(main, ["catalog", "link-generate"])
+        assert result.exit_code == 0
+        # Output should show non-zero heuristic links
+        assert "1" in result.output
+
+    def test_link_generate_idempotent(self, initialized_catalog, catalog_env):
+        """Running twice produces 0 new links the second time."""
+        runner = CliRunner()
+        cat = initialized_catalog
+        from nexus.catalog.tumbler import Tumbler
+        owner = Tumbler.parse("1.1")
+        cat.register(owner, "catalog module", content_type="code", file_path="src/nexus/catalog.py")
+        cat.register(owner, "RDR-001 catalog improvements", content_type="rdr", file_path="docs/rdr/rdr-001.md")
+        runner.invoke(main, ["catalog", "link-generate"])
+        result = runner.invoke(main, ["catalog", "link-generate"])
+        assert result.exit_code == 0
+        # Second run should generate 0 new links
+        assert "0 heuristic + 0 filepath" in result.output
