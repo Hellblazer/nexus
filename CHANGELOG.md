@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-04-08
+
+### Changed
+- **Retire orchestrator agent** (RDR-058) — deleted `nx/agents/orchestrator.md`, removed from registry and model groups. Routing content preserved in `nx/skills/orchestration/reference.md`. Agent count 15 → 14.
+- **Orchestration skill** — converted from agent-delegating to standalone reference skill. Points to routing tables and decision framework in `reference.md`.
+- **Shared agent docs** — `CONTEXT_PROTOCOL.md` and `RELAY_TEMPLATE.md` updated: "orchestrator" → "caller" terminology.
+- **rdr-accept command** — updated "orchestrator" → "caller" in planning chain prohibition.
+
+### Added
+- **Plan library integration** (RDR-058) — `using-nx-skills` Process Flow now checks `plan_search` before multi-agent dispatch and saves successful pipelines via `plan_save`.
+- **5 pipeline templates** — RDR Chain, Plan-Audit-Implement, Research-Synthesize, Code Review, and Debug patterns stored as permanent T2 plan library entries.
+- **Pipeline Pattern Catalog** — new table in `orchestration/reference.md` documenting all 5 standard pipeline patterns with agents, use cases, and prerequisites.
+- **Orchestration standalone skill** — added to `registry.yaml` `standalone_skills` section.
+
+### Docs
+- README updated: 14 agents, 10 standalone skills, orchestration directory comment.
+- RDR-058 accepted.
+
 ## [3.3.1] - 2026-04-07
 
 ### Fixed

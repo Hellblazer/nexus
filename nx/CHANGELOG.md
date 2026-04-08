@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-04-08
+
+### Removed
+- **Orchestrator agent** — `nx/agents/orchestrator.md` deleted, removed from registry.yaml agent block and sonnet model group.
+
+### Changed
+- **Orchestration skill** — converted to standalone reference skill (no agent dispatch). Routing tables, pipeline templates, and decision framework preserved in new `reference.md`.
+- **using-nx-skills** — Process Flow DOT graph extended with plan library nodes. New "Plan Reuse" section wires `plan_search`/`plan_save` into multi-agent dispatch.
+- **Cross-references** — CONTEXT_PROTOCOL, RELAY_TEMPLATE, rdr-accept updated from "orchestrator" to "caller".
+- **README** — 14 agents, 10 standalone skills. Orchestration directory comment updated.
+
+### Added
+- **`nx/skills/orchestration/reference.md`** — routing graph, quick reference table, decision framework, standard pipelines, and pipeline pattern catalog.
+- **5 pipeline templates** in T2 plan library (permanent): RDR Chain, Plan-Audit-Implement, Research-Synthesize, Code Review, Debug.
+- **`orchestration`** entry in `registry.yaml` `standalone_skills`.
+
 ## [3.3.1] - 2026-04-07
 
 Plugin version aligned with Nexus CLI 3.3.1. No plugin-level functional changes.
