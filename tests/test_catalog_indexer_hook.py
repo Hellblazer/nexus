@@ -257,3 +257,50 @@ class TestRunHousekeeping:
         entry = cat.resolve(t)
         assert entry is not None
         assert entry.meta.get("miss_count", 0) == 0
+
+    def test_rename_detected_by_content_hash(self, tmp_path, monkeypatch):
+        """File renamed: orphan with matching content_hash gets file_path updated, links preserved."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="fff666")
+        owner_t = cat.owner_for_repo("fff666")
+        # Old entry at old path with a content hash
+        old_t = cat.register(owner_t, "old_name.py", content_type="code", file_path="src/old_name.py",
+                             meta={"content_hash": "deadbeef1234"})
+        # Create a link from old entry to another doc
+        other_t = cat.register(owner_t, "rdr-1", content_type="rdr", file_path="docs/rdr/rdr-1.md")
+        cat.link(old_t, other_t, "implements", created_by="test")
+
+        # New entry already registered at new path with same content hash
+        new_t = cat.register(owner_t, "new_name.py", content_type="code", file_path="src/new_name.py",
+                             meta={"content_hash": "deadbeef1234"})
+
+        # indexed_set has new path but not old
+        _run_housekeeping(cat, owner_t, indexed_set={"src/new_name.py", "docs/rdr/rdr-1.md"})
+
+        # Old entry should be deleted (rename transfers links, then deletes)
+        assert cat.resolve(old_t) is None
+        # Links should be transferred to the new entry
+        links = cat.links_from(new_t)
+        assert any(str(l.to_tumbler) == str(other_t) for l in links)
+
+    def test_rename_not_triggered_without_content_hash(self, tmp_path, monkeypatch):
+        """Orphan without content_hash follows normal miss_count path, not rename."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="ggg777")
+        owner_t = cat.owner_for_repo("ggg777")
+        # No content_hash in meta
+        t = cat.register(owner_t, "no_hash.py", content_type="code", file_path="src/no_hash.py")
+
+        _run_housekeeping(cat, owner_t, indexed_set=set())
+
+        entry = cat.resolve(t)
+        assert entry is not None  # not renamed, just incremented
+        assert entry.meta.get("miss_count") == 1

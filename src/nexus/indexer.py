@@ -257,6 +257,13 @@ def _catalog_hook(
             except ValueError:
                 rel_path = abs_path.name
 
+            # Per-file content hash for rename detection (RDR-060 E7)
+            import hashlib as _hl
+            try:
+                file_hash = _hl.sha256(abs_path.read_bytes()).hexdigest()
+            except OSError:
+                file_hash = ""
+
             existing = cat.by_file_path(owner, rel_path)
             if existing is None:
                 tumbler = cat.register(
@@ -266,6 +273,7 @@ def _catalog_hook(
                     file_path=rel_path,
                     physical_collection=collection_name,
                     head_hash=head_hash,
+                    meta={"content_hash": file_hash} if file_hash else None,
                 )
                 new_tumblers.append(tumbler)
             else:
@@ -273,6 +281,7 @@ def _catalog_hook(
                     existing.tumbler,
                     head_hash=head_hash,
                     physical_collection=collection_name,
+                    meta={"content_hash": file_hash} if file_hash else None,
                 )
         # Auto-generate links after registration (incremental: only new entries)
         try:
@@ -297,13 +306,23 @@ def _run_housekeeping(
     owner: "Tumbler",
     indexed_set: set[str],
 ) -> None:
-    """Orphan detection with miss_count tracking.
+    """Orphan detection with miss_count tracking and rename detection.
 
     For each catalog entry owned by *owner*:
     - If the file is present in *indexed_set*, reset miss_count to 0.
-    - If absent, increment miss_count. Delete at threshold >= 2.
+    - If absent and a content_hash match exists at a new path, treat as rename:
+      transfer links to the new entry and delete the old one.
+    - If absent with no rename match, increment miss_count. Delete at threshold >= 2.
     """
     owner_entries = cat.by_owner(owner)
+
+    # Build content_hash → entry map for rename detection
+    hash_to_entry: dict[str, object] = {}
+    for e in owner_entries:
+        ch = (e.meta or {}).get("content_hash", "")
+        if ch and e.file_path in indexed_set:
+            hash_to_entry[ch] = e
+
     for entry in owner_entries:
         if entry.file_path in indexed_set:
             meta = entry.meta or {}
@@ -311,6 +330,34 @@ def _run_housekeeping(
                 meta = dict(meta)
                 meta["miss_count"] = 0
                 cat.update(entry.tumbler, meta=meta)
+            continue
+
+        # Check for rename: orphan's content_hash matches a newly-indexed entry
+        orphan_hash = (entry.meta or {}).get("content_hash", "")
+        if orphan_hash and orphan_hash in hash_to_entry:
+            new_entry = hash_to_entry[orphan_hash]
+            # Transfer links from old entry to new entry
+            old_links = cat.links_from(entry.tumbler)
+            for lnk in old_links:
+                cat.link_if_absent(
+                    new_entry.tumbler, lnk.to_tumbler, lnk.link_type,
+                    created_by=lnk.created_by,
+                )
+            # Also transfer incoming links
+            incoming = cat.links_to(entry.tumbler)
+            for lnk in incoming:
+                cat.link_if_absent(
+                    lnk.from_tumbler, new_entry.tumbler, lnk.link_type,
+                    created_by=lnk.created_by,
+                )
+            cat.delete_document(entry.tumbler)
+            _log.info(
+                "housekeeping_rename_detected",
+                old_path=entry.file_path,
+                new_path=new_entry.file_path,
+                old_tumbler=str(entry.tumbler),
+                new_tumbler=str(new_entry.tumbler),
+            )
             continue
 
         # File not in this index run — increment miss_count
