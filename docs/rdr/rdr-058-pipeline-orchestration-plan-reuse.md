@@ -57,103 +57,87 @@ All three papers independently implement structured memory with reuse. DeepEye a
 
 All three papers add a pre-execution step: DeepEye validates type compatibility across DAG edges. LitMOF reconciles heterogeneous sources before accepting corrections. HoldUp clusters before labeling to understand global distribution. Nexus processes in sequence without prior reconciliation.
 
+### RF-5: The Orchestrator Agent Does Not Work and Should Be Retired
+
+**Source**: Operational experience, user feedback (2026-04-07)
+
+The orchestrator agent (`nx/agents/orchestrator.md`) is never invoked in practice. The main
+conversation acts as the orchestrator — the user tells Claude what to do, Claude dispatches
+agents directly. The fundamental constraint is architectural: **subagents cannot spawn other
+subagents**, so the orchestrator can only recommend routing, not execute pipelines.
+
+The `using-nx-skills` routing skill already replaced the orchestrator's dispatch logic
+(documented in CHANGELOG when `/nx:orchestrate` was removed). The orchestrator agent's
+remaining value is as **process documentation** — it describes standard pipeline patterns
+(RDR chain, plan-audit-implement, research-synthesize) that the main conversation and skills
+reference when deciding what to dispatch.
+
+The RDR's original Phases 2-3 (typed pipeline schemas, knowledge-validator agent, DAG
+validation) are solutions to problems that don't exist in practice. The main conversation
+doesn't need a JSON schema to dispatch two agents — it needs to know which agents exist
+and what order to use them. That's a documentation problem, not an infrastructure problem.
+
 ## Proposed Design
 
-### Key Decision: Where Does Orchestration Live?
+> **Scope note:** The original design proposed typed pipeline DAGs, I/O schema validation,
+> and a knowledge-validator agent. Operational reality is simpler: the orchestrator agent
+> doesn't work, the routing skill already handles dispatch, and what's missing is clear
+> process documentation. The design is reduced to: retire the agent, preserve its knowledge
+> as documentation, and ensure plan_search is wired into the skill layer.
 
-Given the subagent-cannot-spawn-subagent constraint, the orchestrator agent should be **retired as an agent** and its intelligence redistributed:
+### Phase 1: Retire Orchestrator Agent (hours)
 
-**Option A: Skill-Based Orchestration (recommended)**
-- A new `pipeline-dispatch` skill that the main conversation invokes before launching multi-agent work
-- The skill calls `plan_search` for matching templates, validates I/O compatibility, and emits a structured dispatch plan
-- The main conversation then dispatches agents per the plan
+**1a. Convert orchestrator agent to reference document**
 
-**Option B: Hook-Based Enforcement**
-- SubagentStart hook checks if the dispatched agent's expected inputs match available context
-- Blocks dispatch with a warning if inputs are missing
+Move `nx/agents/orchestrator.md` content to `nx/skills/orchestration/reference.md` (or similar).
+Remove the agent frontmatter (name, model, color). Keep the routing tables, pipeline templates,
+and standard workflow patterns as skill reference material that the main conversation and
+using-nx-skills consult.
 
-**Option C: Enhanced using-nx-skills Routing**
-- Fold pipeline templates directly into the using-nx-skills skill
-- Add plan_search call to the skill's process flow
+Update all references:
+- `using-nx-skills` SKILL.md — remove orchestrator from agent routing table
+- `plugin.json` — remove orchestrator from agent registry
+- Any skill or hook that mentions the orchestrator agent
 
-### Phase 1: Plan Reuse (hours-days)
+**1b. Wire plan_search into using-nx-skills**
 
-**1a. plan_search before pipeline construction**
-
-Add to using-nx-skills or create a lightweight pipeline-dispatch skill:
+Add to the using-nx-skills skill flow, before agent dispatch:
 ```
 Before dispatching a multi-agent pipeline:
 1. Call plan_search(query="<task description>")
-2. If matching template found, use as starting pipeline structure
+2. If matching template found, present as suggested pipeline structure
 3. After successful pipeline completion, call plan_save(content=<relay chain>)
 ```
 
-**1b. Retire orchestrator agent → reference document**
+This is lightweight — it adds one MCP call before dispatch and one after completion.
+No typed schemas, no validation, no new agents.
 
-Convert `nx/agents/orchestrator.md` from an agent definition to a reference document that skills and the main conversation consult. Remove from registry.yaml agent list. Keep the routing tables, pipeline templates, and failure relay protocol as documentation.
+### Phase 2: Document Standard Pipelines (days)
 
-### Phase 2: Typed Pipeline Plans (weeks)
+**2a. Pipeline pattern catalog**
 
-**2a. Pipeline Plan JSON schema**
+Document the standard multi-agent pipelines that actually get used:
 
-Define a JSON schema for pipeline plans:
-```json
-{
-  "goal": "string",
-  "stages": [
-    {
-      "agent": "strategic-planner",
-      "inputs": {"type": "user-request", "format": "text"},
-      "outputs": {"type": "plan", "format": "relay"},
-      "depends_on": []
-    },
-    {
-      "agent": "plan-auditor",
-      "inputs": {"type": "plan", "format": "relay"},
-      "outputs": {"type": "audit-report", "format": "relay"},
-      "depends_on": ["strategic-planner"]
-    }
-  ],
-  "parallel_groups": [["agent-a", "agent-b"]]
-}
-```
+| Pipeline | Pattern | When to use |
+|----------|---------|-------------|
+| RDR chain | research → gate → accept → plan → implement | New feature design |
+| Plan-audit-implement | strategic-planner → plan-auditor → developer | Planned implementation |
+| Research-synthesize | deep-research → knowledge-tidier | Literature survey |
+| Code review | developer → code-review-expert → test-validator | Feature completion |
+| Debug | debugger → test-validator | Test failures |
 
-**2b. Validation step in pipeline-dispatch skill**
-
-Before dispatching, check:
-- Each stage's input type matches its predecessor's output type
-- No cycles in depends_on graph
-- Parallel groups have no inter-dependencies
-
-### Phase 3: Normalized Result Envelope (weeks)
-
-**3a. Search result metadata propagation**
-
-Extend search result format to always include `{tumbler, corpus, content_type, distance}` alongside chunk_text. The catalog already computes these — search just doesn't propagate them.
-
-**3b. Knowledge-validator agent**
-
-New agent implementing LitMOF's Inspector & Editor pattern: for a T3 collection, validate stored entries against source documents (catalog resolve → search → compare), detect divergent claims, surface via link_audit, auto-repair or flag for human review.
+Store as plan library templates via `plan_save` (already seeded 5 templates at `nx catalog setup`).
 
 ## Risks and Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| Retiring orchestrator agent breaks existing references | Grep for all references; update to point at documentation |
-| Typed pipeline schema adds friction | Keep optional — prose plans still work; schema is for validation only |
-| plan_search returns irrelevant templates | Tune similarity threshold; manual curation of plan library |
-| Knowledge-validator produces false-positive divergence reports | Start with conservative thresholds; human-in-the-loop flag rather than auto-repair |
-
-## Open Questions
-
-1. **Should the orchestrator agent be fully retired**, or kept as a "routing advisor" that returns recommendations without dispatching? The current system already works without it — the question is whether the reference material is more useful as an agent prompt or as documentation.
-2. **Where should pipeline templates live** — T2 plan library (TTL-based, session-scoped), T3 knowledge (permanent), or as markdown files checked into the repo?
-3. **How much validation is worth the latency?** A full Compiler→Validator→Optimizer pass per DeepEye adds overhead. Worth it for 6-stage pipelines, probably not for 2-stage.
+| Retiring orchestrator agent breaks references | Grep all references before removal; update to point at reference doc |
+| plan_search returns irrelevant templates | 5 builtin templates are curated; user templates accumulate via plan_save |
 
 ## Success Criteria
 
-- [ ] plan_search called before every multi-agent pipeline dispatch
-- [ ] Successful pipelines saved to plan library for reuse
-- [ ] Pipeline plans validated for I/O type consistency
-- [ ] Orchestrator agent either retired or has clear invocation path
-- [ ] At least one pipeline template exists in plan library per standard workflow
+- [ ] Orchestrator agent retired — no longer in agent registry
+- [ ] Routing tables and pipeline patterns preserved as reference documentation
+- [ ] plan_search called in using-nx-skills before multi-agent dispatch
+- [ ] Standard pipeline patterns documented and stored in plan library
