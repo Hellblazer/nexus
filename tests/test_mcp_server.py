@@ -502,12 +502,12 @@ def test_plan_search_empty(t2_path):
 # ── _get_catalog error propagation ───────────────────────────────────────────
 
 def test_get_catalog_propagates_non_os_errors():
-    from nexus.mcp_server import _get_catalog
+    from nexus.mcp_infra import get_catalog as _get_catalog
     mock_catalog = MagicMock()
     mock_catalog.degraded = False
-    with patch("nexus.mcp_server._catalog_instance", mock_catalog), \
-         patch("nexus.mcp_server._catalog_mtime", 0.0), \
-         patch("nexus.mcp_server._max_jsonl_mtime", return_value=999.0):
+    with patch("nexus.mcp_infra._catalog_instance", mock_catalog), \
+         patch("nexus.mcp_infra._catalog_mtime", 0.0), \
+         patch("nexus.mcp_infra._max_jsonl_mtime", return_value=999.0):
         mock_catalog._ensure_consistent.side_effect = ValueError("corrupt JSONL")
         with pytest.raises(ValueError):
             _get_catalog()

@@ -1,24 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""MCP server exposing T1/T2/T3 storage APIs as tools.
+"""MCP server tool definitions.
 
-Architecture:
-- T1 (scratch): lazy singleton — SessionStart hook must fire first
-- T2 (memory): per-call context manager — SQLite WAL, microsecond open
-- T3 (store/search): lazy singleton — 1-2s ChromaDB Cloud init, reused
-- All errors return "Error: {message}" strings, never raise exceptions
-- No ANSI escape codes in output
+Infrastructure (singletons, caching, injection) lives in ``mcp_infra.py``.
+All errors return "Error: {message}" strings, never raise exceptions.
+No ANSI escape codes in output.
 """
 from __future__ import annotations
 
-import re
-import threading
-import time
-import warnings
-
-from mcp.server.fastmcp import FastMCP
-
-from nexus.commands._helpers import default_db_path
 from nexus.corpus import (
     embedding_model_for_collection,
     index_model_for_collection,
@@ -26,267 +15,23 @@ from nexus.corpus import (
     t3_collection_name,
 )
 from nexus.db.t3 import verify_collection_deep
+from nexus.filters import parse_where_str as _parse_where_str
+from nexus.mcp_infra import (
+    catalog_auto_link as _catalog_auto_link,
+    get_catalog as _get_catalog,
+    get_collection_names as _get_collection_names,
+    get_t1 as _get_t1,
+    get_t3 as _get_t3,
+    inject_catalog as _inject_catalog,
+    inject_t1 as _inject_t1,
+    inject_t3 as _inject_t3,
+    mcp,
+    require_catalog as _require_catalog,
+    reset_singletons as _reset_singletons,
+    resolve_tumbler_mcp as _resolve_tumbler_mcp,
+    t2_ctx as _t2_ctx,
+)
 from nexus.ttl import parse_ttl
-
-mcp = FastMCP("nexus")
-
-# ── Lazy singletons ──────────────────────────────────────────────────────────
-
-_t1_instance = None
-_t1_isolated = False
-_t1_lock = threading.Lock()
-
-_t3_instance = None
-_t3_lock = threading.Lock()
-
-_collections_cache: tuple[list[str], float] = ([], 0.0)
-_COLLECTIONS_CACHE_TTL = 60.0  # seconds
-
-
-def _get_t1():
-    """Return (T1Database, is_isolated) — lazy init on first call."""
-    global _t1_instance, _t1_isolated
-    if _t1_instance is None:
-        with _t1_lock:
-            if _t1_instance is None:  # double-checked locking
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always")
-                    from nexus.db.t1 import T1Database
-                    _t1_instance = T1Database()
-                    _t1_isolated = any("EphemeralClient" in str(w.message) for w in caught)
-    return _t1_instance, _t1_isolated
-
-
-def _get_t3():
-    """Return T3Database singleton — lazy init on first call."""
-    global _t3_instance
-    if _t3_instance is None:
-        with _t3_lock:
-            if _t3_instance is None:  # double-checked locking
-                from nexus.db import make_t3
-                _t3_instance = make_t3()
-    return _t3_instance
-
-
-def _get_collection_names() -> list[str]:
-    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds."""
-    global _collections_cache
-    names, ts = _collections_cache
-    now = time.monotonic()
-    if now - ts > _COLLECTIONS_CACHE_TTL:
-        new_names = [c["name"] for c in _get_t3().list_collections()]
-        _collections_cache = (new_names, now)  # atomic single-assignment
-        return new_names
-    return names
-
-
-def _t2_ctx():
-    """Return a T2Database context manager — fresh per call."""
-    from nexus.db.t2 import T2Database
-    return T2Database(default_db_path())
-
-
-# ── Where-filter parser (shared with CLI) ────────────────────────────────────
-
-_NUMERIC_FIELDS = frozenset({
-    "bib_year", "bib_citation_count", "page_number", "page_count",
-    "chunk_index", "chunk_count", "chunk_start_char", "chunk_end_char",
-})
-_WHERE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(>=|<=|!=|>|<|=)(.*)$")
-_OP_MAP: dict[str, str | None] = {
-    ">=": "$gte", "<=": "$lte", "!=": "$ne",
-    ">": "$gt", "<": "$lt", "=": None,
-}
-
-
-def _parse_where_str(where_str: str) -> dict | None:
-    """Parse comma-separated KEY{op}VALUE pairs into a ChromaDB where dict.
-
-    Returns None when where_str is empty.
-    """
-    if not where_str.strip():
-        return None
-    parts: list[dict] = []
-    for pair in where_str.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        m = _WHERE_RE.match(pair)
-        if not m:
-            raise ValueError(f"Invalid where format: {pair!r}. Use KEY=VALUE or KEY>=VALUE")
-        key, op_str, raw_value = m.group(1), m.group(2), m.group(3)
-        if not raw_value:
-            continue
-        # Auto-coerce numeric fields
-        value: str | int | float = raw_value
-        if key in _NUMERIC_FIELDS:
-            try:
-                value = int(raw_value)
-            except ValueError:
-                try:
-                    value = float(raw_value)
-                except ValueError:
-                    pass
-        chroma_op = _OP_MAP[op_str]
-        if chroma_op is None:
-            parts.append({key: value})
-        else:
-            parts.append({key: {chroma_op: value}})
-    if not parts:
-        return None
-    if len(parts) == 1:
-        return parts[0]
-    if all(not isinstance(v, dict) for p in parts for v in p.values()):
-        merged: dict = {}
-        for p in parts:
-            merged.update(p)
-        return merged
-    return {"$and": parts}
-
-
-# ── Test injection ────────────────────────────────────────────────────────────
-
-_catalog_instance = None
-_catalog_lock = threading.Lock()
-_catalog_mtime: float = 0.0
-
-
-def _max_jsonl_mtime(cat) -> float:
-    """Return max mtime across all three JSONL files."""
-    mtime = 0.0
-    for path in cat.jsonl_paths():
-        try:
-            mtime = max(mtime, path.stat().st_mtime) if path.exists() else mtime
-        except OSError:
-            pass
-    return mtime
-
-
-def _catalog_auto_link(doc_id: str) -> int:
-    """Create catalog links from T1 link-context to the just-stored document.
-
-    Reads link-context entries from T1 scratch, resolves the stored doc's
-    tumbler via doc_id, and creates links. Link-context entries persist for
-    the session — every store_put in the session links to the seeded targets.
-    Returns count of links created.
-    """
-    import structlog
-    _al_log = structlog.get_logger()
-
-    cat = _get_catalog()
-    if cat is None:
-        return 0
-    t1, _ = _get_t1()
-    entries = t1.list_entries()
-    # Exact tag match — avoid substring hits on e.g. "pre-link-context"
-    link_entries = [
-        e for e in entries
-        if "link-context" in {t.strip() for t in (e.get("tags") or "").split(",")}
-    ]
-    if not link_entries:
-        return 0
-    entry = cat.by_doc_id(doc_id)
-    if entry is None:
-        _al_log.debug("auto_link_skip_doc_not_in_catalog", doc_id=doc_id)
-        return 0
-    from nexus.catalog.auto_linker import auto_link, read_link_contexts
-    contexts = read_link_contexts(link_entries)
-    return auto_link(cat, entry.tumbler, contexts)
-
-
-def _get_catalog():
-    """Return Catalog singleton or None if not initialized.
-
-    Checks JSONL mtime on each access — if files changed externally
-    (e.g., git pull from another process), triggers a rebuild.
-    """
-    global _catalog_instance, _catalog_mtime
-    if _catalog_instance is None:
-        with _catalog_lock:
-            if _catalog_instance is None:
-                from nexus.catalog import Catalog
-                from nexus.config import catalog_path
-
-                path = catalog_path()
-                if Catalog.is_initialized(path):
-                    _catalog_instance = Catalog(path, path / ".catalog.db")
-                    _catalog_mtime = _max_jsonl_mtime(_catalog_instance)
-    elif _catalog_instance is not None:
-        # Check for external JSONL changes (git pull, another process)
-        try:
-            current_mtime = _max_jsonl_mtime(_catalog_instance)
-            if current_mtime > _catalog_mtime:
-                with _catalog_lock:
-                    # Double-check under lock to avoid redundant rebuilds
-                    if current_mtime > _catalog_mtime:
-                        _catalog_mtime = current_mtime
-                        _catalog_instance._ensure_consistent()
-        except OSError:
-            pass  # stat failure is non-fatal (file not found, permission denied)
-    return _catalog_instance
-
-
-def _require_catalog():
-    """Return (catalog, None) or (None, error_message)."""
-    cat = _get_catalog()
-    if cat is None:
-        return None, "Catalog not initialized — run 'nx catalog setup' to create and populate it"
-    return cat, None
-
-
-def _resolve_tumbler_mcp(
-    cat: "Catalog", value: str
-) -> "tuple[Tumbler | None, str | None]":
-    """Resolve tumbler string OR title/filename. Returns (tumbler, None) or (None, error)."""
-    from nexus.catalog.tumbler import Tumbler
-    try:
-        t = Tumbler.parse(value)
-        if cat.resolve(t) is not None:
-            return t, None
-        # Valid tumbler format but document deleted/missing — don't fall through to FTS
-        return None, f"Not found: {value!r}"
-    except ValueError:
-        pass
-    results = cat.find(value)
-    if results:
-        exact = [r for r in results if r.title == value]
-        if exact:
-            return exact[0].tumbler, None
-        if len(results) == 1:
-            return results[0].tumbler, None
-        return None, f"Ambiguous: {len(results)} documents match {value!r} — use tumbler"
-    return None, f"Not found: {value!r}"
-
-
-def _reset_singletons():
-    """Reset lazy singletons (for tests only)."""
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
-    _t1_instance = None
-    _t1_isolated = False
-    _t3_instance = None
-    _collections_cache = ([], 0.0)
-    _catalog_instance = None
-    _catalog_mtime = 0.0
-
-
-def _inject_t1(t1, *, isolated: bool = False):
-    """Inject a T1Database for testing."""
-    global _t1_instance, _t1_isolated
-    _t1_instance = t1
-    _t1_isolated = isolated
-
-
-def _inject_t3(t3):
-    """Inject a T3Database for testing."""
-    global _t3_instance
-    _t3_instance = t3
-
-
-def _inject_catalog(cat):
-    """Inject a Catalog for testing."""
-    global _catalog_instance
-    _catalog_instance = cat
-
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
@@ -1228,13 +973,6 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
 # ── Catalog tools ─────────────────────────────────────────────────────────────
 
 
-def _entry_to_dict(entry) -> dict:
-    return entry.to_dict()
-
-
-def _link_to_dict(link) -> dict:
-    return link.to_dict()
-
 
 @mcp.tool()
 def catalog_search(
@@ -1306,7 +1044,7 @@ def catalog_search(
             ]
             has_more = len(entries) > limit
             entries = entries[:limit]
-            result = [_entry_to_dict(e) for e in entries]
+            result = [e.to_dict() for e in entries]
             if has_more:
                 result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
             return result
@@ -1319,7 +1057,7 @@ def catalog_search(
             return [{"error": "query or at least one filter required"}]
         all_results = cat.find(fts_query, content_type=content_type or None)
         page = all_results[offset:offset + limit]
-        result = [_entry_to_dict(e) for e in page]
+        result = [e.to_dict() for e in page]
         if offset + limit < len(all_results):
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
@@ -1353,9 +1091,9 @@ def catalog_show(
         if entry is None:
             return {"error": f"Not found: {tumbler or title}"}
 
-        d = _entry_to_dict(entry)
-        d["links_from"] = [_link_to_dict(l) for l in cat.links_from(entry.tumbler)]
-        d["links_to"] = [_link_to_dict(l) for l in cat.links_to(entry.tumbler)]
+        d = entry.to_dict()
+        d["links_from"] = [l.to_dict() for l in cat.links_from(entry.tumbler)]
+        d["links_to"] = [l.to_dict() for l in cat.links_to(entry.tumbler)]
         return d
     except Exception as e:
         return {"error": str(e)}
@@ -1404,7 +1142,7 @@ def catalog_list(
         if content_type:
             entries = [e for e in entries if e.content_type == content_type]
         page = entries[:limit]
-        result = [_entry_to_dict(e) for e in page]
+        result = [e.to_dict() for e in page]
         if len(entries) > limit:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
@@ -1539,8 +1277,8 @@ def catalog_links(
             return {"error": err}
         result = cat.graph(t, depth=depth, direction=direction, link_type=link_type)
         return {
-            "nodes": [_entry_to_dict(n) for n in result["nodes"]],
-            "edges": [_link_to_dict(e) for e in result["edges"]],
+            "nodes": [n.to_dict() for n in result["nodes"]],
+            "edges": [e.to_dict() for e in result["edges"]],
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1673,7 +1411,7 @@ def catalog_link_query(
         )
         has_more = len(links) > limit
         links = links[:limit]
-        result = [_link_to_dict(l) for l in links]
+        result = [l.to_dict() for l in links]
         if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
