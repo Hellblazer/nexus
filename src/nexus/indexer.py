@@ -705,6 +705,16 @@ def _paginated_get(col: object, include: list[str], where: dict | None = None) -
     return result
 
 
+def _batched_delete(col: object, ids: list[str]) -> int:
+    """Delete *ids* from *col* in batches of _CHROMA_PAGE_SIZE (Cloud quota: 300)."""
+    deleted = 0
+    for i in range(0, len(ids), _CHROMA_PAGE_SIZE):
+        batch = ids[i : i + _CHROMA_PAGE_SIZE]
+        _chroma_with_retry(col.delete, ids=batch)
+        deleted += len(batch)
+    return deleted
+
+
 def _prune_misclassified(
     repo: Path,
     code_collection: str,
@@ -727,7 +737,7 @@ def _prune_misclassified(
     for source_path in docs_paths:
         existing = _paginated_get(code_col, include=[], where={"source_path": source_path})
         if existing["ids"]:
-            _chroma_with_retry(code_col.delete, ids=existing["ids"])
+            _batched_delete(code_col, existing["ids"])
             _log.debug("pruned misclassified chunks from code collection",
                        source_path=source_path, count=len(existing["ids"]))
 
@@ -736,7 +746,7 @@ def _prune_misclassified(
     for source_path in code_paths:
         existing = _paginated_get(docs_col, include=[], where={"source_path": source_path})
         if existing["ids"]:
-            _chroma_with_retry(docs_col.delete, ids=existing["ids"])
+            _batched_delete(docs_col, existing["ids"])
             _log.debug("pruned misclassified chunks from docs collection",
                        source_path=source_path, count=len(existing["ids"]))
 
@@ -767,7 +777,7 @@ def _prune_deleted_files(
                 stale_ids.append(chunk_id)
 
         if stale_ids:
-            _chroma_with_retry(col.delete, ids=stale_ids)
+            _batched_delete(col, stale_ids)
             _log.info("pruned deleted-file chunks",
                        collection=collection_name, count=len(stale_ids))
 
