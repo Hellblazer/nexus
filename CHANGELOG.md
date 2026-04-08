@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.5.1] - 2026-04-08
+
+### Fixed
+- **Hook permissions** — `stop_failure_hook.py` now executable (was 644).
+- **Hook robustness** — removed `set -euo pipefail` from all advisory and permission auto-approve hooks. Prevents silent failures under load.
+- **Agent frontmatter** — synced 8 agent colors and 2 versions to match registry.yaml source of truth.
+
+### Docs
+- README: corrected agent/skill counts (14→16 agents, 28→32 skills).
+
 ## [3.5.0] - 2026-04-08
 
 ### Added

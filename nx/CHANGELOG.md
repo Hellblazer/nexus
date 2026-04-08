@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.5.1] - 2026-04-08
+
+### Fixed
+- **stop_failure_hook.py** now executable (was 644, hook would fail on StopFailure events).
+- **All hook scripts hardened** — removed `set -euo pipefail` from advisory hooks (stop, close) and permission auto-approve hooks (nx, sn). Prevents silent failures under resource pressure.
+- **Agent frontmatter** — 8 color mismatches and 2 version mismatches synced to registry.yaml.
+
+### Docs
+- README: 14→16 agents, 28→32 skills.
+
 ## [3.5.0] - 2026-04-08
 
 Plugin version aligned with Nexus CLI 3.5.0. No plugin-level functional changes.
