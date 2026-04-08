@@ -112,6 +112,30 @@ FTS5 `rank` is BM25 — negative values, closer to 0 = better match. **Threshold
 
 **Risk**: The `formalization_level` cross-tier dependency (catalog → indexer → chunk metadata) is the only non-trivial migration. All other changes are additive with zero schema migration.
 
+### RF-8: Write-Manage-Read as Universal Memory Loop
+
+**Source**: Memory for Autonomous LLM Agents (arxiv 2603.07670, March 2026)
+
+Defines six atomic memory operations: **consolidation, updating, indexing, forgetting, retrieval, compression**. The manage phase (between write and read) is where value is created — "summarize, deduplicate, score priority, resolve contradictions, and delete when appropriate." RDR-057 should specify which operations apply at each tier boundary rather than treating promotion as a single action. Forgetting complements heat-based promotion: low-heat items are candidates for eviction at T1/T2, not just low-priority items.
+
+### RF-9: Inter-Context Contradiction Detection is Tractable
+
+**Source**: Knowledge Conflicts for LLMs (arxiv 2403.08319, EMNLP 2024), FaithfulRAG (arxiv 2506.08938, ACL 2025)
+
+Three conflict types: context-parametric, inter-context, intra-memory. Inter-context (new chunk vs. existing T3 chunks) is the most tractable — embed the candidate, search existing T3, extract fact-level conflicts. FaithfulRAG's self-fact mining externalizes facts before comparison. TruthfulRAG (arxiv 2511.10375) uses entropy-based filtering on KG triples — entropy spike = contradiction signal. Bayesian update principle (arxiv 2503.10996): single-agent contradiction triggers a flag, not a rewrite; multi-agent convergence reinforces. Start with inter-context conflicts in Phase 3.
+
+### RF-10: Multi-Agent Memory Consistency Gap
+
+**Source**: Multi-Agent Memory from a Computer Architecture Perspective (arxiv 2603.10062, March 2026, SIGARCH)
+
+Frames multi-agent memory as a hardware architecture problem: I/O tier, cache tier, main memory — directly mapping to T1/T2/T3. Key finding: the most pressing unsolved problem is **write-ordering consistency**. Multiple Nexus agents (researcher, developer, planner) all write to T3 with no ordering protocol. Collaborative Memory (arxiv 2505.18279) adds: each memory fragment should carry immutable provenance (contributing agents, timestamps, resource IDs). Nexus T3 chunks already carry `source_agent` metadata — but there's no conflict resolution when two agents write overlapping knowledge.
+
+### RF-11: JIT Formalization as Competing Design Point
+
+**Source**: General Agentic Memory Via Deep Research (arxiv 2511.18423, November 2025)
+
+Proposes JIT compilation instead of transform-at-boundary: keep raw data in a page-store (Memorizer), compute formalization at query time (Researcher agent). Achieves >90% accuracy on RULER Multi-Hop Tracing vs. <60% for transform-at-write approaches. This is the design tension RDR-057 must resolve: eager formalization (transform at tier boundary) vs. lazy formalization (transform at query time). Nexus's `query()` MCP tool with catalog routing is already partially lazy — it composes search scopes at query time rather than pre-computing them. The right answer may be hybrid: cheap transforms (section_type, dedup) at write time, expensive transforms (claim extraction, contradiction detection) at query time.
+
 ## Proposed Design
 
 ### The Formalization Flywheel
