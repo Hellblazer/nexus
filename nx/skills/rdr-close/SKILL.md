@@ -90,7 +90,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to capture implementation provenance:
 
-1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically — no action needed here.
+1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically. Review with `nx catalog links <rdr-tumbler> --type implements-heuristic` — promote high-confidence ones to `implements` via `catalog_link` for link-boost scoring benefit (heuristic links have zero search boost weight).
 
 2. **RDR→prior-RDR links**: If the RDR's T2 record has a `supersedes` field, create the catalog link:
    ```

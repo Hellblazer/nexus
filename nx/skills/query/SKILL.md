@@ -46,7 +46,7 @@ The hybrid path avoids unnecessary planner dispatch for questions like "compare 
 
 ### Path 1: Single-Tool (most questions)
 
-The enhanced `query` MCP tool handles catalog-aware routing internally. Use this when the question maps to a single scoped retrieval.
+The enhanced `query` MCP tool handles catalog-aware routing internally. Use this when the question maps to a single scoped retrieval. The `query` tool automatically applies link-aware scoring — results from documents with `implements` links rank higher than unlinked documents at similar distance. See [querying-guide.md](../../docs/querying-guide.md#link-aware-scoring) for weight details.
 
 **Detection**: The question has explicit catalog handles (author, content type, subtree, citation/link signals) without analytical signals. Or: no catalog handles but a catalog probe returns a match.
 
