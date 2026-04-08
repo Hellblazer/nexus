@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-15 agents, 28 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
+14 agents, 28 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
 
 ## Installation
 
@@ -36,7 +36,7 @@ Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 
 ## What You Get
 
-- **15 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
+- **14 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
 - **28 skills** — 6 standalone + 15 agent-delegating + 7 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
@@ -95,7 +95,7 @@ nx/
     ├── debugging/           # → debugger agent
     ├── development/         # → developer agent
     ├── knowledge-tidying/   # → knowledge-tidier agent
-    ├── orchestration/       # → orchestrator agent
+    ├── orchestration/       # routing reference (no agent)
     ├── pdf-processing/      # → pdf-chromadb-processor agent
     ├── plan-validation/     # → plan-auditor agent
     ├── research-synthesis/  # → deep-research-synthesizer agent
@@ -124,7 +124,7 @@ Skills that provide guidance directly without delegating to an agent.
 | using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring nx plugin skills |
 
-## Agents (15)
+## Agents (14)
 
 See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, predecessors/successors).
 
@@ -139,7 +139,6 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | debugger | debugging | `/nx:debug` | opus | Hypothesis-driven debugging |
 | developer | development | `/nx:implement` | sonnet | TDD implementation, test-first methodology |
 | knowledge-tidier | knowledge-tidying | `/nx:knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
-| orchestrator | orchestration | *(no command)* | sonnet | Route requests to appropriate agents |
 | pdf-chromadb-processor | pdf-processing | `/nx:pdf-process` | haiku | Index PDFs into nx store for semantic search |
 | plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution |
 | plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context — file paths, patterns, constraints, test commands |

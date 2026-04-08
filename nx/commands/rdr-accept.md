@@ -206,7 +206,7 @@ $ARGUMENTS
 
 > **PROHIBITION — PLANNING CHAIN INTEGRITY**
 > You MUST NOT create beads, write plans, enrich beads, or perform any planning/enrichment work yourself.
-> You are the **orchestrator only**. Running `bd create`, `bd dep add`, `bd update --description`,
+> You are the **caller only**. Running `bd create`, `bd dep add`, `bd update --description`,
 > or writing plan content in the Planning Chain is a HARD STOP — halt and report the error.
 > Only the dispatched subagents (strategic-planner, plan-auditor, plan-enricher) do this work.
 > Doing it yourself bypasses the audit and enrichment chain, producing unvalidated plans.
@@ -247,7 +247,7 @@ All RDR metadata is pre-loaded above. Step 8 requires additional tool calls for 
 
 ### Planning Chain (triggered from Step 8 above)
 
-Execute these steps sequentially when the planning handoff triggers (mandatory multi-phase or user opted in). **Reminder: you are the orchestrator. Do NOT create beads or plans yourself.**
+Execute these steps sequentially when the planning handoff triggers (mandatory multi-phase or user opted in). **Reminder: you are the caller. Do NOT create beads or plans yourself.**
 
 **Step 8a — Write T1 context:**
 Write T1 scratch entry: Use scratch tool: action="put", content="RDR-<ID>: planning context for <title>. RDR file: <RDR-file-path>", tags="rdr-planning-context,rdr-<ID>"
