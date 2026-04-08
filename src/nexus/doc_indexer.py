@@ -249,6 +249,7 @@ def _index_document(
     force: bool = False,
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
+    source_key: str | None = None,
 ) -> int | list[dict]:
     """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
 
@@ -268,10 +269,16 @@ def _index_document(
     instead of a bare int.  Callers (index_pdf, index_markdown) use it to
     build format-specific summary dicts.  Default False preserves the existing
     int return type with zero overhead.
+
+    When *source_key* is provided it overrides ``str(file_path)`` as the
+    ``source_path`` value used in the staleness check and stale-chunk pruning.
+    Callers pass a relative path here so that T3 metadata lookups match the
+    relative ``source_path`` stored in chunk metadata (RDR-060).
     """
     if embed_fn is None and not _has_credentials():
         return 0
 
+    sp = source_key if source_key is not None else str(file_path)
     content_hash = _sha256(file_path)
     if collection_name is None:
         collection_name = f"docs__{corpus}"
@@ -283,7 +290,7 @@ def _index_document(
     # Incremental sync: skip if file is already indexed with the same hash AND model
     existing = _chroma_with_retry(
         col.get,
-        where={"source_path": str(file_path)},
+        where={"source_path": sp},
         include=["metadatas"],
         limit=1,
     )
@@ -324,7 +331,7 @@ def _index_document(
     while True:
         batch = _chroma_with_retry(
             col.get,
-            where={"source_path": str(file_path)},
+            where={"source_path": sp},
             include=[],
             limit=300,
             offset=offset,
@@ -540,14 +547,19 @@ def _markdown_chunks(
     target_model: str,
     now_iso: str,
     corpus: str,
+    *,
+    base_path: Path | None = None,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a Markdown file and return (id, text, metadata) tuples."""
+    from nexus.catalog.catalog import make_relative
+
     raw_text = md_path.read_text(encoding="utf-8")
     frontmatter, body = parse_frontmatter(raw_text)
     frontmatter_len = len(raw_text) - len(body)
 
+    sp = make_relative(md_path, base_path) if base_path else str(md_path)
     base_meta: dict = {
-        "source_path": str(md_path),
+        "source_path": sp,
         "corpus": corpus,
     }
     chunks = SemanticMarkdownChunker().chunk(body, base_meta)
@@ -558,7 +570,7 @@ def _markdown_chunks(
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
-            "source_path": str(md_path),
+            "source_path": sp,
             "source_title": str(frontmatter.get("title", "")),
             "source_author": str(frontmatter.get("author", "")),
             "source_date": str(frontmatter.get("date", "")),
@@ -785,10 +797,12 @@ def index_pdf(
 
 def _catalog_markdown_hook(
     md_path: Path, collection_name: str, content_type: str, corpus: str, chunk_count: int,
+    *, base_path: Path | None = None,
 ) -> None:
     """Register markdown document in catalog after indexing. Silently skipped if absent."""
     try:
         from nexus.catalog import Catalog
+        from nexus.catalog.catalog import make_relative
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
@@ -828,9 +842,10 @@ def _catalog_markdown_hook(
         else:
             owner = cat.register_owner(owner_name, "curator")
 
+        fp = make_relative(md_path, base_path) if base_path else str(md_path)
         cat.register(
             owner=owner, title=title, content_type=content_type,
-            file_path=str(md_path), physical_collection=collection_name,
+            file_path=fp, physical_collection=collection_name,
             chunk_count=chunk_count, year=year,
         )
     except Exception:
@@ -848,6 +863,7 @@ def index_markdown(
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     content_type: str = "prose",
+    base_path: Path | None = None,
 ) -> int | dict:
     """Index *md_path* into a T3 collection.
 
@@ -869,25 +885,35 @@ def index_markdown(
 
     *sections* is the count of chunks with a non-empty ``section_title``
     (i.e. produced under a heading).  Default False preserves existing int behavior.
+
+    When *base_path* is provided, ``source_path`` in T3 chunk metadata is
+    stored relative to *base_path* instead of absolute (RDR-060).
     """
+    from functools import partial
+
+    from nexus.catalog.catalog import make_relative
+
     col_name = collection_name if collection_name is not None else f"docs__{corpus}"
+    chunk_fn = partial(_markdown_chunks, base_path=base_path) if base_path else _markdown_chunks
+    source_key = make_relative(md_path, base_path) if base_path else None
     raw = _index_document(
-        md_path, corpus, _markdown_chunks, t3=t3,
+        md_path, corpus, chunk_fn, t3=t3,
         collection_name=collection_name, embed_fn=embed_fn,
         force=force, return_metadata=return_metadata, on_progress=on_progress,
+        source_key=source_key,
     )
     if not return_metadata:
         assert isinstance(raw, int)
         count = raw
         if count > 0:
-            _catalog_markdown_hook(md_path, col_name, content_type, corpus, count)
+            _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path)
         return count
     if not isinstance(raw, list):
         return {"chunks": 0, "sections": 0}
     metadatas: list[dict] = raw
     sections = sum(1 for m in metadatas if m.get("section_title", ""))
     if metadatas:
-        _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas))
+        _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path)
     return {"chunks": len(metadatas), "sections": sections}
 
 
@@ -936,6 +962,7 @@ def batch_index_markdowns(
     content_type: str = "prose",
     force: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
+    base_path: Path | None = None,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
 
@@ -953,6 +980,9 @@ def batch_index_markdowns(
     *on_file*, if provided, is called after each file as
     ``on_file(path, chunks, elapsed_s)`` where *chunks* is the number of
     chunks upserted (0 for skipped/failed) and *elapsed_s* is wall time.
+
+    When *base_path* is provided, ``source_path`` in T3 chunk metadata and
+    catalog ``file_path`` are stored relative to *base_path* (RDR-060).
     """
     results: dict[str, str] = {}
     for path in paths:
@@ -960,7 +990,7 @@ def batch_index_markdowns(
         t0 = time.monotonic()
         try:
             raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name,
-                                 content_type=content_type, force=force)
+                                 content_type=content_type, force=force, base_path=base_path)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:

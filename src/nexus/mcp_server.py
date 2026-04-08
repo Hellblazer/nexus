@@ -1168,12 +1168,28 @@ def catalog_register(
         return {"error": err}
     try:
         import json as _json
+        from pathlib import Path as _Path
 
+        from nexus.catalog.catalog import make_relative
         from nexus.catalog.tumbler import Tumbler
+
+        # Relativize absolute file_path if it falls under a known repo (RDR-060)
+        fp = file_path
+        if fp and _Path(fp).is_absolute():
+            from nexus.config import default_db_path
+            from nexus.registry import RepoRegistry
+
+            reg_path = default_db_path() / "repos.json"
+            if reg_path.exists():
+                for repo_path_str in RepoRegistry(reg_path).all_info():
+                    rel = make_relative(fp, _Path(repo_path_str))
+                    if rel != fp:
+                        fp = rel
+                        break
 
         tumbler = cat.register(
             Tumbler.parse(owner), title,
-            content_type=content_type, file_path=file_path,
+            content_type=content_type, file_path=fp,
             corpus=corpus, author=author, year=year,
             physical_collection=physical_collection,
             meta=_json.loads(meta) if meta else None,

@@ -391,10 +391,26 @@ def register_cmd(
     content_type: str, file_path: str, corpus: str,
 ) -> None:
     """Register a document in the catalog."""
+    from nexus.catalog.catalog import make_relative
+
     cat = _get_catalog()
+    # Relativize absolute file_path if under a known repo (RDR-060)
+    fp = file_path
+    if fp and Path(fp).is_absolute():
+        from nexus.config import default_db_path
+        from nexus.registry import RepoRegistry
+
+        reg_path = default_db_path() / "repos.json"
+        if reg_path.exists():
+            for repo_path_str in RepoRegistry(reg_path).all_info():
+                rel = make_relative(fp, Path(repo_path_str))
+                if rel != fp:
+                    fp = rel
+                    break
+
     tumbler = cat.register(
         Tumbler.parse(owner), title,
-        content_type=content_type, file_path=file_path,
+        content_type=content_type, file_path=fp,
         corpus=corpus, author=author, year=year,
     )
     click.echo(f"Registered: {tumbler}")
@@ -891,16 +907,35 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
                     break
                 offset += 200
 
+            # Derive repo root from registry for relativization (RDR-060)
+            repo_root: Path | None = None
+            try:
+                from nexus.catalog.catalog import make_relative
+                from nexus.config import default_db_path
+                from nexus.registry import RepoRegistry
+
+                reg_path = default_db_path() / "repos.json"
+                if reg_path.exists():
+                    for repo_path_str in RepoRegistry(reg_path).all_info():
+                        import hashlib
+                        h = hashlib.sha256(repo_path_str.encode()).hexdigest()[:8]
+                        if col_name.endswith(h):
+                            repo_root = Path(repo_path_str)
+                            break
+            except Exception:
+                pass  # non-fatal — store as-is
+
             for path, title in seen_paths.items():
                 if dry_run:
                     click.echo(f"  [dry-run] {title} → {col_name}")
                     count += 1
                     continue
-                existing = [e for e in cat.by_owner(curator) if e.file_path == path]
+                fp = make_relative(path, repo_root) if repo_root else path
+                existing = [e for e in cat.by_owner(curator) if e.file_path in (path, fp)]
                 if not existing:
                     cat.register(
                         owner=curator, title=title, content_type="rdr",
-                        file_path=path, physical_collection=col_name,
+                        file_path=fp, physical_collection=col_name,
                     )
                     count += 1
         except Exception as exc:
