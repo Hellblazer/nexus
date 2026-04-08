@@ -1,6 +1,6 @@
 #!/bin/bash
 # Auto-approve nexus MCP tools — explicit full tool names, no wildcards.
-set -euo pipefail
+# No set -e — a failed parse must not kill the hook (user just sees the prompt).
 
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('tool_name',''))" 2>/dev/null || echo "")

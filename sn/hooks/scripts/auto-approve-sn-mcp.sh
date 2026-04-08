@@ -1,6 +1,6 @@
 #!/bin/bash
 # Auto-approve sn plugin MCP tools (Serena + Context7) — explicit full tool names.
-set -euo pipefail
+# No set -e — a failed parse must not kill the hook (user just sees the prompt).
 
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('tool_name',''))" 2>/dev/null || echo "")
