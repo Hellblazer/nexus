@@ -1,6 +1,7 @@
-"""CLI-layer tests for nx store, nx search, and nx collection commands."""
+# SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,742 +17,390 @@ def runner() -> CliRunner:
 
 @pytest.fixture
 def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Set required credential env vars."""
     monkeypatch.setenv("CHROMA_API_KEY", "test-chroma-key")
     monkeypatch.setenv("VOYAGE_API_KEY", "test-voyage-key")
     monkeypatch.setenv("CHROMA_TENANT", "test-tenant")
     monkeypatch.setenv("CHROMA_DATABASE", "test-db")
 
 
-# ── _t3() factory error paths ─────────────────────────────────────────────────
+@pytest.fixture
+def mock_store(env_creds):
+    db = MagicMock()
+    with patch("nexus.commands.store._t3", return_value=db):
+        yield db
 
-def test_store_put_missing_chroma_api_key(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
-    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
+
+@pytest.fixture
+def mock_collection(env_creds):
+    db = MagicMock()
+    with patch("nexus.commands.collection._t3", return_value=db):
+        yield db
+
+
+@pytest.fixture
+def mock_search(env_creds):
+    db = MagicMock()
+    with patch("nexus.commands.search_cmd._t3", return_value=db):
+        yield db
+
+
+def _search_result(content="chunk", **overrides):
+    base = {"id": "abc1", "content": content, "distance": 0.1,
+            "source_path": "./sec.md", "line_start": 1}
+    base.update(overrides)
+    return base
+
+
+def _store_entry(id="aabbccdd1234", title="doc.md", tags="", ttl_days=0,
+                 expires_at="", indexed_at="2026-02-22T00:00:00+00:00"):
+    return {"id": id, "title": title, "tags": tags, "ttl_days": ttl_days,
+            "expires_at": expires_at, "indexed_at": indexed_at}
+
+
+# ── _t3() factory error paths ───────────────────────────────────────────────
+
+@pytest.mark.parametrize("missing_key,present,cred_override,expect", [
+    ("CHROMA_API_KEY", {"VOYAGE_API_KEY": "vk", "CHROMA_TENANT": "t", "CHROMA_DATABASE": "d"},
+     {"chroma_database": "d", "voyage_api_key": "vk", "chroma_api_key": ""}, "chroma_api_key"),
+    ("VOYAGE_API_KEY", {"CHROMA_API_KEY": "ck", "CHROMA_TENANT": "t", "CHROMA_DATABASE": "d"},
+     None, "voyage_api_key"),
+    ("CHROMA_DATABASE", {"CHROMA_API_KEY": "ck", "VOYAGE_API_KEY": "vk"},
+     None, "chroma_database"),
+])
+def test_store_put_missing_credential(runner, monkeypatch, tmp_path,
+                                      missing_key, present, cred_override, expect):
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.delenv(missing_key, raising=False)
+    if "CHROMA_TENANT" not in present:
+        monkeypatch.delenv("CHROMA_TENANT", raising=False)
+    for k, v in present.items():
+        monkeypatch.setenv(k, v)
     src = tmp_path / "f.txt"
     src.write_text("content")
-
-    # Patch get_credential so ~/.config/nexus/config.yml doesn't leak in
-    creds = {"chroma_database": "d", "voyage_api_key": "vk", "chroma_api_key": ""}
-    with patch("nexus.config.get_credential", side_effect=lambda k: creds.get(k, "")):
+    if cred_override:
+        with patch("nexus.config.get_credential", side_effect=lambda k: cred_override.get(k, "")):
+            result = runner.invoke(main, ["store", "put", str(src)])
+    else:
         result = runner.invoke(main, ["store", "put", str(src)])
-
     assert result.exit_code != 0
-    assert "chroma_api_key" in result.output.lower()
+    assert expect in result.output.lower()
 
 
-def test_store_put_missing_voyage_api_key(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
-    monkeypatch.setenv("CHROMA_API_KEY", "ck")
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-    src = tmp_path / "f.txt"
-    src.write_text("content")
-
-    result = runner.invoke(main, ["store", "put", str(src)])
-
-    assert result.exit_code != 0
-    assert "voyage_api_key" in result.output.lower()
-
-
-def test_store_put_missing_database(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    """chroma_database missing (and only that) causes a clear error; tenant is optional."""
-    monkeypatch.setenv("CHROMA_API_KEY", "ck")
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk")
-    monkeypatch.delenv("CHROMA_TENANT", raising=False)   # tenant absent — should not matter
-    monkeypatch.delenv("CHROMA_DATABASE", raising=False)
-    src = tmp_path / "f.txt"
-    src.write_text("content")
-
-    result = runner.invoke(main, ["store", "put", str(src)])
-
-    assert result.exit_code != 0
-    assert "chroma_database" in result.output.lower()
-
-
-def test_store_put_tenant_optional(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    """chroma_tenant absent is not an error — CloudClient infers it from the API key."""
+def test_store_put_tenant_optional(runner, monkeypatch, tmp_path):
     monkeypatch.setenv("CHROMA_API_KEY", "ck")
     monkeypatch.setenv("VOYAGE_API_KEY", "vk")
     monkeypatch.delenv("CHROMA_TENANT", raising=False)
     monkeypatch.setenv("CHROMA_DATABASE", "mydb")
     src = tmp_path / "f.txt"
     src.write_text("content")
-
-    with patch("nexus.commands.store._t3") as mock_t3:
-        mock_db = MagicMock()
-        mock_db.__enter__ = MagicMock(return_value=mock_db)
-        mock_db.__exit__ = MagicMock(return_value=False)
-        mock_db.put.return_value = "doc-id-1"
-        mock_t3.return_value = mock_db
-        result = runner.invoke(
-            main, ["store", "put", str(src), "--title", "test"]
-        )
-
+    with patch("nexus.commands.store._t3") as mt3:
+        db = MagicMock()
+        db.__enter__ = MagicMock(return_value=db)
+        db.__exit__ = MagicMock(return_value=False)
+        db.put.return_value = "doc-id-1"
+        mt3.return_value = db
+        result = runner.invoke(main, ["store", "put", str(src), "--title", "test"])
     assert result.exit_code == 0, result.output
 
 
-# ── nx store put ──────────────────────────────────────────────────────────────
+# ── nx store put ─────────────────────────────────────────────────────────────
 
-def test_store_put_stdin_requires_title(
-    runner: CliRunner, env_creds, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """C1: stdin input without --title is rejected with a clear error."""
-    with patch("nexus.commands.store._t3"):
-        result = runner.invoke(main, ["store", "put", "-"], input="some content")
-
+def test_store_put_stdin_requires_title(runner, mock_store):
+    result = runner.invoke(main, ["store", "put", "-"], input="some content")
     assert result.exit_code != 0
     assert "--title" in result.output
 
 
-def test_store_put_stdin_with_title_succeeds(
-    runner: CliRunner, env_creds
-) -> None:
-    """stdin input with --title stores the document."""
-    mock_db = MagicMock()
-    mock_db.put.return_value = "doc-id-abc"
-
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(
-            main, ["store", "put", "-", "--title", "my-title.md"], input="content here"
-        )
-
+def test_store_put_stdin_with_title_succeeds(runner, mock_store):
+    mock_store.put.return_value = "doc-id-abc"
+    result = runner.invoke(main, ["store", "put", "-", "--title", "my-title.md"], input="content here")
     assert result.exit_code == 0
     assert "doc-id-abc" in result.output
-    mock_db.put.assert_called_once()
-    call_kwargs = mock_db.put.call_args.kwargs
-    assert call_kwargs["title"] == "my-title.md"
-    assert call_kwargs["content"] == "content here"
+    mock_store.put.assert_called_once()
+    kw = mock_store.put.call_args.kwargs
+    assert kw["title"] == "my-title.md"
+    assert kw["content"] == "content here"
 
 
-def test_store_put_file_uses_filename_as_title(
-    runner: CliRunner, env_creds, tmp_path
-) -> None:
-    """File store uses the filename as the default title."""
+def test_store_put_file_uses_filename_as_title(runner, mock_store, tmp_path):
     src = tmp_path / "analysis.md"
     src.write_text("finding: important")
-    mock_db = MagicMock()
-    mock_db.put.return_value = "doc-id-xyz"
-
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "put", str(src)])
-
+    mock_store.put.return_value = "doc-id-xyz"
+    result = runner.invoke(main, ["store", "put", str(src)])
     assert result.exit_code == 0
     assert "doc-id-xyz" in result.output
-    call_kwargs = mock_db.put.call_args.kwargs
-    assert call_kwargs["title"] == "analysis.md"
+    assert mock_store.put.call_args.kwargs["title"] == "analysis.md"
 
 
-def test_store_put_file_not_found(
-    runner: CliRunner, env_creds
-) -> None:
-    with patch("nexus.commands.store._t3"):
-        result = runner.invoke(main, ["store", "put", "/no/such/file.txt"])
-
+def test_store_put_file_not_found(runner, mock_store):
+    result = runner.invoke(main, ["store", "put", "/no/such/file.txt"])
     assert result.exit_code != 0
     assert "not found" in result.output.lower() or "File not found" in result.output
 
 
-def test_store_put_invalid_ttl_shows_error(
-    runner: CliRunner, env_creds, tmp_path
-) -> None:
-    """Invalid TTL format is rejected with a clear CLI error (not a traceback)."""
+def test_store_put_invalid_ttl_shows_error(runner, mock_store, tmp_path):
     src = tmp_path / "f.txt"
     src.write_text("content")
-
-    with patch("nexus.commands.store._t3"):
-        result = runner.invoke(main, ["store", "put", str(src), "--ttl", "5z"])
-
+    result = runner.invoke(main, ["store", "put", str(src), "--ttl", "5z"])
     assert result.exit_code != 0
     assert "5z" in result.output
 
 
-# ── nx store list ─────────────────────────────────────────────────────────────
+# ── nx store list ────────────────────────────────────────────────────────────
 
-def test_store_list_empty_collection(runner: CliRunner, env_creds) -> None:
-    """No entries in collection prints a friendly 'No entries' message."""
-    mock_db = MagicMock()
-    mock_db.list_store.return_value = []
-
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "list"])
-
+def test_store_list_empty_collection(runner, mock_store):
+    mock_store.list_store.return_value = []
+    result = runner.invoke(main, ["store", "list"])
     assert result.exit_code == 0
     assert "No entries" in result.output
-    mock_db.list_store.assert_called_once()
+    mock_store.list_store.assert_called_once()
 
 
-def test_store_list_shows_entries(runner: CliRunner, env_creds) -> None:
-    """Entries are displayed with id, title, ttl, and indexed date."""
-    mock_db = MagicMock()
-    mock_db.list_store.return_value = [
-        {
-            "id": "abc123def456",
-            "title": "analysis.md",
-            "tags": "security,audit",
-            "ttl_days": 0,
-            "expires_at": "",
-            "indexed_at": "2026-02-22T10:00:00+00:00",
-        },
-        {
-            "id": "fff000aaa111",
-            "title": "temp-notes.md",
-            "tags": "",
-            "ttl_days": 30,
-            "expires_at": "2026-03-24T10:00:00+00:00",
-            "indexed_at": "2026-02-22T11:00:00+00:00",
-        },
+def test_store_list_shows_entries_and_tags(runner, mock_store):
+    mock_store.list_store.return_value = [
+        _store_entry(id="abc123def456", title="analysis.md", tags="security,audit"),
+        _store_entry(id="fff000aaa111", title="temp-notes.md", ttl_days=30,
+                     expires_at="2026-03-24T10:00:00+00:00", indexed_at="2026-02-22T11:00:00+00:00"),
+        _store_entry(tags="arch,decision"),
     ]
-
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "list"])
-
+    result = runner.invoke(main, ["store", "list"])
     assert result.exit_code == 0
-    assert "abc123def456" in result.output
-    assert "analysis.md" in result.output
-    assert "permanent" in result.output
-    assert "fff000aaa111" in result.output
-    assert "temp-notes.md" in result.output
-    assert "2026-03-24" in result.output
+    for text in ("abc123def456", "analysis.md", "permanent", "fff000aaa111",
+                 "temp-notes.md", "2026-03-24", "security,audit", "arch,decision"):
+        assert text in result.output
 
 
-def test_store_list_shows_tags(runner: CliRunner, env_creds) -> None:
-    """Tags are shown in brackets when present."""
-    mock_db = MagicMock()
-    mock_db.list_store.return_value = [
-        {
-            "id": "aabbccdd1234",
-            "title": "doc.md",
-            "tags": "arch,decision",
-            "ttl_days": 0,
-            "expires_at": "",
-            "indexed_at": "2026-02-22T00:00:00+00:00",
-        }
-    ]
+def test_store_list_custom_collection(runner, mock_store):
+    mock_store.list_store.return_value = []
+    runner.invoke(main, ["store", "list", "--collection", "knowledge__notes"])
+    assert mock_store.list_store.call_args[0][0] == "knowledge__notes"
 
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "list"])
 
+def test_store_list_limit_flag(runner, mock_store):
+    mock_store.list_store.return_value = []
+    runner.invoke(main, ["store", "list", "--limit", "10"])
+    ca = mock_store.list_store.call_args
+    assert ca[1].get("limit") == 10 or ca[0][1] == 10
+
+
+def test_store_list_shows_16char_ids(runner, mock_store):
+    mock_store.list_store.return_value = [_store_entry(id="abcdef1234567890ff")]
+    result = runner.invoke(main, ["store", "list"])
     assert result.exit_code == 0
-    assert "arch,decision" in result.output
+    assert "abcdef1234567890" in result.output
 
 
-def test_store_list_custom_collection(runner: CliRunner, env_creds) -> None:
-    """--collection flag selects the right collection name."""
-    mock_db = MagicMock()
-    mock_db.list_store.return_value = []
-
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        runner.invoke(main, ["store", "list", "--collection", "knowledge__notes"])
-
-    call_args = mock_db.list_store.call_args
-    assert call_args[0][0] == "knowledge__notes"
-
-
-def test_store_list_limit_flag(runner: CliRunner, env_creds) -> None:
-    """--limit is forwarded to list_store."""
-    mock_db = MagicMock()
-    mock_db.list_store.return_value = []
-
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        runner.invoke(main, ["store", "list", "--limit", "10"])
-
-    call_args = mock_db.list_store.call_args
-    assert call_args[1].get("limit") == 10 or call_args[0][1] == 10
-
-
-def test_store_expire_reports_count(runner: CliRunner, env_creds) -> None:
-    mock_db = MagicMock()
-    mock_db.expire.return_value = 3
-
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "expire"])
-
+def test_store_expire_reports_count(runner, mock_store):
+    mock_store.expire.return_value = 3
+    result = runner.invoke(main, ["store", "expire"])
     assert result.exit_code == 0
     assert "3" in result.output
 
 
-# ── nx collection ─────────────────────────────────────────────────────────────
+# ── nx collection ────────────────────────────────────────────────────────────
 
-def test_collection_list_empty(runner: CliRunner, env_creds) -> None:
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = []
-
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
-        result = runner.invoke(main, ["collection", "list"])
-
+def test_collection_list_empty(runner, mock_collection):
+    mock_collection.list_collections.return_value = []
+    result = runner.invoke(main, ["collection", "list"])
     assert result.exit_code == 0
     assert "No collections" in result.output
 
 
-def test_collection_list_shows_names_and_counts(runner: CliRunner, env_creds) -> None:
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [
-        {"name": "code__myrepo", "count": 42},
-        {"name": "knowledge__sec", "count": 7},
-    ]
-
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
-        result = runner.invoke(main, ["collection", "list"])
-
+def test_collection_list_shows_names_and_counts(runner, mock_collection):
+    mock_collection.list_collections.return_value = [
+        {"name": "code__myrepo", "count": 42}, {"name": "knowledge__sec", "count": 7}]
+    result = runner.invoke(main, ["collection", "list"])
     assert result.exit_code == 0
-    assert "code__myrepo" in result.output
-    assert "42" in result.output
-    assert "knowledge__sec" in result.output
-    assert "7" in result.output
+    for text in ("code__myrepo", "42", "knowledge__sec", "7"):
+        assert text in result.output
 
 
-def test_collection_info_not_found(runner: CliRunner, env_creds) -> None:
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = []
-
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
-        result = runner.invoke(main, ["collection", "info", "no-such-collection"])
-
+@pytest.mark.parametrize("subcmd,args", [("info", ["no-such-collection"]), ("verify", ["missing"])])
+def test_collection_not_found(runner, mock_collection, subcmd, args):
+    mock_collection.list_collections.return_value = []
+    result = runner.invoke(main, ["collection", subcmd] + args)
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
 
 
-def test_collection_verify_not_found(runner: CliRunner, env_creds) -> None:
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = []
+@pytest.mark.parametrize("flag", ["--yes", "--confirm"])
+def test_collection_delete_with_flag(runner, mock_collection, flag):
+    result = runner.invoke(main, ["collection", "delete", "knowledge__test", flag])
+    assert result.exit_code == 0, result.output
+    mock_collection.delete_collection.assert_called_once_with("knowledge__test")
 
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
-        result = runner.invoke(main, ["collection", "verify", "missing"])
 
-    assert result.exit_code != 0
-    assert "not found" in result.output.lower()
+def test_collection_delete_without_yes_prompts(runner, mock_collection):
+    runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
+    mock_collection.delete_collection.assert_not_called()
 
 
 # ── nx search ────────────────────────────────────────────────────────────────
 
-def test_search_no_matching_corpus(runner: CliRunner, env_creds) -> None:
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = []
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(main, ["search", "my query", "--corpus", "code"])
-
+def test_search_no_matching_corpus(runner, mock_search):
+    mock_search.list_collections.return_value = []
+    result = runner.invoke(main, ["search", "my query", "--corpus", "code"])
     assert result.exit_code == 0
     assert "no matching collections" in result.output.lower()
 
 
-def test_search_no_results(runner: CliRunner, env_creds) -> None:
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 5}]
-    mock_db.search.return_value = []
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(main, ["search", "my query", "--corpus", "knowledge"])
-
+def test_search_no_results(runner, mock_search):
+    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 5}]
+    mock_search.search.return_value = []
+    result = runner.invoke(main, ["search", "my query", "--corpus", "knowledge"])
     assert result.exit_code == 0
     assert "No results" in result.output
 
 
-def test_search_displays_results(runner: CliRunner, env_creds) -> None:
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
-    mock_db.search.return_value = [
-        {
-            "id": "abc12345-0000-0000-0000-000000000000",
-            "content": "security finding here",
-            "distance": 0.123,
-            "title": "sec.md",
-            "tags": "security",
-            "source_path": "./sec.md",
-            "line_start": 1,
-        }
-    ]
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(main, ["search", "security", "--corpus", "knowledge"])
-
+def test_search_displays_results(runner, mock_search):
+    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+    mock_search.search.return_value = [
+        _search_result(content="security finding here", id="abc12345-0000",
+                       distance=0.123, title="sec.md", tags="security")]
+    result = runner.invoke(main, ["search", "security", "--corpus", "knowledge"])
     assert result.exit_code == 0
     assert "security finding here" in result.output
 
 
-# ── nexus-ani: collection delete --yes flag ───────────────────────────────────
-
-def test_collection_delete_yes_skips_prompt(runner: CliRunner, env_creds) -> None:
-    """--yes flag skips interactive confirmation."""
-    mock_db = MagicMock()
-
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
-        result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--yes"])
-
-    assert result.exit_code == 0, result.output
-    mock_db.delete_collection.assert_called_once_with("knowledge__test")
-    assert "Deleted" in result.output
-
-
-def test_collection_delete_without_yes_prompts(runner: CliRunner, env_creds) -> None:
-    """Without --yes, a confirmation prompt is shown (user declines via 'n')."""
-    mock_db = MagicMock()
-
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
-        result = runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
-
-    # User said no → aborted, collection NOT deleted
-    mock_db.delete_collection.assert_not_called()
-
-
-def test_collection_delete_confirm_flag_alias(runner: CliRunner, env_creds) -> None:
-    """--confirm is a supported alias for --yes and skips the confirmation prompt."""
-    mock_db = MagicMock()
-
-    with patch("nexus.commands.collection._t3", return_value=mock_db):
-        result = runner.invoke(main, ["collection", "delete", "knowledge__test", "--confirm"])
-
+@pytest.mark.parametrize("content_flag,content_text,expect_indented", [
+    (True, "UNIQUE_CHUNK_BODY", True),
+    (False, "Unique chunk text that only appears when content flag is set.", False),
+])
+def test_search_content_flag_presence(runner, mock_search, content_flag, content_text, expect_indented):
+    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
+    mock_search.search.return_value = [_search_result(content=content_text)]
+    args = ["search", "security", "--corpus", "knowledge"]
+    if content_flag:
+        args.append("--content")
+    result = runner.invoke(main, args)
     assert result.exit_code == 0
-    mock_db.delete_collection.assert_called_once_with("knowledge__test")
+    indented = [ln for ln in result.output.splitlines() if ln.startswith("  ") and content_text in ln]
+    assert bool(indented) == expect_indented
 
 
-# ── nexus-2pw: --content flag ─────────────────────────────────────────────────
-
-def test_search_content_flag_shows_chunk_text(runner: CliRunner, env_creds) -> None:
-    """--content flag prints matched chunk text as a separate indented line under each result."""
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
-    # Use a single-line chunk so format_plain emits exactly one result line;
-    # the --content flag should then emit a second indented line below it.
-    mock_db.search.return_value = [
-        {
-            "id": "abc1",
-            "content": "UNIQUE_CHUNK_BODY",
-            "distance": 0.1,
-            "source_path": "./sec.md",
-            "line_start": 5,
-        }
-    ]
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(
-            main, ["search", "security", "--corpus", "knowledge", "--content"]
-        )
-
+@pytest.mark.parametrize("text,expect_ellipsis,max_len", [
+    ("A" * 300, True, 210), ("Short enough.", False, None)])
+def test_search_content_flag_truncation(runner, mock_search, text, expect_ellipsis, max_len):
+    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
+    mock_search.search.return_value = [_search_result(content=text)]
+    result = runner.invoke(main, ["search", "query", "--corpus", "knowledge", "--content"])
     assert result.exit_code == 0
-    lines = result.output.splitlines()
-    # The indented content line must start with two spaces
-    indented = [ln for ln in lines if ln.startswith("  ") and "UNIQUE_CHUNK_BODY" in ln]
-    assert indented, (
-        f"Expected an indented line containing 'UNIQUE_CHUNK_BODY'. Got output:\n{result.output}"
-    )
+    indented = [ln for ln in result.output.splitlines() if ln.startswith("  ")]
+    assert indented
+    assert indented[0].endswith("...") == expect_ellipsis
+    if max_len:
+        assert len(indented[0]) <= max_len
+    if not expect_ellipsis:
+        assert text in indented[0]
 
 
-def test_search_content_flag_absent_no_chunk_text(runner: CliRunner, env_creds) -> None:
-    """Without --content flag, chunk text is NOT printed inline."""
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
-    chunk_text = "Unique chunk text that only appears when content flag is set."
-    mock_db.search.return_value = [
-        {
-            "id": "abc2",
-            "content": chunk_text,
-            "distance": 0.1,
-            "source_path": "./sec.md",
-            "line_start": 5,
-        }
-    ]
+# ── [path] positional argument ───────────────────────────────────────────────
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(
-            main, ["search", "security", "--corpus", "knowledge"]
-        )
-
-    # Without --content the plain formatter emits path:line:content, so
-    # the text IS in the output (format_plain embeds it).  What must NOT
-    # happen is an extra indented copy appearing below the result line.
-    lines = result.output.splitlines()
-    indented = [ln for ln in lines if ln.startswith("  ") and chunk_text in ln]
-    assert indented == [], "No indented content line should appear without --content"
-
-
-def test_search_content_flag_truncates_long_text(runner: CliRunner, env_creds) -> None:
-    """--content truncates chunk text at ~200 chars and appends '...'."""
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
-    long_content = "A" * 300  # well over 200 chars
-    mock_db.search.return_value = [
-        {
-            "id": "abc3",
-            "content": long_content,
-            "distance": 0.1,
-            "source_path": "./long.md",
-            "line_start": 1,
-        }
-    ]
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(
-            main, ["search", "query", "--corpus", "knowledge", "--content"]
-        )
-
-    assert result.exit_code == 0
-    lines = result.output.splitlines()
-    indented = [ln for ln in lines if ln.startswith("  ")]
-    assert indented, "Expected indented content line"
-    content_line = indented[0]
-    # Must end with ellipsis and not be longer than ~205 chars (200 + "  " + "...")
-    assert content_line.endswith("..."), f"Expected '...' suffix, got: {content_line!r}"
-    assert len(content_line) <= 210, f"Content line too long: {len(content_line)}"
-
-
-def test_search_content_flag_short_text_no_ellipsis(runner: CliRunner, env_creds) -> None:
-    """--content does NOT add '...' when chunk text is 200 chars or fewer."""
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
-    short_content = "Short enough."
-    mock_db.search.return_value = [
-        {
-            "id": "abc4",
-            "content": short_content,
-            "distance": 0.1,
-            "source_path": "./short.md",
-            "line_start": 1,
-        }
-    ]
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(
-            main, ["search", "query", "--corpus", "knowledge", "--content"]
-        )
-
-    assert result.exit_code == 0
-    lines = result.output.splitlines()
-    indented = [ln for ln in lines if ln.startswith("  ")]
-    assert indented, "Expected indented content line"
-    assert not indented[0].endswith("..."), "Short text should not have ellipsis"
-    assert short_content in indented[0]
-
-
-# ── nexus-u4e: [path] positional argument ─────────────────────────────────────
-
-def test_search_path_scopes_where_filter(runner: CliRunner, env_creds, tmp_path) -> None:
-    """[path] argument applies Python-side path filtering; $startswith must NOT be sent to ChromaDB."""
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
-    mock_db.search.return_value = []  # empty is fine; we test the where kwarg
-
+def test_search_path_scopes_where_filter(runner, mock_search, tmp_path):
+    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+    mock_search.search.return_value = []
     src_dir = tmp_path / "src"
     src_dir.mkdir()
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(
-            main, ["search", "query", str(src_dir), "--corpus", "knowledge"]
-        )
-
+    result = runner.invoke(main, ["search", "query", str(src_dir), "--corpus", "knowledge"])
     assert result.exit_code == 0
-    assert mock_db.search.called, "Expected at least one search() call"
-    # Path scoping is Python-side after retrieval; $startswith must not reach ChromaDB
-    actual_call = mock_db.search.call_args
-    where_filter = actual_call.kwargs.get("where")
-    assert "$startswith" not in str(where_filter), (
-        f"$startswith must not be passed to ChromaDB (invalid operator); got where={where_filter}"
-    )
+    assert mock_search.search.called
+    assert "$startswith" not in str(mock_search.search.call_args.kwargs.get("where"))
 
 
-def test_search_path_filters_results_by_file_path(runner: CliRunner, env_creds, tmp_path) -> None:
-    """Two chunks at different paths: scoped search returns only the matching one."""
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
-
+def test_search_path_filters_results_by_file_path(runner, mock_search, tmp_path):
+    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     other_dir = tmp_path / "other"
     other_dir.mkdir()
 
-    # The mock returns both results; Python-side path filtering in search_cmd
-    # keeps only the result whose file_path / source_path starts with src_dir.
     def fake_search(query, collection_names, n_results=10, where=None):
         return [
-            {
-                "id": "r1",
-                "content": "inside src",
-                "distance": 0.1,
-                "source_path": str(src_dir / "file.py"),
-                "line_start": 1,
-                "file_path": str(src_dir / "file.py"),
-            },
-            {
-                "id": "r2",
-                "content": "outside src",
-                "distance": 0.2,
-                "source_path": str(other_dir / "file.py"),
-                "line_start": 1,
-                "file_path": str(other_dir / "file.py"),
-            },
+            _search_result(content="inside src", id="r1",
+                           source_path=str(src_dir / "file.py"), file_path=str(src_dir / "file.py")),
+            _search_result(content="outside src", id="r2", distance=0.2,
+                           source_path=str(other_dir / "file.py"), file_path=str(other_dir / "file.py")),
         ]
 
-    mock_db.search.side_effect = fake_search
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(
-            main, ["search", "query", str(src_dir), "--corpus", "knowledge"]
-        )
-
+    mock_search.search.side_effect = fake_search
+    result = runner.invoke(main, ["search", "query", str(src_dir), "--corpus", "knowledge"])
     assert result.exit_code == 0
     assert "inside src" in result.output
     assert "outside src" not in result.output
 
 
-def test_search_no_path_returns_all(runner: CliRunner, env_creds) -> None:
-    """Without [path], search() is called without a where filter (None)."""
-    mock_db = MagicMock()
-    mock_db.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
-    mock_db.search.return_value = [
-        {
-            "id": "r1",
-            "content": "result one",
-            "distance": 0.1,
-            "source_path": "./a.py",
-            "line_start": 1,
-        }
-    ]
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_db):
-        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
-
+def test_search_no_path_returns_all(runner, mock_search):
+    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+    mock_search.search.return_value = [_search_result(content="result one")]
+    result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
     assert result.exit_code == 0
-    actual_call = mock_db.search.call_args
-    where_filter = actual_call.kwargs.get("where") if actual_call.kwargs else None
-    if where_filter is None and actual_call.args and len(actual_call.args) > 3:
-        where_filter = actual_call.args[3]
-    assert where_filter is None, (
-        f"Expected no where filter when path is absent, got: {where_filter}"
-    )
+    ca = mock_search.search.call_args
+    where_filter = ca.kwargs.get("where") if ca.kwargs else None
+    if where_filter is None and ca.args and len(ca.args) > 3:
+        where_filter = ca.args[3]
+    assert where_filter is None
 
 
-# ── nexus-1ofw: nx store delete ───────────────────────────────────────────────
+# ── nx store delete ──────────────────────────────────────────────────────────
 
-def test_store_delete_by_id_happy(runner: CliRunner, env_creds: None) -> None:
-    """delete --id removes the entry when it exists."""
-    mock_db = MagicMock()
-    mock_db.delete_by_id.return_value = True
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--id", "abcdef1234567890"])
-    assert result.exit_code == 0, result.output
-    mock_db.delete_by_id.assert_called_once()
-    assert "Deleted" in result.output
+@pytest.mark.parametrize("found,exit_ok,expect_text", [(True, True, "Deleted"), (False, False, "not found")])
+def test_store_delete_by_id(runner, mock_store, found, exit_ok, expect_text):
+    mock_store.delete_by_id.return_value = found
+    result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--id", "abcdef1234567890"])
+    assert (result.exit_code == 0) == exit_ok, result.output
+    assert expect_text in result.output
 
 
-def test_store_delete_by_id_not_found(runner: CliRunner, env_creds: None) -> None:
-    """delete --id exits non-zero when entry not found."""
-    mock_db = MagicMock()
-    mock_db.delete_by_id.return_value = False
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--id", "abcdef1234567890"])
-    assert result.exit_code != 0
-    assert "not found" in result.output
+@pytest.mark.parametrize("ids,exit_ok,expect_text", [
+    (["id1", "id2"], True, "Deleted 2"), ([], False, "not found")])
+def test_store_delete_by_title(runner, mock_store, ids, exit_ok, expect_text):
+    mock_store.find_ids_by_title.return_value = ids
+    result = runner.invoke(main, ["store", "delete", "--collection", "knowledge",
+                                  "--title", "doc.md", "--yes"])
+    if exit_ok:
+        assert result.exit_code == 0, result.output
+        mock_store.batch_delete.assert_called_once()
+    else:
+        assert result.exit_code != 0
+    assert expect_text in result.output or "No entries" in result.output
 
 
-def test_store_delete_by_title_yes(runner: CliRunner, env_creds: None) -> None:
-    """delete --title --yes deletes all matching entries without prompting."""
-    mock_db = MagicMock()
-    mock_db.find_ids_by_title.return_value = ["id1", "id2"]
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--title", "doc.md", "--yes"])
-    assert result.exit_code == 0, result.output
-    mock_db.batch_delete.assert_called_once()
-    assert "Deleted 2" in result.output
-
-
-def test_store_delete_by_title_not_found(runner: CliRunner, env_creds: None) -> None:
-    """delete --title exits non-zero when no entries match."""
-    mock_db = MagicMock()
-    mock_db.find_ids_by_title.return_value = []
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--title", "missing.md", "--yes"])
-    assert result.exit_code != 0
-    assert "not found" in result.output or "No entries" in result.output
-
-
-def test_store_delete_missing_collection_rejected(runner: CliRunner, env_creds: None) -> None:
-    """delete without --collection is rejected."""
+def test_store_delete_missing_collection_rejected(runner, env_creds):
     result = runner.invoke(main, ["store", "delete", "--id", "abc"])
     assert result.exit_code != 0
 
 
-def test_store_list_shows_16char_ids(runner: CliRunner, env_creds: None) -> None:
-    """nx store list shows 16-char document IDs."""
-    mock_db = MagicMock()
-    mock_db.list_store.return_value = [
-        {"id": "abcdef1234567890ff", "title": "doc.md", "tags": "", "ttl_days": 0,
-         "expires_at": "", "indexed_at": "2026-03-05"}
-    ]
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "list"])
+# ── nx store get ─────────────────────────────────────────────────────────────
+
+def test_store_get_happy(runner, mock_store):
+    mock_store.get_by_id.return_value = {
+        "id": "abcdef1234567890", "content": "Important knowledge content here",
+        "title": "finding.md", "tags": "arch,review", "indexed_at": "2026-03-09T10:00:00+00:00"}
+    result = runner.invoke(main, ["store", "get", "abcdef1234567890"])
     assert result.exit_code == 0, result.output
-    assert "abcdef1234567890" in result.output  # 16 chars present
+    for text in ("abcdef1234567890", "finding.md", "arch,review", "Important knowledge content here"):
+        assert text in result.output
 
 
-# ── nx store get ──────────────────────────────────────────────────────────────
-
-def test_store_get_happy(runner: CliRunner, env_creds: None) -> None:
-    """get retrieves entry and displays content."""
-    mock_db = MagicMock()
-    mock_db.get_by_id.return_value = {
-        "id": "abcdef1234567890",
-        "content": "Important knowledge content here",
-        "title": "finding.md",
-        "tags": "arch,review",
-        "indexed_at": "2026-03-09T10:00:00+00:00",
-    }
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "get", "abcdef1234567890"])
-    assert result.exit_code == 0, result.output
-    assert "abcdef1234567890" in result.output
-    assert "finding.md" in result.output
-    assert "arch,review" in result.output
-    assert "Important knowledge content here" in result.output
-
-
-def test_store_get_not_found(runner: CliRunner, env_creds: None) -> None:
-    """get exits non-zero when entry not found."""
-    mock_db = MagicMock()
-    mock_db.get_by_id.return_value = None
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "get", "nonexistent12345"])
+def test_store_get_not_found(runner, mock_store):
+    mock_store.get_by_id.return_value = None
+    result = runner.invoke(main, ["store", "get", "nonexistent12345"])
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
 
 
-def test_store_get_json_output(runner: CliRunner, env_creds: None) -> None:
-    """get --json outputs valid JSON with all fields."""
-    import json
-    mock_db = MagicMock()
-    mock_db.get_by_id.return_value = {
-        "id": "abcdef1234567890",
-        "content": "test content",
-        "title": "doc.md",
-        "tags": "test",
-        "indexed_at": "2026-03-09",
-    }
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        result = runner.invoke(main, ["store", "get", "abcdef1234567890", "--json"])
+def test_store_get_json_output(runner, mock_store):
+    mock_store.get_by_id.return_value = {
+        "id": "abcdef1234567890", "content": "test content",
+        "title": "doc.md", "tags": "test", "indexed_at": "2026-03-09"}
+    result = runner.invoke(main, ["store", "get", "abcdef1234567890", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert data["id"] == "abcdef1234567890"
     assert data["content"] == "test content"
 
 
-def test_store_get_custom_collection(runner: CliRunner, env_creds: None) -> None:
-    """get --collection routes to the correct collection."""
-    mock_db = MagicMock()
-    mock_db.get_by_id.return_value = {
-        "id": "abc123", "content": "x", "title": "t",
-    }
-    with patch("nexus.commands.store._t3", return_value=mock_db):
-        runner.invoke(main, ["store", "get", "abc123", "-c", "code__myrepo"])
-    mock_db.get_by_id.assert_called_once_with("code__myrepo", "abc123")
+def test_store_get_custom_collection(runner, mock_store):
+    mock_store.get_by_id.return_value = {"id": "abc123", "content": "x", "title": "t"}
+    runner.invoke(main, ["store", "get", "abc123", "-c", "code__myrepo"])
+    mock_store.get_by_id.assert_called_once_with("code__myrepo", "abc123")

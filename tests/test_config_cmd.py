@@ -1,6 +1,6 @@
-"""AC: nx config set/get/list/init — credential and config management."""
-import json
+# SPDX-License-Identifier: AGPL-3.0-or-later
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -17,393 +17,251 @@ def runner() -> CliRunner:
 @pytest.fixture
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
-    # Remove any real API keys from env so config-file fallback is tested
     for key in ("CHROMA_API_KEY", "VOYAGE_API_KEY", "MXBAI_API_KEY",
                 "CHROMA_TENANT", "CHROMA_DATABASE"):
         monkeypatch.delenv(key, raising=False)
     return tmp_path
 
 
-# ── nx config set ─────────────────────────────────────────────────────────────
+def _config_path(fake_home: Path) -> Path:
+    return fake_home / ".config" / "nexus" / "config.yml"
 
-def test_config_set_writes_credential(runner: CliRunner, fake_home: Path) -> None:
-    """nx config set chroma_api_key=abc writes to ~/.config/nexus/config.yml."""
-    result = runner.invoke(main, ["config", "set", "chroma_api_key=abc123"])
+
+def _read_config(fake_home: Path) -> dict:
+    return yaml.safe_load(_config_path(fake_home).read_text())
+
+
+def _write_config(fake_home: Path, data: dict) -> None:
+    p = _config_path(fake_home)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(yaml.dump(data))
+
+
+# ── nx config set ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("args,section,key,expected", [
+    (["chroma_api_key=abc123"], "credentials", "chroma_api_key", "abc123"),
+    (["voyage_api_key", "vk-space"], "credentials", "voyage_api_key", "vk-space"),
+    (["pdf.extractor=mineru"], "pdf", "extractor", "mineru"),
+    (["pdf.extractor", "mineru"], "pdf", "extractor", "mineru"),
+])
+def test_config_set_writes(runner, fake_home, args, section, key, expected) -> None:
+    result = runner.invoke(main, ["config", "set", *args])
     assert result.exit_code == 0, result.output
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    assert config_path.exists()
-    data = yaml.safe_load(config_path.read_text())
-    assert data["credentials"]["chroma_api_key"] == "abc123"
+    assert _read_config(fake_home)[section][key] == expected
 
 
-def test_config_set_creates_config_dir(runner: CliRunner, fake_home: Path) -> None:
-    """nx config set creates ~/.config/nexus/ directory if missing."""
-    config_dir = fake_home / ".config" / "nexus"
-    assert not config_dir.exists()
-
+def test_config_set_creates_dir(runner, fake_home) -> None:
+    assert not _config_path(fake_home).parent.exists()
     runner.invoke(main, ["config", "set", "voyage_api_key=vk-test"])
+    assert _config_path(fake_home).parent.exists()
 
-    assert config_dir.exists()
 
-
-def test_config_set_preserves_existing_settings(runner: CliRunner, fake_home: Path) -> None:
-    """nx config set preserves pre-existing config keys."""
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump({"server": {"port": 9999}}))
-
+def test_config_set_preserves_existing(runner, fake_home) -> None:
+    _write_config(fake_home, {"server": {"port": 9999}})
     runner.invoke(main, ["config", "set", "chroma_api_key=x"])
-
-    data = yaml.safe_load(config_path.read_text())
+    data = _read_config(fake_home)
     assert data["server"]["port"] == 9999
     assert data["credentials"]["chroma_api_key"] == "x"
 
 
-def test_config_set_updates_existing_credential(runner: CliRunner, fake_home: Path) -> None:
-    """nx config set overwrites an existing credential value."""
+def test_config_set_updates_existing(runner, fake_home) -> None:
     runner.invoke(main, ["config", "set", "chroma_api_key=first"])
     runner.invoke(main, ["config", "set", "chroma_api_key=second"])
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    data = yaml.safe_load(config_path.read_text())
-    assert data["credentials"]["chroma_api_key"] == "second"
+    assert _read_config(fake_home)["credentials"]["chroma_api_key"] == "second"
 
 
-def test_config_set_accepts_space_separated_key_value(runner: CliRunner, fake_home: Path) -> None:
-    """nx config set KEY VALUE (space-separated) also works."""
-    result = runner.invoke(main, ["config", "set", "voyage_api_key", "vk-space"])
-    assert result.exit_code == 0, result.output
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    data = yaml.safe_load(config_path.read_text())
-    assert data["credentials"]["voyage_api_key"] == "vk-space"
-
-
-# ── nx config set — dotted keys ──────────────────────────────────────────────
-
-
-def test_config_set_dotted_key_writes_nested_yaml(runner: CliRunner, fake_home: Path) -> None:
-    """nx config set pdf.extractor=mineru writes nested YAML."""
-    result = runner.invoke(main, ["config", "set", "pdf.extractor=mineru"])
-    assert result.exit_code == 0, result.output
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    data = yaml.safe_load(config_path.read_text())
-    assert data["pdf"]["extractor"] == "mineru"
-
-
-def test_config_set_dotted_key_preserves_existing(runner: CliRunner, fake_home: Path) -> None:
-    """Dotted key set preserves existing config."""
+def test_config_set_dotted_preserves_existing(runner, fake_home) -> None:
     runner.invoke(main, ["config", "set", "chroma_api_key=abc"])
     runner.invoke(main, ["config", "set", "pdf.extractor=docling"])
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    data = yaml.safe_load(config_path.read_text())
+    data = _read_config(fake_home)
     assert data["credentials"]["chroma_api_key"] == "abc"
     assert data["pdf"]["extractor"] == "docling"
 
 
-def test_config_set_dotted_key_overwrites(runner: CliRunner, fake_home: Path) -> None:
-    """Dotted key set overwrites existing value."""
+def test_config_set_dotted_overwrites(runner, fake_home) -> None:
     runner.invoke(main, ["config", "set", "pdf.extractor=mineru"])
     runner.invoke(main, ["config", "set", "pdf.extractor=auto"])
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    data = yaml.safe_load(config_path.read_text())
-    assert data["pdf"]["extractor"] == "auto"
+    assert _read_config(fake_home)["pdf"]["extractor"] == "auto"
 
 
-def test_config_set_dotted_key_space_separated(runner: CliRunner, fake_home: Path) -> None:
-    """nx config set pdf.extractor mineru (space-separated) works."""
-    result = runner.invoke(main, ["config", "set", "pdf.extractor", "mineru"])
-    assert result.exit_code == 0, result.output
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    data = yaml.safe_load(config_path.read_text())
-    assert data["pdf"]["extractor"] == "mineru"
+# ── get_pdf_extractor ───────────────────────────────────────────────────────
 
 
-# ── get_pdf_extractor ────────────────────────────────────────────────────────
-
-
-def test_get_pdf_extractor_default(fake_home: Path) -> None:
-    """get_pdf_extractor returns 'auto' when no config exists."""
+@pytest.mark.parametrize("config_data,repo_root,expected", [
+    (None, None, "auto"),
+    ({"pdf": {"extractor": "mineru"}}, None, "mineru"),
+    ({"pdf": {"extractor": "bogus"}}, None, "auto"),
+])
+def test_get_pdf_extractor(fake_home, config_data, repo_root, expected) -> None:
     from nexus.config import get_pdf_extractor
-    assert get_pdf_extractor() == "auto"
+    if config_data:
+        _write_config(fake_home, config_data)
+    assert get_pdf_extractor() == expected
 
 
-def test_get_pdf_extractor_from_global_config(fake_home: Path) -> None:
-    """get_pdf_extractor reads from global config.yml."""
+def test_get_pdf_extractor_repo_overrides_global(fake_home, tmp_path) -> None:
     from nexus.config import get_pdf_extractor
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump({"pdf": {"extractor": "mineru"}}))
-
-    assert get_pdf_extractor() == "mineru"
-
-
-def test_get_pdf_extractor_invalid_falls_back_to_auto(fake_home: Path) -> None:
-    """get_pdf_extractor returns 'auto' for invalid config values."""
-    from nexus.config import get_pdf_extractor
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump({"pdf": {"extractor": "bogus"}}))
-
-    assert get_pdf_extractor() == "auto"
-
-
-def test_get_pdf_extractor_repo_overrides_global(fake_home: Path, tmp_path: Path) -> None:
-    """Per-repo .nexus.yml overrides global config."""
-    from nexus.config import get_pdf_extractor
-
-    global_path = fake_home / ".config" / "nexus" / "config.yml"
-    global_path.parent.mkdir(parents=True, exist_ok=True)
-    global_path.write_text(yaml.dump({"pdf": {"extractor": "auto"}}))
-
-    repo_config = tmp_path / ".nexus.yml"
-    repo_config.write_text(yaml.dump({"pdf": {"extractor": "mineru"}}))
-
+    _write_config(fake_home, {"pdf": {"extractor": "auto"}})
+    (tmp_path / ".nexus.yml").write_text(yaml.dump({"pdf": {"extractor": "mineru"}}))
     assert get_pdf_extractor(repo_root=tmp_path) == "mineru"
 
 
-# ── CLI --extractor reads config default ─────────────────────────────────────
+# ── CLI --extractor reads config default ────────────────────────────────────
 
 
-def test_index_pdf_extractor_from_config(runner: CliRunner, fake_home: Path) -> None:
-    """nx index pdf uses pdf.extractor from config when --extractor not passed."""
-    from unittest.mock import patch
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump({"pdf": {"extractor": "docling"}}))
-
+@pytest.mark.parametrize("extra_args,expected_extractor", [
+    ([], "docling"),
+    (["--extractor", "mineru"], "mineru"),
+])
+def test_index_pdf_extractor(runner, fake_home, extra_args, expected_extractor) -> None:
+    _write_config(fake_home, {"pdf": {"extractor": "docling"}})
     pdf = fake_home / "test.pdf"
     pdf.write_bytes(b"dummy")
-
-    with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
-        result = runner.invoke(main, ["index", "pdf", str(pdf)])
-
+    with patch("nexus.doc_indexer.index_pdf",
+               return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
+        result = runner.invoke(main, ["index", "pdf", str(pdf), *extra_args])
     assert result.exit_code == 0, result.output
     _, kwargs = mock_index.call_args
-    assert kwargs["extractor"] == "docling"
+    assert kwargs["extractor"] == expected_extractor
 
 
-def test_index_pdf_flag_overrides_config(runner: CliRunner, fake_home: Path) -> None:
-    """--extractor flag overrides pdf.extractor config."""
-    from unittest.mock import patch
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump({"pdf": {"extractor": "docling"}}))
-
-    pdf = fake_home / "test.pdf"
-    pdf.write_bytes(b"dummy")
-
-    with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
-        result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "mineru"])
-
-    assert result.exit_code == 0, result.output
-    _, kwargs = mock_index.call_args
-    assert kwargs["extractor"] == "mineru"
+# ── nx config get ───────────────────────────────────────────────────────────
 
 
-# ── nx config get ─────────────────────────────────────────────────────────────
-
-def test_config_get_returns_value_from_file(runner: CliRunner, fake_home: Path) -> None:
-    """nx config get --show prints the full credential value from config.yml."""
+def test_config_get_returns_value(runner, fake_home) -> None:
     runner.invoke(main, ["config", "set", "voyage_api_key=vk-123"])
     result = runner.invoke(main, ["config", "get", "--show", "voyage_api_key"])
     assert result.exit_code == 0, result.output
     assert "vk-123" in result.output
 
 
-def test_config_get_masks_by_default(runner: CliRunner, fake_home: Path) -> None:
-    """nx config get masks the credential value by default."""
+def test_config_get_masks_by_default(runner, fake_home) -> None:
     runner.invoke(main, ["config", "set", "voyage_api_key=secret-voyage-key-xyz"])
     result = runner.invoke(main, ["config", "get", "voyage_api_key"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0
     assert "secret-voyage-key-xyz" not in result.output
     assert "***" in result.output
 
 
-def test_config_get_prefers_env_var(
-    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """nx config get --show returns env var value when both env and file set."""
+def test_config_get_prefers_env_var(runner, fake_home, monkeypatch) -> None:
     runner.invoke(main, ["config", "set", "chroma_api_key=file-val"])
     monkeypatch.setenv("CHROMA_API_KEY", "env-val")
     result = runner.invoke(main, ["config", "get", "--show", "chroma_api_key"])
     assert "env-val" in result.output
 
 
-def test_config_get_missing_key_reports_not_set(runner: CliRunner, fake_home: Path) -> None:
-    """nx config get reports 'not set' for unset credential."""
-    result = runner.invoke(main, ["config", "get", "chroma_api_key"])
+@pytest.mark.parametrize("key", ["chroma_api_key", "pdf.nonexistent_key", "ghost.setting"])
+def test_config_get_missing_reports_not_set(runner, fake_home, key) -> None:
+    result = runner.invoke(main, ["config", "get", key])
     assert result.exit_code == 0
     assert "not set" in result.output.lower()
 
 
-# ── nx config get — dotted keys ───────────────────────────────────────────────
-
-
-def test_config_get_dotted_key_returns_value(runner: CliRunner, fake_home: Path) -> None:
-    """nx config get pdf.mineru_server_url returns the set value."""
+def test_config_get_dotted_key_returns_value(runner, fake_home) -> None:
     runner.invoke(main, ["config", "set", "pdf.mineru_server_url=http://10.0.0.1:9000"])
     result = runner.invoke(main, ["config", "get", "pdf.mineru_server_url"])
     assert result.exit_code == 0, result.output
     assert "http://10.0.0.1:9000" in result.output
 
 
-def test_config_get_dotted_key_returns_default(runner: CliRunner, fake_home: Path) -> None:
-    """nx config get pdf.mineru_server_url returns the built-in default when not set."""
+def test_config_get_dotted_key_returns_default(runner, fake_home) -> None:
     result = runner.invoke(main, ["config", "get", "pdf.mineru_server_url"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0
     assert "127.0.0.1" in result.output
 
 
-def test_config_get_dotted_key_show_flag_not_masked(runner: CliRunner, fake_home: Path) -> None:
-    """nx config get --show pdf.extractor shows the plain value (settings are not masked)."""
+def test_config_get_dotted_show_not_masked(runner, fake_home) -> None:
     runner.invoke(main, ["config", "set", "pdf.extractor=docling"])
     result = runner.invoke(main, ["config", "get", "--show", "pdf.extractor"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0
     assert "docling" in result.output
 
 
-def test_config_get_dotted_key_missing_leaf_reports_not_set(runner: CliRunner, fake_home: Path) -> None:
-    """nx config get reports 'not set' for a nonexistent leaf under a known section."""
-    result = runner.invoke(main, ["config", "get", "pdf.nonexistent_key"])
-    assert result.exit_code == 0, result.output
-    assert "not set" in result.output.lower()
+# ── nx config list ──────────────────────────────────────────────────────────
 
 
-def test_config_get_dotted_key_missing_section_reports_not_set(runner: CliRunner, fake_home: Path) -> None:
-    """nx config get reports 'not set' for a completely nonexistent section.key."""
-    result = runner.invoke(main, ["config", "get", "ghost.setting"])
-    assert result.exit_code == 0, result.output
-    assert "not set" in result.output.lower()
-
-
-# ── nx config list ────────────────────────────────────────────────────────────
-
-def test_config_list_masks_api_key_values(runner: CliRunner, fake_home: Path) -> None:
-    """nx config list shows masked value (not plaintext) for API keys."""
+def test_config_list_masks_values(runner, fake_home) -> None:
     runner.invoke(main, ["config", "set", "chroma_api_key=super-secret"])
     result = runner.invoke(main, ["config", "list"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0
     assert "super-secret" not in result.output
     assert "chroma_api_key" in result.output
 
 
-def test_config_list_shows_credential_names(runner: CliRunner, fake_home: Path) -> None:
-    """nx config list shows all known credential names."""
+def test_config_list_shows_credential_names(runner, fake_home) -> None:
     result = runner.invoke(main, ["config", "list"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0
     assert "chroma_api_key" in result.output
     assert "voyage_api_key" in result.output
 
 
-def test_config_list_shows_non_secret_settings(runner: CliRunner, fake_home: Path) -> None:
-    """nx config list shows indexing and other non-secret settings."""
+def test_config_list_shows_non_secret_settings(runner, fake_home) -> None:
     result = runner.invoke(main, ["config", "list"])
-    assert result.exit_code == 0, result.output
-    # Indexing section should be visible
+    assert result.exit_code == 0
     assert "indexing" in result.output.lower()
 
 
-# ── nx config init ────────────────────────────────────────────────────────────
+# ── nx config init ──────────────────────────────────────────────────────────
 
-def test_config_init_writes_provided_values(runner: CliRunner, fake_home: Path) -> None:
-    """nx config init with all inputs writes all credentials to config.yml."""
-    inputs = "chroma-key\nmy-db\nvoyage-key\n"
-    result = runner.invoke(main, ["config", "init"], input=inputs)
+
+def test_config_init_writes_provided_values(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "init"], input="chroma-key\nmy-db\nvoyage-key\n")
     assert result.exit_code == 0, result.output
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    assert config_path.exists()
-    data = yaml.safe_load(config_path.read_text())
-    creds = data.get("credentials", {})
+    creds = _read_config(fake_home).get("credentials", {})
     assert creds.get("chroma_api_key") == "chroma-key"
     assert creds.get("chroma_database") == "my-db"
     assert creds.get("voyage_api_key") == "voyage-key"
 
 
-def test_config_init_provisions_databases_success(runner: CliRunner, fake_home: Path) -> None:
-    """nx config init reports database status when provisioning succeeds."""
-    from unittest.mock import MagicMock, patch
-
+def test_config_init_provisions_databases_success(runner, fake_home) -> None:
     mock_admin = MagicMock()
-    created = {"mydb": True}
     with patch("nexus.commands._provision._cloud_admin_client", return_value=mock_admin), \
-         patch("nexus.commands._provision.ensure_databases", return_value=created):
+         patch("nexus.commands._provision.ensure_databases", return_value={"mydb": True}):
         result = runner.invoke(main, ["config", "init"], input="ck-key\nmydb\nvoyage-key\n")
-
     assert result.exit_code == 0, result.output
     assert "mydb" in result.output
     assert "created" in result.output
 
 
-def test_config_init_provisioning_failure_is_a_warning(runner: CliRunner, fake_home: Path) -> None:
-    """Provisioning failure is shown as a warning; init still succeeds."""
-    from unittest.mock import patch
-
+def test_config_init_provisioning_failure_is_warning(runner, fake_home) -> None:
     with patch("nexus.commands._provision._cloud_admin_client",
                side_effect=Exception("network timeout")):
         result = runner.invoke(main, ["config", "init"], input="ck-key\nmydb\nvoyage-key\n")
-
     assert result.exit_code == 0, result.output
     assert "warning" in result.output.lower() or "could not" in result.output.lower()
 
 
-def test_config_init_shows_signup_urls(runner: CliRunner, fake_home: Path) -> None:
-    """nx config init output includes URLs to obtain the required keys."""
+def test_config_init_shows_signup_urls(runner, fake_home) -> None:
     result = runner.invoke(main, ["config", "init"], input="\n\n\n")
     output = result.output
     assert "trychroma.com" in output or "chromadb" in output.lower()
     assert "voyageai.com" in output or "voyage" in output.lower()
 
 
-def test_config_init_skips_keys_already_in_env(
-    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """nx config init does not prompt for keys already set in environment."""
+def test_config_init_skips_keys_already_in_env(runner, fake_home, monkeypatch) -> None:
     monkeypatch.setenv("CHROMA_API_KEY", "env-chroma")
     result = runner.invoke(main, ["config", "init"], input="\n\n\n")
-    # Should mention the key is already set via env, not prompt to re-enter
     assert "env-chroma" in result.output or "already set" in result.output.lower() or "environment" in result.output.lower()
 
 
-# ── get_credential() fallback ────────────────────────────────────────────────
+# ── get_credential() fallback ───────────────────────────────────────────────
 
-def test_get_credential_env_var_takes_precedence(
-    fake_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """get_credential returns env var over config file value."""
+
+def test_get_credential_env_takes_precedence(fake_home, monkeypatch) -> None:
     from nexus.config import get_credential
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump({"credentials": {"chroma_api_key": "file-val"}}))
-
+    _write_config(fake_home, {"credentials": {"chroma_api_key": "file-val"}})
     monkeypatch.setenv("CHROMA_API_KEY", "env-val")
     assert get_credential("chroma_api_key") == "env-val"
 
 
-def test_get_credential_falls_back_to_config_file(fake_home: Path) -> None:
-    """get_credential returns config file value when env var is absent."""
+def test_get_credential_falls_back_to_file(fake_home) -> None:
     from nexus.config import get_credential
-
-    config_path = fake_home / ".config" / "nexus" / "config.yml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump({"credentials": {"voyage_api_key": "vk-file"}}))
-
+    _write_config(fake_home, {"credentials": {"voyage_api_key": "vk-file"}})
     assert get_credential("voyage_api_key") == "vk-file"
 
 
-def test_get_credential_returns_empty_when_unset(fake_home: Path) -> None:
-    """get_credential returns empty string when neither env nor file set."""
+def test_get_credential_returns_empty_when_unset(fake_home) -> None:
     from nexus.config import get_credential
-
     assert get_credential("chroma_api_key") == ""

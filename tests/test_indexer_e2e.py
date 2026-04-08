@@ -1,11 +1,4 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""E2E tests for the code-indexing pipeline and HEAD-polling logic.
-
-No API keys required — T3 is backed by EphemeralClient + local ONNX model.
-A small subset of Nexus's own source code is used as the test corpus so the
-chunker, AST parser, frecency scoring, and search engine all exercise real
-code paths rather than synthetic fixtures.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -21,21 +14,14 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
 
-
-# ── Corpus definition ─────────────────────────────────────────────────────────
-
-# Small Nexus source files — together they cover TTL parsing, corpus naming,
-# type definitions, and session logic.  300 lines total; fast to index.
 _CORPUS_FILES = [
     "src/nexus/ttl.py",
     "src/nexus/corpus.py",
     "src/nexus/types.py",
     "src/nexus/session.py",
 ]
-
 _NEXUS_ROOT = Path(__file__).parent.parent
 
-# Prose files for the rich_repo fixture — markdown + config content
 _PROSE_FILES = {
     "README.md": (
         "# Nexus\n\nNexus is a semantic search and knowledge management system.\n\n"
@@ -53,7 +39,6 @@ _PROSE_FILES = {
     ),
 }
 
-# RDR (Record of Design Rationale) files — under docs/rdr/
 _RDR_FILES = {
     "docs/rdr/ADR-001-storage-tiers.md": (
         "---\ntitle: Storage Tier Architecture\nstatus: accepted\n---\n\n"
@@ -64,40 +49,39 @@ _RDR_FILES = {
 }
 
 
+def _git_init(repo: Path, msg: str = "Initial commit") -> None:
+    for cmd in (
+        ["git", "init", "-b", "main"],
+        ["git", "config", "user.email", "test@nexus"],
+        ["git", "config", "user.name", "Nexus Test"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", msg],
+    ):
+        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
 def mini_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A real git repo containing a subset of Nexus source files.
-
-    Module-scoped so the git init + commit runs once per test session.
-    """
     repo = tmp_path_factory.mktemp("nexus-mini")
     for rel in _CORPUS_FILES:
-        src = _NEXUS_ROOT / rel
         dest = repo / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@nexus"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Nexus Test"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "Initial corpus commit"], cwd=repo, check=True, capture_output=True)
+        shutil.copy2(_NEXUS_ROOT / rel, dest)
+    _git_init(repo, "Initial corpus commit")
     return repo
 
 
 @pytest.fixture
 def local_t3() -> T3Database:
-    """Fresh EphemeralClient T3Database per test — no API keys needed."""
-    client = chromadb.EphemeralClient()
-    ef = DefaultEmbeddingFunction()
-    return T3Database(_client=client, _ef_override=ef)
+    return T3Database(
+        _client=chromadb.EphemeralClient(), _ef_override=DefaultEmbeddingFunction()
+    )
 
 
 @pytest.fixture
 def registry(tmp_path: Path, mini_repo: Path) -> RepoRegistry:
-    """RepoRegistry in a temp file with mini_repo pre-registered."""
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(mini_repo)
     return reg
@@ -105,648 +89,339 @@ def registry(tmp_path: Path, mini_repo: Path) -> RepoRegistry:
 
 @pytest.fixture(autouse=True)
 def mock_voyage_client():
-    """Patch voyageai.Client so E2E tests run without API keys.
-
-    Mocks both embed() and contextualized_embed() so that:
-    - Code indexing (direct embed via voyage-code-3) works
-    - Prose/PDF indexing (CCE via _embed_with_fallback / voyage-context-3) works
-
-    Uses DefaultEmbeddingFunction (ONNX MiniLM-L6) to produce embeddings so
-    that index vectors and query vectors are in the same space as the local_t3
-    fixture's _ef_override — keeping semantic search meaningful in unit tests.
-    """
     ef = DefaultEmbeddingFunction()
-
     mock_client = MagicMock()
 
     def fake_embed(texts, model, input_type="document"):
-        result = MagicMock()
-        result.embeddings = ef(texts)
-        return result
+        r = MagicMock()
+        r.embeddings = ef(texts)
+        return r
 
     def fake_contextualized_embed(inputs, model, input_type="document"):
-        # inputs is a list of lists: [[chunk1, chunk2, ...]]
-        # contextualized_embed returns result.results[i].embeddings
-        result = MagicMock()
-        batch_result = MagicMock()
-        batch_result.embeddings = ef(inputs[0])
-        result.results = [batch_result]
-        return result
+        r = MagicMock()
+        br = MagicMock()
+        br.embeddings = ef(inputs[0])
+        r.results = [br]
+        return r
 
     mock_client.embed.side_effect = fake_embed
     mock_client.contextualized_embed.side_effect = fake_contextualized_embed
-
     with patch("voyageai.Client", return_value=mock_client):
         yield mock_client
 
 
 @pytest.fixture(scope="module")
 def rich_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A real git repo with code, prose, RDR, and PDF files.
-
-    Module-scoped: git init + commit runs once per test session.
-    Contains:
-      - Code files (from _CORPUS_FILES): .py source files
-      - Prose files (from _PROSE_FILES): .md and .yaml files
-      - RDR files (from _RDR_FILES): ADR markdown under docs/rdr/
-      - PDF file (docs/test.pdf): single-page with title/author metadata (AC-E5)
-    """
     import pymupdf as _fitz
     repo = tmp_path_factory.mktemp("nexus-rich")
-
-    # Code files — copied from the real Nexus source
     for rel in _CORPUS_FILES:
-        src = _NEXUS_ROOT / rel
         dest = repo / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-
-    # Prose files — synthetic content
-    for rel, content in _PROSE_FILES.items():
+        shutil.copy2(_NEXUS_ROOT / rel, dest)
+    for rel, content in {**_PROSE_FILES, **_RDR_FILES}.items():
         dest = repo / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
-
-    # RDR files — synthetic ADR content
-    for rel, content in _RDR_FILES.items():
-        dest = repo / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content, encoding="utf-8")
-
-    # PDF file — single-page with metadata for AC-E5 routing test
     pdf_doc = _fitz.open()
-    pdf_page = pdf_doc.new_page()
-    pdf_page.insert_text(
-        (72, 100),
-        "Hello World. This is a test document for PDF ingest.",
-        fontsize=12,
-    )
+    page = pdf_doc.new_page()
+    page.insert_text((72, 100), "Hello World. This is a test document for PDF ingest.", fontsize=12)
     pdf_doc.set_metadata({"title": "Test Document", "author": "Test Author"})
-    pdf_bytes = pdf_doc.tobytes()
+    (repo / "docs" / "test.pdf").write_bytes(pdf_doc.tobytes())
     pdf_doc.close()
-    pdf_dest = repo / "docs" / "test.pdf"
-    pdf_dest.parent.mkdir(parents=True, exist_ok=True)
-    pdf_dest.write_bytes(pdf_bytes)
-
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@nexus"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Nexus Test"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "Initial rich corpus commit"], cwd=repo, check=True, capture_output=True)
+    _git_init(repo, "Initial rich corpus commit")
     return repo
 
 
 @pytest.fixture
 def rich_registry(tmp_path: Path, rich_repo: Path) -> RepoRegistry:
-    """RepoRegistry in a temp file with rich_repo pre-registered."""
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(rich_repo)
     return reg
 
 
-# ── Indexer pipeline tests ─────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _index(repo: Path, registry: RepoRegistry, t3: T3Database, **kw) -> None:
+    from nexus.indexer import index_repository
+    with patch("nexus.db.make_t3", return_value=t3), \
+         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+        index_repository(repo, registry, **kw)
+
+
+def _get_sources(t3: T3Database, col_name: str) -> set[str]:
+    col = t3.get_or_create_collection(col_name)
+    return {m.get("source_path", "") for m in col.get(include=["metadatas"])["metadatas"]}
+
+
+# ── Basic indexer pipeline ────────────────────────────────────────────────────
 
 def test_index_creates_chunks_in_t3(
     mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
 ) -> None:
-    """index_repository() chunks corpus files and stores them in T3."""
-    from nexus.indexer import index_repository
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(mini_repo, registry)
-
-    col_name = registry.get(mini_repo)["collection"]
-    col = local_t3.get_or_create_collection(col_name)
-    assert col.count() > 0, "Expected at least one chunk in T3 after indexing"
-
+    _index(mini_repo, registry, local_t3)
+    col = local_t3.get_or_create_collection(registry.get(mini_repo)["collection"])
+    assert col.count() > 0
 
 def test_index_status_transitions_to_ready(
     mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
 ) -> None:
-    """Registry status goes registered → ready after a successful index."""
-    from nexus.indexer import index_repository
-
     assert registry.get(mini_repo)["status"] == "registered"
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(mini_repo, registry)
-
+    _index(mini_repo, registry, local_t3)
     assert registry.get(mini_repo)["status"] == "ready"
 
 
-def test_index_chunks_carry_source_path_metadata(
+@pytest.mark.parametrize("expected_file", ["ttl.py", "session.py"])
+def test_index_chunks_carry_source_path(
+    mini_repo: Path, registry: RepoRegistry, local_t3: T3Database, expected_file: str
+) -> None:
+    _index(mini_repo, registry, local_t3)
+    sources = _get_sources(local_t3, registry.get(mini_repo)["collection"])
+    assert any(expected_file in p for p in sources), f"{expected_file} missing from: {sources}"
+
+
+def test_index_staleness_skips_unchanged(
     mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
 ) -> None:
-    """Every chunk has a source_path pointing at the original file."""
-    from nexus.indexer import index_repository
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(mini_repo, registry)
-
-    col_name = registry.get(mini_repo)["collection"]
-    col = local_t3.get_or_create_collection(col_name)
-    result = col.get(include=["metadatas"])
-    source_paths = {m.get("source_path", "") for m in result["metadatas"]}
-
-    assert any("ttl.py" in p for p in source_paths), f"ttl.py missing from: {source_paths}"
-    assert any("session.py" in p for p in source_paths), f"session.py missing from: {source_paths}"
+    _index(mini_repo, registry, local_t3)
+    col = local_t3.get_or_create_collection(registry.get(mini_repo)["collection"])
+    count1 = col.count()
+    _index(mini_repo, registry, local_t3)
+    assert col.count() == count1
 
 
-def test_index_staleness_check_skips_unchanged_files(
+def test_index_frecency_only_preserves_count(
     mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
 ) -> None:
-    """Second index run skips files whose content_hash is unchanged."""
-    from nexus.indexer import index_repository
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(mini_repo, registry)
-        col_name = registry.get(mini_repo)["collection"]
-        col = local_t3.get_or_create_collection(col_name)
-        count_after_first = col.count()
-
-        index_repository(mini_repo, registry)
-        count_after_second = col.count()
-
-    assert count_after_second == count_after_first, (
-        f"Expected no new chunks on re-index of unchanged files "
-        f"(first={count_after_first}, second={count_after_second})"
-    )
+    _index(mini_repo, registry, local_t3)
+    col = local_t3.get_or_create_collection(registry.get(mini_repo)["collection"])
+    count = col.count()
+    _index(mini_repo, registry, local_t3, frecency_only=True)
+    assert col.count() == count
 
 
-def test_index_frecency_only_preserves_chunk_count(
-    mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
-) -> None:
-    """--frecency-only reindex updates scores without adding or removing chunks."""
-    from nexus.indexer import index_repository
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(mini_repo, registry)
-        col_name = registry.get(mini_repo)["collection"]
-        col = local_t3.get_or_create_collection(col_name)
-        count_before = col.count()
-
-        index_repository(mini_repo, registry, frecency_only=True)
-
-    assert col.count() == count_before
-
-
-# ── Smart indexing: dual collection tests ────────────────────────────────────
-
-def _run_smart_index(repo: Path, registry: RepoRegistry, local_t3: T3Database) -> None:
-    """Helper: run index_repository with standard test patches."""
-    from nexus.indexer import index_repository
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(repo, registry)
-
+# ── Smart indexing: dual collection ───────────────────────────────────────────
 
 def test_smart_index_creates_both_collections(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    """index_repository creates both code__ and docs__ collections with chunks."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
+    _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-    code_col = local_t3.get_or_create_collection(info["code_collection"])
-    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-
-    assert code_col.count() > 0, "Expected chunks in code__ collection"
-    assert docs_col.count() > 0, "Expected chunks in docs__ collection"
+    for key in ("code_collection", "docs_collection"):
+        col = local_t3.get_or_create_collection(info[key])
+        assert col.count() > 0, f"No chunks in {key}"
 
 
-def test_smart_index_code_files_in_code_collection(
+@pytest.mark.parametrize("file,expected_col,excluded_col", [
+    ("ttl.py", "code_collection", "docs_collection"),
+    ("README.md", "docs_collection", "code_collection"),
+    ("architecture.md", "docs_collection", None),
+])
+def test_smart_index_file_routing(
+    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
+    file: str, expected_col: str, excluded_col: str | None,
+) -> None:
+    _index(rich_repo, rich_registry, local_t3)
+    info = rich_registry.get(rich_repo)
+    sources = _get_sources(local_t3, info[expected_col])
+    assert any(file in p for p in sources), f"{file} not in {expected_col}: {sources}"
+    if excluded_col:
+        excl_sources = _get_sources(local_t3, info[excluded_col])
+        assert not any(file in p for p in excl_sources), f"{file} should not be in {excluded_col}"
+
+
+def test_smart_index_config_yaml_excluded(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    """.py files should be in code__, NOT in docs__."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
+    _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-    code_col = local_t3.get_or_create_collection(info["code_collection"])
-    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-
-    code_result = code_col.get(include=["metadatas"])
-    code_sources = {m.get("source_path", "") for m in code_result["metadatas"]}
-    assert any("ttl.py" in p for p in code_sources), (
-        f"ttl.py should be in code__ collection; got: {code_sources}"
-    )
-
-    docs_result = docs_col.get(include=["metadatas"])
-    docs_sources = {m.get("source_path", "") for m in docs_result["metadatas"]}
-    assert not any(".py" in p for p in docs_sources), (
-        f".py files should NOT be in docs__ collection; found: "
-        f"{[p for p in docs_sources if '.py' in p]}"
-    )
+    docs_sources = _get_sources(local_t3, info["docs_collection"])
+    assert not any("config.yaml" in p for p in docs_sources)
 
 
-def test_smart_index_prose_files_in_docs_collection(
+def test_smart_index_py_excluded_from_docs(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    """.md and .yaml files should be in docs__, NOT in code__."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
+    _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-    code_col = local_t3.get_or_create_collection(info["code_collection"])
-    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-
-    docs_result = docs_col.get(include=["metadatas"])
-    docs_sources = {m.get("source_path", "") for m in docs_result["metadatas"]}
-    assert any("README.md" in p for p in docs_sources), (
-        f"README.md should be in docs__ collection; got: {docs_sources}"
-    )
-    assert any("architecture.md" in p for p in docs_sources), (
-        f"architecture.md should be in docs__ collection; got: {docs_sources}"
-    )
-    assert not any("config.yaml" in p for p in docs_sources), (
-        f"config.yaml is SKIP and must not appear in docs__ collection; got: {docs_sources}"
-    )
-
-    code_result = code_col.get(include=["metadatas"])
-    code_sources = {m.get("source_path", "") for m in code_result["metadatas"]}
-    assert not any("README.md" in p for p in code_sources), (
-        "README.md should NOT be in code__ collection"
-    )
+    docs_sources = _get_sources(local_t3, info["docs_collection"])
+    assert not any(".py" in p for p in docs_sources)
 
 
-def test_smart_index_rdr_excluded_from_docs(
+def test_smart_index_rdr_routing(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    """RDR files should NOT be in the main docs__<repo> collection."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
+    _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-
-    docs_result = docs_col.get(include=["metadatas"])
-    docs_sources = {m.get("source_path", "") for m in docs_result["metadatas"]}
-    assert not any("ADR-001" in p for p in docs_sources), (
-        f"RDR files should NOT be in docs__<repo> collection; "
-        f"found: {[p for p in docs_sources if 'ADR-001' in p]}"
-    )
-
-
-def test_smart_index_rdr_in_rdr_collection(
-    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
-) -> None:
-    """RDR files should be indexed into rdr__<basename>-<hash8>."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
+    # RDR should NOT be in docs__
+    docs_sources = _get_sources(local_t3, info["docs_collection"])
+    assert not any("ADR-001" in p for p in docs_sources)
+    # RDR should be in rdr__
     path_hash = hashlib.sha256(str(rich_repo).encode()).hexdigest()[:8]
-    rdr_col_name = f"rdr__{rich_repo.name}-{path_hash}"
-    rdr_col = local_t3.get_or_create_collection(rdr_col_name)
-    assert rdr_col.count() > 0, "Expected RDR chunks in rdr__ collection"
-
-    result = rdr_col.get(include=["metadatas"])
-    source_paths = {m.get("source_path", "") for m in result["metadatas"]}
-    assert any("ADR-001" in p for p in source_paths), (
-        f"ADR-001 should be in rdr__ collection; got: {source_paths}"
-    )
+    rdr_col = f"rdr__{rich_repo.name}-{path_hash}"
+    rdr_sources = _get_sources(local_t3, rdr_col)
+    assert any("ADR-001" in p for p in rdr_sources), f"ADR-001 not in rdr__: {rdr_sources}"
 
 
-def test_smart_index_search_code_query(
+@pytest.mark.parametrize("query,corpus_key,expected_file", [
+    ("parse TTL days weeks permanent", "code_collection", "ttl.py"),
+    ("semantic search knowledge management features", "docs_collection", "README.md"),
+])
+def test_smart_index_search(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
+    query: str, corpus_key: str, expected_file: str,
 ) -> None:
-    """Searching code__ returns code files for a code-related query."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
+    _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-    results = local_t3.search(
-        "parse TTL days weeks permanent", [info["code_collection"]], n_results=5,
-    )
-    assert len(results) > 0, "Expected code search results"
-    source_paths = [r.get("source_path", "") for r in results]
-    assert any("ttl.py" in p for p in source_paths), (
-        f"Expected ttl.py in code search results; got: {source_paths}"
-    )
-
-
-def test_smart_index_search_prose_query(
-    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
-) -> None:
-    """Searching docs__ returns prose files for a prose-related query."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
-    info = rich_registry.get(rich_repo)
-    results = local_t3.search(
-        "semantic search knowledge management features", [info["docs_collection"]], n_results=5,
-    )
-    assert len(results) > 0, "Expected prose search results"
-    source_paths = [r.get("source_path", "") for r in results]
-    assert any("README.md" in p for p in source_paths), (
-        f"Expected README.md in prose search results; got: {source_paths}"
-    )
+    results = local_t3.search(query, [info[corpus_key]], n_results=5)
+    assert len(results) > 0
+    sources = [r.get("source_path", "") for r in results]
+    assert any(expected_file in p for p in sources), f"{expected_file} not in: {sources}"
 
 
 def test_smart_index_embedding_model_metadata(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    """Code chunks record voyage-code-3; docs chunks record voyage-context-3 or voyage-4."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
+    _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-
-    # Check code collection
     code_col = local_t3.get_or_create_collection(info["code_collection"])
-    code_result = code_col.get(include=["metadatas"])
-    code_models = {m.get("embedding_model", "") for m in code_result["metadatas"]}
-    assert "voyage-code-3" in code_models, (
-        f"Code chunks should use voyage-code-3; got: {code_models}"
-    )
-
-    # Check docs collection — all docs use voyage-context-3 (CCE)
+    code_models = {m.get("embedding_model", "") for m in code_col.get(include=["metadatas"])["metadatas"]}
+    assert "voyage-code-3" in code_models
     docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-    docs_result = docs_col.get(include=["metadatas"])
-    docs_models = {m.get("embedding_model", "") for m in docs_result["metadatas"]}
-    allowed = {"voyage-context-3"}
-    assert docs_models <= allowed, (
-        f"Docs chunks should use voyage-context-3; got: {docs_models}"
-    )
-    assert len(docs_models) > 0, "Expected at least one embedding model in docs chunks"
+    docs_models = {m.get("embedding_model", "") for m in docs_col.get(include=["metadatas"])["metadatas"]}
+    assert docs_models <= {"voyage-context-3"} and docs_models
 
 
 def test_smart_index_staleness_check(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    """Second index skips unchanged files in both code__ and docs__ collections."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
+    _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-    code_col = local_t3.get_or_create_collection(info["code_collection"])
-    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-    code_count_1 = code_col.count()
-    docs_count_1 = docs_col.count()
-
-    # Re-run indexing — should be a no-op
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
-    assert code_col.count() == code_count_1, (
-        f"Code chunk count changed on re-index: {code_count_1} -> {code_col.count()}"
-    )
-    assert docs_col.count() == docs_count_1, (
-        f"Docs chunk count changed on re-index: {docs_count_1} -> {docs_col.count()}"
-    )
+    counts = {}
+    for key in ("code_collection", "docs_collection"):
+        counts[key] = local_t3.get_or_create_collection(info[key]).count()
+    _index(rich_repo, rich_registry, local_t3)
+    for key, c in counts.items():
+        assert local_t3.get_or_create_collection(info[key]).count() == c
 
 
-def test_smart_index_git_metadata_present(
+@pytest.mark.parametrize("meta_key", ["git_commit_hash", "git_branch", "source_path"])
+def test_smart_index_git_metadata(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
+    meta_key: str,
 ) -> None:
-    """Chunks in both collections carry git_commit_hash, git_branch, source_path."""
-    _run_smart_index(rich_repo, rich_registry, local_t3)
-
+    _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-
-    for col_name in (info["code_collection"], info["docs_collection"]):
-        col = local_t3.get_or_create_collection(col_name)
-        result = col.get(include=["metadatas"])
-        assert len(result["metadatas"]) > 0, f"No chunks in {col_name}"
-
-        sample = result["metadatas"][0]
-        assert sample.get("git_commit_hash"), (
-            f"git_commit_hash missing in {col_name}: {sample}"
-        )
-        assert sample.get("git_branch"), (
-            f"git_branch missing in {col_name}: {sample}"
-        )
-        assert sample.get("source_path"), (
-            f"source_path missing in {col_name}: {sample}"
-        )
+    for col_key in ("code_collection", "docs_collection"):
+        col = local_t3.get_or_create_collection(info[col_key])
+        sample = col.get(include=["metadatas"])["metadatas"][0]
+        assert sample.get(meta_key), f"{meta_key} missing in {col_key}: {sample}"
 
 
-# ── Migration test ──────────────────────────────────────────────────────────
+# ── Migration ─────────────────────────────────────────────────────────────────
 
 def test_migration_moves_prose_from_code_to_docs(
     rich_repo: Path, tmp_path: Path, local_t3: T3Database,
 ) -> None:
-    """Simulates old indexer (all in code__), then runs new indexer to verify migration.
-
-    The _prune_misclassified step should remove prose chunks from code__ and
-    the new indexer should place prose into docs__.
-
-    Note: chromadb.EphemeralClient is a singleton — all instances share state.
-    The test verifies by ID that the specific fake chunk is pruned.
-    """
-    from nexus.indexer import index_repository
-
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(rich_repo)
     info = reg.get(rich_repo)
-    code_col_name = info["code_collection"]
-    docs_col_name = info["docs_collection"]
-
-    # Manually insert a prose file's chunk into code__ (simulating old behavior)
-    code_col = local_t3.get_or_create_collection(code_col_name)
+    code_col = local_t3.get_or_create_collection(info["code_collection"])
     readme_path = str(rich_repo / "README.md")
     code_col.add(
         ids=["fake-prose-in-code"],
         documents=["Nexus is a semantic search system"],
         metadatas=[{
-            "source_path": readme_path,
-            "content_hash": "old-hash",
-            "embedding_model": "voyage-code-3",
-            "store_type": "code",
+            "source_path": readme_path, "content_hash": "old-hash",
+            "embedding_model": "voyage-code-3", "store_type": "code",
         }],
     )
-    # Verify the fake chunk was inserted (by specific ID, not total count)
-    pre_result = code_col.get(ids=["fake-prose-in-code"], include=["metadatas"])
-    assert len(pre_result["ids"]) == 1, "Fake prose chunk must exist before migration"
+    assert len(code_col.get(ids=["fake-prose-in-code"])["ids"]) == 1
 
-    # Run the new unified indexer
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(rich_repo, reg)
+    _index(rich_repo, reg, local_t3)
 
-    # The fake prose chunk should have been pruned from code__
-    code_result = code_col.get(include=["metadatas"])
-    code_sources = {m.get("source_path", "") for m in code_result["metadatas"]}
-    assert readme_path not in code_sources, (
-        "README.md should be pruned from code__ after reclassification"
-    )
-
-    # Specifically, the fake ID should be gone
-    post_fake = code_col.get(ids=["fake-prose-in-code"], include=[])
-    assert len(post_fake["ids"]) == 0, (
-        "The fake-prose-in-code chunk should have been pruned from code__"
-    )
-
-    # README.md should now be in docs__
-    docs_col = local_t3.get_or_create_collection(docs_col_name)
-    docs_result = docs_col.get(include=["metadatas"])
-    docs_sources = {m.get("source_path", "") for m in docs_result["metadatas"]}
-    assert any("README.md" in p for p in docs_sources), (
-        f"README.md should be in docs__ after migration; got: {docs_sources}"
-    )
+    assert readme_path not in _get_sources(local_t3, info["code_collection"])
+    assert len(code_col.get(ids=["fake-prose-in-code"])["ids"]) == 0
+    assert any("README.md" in p for p in _get_sources(local_t3, info["docs_collection"]))
 
 
-# ── Index → search pipeline ───────────────────────────────────────────────────
+# ── Index-then-search (mini_repo) ────────────────────────────────────────────
 
-def test_index_then_search_ttl_content(
-    mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
+@pytest.mark.parametrize("query,expected_file", [
+    ("parse TTL days weeks permanent", "ttl.py"),
+    ("session identifier process group ID", "session.py"),
+    ("collection name prefix code docs knowledge", "corpus.py"),
+])
+def test_index_then_search(
+    mini_repo: Path, registry: RepoRegistry, local_t3: T3Database,
+    query: str, expected_file: str,
 ) -> None:
-    """Index corpus, then search for TTL-related content — ttl.py should rank."""
-    from nexus.indexer import index_repository
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(mini_repo, registry)
-
-    col_name = registry.get(mini_repo)["collection"]
-    results = local_t3.search("parse TTL days weeks permanent", [col_name], n_results=5)
-
-    assert len(results) > 0, "Expected search results after indexing"
-    source_paths = [r.get("source_path", "") for r in results]
-    assert any("ttl.py" in p for p in source_paths), (
-        f"Expected ttl.py in top results for TTL query; got: {source_paths}"
-    )
-
-
-def test_index_then_search_session_content(
-    mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
-) -> None:
-    """Search for session/getsid content — session.py should be in results."""
-    from nexus.indexer import index_repository
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(mini_repo, registry)
-
-    col_name = registry.get(mini_repo)["collection"]
-    results = local_t3.search("session identifier process group ID", [col_name], n_results=5)
-
+    _index(mini_repo, registry, local_t3)
+    col = registry.get(mini_repo)["collection"]
+    results = local_t3.search(query, [col], n_results=5)
     assert len(results) > 0
-    source_paths = [r.get("source_path", "") for r in results]
-    assert any("session.py" in p for p in source_paths), (
-        f"Expected session.py in top results; got: {source_paths}"
-    )
+    sources = [r.get("source_path", "") for r in results]
+    assert any(expected_file in p for p in sources), f"{expected_file} not in: {sources}"
 
 
-def test_index_then_search_corpus_naming(
-    mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
+# ── CLI tests ─────────────────────────────────────────────────────────────────
+
+
+def test_cli_index_repo(
+    mini_repo: Path, tmp_path: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Search for collection naming logic — corpus.py should appear."""
-    from nexus.indexer import index_repository
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(mini_repo, registry)
-
-    col_name = registry.get(mini_repo)["collection"]
-    results = local_t3.search("collection name prefix code docs knowledge", [col_name], n_results=5)
-
-    assert len(results) > 0
-    source_paths = [r.get("source_path", "") for r in results]
-    assert any("corpus.py" in p for p in source_paths), (
-        f"Expected corpus.py in top results; got: {source_paths}"
-    )
-
-
-# ── CLI: nx index repo ─────────────────────────────────────────────────────────
-
-def test_cli_index_repo_registers_and_indexes(
-    mini_repo: Path, tmp_path: Path, local_t3: T3Database,
-    monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """nx index repo <path> registers the repo and indexes it end-to-end."""
     from click.testing import CliRunner
     from nexus.cli import main
-
     monkeypatch.setenv("HOME", str(tmp_path))
     runner = CliRunner()
-
     with patch("nexus.db.make_t3", return_value=local_t3), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         result = runner.invoke(main, ["index", "repo", str(mini_repo)])
-
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0
     assert "Done" in result.output
 
 
-def test_cli_index_then_search_pipeline(
-    mini_repo: Path, tmp_path: Path, local_t3: T3Database,
-    monkeypatch: pytest.MonkeyPatch
+def test_cli_index_then_search(
+    mini_repo: Path, tmp_path: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """nx index repo → nx search: full CLI pipeline returns results."""
     from click.testing import CliRunner
     from nexus.cli import main
-
     monkeypatch.setenv("HOME", str(tmp_path))
     runner = CliRunner()
-
-    col_name = (
-        "code__"
-        + mini_repo.name
-        + "-"
-        + hashlib.sha256(str(mini_repo).encode()).hexdigest()[:8]
-    )
-
+    col_name = f"code__{mini_repo.name}-{hashlib.sha256(str(mini_repo).encode()).hexdigest()[:8]}"
     with patch("nexus.db.make_t3", return_value=local_t3), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
          patch("nexus.commands.search_cmd._t3", return_value=local_t3):
-
-        index_result = runner.invoke(main, ["index", "repo", str(mini_repo)])
-        assert index_result.exit_code == 0, index_result.output
-
-        search_result = runner.invoke(main, [
-            "search", "parse TTL expiry days",
-            "--corpus", col_name,
-            "--n", "5",
-        ])
-
-    assert search_result.exit_code == 0, search_result.output
-    assert len(search_result.output.strip()) > 0
+        idx = runner.invoke(main, ["index", "repo", str(mini_repo)])
+        assert idx.exit_code == 0
+        search = runner.invoke(main, ["search", "parse TTL expiry days", "--corpus", col_name, "--n", "5"])
+    assert search.exit_code == 0
+    assert len(search.output.strip()) > 0
 
 
-def test_cli_index_frecency_only_flag(
-    mini_repo: Path, tmp_path: Path, local_t3: T3Database,
-    monkeypatch: pytest.MonkeyPatch
+def test_cli_index_frecency_only(
+    mini_repo: Path, tmp_path: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """nx index repo --frecency-only completes without error after a full index."""
     from click.testing import CliRunner
     from nexus.cli import main
-
     monkeypatch.setenv("HOME", str(tmp_path))
     runner = CliRunner()
-
     with patch("nexus.db.make_t3", return_value=local_t3), \
          patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
         runner.invoke(main, ["index", "repo", str(mini_repo)])
         result = runner.invoke(main, ["index", "repo", str(mini_repo), "--frecency-only"])
-
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0
     assert "Done" in result.output
 
 
-# ── AC-E5 — index_repository() PDF routing ───────────────────────────────────
+# ── AC-E5: PDF routing ───────────────────────────────────────────────────────
 
 def test_index_repository_pdf_routing(
-    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database
+    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    """AC-E5: index_repository() routes PDF files into docs__ with correct metadata."""
-    from nexus.indexer import index_repository
     from nexus.registry import _docs_collection_name
-
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-        index_repository(rich_repo, rich_registry)
-
-    docs_col_name = _docs_collection_name(rich_repo)
-    results = local_t3.search(
-        "Hello World test document PDF ingest",
-        [docs_col_name],
-        n_results=5,
-    )
+    _index(rich_repo, rich_registry, local_t3)
+    docs_col = _docs_collection_name(rich_repo)
+    results = local_t3.search("Hello World test document PDF ingest", [docs_col], n_results=5)
     pdf_results = [r for r in results if r.get("store_type") == "pdf"]
-    assert pdf_results, (
-        f"Expected at least one PDF chunk in {docs_col_name!r}; "
-        f"got store_types: {[r.get('store_type') for r in results]}"
-    )
-    # RDR-021: source_title comes from docling_title (content-extracted) or filename stem.
-    # Docling does not expose XMP metadata, so "Test Document" from the XMP title field
-    # is no longer the source. Accept any non-None string.
-    assert isinstance(pdf_results[0]["source_title"], str), (
-        f"Expected source_title to be a str, got {pdf_results[0]['source_title']!r}"
-    )
+    assert pdf_results, f"No PDF chunks; store_types: {[r.get('store_type') for r in results]}"
+    assert isinstance(pdf_results[0]["source_title"], str)

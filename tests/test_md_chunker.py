@@ -1,78 +1,64 @@
-"""AC4–AC5: SemanticMarkdownChunker — headings, frontmatter, naive fallback."""
+# SPDX-License-Identifier: AGPL-3.0-or-later
 import pytest
 
 import nexus.md_chunker as md_mod
 from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter
 
 
-# ── parse_frontmatter ─────────────────────────────────────────────────────────
+# ── fixtures ─────────────────────────────────────────────────────────────────
 
-def test_parse_frontmatter_extracts_key_value_pairs():
-    """YAML frontmatter block parsed into metadata dict."""
-    text = "---\ntitle: My Doc\nauthor: Alice\n---\n\n# Content\n\nHello."
+@pytest.fixture
+def chunker():
+    return SemanticMarkdownChunker(chunk_size=512)
+
+
+@pytest.fixture
+def small_chunker():
+    return SemanticMarkdownChunker(chunk_size=50, chunk_overlap=0)
+
+
+# ── parse_frontmatter ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text, exp_fm, body_contains", [
+    ("---\ntitle: My Doc\nauthor: Alice\n---\n\n# Content\nHello.",
+     {"title": "My Doc", "author": "Alice"}, "# Content"),
+    ("# Just a heading\n\nSome content.", {}, "# Just a heading"),
+    ("---\n---\n\n# Body", {}, "# Body"),
+    ("---\n: invalid: : yaml: [\n---\nBody text", {}, "Body text"),
+    ("---\n- item1\n- item2\n---\nBody text", {}, "Body text"),
+    ("---\ntitle: oops\nno closing delimiter", {}, "no closing delimiter"),
+])
+def test_parse_frontmatter(text, exp_fm, body_contains):
     fm, rest = parse_frontmatter(text)
-    assert fm["title"] == "My Doc"
-    assert fm["author"] == "Alice"
-    assert "# Content" in rest
+    assert fm == exp_fm
+    assert body_contains in rest
+
+
+def test_parse_frontmatter_strips_delimiters():
+    fm, rest = parse_frontmatter("---\ntitle: X\n---\n\n# Content\nHello.")
     assert "---" not in rest
 
 
-def test_parse_frontmatter_no_frontmatter_returns_empty():
-    """Text without leading --- returns ({}, original_text)."""
-    text = "# Just a heading\n\nSome content."
-    fm, rest = parse_frontmatter(text)
-    assert fm == {}
-    assert rest == text
+# ── SemanticMarkdownChunker basics ───────────────────────────────────────────
 
-
-def test_parse_frontmatter_empty_frontmatter():
-    """--- ... --- with no keys returns ({}, body)."""
-    text = "---\n---\n\n# Body"
-    fm, rest = parse_frontmatter(text)
-    assert fm == {}
-    assert "# Body" in rest
-
-
-# ── SemanticMarkdownChunker ───────────────────────────────────────────────────
-
-def test_chunk_empty_text_returns_empty():
-    chunker = SemanticMarkdownChunker()
+def test_chunk_empty_text_returns_empty(chunker):
     assert chunker.chunk("", {}) == []
     assert chunker.chunk("   ", {}) == []
 
 
-def test_chunk_headings_create_separate_sections():
-    """H1 and H2 headings each start a new section → at least 2 chunks."""
-    chunker = SemanticMarkdownChunker(chunk_size=512)
-    text = "# Introduction\n\nIntro content.\n\n## Background\n\nBG content."
-    chunks = chunker.chunk(text, {})
+def test_chunk_headings_create_separate_sections(chunker):
+    chunks = chunker.chunk("# Introduction\n\nIntro content.\n\n## Background\n\nBG content.", {})
     assert len(chunks) >= 2
 
 
-def test_chunk_header_path_in_metadata():
-    """Sub-section chunks carry header_path metadata for retrieval context."""
-    chunker = SemanticMarkdownChunker(chunk_size=512)
-    text = "# Main\n\nMain content.\n\n## Sub\n\nSub content."
-    chunks = chunker.chunk(text, {"source_path": "/doc.md"})
-    # At least one chunk should reference the sub-section path
+def test_chunk_header_path_in_metadata(chunker):
+    chunks = chunker.chunk("# Main\n\nMain content.\n\n## Sub\n\nSub content.",
+                           {"source_path": "/doc.md"})
     header_paths = [c.metadata.get("header_path", "") for c in chunks]
     assert any("Sub" in (hp or "") for hp in header_paths)
 
 
-def test_chunk_naive_fallback_without_markdown_it(monkeypatch):
-    """Falls back to naive chunking when markdown-it-py is unavailable."""
-    monkeypatch.setattr(md_mod, "MARKDOWN_IT_AVAILABLE", False)
-    chunker = SemanticMarkdownChunker(chunk_size=50)
-    chunker.md = None
-    text = "Some content here.\n\nMore content below.\n\nThird paragraph."
-    chunks = chunker.chunk(text, {})
-    assert len(chunks) >= 1
-    assert all(c.text.strip() for c in chunks)
-
-
-def test_chunk_preserves_base_metadata():
-    """Base metadata dict is merged into every chunk's metadata."""
-    chunker = SemanticMarkdownChunker(chunk_size=512)
+def test_chunk_preserves_base_metadata(chunker):
     base = {"source_path": "/my/doc.md", "corpus": "notes"}
     chunks = chunker.chunk("# Hello\n\nWorld.", base)
     for c in chunks:
@@ -80,422 +66,226 @@ def test_chunk_preserves_base_metadata():
         assert c.metadata["corpus"] == "notes"
 
 
-def test_chunk_multiple_headings_no_index_error():
-    """Multiple headings in sequence do not crash the token advance loop.
-
-    Exercises the forward-search for heading_close (guards against the old
-    hardcoded i += 3 assumption).
-    """
-    chunker = SemanticMarkdownChunker(chunk_size=512)
-    text = "# Alpha\n\nContent A.\n\n# Beta\n\nContent B.\n\n# Gamma\n\nContent C."
-    chunks = chunker.chunk(text, {})
+def test_chunk_multiple_headings_no_index_error(chunker):
+    chunks = chunker.chunk(
+        "# Alpha\n\nContent A.\n\n# Beta\n\nContent B.\n\n# Gamma\n\nContent C.", {})
     titles = [c.metadata.get("header_path", "") for c in chunks]
     assert any("Alpha" in t for t in titles)
     assert any("Gamma" in t for t in titles)
 
 
-# ── nexus-zmu: pre-heading content must not be silently dropped ───────────────
-
-def test_chunk_pre_heading_content_is_not_dropped():
-    """Content before the first heading is preserved as its own chunk."""
-    chunker = SemanticMarkdownChunker(chunk_size=512)
-    text = "Preamble text before any heading.\n\n# First Section\n\nSection content."
-    chunks = chunker.chunk(text, {})
+def test_chunk_pre_heading_content_is_not_dropped(chunker):
+    chunks = chunker.chunk("Preamble text before any heading.\n\n# First Section\n\nSection content.", {})
     combined = " ".join(c.text for c in chunks)
     assert "Preamble" in combined, "Pre-heading content was silently dropped"
 
 
-def test_chunk_only_pre_heading_content_returns_one_chunk():
-    """A document with no headings at all returns its content as a single chunk."""
-    chunker = SemanticMarkdownChunker(chunk_size=512)
-    text = "Just some plain content with no headings.\n\nAnother paragraph."
-    chunks = chunker.chunk(text, {})
+def test_chunk_only_pre_heading_content(chunker):
+    chunks = chunker.chunk("Just some plain content with no headings.\n\nAnother paragraph.", {})
     assert len(chunks) >= 1
-    combined = " ".join(c.text for c in chunks)
-    assert "plain content" in combined
+    assert "plain content" in " ".join(c.text for c in chunks)
 
 
-# ── nexus-9ar: semantic chunker must write chunk_start_char/chunk_end_char ────
+# ── naive fallback ───────────────────────────────────────────────────────────
 
-def test_semantic_chunk_start_char_is_not_all_zero():
-    """Every semantic chunk must have chunk_start_char set in its metadata."""
-    chunker = SemanticMarkdownChunker(chunk_size=512)
-    text = "# Alpha\n\nContent for alpha.\n\n# Beta\n\nContent for beta."
-    chunks = chunker.chunk(text, {})
-    assert len(chunks) >= 2, "Expected at least 2 chunks"
-    for c in chunks:
-        assert "chunk_start_char" in c.metadata, "chunk_start_char missing from metadata"
-        assert "chunk_end_char" in c.metadata, "chunk_end_char missing from metadata"
-
-
-def test_semantic_chunk_offsets_are_monotonically_increasing():
-    """chunk_start_char offsets across sections should be non-decreasing."""
-    chunker = SemanticMarkdownChunker(chunk_size=512)
-    text = "# Section One\n\nContent one.\n\n# Section Two\n\nContent two.\n\n# Section Three\n\nContent three."
-    chunks = chunker.chunk(text, {})
-    starts = [c.metadata.get("chunk_start_char", 0) for c in chunks]
-    for a, b in zip(starts, starts[1:]):
-        assert a <= b, f"chunk_start_char decreased: {a} → {b}"
-
-
-def test_semantic_chunk_end_char_greater_than_start():
-    """For non-empty sections, chunk_end_char should be > chunk_start_char."""
-    chunker = SemanticMarkdownChunker(chunk_size=512)
-    text = "# Alpha\n\nSome alpha content here.\n\n# Beta\n\nSome beta content here."
-    chunks = chunker.chunk(text, {})
-    for c in chunks:
-        start = c.metadata.get("chunk_start_char", 0)
-        end = c.metadata.get("chunk_end_char", 0)
-        assert end >= start, f"chunk_end_char ({end}) < chunk_start_char ({start})"
-
-
-# ── nexus-9vp: oversized part is truncated in _split_large_section ───────────
-
-def test_split_large_section_truncates_oversized_part():
-    """A content part larger than max_chars is truncated to max_chars."""
-    chunker = SemanticMarkdownChunker(chunk_size=10, chunk_overlap=0)  # max_chars ≈ 33 chars
-
-    # Build a section with one part that vastly exceeds max_chars
-    oversized = "x" * 10000  # 10000 chars >> max_chars (≈33)
-    section = {
-        "level": 1,
-        "header": "Big Section",
-        "header_path": ["Big Section"],
-        "content_parts": [{"type": "text", "content": oversized, "is_code_block": False}],
-    }
-    chunks = chunker._split_large_section(section, {}, start_index=0)
-
+def test_chunk_naive_fallback_without_markdown_it(monkeypatch):
+    monkeypatch.setattr(md_mod, "MARKDOWN_IT_AVAILABLE", False)
+    chunker = SemanticMarkdownChunker(chunk_size=50)
+    chunker.md = None
+    chunks = chunker.chunk("Some content here.\n\nMore content below.\n\nThird paragraph.", {})
     assert len(chunks) >= 1
-    for chunk in chunks:
-        assert len(chunk.text) <= chunker.max_chars + len("# Big Section") + 4, (
-            f"Chunk text exceeds max_chars: {len(chunk.text)} chars"
-        )
+    assert all(c.text.strip() for c in chunks)
 
-
-# ── frontmatter edge cases ──────────────────────────────────────────────────
-
-def test_parse_frontmatter_invalid_yaml_returns_empty():
-    """Malformed YAML in frontmatter returns ({}, body)."""
-    text = "---\n: invalid: : yaml: [\n---\nBody text"
-    fm, rest = parse_frontmatter(text)
-    assert fm == {}
-    assert "Body text" in rest
-
-
-def test_parse_frontmatter_non_dict_returns_empty():
-    """YAML parsing to a non-dict (e.g. list) is treated as empty."""
-    text = "---\n- item1\n- item2\n---\nBody text"
-    fm, rest = parse_frontmatter(text)
-    assert fm == {}
-    assert "Body text" in rest
-
-
-def test_parse_frontmatter_unclosed_block():
-    """No closing --- means no frontmatter detected."""
-    text = "---\ntitle: oops\nno closing delimiter"
-    fm, rest = parse_frontmatter(text)
-    assert fm == {}
-    assert rest == text
-
-
-# ── semantic exception fallback ──────────────────────────────────────────────
 
 def test_chunk_semantic_exception_falls_back_to_naive():
-    """When markdown-it parse() raises, chunker falls back to naive splitting."""
     chunker = SemanticMarkdownChunker(chunk_size=512)
-    original_parse = chunker.md.parse
     chunker.md.parse = lambda text: (_ for _ in ()).throw(RuntimeError("boom"))
-
     chunks = chunker.chunk("Some plain text content.", {"source": "test"})
     assert len(chunks) >= 1
     assert "plain text" in chunks[0].text
 
-    chunker.md.parse = original_parse
+
+# ── chunk offset metadata ───────────────────────────────────────────────────
+
+def test_semantic_chunk_offsets(chunker):
+    chunks = chunker.chunk("# Alpha\n\nContent for alpha.\n\n# Beta\n\nContent for beta.", {})
+    assert len(chunks) >= 2
+    for c in chunks:
+        assert "chunk_start_char" in c.metadata
+        assert "chunk_end_char" in c.metadata
+        assert c.metadata["chunk_end_char"] >= c.metadata["chunk_start_char"]
+
+    starts = [c.metadata["chunk_start_char"] for c in chunks]
+    for a, b in zip(starts, starts[1:]):
+        assert a <= b, f"chunk_start_char decreased: {a} -> {b}"
 
 
-# ── nexus-q25l: structural-token dedup blocklist ──────────────────────────────
+# ── _split_large_section ────────────────────────────────────────────────────
+
+def test_split_large_section_truncates_oversized_part():
+    chunker = SemanticMarkdownChunker(chunk_size=10, chunk_overlap=0)
+    section = {
+        "level": 1, "header": "Big Section", "header_path": ["Big Section"],
+        "content_parts": [{"type": "text", "content": "x" * 10000, "is_code_block": False}],
+    }
+    chunks = chunker._split_large_section(section, {}, start_index=0)
+    assert len(chunks) >= 1
+    for chunk in chunks:
+        assert len(chunk.text) <= chunker.max_chars + len("# Big Section") + 4
+
+
+def test_split_large_section_truncation_with_overlap():
+    chunker = SemanticMarkdownChunker(chunk_size=10, chunk_overlap=3)
+    section = {
+        "level": 1, "header": "Big", "header_path": ["Big"],
+        "content_parts": [{"type": "text", "content": "x" * 10000, "is_code_block": False}],
+    }
+    chunks = chunker._split_large_section(section, {}, start_index=0)
+    assert len(chunks) >= 1
+    budget = chunker.max_chars + len("# Big") + chunker.overlap_chars + 8
+    for chunk in chunks:
+        assert len(chunk.text) <= budget
+
+
+# ── dedup blocklist ──────────────────────────────────────────────────────────
 
 def test_no_duplicate_content_in_chunk():
-    """paragraph_open and list_item_open must not duplicate inline content."""
-    text = "### Section\n\nA paragraph with content.\n\n- bullet one\n- bullet two\n"
-    chunks = SemanticMarkdownChunker().chunk(text, {})
+    chunks = SemanticMarkdownChunker().chunk(
+        "### Section\n\nA paragraph with content.\n\n- bullet one\n- bullet two\n", {})
     assert len(chunks) == 1
     assert chunks[0].text.count("A paragraph with content.") == 1
     assert chunks[0].text.count("bullet one") == 1
 
 
 def test_structural_token_not_duplicated():
-    """Plain paragraphs must not appear twice due to paragraph_open .map fallback."""
-    text = "Paragraph text.\n\nSecond paragraph.\n"
-    chunks = SemanticMarkdownChunker().chunk(text, {})
+    chunks = SemanticMarkdownChunker().chunk("Paragraph text.\n\nSecond paragraph.\n", {})
     full_text = "\n".join(c.text for c in chunks)
     assert full_text.count("Paragraph text.") == 1
     assert full_text.count("Second paragraph.") == 1
 
 
 def test_spurious_split_resolved():
-    """Single paragraph ~345 tokens fits in 512-token chunk after dedup fix.
-
-    sentence × 17 ≈ 1139 chars ÷ 3.3 ≈ 345 tokens (clean).
-    With paragraph_open duplication: ≈ 690 tokens → spurious split.
-    After fix: only inline token contributes → 345 tokens → one chunk.
-    """
     sentence = "The quick brown fox jumps over the lazy dog and continues running. "
-    paragraph = sentence * 17
-    text = f"### Section\n\n{paragraph}"
-    chunks = SemanticMarkdownChunker().chunk(text, {})
-    assert len(chunks) == 1, (
-        f"Expected 1 chunk after dedup fix, got {len(chunks)}"
-    )
+    chunks = SemanticMarkdownChunker().chunk(f"### Section\n\n{sentence * 17}", {})
+    assert len(chunks) == 1, f"Expected 1 chunk after dedup fix, got {len(chunks)}"
 
 
-# ── Phase 2b: byte cap post-pass ──────────────────────────────────────────────
+# ── byte cap post-pass ──────────────────────────────────────────────────────
 
-def test_md_chunker_byte_cap_enforced_on_large_code_fence() -> None:
-    """Code fence larger than SAFE_CHUNK_BYTES must be truncated in the post-pass."""
+@pytest.mark.parametrize("text", [
+    "# Section\n\n```python\n{code}\n```\n",
+    "```python\n{code}\n```",
+], ids=["with-heading", "no-heading"])
+def test_md_chunker_byte_cap_enforced(text):
     from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
-    big_code = "x" * 15_000  # 15 KB > SAFE_CHUNK_BYTES (12 288)
-    text = f"# Section\n\n```python\n{big_code}\n```\n"
-
-    chunker = SemanticMarkdownChunker(preserve_code_blocks=True)
-    chunks = chunker.chunk(text, {})
-
+    text = text.format(code="x" * 15_000)
+    chunks = SemanticMarkdownChunker(preserve_code_blocks=True).chunk(text, {})
     assert len(chunks) >= 1
     for c in chunks:
-        assert len(c.text.encode()) <= SAFE_CHUNK_BYTES, (
-            f"Chunk exceeds SAFE_CHUNK_BYTES: {len(c.text.encode())} bytes (limit {SAFE_CHUNK_BYTES})"
-        )
+        assert len(c.text.encode()) <= SAFE_CHUNK_BYTES
 
 
-def test_md_chunker_byte_cap_no_code_fence() -> None:
-    """Non-code content larger than SAFE_CHUNK_BYTES is also capped in the post-pass."""
-    from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
-    big_code = "y" * 15_000  # 15 KB single-line fence (no heading → naive path likely)
-    text = f"```python\n{big_code}\n```"
-
-    chunker = SemanticMarkdownChunker(preserve_code_blocks=True)
-    chunks = chunker.chunk(text, {})
-
-    assert len(chunks) >= 1
-    for c in chunks:
-        assert len(c.text.encode()) <= SAFE_CHUNK_BYTES, (
-            f"Chunk exceeds SAFE_CHUNK_BYTES: {len(c.text.encode())} bytes (limit {SAFE_CHUNK_BYTES})"
-        )
-
-
-# ── nexus-je5o: _split_large_section must carry overlap into next chunk ──────
-
+# ── overlap in _split_large_section ─────────────────────────────────────────
 
 def _assert_overlap_at_start(chunks, overlap_chars):
-    """Verify overlap tail of chunk[i] appears at START of chunk[i+1] body."""
     for i in range(len(chunks) - 1):
         tail = chunks[i].text[-overlap_chars:]
         next_text = chunks[i + 1].text
-        # Strip the repeated header line (e.g. "## Test\n\n") to find the overlap body
         body_start = next_text.find("\n\n")
         next_body = next_text[body_start + 2:] if body_start != -1 else next_text
         assert next_body.startswith(tail), (
             f"Chunk {i} tail not at START of chunk {i+1} body.\n"
             f"  tail ({overlap_chars} chars): {tail!r}\n"
-            f"  next body: {next_body!r}"
-        )
+            f"  next body: {next_body!r}")
 
 
 def test_split_large_section_overlap():
-    """Tail of chunk[i] text must appear verbatim at start of chunk[i+1] text.
-
-    Uses small chunk_size=50 / chunk_overlap=10 so the fixture stays compact.
-    max_chars = int(50 * 3.3) = 165, overlap_chars = int(10 * 3.3) = 33.
-    Five paragraphs force ≥3 chunks, exercising the overlap carry-forward chain.
-    """
     chunker = SemanticMarkdownChunker(chunk_size=50, chunk_overlap=10)
-    overlap_chars = chunker.overlap_chars  # 33
-
-    para = "Alpha bravo charlie delta echo foxtrot golf hotel. "  # 52 chars
+    para = "Alpha bravo charlie delta echo foxtrot golf hotel. "
     section = {
-        "level": 2,
-        "header": "Test",
-        "header_path": ["Test"],
+        "level": 2, "header": "Test", "header_path": ["Test"],
         "content_parts": [
-            {"type": "text", "content": para + "One.", "is_code_block": False},
-            {"type": "text", "content": para + "Two.", "is_code_block": False},
-            {"type": "text", "content": para + "Three.", "is_code_block": False},
-            {"type": "text", "content": para + "Four.", "is_code_block": False},
-            {"type": "text", "content": para + "Five.", "is_code_block": False},
+            {"type": "text", "content": para + suffix, "is_code_block": False}
+            for suffix in ("One.", "Two.", "Three.", "Four.", "Five.")
         ],
     }
     chunks = chunker._split_large_section(section, {}, start_index=0)
-
-    assert len(chunks) >= 3, (
-        f"Expected ≥3 chunks from 5-part section, got {len(chunks)}"
-    )
-    _assert_overlap_at_start(chunks, overlap_chars)
+    assert len(chunks) >= 3
+    _assert_overlap_at_start(chunks, chunker.overlap_chars)
 
 
 def test_split_large_section_overlap_no_header_duplication():
-    """Overlap from a short emitted chunk must not duplicate the section header."""
     chunker = SemanticMarkdownChunker(chunk_size=20, chunk_overlap=15)
-    # max_chars=66, overlap_chars=49 — overlap > likely content length
-
     section = {
-        "level": 2,
-        "header": "Hdr",
-        "header_path": ["Hdr"],
+        "level": 2, "header": "Hdr", "header_path": ["Hdr"],
         "content_parts": [
-            {"type": "text", "content": "Short.", "is_code_block": False},
-            {"type": "text", "content": "Second part is here.", "is_code_block": False},
-            {"type": "text", "content": "Third part follows.", "is_code_block": False},
+            {"type": "text", "content": t, "is_code_block": False}
+            for t in ("Short.", "Second part is here.", "Third part follows.")
         ],
     }
     chunks = chunker._split_large_section(section, {}, start_index=0)
     for chunk in chunks:
-        header_count = chunk.text.count("## Hdr")
-        assert header_count <= 1, (
-            f"Header duplicated {header_count} times in chunk: {chunk.text!r}"
-        )
+        assert chunk.text.count("## Hdr") <= 1
 
 
-# ── nexus-zg3p: classify_section_type ────────────────────────────────────────
+# ── classify_section_type ────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("header_path, expected", [
+    ([], ""),
+    (["Abstract"], "abstract"),
+    (["ABSTRACT"], "abstract"),
+    (["abstract"], "abstract"),
+    (["1. Introduction"], "introduction"),
+    (["Introduction"], "introduction"),
+    (["Methods"], "methods"),
+    (["Materials and Methods"], "methods"),
+    (["Methodology"], "methods"),
+    (["3. Methods"], "methods"),
+    (["Results"], "results"),
+    (["Results and Discussion"], "results"),
+    (["4. Results"], "results"),
+    (["Discussion"], "discussion"),
+    (["5. Discussion"], "discussion"),
+    (["Conclusion"], "conclusion"),
+    (["Conclusions"], "conclusion"),
+    (["6. Conclusion"], "conclusion"),
+    (["References"], "references"),
+    (["Reference"], "references"),
+    (["Acknowledgements"], "acknowledgements"),
+    (["Acknowledgments"], "acknowledgements"),
+    (["Appendix A"], "appendix"),
+    (["Appendices"], "appendix"),
+    (["Related Work"], "other"),
+    (["Introduction", "Background"], "introduction"),
+    (["References", "Cited Works"], "references"),
+])
+def test_classify_section_type(header_path, expected):
+    assert classify_section_type(header_path) == expected
 
 
-class TestClassifySectionType:
-    """Unit tests for classify_section_type(header_path)."""
+# ── section_type in metadata ─────────────────────────────────────────────────
 
-    def test_empty_header_path(self):
-        assert classify_section_type([]) == ""
-
-    def test_abstract(self):
-        assert classify_section_type(["Abstract"]) == "abstract"
-
-    def test_abstract_all_caps(self):
-        assert classify_section_type(["ABSTRACT"]) == "abstract"
-
-    def test_abstract_lowercase(self):
-        assert classify_section_type(["abstract"]) == "abstract"
-
-    def test_introduction_with_number(self):
-        assert classify_section_type(["1. Introduction"]) == "introduction"
-
-    def test_introduction_plain(self):
-        assert classify_section_type(["Introduction"]) == "introduction"
-
-    def test_methods(self):
-        assert classify_section_type(["Methods"]) == "methods"
-
-    def test_materials_and_methods(self):
-        assert classify_section_type(["Materials and Methods"]) == "methods"
-
-    def test_methodology(self):
-        assert classify_section_type(["Methodology"]) == "methods"
-
-    def test_results(self):
-        assert classify_section_type(["Results"]) == "results"
-
-    def test_results_and_discussion(self):
-        assert classify_section_type(["Results and Discussion"]) == "results"
-
-    def test_discussion(self):
-        assert classify_section_type(["Discussion"]) == "discussion"
-
-    def test_conclusion(self):
-        assert classify_section_type(["Conclusion"]) == "conclusion"
-
-    def test_conclusions_plural(self):
-        assert classify_section_type(["Conclusions"]) == "conclusion"
-
-    def test_references(self):
-        assert classify_section_type(["References"]) == "references"
-
-    def test_reference_singular(self):
-        assert classify_section_type(["Reference"]) == "references"
-
-    def test_acknowledgements(self):
-        assert classify_section_type(["Acknowledgements"]) == "acknowledgements"
-
-    def test_acknowledgments_us_spelling(self):
-        assert classify_section_type(["Acknowledgments"]) == "acknowledgements"
-
-    def test_appendix(self):
-        assert classify_section_type(["Appendix A"]) == "appendix"
-
-    def test_appendices(self):
-        assert classify_section_type(["Appendices"]) == "appendix"
-
-    def test_methods_with_number(self):
-        assert classify_section_type(["3. Methods"]) == "methods"
-
-    def test_results_with_number(self):
-        assert classify_section_type(["4. Results"]) == "results"
-
-    def test_discussion_with_number(self):
-        assert classify_section_type(["5. Discussion"]) == "discussion"
-
-    def test_conclusion_with_number(self):
-        assert classify_section_type(["6. Conclusion"]) == "conclusion"
-
-    def test_unrecognised_heading_returns_other(self):
-        assert classify_section_type(["Related Work"]) == "other"
-
-    def test_outer_heading_used_when_inner_unrecognised(self):
-        """Falls through to outer heading when innermost doesn't match."""
-        assert classify_section_type(["Introduction", "Background"]) == "introduction"
-
-    def test_innermost_heading_matches(self):
-        """Outer heading matched when innermost doesn't match."""
-        assert classify_section_type(["References", "Cited Works"]) == "references"
+@pytest.mark.parametrize("header_path, expected", [
+    (["Abstract"], "abstract"),
+    ([], ""),
+    (["Related Work"], "other"),
+])
+def test_make_chunk_section_type(header_path, expected):
+    chunker = SemanticMarkdownChunker(chunk_size=512)
+    chunk = chunker._make_chunk("text", 0, {}, header_path)
+    assert chunk.metadata["section_type"] == expected
 
 
-class TestSectionTypeInMetadata:
-    """Integration: section_type key is present in chunk metadata."""
-
-    def test_make_chunk_with_header(self):
-        chunker = SemanticMarkdownChunker(chunk_size=512)
-        chunk = chunker._make_chunk("text", 0, {}, ["Abstract"])
-        assert chunk.metadata["section_type"] == "abstract"
-
-    def test_make_chunk_no_header(self):
-        chunker = SemanticMarkdownChunker(chunk_size=512)
-        chunk = chunker._make_chunk("text", 0, {}, [])
-        assert chunk.metadata["section_type"] == ""
-
-    def test_make_chunk_unrecognised_header(self):
-        chunker = SemanticMarkdownChunker(chunk_size=512)
-        chunk = chunker._make_chunk("text", 0, {}, ["Related Work"])
-        assert chunk.metadata["section_type"] == "other"
-
-    def test_full_chunk_pipeline_has_section_type(self):
-        chunker = SemanticMarkdownChunker(chunk_size=512)
-        text = "# Abstract\n\nThis paper presents...\n\n# References\n\n[1] Foo et al."
-        chunks = chunker.chunk(text, {})
-        for c in chunks:
-            assert "section_type" in c.metadata
-
-    def test_naive_fallback_has_section_type(self, monkeypatch):
-        monkeypatch.setattr(md_mod, "MARKDOWN_IT_AVAILABLE", False)
-        chunker = SemanticMarkdownChunker(chunk_size=50)
-        chunker.md = None
-        chunks = chunker.chunk("Some content here.\n\nMore content.", {})
-        for c in chunks:
-            assert c.metadata.get("section_type") == ""
+def test_full_chunk_pipeline_has_section_type(chunker):
+    chunks = chunker.chunk("# Abstract\n\nThis paper presents...\n\n# References\n\n[1] Foo et al.", {})
+    for c in chunks:
+        assert "section_type" in c.metadata
 
 
-def test_split_large_section_truncation_with_overlap():
-    """Oversized part is truncated even when overlap is non-zero."""
-    chunker = SemanticMarkdownChunker(chunk_size=10, chunk_overlap=3)
-    # max_chars=33, overlap_chars=9
-
-    oversized = "x" * 10000
-    section = {
-        "level": 1,
-        "header": "Big",
-        "header_path": ["Big"],
-        "content_parts": [{"type": "text", "content": oversized, "is_code_block": False}],
-    }
-    chunks = chunker._split_large_section(section, {}, start_index=0)
-    assert len(chunks) >= 1
-    for chunk in chunks:
-        # Budget: max_chars + header + overlap + separators
-        budget = chunker.max_chars + len("# Big") + chunker.overlap_chars + 8
-        assert len(chunk.text) <= budget, (
-            f"Chunk exceeds budget: {len(chunk.text)} > {budget}"
-        )
+def test_naive_fallback_has_section_type(monkeypatch):
+    monkeypatch.setattr(md_mod, "MARKDOWN_IT_AVAILABLE", False)
+    chunker = SemanticMarkdownChunker(chunk_size=50)
+    chunker.md = None
+    chunks = chunker.chunk("Some content here.\n\nMore content.", {})
+    for c in chunks:
+        assert c.metadata.get("section_type") == ""

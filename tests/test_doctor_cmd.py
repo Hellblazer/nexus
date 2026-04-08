@@ -1,8 +1,10 @@
-"""nx doctor — health check command tests."""
+# SPDX-License-Identifier: AGPL-3.0-or-later
+import contextlib
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
@@ -10,539 +12,275 @@ from nexus.cli import main
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 
 
-def _runner() -> CliRunner:
+# ── Fixtures / helpers ──────────────────────────────────────────────────────
+
+@pytest.fixture()
+def runner():
     return CliRunner()
 
 
-# ── All credentials present, tools found ─────────────────────────────────────
+@pytest.fixture()
+def mock_reg():
+    reg = MagicMock()
+    reg.all.return_value = []
+    return reg
 
-def test_doctor_all_healthy() -> None:
-    """When everything is present, exit code is 0."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
+
+def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
+            cloud_client=None, extra_patches=None):
+    patches = [
         patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-fake-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
+    ]
+    if callable(cred):
+        patches.append(patch("nexus.commands.doctor.get_credential",
+                             side_effect=cred))
+    else:
+        patches.append(patch("nexus.commands.doctor.get_credential",
+                             return_value=cred))
+    if callable(which):
+        patches.append(patch("nexus.commands.doctor.shutil.which",
+                             side_effect=which))
+    else:
+        patches.append(patch("nexus.commands.doctor.shutil.which",
+                             return_value=which))
+    if cloud_client is not None:
+        patches.append(patch("nexus.commands.doctor.chromadb.CloudClient",
+                             **cloud_client))
+    elif cred and not callable(cred):
+        patches.append(patch("nexus.commands.doctor.chromadb.CloudClient",
+                             return_value=MagicMock()))
+    patches.extend(extra_patches or [])
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        return runner.invoke(main, ["doctor"])
 
+
+# ── Healthy / basic output ──────────────────────────────────────────────────
+
+def test_doctor_all_healthy(runner, mock_reg):
+    result = _invoke(runner, mock_reg)
     assert result.exit_code == 0
-    assert "✓" in result.output
+    assert "\u2713" in result.output
 
 
-# ── Missing credentials ──────────────────────────────────────────────────────
+@pytest.mark.parametrize("expected", [
+    "git hooks", "index log", "\u2713 index log", "Python", "3.12",
+])
+def test_doctor_healthy_output_contains(runner, mock_reg, expected):
+    result = _invoke(runner, mock_reg)
+    assert result.exit_code == 0
+    assert expected in result.output
 
-def test_doctor_missing_credentials_exit_1() -> None:
-    """Missing credentials cause exit code 1 with signup hints."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value=None),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-    ):
-        result = runner.invoke(main, ["doctor"])
 
+@pytest.mark.parametrize("absent", ["nx serve start", "Nexus server"])
+def test_doctor_does_not_mention_serve(runner, mock_reg, absent):
+    result = _invoke(runner, mock_reg)
+    assert absent not in result.output
+
+
+# ── Missing credentials ─────────────────────────────────────────────────────
+
+def test_doctor_missing_credentials_exit_1(runner, mock_reg):
+    result = _invoke(runner, mock_reg, cred=None)
     assert result.exit_code == 1
-    assert "✗" in result.output
+    assert "\u2717" in result.output
     assert "CHROMA_API_KEY" in result.output
     assert "nx config init" in result.output
 
 
-# ── Missing tools ────────────────────────────────────────────────────────────
-
-def test_doctor_missing_rg() -> None:
-    """Missing ripgrep is reported with actionable fix hints."""
-    runner = _runner()
-
-    def which_side_effect(name):
-        if name == "rg":
-            return None
-        return f"/usr/bin/{name}"
-
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 1
-    assert "not found" in result.output
-    assert "hybrid search disabled" in result.output
-    assert "brew install ripgrep" in result.output
-
-
-# ── Hooks status ──────────────────────────────────────────────────────────────
-
-def test_doctor_hooks_section_present() -> None:
-    """nx doctor output includes a hooks section (shows 'git hooks' in output)."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 0
-    assert "git hooks" in result.output
-
-
-def test_doctor_hooks_no_repos_registered() -> None:
-    """When no repos in registry, doctor shows 'no repos registered' message."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 0
-    assert "no repos registered" in result.output
-    assert "nx index repo" in result.output
-    # Always ✓ — never causes exit 1
-    assert "✓ git hooks" in result.output
-
-
-def test_doctor_hooks_installed() -> None:
-    """When hooks are installed, doctor shows tick with repo path and hook names."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = ["/some/repo"]
-
-    with tempfile.TemporaryDirectory() as td:
-        hooks_dir = Path(td)
-        for name in ("post-commit", "post-merge", "post-rewrite"):
-            (hooks_dir / name).write_text(f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
-
-        with (
-            patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-            patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-            patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-            patch("nexus.commands.doctor._effective_hooks_dir", return_value=hooks_dir),
-            patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-        ):
-            result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 0
-    assert "✓ git hooks" in result.output
-    assert "/some/repo" in result.output
-    assert "post-commit" in result.output
-
-
-def test_doctor_hooks_not_installed() -> None:
-    """When hooks are missing, doctor shows tick (non-fatal) with 'not installed' and Fix hint."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = ["/some/repo"]
-
-    with tempfile.TemporaryDirectory() as td:
-        hooks_dir = Path(td)  # empty — no hook files
-
-        with (
-            patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-            patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-            patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-            patch("nexus.commands.doctor._effective_hooks_dir", return_value=hooks_dir),
-            patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-        ):
-            result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 0  # Always non-fatal
-    assert "✓ git hooks" in result.output
-    assert "not installed" in result.output
-    assert "nx hooks install /some/repo" in result.output
-
-
-def test_doctor_hooks_check_always_nonfatal() -> None:
-    """Hooks check is always ✓ (non-fatal), even when hooks are missing."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = ["/some/repo"]
-
-    with tempfile.TemporaryDirectory() as td:
-        hooks_dir = Path(td)  # empty — no hook files
-
-        with (
-            patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-            patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-            patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-            patch("nexus.commands.doctor._effective_hooks_dir", return_value=hooks_dir),
-            patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-        ):
-            result = runner.invoke(main, ["doctor"])
-
-    # Credentials all set, tools found — only hooks missing, which is non-fatal
-    assert result.exit_code == 0
-    assert "✗ git hooks" not in result.output
-
-
-def test_doctor_hooks_exception_does_not_propagate() -> None:
-    """Exception in hooks check is swallowed — doctor still exits 0 when creds are ok."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = ["/some/repo"]
-
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor._effective_hooks_dir",
-              side_effect=RuntimeError("git error")),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 0
-    assert "git hooks" in result.output
-
-
-# ── Index log check ───────────────────────────────────────────────────────────
-
-def test_doctor_index_log_shows_path() -> None:
-    """Doctor output contains the index log label."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert "index log" in result.output
-    assert "✓ index log" in result.output
-
-
-def test_doctor_index_log_not_created_yet() -> None:
-    """When index.log does not exist, doctor reports 'not created yet'."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Point HOME to a temp dir that has no index.log
-        fake_home = Path(tmpdir)
-        (fake_home / ".config" / "nexus").mkdir(parents=True, exist_ok=True)
-        # Do not create index.log — it should not exist
-
-        with (
-            patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-            patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-            patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-            patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-        ):
-            # Patch Path.home so the log_path and registry_path use our tmp dir
-            with patch.object(Path, "home", return_value=fake_home):
-                result = runner.invoke(main, ["doctor"])
-
-    assert "index log" in result.output
-    assert "not created yet" in result.output
-
-
-# ── No serve import ───────────────────────────────────────────────────────────
-
-def test_doctor_does_not_mention_serve_start() -> None:
-    """doctor output does NOT mention 'nx serve start' (serve check removed)."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert "nx serve start" not in result.output
-    assert "Nexus server" not in result.output
-
-
-# ── Partial credentials ──────────────────────────────────────────────────────
-
-def test_doctor_partial_credentials() -> None:
-    """Some present, some missing — inline Fix hints shown only for missing."""
-    runner = _runner()
-
-    def cred_side_effect(key):
-        return "sk-key" if key in ("chroma_api_key", "voyage_api_key") else None
-
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", side_effect=cred_side_effect),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 1
-    # CHROMA_TENANT is optional — shown informationally but no fix hint
-    assert "CHROMA_TENANT" in result.output
-    assert "nx config set chroma_tenant" not in result.output
-    # Missing CHROMA_DATABASE should produce a fix hint
-    assert "nx config set chroma_database" in result.output
-    # Present keys should show as set, not have fix hints
-    assert "nx config set chroma_api_key" not in result.output
-    assert "nx config set voyage_api_key" not in result.output
-
-
-# ── Python version check ─────────────────────────────────────────────────────
-
-def test_doctor_python_version_shown() -> None:
-    """Python version is always reported in output."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert "Python" in result.output
-    assert "3.12" in result.output
-
-
-def test_doctor_python_version_too_old_fails() -> None:
-    """Exit code 1 and fix hint when Python < 3.12."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.commands.doctor._python_ok", return_value=(False, "3.11.0")),
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 1
-    assert "✗" in result.output
-    assert "3.12" in result.output
-    assert "python.org" in result.output
-
-
-# ── Inline fix hints ──────────────────────────────────────────────────────────
-
-def test_doctor_missing_credential_shows_inline_fix() -> None:
-    """Each missing credential shows an inline Fix: hint with nx config set command."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value=None),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/tool"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
+def test_doctor_missing_credential_shows_inline_fix(runner, mock_reg):
+    result = _invoke(runner, mock_reg, cred=None)
     assert "nx config set chroma_api_key" in result.output
     assert "nx config set voyage_api_key" in result.output
     assert "trychroma.com" in result.output
     assert "voyageai.com" in result.output
 
 
-def test_doctor_missing_rg_shows_platform_hints() -> None:
-    """Missing ripgrep shows brew, apt, and URL fix hints."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
+def test_doctor_partial_credentials(runner, mock_reg):
+    def cred_side_effect(key):
+        return "sk-key" if key in ("chroma_api_key", "voyage_api_key") else None
 
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value=None),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
+    result = _invoke(runner, mock_reg, cred=cred_side_effect)
+    assert result.exit_code == 1
+    assert "CHROMA_TENANT" in result.output
+    assert "nx config set chroma_tenant" not in result.output
+    assert "nx config set chroma_database" in result.output
+    assert "nx config set chroma_api_key" not in result.output
+    assert "nx config set voyage_api_key" not in result.output
 
+
+# ── Missing tools ───────────────────────────────────────────────────────────
+
+def _which_missing(name):
+    """which side-effect that only hides rg."""
+    return None if name == "rg" else f"/usr/bin/{name}"
+
+
+def test_doctor_missing_rg(runner, mock_reg):
+    result = _invoke(runner, mock_reg, which=_which_missing)
+    assert result.exit_code == 1
+    assert "not found" in result.output
+    assert "hybrid search disabled" in result.output
+    assert "brew install ripgrep" in result.output
+
+
+def test_doctor_missing_rg_shows_platform_hints(runner, mock_reg):
+    result = _invoke(runner, mock_reg, which=lambda _: None)
     assert "brew install ripgrep" in result.output
     assert "apt install ripgrep" in result.output
     assert "BurntSushi/ripgrep" in result.output
 
 
-# ── Single-database check ─────────────────────────────────────────────────────
-
-def test_doctor_single_db_calls_cloud_client() -> None:
-    """doctor checks the single database (reachability + pipeline + pagination)."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    mock_client = MagicMock()
-    mock_client.list_collections.return_value = []
-
-    import chromadb.errors
-    def cloud_client_side_effect(**kwargs):
-        db_name = kwargs.get("database", "")
-        # Old layout probe for {base}_code should fail
-        if db_name.endswith("_code"):
-            raise chromadb.errors.NotFoundError("probe: not found")
-        return mock_client
-
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient",
-              side_effect=cloud_client_side_effect),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert "reachable" in result.output
+@pytest.mark.parametrize("tool,exit_code", [("bd", 0), ("uv", 0)])
+def test_doctor_missing_optional_tool(runner, mock_reg, tool, exit_code):
+    def which_side(name):
+        return None if name == tool else f"/usr/bin/{name}"
+    result = _invoke(runner, mock_reg, which=which_side)
+    assert result.exit_code == exit_code
 
 
-def test_doctor_single_db_unreachable_fails_with_fix_hint() -> None:
-    """When the database is unreachable, exit code 1 and fix hint shown."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient",
-              side_effect=RuntimeError("connection refused")),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 1
-    assert "not reachable" in result.output
-    assert "nx config init" in result.output
-
-
-def test_doctor_single_db_error_does_not_expose_exception_text() -> None:
-    """doctor check prints 'not reachable' without raw exception detail."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient",
-              side_effect=RuntimeError("HTTP 401: invalid api_key SUPERSECRET")),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert "SUPERSECRET" not in result.output
-    assert "not reachable" in result.output
-
-
-# ── bd (beads) ───────────────────────────────────────────────────────────────
-
-def test_doctor_missing_bd_does_not_fail() -> None:
-    """Missing bd is reported as informational — does not cause exit code 1."""
-    runner = _runner()
-
-    def which_side_effect(name):
-        if name == "bd":
-            return None
-        return f"/usr/bin/{name}"
-
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert result.exit_code == 0
+def test_doctor_missing_bd_output(runner, mock_reg):
+    def which_side(name):
+        return None if name == "bd" else f"/usr/bin/{name}"
+    result = _invoke(runner, mock_reg, which=which_side)
     assert "bd (beads" in result.output
     assert "not found" in result.output
     assert "BeadsProject/beads" in result.output
 
 
-def test_doctor_missing_uv_does_not_fail() -> None:
-    """uv is an install-time tool and is not checked by doctor at all."""
-    runner = _runner()
+# ── Python version ──────────────────────────────────────────────────────────
 
-    def which_side_effect(name):
-        if name == "uv":
-            return None
-        return f"/usr/bin/{name}"
+def test_doctor_python_version_too_old_fails(runner, mock_reg):
+    result = _invoke(runner, mock_reg, extra_patches=[
+        patch("nexus.commands.doctor._python_ok", return_value=(False, "3.11.0")),
+    ])
+    assert result.exit_code == 1
+    assert "\u2717" in result.output
+    assert "3.12" in result.output
+    assert "python.org" in result.output
 
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.get_credential", return_value="sk-key"),
-        patch("nexus.commands.doctor.shutil.which", side_effect=which_side_effect),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
-        patch("nexus.commands.doctor.chromadb.CloudClient", return_value=MagicMock()),
-    ):
-        result = runner.invoke(main, ["doctor"])
 
+# ── Hooks ───────────────────────────────────────────────────────────────────
+
+def test_doctor_hooks_no_repos_registered(runner, mock_reg):
+    result = _invoke(runner, mock_reg)
     assert result.exit_code == 0
+    assert "no repos registered" in result.output
+    assert "nx index repo" in result.output
+    assert "\u2713 git hooks" in result.output
 
 
-# ── _check helper ────────────────────────────────────────────────────────────
+def test_doctor_hooks_installed(runner):
+    reg = MagicMock()
+    reg.all.return_value = ["/some/repo"]
+    with tempfile.TemporaryDirectory() as td:
+        hooks_dir = Path(td)
+        for name in ("post-commit", "post-merge", "post-rewrite"):
+            (hooks_dir / name).write_text(
+                f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
+        result = _invoke(runner, reg, extra_patches=[
+            patch("nexus.commands.doctor._effective_hooks_dir",
+                  return_value=hooks_dir),
+        ])
+    assert result.exit_code == 0
+    assert "\u2713 git hooks" in result.output
+    assert "/some/repo" in result.output
+    assert "post-commit" in result.output
 
-def test_check_helper_format() -> None:
+
+def test_doctor_hooks_not_installed(runner):
+    reg = MagicMock()
+    reg.all.return_value = ["/some/repo"]
+    with tempfile.TemporaryDirectory() as td:
+        result = _invoke(runner, reg, extra_patches=[
+            patch("nexus.commands.doctor._effective_hooks_dir",
+                  return_value=Path(td)),
+        ])
+    assert result.exit_code == 0
+    assert "\u2713 git hooks" in result.output
+    assert "not installed" in result.output
+    assert "nx hooks install /some/repo" in result.output
+    assert "\u2717 git hooks" not in result.output
+
+
+def test_doctor_hooks_exception_does_not_propagate(runner):
+    reg = MagicMock()
+    reg.all.return_value = ["/some/repo"]
+    result = _invoke(runner, reg, extra_patches=[
+        patch("nexus.commands.doctor._effective_hooks_dir",
+              side_effect=RuntimeError("git error")),
+    ])
+    assert result.exit_code == 0
+    assert "git hooks" in result.output
+
+
+# ── Index log ───────────────────────────────────────────────────────────────
+
+def test_doctor_index_log_not_created_yet(runner, mock_reg):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_home = Path(tmpdir)
+        (fake_home / ".config" / "nexus").mkdir(parents=True, exist_ok=True)
+        result = _invoke(runner, mock_reg, extra_patches=[
+            patch.object(Path, "home", return_value=fake_home),
+        ])
+    assert "index log" in result.output
+    assert "not created yet" in result.output
+
+
+# ── Single-database check ───────────────────────────────────────────────────
+
+def test_doctor_single_db_calls_cloud_client(runner, mock_reg):
+    import chromadb.errors
+    mock_client = MagicMock()
+    mock_client.list_collections.return_value = []
+
+    def cloud_side(**kwargs):
+        if kwargs.get("database", "").endswith("_code"):
+            raise chromadb.errors.NotFoundError("probe: not found")
+        return mock_client
+
+    result = _invoke(runner, mock_reg,
+                     cloud_client={"side_effect": cloud_side})
+    assert "reachable" in result.output
+
+
+def test_doctor_single_db_unreachable_fails(runner, mock_reg):
+    result = _invoke(runner, mock_reg, cloud_client={
+        "side_effect": RuntimeError("connection refused"),
+    })
+    assert result.exit_code == 1
+    assert "not reachable" in result.output
+    assert "nx config init" in result.output
+
+
+def test_doctor_single_db_no_secret_leak(runner, mock_reg):
+    result = _invoke(runner, mock_reg, cloud_client={
+        "side_effect": RuntimeError("HTTP 401: invalid api_key SUPERSECRET"),
+    })
+    assert "SUPERSECRET" not in result.output
+    assert "not reachable" in result.output
+
+
+# ── _check helper ───────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("ok,expected", [
+    (True, "\u2713"), (False, "\u2717"),
+])
+def test_check_helper_format(ok, expected):
     from nexus.commands.doctor import _check
+    assert expected in _check("Test", ok)
 
-    assert "✓" in _check("Test", True)
-    assert "✗" in _check("Test", False)
+
+def test_check_helper_detail():
+    from nexus.commands.doctor import _check
     assert "some detail" in _check("Test", True, "some detail")
 
 
-# ── Local mode ───────────────────────────────────────────────────────────────
+# ── Local mode ──────────────────────────────────────────────────────────────
 
-def test_doctor_local_mode_shows_local_checks(tmp_path: Path) -> None:
-    """In local mode, doctor shows local path, embedding model, and skips cloud checks."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-
+def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config._default_local_path", return_value=tmp_path / "chroma"),
@@ -550,7 +288,6 @@ def test_doctor_local_mode_shows_local_checks(tmp_path: Path) -> None:
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
     ):
         result = runner.invoke(main, ["doctor"])
-
     assert result.exit_code == 0
     assert "local" in result.output.lower()
     assert "Embedding model" in result.output
@@ -558,13 +295,7 @@ def test_doctor_local_mode_shows_local_checks(tmp_path: Path) -> None:
     assert "VOYAGE_API_KEY" not in result.output
 
 
-def test_doctor_local_mode_shows_collection_count(tmp_path: Path) -> None:
-    """In local mode with existing data, doctor shows collection count and disk usage."""
-    runner = _runner()
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-
-    # Create a local chroma dir with some data
+def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     chroma_path = tmp_path / "chroma"
     import chromadb
     from nexus.db.local_ef import LocalEmbeddingFunction
@@ -580,7 +311,6 @@ def test_doctor_local_mode_shows_collection_count(tmp_path: Path) -> None:
         patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
     ):
         result = runner.invoke(main, ["doctor"])
-
     assert result.exit_code == 0
     assert "1 collections" in result.output
     assert "on disk" in result.output

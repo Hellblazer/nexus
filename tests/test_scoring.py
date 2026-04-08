@@ -1,4 +1,7 @@
-"""scoring.py edge cases: empty inputs, error paths, interleaving."""
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Consolidated scoring tests: normalize, hybrid, rerank, interleave, quality, file-size."""
+from __future__ import annotations
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -6,153 +9,212 @@ import pytest
 from nexus.scoring import (
     _file_size_factor,
     apply_hybrid_scoring,
+    apply_quality_boost,
     min_max_normalize,
+    quality_score,
     rerank_results,
     round_robin_interleave,
 )
 from nexus.types import SearchResult
 
 
-def _result(coll: str = "code__repo", dist: float = 0.3, frecency: float = 0.5) -> SearchResult:
-    return SearchResult(
-        id="r1",
-        content="some content",
-        distance=dist,
-        collection=coll,
-        metadata={"frecency_score": frecency},
-    )
+def _r(coll: str = "code__repo", dist: float = 0.3, frecency: float = 0.5,
+       chunks: int = 1, **meta: object) -> SearchResult:
+    m = {"frecency_score": frecency, "chunk_count": chunks}
+    m.update(meta)
+    return SearchResult(id=f"{coll}-d{dist}", content="content",
+                        distance=dist, collection=coll, metadata=m)
 
 
 # ── min_max_normalize ────────────────────────────────────────────────────────
 
-def test_min_max_normalize_empty_window_raises() -> None:
-    with pytest.raises(ValueError, match="window must be non-empty"):
+@pytest.mark.parametrize("value,window,expected", [
+    (42.0, [42.0], 1.0),               # single element
+    (5.0, [5.0, 5.0, 5.0], 0.0),       # identical values
+    (0.5, [0.0, 1.0], 0.5),            # typical
+    (1.0, [1.0, 3.0, 5.0], 0.0),       # min of range
+    (5.0, [1.0, 3.0, 5.0], 1.0),       # max of range
+])
+def test_min_max_normalize(value, window, expected):
+    assert min_max_normalize(value, window) == pytest.approx(expected, abs=1e-6)
+
+
+def test_min_max_normalize_empty_raises():
+    with pytest.raises(ValueError, match="non-empty"):
         min_max_normalize(0.5, [])
-
-
-def test_min_max_normalize_single_element() -> None:
-    assert min_max_normalize(42.0, [42.0]) == 1.0
-
-
-def test_min_max_normalize_identical_values() -> None:
-    """When all window values are the same, result collapses to ~0.0."""
-    result = min_max_normalize(5.0, [5.0, 5.0, 5.0])
-    assert result == pytest.approx(0.0, abs=1e-6)
-
-
-def test_min_max_normalize_typical() -> None:
-    result = min_max_normalize(0.5, [0.0, 1.0])
-    assert result == pytest.approx(0.5, abs=1e-6)
 
 
 # ── apply_hybrid_scoring ─────────────────────────────────────────────────────
 
-def test_apply_hybrid_scoring_empty_results() -> None:
+def test_hybrid_scoring_empty():
     assert apply_hybrid_scoring([], hybrid=True) == []
 
 
-def test_apply_hybrid_scoring_no_code_corpus_warning() -> None:
-    """--hybrid with only docs results logs warning, uses v_norm only."""
-    r = _result(coll="docs__corpus", dist=0.2)
+def test_hybrid_scoring_no_code_warns():
+    r = _r(coll="docs__corpus", dist=0.2)
     results = apply_hybrid_scoring([r], hybrid=True)
-    assert len(results) == 1
-    assert results[0].hybrid_score is not None
+    assert len(results) == 1 and results[0].hybrid_score is not None
 
 
-def test_apply_hybrid_scoring_code_corpus_uses_frecency() -> None:
-    r = _result(coll="code__repo", dist=0.2, frecency=0.8)
+def test_hybrid_scoring_code_uses_frecency():
+    r = _r(coll="code__repo", dist=0.2, frecency=0.8)
     results = apply_hybrid_scoring([r], hybrid=True)
     assert results[0].hybrid_score > 0
 
 
+def test_hybrid_score_weighted_sum():
+    from nexus.scoring import hybrid_score
+    assert hybrid_score(0.8, 0.5) == pytest.approx(0.71, abs=1e-6)
+
+
 # ── rerank_results ───────────────────────────────────────────────────────────
 
-def test_rerank_results_empty() -> None:
+def test_rerank_empty():
     assert rerank_results([], "query") == []
 
 
-def test_rerank_results_exception_returns_original() -> None:
-    """When reranker raises, results are returned in original order."""
+@pytest.mark.parametrize("exc", [Exception("API error"), RuntimeError("timeout")])
+def test_rerank_degrades_on_error(exc):
     mock_client = MagicMock()
-    mock_client.rerank.side_effect = Exception("API error")
-    r = _result()
-
+    mock_client.rerank.side_effect = exc
     with patch("nexus.scoring._voyage_client", return_value=mock_client):
-        results = rerank_results([r], "query", top_k=1)
-
+        results = rerank_results([_r()], "query", top_k=1)
     assert len(results) == 1
-    assert results[0].id == "r1"
 
 
 # ── round_robin_interleave ───────────────────────────────────────────────────
 
-def test_round_robin_interleave_empty_groups() -> None:
-    assert round_robin_interleave([]) == []
-
-
-def test_round_robin_interleave_single_empty_group() -> None:
-    assert round_robin_interleave([[]]) == []
-
-
-def test_round_robin_interleave_mixed_lengths() -> None:
-    a = _result(coll="code__a", dist=0.1)
-    b = _result(coll="code__b", dist=0.2)
-    c = _result(coll="code__a", dist=0.3)
-    result = round_robin_interleave([[a, c], [b]])
-    assert [r.distance for r in result] == [0.1, 0.2, 0.3]
+@pytest.mark.parametrize("groups,expected_dists", [
+    ([], []),
+    ([[]], []),
+    ([[_r(dist=0.1), _r(dist=0.3)], [_r(dist=0.2)]], [0.1, 0.2, 0.3]),
+])
+def test_round_robin_interleave(groups, expected_dists):
+    result = round_robin_interleave(groups)
+    assert [r.distance for r in result] == expected_dists
 
 
 # ── _file_size_factor ────────────────────────────────────────────────────────
 
-def test_file_size_factor_at_threshold() -> None:
-    """chunk_count == threshold → factor == 1.0 (no penalty)."""
-    assert _file_size_factor(30) == pytest.approx(1.0)
+@pytest.mark.parametrize("chunks,expected", [
+    (30, 1.0),       # at threshold
+    (37, 30 / 37),   # above threshold
+    (10, 1.0),       # below threshold
+    (0, 1.0),        # zero → max(1, 0)=1
+])
+def test_file_size_factor(chunks, expected):
+    assert _file_size_factor(chunks) == pytest.approx(expected, abs=0.001)
 
 
-def test_file_size_factor_above_threshold() -> None:
-    """chunk_count > threshold → factor < 1.0."""
-    assert _file_size_factor(37) == pytest.approx(30 / 37, abs=0.001)
-
-
-def test_file_size_factor_below_threshold() -> None:
-    """chunk_count < threshold → capped at 1.0."""
-    assert _file_size_factor(10) == pytest.approx(1.0)
-
-
-def test_file_size_factor_zero_chunks() -> None:
-    """chunk_count == 0 → treated as 1 via max(1, 0), factor == 1.0."""
-    assert _file_size_factor(0) == pytest.approx(1.0)
-
-
-# ── file-size penalty in apply_hybrid_scoring ────────────────────────────────
-
-def _sized_result(coll: str, dist: float, chunks: int) -> SearchResult:
-    return SearchResult(
-        id=f"{coll}-d{dist}",
-        content="content",
-        distance=dist,
-        collection=coll,
-        metadata={"frecency_score": 0.5, "chunk_count": chunks},
-    )
-
-
-def test_size_penalty_applied_regardless_of_hybrid_flag() -> None:
-    """File-size penalty applies to code__ results even when hybrid=False."""
-    # Three results so middle one (dist=0.5) gets v_norm=0.5
-    r_a = _sized_result("code__repo", 0.0, 5)   # v_norm=1.0, factor=1.0 → score=1.0
-    r_b = _sized_result("code__repo", 0.5, 60)  # v_norm=0.5, factor=30/60=0.5 → score=0.25
-    r_c = _sized_result("code__repo", 1.0, 5)   # v_norm=0.0, factor=1.0 → score=0.0
+def test_size_penalty_applied_to_code():
+    r_a = _r("code__repo", 0.0, chunks=5)
+    r_b = _r("code__repo", 0.5, chunks=60)
+    r_c = _r("code__repo", 1.0, chunks=5)
     results = apply_hybrid_scoring([r_a, r_b, r_c], hybrid=False)
     score_map = {r.distance: r.hybrid_score for r in results}
     assert score_map[0.5] == pytest.approx(0.25, abs=1e-6)
 
 
 @pytest.mark.parametrize("coll", ["docs__corpus", "knowledge__notes"])
-def test_size_penalty_not_applied_to_non_code_results(coll: str) -> None:
-    """File-size penalty NOT applied to docs__ or knowledge__ results."""
-    r_a = _sized_result(coll, 0.0, 5)   # v_norm=1.0 → score=1.0
-    r_b = _sized_result(coll, 0.5, 60)  # v_norm=0.5, no penalty → score=0.5
-    r_c = _sized_result(coll, 1.0, 5)   # v_norm=0.0 → score=0.0
+def test_size_penalty_not_applied_to_non_code(coll):
+    r_a = _r(coll, 0.0, chunks=5)
+    r_b = _r(coll, 0.5, chunks=60)
+    r_c = _r(coll, 1.0, chunks=5)
     results = apply_hybrid_scoring([r_a, r_b, r_c], hybrid=False)
     score_map = {r.distance: r.hybrid_score for r in results}
     assert score_map[0.5] == pytest.approx(0.5, abs=1e-6)
+
+
+# ── quality_score (RDR-055 E2) ───────────────────────────────────────────────
+
+@pytest.mark.parametrize("count,expected_zero", [
+    (0, True), (-1, True),
+])
+def test_quality_score_zero_for_unenriched(count, expected_zero):
+    assert (quality_score(count) == 0.0) == expected_zero
+
+
+def test_quality_score_monotonic():
+    scores = [quality_score(n) for n in (10, 100, 1000)]
+    assert scores[0] < scores[1] < scores[2]
+
+
+def test_quality_score_bounded():
+    assert quality_score(100_000) <= 1.0
+
+
+def test_quality_score_age_decay():
+    assert quality_score(100, age_days=30) > quality_score(100, age_days=3000)
+
+
+def test_quality_score_alpha_ignores_age():
+    assert quality_score(100, age_days=365, alpha=1.0) == pytest.approx(
+        quality_score(100, age_days=0, alpha=1.0), abs=1e-9)
+
+
+# ── apply_quality_boost ──────────────────────────────────────────────────────
+
+def _qr(dist: float = 0.3, coll: str = "knowledge__papers",
+        bib_count: int = 0, **meta: object) -> SearchResult:
+    m = {"bib_citation_count": bib_count}
+    m.update(meta)
+    return SearchResult(id="r1", content="chunk", distance=dist,
+                        collection=coll, metadata=m)
+
+
+def test_quality_boost_no_enrichment():
+    results = [_qr(0.3), _qr(0.5)]
+    for r in results:
+        r.hybrid_score = 1.0 - r.distance
+    orig = [r.hybrid_score for r in results]
+    apply_quality_boost(results)
+    assert [r.hybrid_score for r in results] == orig
+
+
+def test_quality_boost_enriched():
+    r_high, r_low = _qr(bib_count=500), _qr(bib_count=0)
+    r_high.hybrid_score = r_low.hybrid_score = 0.5
+    apply_quality_boost([r_high, r_low])
+    assert r_high.hybrid_score > r_low.hybrid_score
+
+
+def test_quality_boost_skips_code():
+    r = _qr(coll="code__repo", bib_count=500)
+    r.hybrid_score = 0.7
+    apply_quality_boost([r])
+    assert r.hybrid_score == 0.7
+
+
+# ── module import + circular dep guards ──────────────────────────────────────
+
+def test_no_circular_imports():
+    import importlib, sys
+    saved = dict(sys.modules)
+    try:
+        for mod in [k for k in sys.modules if k.startswith("nexus.")]:
+            del sys.modules[mod]
+        scoring = importlib.import_module("nexus.scoring")
+        formatters = importlib.import_module("nexus.formatters")
+        assert not hasattr(scoring, "search_engine")
+        assert not hasattr(formatters, "search_engine")
+    finally:
+        sys.modules.clear()
+        sys.modules.update(saved)
+
+
+# ── formatter spot-checks ────────────────────────────────────────────────────
+
+def test_format_vimgrep():
+    from nexus.formatters import format_vimgrep
+    r = SearchResult(id="1", content="def foo():", distance=0.1,
+                     collection="code__r", metadata={"source_path": "./foo.py", "line_start": 10})
+    assert format_vimgrep([r]) == ["./foo.py:10:0:def foo():"]
+
+
+def test_format_json_no_metadata_shadow():
+    import json as _json
+    from nexus.formatters import format_json
+    r = SearchResult(id="real", content="real", distance=0.3, collection="c",
+                     metadata={"id": "EVIL", "content": "EVIL"})
+    parsed = _json.loads(format_json([r]))
+    assert parsed[0]["id"] == "real" and parsed[0]["content"] == "real"

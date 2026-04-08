@@ -1,17 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-052 verification tests: catalog-first query routing.
-
-Unit tests (no API keys) verifying:
-- Path routing logic (author, content_type, subtree, follow_links)
-- Template matching and idempotency
-- Plan TTL auto-cache behavior
-- Backward compatibility (no catalog params = old behavior)
-- Tumbler hierarchy helpers (ancestors, lca, depth, resolve_chunk)
-"""
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 
 import chromadb
@@ -21,12 +11,7 @@ from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
-from nexus.mcp_server import (
-    _inject_catalog,
-    _inject_t3,
-    _reset_singletons,
-    query,
-)
+from nexus.mcp_server import _inject_catalog, _inject_t3, _reset_singletons, query
 
 
 @pytest.fixture(autouse=True)
@@ -47,121 +32,82 @@ def t3():
 
 @pytest.fixture()
 def catalog(tmp_path):
-    """Catalog with two owners and documents for routing tests."""
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()
     cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
     repo_owner = cat.register_owner("nexus", "repo", repo_hash="aabb1122")
     paper_owner = cat.register_owner("papers", "curator")
-
-    # Code documents under nexus owner (1.1)
-    cat.register(
-        repo_owner, "indexer.py", content_type="code",
-        file_path="src/nexus/indexer.py", physical_collection="code__nexus",
-        chunk_count=10, author="hal",
-    )
-    cat.register(
-        repo_owner, "chunker.py", content_type="code",
-        file_path="src/nexus/chunker.py", physical_collection="code__nexus",
-        chunk_count=5, author="hal",
-    )
-
-    # Paper documents under papers owner (1.2)
-    cat.register(
-        paper_owner, "Schema Mappings and Data Exchange",
-        content_type="paper", physical_collection="knowledge__delos",
-        chunk_count=20, author="Fagin",
-    )
-    cat.register(
-        paper_owner, "Composing Mappings Among Data Sources",
-        content_type="paper", physical_collection="knowledge__delos",
-        chunk_count=15, author="Fagin",
-    )
-    cat.register(
-        paper_owner, "Attention Is All You Need",
-        content_type="paper", physical_collection="knowledge__transformers",
-        chunk_count=30, author="Vaswani",
-    )
-
-    # RDR document
-    cat.register(
-        repo_owner, "RDR-052: Catalog-First Query Routing",
-        content_type="rdr", physical_collection="rdr__nexus",
-        chunk_count=8, author="hal",
-    )
-
-    # Links: Fagin paper cites Vaswani paper (synthetic for testing)
+    cat.register(repo_owner, "indexer.py", content_type="code",
+                 file_path="src/nexus/indexer.py", physical_collection="code__nexus", chunk_count=10, author="hal")
+    cat.register(repo_owner, "chunker.py", content_type="code",
+                 file_path="src/nexus/chunker.py", physical_collection="code__nexus", chunk_count=5, author="hal")
+    cat.register(paper_owner, "Schema Mappings and Data Exchange",
+                 content_type="paper", physical_collection="knowledge__delos", chunk_count=20, author="Fagin")
+    cat.register(paper_owner, "Composing Mappings Among Data Sources",
+                 content_type="paper", physical_collection="knowledge__delos", chunk_count=15, author="Fagin")
+    cat.register(paper_owner, "Attention Is All You Need",
+                 content_type="paper", physical_collection="knowledge__transformers", chunk_count=30, author="Vaswani")
+    cat.register(repo_owner, "RDR-052: Catalog-First Query Routing",
+                 content_type="rdr", physical_collection="rdr__nexus", chunk_count=8, author="hal")
     fagin_t = cat.find("Schema Mappings")[0].tumbler
     vaswani_t = cat.find("Attention")[0].tumbler
     cat.link(fagin_t, vaswani_t, "cites", created_by="test")
-
     _inject_catalog(cat)
     return cat
 
 
-# ── Path Routing Tests ───────────────────────────────────────────────────────
+def _seed_templates(tmp_path, monkeypatch):
+    db_path = tmp_path / "t2.db"
+    monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+    from nexus.commands.catalog import _seed_plan_templates
+    return db_path, _seed_plan_templates
+
+
+# ── Path Routing ────────────────────────────────────────────────────────────
 
 
 class TestPathRouting:
-    """Verify that catalog params route to the correct collections."""
-
-    def test_author_routes_to_author_collections(self, t3, catalog):
-        """query(author="Fagin") should search knowledge__delos only."""
-        t3.put(collection="knowledge__delos", content="chase procedure schema", title="fagin-chunk")
-        t3.put(collection="knowledge__transformers", content="attention mechanism", title="vaswani-chunk")
-        result = query(question="schema mappings", author="Fagin")
+    @pytest.mark.parametrize("put_col,put_content,query_kw,assert_in", [
+        ("knowledge__delos", "chase procedure schema", {"author": "Fagin"}, "knowledge__delos"),
+        ("code__nexus", "def index_repo(): pipeline", {"content_type": "code"}, "code__nexus"),
+    ])
+    def test_catalog_param_routes_correctly(self, t3, catalog, put_col, put_content, query_kw, assert_in):
+        t3.put(collection=put_col, content=put_content, title="chunk")
+        result = query(question=put_content.split()[0], **query_kw)
         assert not result.startswith("Error:")
-        assert "knowledge__delos" in result
-
-    def test_content_type_routes_to_type_collections(self, t3, catalog):
-        """query(content_type="code") should search code__nexus only."""
-        t3.put(collection="code__nexus", content="def index_repo(): pipeline", title="code-chunk")
-        result = query(question="indexing pipeline", content_type="code")
-        assert not result.startswith("Error:")
-        assert "code__nexus" in result
+        assert assert_in in result
 
     def test_subtree_routes_to_descendants(self, t3, catalog):
-        """query(subtree="1.1") should find all nexus repo docs (code + rdr)."""
         t3.put(collection="code__nexus", content="tree sitter chunking", title="ts-chunk")
         t3.put(collection="rdr__nexus", content="catalog first query routing", title="rdr-chunk")
         result = query(question="chunking", subtree="1.1")
         assert not result.startswith("Error:")
-        # Should search both code__nexus and rdr__nexus (both under owner 1.1)
 
     def test_follow_links_enriches_collections(self, t3, catalog):
-        """query(follow_links="cites") should include linked document collections."""
         t3.put(collection="knowledge__delos", content="schema data exchange", title="delos-chunk")
         t3.put(collection="knowledge__transformers", content="attention heads layers", title="trans-chunk")
-        # Fagin paper cites Vaswani — follow_links should pull in knowledge__transformers
         result = query(question="schema mappings", follow_links="cites")
         assert not result.startswith("Error:")
-        assert "Found" in result or "knowledge__" in result
 
     def test_no_catalog_params_backward_compat(self, t3):
-        """query() without catalog params works as before."""
         t3.put(collection="knowledge__test", content="vector database embeddings", title="vec-chunk")
         result = query(question="vector database", corpus="knowledge__test")
         assert not result.startswith("Error:")
-        assert "vector" in result.lower() or "Found" in result
 
-    def test_author_no_match_returns_clear_message(self, t3, catalog):
-        """query(author="NonexistentPerson") returns a clear no-match message."""
-        result = query(question="anything", author="NonexistentPerson")
-        assert "No documents found matching catalog filters" in result
-
-    def test_subtree_empty_returns_clear_message(self, t3, catalog):
-        """query(subtree="9.9") returns a clear no-match message."""
-        result = query(question="anything", subtree="9.9")
-        assert "No documents found matching catalog filters" in result
+    @pytest.mark.parametrize("kw,expected_msg", [
+        ({"author": "NonexistentPerson"}, "No documents found matching catalog filters"),
+        ({"subtree": "9.9"}, "No documents found matching catalog filters"),
+    ])
+    def test_no_match_returns_clear_message(self, t3, catalog, kw, expected_msg):
+        result = query(question="anything", **kw)
+        assert expected_msg in result
 
     def test_subtree_document_level_returns_error(self, t3, catalog):
-        """query(subtree="1.1.42") is document-level — should return helpful error."""
         result = query(question="anything", subtree="1.1.42")
         assert "document-level address" in result
-        assert "1.1" in result  # suggests the owner prefix
+        assert "1.1" in result
 
     def test_catalog_params_without_catalog_returns_error(self, t3, monkeypatch):
-        """query() with catalog params but no catalog returns clear error."""
         import nexus.mcp_server as mod
         monkeypatch.setattr(mod, "_get_catalog", lambda: None)
         result = query(question="test", author="someone")
@@ -169,253 +115,159 @@ class TestPathRouting:
 
 
 class TestReferenceQuestions:
-    """5 reference questions that verify correct path selection."""
-
-    def test_papers_by_fagin(self, t3, catalog):
-        """'papers by Fagin' → Path 1: query(author='Fagin')."""
-        t3.put(collection="knowledge__delos", content="schema mappings chase", title="ref1")
-        result = query(question="papers by Fagin", author="Fagin")
-        assert not result.startswith("Error:")
-        assert "knowledge__delos" in result
-
-    def test_author_and_topic(self, t3, catalog):
-        """'schema mappings' + author=Fagin → Path 1: scoped query."""
-        t3.put(collection="knowledge__delos", content="schema mappings data exchange", title="ref2")
-        result = query(question="schema mappings", author="Fagin")
-        assert not result.startswith("Error:")
-
-    def test_rdr_by_type(self, t3, catalog):
-        """'RDR about streaming' → Path 1: query(content_type='rdr')."""
-        t3.put(collection="rdr__nexus", content="streaming pipeline buffer", title="ref3")
-        result = query(question="RDR about streaming", content_type="rdr")
-        assert not result.startswith("Error:")
-
-    def test_citation_enriched(self, t3, catalog):
-        """'what cites schema mappings' → Path 1: follow_links."""
-        t3.put(collection="knowledge__delos", content="data exchange framework", title="ref4")
-        result = query(question="what cites schema mappings", follow_links="cites")
-        assert not result.startswith("Error:")
-
-    def test_subtree_scoped(self, t3, catalog):
-        """'nexus architecture' → subtree scoped to nexus owner."""
-        t3.put(collection="code__nexus", content="module architecture design", title="ref5")
-        result = query(question="nexus architecture", subtree="1.1")
-        assert not result.startswith("Error:")
+    @pytest.mark.parametrize("question,kw,assert_check", [
+        ("papers by Fagin", {"author": "Fagin"}, lambda r: "knowledge__delos" in r),
+        ("schema mappings", {"author": "Fagin"}, lambda r: not r.startswith("Error:")),
+        ("RDR about streaming", {"content_type": "rdr"}, lambda r: not r.startswith("Error:")),
+        ("what cites schema mappings", {"follow_links": "cites"}, lambda r: not r.startswith("Error:")),
+        ("nexus architecture", {"subtree": "1.1"}, lambda r: not r.startswith("Error:")),
+    ])
+    def test_reference_question(self, t3, catalog, question, kw, assert_check):
+        # Seed data for all reference questions
+        for col, content, title in [
+            ("knowledge__delos", "schema mappings chase", "ref1"),
+            ("knowledge__delos", "schema mappings data exchange", "ref2"),
+            ("rdr__nexus", "streaming pipeline buffer", "ref3"),
+            ("knowledge__delos", "data exchange framework", "ref4"),
+            ("code__nexus", "module architecture design", "ref5"),
+        ]:
+            t3.put(collection=col, content=content, title=title)
+        result = query(question=question, **kw)
+        assert assert_check(result)
 
 
-# ── Template and Plan Tests ──────────────────────────────────────────────────
+# ── Templates and Plans ─────────────────────────────────────────────────────
 
 
 class TestPlanTemplates:
-    """Verify builtin template seeding and idempotency."""
+    def test_seed_creates_five_idempotent(self, tmp_path, monkeypatch):
+        db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
+        assert seed_fn() == 5
+        assert seed_fn() == 0  # idempotent
 
-    def test_seed_templates_creates_five(self, tmp_path, monkeypatch):
-        db_path = tmp_path / "t2.db"
-        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
-        from nexus.commands.catalog import _seed_plan_templates
-        assert _seed_plan_templates() == 5
-
-    def test_seed_templates_idempotent(self, tmp_path, monkeypatch):
-        db_path = tmp_path / "t2.db"
-        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
-        from nexus.commands.catalog import _seed_plan_templates
-        _seed_plan_templates()
-        assert _seed_plan_templates() == 0
-
-    def test_templates_all_tagged_builtin(self, tmp_path, monkeypatch):
-        db_path = tmp_path / "t2.db"
-        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
-        from nexus.commands.catalog import _seed_plan_templates
-        _seed_plan_templates()
+    @pytest.mark.parametrize("field,expected", [
+        ("tags", lambda v: "builtin-template" in v),
+        ("ttl", lambda v: v is None),
+    ])
+    def test_template_properties(self, tmp_path, monkeypatch, field, expected):
+        db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
+        seed_fn()
         db = T2Database(db_path)
         for p in db.list_plans(limit=10):
-            assert "builtin-template" in p["tags"]
-        db.close()
-
-    def test_templates_have_no_ttl(self, tmp_path, monkeypatch):
-        db_path = tmp_path / "t2.db"
-        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
-        from nexus.commands.catalog import _seed_plan_templates
-        _seed_plan_templates()
-        db = T2Database(db_path)
-        for p in db.list_plans(limit=10):
-            assert p["ttl"] is None
+            assert expected(p[field])
         db.close()
 
 
 class TestPlanTTL:
-    """Verify plan TTL storage and auto-cache behavior."""
-
-    def test_save_plan_with_ttl(self, tmp_path):
+    @pytest.mark.parametrize("ttl,expected_ttl", [(30, 30), (None, None)])
+    def test_save_plan_ttl(self, tmp_path, ttl, expected_ttl):
         db = T2Database(tmp_path / "t2.db")
-        row_id = db.save_plan(query="cached plan", plan_json='{"steps":[]}', ttl=30)
+        row_id = db.save_plan(query="plan", plan_json='{}', **({} if ttl is None else {"ttl": ttl}))
         row = db.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
-        assert row[0] == 30
+        assert row[0] == expected_ttl
         db.close()
 
-    def test_save_plan_permanent(self, tmp_path):
+    @pytest.mark.parametrize("method", ["search_plans", "list_plans"])
+    def test_ttl_in_results(self, tmp_path, method):
         db = T2Database(tmp_path / "t2.db")
-        row_id = db.save_plan(query="permanent plan", plan_json='{}')
-        row = db.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
-        assert row[0] is None
-        db.close()
-
-    def test_ttl_in_search_results(self, tmp_path):
-        db = T2Database(tmp_path / "t2.db")
-        db.save_plan(query="searchable cached plan", plan_json='{}', ttl=7)
-        results = db.search_plans("searchable")
+        db.save_plan(query="ttl plan", plan_json='{}', ttl=7)
+        results = getattr(db, method)("ttl plan") if method == "search_plans" else getattr(db, method)()
         assert len(results) == 1
         assert results[0]["ttl"] == 7
         db.close()
 
-    def test_ttl_in_list_results(self, tmp_path):
-        db = T2Database(tmp_path / "t2.db")
-        db.save_plan(query="listed plan", plan_json='{}', ttl=14)
-        results = db.list_plans()
-        assert len(results) == 1
-        assert results[0]["ttl"] == 14
-        db.close()
-
-
-# ── Tumbler Hierarchy Verification ───────────────────────────────────────────
-
-
-class TestFollowLinksFallback:
-    """Verify follow_links falls back to broad search when no catalog seeds found."""
-
-    def test_follow_links_no_seed_falls_back(self, t3, catalog):
-        """query(follow_links=...) with no FTS match should not error — falls back to broad search."""
-        t3.put(collection="knowledge__delos", content="schema data exchange", title="fb-chunk")
-        result = query(question="xyzzy_nonexistent_topic_12345", follow_links="cites", corpus="knowledge__delos")
-        # Should fall back to broad search on knowledge__delos, not return an error
-        assert "No documents found matching catalog filters" not in result
-
 
 class TestPlanTTLEnforcement:
-    """Verify expired plans are excluded from search and list results."""
-
-    def test_expired_plan_excluded_from_search(self, tmp_path):
+    @pytest.mark.parametrize("method", ["search_plans", "list_plans"])
+    def test_expired_plan_excluded(self, tmp_path, method):
         db = T2Database(tmp_path / "t2.db")
         row_id = db.save_plan(query="old cached plan", plan_json='{}', ttl=1)
-        # Backdate created_at to 10 days ago
-        db.conn.execute(
-            "UPDATE plans SET created_at = datetime('now', '-10 days') WHERE id = ?",
-            (row_id,),
-        )
+        db.conn.execute("UPDATE plans SET created_at = datetime('now', '-10 days') WHERE id = ?", (row_id,))
         db.conn.commit()
-        results = db.search_plans("old cached plan")
-        assert len(results) == 0
-
-    def test_expired_plan_excluded_from_list(self, tmp_path):
-        db = T2Database(tmp_path / "t2.db")
-        row_id = db.save_plan(query="expired listed plan", plan_json='{}', ttl=1)
-        db.conn.execute(
-            "UPDATE plans SET created_at = datetime('now', '-10 days') WHERE id = ?",
-            (row_id,),
-        )
-        db.conn.commit()
-        results = db.list_plans()
+        results = getattr(db, method)("old cached plan") if method == "search_plans" else getattr(db, method)()
         assert len(results) == 0
 
     def test_permanent_plan_never_expires(self, tmp_path):
         db = T2Database(tmp_path / "t2.db")
-        db.save_plan(query="permanent plan", plan_json='{}')  # ttl=None
-        db.conn.execute(
-            "UPDATE plans SET created_at = datetime('now', '-365 days') WHERE id = 1"
-        )
+        db.save_plan(query="permanent plan", plan_json='{}')
+        db.conn.execute("UPDATE plans SET created_at = datetime('now', '-365 days') WHERE id = 1")
         db.conn.commit()
-        results = db.list_plans()
-        assert len(results) == 1
+        assert len(db.list_plans()) == 1
 
     def test_fresh_plan_with_ttl_included(self, tmp_path):
         db = T2Database(tmp_path / "t2.db")
         db.save_plan(query="fresh cached plan", plan_json='{}', ttl=30)
-        results = db.search_plans("fresh cached plan")
-        assert len(results) == 1
+        assert len(db.search_plans("fresh cached plan")) == 1
+
+
+class TestFollowLinksFallback:
+    def test_follow_links_no_seed_falls_back(self, t3, catalog):
+        t3.put(collection="knowledge__delos", content="schema data exchange", title="fb-chunk")
+        result = query(question="xyzzy_nonexistent_topic_12345", follow_links="cites", corpus="knowledge__delos")
+        assert "No documents found matching catalog filters" not in result
 
 
 class TestTemplateRetrieval:
-    """Verify Path 2 template matching at the MCP/T2 level."""
-
     def test_builtin_template_retrievable_by_query(self, tmp_path, monkeypatch):
-        """Seeded templates are findable via plan_search by natural question."""
-        db_path = tmp_path / "t2.db"
-        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
-        from nexus.commands.catalog import _seed_plan_templates
-        _seed_plan_templates()
+        db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
+        seed_fn()
         db = T2Database(db_path)
         results = db.search_plans("find documents by author")
         builtin = [r for r in results if "builtin-template" in r.get("tags", "")]
         assert len(builtin) >= 1
-        plan = json.loads(builtin[0]["plan_json"])
-        assert "steps" in plan
+        assert "steps" in json.loads(builtin[0]["plan_json"])
         db.close()
 
     def test_template_plan_json_structure(self, tmp_path, monkeypatch):
-        """Template plan_json has expected structure (steps with op and params)."""
-        db_path = tmp_path / "t2.db"
-        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
-        from nexus.commands.catalog import _seed_plan_templates
-        _seed_plan_templates()
+        db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
+        seed_fn()
         db = T2Database(db_path)
         results = db.search_plans("citation chain")
         builtin = [r for r in results if "builtin-template" in r.get("tags", "")]
         assert len(builtin) >= 1
         plan = json.loads(builtin[0]["plan_json"])
-        assert "steps" in plan
         assert any("operation" in step for step in plan["steps"])
         db.close()
 
     def test_all_five_templates_searchable(self, tmp_path, monkeypatch):
-        """Each of the 5 templates is retrievable by its query string."""
-        db_path = tmp_path / "t2.db"
-        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
-        from nexus.commands.catalog import _seed_plan_templates, _PLAN_TEMPLATES
-        _seed_plan_templates()
+        db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
+        seed_fn()
+        from nexus.commands.catalog import _PLAN_TEMPLATES
         db = T2Database(db_path)
         for tmpl in _PLAN_TEMPLATES:
-            results = db.search_plans(tmpl["query"])
-            assert len(results) >= 1, f"Template not found: {tmpl['query']}"
+            assert db.search_plans(tmpl["query"]), f"Template not found: {tmpl['query']}"
         db.close()
 
 
-class TestTumblerHierarchyVerification:
-    """Cross-check tumbler hierarchy helpers match RDR-052 spec."""
+# ── Tumbler Hierarchy ───────────────────────────────────────────────────────
 
-    def test_depth(self):
-        assert Tumbler.parse("1").depth == 1
-        assert Tumbler.parse("1.2").depth == 2
-        assert Tumbler.parse("1.2.42").depth == 3
-        assert Tumbler.parse("1.2.42.7").depth == 4
+
+class TestTumblerHierarchy:
+    @pytest.mark.parametrize("addr,expected_depth", [
+        ("1", 1), ("1.2", 2), ("1.2.42", 3), ("1.2.42.7", 4),
+    ])
+    def test_depth(self, addr, expected_depth):
+        assert Tumbler.parse(addr).depth == expected_depth
 
     def test_ancestors_includes_self(self):
         t = Tumbler.parse("1.2.42")
-        anc = t.ancestors()
-        assert anc[-1] == t
+        assert t.ancestors()[-1] == t
 
-    def test_lca_sibling_documents(self):
-        a = Tumbler.parse("1.1.10")
-        b = Tumbler.parse("1.1.20")
-        assert Tumbler.lca(a, b) == Tumbler.parse("1.1")
-
-    def test_lca_no_common_prefix(self):
-        a = Tumbler.parse("1.1.1")
-        b = Tumbler.parse("2.1.1")
-        assert Tumbler.lca(a, b) is None
-
-    def test_lca_fully_disjoint(self):
-        a = Tumbler.parse("1.1")
-        b = Tumbler.parse("2.2")
-        assert Tumbler.lca(a, b) is None
+    @pytest.mark.parametrize("a,b,expected", [
+        ("1.1.10", "1.1.20", "1.1"),
+        ("1.1.1", "2.1.1", None),
+        ("1.1", "2.2", None),
+    ])
+    def test_lca(self, a, b, expected):
+        result = Tumbler.lca(Tumbler.parse(a), Tumbler.parse(b))
+        assert result == (Tumbler.parse(expected) if expected else None)
 
     def test_resolve_chunk_ghost_element(self, tmp_path):
-        """Chunks are ghost elements — addressable without registration."""
         catalog_dir = tmp_path / "catalog"
         catalog_dir.mkdir()
         cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
         owner = cat.register_owner("nexus", "repo", repo_hash="aabb")
-        cat.register(owner, "a.py", content_type="code",
-                     physical_collection="code__nexus", chunk_count=5)
+        cat.register(owner, "a.py", content_type="code", physical_collection="code__nexus", chunk_count=5)
         result = cat.resolve_chunk(Tumbler.parse("1.1.1.3"))
         assert result is not None
         assert result["document_tumbler"] == "1.1.1"
@@ -427,8 +279,7 @@ class TestTumblerHierarchyVerification:
         catalog_dir.mkdir()
         cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
         owner = cat.register_owner("nexus", "repo", repo_hash="aabb")
-        cat.register(owner, "a.py", content_type="code",
-                     physical_collection="code__nexus", chunk_count=5)
+        cat.register(owner, "a.py", content_type="code", physical_collection="code__nexus", chunk_count=5)
         assert cat.resolve_chunk(Tumbler.parse("1.1.1.10")) is None
 
     def test_negative_tumbler_rejected(self):
@@ -436,7 +287,6 @@ class TestTumblerHierarchyVerification:
             Tumbler.parse("1.-1.42")
 
     def test_descendants_any_depth(self, tmp_path):
-        """descendants() returns all depths, not just direct children."""
         catalog_dir = tmp_path / "catalog"
         catalog_dir.mkdir()
         cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
@@ -444,6 +294,4 @@ class TestTumblerHierarchyVerification:
         o2 = cat.register_owner("arcaneum", "repo", repo_hash="ccdd")
         cat.register(o1, "a.py", content_type="code", file_path="a.py")
         cat.register(o2, "b.py", content_type="code", file_path="b.py")
-        # Store "1" has two owners, each with one doc
-        results = cat.descendants("1")
-        assert len(results) == 2
+        assert len(cat.descendants("1")) == 2

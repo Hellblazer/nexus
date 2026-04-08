@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""E2E tests for the catalog system (RDR-049 + RDR-050).
-
-No API keys required — T3 is backed by EphemeralClient + local ONNX model.
-Tests the full pipeline: index repo → catalog hook fires → catalog populated →
-MCP tools return real data → link generation works → query planner templates exist.
-
-Uses the same rich_repo fixture pattern as test_indexer_e2e.py.
-"""
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,91 +12,70 @@ import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.catalog.catalog import Catalog
+from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
 
-
-# ── Corpus definition ────────────────────────────────────────────────────────
-
 _NEXUS_ROOT = Path(__file__).parent.parent
+_CODE_FILES = ["src/nexus/ttl.py", "src/nexus/corpus.py", "src/nexus/types.py"]
+_PROSE = "# Test Repo\n\nA test repository for catalog E2E tests.\n\n## Features\n\n- Catalog integration\n- Tumbler addressing\n"
+_RDR = "---\ntitle: Corpus and TTL Design\nstatus: accepted\n---\n\n# RDR-001: Corpus and TTL Design\n\n## Decision\n\nWe use tumblers for addressing.\n## Implementation\n\nThe ttl module handles time-to-live logic.\nThe corpus module handles naming.\n"
 
-_CODE_FILES = [
-    "src/nexus/ttl.py",
-    "src/nexus/corpus.py",
-    "src/nexus/types.py",
-]
 
-_PROSE_FILES = {
-    "README.md": (
-        "# Test Repo\n\nA test repository for catalog E2E tests.\n\n"
-        "## Features\n\n- Catalog integration\n- Tumbler addressing\n"
-    ),
-}
+def _git(repo, *args):
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
-_RDR_FILES = {
-    "docs/rdr/rdr-001-corpus-ttl-design.md": (
-        "---\ntitle: Corpus and TTL Design\nstatus: accepted\n---\n\n"
-        "# RDR-001: Corpus and TTL Design\n\n"
-        "## Decision\n\nWe use tumblers for addressing.\n"
-        "## Implementation\n\nThe ttl module handles time-to-live logic.\n"
-        "The corpus module handles naming.\n"
-    ),
-}
+
+def _do_index(catalog_repo, registry, local_t3, monkeypatch, force=False):
+    from nexus.indexer import index_repository
+
+    monkeypatch.setenv("NX_LOCAL", "1")
+    with patch("nexus.db.make_t3", return_value=local_t3), \
+         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+        index_repository(catalog_repo, registry, force=force)
+
+
+def _write(repo, rel, content):
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(content, encoding="utf-8")
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture(autouse=True)
 def git_identity(monkeypatch):
-    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
-    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
-    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+    for k, v in [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@test.invalid"),
+                 ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@test.invalid")]:
+        monkeypatch.setenv(k, v)
 
 
 @pytest.fixture(scope="module")
 def catalog_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A real git repo with code, prose, and RDR files."""
     repo = tmp_path_factory.mktemp("catalog-e2e")
-
-    # Code files — copied from real Nexus source
     for rel in _CODE_FILES:
-        src = _NEXUS_ROOT / rel
-        dest = repo / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-
-    # Prose files
-    for rel, content in _PROSE_FILES.items():
-        dest = repo / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content, encoding="utf-8")
-
-    # RDR files
-    for rel, content in _RDR_FILES.items():
-        dest = repo / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content, encoding="utf-8")
-
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@nexus"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Nexus Test"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo, check=True, capture_output=True)
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_NEXUS_ROOT / rel, repo / rel)
+    _write(repo, "README.md", _PROSE)
+    _write(repo, "docs/rdr/rdr-001-corpus-ttl-design.md", _RDR)
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@nexus")
+    _git(repo, "config", "user.name", "Nexus Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "Initial commit")
     return repo
 
 
 @pytest.fixture
 def local_t3() -> T3Database:
-    """Fresh EphemeralClient T3Database — no API keys needed."""
-    client = chromadb.EphemeralClient()
-    ef = DefaultEmbeddingFunction()
-    return T3Database(_client=client, _ef_override=ef)
+    return T3Database(
+        _client=chromadb.EphemeralClient(),
+        _ef_override=DefaultEmbeddingFunction(),
+    )
 
 
 @pytest.fixture
 def registry(tmp_path: Path, catalog_repo: Path) -> RepoRegistry:
-    """RepoRegistry with catalog_repo pre-registered."""
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(catalog_repo)
     return reg
@@ -111,684 +83,340 @@ def registry(tmp_path: Path, catalog_repo: Path) -> RepoRegistry:
 
 @pytest.fixture(autouse=True)
 def mock_voyage_client():
-    """Patch voyageai.Client so E2E tests run without API keys."""
     ef = DefaultEmbeddingFunction()
     mock_client = MagicMock()
 
     def fake_embed(texts, model, input_type="document"):
-        result = MagicMock()
-        result.embeddings = ef(texts)
-        return result
+        r = MagicMock()
+        r.embeddings = ef(texts)
+        return r
 
     def fake_contextualized_embed(inputs, model, input_type="document"):
-        result = MagicMock()
-        batch_result = MagicMock()
-        batch_result.embeddings = ef(inputs[0])
-        result.results = [batch_result]
-        return result
+        r = MagicMock()
+        br = MagicMock()
+        br.embeddings = ef(inputs[0])
+        r.results = [br]
+        return r
 
     mock_client.embed.side_effect = fake_embed
     mock_client.contextualized_embed.side_effect = fake_contextualized_embed
-
     with patch("voyageai.Client", return_value=mock_client):
         yield mock_client
 
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch) -> Path:
-    """Initialize a catalog and point NEXUS_CATALOG_PATH at it."""
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     Catalog.init(catalog_dir)
     return catalog_dir
 
 
-# ── E2E Tests ─────────────────────────────────────────────────────────────────
+@pytest.fixture
+def indexed_catalog(catalog_repo, registry, local_t3, catalog_env, monkeypatch):
+    _do_index(catalog_repo, registry, local_t3, monkeypatch)
+    return Catalog(catalog_env, catalog_env / ".catalog.db"), local_t3
 
 
-class TestIndexerPopulatesCatalog:
-    """index_repository() fires _catalog_hook which populates the catalog."""
+@pytest.fixture
+def injected_catalog(indexed_catalog):
+    from nexus.mcp_server import _inject_catalog, _reset_singletons
 
-    def test_index_creates_catalog_owner(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        from nexus.indexer import index_repository
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        # Owner should have been auto-created by the hook
-        rows = cat._db.execute("SELECT count(*) FROM owners").fetchone()
-        assert rows[0] >= 1
-
-    def test_index_registers_code_files(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        from nexus.indexer import index_repository
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        rows = cat._db.execute(
-            "SELECT count(*) FROM documents WHERE content_type = 'code'"
-        ).fetchone()
-        assert rows[0] >= len(_CODE_FILES)
-
-    def test_index_registers_rdr_files(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        from nexus.indexer import index_repository
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        rows = cat._db.execute(
-            "SELECT count(*) FROM documents WHERE content_type = 'rdr'"
-        ).fetchone()
-        assert rows[0] >= 1, "RDR files should be registered in catalog"
-
-    def test_reindex_preserves_tumblers(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        from nexus.indexer import index_repository
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        first_tumblers = {
-            r[0] for r in cat._db.execute("SELECT tumbler FROM documents").fetchall()
-        }
-
-        # Re-index
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry, force=True)
-
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
-        second_tumblers = {
-            r[0] for r in cat2._db.execute("SELECT tumbler FROM documents").fetchall()
-        }
-        # All first-run tumblers should still exist (idempotent registration)
-        assert first_tumblers.issubset(second_tumblers), \
-            f"Original tumblers should be preserved. Lost: {first_tumblers - second_tumblers}"
+    cat, local_t3 = indexed_catalog
+    _reset_singletons()
+    _inject_catalog(cat)
+    return cat, local_t3
 
 
-class TestCatalogMCPWithRealData:
-    """MCP tools work against a catalog populated by real indexing."""
+@pytest.fixture
+def linked_catalog(tmp_path):
+    cat = Catalog.init(tmp_path / "catalog")
+    owner = cat.register_owner("test", "repo", repo_hash="aabb1122")
+    docs = [
+        cat.register(owner, f"paper-{x}", content_type="paper",
+                     meta={"bib_semantic_scholar_id": f"ss-{x}",
+                           **({"references": ["ss-b", "ss-c"]} if x == "a" else {})})
+        for x in ("a", "b", "c")
+    ]
+    return cat, *docs
 
-    def _index_and_get_catalog(self, catalog_repo, registry, local_t3, catalog_env, monkeypatch):
-        from nexus.indexer import index_repository
-        from nexus.mcp_server import _inject_catalog, _reset_singletons
 
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
+# ── Indexer populates catalog ────────────────────────────────────────────────
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        _reset_singletons()
-        _inject_catalog(cat)
-        return cat
 
-    def test_catalog_search_returns_indexed_files(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
+@pytest.mark.parametrize("query,min_count", [
+    ("SELECT count(*) FROM owners", 1),
+    ("SELECT count(*) FROM documents WHERE content_type = 'code'", len(_CODE_FILES)),
+    ("SELECT count(*) FROM documents WHERE content_type = 'rdr'", 1),
+])
+def test_index_populates_catalog(indexed_catalog, query, min_count):
+    cat, _ = indexed_catalog
+    assert cat._db.execute(query).fetchone()[0] >= min_count
+
+
+def test_reindex_preserves_tumblers(
+    catalog_repo, registry, local_t3, catalog_env, monkeypatch,
+):
+    _do_index(catalog_repo, registry, local_t3, monkeypatch)
+    first = {r[0] for r in Catalog(catalog_env, catalog_env / ".catalog.db")
+             ._db.execute("SELECT tumbler FROM documents").fetchall()}
+    _do_index(catalog_repo, registry, local_t3, monkeypatch, force=True)
+    second = {r[0] for r in Catalog(catalog_env, catalog_env / ".catalog.db")
+              ._db.execute("SELECT tumbler FROM documents").fetchall()}
+    assert first.issubset(second)
+
+
+# ── MCP tools + graph traversal (class saves blank-line overhead) ────────────
+
+
+class TestMCP:
+    def test_search_returns_indexed_files(self, injected_catalog):
         from nexus.mcp_server import catalog_search
-
-        self._index_and_get_catalog(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
         results = catalog_search(query="ttl")
         assert len(results) >= 1
         assert any("ttl" in r.get("title", "").lower() or "ttl" in r.get("file_path", "").lower()
                     for r in results)
 
-    def test_catalog_search_structured_filter(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
+    def test_search_structured_filter(self, injected_catalog):
         from nexus.mcp_server import catalog_search
+        cat, _ = injected_catalog
+        owner = cat._db.execute("SELECT tumbler_prefix FROM owners LIMIT 1").fetchone()
+        assert owner is not None
+        results = catalog_search(owner=owner[0])
+        assert len(results) >= 1 and "error" not in results[0]
 
-        cat = self._index_and_get_catalog(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
-        # Get the owner tumbler
-        owner_row = cat._db.execute("SELECT tumbler_prefix FROM owners LIMIT 1").fetchone()
-        assert owner_row is not None
-        results = catalog_search(owner=owner_row[0])
-        assert len(results) >= 1
-        assert "error" not in results[0]
-
-    def test_catalog_show_returns_full_entry(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
+    def test_show_returns_full_entry(self, injected_catalog):
         from nexus.mcp_server import catalog_show
-
-        cat = self._index_and_get_catalog(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
+        cat, _ = injected_catalog
         tumbler = cat._db.execute("SELECT tumbler FROM documents LIMIT 1").fetchone()[0]
         result = catalog_show(tumbler=tumbler)
-        assert "error" not in result
-        assert result["tumbler"] == tumbler
-        assert "links_from" in result
-        assert "links_to" in result
+        assert "error" not in result and result["tumbler"] == tumbler
+        assert "links_from" in result and "links_to" in result
 
-    def test_catalog_resolve_returns_collections(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
+    def test_resolve_returns_collections(self, injected_catalog):
         from nexus.mcp_server import catalog_resolve
+        cat, _ = injected_catalog
+        owner = cat._db.execute("SELECT tumbler_prefix FROM owners LIMIT 1").fetchone()
+        result = catalog_resolve(owner=owner[0])
+        assert len(result) >= 1 and any("__" in n for n in result)
 
-        cat = self._index_and_get_catalog(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
-        owner_row = cat._db.execute("SELECT tumbler_prefix FROM owners LIMIT 1").fetchone()
-        result = catalog_resolve(owner=owner_row[0])
-        assert len(result) >= 1
-        # Should be real collection names like code__* or docs__*
-        assert any("__" in name for name in result)
-
-
-class TestLinkGenerationE2E:
-    """Link generation works against a catalog populated by real indexing."""
-
-    def test_code_rdr_links_generated(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        from nexus.catalog.link_generator import generate_code_rdr_links
-        from nexus.indexer import index_repository
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-
-        # Verify we have both code and RDR entries
-        code_count = cat._db.execute(
-            "SELECT count(*) FROM documents WHERE content_type='code'"
-        ).fetchone()[0]
-        rdr_count = cat._db.execute(
-            "SELECT count(*) FROM documents WHERE content_type='rdr'"
-        ).fetchone()[0]
-        assert code_count >= 1, "Need code entries for link generation"
-        assert rdr_count >= 1, "Need RDR entries for link generation"
-
-        # Links auto-generated by _catalog_hook during index_repository
-        link_count = cat._db.execute("SELECT count(*) FROM links").fetchone()[0]
-        assert link_count >= 1, "Expected auto-generated code→RDR links from indexer hook"
-        # Calling again should be idempotent (0 new links)
-        count = generate_code_rdr_links(cat)
-        assert count == 0, "Re-running generator should create 0 new links (idempotent)"
-
-
-class TestLinkLifecycleE2E:
-    """Full link lifecycle: create → query → audit → delete → regenerate."""
-
-    def _make_linked_catalog(self, tmp_path):
-        catalog_dir = tmp_path / "catalog"
-        cat = Catalog.init(catalog_dir)
-        owner = cat.register_owner("test", "repo", repo_hash="aabb1122")
-        doc_a = cat.register(owner, "paper-a", content_type="paper",
-                             meta={"bib_semantic_scholar_id": "ss-a",
-                                   "references": ["ss-b", "ss-c"]})
-        doc_b = cat.register(owner, "paper-b", content_type="paper",
-                             meta={"bib_semantic_scholar_id": "ss-b"})
-        doc_c = cat.register(owner, "paper-c", content_type="paper",
-                             meta={"bib_semantic_scholar_id": "ss-c"})
-        return cat, doc_a, doc_b, doc_c
-
-    def test_full_link_lifecycle(self, tmp_path):
-        from nexus.catalog.link_generator import generate_citation_links
-
-        cat, doc_a, doc_b, doc_c = self._make_linked_catalog(tmp_path)
-
-        # Generate
-        count = generate_citation_links(cat)
-        assert count == 2  # a→b, a→c
-
-        # Query
-        links = cat.link_query(created_by="bib_enricher")
-        assert len(links) == 2
-
-        # Bulk delete
-        removed = cat.bulk_unlink(created_by="bib_enricher")
-        assert removed == 2
-        assert cat.link_query(created_by="bib_enricher") == []
-
-        # Regenerate (idempotent)
-        count2 = generate_citation_links(cat)
-        assert count2 == 2
-
-        # Audit
-        audit = cat.link_audit()
-        assert audit["orphaned_count"] == 0
-        assert audit["total"] == 2
-
-    def test_delete_document_orphan_preserved(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = self._make_linked_catalog(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.delete_document(doc_a)
-
-        audit = cat.link_audit()
-        assert audit["orphaned_count"] == 1
-        assert cat.resolve(doc_a) is None
-        assert len(cat.links_to(doc_b)) == 1
-
-    def test_link_if_absent_idempotent_generator(self, tmp_path):
-        from nexus.catalog.link_generator import generate_citation_links
-
-        cat, doc_a, doc_b, doc_c = self._make_linked_catalog(tmp_path)
-        count1 = generate_citation_links(cat)
-        count2 = generate_citation_links(cat)
-        assert count1 == 2
-        assert count2 == 0  # all already exist
-        assert len(cat.link_query(link_type="cites")) == 2
-
-
-class TestMCPGraphTraversalE2E:
-    """The core value proposition: index → search catalog → traverse links → get collections."""
-
-    def _index_and_inject(self, catalog_repo, registry, local_t3, catalog_env, monkeypatch):
-        from nexus.indexer import index_repository
-        from nexus.mcp_server import _inject_catalog, _reset_singletons
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        _reset_singletons()
-        _inject_catalog(cat)
-        return cat
-
-    def test_search_then_traverse_links(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        """Agent workflow: search catalog → find entry → traverse links → get connected docs."""
+    def test_search_then_traverse_links(self, injected_catalog):
         from nexus.mcp_server import catalog_links, catalog_search
-
-        cat = self._index_and_inject(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
-
-        # Step 1: agent searches for a code file by name
         results = catalog_search(query="ttl")
         assert len(results) >= 1
         tumbler = results[0]["tumbler"]
-
-        # Step 2: agent traverses the link graph from that entry
         graph = catalog_links(tumbler=tumbler, depth=1)
-        assert "nodes" in graph
-        assert "edges" in graph
-        # The indexer hook auto-generates implements-heuristic links
-        # so the code file should have outbound links to matching RDRs
-        node_tumblers = {n["tumbler"] for n in graph["nodes"]}
-        assert tumbler in node_tumblers  # starting node included
+        assert "nodes" in graph and "edges" in graph
+        assert tumbler in {n["tumbler"] for n in graph["nodes"]}
 
-    def test_link_creation_via_mcp_with_title(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        """Agent creates a link using document titles, not tumblers."""
+    def test_link_creation_via_title(self, injected_catalog):
         from nexus.mcp_server import catalog_link, catalog_link_query
+        result = catalog_link(from_tumbler="types.py", to_tumbler="corpus.py",
+                              link_type="relates", created_by="test")
+        assert "error" not in result and result["created"] is True
+        assert len(catalog_link_query(link_type="relates", created_by="test")) >= 1
 
-        self._index_and_inject(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
-
-        # Create a 'relates' link between two entries using exact titles
-        # (exact title match bypasses the ambiguity guard)
-        result = catalog_link(
-            from_tumbler="types.py", to_tumbler="corpus.py",
-            link_type="relates", created_by="test",
-        )
-        assert "error" not in result
-        assert result["created"] is True
-
-        # Verify via query
-        links = catalog_link_query(link_type="relates", created_by="test")
-        assert len(links) >= 1
-
-    def test_catalog_link_audit_after_indexing(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        """Audit reports correct stats after real indexing."""
+    def test_link_audit_after_indexing(self, injected_catalog):
         from nexus.mcp_server import catalog_link_audit
-
-        self._index_and_inject(catalog_repo, registry, local_t3, catalog_env, monkeypatch)
-
         audit = catalog_link_audit()
-        assert "error" not in audit
-        assert audit["total"] >= 1  # auto-generated links exist
+        assert "error" not in audit and audit["total"] >= 1
         assert "implements-heuristic" in audit["by_type"]
-        assert audit["orphaned_count"] == 0  # all endpoints live
+        assert audit["orphaned_count"] == 0
 
 
-class TestMCPStorePutCatalogE2E:
-    """MCP store_put creates catalog entries — the primary agent write path."""
-
-    def test_store_put_registers_in_catalog(self, tmp_path, monkeypatch):
-        from nexus.mcp_server import _reset_singletons, store_put
-
-        catalog_dir = tmp_path / "catalog"
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-        cat = Catalog.init(catalog_dir)
-
-        # Pre-create a knowledge curator owner (the hook expects this)
-        cat.register_owner("knowledge", "curator")
-
-        _reset_singletons()
-
-        # Simulate what an agent does: store_put via MCP
-        with patch("nexus.mcp_server._get_t3") as mock_t3:
-            mock_db = MagicMock()
-            mock_db.put.return_value = "doc-abc123"
-            mock_t3.return_value = mock_db
-
-            result = store_put(
-                content="# Research: Vector Indexing\n\nFindings about HNSW...",
-                collection="knowledge",
-                title="research-vector-indexing",
-                tags="research,embeddings",
-            )
-
-        assert "Stored" in result
-
-        # Verify the catalog entry was created
-        cat2 = Catalog(catalog_dir, catalog_dir / ".catalog.db")
-        entry = cat2.by_doc_id("doc-abc123")
-        assert entry is not None
-        assert entry.title == "research-vector-indexing"
+# ── Link generation + lifecycle ──────────────────────────────────────────────
 
 
-class TestTumblerPermanenceE2E:
-    """Tumbler permanence under real conditions: index → delete → compact → re-index."""
+class TestLinks:
+    def test_code_rdr_links_generated(self, indexed_catalog):
+        from nexus.catalog.link_generator import generate_code_rdr_links
+        cat, _ = indexed_catalog
+        assert cat._db.execute("SELECT count(*) FROM documents WHERE content_type='code'").fetchone()[0] >= 1
+        assert cat._db.execute("SELECT count(*) FROM documents WHERE content_type='rdr'").fetchone()[0] >= 1
+        assert cat._db.execute("SELECT count(*) FROM links").fetchone()[0] >= 1
+        assert generate_code_rdr_links(cat) == 0
 
-    def test_tumblers_stable_across_delete_compact_reindex(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        from nexus.indexer import index_repository
+    def test_full_link_lifecycle(self, linked_catalog):
+        from nexus.catalog.link_generator import generate_citation_links
+        cat, doc_a, doc_b, doc_c = linked_catalog
+        assert generate_citation_links(cat) == 2
+        assert len(cat.link_query(created_by="bib_enricher")) == 2
+        assert cat.bulk_unlink(created_by="bib_enricher") == 2
+        assert cat.link_query(created_by="bib_enricher") == []
+        assert generate_citation_links(cat) == 2
+        audit = cat.link_audit()
+        assert audit["orphaned_count"] == 0 and audit["total"] == 2
 
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
+    def test_delete_document_orphan_preserved(self, linked_catalog):
+        cat, doc_a, doc_b, _doc_c = linked_catalog
+        cat.link(doc_a, doc_b, "cites", created_by="user")
+        cat.delete_document(doc_a)
+        assert cat.link_audit()["orphaned_count"] == 1
+        assert cat.resolve(doc_a) is None and len(cat.links_to(doc_b)) == 1
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        original_tumblers = {
-            r[0] for r in cat._db.execute("SELECT tumbler FROM documents").fetchall()
-        }
-        original_count = len(original_tumblers)
+    def test_link_if_absent_idempotent(self, linked_catalog):
+        from nexus.catalog.link_generator import generate_citation_links
+        cat, *_ = linked_catalog
+        assert generate_citation_links(cat) == 2
+        assert generate_citation_links(cat) == 0
+        assert len(cat.link_query(link_type="cites")) == 2
 
-        # Delete one document
-        first_tumbler = sorted(original_tumblers)[0]
-        from nexus.catalog.tumbler import Tumbler
-        cat.delete_document(Tumbler.parse(first_tumbler))
 
-        # Compact (removes tombstones)
+# ── store_put → catalog ─────────────────────────────────────────────────────
+
+
+def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
+    from nexus.mcp_server import _reset_singletons, store_put
+
+    catalog_dir = tmp_path / "catalog"
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+    cat = Catalog.init(catalog_dir)
+    cat.register_owner("knowledge", "curator")
+    _reset_singletons()
+    with patch("nexus.mcp_server._get_t3") as mock_t3:
+        mock_db = MagicMock()
+        mock_db.put.return_value = "doc-abc123"
+        mock_t3.return_value = mock_db
+        result = store_put(
+            content="# Research: Vector Indexing\n\nFindings about HNSW...",
+            collection="knowledge", title="research-vector-indexing",
+            tags="research,embeddings",
+        )
+    assert "Stored" in result
+    entry = Catalog(catalog_dir, catalog_dir / ".catalog.db").by_doc_id("doc-abc123")
+    assert entry is not None and entry.title == "research-vector-indexing"
+
+
+# ── Tumbler permanence ───────────────────────────────────────────────────────
+
+
+def test_tumblers_stable_across_delete_compact_reindex(
+    catalog_repo, registry, local_t3, catalog_env, monkeypatch,
+):
+    _do_index(catalog_repo, registry, local_t3, monkeypatch)
+    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+    original = {r[0] for r in cat._db.execute("SELECT tumbler FROM documents").fetchall()}
+    first_tumbler = sorted(original)[0]
+    cat.delete_document(Tumbler.parse(first_tumbler))
+    cat.compact()
+    _do_index(catalog_repo, registry, local_t3, monkeypatch, force=True)
+    new = {r[0] for r in Catalog(catalog_env, catalog_env / ".catalog.db")
+           ._db.execute("SELECT tumbler FROM documents").fetchall()}
+    assert first_tumbler not in new and len(new) >= len(original) - 1
+
+
+# ── Span transclusion ────────────────────────────────────────────────────────
+
+
+def test_link_with_line_span_resolves_text(tmp_path):
+    cat = Catalog.init(tmp_path / "catalog")
+    owner = cat.register_owner("test", "repo", repo_hash="e2etest")
+    src_file = tmp_path / "source.py"
+    src_file.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+    doc_a = cat.register(owner, "source.py", content_type="code", file_path=str(src_file))
+    doc_b = cat.register(owner, "target.py", content_type="code", file_path="target.py")
+    cat.link(doc_a, doc_b, "quotes", created_by="user", from_span="2-4", to_span="")
+    assert cat.resolve_span_text(doc_a, "2-4") == "line2\nline3\nline4"
+
+
+# ── JSONL rebuild + compact ──────────────────────────────────────────────────
+
+
+class TestJSONLResilience:
+    def test_fresh_catalog_sees_indexed_data(self, indexed_catalog, catalog_env):
+        assert Catalog(catalog_env, catalog_env / ".catalog-fresh.db")._db.execute(
+            "SELECT count(*) FROM documents"
+        ).fetchone()[0] >= len(_CODE_FILES)
+
+    def test_compact_and_rebuild(self, indexed_catalog, catalog_env):
+        cat, _ = indexed_catalog
+        before = cat._db.execute("SELECT count(*) FROM documents").fetchone()[0]
         cat.compact()
-
-        # Re-index — new files should get NEW tumblers, not reuse deleted one
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry, force=True)
-
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
-        new_tumblers = {
-            r[0] for r in cat2._db.execute("SELECT tumbler FROM documents").fetchall()
-        }
-
-        # The deleted tumbler must NOT reappear
-        assert first_tumbler not in new_tumblers, \
-            f"Deleted tumbler {first_tumbler} was reused — permanent addressing violated"
-        # We should have at least as many docs as before (minus 1 deleted, plus re-registered)
-        assert len(new_tumblers) >= original_count - 1
+        after = Catalog(catalog_env, catalog_env / ".catalog-compact.db")._db.execute(
+            "SELECT count(*) FROM documents"
+        ).fetchone()[0]
+        assert after == before
 
 
-class TestSpanTransclusionE2E:
-    """Span-addressed links with text resolution."""
-
-    def test_link_with_line_span_resolves_text(self, tmp_path):
-        catalog_dir = tmp_path / "catalog"
-        cat = Catalog.init(catalog_dir)
-        owner = cat.register_owner("test", "repo", repo_hash="e2etest")
-
-        # Create a real file with known content
-        src_file = tmp_path / "source.py"
-        src_file.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
-
-        doc_a = cat.register(owner, "source.py", content_type="code",
-                             file_path=str(src_file))
-        doc_b = cat.register(owner, "target.py", content_type="code",
-                             file_path="target.py")
-
-        # Create a link with a span pointing to lines 2-4 of the source
-        cat.link(doc_a, doc_b, "quotes", created_by="user",
-                 from_span="2-4", to_span="")
-
-        # Resolve the span — should return the actual text
-        text = cat.resolve_span_text(doc_a, "2-4")
-        assert text == "line2\nline3\nline4"
+# ── chash span pipeline (RDR-053) ────────────────────────────────────────────
 
 
-class TestCatalogRebuildFromJSONL:
-    """A fresh Catalog instance rebuilds correctly from JSONL truth."""
-
-    def test_fresh_catalog_sees_indexed_data(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        from nexus.indexer import index_repository
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        # Create a completely fresh Catalog with new DB file
-        fresh_db = catalog_env / ".catalog-fresh.db"
-        cat2 = Catalog(catalog_env, fresh_db)
-        # Should auto-rebuild from JSONL
-        rows = cat2._db.execute("SELECT count(*) FROM documents").fetchone()
-        assert rows[0] >= len(_CODE_FILES), "Fresh catalog should rebuild from JSONL"
+def _get_two_docs_and_chunk(cat, local_t3):
+    docs = cat._db.execute(
+        "SELECT tumbler, physical_collection FROM documents LIMIT 2"
+    ).fetchall()
+    assert len(docs) >= 2
+    col = local_t3._client.get_collection(docs[0][1])
+    chunk = col.get(limit=1, include=["documents", "metadatas"])
+    assert chunk["ids"]
+    return (Tumbler.parse(docs[0][0]), Tumbler.parse(docs[1][0]), docs[0][1],
+            chunk["metadatas"][0]["chunk_text_hash"], chunk["documents"][0])
 
 
-class TestCatalogCompactE2E:
-    """compact() produces correct JSONL that survives rebuild."""
-
-    def test_compact_and_rebuild(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        from nexus.indexer import index_repository
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        doc_count_before = cat._db.execute("SELECT count(*) FROM documents").fetchone()[0]
-
-        # Compact
-        cat.compact()
-
-        # Rebuild from compacted JSONL
-        fresh_db = catalog_env / ".catalog-compact.db"
-        cat2 = Catalog(catalog_env, fresh_db)
-        doc_count_after = cat2._db.execute("SELECT count(*) FROM documents").fetchone()[0]
-        assert doc_count_after == doc_count_before, "Compact + rebuild should preserve all documents"
-
-
-class TestChashSpanPipelineE2E:
-    """RDR-053: Full pipeline — index → chunk_text_hash → chash: link → audit → resolve."""
-
-    def test_index_produces_chunk_text_hash(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        """Indexing real code files produces chunk_text_hash in ChromaDB metadata."""
-        import hashlib
-
-        from nexus.indexer import index_repository
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        # Find a code collection via catalog and verify chunk_text_hash is present
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+class TestChashSpan:
+    def test_index_produces_chunk_text_hash(self, indexed_catalog):
+        cat, local_t3 = indexed_catalog
         row = cat._db.execute(
-            "SELECT physical_collection FROM documents "
-            "WHERE content_type = 'code' LIMIT 1"
+            "SELECT physical_collection FROM documents WHERE content_type = 'code' LIMIT 1"
         ).fetchone()
-        assert row, "Indexing should create at least one code document"
-        col = local_t3._client.get_collection(row[0])
-        result = col.get(limit=5, include=["documents", "metadatas"])
-        assert result["ids"], "Collection should have chunks"
-
+        assert row
+        result = local_t3._client.get_collection(row[0]).get(
+            limit=5, include=["documents", "metadatas"],
+        )
+        assert result["ids"]
         for doc_text, meta in zip(result["documents"], result["metadatas"]):
-            assert "chunk_text_hash" in meta, "chunk_text_hash must be in metadata"
-            assert "content_hash" in meta, "content_hash (file-level) must still exist"
-            expected_hash = hashlib.sha256(doc_text.encode()).hexdigest()
-            assert meta["chunk_text_hash"] == expected_hash, \
-                "chunk_text_hash must equal sha256 of stored document text"
-            assert meta["chunk_text_hash"] != meta["content_hash"], \
-                "chunk-level hash must differ from file-level hash"
+            assert "chunk_text_hash" in meta and "content_hash" in meta
+            expected = hashlib.sha256(doc_text.encode()).hexdigest()
+            assert meta["chunk_text_hash"] == expected
+            assert meta["chunk_text_hash"] != meta["content_hash"]
 
-    def test_chash_link_audit_and_resolve_roundtrip(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        """Create a chash: link from real indexed data, audit it, and resolve the span."""
-        from nexus.indexer import index_repository
+    def test_audit_and_resolve_roundtrip(self, indexed_catalog):
+        cat, local_t3 = indexed_catalog
+        from_t, to_t, coll, real_hash, real_text = _get_two_docs_and_chunk(cat, local_t3)
+        assert cat.link(from_t, to_t, "quotes", "e2e-test", from_span=f"chash:{real_hash}") is True
+        assert cat.link_audit(t3=local_t3._client)["stale_chash_count"] == 0
+        resolved = cat.resolve_span(f"chash:{real_hash}", coll, local_t3._client)
+        assert resolved is not None
+        assert resolved["chunk_text"] == real_text and resolved["chunk_hash"] == real_hash
 
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-
-        # Pick two documents from the catalog
-        docs = cat._db.execute(
-            "SELECT tumbler, physical_collection FROM documents LIMIT 2"
-        ).fetchall()
-        assert len(docs) >= 2, "Need at least 2 documents for link test"
-        from_tumbler_str, from_collection = docs[0]
-        to_tumbler_str, _ = docs[1]
-
-        # Get a real chunk_text_hash from ChromaDB
-        col = local_t3._client.get_collection(from_collection)
-        chunk_result = col.get(limit=1, include=["documents", "metadatas"])
-        assert chunk_result["ids"], "Collection should have at least one chunk"
-        real_hash = chunk_result["metadatas"][0]["chunk_text_hash"]
-        real_text = chunk_result["documents"][0]
-
-        from nexus.catalog.tumbler import Tumbler
-        from_t = Tumbler.parse(from_tumbler_str)
-        to_t = Tumbler.parse(to_tumbler_str)
-
-        # Create a chash: link
-        created = cat.link(from_t, to_t, "quotes", "e2e-test",
-                           from_span=f"chash:{real_hash}")
-        assert created is True
-
-        # Audit — the chash span should be resolvable (not stale)
-        audit = cat.link_audit(t3=local_t3._client)
-        assert audit["stale_chash_count"] == 0, \
-            f"Real chash span should resolve. Stale: {audit['stale_chash']}"
-
-        # Resolve the span back to chunk content
-        resolved = cat.resolve_span(f"chash:{real_hash}", from_collection, local_t3._client)
-        assert resolved is not None, "resolve_span should find the chunk"
-        assert resolved["chunk_text"] == real_text
-        assert resolved["chunk_hash"] == real_hash
-
-    def test_chash_link_audit_detects_bogus_hash(
-        self, catalog_repo, registry, local_t3, catalog_env, monkeypatch
-    ):
-        """link_audit detects a chash: span pointing to a non-existent chunk."""
-        from nexus.indexer import index_repository
-
-        monkeypatch.setenv("NX_LOCAL", "1")
-        with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
-            index_repository(catalog_repo, registry)
-
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-
-        docs = cat._db.execute(
-            "SELECT tumbler FROM documents LIMIT 2"
-        ).fetchall()
+    def test_audit_detects_bogus_hash(self, indexed_catalog):
+        cat, local_t3 = indexed_catalog
+        docs = cat._db.execute("SELECT tumbler FROM documents LIMIT 2").fetchall()
         assert len(docs) >= 2
-
-        from nexus.catalog.tumbler import Tumbler
-        from_t = Tumbler.parse(docs[0][0])
-        to_t = Tumbler.parse(docs[1][0])
-
-        # Create a link with a fabricated hash that doesn't exist in ChromaDB
-        bogus_hash = "f" * 64
-        cat.link(from_t, to_t, "quotes", "e2e-test",
-                 from_span=f"chash:{bogus_hash}")
-
+        bogus = "f" * 64
+        cat.link(Tumbler.parse(docs[0][0]), Tumbler.parse(docs[1][0]),
+                 "quotes", "e2e-test", from_span=f"chash:{bogus}")
         audit = cat.link_audit(t3=local_t3._client)
-        assert audit["stale_chash_count"] >= 1, \
-            "Bogus chash span should be detected as stale"
-        stale_spans = [s["span"] for s in audit["stale_chash"]]
-        assert f"chash:{bogus_hash}" in stale_spans
-
-    def test_tumbler_comparison_sorted_order(self):
-        """Tumbler comparison operators produce correct sorted order."""
-        from nexus.catalog.tumbler import Tumbler
-
-        tumblers = [
-            Tumbler.parse("1.1.10"),
-            Tumbler.parse("1.1.3"),
-            Tumbler.parse("1.1.3.0"),
-            Tumbler.parse("2.1.1"),
-            Tumbler.parse("1.2.1"),
-        ]
-        result = sorted(tumblers)
-        expected = [
-            Tumbler.parse("1.1.3"),
-            Tumbler.parse("1.1.3.0"),
-            Tumbler.parse("1.1.10"),
-            Tumbler.parse("1.2.1"),
-            Tumbler.parse("2.1.1"),
-        ]
-        assert result == expected
-
-    def test_spans_overlap_with_real_tumblers(self):
-        """spans_overlap uses comparison operators correctly."""
-        from nexus.catalog.tumbler import Tumbler
-
-        # Overlapping spans
-        assert Tumbler.spans_overlap(
-            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.7"),
-            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.10"),
-        )
-        # Non-overlapping
-        assert not Tumbler.spans_overlap(
-            Tumbler.parse("1.1.1"), Tumbler.parse("1.1.3"),
-            Tumbler.parse("1.1.5"), Tumbler.parse("1.1.7"),
-        )
-        # Cross-depth overlap
-        assert Tumbler.spans_overlap(
-            Tumbler.parse("1.1.3"), Tumbler.parse("1.1.3.5"),
-            Tumbler.parse("1.1.3.2"), Tumbler.parse("1.1.4"),
-        )
+        assert audit["stale_chash_count"] >= 1
+        assert f"chash:{bogus}" in [s["span"] for s in audit["stale_chash"]]
 
 
-class TestPlanTemplatesSeeded:
-    """Verify catalog-aware plan templates exist in T2 plan library."""
+# ── Tumbler ordering ─────────────────────────────────────────────────────────
 
-    def test_catalog_plan_templates_exist(self, db):
-        """Check that T2 plan library schema supports catalog-tagged plans.
 
-        Templates are seeded in production T2 via plan_save MCP, not test DB.
-        This verifies the schema can store and query catalog-tagged plans.
-        """
-        rows = db.conn.execute(
-            "SELECT count(*) FROM plans WHERE tags LIKE '%catalog%'"
-        ).fetchall()
-        assert isinstance(rows, list)  # schema query succeeds
-        assert rows[0][0] >= 0  # count is a valid integer (0 in test, >0 in prod)
+def test_tumbler_comparison_sorted_order():
+    tumblers = [Tumbler.parse(s) for s in ("1.1.10", "1.1.3", "1.1.3.0", "2.1.1", "1.2.1")]
+    expected = [Tumbler.parse(s) for s in ("1.1.3", "1.1.3.0", "1.1.10", "1.2.1", "2.1.1")]
+    assert sorted(tumblers) == expected
+
+
+@pytest.mark.parametrize("s1,e1,s2,e2,expected", [
+    ("1.1.3", "1.1.7", "1.1.5", "1.1.10", True),
+    ("1.1.1", "1.1.3", "1.1.5", "1.1.7", False),
+    ("1.1.3", "1.1.3.5", "1.1.3.2", "1.1.4", True),
+])
+def test_spans_overlap(s1, e1, s2, e2, expected):
+    assert Tumbler.spans_overlap(
+        Tumbler.parse(s1), Tumbler.parse(e1),
+        Tumbler.parse(s2), Tumbler.parse(e2),
+    ) is expected
+
+
+# ── Plan templates ───────────────────────────────────────────────────────────
+
+
+def test_catalog_plan_templates_exist(db):
+    rows = db.conn.execute(
+        "SELECT count(*) FROM plans WHERE tags LIKE '%catalog%'"
+    ).fetchall()
+    assert isinstance(rows, list) and rows[0][0] >= 0
