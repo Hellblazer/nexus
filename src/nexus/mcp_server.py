@@ -302,22 +302,15 @@ def search(
     where: str = "",
     cluster_by: str = "",
 ) -> str:
-    """Semantic search across T3 knowledge collections.
-
-    Results are paged. Response footer shows ``offset=N`` for next page.
+    """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
 
     Args:
         query: Search query string
-        corpus: Comma-separated corpus prefixes or full collection names.
-                Use "all" to search all corpora.
-        limit: Page size — results per page (default 10)
-        offset: Skip this many results (default 0). Use for pagination.
-        where: Metadata filter in KEY=VALUE format, comma-separated.
-               Operators: =, >=, <=, >, <, !=
-               Numeric fields auto-coerced: bib_year, bib_citation_count, page_count.
-               Example: "bib_year>=2023,tags=arch"
-        cluster_by: Clustering mode. "semantic" groups results by Ward linkage.
-                    Empty string (default) returns flat ranked list.
+        corpus: Corpus prefixes or collection names, comma-separated. "all" for everything.
+        limit: Page size (default 10)
+        offset: Skip N results for pagination (default 0)
+        where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
+        cluster_by: "semantic" for Ward hierarchical clustering, empty for flat ranked list
     """
     try:
         from nexus.search_engine import search_cross_corpus
