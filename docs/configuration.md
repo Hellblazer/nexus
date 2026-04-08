@@ -41,6 +41,14 @@ Nexus auto-detects local mode when cloud credentials are absent. No configuratio
 
 Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.config/nexus/config.yml`.
 
+## Semantic Scholar (Enrichment)
+
+| Env var | Required | Notes |
+|---|---|---|
+| `S2_API_KEY` | No | Free API key for 100 req/s (vs 100/5min unauthenticated). Get one at https://www.semanticscholar.org/product/api#api-key |
+
+Used by `nx enrich` to fetch bibliographic metadata (year, venue, authors, citation count). Without the key, enrichment works but is ~50x slower due to rate limiting.
+
 **`chroma_database` is the database name.** Nexus connects to this single database on ChromaDB Cloud. All collection prefixes (`code__*`, `docs__*`, `rdr__*`, `knowledge__*`) coexist in it. Use `nx doctor` to check its status.
 
 **`chroma_tenant` is optional.** The ChromaDB `CloudClient` infers the tenant UUID directly from your API key. You only need to set it explicitly if you belong to multiple Chroma Cloud workspaces.
