@@ -101,6 +101,7 @@ Plan reuse is opportunistic — the skill functions normally when the plan libra
 - Tests written? → `/nx:test-validate`
 
 **Research and knowledge:**
+- Analytical question over nx knowledge (compare, extract, synthesize) → `/nx:query`
 - Unfamiliar topic or technology comparison → `/nx:research`
 - 3+ validated findings worth keeping → `/nx:knowledge-tidy`
 - PDF to index → `/nx:pdf-process`
@@ -150,6 +151,7 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 |-------|---------|----------------|
 | codebase-analysis | `/nx:analyze-code` | Exploring unfamiliar codebase or understanding module structure before changes |
 | deep-analysis | `/nx:deep-analysis` | Surface-level analysis is insufficient; hypothesis-driven investigation needed |
+| query | `/nx:query` | Analytical questions over nx knowledge — compare, extract, synthesize across corpora with link-aware boosting |
 | research-synthesis | `/nx:research` | Researching unfamiliar topics or comparing technology approaches |
 | architecture | `/nx:architecture` | Complex features need architectural design before implementation |
 | development | `/nx:implement` | Plan approved; implementation work ready to begin |
