@@ -2,8 +2,10 @@
 title: "Code Search Embedding Model Mismatch"
 id: RDR-059
 type: Bug
-status: draft
+status: closed
 priority: critical
+closed: 2026-04-07
+close_reason: implemented
 author: Hal Hildebrand
 created: 2026-04-07
 related_issues: [RDR-056, RDR-014]
