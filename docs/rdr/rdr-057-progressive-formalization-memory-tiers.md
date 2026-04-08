@@ -124,11 +124,13 @@ Defines six atomic memory operations: **consolidation, updating, indexing, forge
 
 Three conflict types: context-parametric, inter-context, intra-memory. Inter-context (new chunk vs. existing T3 chunks) is the most tractable — embed the candidate, search existing T3, extract fact-level conflicts. FaithfulRAG's self-fact mining externalizes facts before comparison. TruthfulRAG (arxiv 2511.10375) uses entropy-based filtering on KG triples — entropy spike = contradiction signal. Bayesian update principle (arxiv 2503.10996): single-agent contradiction triggers a flag, not a rewrite; multi-agent convergence reinforces. Start with inter-context conflicts in Phase 3.
 
-### RF-10: Multi-Agent Memory Consistency Gap
+### RF-10: Multi-Agent Semantic Consistency (Not a Locking Problem)
 
-**Source**: Multi-Agent Memory from a Computer Architecture Perspective (arxiv 2603.10062, March 2026, SIGARCH)
+**Source**: Multi-Agent Memory from a Computer Architecture Perspective (arxiv 2603.10062, March 2026, SIGARCH); codebase audit of concurrency primitives
 
-Frames multi-agent memory as a hardware architecture problem: I/O tier, cache tier, main memory — directly mapping to T1/T2/T3. Key finding: the most pressing unsolved problem is **write-ordering consistency**. Multiple Nexus agents (researcher, developer, planner) all write to T3 with no ordering protocol. Collaborative Memory (arxiv 2505.18279) adds: each memory fragment should carry immutable provenance (contributing agents, timestamps, resource IDs). Nexus T3 chunks already carry `source_agent` metadata — but there's no conflict resolution when two agents write overlapping knowledge.
+Frames multi-agent memory as a hardware architecture problem. However, Nexus's **structural concurrency is already handled**: T3 cloud uses REST API with atomic upserts (ChromaDB Cloud); T2 SQLite uses WAL mode + file-level locks for cross-process safety; T3 local has per-collection `BoundedSemaphore` for in-process threading. No locking primitives are missing.
+
+The real gap is **semantic consistency**: agent A writes "caching uses Redis" while agent B writes "caching uses Memcached" — neither checks for contradictions. This is RF-9's domain (inter-context contradiction detection), not a concurrency control problem. Provenance metadata (`source_agent`, `session_id`) already exists on T3 chunks — it just isn't used for conflict detection.
 
 ### RF-11: JIT Formalization as Competing Design Point
 
