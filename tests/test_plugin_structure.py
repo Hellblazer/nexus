@@ -336,8 +336,8 @@ class TestCliSyntax:
 # Standalone skills don't delegate to agents — exclude from agent-specific tests
 _STANDALONE_SKILLS = {
     "cli-controller", "nexus",
-    "brainstorming-gate", "using-nx-skills",
-    "writing-nx-skills",
+    "brainstorming-gate", "orchestration",
+    "using-nx-skills", "writing-nx-skills",
     "rdr-list", "rdr-show", "rdr-create",
     "sequential-thinking",
     "serena-code-nav",

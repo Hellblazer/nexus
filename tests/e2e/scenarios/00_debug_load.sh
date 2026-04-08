@@ -183,7 +183,6 @@ for agent in \
     "java-developer" \
     "code-review-expert" \
     "plan-auditor" \
-    "orchestrator" \
     "deep-analyst" \
     "knowledge-tidier"; do
     if echo "$agents_out" | grep -qiE "$agent"; then

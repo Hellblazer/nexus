@@ -196,24 +196,6 @@ agents:
     predecessors: [deep-research-synthesizer]
     successors: []
 
-  orchestrator:
-    model: sonnet
-    version: "2.0"
-    color: gold
-    skill: orchestration
-    description: "Routes requests to appropriate specialized agents"
-    triggers:
-      - "unsure which agent to use after reading the skill directory"
-      - "coordinating work across multiple agents in a pipeline"
-      - "task spans multiple agent types and needs explicit routing"
-    strengths:
-      - "Agent selection"
-      - "Pipeline coordination"
-      - "Routing decisions"
-    typical_runtime: "5-15 seconds"
-    predecessors: []
-    successors: [] # Routes to any agent
-
   pdf-chromadb-processor:
     model: haiku
     version: "2.0"
@@ -484,6 +466,14 @@ standalone_skills:
       - "plugin authorship"
     tools: [Read, Write, Edit, Bash]
 
+  orchestration:
+    description: "Agent routing reference — routing tables, pipeline templates, decision framework"
+    triggers:
+      - "unsure which agent to use"
+      - "coordinating multi-agent pipeline"
+      - "workflow routing decision"
+    tools: []
+
   receiving-review:
     description: "Technical evaluation of code review feedback — verify before implementing"
     triggers:
@@ -590,7 +580,6 @@ model_summary:
     - substantive-critic
     - deep-research-synthesizer
     - developer
-    - orchestrator
     - plan-auditor
     - plan-enricher
     - query-planner

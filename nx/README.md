@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-15 agents, 28 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
+14 agents, 28 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
 
 ## Installation
 
@@ -36,7 +36,7 @@ Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 
 ## What You Get
 
-- **15 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
+- **14 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
 - **28 skills** — 6 standalone + 15 agent-delegating + 7 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
@@ -67,7 +67,7 @@ nx/
 │   │   ├── MAINTENANCE.md       # How to maintain/update agents
 │   │   ├── README.md            # _shared directory guide (this section)
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
-│   └── *.md                 # 15 specialized agent definitions
+│   └── *.md                 # 14 specialized agent definitions (+ 2 internal)
 ├── commands/
 │   └── *.md                 # Slash commands (/nx:research, /nx:create-plan, /nx:review-code, etc.)
 ├── hooks/
@@ -95,7 +95,7 @@ nx/
     ├── debugging/           # → debugger agent
     ├── development/         # → developer agent
     ├── knowledge-tidying/   # → knowledge-tidier agent
-    ├── orchestration/       # → orchestrator agent
+    ├── orchestration/       # routing reference (no agent)
     ├── pdf-processing/      # → pdf-chromadb-processor agent
     ├── plan-validation/     # → plan-auditor agent
     ├── research-synthesis/  # → deep-research-synthesizer agent
@@ -111,7 +111,7 @@ nx/
     └── rdr-show/            # RDR workflow: show RDR details
 ```
 
-## Standalone Skills (9)
+## Standalone Skills (10)
 
 Skills that provide guidance directly without delegating to an agent.
 
@@ -119,12 +119,16 @@ Skills that provide guidance directly without delegating to an agent.
 |-------|---------|
 | brainstorming-gate | Design gate — requires exploration and user approval before implementation |
 | cli-controller | Expert guidance for controlling interactive CLI applications via tmux |
+| finishing-branch | Guide branch completion — verify tests, present merge/PR/keep/discard options |
+| git-worktrees | Isolated workspace setup via git worktrees with safety verification |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
+| orchestration | Agent routing reference — routing tables, pipeline templates, decision framework |
+| receiving-review | Technical evaluation of code review feedback — verify before implementing |
 | serena-code-nav | Navigate code by symbol — definitions, callers, type hierarchies, safe renames |
 | using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring nx plugin skills |
 
-## Agents (15)
+## Agents (14)
 
 See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, predecessors/successors).
 
@@ -139,7 +143,6 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | debugger | debugging | `/nx:debug` | opus | Hypothesis-driven debugging |
 | developer | development | `/nx:implement` | sonnet | TDD implementation, test-first methodology |
 | knowledge-tidier | knowledge-tidying | `/nx:knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
-| orchestrator | orchestration | *(no command)* | sonnet | Route requests to appropriate agents |
 | pdf-chromadb-processor | pdf-processing | `/nx:pdf-process` | haiku | Index PDFs into nx store for semantic search |
 | plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution |
 | plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context — file paths, patterns, constraints, test commands |

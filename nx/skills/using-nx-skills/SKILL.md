@@ -26,25 +26,53 @@ digraph skill_flow {
     "About to implement?" [shape=diamond];
     "Already brainstormed?" [shape=diamond];
     "Invoke brainstorming-gate" [shape=box];
+    "Multi-agent pipeline?" [shape=diamond];
+    "Check plan library" [shape=box];
+    "Matching template?" [shape=diamond];
+    "Present template to user" [shape=box];
     "Might any skill apply?" [shape=diamond];
     "Invoke Skill tool" [shape=box];
     "Announce: 'Using [skill] to [purpose]'" [shape=box];
     "Follow skill exactly" [shape=box];
+    "Pipeline succeeded?" [shape=diamond];
+    "Save plan to library" [shape=box];
     "Respond" [shape=doublecircle];
 
     "User message received" -> "About to implement?";
     "About to implement?" -> "Already brainstormed?" [label="yes"];
-    "About to implement?" -> "Might any skill apply?" [label="no"];
+    "About to implement?" -> "Multi-agent pipeline?" [label="no"];
     "Already brainstormed?" -> "Invoke brainstorming-gate" [label="no"];
-    "Already brainstormed?" -> "Might any skill apply?" [label="yes"];
-    "Invoke brainstorming-gate" -> "Might any skill apply?";
+    "Already brainstormed?" -> "Multi-agent pipeline?" [label="yes"];
+    "Invoke brainstorming-gate" -> "Multi-agent pipeline?";
+    "Multi-agent pipeline?" -> "Check plan library" [label="yes"];
+    "Multi-agent pipeline?" -> "Might any skill apply?" [label="no"];
+    "Check plan library" -> "Matching template?" ;
+    "Matching template?" -> "Present template to user" [label="yes"];
+    "Matching template?" -> "Might any skill apply?" [label="no"];
+    "Present template to user" -> "Might any skill apply?";
     "Might any skill apply?" -> "Invoke Skill tool" [label="yes, even 1%"];
     "Might any skill apply?" -> "Respond" [label="definitely not"];
     "Invoke Skill tool" -> "Announce: 'Using [skill] to [purpose]'";
     "Announce: 'Using [skill] to [purpose]'" -> "Follow skill exactly";
-    "Follow skill exactly" -> "Respond";
+    "Follow skill exactly" -> "Pipeline succeeded?";
+    "Pipeline succeeded?" -> "Save plan to library" [label="yes"];
+    "Pipeline succeeded?" -> "Respond" [label="no or single agent"];
+    "Save plan to library" -> "Respond";
 }
 ```
+
+## Plan Reuse
+
+Before dispatching any multi-agent pipeline:
+1. Call `mcp__plugin_nx_nexus__plan_search(query="<task description>", limit=3)`
+2. If a matching template is returned, present it to the user and offer to use it as the starting structure
+3. If no match ("No matching plans."), proceed with standard routing
+
+After a multi-agent pipeline completes successfully:
+1. Call `mcp__plugin_nx_nexus__plan_save(query="<task description>", plan_json=<relay chain as JSON>, tags="<agent names>")`
+2. The `plan_json` should capture: `{"steps": [...], "tools_used": [...], "outcome_notes": "..."}`
+
+Plan reuse is opportunistic — the skill functions normally when the plan library is empty.
 
 ## Routing: What Skill Do I Use?
 
@@ -148,7 +176,7 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 | Skill | Command | Invoke when... |
 |-------|---------|----------------|
 | knowledge-tidying | `/nx:knowledge-tidy` | 3+ validated findings or decisions need persisting to T3 for cross-session reuse |
-| orchestration | `/nx:orchestrate` | After reading this directory, still unsure which agent fits the task |
+| orchestration | `/nx:orchestrate` | Unsure which agent fits — consult [routing reference](../orchestration/reference.md) |
 | pdf-processing | `/nx:pdf-process` | PDF documents need indexing into nx store for semantic search |
 | nexus | `/nx:nexus` | Running nx commands or unsure which nx subcommand to use |
 | serena-code-nav | `/nx:serena-code-nav` | Navigating code by symbol — finding definitions, callers, type hierarchies, or safe renames |
