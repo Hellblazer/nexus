@@ -125,6 +125,18 @@ Route here when the question involves: specific authors, paper citations, "what 
 2. plan-auditor: Validate technical accuracy
 3. substantive-critic: Critique for gaps and assumptions
 
+## Pipeline Pattern Catalog
+
+These patterns are stored in the T2 plan library and are returned by `plan_search` when matching queries are detected. The `using-nx-skills` skill checks for matching templates before dispatching multi-agent pipelines.
+
+| Pattern | Agents | When to Use | Prerequisites |
+|---------|--------|-------------|---------------|
+| RDR Chain | research → gate → accept → plan → audit → enrich → implement → review | Non-trivial features needing design documentation before coding | RDR created and populated with research findings |
+| Plan-Audit-Implement | strategic-planner → plan-auditor → developer → review → test-validator | Standard feature development with clear requirements | Requirements defined, no RDR needed |
+| Research-Synthesize | deep-research-synthesizer → knowledge-tidier | Gathering information on unfamiliar topics or comparing approaches | Topic identified |
+| Code Review | code-review-expert → test-validator | Post-implementation quality gate before merge or PR | Code changes committed |
+| Debug | debugger → developer → test-validator | Test failures or non-deterministic behavior, especially after 2+ failed manual fix attempts | Reproducible failure or clear symptom |
+
 ## Agent Ecosystem
 
 ### Development Agents
