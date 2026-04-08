@@ -4,7 +4,8 @@
 # Exit 0 always with hookSpecificOutput JSON.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-set -euo pipefail
+# No set -e/-u/-o pipefail — this hook must NEVER fail.
+# Every code path must produce valid JSON on stdout and exit 0.
 
 # ---------------------------------------------------------------------------
 # Helpers — PreToolUse uses hookSpecificOutput, NOT decision/reason

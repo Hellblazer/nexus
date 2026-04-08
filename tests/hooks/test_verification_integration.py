@@ -185,9 +185,11 @@ class TestStopHookPipeline:
         env = mock_plugin_root({"on_stop": True})
         payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": False})
         result = _run_hook(STOP_HOOK, payload, env_overrides=env, cwd=tmp_path)
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout.strip(), f"empty stdout, stderr: {result.stderr}"
-        assert json.loads(result.stdout)["decision"] == "approve"
+        assert result.returncode == 0, f"rc={result.returncode} stderr={result.stderr!r}"
+        assert result.stdout.strip(), f"empty stdout, stderr={result.stderr!r}"
+        # Extract last JSON line — earlier lines may be command output (e.g., nx catalog sync)
+        json_line = [l for l in result.stdout.strip().splitlines() if l.startswith("{")][-1]
+        assert json.loads(json_line)["decision"] == "approve"
 
     def test_warns_on_uncommitted_changes(self, tmp_path, mock_plugin_root) -> None:
         _init_git_repo(tmp_path)

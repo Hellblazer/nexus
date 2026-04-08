@@ -163,7 +163,10 @@ def test_t3_store_put_and_list_roundtrip(runner):
 def test_t3_store_put_search_roundtrip(runner):
     uid = _uid("search")
     _store_put(runner, uid)
-    result = runner.invoke(main, ["search", uid, "--corpus", _T3_COL, "--n", "5"])
+    result = runner.invoke(main, [
+        "search", uid, "--corpus", _T3_COL, "--n", "5",
+        "--where", f"title={uid}.md",
+    ])
     assert result.exit_code == 0 and uid in result.output
 
 
@@ -200,9 +203,13 @@ def test_t3_collection_verify_missing(runner):
 @pytest.mark.integration
 @requires_t3
 def test_nx_search_knowledge_corpus(runner):
-    uid = _uid("corpus")
+    uid = _uid("searchcorpus")
     _store_put(runner, uid)
-    result = runner.invoke(main, ["search", uid, "--corpus", _T3_COL, "--n", "3"])
+    # Search with enough results and filter by title to avoid noise from prior runs
+    result = runner.invoke(main, [
+        "search", uid, "--corpus", _T3_COL, "--n", "10",
+        "--where", f"title={uid}.md",
+    ])
     assert result.exit_code == 0 and uid in result.output
 
 

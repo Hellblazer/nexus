@@ -4,7 +4,8 @@
 # Exit 0 always. Communicate via JSON stdout.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-set -euo pipefail
+# No set -e/-u/-o pipefail — this hook must NEVER fail.
+# Every code path must produce valid JSON on stdout and exit 0.
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,7 +56,7 @@ if command -v nx &>/dev/null; then
         # grep -c exits 1 on zero matches; || echo "0" catches both that and pipe failures
         CATALOG_DIRTY=$(git -C "$CATALOG_PATH" status --porcelain 2>/dev/null | grep -c "\.jsonl" || echo "0")
         if [[ "$CATALOG_DIRTY" -gt 0 ]]; then
-            nx catalog sync -m "auto-sync at session close" 2>/dev/null || true
+            nx catalog sync -m "auto-sync at session close" >/dev/null 2>&1 || true
         fi
     fi
 fi
