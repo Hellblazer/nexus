@@ -10,7 +10,7 @@ from voyageai.object.contextualized_embeddings import (
 )
 from voyageai.object.embeddings import EmbeddingsObject
 
-from nexus.doc_indexer import index_markdown, index_pdf
+from nexus.doc_indexer import _markdown_chunks, index_markdown, index_pdf
 from tests.conftest import set_credentials
 
 
@@ -2640,3 +2640,31 @@ class TestStreamingRouting:
 
         assert result == 5
         mock_pipeline.assert_called_once()
+
+
+# ── nexus-xbco: section_type wired through indexing pipeline ─────────────────
+
+
+class TestSectionTypeInPipeline:
+    """section_type metadata must be present in all indexing paths."""
+
+    def test_markdown_chunks_has_section_type(self, tmp_path: Path):
+        md_file = tmp_path / "paper.md"
+        md_file.write_text("# Abstract\n\nThis paper presents...\n\n# References\n\n[1] Foo.\n")
+        tuples = _markdown_chunks(md_file, "abc123", "voyage-context-3", "2026-01-01", "docs__test")
+        assert len(tuples) >= 2
+        for _id, _text, meta in tuples:
+            assert "section_type" in meta, "section_type missing from markdown chunk metadata"
+
+    def test_markdown_chunks_abstract_classified(self, tmp_path: Path):
+        md_file = tmp_path / "paper.md"
+        md_file.write_text("# Abstract\n\nThis paper presents results.\n")
+        tuples = _markdown_chunks(md_file, "abc123", "voyage-context-3", "2026-01-01", "docs__test")
+        assert tuples[0][2]["section_type"] == "abstract"
+
+    def test_markdown_chunks_references_classified(self, tmp_path: Path):
+        md_file = tmp_path / "paper.md"
+        md_file.write_text("# Abstract\n\nContent.\n\n# References\n\n[1] Foo et al.\n")
+        tuples = _markdown_chunks(md_file, "abc123", "voyage-context-3", "2026-01-01", "docs__test")
+        ref_chunks = [m for _, _, m in tuples if m["section_type"] == "references"]
+        assert ref_chunks, "Expected at least one chunk classified as 'references'"
