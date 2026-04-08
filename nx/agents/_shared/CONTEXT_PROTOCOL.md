@@ -20,7 +20,8 @@ These agents **MUST proactively search** for context before starting:
 1. **Bead**: `/beads:show <id>` for task context, design field, dependencies
 2. **Project Infrastructure**: T2 memory and beads context is auto-injected by SessionStart and SubagentStart hooks
 3. **nx T3 store**: mcp__plugin_nx_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
-4. **nx T2 memory**: mcp__plugin_nx_nexus__memory_get( `project="{project}", title="ACTIVE_INDEX.md"`
+4. **Catalog link graph**: `mcp__plugin_nx_nexus__query( question="[topic]", follow_links="implements" )` — the `query` tool automatically boosts results from documents with precise `implements` links
+5. **nx T2 memory**: mcp__plugin_nx_nexus__memory_get( `project="{project}", title="ACTIVE_INDEX.md"`
 5. **T1 scratch** (current session): mcp__plugin_nx_nexus__scratch( `action="search", query="[topic]"`
 
 ### Relay-Reliant Agents (Execution & Validation)

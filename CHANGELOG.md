@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Catalog path rationalization (RDR-060)** — catalog `file_path` and T3 `source_path` now store relative paths. `resolve_path()` reconstructs absolute paths via `owner.repo_root` or registry fallback.
+- **Link-aware search boost** — `query` MCP tool boosts results from documents with `implements` links. `implements-heuristic` links get zero boost (too noisy). Configurable per-type weights.
+- **Discovery tools** — `nx catalog orphans`, `coverage`, `suggest-links` for link graph observability.
+- **Incremental link generation** — link generators accept `new_tumblers` for O(new_n × m) incremental mode during `nx index repo`. `nx catalog link-generate` for full batch scans.
+- **Agent integration** — `nx catalog links-for-file` and `session-summary` surface linked RDRs for code files.
+- **Catalog housekeeping** — `_run_housekeeping()` tracks `miss_count`, evicts orphans after 2 missed index runs, detects renames via content hash. `nx catalog gc` CLI.
+- **`nx doctor --fix-paths [--dry-run]`** — one-time migration of absolute paths to relative (catalog + T3 metadata).
+
+### Fixed
+- **Test catalog isolation** — autouse `conftest.py` fixture prevents integration tests from polluting the user's live catalog.
+
 ## [3.5.2] - 2026-04-08
 
 ### Fixed

@@ -260,6 +260,47 @@ nx catalog link-bulk-delete --type implements-heuristic --created-by indexer --d
 
 Preview and bulk-delete links by type and/or creator. Always use `--dry-run` first.
 
+### Discovery and observability
+
+```bash
+nx catalog orphans --no-links           # entries with zero links
+nx catalog coverage                     # % of entries with links, by content type
+nx catalog coverage --owner 1.1         # scoped to a specific repo
+nx catalog suggest-links --limit 20     # unlinked code-RDR pairs by name overlap
+nx catalog links-for-file src/foo.py    # all docs linked to a file
+nx catalog session-summary              # recently modified files + linked RDRs
+```
+
+Use `coverage` to track link graph completeness. Use `orphans` to find documents that need linking. `links-for-file` shows the design context for any source file.
+
+### Link generation
+
+```bash
+nx catalog link-generate                # full batch scan — all linkers
+nx catalog link-generate --dry-run      # preview without creating
+```
+
+Normal `nx index repo` runs generate links incrementally (only for newly indexed files). Use `link-generate` for the full O(n×m) batch scan after bulk imports or initial setup.
+
+### Housekeeping
+
+```bash
+nx catalog gc                           # delete entries missed in 2+ index runs
+nx catalog gc --dry-run                 # preview
+nx catalog compact                      # remove tombstones from JSONL
+```
+
+The indexer automatically tracks `miss_count` for each catalog entry. Files deleted or renamed are detected: renames (same content hash at a new path) transfer links to the new entry; true deletions are evicted after 2 consecutive missed index runs. `gc` provides the manual escape hatch.
+
+### Path migration
+
+```bash
+nx doctor --fix-paths --dry-run         # preview absolute→relative migration
+nx doctor --fix-paths                   # apply migration (catalog + T3 source_path)
+```
+
+After upgrading to RDR-060, run `--fix-paths` once to migrate existing absolute `file_path` entries to relative paths. Curator-owned entries (PDFs, standalone docs) are skipped — they keep absolute paths by design.
+
 ### Troubleshooting
 
 **SQLite cache disappeared:** Delete `.catalog.db` (or let it be deleted). The system rebuilds it from JSONL on next access — no data lost.

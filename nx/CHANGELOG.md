@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Link-boosted query results** — `query` MCP tool now automatically boosts results from documents with `implements` links. No agent changes needed.
+- **CONTEXT_PROTOCOL** — added catalog link graph as search source #4 for proactive agents.
+
 ## [3.5.2] - 2026-04-08
 
 Plugin version aligned with Nexus CLI 3.5.2. No plugin-level changes.
