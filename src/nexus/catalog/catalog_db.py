@@ -106,7 +106,8 @@ class CatalogDB:
         try:
             self._conn.execute("SELECT repo_root FROM owners LIMIT 0")
         except sqlite3.OperationalError:
-            self._conn.execute("ALTER TABLE owners ADD COLUMN repo_root TEXT DEFAULT ''")
+            with self._conn:
+                self._conn.execute("ALTER TABLE owners ADD COLUMN repo_root TEXT DEFAULT ''")
 
     def rebuild(
         self,

@@ -1176,10 +1176,10 @@ def catalog_register(
         # Relativize absolute file_path if it falls under a known repo (RDR-060)
         fp = file_path
         if fp and _Path(fp).is_absolute():
-            from nexus.config import default_db_path
+            from nexus.catalog.catalog import _default_registry_path
             from nexus.registry import RepoRegistry
 
-            reg_path = default_db_path() / "repos.json"
+            reg_path = _default_registry_path()
             if reg_path.exists():
                 for repo_path_str in RepoRegistry(reg_path).all_info():
                     rel = make_relative(fp, _Path(repo_path_str))

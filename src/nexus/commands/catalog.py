@@ -397,10 +397,10 @@ def register_cmd(
     # Relativize absolute file_path if under a known repo (RDR-060)
     fp = file_path
     if fp and Path(fp).is_absolute():
-        from nexus.config import default_db_path
+        from nexus.catalog.catalog import _default_registry_path
         from nexus.registry import RepoRegistry
 
-        reg_path = default_db_path() / "repos.json"
+        reg_path = _default_registry_path()
         if reg_path.exists():
             for repo_path_str in RepoRegistry(reg_path).all_info():
                 rel = make_relative(fp, Path(repo_path_str))
@@ -910,14 +910,14 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
             # Derive repo root from registry for relativization (RDR-060)
             repo_root: Path | None = None
             try:
-                from nexus.catalog.catalog import make_relative
-                from nexus.config import default_db_path
+                import hashlib
+
+                from nexus.catalog.catalog import _default_registry_path, make_relative
                 from nexus.registry import RepoRegistry
 
-                reg_path = default_db_path() / "repos.json"
+                reg_path = _default_registry_path()
                 if reg_path.exists():
                     for repo_path_str in RepoRegistry(reg_path).all_info():
-                        import hashlib
                         h = hashlib.sha256(repo_path_str.encode()).hexdigest()[:8]
                         if col_name.endswith(h):
                             repo_root = Path(repo_path_str)

@@ -317,6 +317,8 @@ class Catalog:
     def register_owner(
         self, name: str, owner_type: str, *, repo_hash: str = "", description: str = "", repo_root: str = ""
     ) -> Tumbler:
+        if repo_root and not Path(repo_root).is_absolute():
+            raise ValueError(f"repo_root must be an absolute path: {repo_root!r}")
         dir_fd = self._acquire_lock()
         try:
             # Read existing owners to find next number
@@ -497,15 +499,18 @@ class Catalog:
         if not entry:
             return None
 
-        # Find owner
+        # Find owner via SQLite (avoids re-reading JSONL on every call)
         owner_prefix = str(tumbler.owner_address())
-        owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-        owner_rec = owners.get(owner_prefix)
-        if not owner_rec:
+        row = self._db.execute(
+            "SELECT owner_type, repo_root, repo_hash FROM owners WHERE tumbler_prefix = ?",
+            (owner_prefix,),
+        ).fetchone()
+        if not row:
             return None
+        owner_type, repo_root, repo_hash = row[0], row[1], row[2]
 
         # Curators (PDFs, standalone docs) are not resolvable
-        if owner_rec.owner_type == "curator":
+        if owner_type == "curator":
             return None
 
         # If file_path is already absolute, return it directly
@@ -514,17 +519,17 @@ class Catalog:
             return fp
 
         # Primary: use repo_root from owner
-        if owner_rec.repo_root:
-            return Path(owner_rec.repo_root) / entry.file_path
+        if repo_root:
+            return Path(repo_root) / entry.file_path
 
         # Fallback: find repo_root from registry by matching repo_hash
-        if owner_rec.repo_hash:
+        if repo_hash:
             registry_path = _default_registry_path()
             if registry_path.exists():
                 reg = RepoRegistry(registry_path)
                 for path_str in reg.all_info():
                     path_hash = hashlib.sha256(path_str.encode()).hexdigest()[:8]
-                    if path_hash == owner_rec.repo_hash:
+                    if path_hash == repo_hash:
                         return Path(path_str) / entry.file_path
 
         return None
