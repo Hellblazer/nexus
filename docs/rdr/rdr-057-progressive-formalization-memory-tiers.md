@@ -57,6 +57,26 @@ The Semantic Ladder's monotonic-extension property (transformations extend, not 
 
 Adding `formalizes` as a catalog link type operationalizes multi-representation equivalence in ~10 LOC. RDR-053's `chunk_text_hash` (RF-6) is prerequisite for stable `formalizes` span links — L2 representations pointing to specific L0 chunks need content-addressed spans to survive re-indexing.
 
+### RF-6: RDR-055/056 Infrastructure Accelerates Phases 1-4
+
+**Source**: Codebase audit post-v3.3.0 (RDR-055 section_type, RDR-056 search robustness)
+
+RDR-055 and RDR-056 shipped infrastructure that directly serves RDR-057's phases:
+
+**Phase 1 (Foundation) — already partially delivered:**
+- `section_type` metadata (RDR-055) is an L1 annotation on L0 chunks — the first Semantic Ladder transformation already exists in production. `classify_section_type()` in `md_chunker.py` is the pattern for future L1 classifiers. Phase 1b's `formalization_level` field can seed `1` for chunks with `section_type != ""` instead of universally `0`, giving immediate queryable signal.
+
+**Phase 2 (Tier Boundary Transformations) — informed by thresholds:**
+- Per-corpus distance thresholds (RDR-056 P1c) provide empirically validated semantic boundaries: knowledge/docs noise starts at distance 0.67, relevant content ends at 0.59. These values directly calibrate Phase 2b's T2 consolidation similarity threshold — entries within 0.59 distance are candidates for merge.
+- `_prefilter_from_catalog()` (RDR-056 P3) demonstrates the pattern for routing through catalog SQLite before vector operations — same architecture T2 consolidation would use (query FTS5 for overlap candidates, then vector-verify).
+
+**Phase 4 (Community Detection) — module already exists:**
+- `search_clusterer.py` (RDR-056 P2b) implements Ward hierarchical clustering with numpy k-means fallback. Phase 4's `generate_community_links()` can call `cluster_results()` directly — the algorithm, determinism guarantees, and scipy/numpy fallback are already tested (16 tests).
+- `T3Database.get_embeddings()` (RDR-056 P2c) solves the embedding post-fetch problem. Phase 4 needs document embeddings for community detection — `get_embeddings()` already handles per-collection batching with `_chroma_with_retry`.
+- `Catalog.doc_count()` (RDR-056 P3) enables selectivity calculations reusable for consolidation threshold tuning.
+
+**Net effect**: Phase 1 scope shrinks (~10 LOC for `formalizes` link + metadata field, vs building L1 classification from scratch). Phase 4 becomes integration work rather than greenfield (wire existing `cluster_results()` into `link_generator.py`). Phase 2 consolidation has empirical threshold data instead of guesswork.
+
 ## Proposed Design
 
 ### The Formalization Flywheel
