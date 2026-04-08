@@ -56,7 +56,7 @@ def _cloud_db_with_ef() -> T3Database:
 class TestGetOrCreateCollectionHnswMetadata:
     def test_local_mode_passes_hnsw_search_ef_metadata(self) -> None:
         """get_or_create_collection passes hnsw:search_ef metadata in local mode."""
-        db = _local_db()
+        db = _local_db_with_ef()
         col = db.get_or_create_collection(_unique("code__ef"))
         meta = col.metadata or {}
         assert "hnsw:search_ef" in meta
@@ -64,7 +64,7 @@ class TestGetOrCreateCollectionHnswMetadata:
 
     def test_local_mode_hnsw_ef_matches_config(self) -> None:
         """hnsw:search_ef value matches config search.hnsw_ef default (256)."""
-        db = _local_db()
+        db = _local_db_with_ef()
         col = db.get_or_create_collection(_unique("knowledge__ef"))
         assert col.metadata["hnsw:search_ef"] == 256
 
