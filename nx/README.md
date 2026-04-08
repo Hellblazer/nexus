@@ -67,7 +67,7 @@ nx/
 │   │   ├── MAINTENANCE.md       # How to maintain/update agents
 │   │   ├── README.md            # _shared directory guide (this section)
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
-│   └── *.md                 # 15 specialized agent definitions
+│   └── *.md                 # 14 specialized agent definitions (+ 2 internal)
 ├── commands/
 │   └── *.md                 # Slash commands (/nx:research, /nx:create-plan, /nx:review-code, etc.)
 ├── hooks/
@@ -111,7 +111,7 @@ nx/
     └── rdr-show/            # RDR workflow: show RDR details
 ```
 
-## Standalone Skills (9)
+## Standalone Skills (10)
 
 Skills that provide guidance directly without delegating to an agent.
 
@@ -119,7 +119,11 @@ Skills that provide guidance directly without delegating to an agent.
 |-------|---------|
 | brainstorming-gate | Design gate — requires exploration and user approval before implementation |
 | cli-controller | Expert guidance for controlling interactive CLI applications via tmux |
+| finishing-branch | Guide branch completion — verify tests, present merge/PR/keep/discard options |
+| git-worktrees | Isolated workspace setup via git worktrees with safety verification |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
+| orchestration | Agent routing reference — routing tables, pipeline templates, decision framework |
+| receiving-review | Technical evaluation of code review feedback — verify before implementing |
 | serena-code-nav | Navigate code by symbol — definitions, callers, type hierarchies, safe renames |
 | using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring nx plugin skills |

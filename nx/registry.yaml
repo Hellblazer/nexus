@@ -466,6 +466,14 @@ standalone_skills:
       - "plugin authorship"
     tools: [Read, Write, Edit, Bash]
 
+  orchestration:
+    description: "Agent routing reference — routing tables, pipeline templates, decision framework"
+    triggers:
+      - "unsure which agent to use"
+      - "coordinating multi-agent pipeline"
+      - "workflow routing decision"
+    tools: []
+
   receiving-review:
     description: "Technical evaluation of code review feedback — verify before implementing"
     triggers:
