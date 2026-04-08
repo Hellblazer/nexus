@@ -1,6 +1,8 @@
-"""AC2: Repo registry add/remove/update, JSON persistence, atomic write."""
+# SPDX-License-Identifier: AGPL-3.0-or-later
 import hashlib
-import json
+import os
+import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -8,125 +10,88 @@ import pytest
 from nexus.registry import RepoRegistry
 
 
-def test_registry_add_repo(tmp_path: Path) -> None:
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
+@pytest.fixture
+def reg(tmp_path: Path) -> RepoRegistry:
+    return RepoRegistry(tmp_path / "repos.json")
 
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    r = tmp_path / "myrepo"
+    r.mkdir()
+    return r
+
+
+def _expected_hash(repo: Path) -> str:
+    return hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+
+
+# ── add / get / remove ──────────────────────────────────────────────────────
+
+
+def test_add_and_get(reg, repo) -> None:
     reg.add(repo)
-
     assert str(repo) in reg.all()
-
-
-def test_registry_add_sets_collection_name(tmp_path: Path) -> None:
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
-    reg.add(repo)
     info = reg.get(repo)
-
     assert info is not None
-    expected_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
-    assert info["collection"] == f"code__myrepo-{expected_hash}"
+    assert info["collection"] == f"code__myrepo-{_expected_hash(repo)}"
     assert info["name"] == "myrepo"
+    assert info["head_hash"] == ""
 
 
-def test_registry_add_initialises_head_hash_empty(tmp_path: Path) -> None:
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
+def test_persists_to_json(reg, repo) -> None:
+    import json
     reg.add(repo)
-
-    assert reg.get(repo)["head_hash"] == ""
-
-
-def test_registry_persists_to_json(tmp_path: Path) -> None:
-    reg_path = tmp_path / "repos.json"
-    reg = RepoRegistry(reg_path)
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
-    reg.add(repo)
-
-    data = json.loads(reg_path.read_text())
+    data = json.loads(reg._path.read_text())
     assert str(repo) in data["repos"]
 
 
-def test_registry_survives_reload(tmp_path: Path) -> None:
-    reg_path = tmp_path / "repos.json"
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
-    RepoRegistry(reg_path).add(repo)
-
-    # Second instance reads from disk
-    reg2 = RepoRegistry(reg_path)
-    assert reg2.get(repo) is not None
+def test_survives_reload(tmp_path, repo) -> None:
+    path = tmp_path / "repos.json"
+    RepoRegistry(path).add(repo)
+    assert RepoRegistry(path).get(repo) is not None
 
 
-def test_registry_remove_repo(tmp_path: Path) -> None:
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
+def test_remove(reg, repo) -> None:
     reg.add(repo)
     reg.remove(repo)
-
     assert reg.get(repo) is None
 
 
-def test_registry_get_missing_returns_none(tmp_path: Path) -> None:
-    reg = RepoRegistry(tmp_path / "repos.json")
+def test_get_missing(reg) -> None:
     assert reg.get(Path("/no/such/repo")) is None
 
 
-def test_registry_update_head_hash(tmp_path: Path) -> None:
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
+# ── update ──────────────────────────────────────────────────────────────────
 
+
+@pytest.mark.parametrize("field,value", [
+    ("head_hash", "abc123def456"),
+    ("status", "indexing"),
+])
+def test_update(reg, repo, field, value) -> None:
     reg.add(repo)
-    reg.update(repo, head_hash="abc123def456")
+    reg.update(repo, **{field: value})
+    assert reg.get(repo)[field] == value
 
-    assert reg.get(repo)["head_hash"] == "abc123def456"
+
+# ── atomic write / concurrent access ────────────────────────────────────────
 
 
-def test_registry_update_status(tmp_path: Path) -> None:
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
+def test_atomic_write_leaves_no_tmp(reg, repo) -> None:
     reg.add(repo)
-    reg.update(repo, status="indexing")
-
-    assert reg.get(repo)["status"] == "indexing"
+    assert not reg._path.with_suffix(".json.tmp").exists()
 
 
-def test_registry_atomic_write_leaves_no_tmp(tmp_path: Path) -> None:
-    """Save writes to .tmp then os.replace(); no stale .tmp remains."""
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
-    reg.add(repo)
-
-    assert not (tmp_path / "repos.json.tmp").exists()
-
-
-def test_registry_concurrent_reads_and_writes(tmp_path: Path) -> None:
-    """T5: Concurrent add() and get() calls do not raise or corrupt data."""
-    import threading
-
+def test_concurrent_reads_and_writes(tmp_path) -> None:
     reg = RepoRegistry(tmp_path / "repos.json")
     errors: list[Exception] = []
 
     def writer(n: int) -> None:
         try:
-            repo = tmp_path / f"repo{n}"
-            repo.mkdir(exist_ok=True)
-            reg.add(repo)
+            r = tmp_path / f"repo{n}"
+            r.mkdir(exist_ok=True)
+            reg.add(r)
         except Exception as e:
             errors.append(e)
 
@@ -144,246 +109,147 @@ def test_registry_concurrent_reads_and_writes(tmp_path: Path) -> None:
         t.start()
     for t in threads:
         t.join()
-
     assert errors == [], f"Concurrent access raised: {errors}"
-    # All writers completed — 10 repos should be registered
     assert len(reg.all()) == 10
 
 
-# ── nexus-bgv: get() returns a copy, not a mutable reference ─────────────────
+# ── get() returns copy ─────────────────────────────────────────────────────
 
-def test_registry_get_returns_copy_not_reference(tmp_path: Path) -> None:
-    """registry.get() returns a copy; mutating it does not corrupt the registry."""
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
+
+def test_get_returns_copy(reg, repo) -> None:
     reg.add(repo)
-
     entry = reg.get(repo)
-    assert entry is not None
-
-    # Mutate the returned dict
     entry["collection"] = "code__MUTATED"
     entry["injected"] = True
-
-    # Internal state must be unchanged
     fresh = reg.get(repo)
-    expected_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
-    assert fresh["collection"] == f"code__myrepo-{expected_hash}"
+    assert fresh["collection"] == f"code__myrepo-{_expected_hash(repo)}"
     assert "injected" not in fresh
 
 
-# ── dual-collection names ─────────────────────────────────────────────────────
+# ── dual-collection names ──────────────────────────────────────────────────
 
 
-def test_add_stores_both_collection_names(tmp_path: Path) -> None:
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
+def test_dual_collection_names(reg, repo) -> None:
     reg.add(repo)
     info = reg.get(repo)
-    assert "code_collection" in info
-    assert "docs_collection" in info
     assert info["code_collection"].startswith("code__")
     assert info["docs_collection"].startswith("docs__")
-    # Same hash suffix
     code_suffix = info["code_collection"].split("code__")[1]
     docs_suffix = info["docs_collection"].split("docs__")[1]
     assert code_suffix == docs_suffix
-
-
-def test_backward_compat_collection_key(tmp_path: Path) -> None:
-    """The 'collection' key still works as alias for code_collection."""
-    reg = RepoRegistry(tmp_path / "repos.json")
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-    reg.add(repo)
-    info = reg.get(repo)
     assert info["collection"] == info["code_collection"]
 
 
 def test_docs_collection_name_function() -> None:
     from nexus.registry import _docs_collection_name
-
-    repo = Path("/some/path/myrepo")
-    name = _docs_collection_name(repo)
+    name = _docs_collection_name(Path("/some/path/myrepo"))
     assert name.startswith("docs__myrepo-")
-    assert len(name.split("-")[-1]) == 8  # 8-char hash
+    assert len(name.split("-")[-1]) == 8
 
 
-# ── worktree-stable hashing ──────────────────────────────────────────────────
+# ── worktree-stable hashing ────────────────────────────────────────────────
 
 
-def test_repo_identity_fallback_without_git(tmp_path: Path) -> None:
-    """_repo_identity falls back to repo path when not a git repo."""
+def _git_env():
+    return {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"}
+
+
+def _init_git_repo(path: Path) -> None:
+    path.mkdir(exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True)
+    (path / "f.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, capture_output=True, check=True, env=_git_env())
+
+
+def test_repo_identity_fallback_without_git(tmp_path) -> None:
     from nexus.registry import _repo_identity
-
-    repo = tmp_path / "not-a-git-repo"
-    repo.mkdir()
-    name, hash8 = _repo_identity(repo)
+    r = tmp_path / "not-a-git-repo"
+    r.mkdir()
+    name, hash8 = _repo_identity(r)
     assert name == "not-a-git-repo"
-    expected = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
-    assert hash8 == expected
+    assert hash8 == _expected_hash(r)
 
 
-def test_repo_identity_stable_in_git_repo(tmp_path: Path) -> None:
-    """_repo_identity uses the git common dir for a real git repo."""
-    import subprocess
-
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
-
+def test_repo_identity_stable_in_git_repo(tmp_path) -> None:
     from nexus.registry import _repo_identity
-
-    name, hash8 = _repo_identity(repo)
+    r = tmp_path / "myrepo"
+    _init_git_repo(r)
+    name, hash8 = _repo_identity(r)
     assert name == "myrepo"
-    expected = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
-    assert hash8 == expected
+    assert hash8 == hashlib.sha256(str(r).encode()).hexdigest()[:8]
 
 
-def test_repo_identity_worktree_matches_main(tmp_path: Path) -> None:
-    """A worktree produces the same identity as the main repo."""
-    import subprocess
-
-    # Create a main repo with an initial commit (required for worktree)
-    main_repo = tmp_path / "main-repo"
-    main_repo.mkdir()
-    subprocess.run(["git", "init"], cwd=main_repo, capture_output=True, check=True)
-    (main_repo / "f.txt").write_text("hello")
-    subprocess.run(["git", "add", "."], cwd=main_repo, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=main_repo, capture_output=True, check=True,
-        env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
-             "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"},
-    )
-
-    # Create a worktree
-    wt = tmp_path / "my-worktree"
-    subprocess.run(
-        ["git", "worktree", "add", str(wt), "-b", "wt-branch"],
-        cwd=main_repo, capture_output=True, check=True,
-    )
-
+def test_worktree_matches_main(tmp_path) -> None:
     from nexus.registry import _repo_identity
-
+    main_repo = tmp_path / "main-repo"
+    _init_git_repo(main_repo)
+    wt = tmp_path / "my-worktree"
+    subprocess.run(["git", "worktree", "add", str(wt), "-b", "wt-branch"],
+                   cwd=main_repo, capture_output=True, check=True)
     main_name, main_hash = _repo_identity(main_repo)
     wt_name, wt_hash = _repo_identity(wt)
+    assert main_name == wt_name
+    assert main_hash == wt_hash
 
-    assert main_name == wt_name, f"names differ: {main_name} vs {wt_name}"
-    assert main_hash == wt_hash, f"hashes differ: {main_hash} vs {wt_hash}"
 
-
-def test_collection_names_stable_across_worktrees(tmp_path: Path) -> None:
-    """_collection_name and _docs_collection_name are identical for main and worktree."""
-    import subprocess
-
+def test_collection_names_stable_across_worktrees(tmp_path) -> None:
     from nexus.registry import _collection_name, _docs_collection_name
-
     main_repo = tmp_path / "repo"
-    main_repo.mkdir()
-    subprocess.run(["git", "init"], cwd=main_repo, capture_output=True, check=True)
-    (main_repo / "f.txt").write_text("hello")
-    subprocess.run(["git", "add", "."], cwd=main_repo, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=main_repo, capture_output=True, check=True,
-        env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
-             "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"},
-    )
-
+    _init_git_repo(main_repo)
     wt = tmp_path / "wt"
-    subprocess.run(
-        ["git", "worktree", "add", str(wt), "-b", "wt-branch"],
-        cwd=main_repo, capture_output=True, check=True,
-    )
-
+    subprocess.run(["git", "worktree", "add", str(wt), "-b", "wt-branch"],
+                   cwd=main_repo, capture_output=True, check=True)
     assert _collection_name(main_repo) == _collection_name(wt)
     assert _docs_collection_name(main_repo) == _docs_collection_name(wt)
 
 
-# ── _rdr_collection_name ─────────────────────────────────────────────────────
+# ── _rdr_collection_name ───────────────────────────────────────────────────
 
 
-def test_rdr_collection_name_function() -> None:
+def test_rdr_collection_name() -> None:
     from nexus.registry import _rdr_collection_name
-
-    repo = Path("/some/path/myrepo")
-    name = _rdr_collection_name(repo)
+    name = _rdr_collection_name(Path("/some/path/myrepo"))
     assert name.startswith("rdr__myrepo-")
-    assert len(name.split("-")[-1]) == 8  # 8-char hash
+    assert len(name.split("-")[-1]) == 8
 
 
-def test_rdr_collection_name_same_hash_as_code_and_docs() -> None:
-    """All three collection functions use the same identity → same hash suffix."""
+def test_all_collection_names_same_hash() -> None:
     from nexus.registry import _collection_name, _docs_collection_name, _rdr_collection_name
-
     repo = Path("/some/path/myrepo")
-    code_suffix = _collection_name(repo).split("-")[-1]
-    docs_suffix = _docs_collection_name(repo).split("-")[-1]
-    rdr_suffix = _rdr_collection_name(repo).split("-")[-1]
-    assert code_suffix == docs_suffix == rdr_suffix
+    suffixes = [fn(repo).split("-")[-1] for fn in (_collection_name, _docs_collection_name, _rdr_collection_name)]
+    assert len(set(suffixes)) == 1
 
 
-# ── long basename truncation ─────────────────────────────────────────────────
+# ── long basename truncation ──────────────────────────────────────────────
 
 
-def test_collection_name_truncates_long_basename() -> None:
-    """Repo basenames exceeding 48 chars are truncated to stay within 63-char limit."""
-    from nexus.registry import _collection_name
-
-    long_name = "a" * 60
-    repo = Path(f"/tmp/{long_name}")
-    col_name = _collection_name(repo)
+@pytest.mark.parametrize("fn_name", ["_collection_name", "_docs_collection_name", "_rdr_collection_name"])
+def test_truncates_long_basename(fn_name) -> None:
+    import nexus.registry as reg_mod
+    fn = getattr(reg_mod, fn_name)
+    col_name = fn(Path(f"/tmp/{'a' * 60}"))
     assert len(col_name) <= 63
-    assert col_name.startswith("code__")
+    prefix = fn_name.split("_")[1]  # "collection" or "docs" or "rdr"
+    if prefix == "collection":
+        prefix = "code"
+    assert col_name.startswith(f"{prefix}__")
 
 
-def test_docs_collection_name_truncates_long_basename() -> None:
-    from nexus.registry import _docs_collection_name
-
-    long_name = "a" * 60
-    repo = Path(f"/tmp/{long_name}")
-    col_name = _docs_collection_name(repo)
-    assert len(col_name) <= 63
-    assert col_name.startswith("docs__")
-
-
-def test_rdr_collection_name_truncates_long_basename() -> None:
-    from nexus.registry import _rdr_collection_name
-
-    long_name = "a" * 60
-    repo = Path(f"/tmp/{long_name}")
-    col_name = _rdr_collection_name(repo)
-    assert len(col_name) <= 63
-    assert col_name.startswith("rdr__")
-
-
-def test_truncated_name_still_valid_collection_name() -> None:
-    """Truncated collection names must pass ChromaDB validation."""
+def test_truncated_names_valid() -> None:
     from nexus.corpus import validate_collection_name
     from nexus.registry import _collection_name, _docs_collection_name, _rdr_collection_name
-
-    long_name = "a" * 60
-    repo = Path(f"/tmp/{long_name}")
+    repo = Path(f"/tmp/{'a' * 60}")
     for fn in (_collection_name, _docs_collection_name, _rdr_collection_name):
-        validate_collection_name(fn(repo))  # should not raise
+        validate_collection_name(fn(repo))
 
 
 def test_short_basename_not_truncated() -> None:
-    """Normal-length basenames are not affected by truncation logic."""
     from nexus.registry import _collection_name
-
-    repo = Path("/tmp/myrepo")
-    col_name = _collection_name(repo)
-    assert "myrepo" in col_name  # full name preserved
+    assert "myrepo" in _collection_name(Path("/tmp/myrepo"))
 
 
-def test_truncated_names_still_unique_for_same_prefix() -> None:
-    """Two repos with long basenames sharing a prefix still differ (hash differs)."""
+def test_truncated_names_still_unique() -> None:
     from nexus.registry import _collection_name
-
-    repo_a = Path("/tmp/" + "a" * 60)
-    repo_b = Path("/other/" + "a" * 60)
-    assert _collection_name(repo_a) != _collection_name(repo_b)
+    assert _collection_name(Path("/tmp/" + "a" * 60)) != _collection_name(Path("/other/" + "a" * 60))

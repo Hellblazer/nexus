@@ -254,9 +254,17 @@ Add lightweight SQLite FTS5 table in T2 indexing chunk titles, tags, and first 2
 | hnsw:search_ef=256 reduces throughput | Benchmark before/after; tunable via .nexus.yml |
 | Over-fetch increases Voyage API cost | Only for rerank path; quantify cost per query at 4x vs 2x |
 
+## Errata (2026-04-07)
+
+**MCP cluster output fix**: `mcp_server.py` had two bugs that made clustering invisible to agents:
+1. `results.sort(key=lambda r: r.distance)` ran unconditionally, destroying cluster-grouped order
+2. Formatter didn't render `_cluster_label` metadata as group headers
+
+Fixed: sort is now conditional (skipped when `cluster_by` is set), and formatter emits `── {label} ──` headers at cluster boundaries.
+
 ## Success Criteria
 
 - [ ] verify_collection_deep() reports multi-probe hit rate
-- [ ] Search results for >15 chunks show cluster groupings
+- [x] Search results for >15 chunks show cluster groupings (fixed: cluster headers rendered in MCP output)
 - [ ] Measurable reduction in high-distance (>0.7) results in agent workflows
 - [ ] nx doctor reports per-collection robustness proxy

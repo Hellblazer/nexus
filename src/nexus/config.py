@@ -103,36 +103,43 @@ def _tuning_from_dict(raw: dict[str, Any]) -> TuningConfig:
     )
 
 
+@dataclass(frozen=True)
+class PDFConfig:
+    """PDF extraction settings from ``[pdf]`` config section."""
+
+    extractor: str = "auto"
+    mineru_server_url: str = "http://127.0.0.1:8010"
+    mineru_table_enable: bool = False
+    mineru_page_batch: int = 1
+
+
+def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
+    """Load PDF config. Invalid ``extractor`` falls back to ``"auto"``."""
+    pdf = load_config(repo_root=repo_root).get("pdf", {})
+    extractor = pdf.get("extractor", "auto")
+    if extractor not in ("auto", "docling", "mineru"):
+        _log.warning("invalid pdf.extractor config", value=extractor)
+        extractor = "auto"
+    return PDFConfig(
+        extractor=extractor,
+        mineru_server_url=pdf.get("mineru_server_url", "http://127.0.0.1:8010"),
+        mineru_table_enable=bool(pdf.get("mineru_table_enable", False)),
+        mineru_page_batch=max(1, int(pdf.get("mineru_page_batch", 1))),
+    )
+
+
+# Backward-compatible accessors — thin wrappers for existing callers.
 def get_pdf_extractor(repo_root: Path | None = None) -> str:
-    """Return the configured PDF extractor backend.
-
-    Reads ``pdf.extractor`` from the merged config.  Defaults to ``"auto"``.
-    Valid values: ``"auto"``, ``"docling"``, ``"mineru"``.
-    """
-    cfg = load_config(repo_root=repo_root)
-    value = cfg.get("pdf", {}).get("extractor", "auto")
-    if value not in ("auto", "docling", "mineru"):
-        _log.warning("invalid pdf.extractor config", value=value)
-        return "auto"
-    return value
-
+    return get_pdf_config(repo_root).extractor
 
 def get_mineru_server_url(repo_root: Path | None = None) -> str:
-    """Return the configured MinerU server URL (default http://127.0.0.1:8010)."""
-    cfg = load_config(repo_root=repo_root)
-    return cfg.get("pdf", {}).get("mineru_server_url", "http://127.0.0.1:8010")
-
+    return get_pdf_config(repo_root).mineru_server_url
 
 def get_mineru_table_enable(repo_root: Path | None = None) -> bool:
-    """Return whether MinerU table extraction is enabled (default False)."""
-    cfg = load_config(repo_root=repo_root)
-    return bool(cfg.get("pdf", {}).get("mineru_table_enable", False))
-
+    return get_pdf_config(repo_root).mineru_table_enable
 
 def get_mineru_page_batch(repo_root: Path | None = None) -> int:
-    """Return the configured MinerU page batch size (default 1)."""
-    cfg = load_config(repo_root=repo_root)
-    return max(1, int(cfg.get("pdf", {}).get("mineru_page_batch", 1)))
+    return get_pdf_config(repo_root).mineru_page_batch
 
 
 def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:

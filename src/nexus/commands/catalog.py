@@ -117,41 +117,13 @@ def _get_catalog() -> Catalog:
 
 
 def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
-    """Resolve a tumbler string OR a title/filename to a Tumbler.
+    """Resolve a tumbler string OR title/filename. Raises ClickException on failure."""
+    from nexus.catalog import resolve_tumbler
+    t, err = resolve_tumbler(cat, value)
+    if err:
+        raise click.ClickException(err)
+    return t
 
-    Tries numeric parse first. Falls back to FTS search, then file_path match.
-    """
-    # Try as tumbler first
-    try:
-        t = Tumbler.parse(value)
-        if cat.resolve(t) is not None:
-            return t
-        # Valid tumbler format but document deleted/missing
-        raise click.ClickException(f"Not found: {value}")
-    except ValueError:
-        pass
-
-    # Try FTS search by title/filename
-    results = cat.find(value)
-    if results:
-        exact = [r for r in results if r.title == value]
-        if exact:
-            return exact[0].tumbler
-        if len(results) == 1:
-            return results[0].tumbler
-        raise click.ClickException(
-            f"Ambiguous: {len(results)} documents match {value!r} — use tumbler"
-        )
-
-    raise click.ClickException(f"Not found: {value}")
-
-
-def _entry_to_dict(entry) -> dict:
-    return entry.to_dict()
-
-
-def _link_to_dict(link) -> dict:
-    return link.to_dict()
 
 
 @click.group()
@@ -315,7 +287,7 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, as_json: bo
     entries = entries[offset:offset + limit]
 
     if as_json:
-        click.echo(json.dumps([_entry_to_dict(e) for e in entries], indent=2))
+        click.echo(json.dumps([e.to_dict() for e in entries], indent=2))
     else:
         for e in entries:
             click.echo(f"{str(e.tumbler):<12} {e.content_type:<10} {e.title}")
@@ -338,9 +310,9 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
         raise click.ClickException(f"Not found: {tumbler_or_title}")
 
     if as_json:
-        d = _entry_to_dict(entry)
-        d["links_from"] = [_link_to_dict(l) for l in cat.links_from(entry.tumbler)]
-        d["links_to"] = [_link_to_dict(l) for l in cat.links_to(entry.tumbler)]
+        d = entry.to_dict()
+        d["links_from"] = [l.to_dict() for l in cat.links_from(entry.tumbler)]
+        d["links_to"] = [l.to_dict() for l in cat.links_to(entry.tumbler)]
         click.echo(json.dumps(d, indent=2))
     else:
         click.echo(f"Tumbler:    {entry.tumbler}")
@@ -395,7 +367,7 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
     total = len(all_results)
     results = all_results[offset:offset + limit]
     if as_json:
-        click.echo(json.dumps([_entry_to_dict(e) for e in results], indent=2))
+        click.echo(json.dumps([e.to_dict() for e in results], indent=2))
     else:
         if not results:
             click.echo("No results.")
@@ -591,8 +563,8 @@ def links_cmd(
         result = cat.graph(t, depth=depth, direction=direction, link_type=link_type)
         if as_json:
             click.echo(json.dumps({
-                "nodes": [_entry_to_dict(n) for n in result["nodes"]],
-                "edges": [_link_to_dict(e) for e in result["edges"]],
+                "nodes": [n.to_dict() for n in result["nodes"]],
+                "edges": [e.to_dict() for e in result["edges"]],
             }, indent=2))
         else:
             if not result["edges"]:
@@ -613,7 +585,7 @@ def links_cmd(
     has_more = len(links) > limit
     links = links[:limit]
     if as_json:
-        click.echo(json.dumps([_link_to_dict(lnk) for lnk in links], indent=2))
+        click.echo(json.dumps([lnk.to_dict() for lnk in links], indent=2))
     else:
         if not links:
             click.echo("No links found.")

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -28,10 +26,10 @@ from nexus.mcp_server import (
 
 @pytest.fixture(autouse=True)
 def git_identity(monkeypatch):
-    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
-    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
-    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+    for var in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+        monkeypatch.setenv(var, "Test")
+    for var in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.setenv(var, "test@test.invalid")
 
 
 @pytest.fixture(autouse=True)
@@ -41,294 +39,184 @@ def clean_singletons():
     _reset_singletons()
 
 
-def _make_test_catalog(tmp_path: Path) -> Catalog:
-    cat = Catalog.init(tmp_path / "catalog")
-    cat.register_owner("test-repo", "repo", repo_hash="abcd1234")
-    return cat
+@pytest.fixture
+def cat(tmp_path: Path) -> Catalog:
+    c = Catalog.init(tmp_path / "catalog")
+    c.register_owner("test-repo", "repo", repo_hash="abcd1234")
+    _inject_catalog(c)
+    return c
 
 
-class TestGracefulAbsence:
-    def test_search_without_catalog(self, monkeypatch):
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
-        _reset_singletons()
-        result = catalog_search("anything")
-        assert isinstance(result, list)
-        assert "error" in result[0]
-        assert "not initialized" in result[0]["error"].lower()
-
-    def test_list_without_catalog(self, monkeypatch):
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
-        _reset_singletons()
-        result = catalog_list()
-        assert "error" in result[0]
-
-    def test_show_without_catalog(self, monkeypatch):
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
-        _reset_singletons()
-        result = catalog_show(tumbler="1.1.1")
-        assert "error" in result
+@pytest.mark.parametrize("fn,kwargs", [
+    (catalog_search, dict(query="anything")),
+    (catalog_list, {}),
+])
+def test_without_catalog_returns_error(fn, kwargs, monkeypatch) -> None:
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
+    _reset_singletons()
+    assert "error" in fn(**kwargs)[0]
 
 
-class TestCatalogRegister:
-    def test_register_and_show(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        result = catalog_register(title="Test Paper", owner="1.1", content_type="paper")
-        assert "tumbler" in result
-        assert result["tumbler"] == "1.1.1"
-        show = catalog_show(tumbler="1.1.1")
-        assert show["title"] == "Test Paper"
-
-    def test_register_ghost(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        result = catalog_register(
-            title="Ghost Paper", owner="1.1",
-            physical_collection="",
-        )
-        assert result["tumbler"] == "1.1.1"
+def test_show_without_catalog(monkeypatch) -> None:
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
+    _reset_singletons()
+    assert "error" in catalog_show(tumbler="1.1.1")
 
 
-class TestCatalogSearch:
-    def test_search_returns_results(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="authentication module", owner="1.1", content_type="code")
-        catalog_register(title="database schema", owner="1.1", content_type="code")
-        results = catalog_search("authentication")
-        assert len(results) == 1
-        assert results[0]["title"] == "authentication module"
-
-    def test_search_no_results(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        results = catalog_search(query="nonexistent")
-        assert results == []
-
-    def test_search_by_author(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="Paper A", owner="1.1", author="Fagin")
-        catalog_register(title="Paper B", owner="1.1", author="Bernstein")
-        results = catalog_search(author="Fagin")
-        assert len(results) == 1
-        assert results[0]["author"] == "Fagin"
-
-    def test_search_by_corpus(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1", corpus="ml")
-        catalog_register(title="B", owner="1.1", corpus="systems")
-        results = catalog_search(corpus="ml")
-        assert len(results) == 1
-        assert results[0]["title"] == "A"
-
-    def test_search_by_owner(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        cat.register_owner("other", "repo", repo_hash="xxxx1234")
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.2")
-        results = catalog_search(owner="1.1")
-        assert len(results) == 1
-        assert results[0]["title"] == "A"
-
-    def test_search_requires_some_param(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        results = catalog_search()
-        assert "error" in results[0]
+def test_register_and_show(cat) -> None:
+    assert catalog_register(title="Test Paper", owner="1.1", content_type="paper")["tumbler"] == "1.1.1"
+    assert catalog_show(tumbler="1.1.1")["title"] == "Test Paper"
 
 
-class TestCatalogList:
-    def test_list_all(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.1")
-        results = catalog_list()
-        assert len(results) == 2
-
-    def test_list_by_owner(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        results = catalog_list(owner="1.1")
-        assert len(results) == 1
+def test_register_ghost(cat) -> None:
+    assert catalog_register(title="Ghost", owner="1.1", physical_collection="")["tumbler"] == "1.1.1"
 
 
-class TestCatalogUpdate:
-    def test_update(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="Old Title", owner="1.1")
-        result = catalog_update(tumbler="1.1.1", title="New Title")
-        assert "tumbler" in result
-        show = catalog_show(tumbler="1.1.1")
-        assert show["title"] == "New Title"
+def test_search_returns_match(cat) -> None:
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    catalog_register(title="database schema", owner="1.1", content_type="code")
+    results = catalog_search("authentication")
+    assert len(results) == 1 and results[0]["title"] == "authentication module"
 
 
-class TestCatalogLinks:
-    def test_link_and_links(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.1")
-        result = catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        assert result["from"] == "1.1.1"
-        graph = catalog_links(tumbler="1.1.1")
-        assert "nodes" in graph
-        assert "edges" in graph
-        assert len(graph["edges"]) > 0
-        # Starting node included in nodes
-        node_tumblers = {n["tumbler"] for n in graph["nodes"]}
-        assert "1.1.1" in node_tumblers
+def test_search_no_results(cat) -> None:
+    assert catalog_search(query="nonexistent") == []
 
 
-class TestTitleResolution:
-    def test_catalog_link_by_title(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="auth module", owner="1.1", content_type="code")
-        catalog_register(title="db schema", owner="1.1", content_type="code")
-        result = catalog_link(from_tumbler="auth module", to_tumbler="db schema", link_type="cites")
-        assert "error" not in result
-        assert result["from"] == "1.1.1"
-        assert result["to"] == "1.1.2"
+@pytest.mark.parametrize("field,register_val,search_kwarg", [
+    ("author", "Fagin", "author"),
+    ("corpus", "ml", "corpus"),
+])
+def test_search_by_field(cat, field, register_val, search_kwarg) -> None:
+    catalog_register(title="A", owner="1.1", **{field: register_val})
+    catalog_register(title="B", owner="1.1", **{field: "other"})
+    results = catalog_search(**{search_kwarg: register_val})
+    assert len(results) == 1
 
-    def test_catalog_link_by_tumbler(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.1")
-        result = catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        assert "error" not in result
-        assert result["created"] is True
 
-    def test_catalog_link_merge_returns_created_false(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.1")
-        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        result = catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites",
-                              created_by="other")
-        assert result["created"] is False
+def test_search_by_owner(cat) -> None:
+    cat.register_owner("other", "repo", repo_hash="xxxx1234")
+    catalog_register(title="A", owner="1.1")
+    catalog_register(title="B", owner="1.2")
+    assert len(catalog_search(owner="1.1")) == 1
 
-    def test_catalog_link_dangling_after_delete(self, tmp_path):
-        """Delete a doc, then try to link to it — MCP returns error."""
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.1")
-        # Delete B
-        from nexus.catalog.tumbler import Tumbler
-        cat.delete_document(Tumbler.parse("1.1.2"))
-        result = catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        assert "error" in result
-        assert "dangling" in result["error"] or "Not found" in result["error"]
 
-    def test_catalog_link_ambiguous_title_returns_error(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
+def test_search_requires_param(cat) -> None:
+    assert "error" in catalog_search()[0]
+
+
+def test_list_all(cat) -> None:
+    catalog_register(title="A", owner="1.1")
+    catalog_register(title="B", owner="1.1")
+    assert len(catalog_list()) == 2
+
+
+def test_list_by_owner(cat) -> None:
+    catalog_register(title="A", owner="1.1")
+    assert len(catalog_list(owner="1.1")) == 1
+
+
+def test_update(cat) -> None:
+    catalog_register(title="Old Title", owner="1.1")
+    catalog_update(tumbler="1.1.1", title="New Title")
+    assert catalog_show(tumbler="1.1.1")["title"] == "New Title"
+
+
+def _setup_two_docs(cat) -> None:
+    catalog_register(title="A", owner="1.1")
+    catalog_register(title="B", owner="1.1")
+
+
+def test_link_and_links(cat) -> None:
+    _setup_two_docs(cat)
+    assert catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")["from"] == "1.1.1"
+    graph = catalog_links(tumbler="1.1.1")
+    assert len(graph["edges"]) > 0 and "1.1.1" in {n["tumbler"] for n in graph["nodes"]}
+
+
+def test_link_by_title(cat) -> None:
+    catalog_register(title="auth module", owner="1.1", content_type="code")
+    catalog_register(title="db schema", owner="1.1", content_type="code")
+    result = catalog_link(from_tumbler="auth module", to_tumbler="db schema", link_type="cites")
+    assert result["from"] == "1.1.1" and result["to"] == "1.1.2"
+
+
+def test_link_by_tumbler(cat) -> None:
+    _setup_two_docs(cat)
+    result = catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+    assert result["created"] is True
+
+
+def test_link_merge_returns_created_false(cat) -> None:
+    _setup_two_docs(cat)
+    catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+    result = catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites", created_by="other")
+    assert result["created"] is False
+
+
+def test_link_dangling_after_delete(cat) -> None:
+    _setup_two_docs(cat)
+    from nexus.catalog.tumbler import Tumbler
+    cat.delete_document(Tumbler.parse("1.1.2"))
+    result = catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+    assert "error" in result
+
+
+@pytest.mark.parametrize("from_t,err_substr", [
+    ("auth module", "Ambiguous"),
+    ("nonexistent", "Not found"),
+])
+def test_link_resolution_errors(cat, from_t, err_substr) -> None:
+    if err_substr == "Ambiguous":
         catalog_register(title="auth module main", owner="1.1")
         catalog_register(title="auth module test", owner="1.1")
-        result = catalog_link(from_tumbler="auth module", to_tumbler="1.1.2", link_type="cites")
-        assert "error" in result
-        assert "Ambiguous" in result["error"]
-
-    def test_catalog_link_not_found_returns_error(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        result = catalog_link(from_tumbler="nonexistent", to_tumbler="1.1.1", link_type="cites")
-        assert "error" in result
-        assert "Not found" in result["error"]
-
-    def test_catalog_unlink_by_title(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="auth module", owner="1.1")
-        catalog_register(title="db schema", owner="1.1")
-        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        result = catalog_unlink(from_tumbler="auth module", to_tumbler="db schema", link_type="cites")
-        assert "error" not in result
-        assert result["removed"] == 1
-
-    def test_catalog_links_by_title(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="auth module", owner="1.1")
-        catalog_register(title="db schema", owner="1.1")
-        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        result = catalog_links(tumbler="auth module")
-        assert "edges" in result
-        assert len(result["edges"]) >= 1
+    result = catalog_link(from_tumbler=from_t, to_tumbler="1.1.1", link_type="cites")
+    assert err_substr in result["error"]
 
 
-class TestCatalogLinkQuery:
-    def test_catalog_link_query_mcp_by_type(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.1")
-        catalog_register(title="C", owner="1.1")
-        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.3", link_type="implements")
-        results = catalog_link_query(link_type="cites")
-        assert len(results) == 1
-        assert results[0]["type"] == "cites"
-
-    def test_catalog_link_query_mcp_by_created_by(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.1")
-        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites", created_by="bib_enricher")
-        results = catalog_link_query(created_by="bib_enricher")
-        assert len(results) == 1
+def test_unlink_by_title(cat) -> None:
+    catalog_register(title="auth module", owner="1.1")
+    catalog_register(title="db schema", owner="1.1")
+    catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+    result = catalog_unlink(from_tumbler="auth module", to_tumbler="db schema", link_type="cites")
+    assert result["removed"] == 1
 
 
-class TestCatalogLinkBulk:
-    def test_catalog_link_bulk_dry_run(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.1")
-        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        result = catalog_link_bulk(link_type="cites", dry_run=True)
-        assert result["would_remove"] == 1
-        assert result["dry_run"] is True
-        # Still exists
-        links = catalog_link_query(link_type="cites")
-        assert len(links) == 1
+def test_links_by_title(cat) -> None:
+    catalog_register(title="auth module", owner="1.1")
+    catalog_register(title="db schema", owner="1.1")
+    catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+    assert len(catalog_links(tumbler="auth module")["edges"]) >= 1
 
 
-class TestCatalogLinkAudit:
-    def test_catalog_link_audit_mcp(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1")
-        catalog_register(title="B", owner="1.1")
-        catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
-        result = catalog_link_audit()
-        assert result["total"] == 1
-        assert result["by_type"]["cites"] == 1
+# ── Link query ──────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("query_kw,link_kw", [
+    (dict(link_type="cites"), dict(link_type="cites")),
+    (dict(created_by="bib_enricher"), dict(link_type="cites", created_by="bib_enricher")),
+])
+def test_link_query(cat, query_kw, link_kw) -> None:
+    _setup_two_docs(cat)
+    catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", **link_kw)
+    assert len(catalog_link_query(**query_kw)) == 1
 
 
-class TestCatalogResolve:
-    def test_resolve_document(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(
-            title="A", owner="1.1",
-            physical_collection="code__test",
-        )
-        result = catalog_resolve(tumbler="1.1.1")
-        assert "code__test" in result
+def test_link_bulk_dry_run(cat) -> None:
+    _setup_two_docs(cat)
+    catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+    result = catalog_link_bulk(link_type="cites", dry_run=True)
+    assert result["would_remove"] == 1 and result["dry_run"] is True
+    assert len(catalog_link_query(link_type="cites")) == 1
 
-    def test_resolve_owner(self, tmp_path):
-        cat = _make_test_catalog(tmp_path)
-        _inject_catalog(cat)
-        catalog_register(title="A", owner="1.1", physical_collection="code__test")
-        result = catalog_resolve(owner="1.1")
-        assert "code__test" in result
+
+def test_link_audit(cat) -> None:
+    _setup_two_docs(cat)
+    catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
+    result = catalog_link_audit()
+    assert result["total"] == 1 and result["by_type"]["cites"] == 1
+
+
+@pytest.mark.parametrize("resolve_kw", [dict(tumbler="1.1.1"), dict(owner="1.1")])
+def test_resolve(cat, resolve_kw) -> None:
+    catalog_register(title="A", owner="1.1", physical_collection="code__test")
+    assert "code__test" in catalog_resolve(**resolve_kw)

@@ -127,6 +127,65 @@ def apply_hybrid_scoring(
     return sorted(results, key=lambda r: r.hybrid_score, reverse=True)
 
 
+def quality_score(
+    citation_count: int,
+    age_days: float = 0.0,
+    alpha: float = 0.5,
+    half_life: float = 730.0,
+    c_max: float = 10_000.0,
+) -> float:
+    """Compute quality score from bibliographic metadata (RDR-055 E2).
+
+    Returns 0.0 when *citation_count* is 0 (unenriched) to avoid bias.
+
+    ``quality = α × log(count+1)/log(C+1) + (1-α) × 0.5^(age/half_life)``
+    """
+    if citation_count <= 0:
+        return 0.0
+    import math
+    citation_signal = min(1.0, math.log(citation_count + 1) / math.log(c_max + 1))
+    age_signal = 0.5 ** (age_days / half_life) if half_life > 0 else 1.0
+    return alpha * citation_signal + (1 - alpha) * age_signal
+
+
+# Default boost weight — how much quality_score influences hybrid_score.
+_QUALITY_BOOST_WEIGHT: float = 0.1
+
+# Collections eligible for quality boost (bibliographic metadata expected).
+_QUALITY_ELIGIBLE_PREFIXES = ("knowledge__", "docs__", "rdr__")
+
+
+def apply_quality_boost(
+    results: list[SearchResult],
+    boost_weight: float = _QUALITY_BOOST_WEIGHT,
+) -> list[SearchResult]:
+    """Boost hybrid_score of results that have bibliographic quality metadata.
+
+    Mutates ``hybrid_score`` in place: ``score += boost_weight × quality_score``.
+    Only applies to knowledge__/docs__/rdr__ collections.  Results without
+    ``bib_citation_count`` are untouched.
+    """
+    from datetime import date
+
+    today = date.today()
+    for r in results:
+        if not r.collection.startswith(_QUALITY_ELIGIBLE_PREFIXES):
+            continue
+        count = int(r.metadata.get("bib_citation_count", 0))
+        if count <= 0:
+            continue
+        bib_year = r.metadata.get("bib_year", "")
+        age_days = 0.0
+        if bib_year:
+            try:
+                pub_date = date(int(bib_year), 6, 15)  # mid-year estimate
+                age_days = max(0.0, (today - pub_date).days)
+            except (ValueError, TypeError):
+                pass
+        r.hybrid_score += boost_weight * quality_score(count, age_days=age_days)
+    return results
+
+
 _voyage_instance: object | None = None
 _voyage_lock = threading.Lock()
 

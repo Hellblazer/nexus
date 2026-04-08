@@ -176,18 +176,23 @@ The full EvidenceNet analysis (RF-1 through RF-10 of the original research) is p
 
 ## Post-Mortem
 
-**Closed**: 2026-04-07 — E1 implemented, E2 deferred.
+**Closed**: 2026-04-07 — E1 implemented, E2 implemented (dormant until enrichment).
 
 ### What Was Built (E1)
 
 - `classify_section_type(header_path)` — regex classifier with 9 patterns + optional numeric prefix (`_NUM`), in `md_chunker.py`
-- `SECTION_PATTERNS` dict — compiled `re.IGNORECASE` patterns for: abstract, introduction, methods, results, discussion, conclusion, references, acknowledgements, appendix
+- `SECTION_PATTERNS` dict — compiled `re.IGNORECASE` patterns for: abstract, introduction, methods, results, discussion, references, acknowledgements, appendix
 - `section_type` metadata wired through all 5 indexing paths: `doc_indexer._markdown_chunks`, `doc_indexer._pdf_chunks` (empty), `prose_indexer` markdown branch, `prose_indexer` non-markdown branch (empty), `pipeline_stages` PDF default (empty)
 - 36 new tests across `test_md_chunker.py`, `test_doc_indexer.py`, `test_indexer.py`
 
-### What Was Deferred (E2)
+### What Was Built (E2)
 
-E2 (quality_score reranking from `bib_citation_count`) deferred — enrichment gate returned 0% coverage across all `knowledge__` collections. The `bib_citation_count` field is entirely absent, not zero. Beads nexus-rg6x and nexus-3idt deferred to 2026-04-14 pending `nx enrich` run.
+- `quality_score(citation_count, age_days, alpha, half_life, c_max)` — log-scaled citation signal + exponential age decay, in `scoring.py`
+- `apply_quality_boost(results, boost_weight)` — mutates `hybrid_score` for knowledge__/docs__/rdr__ results with `bib_citation_count > 0`. No-op when unenriched (0 citations → 0 boost).
+- Wired into CLI search pipeline after `apply_hybrid_scoring`, before reranking.
+- Citation signal capped at 1.0 via `min(1.0, log(count+1)/log(C+1))`. Default boost_weight=0.1.
+- 15 new tests in `test_quality_score.py` covering formula, bounds, decay, integration.
+- **Dormant**: activates only when `nx enrich` populates `bib_citation_count` metadata.
 
 ### Baseline Results
 

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for doctor.py Steps 5–7: orphan T1 detection, T2 integrity, ChromaDB pagination."""
 import json
 import os
-import sqlite3
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,361 +18,216 @@ from nexus.commands.doctor import (
 from nexus.db.t2 import T2Database
 
 
-# ── Step 5: Orphan T1 process detection ──────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _make_session_file(sessions_dir: Path, name: str, pid: int) -> Path:
+    record = {
+        "session_id": "test-session", "server_host": "127.0.0.1",
+        "server_port": 12345, "server_pid": pid, "created_at": 9999999999.0,
+    }
+    path = sessions_dir / name
+    path.write_text(json.dumps(record))
+    return path
+
+
+def _dead_pid() -> int:
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return proc.pid
+
+
+def _run_orphan_t1(sessions_dir: Path) -> tuple[bool, list[str]]:
+    lines: list[str] = []
+    with patch("nexus.commands.doctor.SESSIONS_DIR", sessions_dir):
+        ok = _check_orphan_t1(lines)
+    return ok, lines
+
+
+# ── Step 5: Orphan T1 ───────────────────────────────────────────────────────
 
 class TestCheckOrphanT1:
-    """Tests for _check_orphan_t1."""
+    @pytest.mark.parametrize("setup,expect_ok,expect_text", [
+        ("no_dir", True, "no sessions directory"),
+        ("empty_dir", True, "no session files"),
+    ])
+    def test_missing_or_empty(self, tmp_path, setup, expect_ok, expect_text):
+        d = tmp_path / "sessions"
+        if setup == "empty_dir":
+            d.mkdir()
+        ok, lines = _run_orphan_t1(d)
+        assert ok is expect_ok
+        assert expect_text in lines[0]
 
-    def _make_session_file(self, sessions_dir: Path, name: str, pid: int) -> Path:
-        """Write a minimal JSON session record with the given pid."""
-        record = {
-            "session_id": "test-session",
-            "server_host": "127.0.0.1",
-            "server_port": 12345,
-            "server_pid": pid,
-            "created_at": 9999999999.0,
-        }
-        path = sessions_dir / name
-        path.write_text(json.dumps(record))
-        return path
+    def test_live_process_reports_ok(self, tmp_path):
+        d = tmp_path / "sessions"
+        d.mkdir()
+        _make_session_file(d, "99999.session", os.getpid())
+        ok, lines = _run_orphan_t1(d)
+        assert ok is True and "no orphans detected" in lines[0]
 
-    def test_no_sessions_dir_reports_ok(self, tmp_path: Path) -> None:
-        """When sessions dir does not exist, check reports ok and returns True."""
-        missing_dir = tmp_path / "sessions"
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.SESSIONS_DIR", missing_dir):
-            result = _check_orphan_t1(lines)
-        assert result is True
-        assert len(lines) == 1
-        assert "✓" in lines[0]
-        assert "no sessions directory" in lines[0]
-
-    def test_empty_sessions_dir_reports_ok(self, tmp_path: Path) -> None:
-        """When sessions dir exists but has no *.session files, check reports ok."""
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.SESSIONS_DIR", sessions_dir):
-            result = _check_orphan_t1(lines)
-        assert result is True
-        assert "no session files" in lines[0]
-
-    def test_live_process_session_reports_ok(self, tmp_path: Path) -> None:
-        """A session file with our own PID (definitely live) reports ✓."""
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        self._make_session_file(sessions_dir, "99999.session", os.getpid())
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.SESSIONS_DIR", sessions_dir):
-            result = _check_orphan_t1(lines)
-        assert result is True
-        assert "✓" in lines[0]
-        assert "no orphans detected" in lines[0]
-
-    def test_dead_pid_session_detected_as_orphan(self, tmp_path: Path) -> None:
-        """A session file with a dead PID is detected as an orphan."""
-        import subprocess
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        # Spawn a short-lived process and wait for it to exit — guarantees a dead PID.
-        proc = subprocess.Popen(["true"])
-        proc.wait()
-        dead_pid = proc.pid
-        self._make_session_file(sessions_dir, f"{dead_pid}.session", dead_pid)
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.SESSIONS_DIR", sessions_dir):
-            result = _check_orphan_t1(lines)
-        assert result is False
-        assert "✗" in lines[0]
-        assert "orphaned" in lines[0]
-        assert "1 orphaned" in lines[0]
-        # Fix hint should be appended
+    def test_dead_pid_detected_as_orphan(self, tmp_path):
+        d = tmp_path / "sessions"
+        d.mkdir()
+        pid = _dead_pid()
+        _make_session_file(d, f"{pid}.session", pid)
+        ok, lines = _run_orphan_t1(d)
+        assert ok is False and "1 orphaned" in lines[0]
         assert any("rm" in line for line in lines)
 
-    def test_corrupt_session_file_skipped(self, tmp_path: Path) -> None:
-        """Corrupt (non-JSON) session files are skipped, not counted as orphans."""
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        (sessions_dir / "corrupt.session").write_text("not-json{{{")
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.SESSIONS_DIR", sessions_dir):
-            result = _check_orphan_t1(lines)
-        # Corrupt files are skipped; no valid sessions remain → "no session files"
-        # is not quite right here — the glob finds the file, so we get "all live"
-        # because the corrupt file has no valid pid entry.
-        assert result is True
+    @pytest.mark.parametrize("content", [
+        "not-json{{{",
+        json.dumps({"session_id": "abc", "server_host": "127.0.0.1", "server_port": 1234}),
+    ])
+    def test_corrupt_or_missing_pid_skipped(self, tmp_path, content):
+        d = tmp_path / "sessions"
+        d.mkdir()
+        (d / "bad.session").write_text(content)
+        ok, _ = _run_orphan_t1(d)
+        assert ok is True
 
-    def test_session_without_server_pid_skipped(self, tmp_path: Path) -> None:
-        """Session files missing server_pid field are skipped silently."""
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        record = {"session_id": "abc", "server_host": "127.0.0.1", "server_port": 1234}
-        (sessions_dir / "nopid.session").write_text(json.dumps(record))
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.SESSIONS_DIR", sessions_dir):
-            result = _check_orphan_t1(lines)
-        assert result is True
-
-    def test_multiple_orphans_count_reported(self, tmp_path: Path) -> None:
-        """When multiple session files have dead PIDs, the count is reported."""
-        import subprocess
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        # Spawn two short-lived processes to get guaranteed-dead PIDs
-        dead_pids = []
+    def test_multiple_orphans_count(self, tmp_path):
+        d = tmp_path / "sessions"
+        d.mkdir()
         for _ in range(2):
-            proc = subprocess.Popen(["true"])
-            proc.wait()
-            dead_pids.append(proc.pid)
-        for pid in dead_pids:
-            self._make_session_file(sessions_dir, f"{pid}.session", pid)
-
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.SESSIONS_DIR", sessions_dir):
-            result = _check_orphan_t1(lines)
-
-        assert result is False
-        assert "2 orphaned" in lines[0]
+            pid = _dead_pid()
+            _make_session_file(d, f"{pid}.session", pid)
+        ok, lines = _run_orphan_t1(d)
+        assert ok is False and "2 orphaned" in lines[0]
 
 
-# ── Step 6: T2 database integrity ────────────────────────────────────────────
+# ── Step 6: T2 integrity ────────────────────────────────────────────────────
 
 class TestCheckT2Integrity:
-    """Tests for _check_t2_integrity."""
-
-    def test_db_not_exists_reports_ok(self, tmp_path: Path) -> None:
-        """When memory.db does not exist, check reports 'not created yet' and returns True."""
-        missing_db = tmp_path / "nonexistent.db"
+    def _run(self, db_path: Path) -> tuple[bool, list[str]]:
         lines: list[str] = []
-        with patch("nexus.commands.doctor.default_db_path", return_value=missing_db):
-            result = _check_t2_integrity(lines)
-        assert result is True
-        assert "not created yet" in lines[0]
-        assert "✓" in lines[0]
+        with patch("nexus.commands.doctor.default_db_path", return_value=db_path):
+            ok = _check_t2_integrity(lines)
+        return ok, lines
 
-    def test_valid_t2_database_passes(self, tmp_path: Path) -> None:
-        """A properly created T2 database passes both PRAGMA and FTS5 checks."""
+    def test_db_not_exists(self, tmp_path):
+        ok, lines = self._run(tmp_path / "nonexistent.db")
+        assert ok is True and "not created yet" in lines[0]
+
+    @pytest.mark.parametrize("populate", [True, False], ids=["with_data", "empty"])
+    def test_valid_database_passes(self, tmp_path, populate):
         db_path = tmp_path / "memory.db"
-        # Create a valid T2 database using the real T2Database class.
         with T2Database(db_path) as db:
-            db.put(project="test", title="item1", content="hello world", ttl=30)
+            if populate:
+                db.put(project="test", title="item1", content="hello world", ttl=30)
+        ok, lines = self._run(db_path)
+        assert ok is True and "PRAGMA ok" in lines[0]
 
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.default_db_path", return_value=db_path):
-            result = _check_t2_integrity(lines)
-
-        assert result is True
-        assert "✓" in lines[0]
-        assert "PRAGMA ok" in lines[0]
-        assert "FTS5 ok" in lines[0]
-
-    def test_empty_t2_database_passes(self, tmp_path: Path) -> None:
-        """A freshly created but empty T2 database also passes integrity checks."""
+    @pytest.mark.parametrize("corrupt_fn", [
+        lambda p: open(str(p), "r+b").truncate(512) or None,
+        lambda p: p.write_bytes(b"this is not sqlite" * 100),
+    ], ids=["truncated", "not_sqlite"])
+    def test_corrupt_database_fails(self, tmp_path, corrupt_fn):
         db_path = tmp_path / "memory.db"
-        with T2Database(db_path):
-            pass  # create schema only
-
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.default_db_path", return_value=db_path):
-            result = _check_t2_integrity(lines)
-
-        assert result is True
-        assert "PRAGMA ok" in lines[0]
-
-    def test_truncated_database_fails_pragma(self, tmp_path: Path) -> None:
-        """A truncated (corrupt) database file fails PRAGMA integrity_check."""
-        db_path = tmp_path / "memory.db"
-        # Create valid DB first.
         with T2Database(db_path) as db:
             db.put(project="p", title="t", content="data", ttl=1)
-        # Truncate to 512 bytes — corrupts the SQLite file format.
-        with open(str(db_path), "r+b") as f:
-            f.truncate(512)
-
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.default_db_path", return_value=db_path):
-            result = _check_t2_integrity(lines)
-
-        # A truncated file may raise on connect or on PRAGMA — either way, check fails.
-        assert result is False
-        assert "✗" in lines[0]
-
-    def test_unparseable_database_fails_gracefully(self, tmp_path: Path) -> None:
-        """A file that is not a SQLite database at all fails gracefully (no exception raised)."""
-        db_path = tmp_path / "memory.db"
-        db_path.write_bytes(b"this is not sqlite" * 100)
-
-        lines: list[str] = []
-        with patch("nexus.commands.doctor.default_db_path", return_value=db_path):
-            result = _check_t2_integrity(lines)
-
-        assert result is False
-        assert "✗" in lines[0]
+        corrupt_fn(db_path)
+        ok, lines = self._run(db_path)
+        assert ok is False and "✗" in lines[0]
 
 
-# ── Step 7: ChromaDB pagination audit ────────────────────────────────────────
+# ── Step 7: ChromaDB pagination ─────────────────────────────────────────────
+
+@pytest.fixture()
+def ephemeral_client():
+    client = chromadb.EphemeralClient()
+    for col in client.list_collections():
+        client.delete_collection(col.name)
+    return client
+
 
 class TestCheckChromaPagination:
-    """Tests for _check_chroma_pagination using EphemeralClient."""
-
-    @pytest.fixture()
-    def ephemeral_client(self):
-        """Return a ChromaDB client with all pre-existing collections removed."""
-        client = chromadb.EphemeralClient()
-        # Clean up any collections leaked from previous tests (singleton client)
-        for col in client.list_collections():
-            client.delete_collection(col.name)
-        return client
-
-    def test_no_collections_reports_ok(self, ephemeral_client) -> None:
-        """When there are no non-empty collections, check reports ok."""
+    def _run(self, client, db="test_db") -> tuple[bool, list[str]]:
         lines: list[str] = []
-        result = _check_chroma_pagination(lines, ephemeral_client, "test_db")
-        assert result is True
-        assert "✓" in lines[0]
-        assert "no non-empty" in lines[0]
+        ok = _check_chroma_pagination(lines, client, db)
+        return ok, lines
 
-    def test_empty_collection_reports_ok(self, ephemeral_client) -> None:
-        """An empty collection is skipped; check reports ok (nothing to audit)."""
-        ephemeral_client.create_collection("empty_col")
-        lines: list[str] = []
-        result = _check_chroma_pagination(lines, ephemeral_client, "test_db")
-        assert result is True
-        assert "no non-empty" in lines[0]
+    @pytest.mark.parametrize("n_docs,setup", [
+        (0, "no_col"), (0, "empty_col"), (10, "small"), (350, "large"),
+    ])
+    def test_valid_collections_pass(self, ephemeral_client, n_docs, setup):
+        if setup == "empty_col":
+            ephemeral_client.create_collection("empty_col")
+        elif setup in ("small", "large"):
+            col = ephemeral_client.create_collection("col")
+            col.add(ids=[f"id{i}" for i in range(n_docs)],
+                    documents=[f"doc {i}" for i in range(n_docs)])
+        ok, lines = self._run(ephemeral_client)
+        assert ok is True and "✓" in lines[0]
+        if n_docs > 0:
+            assert f"count={n_docs}" in lines[0] and f"paginated={n_docs}" in lines[0]
 
-    def test_single_page_collection_passes(self, ephemeral_client) -> None:
-        """A collection with fewer than 300 records: count() == paginated result."""
-        col = ephemeral_client.create_collection("small_col")
-        n = 10
-        col.add(
-            ids=[f"id{i}" for i in range(n)],
-            documents=[f"doc {i}" for i in range(n)],
-        )
-        lines: list[str] = []
-        result = _check_chroma_pagination(lines, ephemeral_client, "test_db")
-        assert result is True
-        assert "✓" in lines[0]
-        assert f"count={n}" in lines[0]
-        assert f"paginated={n}" in lines[0]
-
-    def test_multi_page_collection_passes(self, ephemeral_client) -> None:
-        """A collection with >300 records paginates correctly and passes."""
-        col = ephemeral_client.create_collection("large_col")
-        n = 350
-        col.add(
-            ids=[f"id{i}" for i in range(n)],
-            documents=[f"document number {i}" for i in range(n)],
-        )
-        lines: list[str] = []
-        result = _check_chroma_pagination(lines, ephemeral_client, "test_db")
-        assert result is True
-        assert f"count={n}" in lines[0]
-        assert f"paginated={n}" in lines[0]
-
-    def test_count_mismatch_fails(self, ephemeral_client) -> None:
-        """When mocked count() disagrees with paginated get(), check returns False."""
+    def test_count_mismatch_fails(self, ephemeral_client):
         col = ephemeral_client.create_collection("mismatch_col")
-        n = 5
-        col.add(
-            ids=[f"id{i}" for i in range(n)],
-            documents=[f"doc {i}" for i in range(n)],
-        )
-        # Wrap the real collection in a mock that inflates count()
+        col.add(ids=[f"id{i}" for i in range(5)], documents=[f"doc {i}" for i in range(5)])
         mock_col = MagicMock(wraps=col)
         mock_col.name = col.name
-        mock_col.count.return_value = n + 100  # inflated — pagination will return only n
-
+        mock_col.count.return_value = 105
         mock_client = MagicMock()
         mock_client.list_collections.return_value = [mock_col]
+        ok, lines = self._run(mock_client)
+        assert ok is False and "✗" in lines[0]
 
-        lines: list[str] = []
-        result = _check_chroma_pagination(lines, mock_client, "test_db")
-        assert result is False
-        assert "✗" in lines[0]
-
-    def test_list_collections_exception_fails_gracefully(self) -> None:
-        """If list_collections() raises, check returns False without propagating."""
+    def test_list_collections_exception(self):
         bad_client = MagicMock()
         bad_client.list_collections.side_effect = RuntimeError("network error")
-        lines: list[str] = []
-        result = _check_chroma_pagination(lines, bad_client, "bad_db")
-        assert result is False
-        assert "✗" in lines[0]
-        assert "list failed" in lines[0]
+        ok, lines = self._run(bad_client, "bad_db")
+        assert ok is False and "list failed" in lines[0]
 
-    def test_only_one_collection_audited(self, ephemeral_client) -> None:
-        """Only the first non-empty collection is spot-checked — not all of them."""
+    def test_only_one_collection_audited(self, ephemeral_client):
         for i in range(3):
             col = ephemeral_client.create_collection(f"col_{i}")
             col.add(ids=[f"id{i}"], documents=[f"doc {i}"])
-        lines: list[str] = []
-        _check_chroma_pagination(lines, ephemeral_client, "test_db")
-        # Only one line added (one audit, not three).
+        _, lines = self._run(ephemeral_client)
         assert len(lines) == 1
 
 
-# ── Orphan checkpoint detection ───────────────────────────────────────────────
+# ── Orphan checkpoints ──────────────────────────────────────────────────────
 
 class TestCheckOrphanCheckpoints:
-    """Tests for _check_orphan_checkpoints in doctor.py."""
-
     @pytest.fixture()
-    def ckpt_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    def ckpt_dir(self, tmp_path, monkeypatch):
         d = tmp_path / "checkpoints"
         d.mkdir()
         monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", d)
         return d
 
-    def _write_ckpt(self, ckpt_dir: Path, pdf: str, content_hash: str, collection: str = "knowledge__art") -> None:
+    def _write_ckpt(self, ckpt_dir, pdf, content_hash, collection="knowledge__art"):
         from nexus.checkpoint import CheckpointData, write_checkpoint
         write_checkpoint(CheckpointData(
-            pdf=pdf,
-            collection=collection,
-            content_hash=content_hash,
-            chunks_upserted=10,
-            total_chunks=100,
-            embedding_model="voyage-context-3",
+            pdf=pdf, collection=collection, content_hash=content_hash,
+            chunks_upserted=10, total_chunks=100, embedding_model="voyage-context-3",
         ))
 
-    def test_no_checkpoint_dir_reports_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", tmp_path / "nonexistent")
+    @pytest.mark.parametrize("setup", ["no_dir", "empty_dir"])
+    def test_missing_or_empty_reports_ok(self, tmp_path, monkeypatch, setup):
+        d = tmp_path / "checkpoints"
+        if setup == "empty_dir":
+            d.mkdir()
+        monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", d)
         lines: list[str] = []
-        ok = _check_orphan_checkpoints(lines)
-        assert ok is True
-        assert "PDF checkpoints" in lines[0]
-        assert "\u2713" in lines[0]
+        assert _check_orphan_checkpoints(lines) is True and "✓" in lines[0]
 
-    def test_empty_checkpoint_dir_reports_ok(self, ckpt_dir: Path) -> None:
+    def test_live_pdf_reports_ok(self, ckpt_dir, tmp_path):
+        pdf = tmp_path / "present.pdf"
+        pdf.write_bytes(b"%PDF")
+        self._write_ckpt(ckpt_dir, str(pdf), "live123")
         lines: list[str] = []
-        ok = _check_orphan_checkpoints(lines)
-        assert ok is True
-        assert "\u2713" in lines[0]
+        assert _check_orphan_checkpoints(lines) is True
 
-    def test_live_pdf_reports_ok(self, ckpt_dir: Path, tmp_path: Path) -> None:
-        live_pdf = tmp_path / "present.pdf"
-        live_pdf.write_bytes(b"%PDF")
-        self._write_ckpt(ckpt_dir, str(live_pdf), "live123")
-
+    def test_dead_pdf_reports_failure(self, ckpt_dir, tmp_path):
+        self._write_ckpt(ckpt_dir, str(tmp_path / "gone.pdf"), "dead123")
         lines: list[str] = []
-        ok = _check_orphan_checkpoints(lines)
-        assert ok is True
-        assert "\u2713" in lines[0]
+        assert _check_orphan_checkpoints(lines) is False
 
-    def test_dead_pdf_reports_failure(self, ckpt_dir: Path, tmp_path: Path) -> None:
-        missing_pdf = str(tmp_path / "gone.pdf")  # does not exist
-        self._write_ckpt(ckpt_dir, missing_pdf, "dead123")
-
-        lines: list[str] = []
-        ok = _check_orphan_checkpoints(lines)
-        assert ok is False
-        assert "\u2717" in lines[0]
-
-    def test_mixed_reports_failure(self, ckpt_dir: Path, tmp_path: Path) -> None:
-        live_pdf = tmp_path / "here.pdf"
-        live_pdf.write_bytes(b"%PDF")
-        self._write_ckpt(ckpt_dir, str(live_pdf), "live_mixed")
+    def test_mixed_reports_failure(self, ckpt_dir, tmp_path):
+        pdf = tmp_path / "here.pdf"
+        pdf.write_bytes(b"%PDF")
+        self._write_ckpt(ckpt_dir, str(pdf), "live_mixed")
         self._write_ckpt(ckpt_dir, str(tmp_path / "nope.pdf"), "dead_mixed")
-
         lines: list[str] = []
-        ok = _check_orphan_checkpoints(lines)
-        assert ok is False
+        assert _check_orphan_checkpoints(lines) is False

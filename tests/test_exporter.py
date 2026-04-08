@@ -1,23 +1,18 @@
-"""Tests for nexus.exporter — collection export/import (RDR-031).
-
-All tests use chromadb.EphemeralClient + DefaultEmbeddingFunction to avoid
-requiring any real API keys or network access.
-"""
+# SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
-import json
 import gzip
+import json
 from pathlib import Path
 from typing import Generator
 
 import chromadb
-import msgpack
 import numpy as np
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.db.t3 import T3Database
-from nexus.errors import EmbeddingModelMismatch, FormatVersionError
+from nexus.errors import EmbeddingModelMismatch, FormatVersionError, NexusError
 from nexus.exporter import (
     FORMAT_VERSION,
     MAX_SUPPORTED_FORMAT_VERSION,
@@ -27,445 +22,221 @@ from nexus.exporter import (
     import_collection,
 )
 
+_EF = DefaultEmbeddingFunction()
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
 def ephemeral_db() -> Generator[T3Database, None, None]:
-    """T3Database backed by an in-memory EphemeralClient — no API keys needed."""
-    client = chromadb.EphemeralClient()
-    ef = DefaultEmbeddingFunction()
-    yield T3Database(_client=client, _ef_override=ef)
+    yield T3Database(_client=chromadb.EphemeralClient(), _ef_override=_EF)
 
 
 @pytest.fixture
-def populated_db(ephemeral_db: T3Database, tmp_path: Path):
-    """T3Database pre-populated with 5 records in code__test collection."""
+def populated_db(ephemeral_db: T3Database):
     col = ephemeral_db.get_or_create_collection("code__test")
-    ef = DefaultEmbeddingFunction()
     docs = [f"document {i}" for i in range(5)]
     ids = [f"id-{i:03d}" for i in range(5)]
     metadatas = [
-        {
-            "source_path": f"/repo/file_{i}.py",
-            "title": f"File {i}",
-            "indexed_at": "2026-03-01T00:00:00+00:00",
-        }
+        {"source_path": f"/repo/file_{i}.py", "title": f"File {i}",
+         "indexed_at": "2026-03-01T00:00:00+00:00"}
         for i in range(5)
     ]
-    embeddings = [ef([doc])[0] for doc in docs]
+    embeddings = [_EF([doc])[0] for doc in docs]
     col.upsert(ids=ids, documents=docs, embeddings=embeddings, metadatas=metadatas)
     return ephemeral_db
 
 
-# ── Unit: filter helpers ───────────────────────────────────────────────────────
+def _export(db, col_name, tmp_path, fname="out.nxexp", **kwargs):
+    out = tmp_path / fname
+    result = export_collection(db=db, collection_name=col_name, output_path=out, **kwargs)
+    return out, result
+
+
+def _export_import(db, src_col, tmp_path, target=None, fname="rt.nxexp", **kwargs):
+    out, export_result = _export(db, src_col, tmp_path, fname)
+    import_result = import_collection(db=db, input_path=out, target_collection=target, **kwargs)
+    return out, export_result, import_result
+
+
+def _seed_collection(db, name, docs, ids, metadatas):
+    col = db.get_or_create_collection(name)
+    embeddings = [_EF([d])[0] for d in docs]
+    col.upsert(ids=ids, documents=docs, embeddings=embeddings, metadatas=metadatas)
+    return col
+
+
+# ── Unit: filter helpers ──────────────────────────────────────────────────────
 
 
 class TestApplyFilter:
-    def test_no_filters_all_pass(self):
-        assert _apply_filter("/repo/file.py", (), ()) is True
+    @pytest.mark.parametrize("path,includes,excludes,expected", [
+        ("/repo/file.py", (), (), True),
+        ("/repo/main.py", ("*.py",), (), True),
+        ("/repo/main.go", ("*.py",), (), False),
+        ("/repo/test_foo.py", (), ("*/test_*",), False),
+        ("/repo/main.py", (), ("*/test_*",), True),
+        (None, ("*.py",), ("*/test*",), True),
+        ("/repo/test_main.py", ("*.py",), ("*/test_*",), False),
+        (None, ("*.py",), (), True),
+    ])
+    def test_filter(self, path, includes, excludes, expected):
+        assert _apply_filter(path, includes, excludes) is expected
 
-    def test_include_match(self):
-        assert _apply_filter("/repo/main.py", ("*.py",), ()) is True
-
-    def test_include_no_match(self):
-        assert _apply_filter("/repo/main.go", ("*.py",), ()) is False
-
-    def test_include_or_logic(self):
-        """Multiple --include patterns use OR logic."""
-        assert _apply_filter("/repo/main.py", ("*.py", "*.go"), ()) is True
-        assert _apply_filter("/repo/main.go", ("*.py", "*.go"), ()) is True
-        assert _apply_filter("/repo/main.rs", ("*.py", "*.go"), ()) is False
-
-    def test_exclude_match(self):
-        assert _apply_filter("/repo/test_foo.py", (), ("*/test_*",)) is False
-
-    def test_exclude_no_match(self):
-        assert _apply_filter("/repo/main.py", (), ("*/test_*",)) is True
-
-    def test_none_source_path_passes_unconditionally(self):
-        """Entries without source_path always pass (nx store put entries)."""
-        assert _apply_filter(None, ("*.py",), ("*/test*",)) is True
-
-    def test_include_and_exclude_combined(self):
-        """Entry matching include but also exclude is excluded."""
-        assert _apply_filter("/repo/test_main.py", ("*.py",), ("*/test_*",)) is False
-
-    def test_include_only_entry_without_path_passes(self):
-        """No source_path bypasses include filter."""
-        assert _apply_filter(None, ("*.py",), ()) is True
+    @pytest.mark.parametrize("path,includes,excludes,expected", [
+        ("/repo/main.py", ("*.py", "*.go"), (), True),
+        ("/repo/main.go", ("*.py", "*.go"), (), True),
+        ("/repo/main.rs", ("*.py", "*.go"), (), False),
+    ])
+    def test_include_or_logic(self, path, includes, excludes, expected):
+        assert _apply_filter(path, includes, excludes) is expected
 
 
 class TestApplyRemap:
-    def test_matching_prefix(self):
-        result = _apply_remap("/old/path/file.py", [("/old/path", "/new/path")])
-        assert result == "/new/path/file.py"
-
-    def test_no_match(self):
-        result = _apply_remap("/other/file.py", [("/old/path", "/new/path")])
-        assert result == "/other/file.py"
-
-    def test_first_match_wins(self):
-        result = _apply_remap(
-            "/prefix/file.py",
-            [("/prefix", "/first"), ("/prefix", "/second")],
-        )
-        assert result == "/first/file.py"
-
-    def test_empty_remaps(self):
-        assert _apply_remap("/some/path", []) == "/some/path"
+    @pytest.mark.parametrize("path,remaps,expected", [
+        ("/old/path/file.py", [("/old/path", "/new/path")], "/new/path/file.py"),
+        ("/other/file.py", [("/old/path", "/new/path")], "/other/file.py"),
+        ("/prefix/file.py", [("/prefix", "/first"), ("/prefix", "/second")], "/first/file.py"),
+        ("/some/path", [], "/some/path"),
+    ])
+    def test_remap(self, path, remaps, expected):
+        assert _apply_remap(path, remaps) == expected
 
 
-# ── Unit: round-trip ──────────────────────────────────────────────────────────
+# ── Unit: round-trip ─────────────────────────────────────────────────────────
 
 
 class TestRoundTrip:
     def test_basic_round_trip(self, populated_db: T3Database, tmp_path: Path):
-        """Export then import preserves documents, metadata, and embedding count."""
-        out_file = tmp_path / "test.nxexp"
-
-        export_result = export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
+        out, export_result, import_result = _export_import(
+            populated_db, "code__test", tmp_path, target="code__restored",
         )
         assert export_result["exported_count"] == 5
-        assert out_file.exists()
-        assert out_file.stat().st_size > 0
-
-        # Import into a new collection name.
-        import_result = import_collection(
-            db=populated_db,
-            input_path=out_file,
-            target_collection="code__restored",
-        )
+        assert out.exists() and out.stat().st_size > 0
         assert import_result["imported_count"] == 5
         assert import_result["collection_name"] == "code__restored"
-
-        # Verify the data made it in.
-        restored_col = populated_db._client_for("code__restored").get_collection(
-            "code__restored"
-        )
-        assert restored_col.count() == 5
+        restored = populated_db._client_for("code__restored").get_collection("code__restored")
+        assert restored.count() == 5
 
     def test_round_trip_preserves_metadata(self, populated_db: T3Database, tmp_path: Path):
-        """Import preserves all metadata fields from the export."""
-        out_file = tmp_path / "meta_rt.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        import_collection(
-            db=populated_db,
-            input_path=out_file,
-            target_collection="code__meta_check",
-        )
+        _export_import(populated_db, "code__test", tmp_path, target="code__meta_check")
         col = populated_db._client_for("code__meta_check").get_collection("code__meta_check")
-        result = col.get(include=["documents", "metadatas"])
-        # Check a metadata field
-        source_paths = {m["source_path"] for m in result["metadatas"]}
-        assert "/repo/file_0.py" in source_paths
-        assert "/repo/file_4.py" in source_paths
+        paths = {m["source_path"] for m in col.get(include=["metadatas"])["metadatas"]}
+        assert "/repo/file_0.py" in paths and "/repo/file_4.py" in paths
 
     def test_round_trip_preserves_embeddings(self, populated_db: T3Database, tmp_path: Path):
-        """Embeddings are preserved byte-for-byte through export/import."""
-        out_file = tmp_path / "emb_rt.nxexp"
-
-        # Get original embeddings.
         orig_col = populated_db._client_for("code__test").get_collection("code__test")
-        orig = orig_col.get(ids=["id-000"], include=["embeddings"])
-        orig_emb = orig["embeddings"][0]
+        orig_emb = orig_col.get(ids=["id-000"], include=["embeddings"])["embeddings"][0]
 
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        import_collection(
-            db=populated_db,
-            input_path=out_file,
-            target_collection="code__emb_check",
-        )
-
-        restored_col = populated_db._client_for("code__emb_check").get_collection(
-            "code__emb_check"
-        )
-        restored = restored_col.get(ids=["id-000"], include=["embeddings"])
-        restored_emb = restored["embeddings"][0]
-
-        # Embeddings should match within float32 precision.
+        _export_import(populated_db, "code__test", tmp_path, target="code__emb_check")
+        restored_col = populated_db._client_for("code__emb_check").get_collection("code__emb_check")
+        restored_emb = restored_col.get(ids=["id-000"], include=["embeddings"])["embeddings"][0]
         np.testing.assert_allclose(orig_emb, restored_emb, rtol=1e-6)
 
 
-# ── Unit: gzip compression ─────────────────────────────────────────────────────
+# ── Unit: gzip compression ───────────────────────────────────────────────────
 
 
 class TestGzipCompression:
-    def test_body_is_gzip_compressed(self, populated_db: T3Database, tmp_path: Path):
-        """The body (after the JSON header line) is gzip-compressed."""
-        out_file = tmp_path / "gz_test.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        with open(out_file, "rb") as f:
+    def test_file_format(self, populated_db: T3Database, tmp_path: Path):
+        out, _ = _export(populated_db, "code__test", tmp_path)
+        with open(out, "rb") as f:
             header_line = f.readline()
             body_start = f.read(2)
-        # gzip magic bytes: 0x1f 0x8b
-        assert body_start == b"\x1f\x8b", "Body should start with gzip magic bytes"
-
-    def test_header_is_valid_json(self, populated_db: T3Database, tmp_path: Path):
-        """The first line is valid JSON."""
-        out_file = tmp_path / "hdr_test.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        with open(out_file, "rb") as f:
-            header_line = f.readline()
+        # Header is valid JSON
         header = json.loads(header_line.decode())
         assert header["format_version"] == FORMAT_VERSION
         assert header["collection_name"] == "code__test"
         assert header["record_count"] == 5
         assert "embedding_model" in header
         assert "exported_at" in header
+        # Body is gzip
+        assert body_start == b"\x1f\x8b"
 
 
-# ── Unit: pagination ──────────────────────────────────────────────────────────
+# ── Unit: pagination ─────────────────────────────────────────────────────────
 
 
 class TestPagination:
-    def test_export_pagination_handles_large_collection(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """Export paginate correctly for collections larger than one page (300 records)."""
+    def _seed_large(self, db, col_name, prefix):
         from nexus.db.chroma_quotas import QUOTAS
-
-        n = QUOTAS.MAX_RECORDS_PER_WRITE + 50  # 350 records
-        col = ephemeral_db.get_or_create_collection("code__large")
-        ef = DefaultEmbeddingFunction()
+        n = QUOTAS.MAX_RECORDS_PER_WRITE + 50
+        col = db.get_or_create_collection(col_name)
         docs = [f"doc {i}" for i in range(n)]
-        ids = [f"id-{i:04d}" for i in range(n)]
+        ids = [f"{prefix}-{i:04d}" for i in range(n)]
         metadatas = [{"source_path": f"/f{i}.py"} for i in range(n)]
-        embeddings = [ef([d])[0] for d in docs]
-        # Insert in two batches to avoid ChromaDB limit.
+        embeddings = [_EF([d])[0] for d in docs]
         mid = n // 2
-        col.upsert(
-            ids=ids[:mid],
-            documents=docs[:mid],
-            embeddings=embeddings[:mid],
-            metadatas=metadatas[:mid],
-        )
-        col.upsert(
-            ids=ids[mid:],
-            documents=docs[mid:],
-            embeddings=embeddings[mid:],
-            metadatas=metadatas[mid:],
-        )
+        col.upsert(ids=ids[:mid], documents=docs[:mid],
+                    embeddings=embeddings[:mid], metadatas=metadatas[:mid])
+        col.upsert(ids=ids[mid:], documents=docs[mid:],
+                    embeddings=embeddings[mid:], metadatas=metadatas[mid:])
+        return n
 
-        out_file = tmp_path / "large.nxexp"
-        result = export_collection(
-            db=ephemeral_db,
-            collection_name="code__large",
-            output_path=out_file,
-        )
+    def test_export_pagination(self, ephemeral_db: T3Database, tmp_path: Path):
+        n = self._seed_large(ephemeral_db, "code__large", "id")
+        _, result = _export(ephemeral_db, "code__large", tmp_path)
         assert result["exported_count"] == n
 
-    def test_import_pagination_handles_large_export(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """Import paginates correctly for exports with > 300 records."""
-        from nexus.db.chroma_quotas import QUOTAS
-
-        n = QUOTAS.MAX_RECORDS_PER_WRITE + 50  # 350 records
-        col = ephemeral_db.get_or_create_collection("code__big_src")
-        ef = DefaultEmbeddingFunction()
-        docs = [f"doc {i}" for i in range(n)]
-        ids = [f"big-{i:04d}" for i in range(n)]
-        metadatas = [{"source_path": f"/big{i}.py"} for i in range(n)]
-        embeddings = [ef([d])[0] for d in docs]
-        mid = n // 2
-        col.upsert(
-            ids=ids[:mid],
-            documents=docs[:mid],
-            embeddings=embeddings[:mid],
-            metadatas=metadatas[:mid],
+    def test_import_pagination(self, ephemeral_db: T3Database, tmp_path: Path):
+        n = self._seed_large(ephemeral_db, "code__big_src", "big")
+        _, _, import_result = _export_import(
+            ephemeral_db, "code__big_src", tmp_path, target="code__big_dst",
         )
-        col.upsert(
-            ids=ids[mid:],
-            documents=docs[mid:],
-            embeddings=embeddings[mid:],
-            metadatas=metadatas[mid:],
-        )
-
-        out_file = tmp_path / "big.nxexp"
-        export_collection(
-            db=ephemeral_db,
-            collection_name="code__big_src",
-            output_path=out_file,
-        )
-        result = import_collection(
-            db=ephemeral_db,
-            input_path=out_file,
-            target_collection="code__big_dst",
-        )
-        assert result["imported_count"] == n
-
-        dst_col = ephemeral_db._client_for("code__big_dst").get_collection("code__big_dst")
-        assert dst_col.count() == n
+        assert import_result["imported_count"] == n
+        dst = ephemeral_db._client_for("code__big_dst").get_collection("code__big_dst")
+        assert dst.count() == n
 
 
-# ── Unit: path remapping ───────────────────────────────────────────────────────
+# ── Unit: path remapping ─────────────────────────────────────────────────────
 
 
 class TestPathRemapping:
-    def test_remap_transforms_source_path_on_import(
-        self, populated_db: T3Database, tmp_path: Path
-    ):
-        """--remap applies the prefix substitution to source_path metadata."""
-        out_file = tmp_path / "remap.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        import_collection(
-            db=populated_db,
-            input_path=out_file,
-            target_collection="code__remapped",
-            remaps=[("/repo", "/new_root")],
-        )
-        col = populated_db._client_for("code__remapped").get_collection("code__remapped")
-        result = col.get(include=["metadatas"])
-        paths = {m["source_path"] for m in result["metadatas"]}
-        assert all(p.startswith("/new_root/") for p in paths), (
-            f"Expected all paths to start with /new_root/, got: {paths}"
-        )
-
-    def test_remap_no_match_leaves_path_unchanged(
-        self, populated_db: T3Database, tmp_path: Path
-    ):
-        """A remap that doesn't match leaves source_path unchanged."""
-        out_file = tmp_path / "no_remap.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        import_collection(
-            db=populated_db,
-            input_path=out_file,
-            target_collection="code__no_remap",
-            remaps=[("/nonexistent", "/other")],
-        )
-        col = populated_db._client_for("code__no_remap").get_collection("code__no_remap")
-        result = col.get(include=["metadatas"])
-        paths = {m["source_path"] for m in result["metadatas"]}
-        assert all(p.startswith("/repo/") for p in paths)
+    @pytest.mark.parametrize("remaps,prefix_check", [
+        ([("/repo", "/new_root")], "/new_root/"),
+        ([("/nonexistent", "/other")], "/repo/"),
+    ])
+    def test_remap_on_import(self, populated_db: T3Database, tmp_path: Path, remaps, prefix_check):
+        target = f"code__remap_{prefix_check.strip('/')}"
+        out, _ = _export(populated_db, "code__test", tmp_path, fname=f"{target}.nxexp")
+        import_collection(db=populated_db, input_path=out, target_collection=target, remaps=remaps)
+        col = populated_db._client_for(target).get_collection(target)
+        paths = {m["source_path"] for m in col.get(include=["metadatas"])["metadatas"]}
+        assert all(p.startswith(prefix_check) for p in paths)
 
 
 # ── Unit: embedding model validation ─────────────────────────────────────────
 
 
 class TestEmbeddingModelValidation:
-    def test_code_to_code_same_model_succeeds(
-        self, populated_db: T3Database, tmp_path: Path
-    ):
-        """Importing a code__ export into a code__ collection succeeds."""
-        out_file = tmp_path / "same_model.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        # Should not raise.
-        result = import_collection(
-            db=populated_db,
-            input_path=out_file,
-            target_collection="code__compat",
+    def test_same_model_succeeds(self, populated_db: T3Database, tmp_path: Path):
+        _, _, result = _export_import(
+            populated_db, "code__test", tmp_path, target="code__compat",
         )
         assert result["imported_count"] == 5
 
-    def test_code_export_into_docs_collection_raises(
-        self, populated_db: T3Database, tmp_path: Path
-    ):
-        """Importing a code__ (voyage-code-3) export into docs__ (voyage-context-3) MUST fail."""
-        out_file = tmp_path / "mismatch.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
+    @pytest.mark.parametrize("target", [
+        "docs__corpus", "knowledge__myknowledge", "rdr__decisions",
+    ])
+    def test_code_into_incompatible_raises(self, populated_db: T3Database, tmp_path: Path, target):
+        out, _ = _export(populated_db, "code__test", tmp_path, fname=f"{target}.nxexp")
+        with pytest.raises(EmbeddingModelMismatch):
+            import_collection(db=populated_db, input_path=out, target_collection=target)
+
+    def test_code_into_docs_error_detail(self, populated_db: T3Database, tmp_path: Path):
+        out, _ = _export(populated_db, "code__test", tmp_path)
         with pytest.raises(EmbeddingModelMismatch) as exc_info:
-            import_collection(
-                db=populated_db,
-                input_path=out_file,
-                target_collection="docs__corpus",
-            )
-        assert "voyage-code-3" in str(exc_info.value)
-        assert "voyage-context-3" in str(exc_info.value)
-        assert "docs__corpus" in str(exc_info.value)
+            import_collection(db=populated_db, input_path=out, target_collection="docs__corpus")
+        msg = str(exc_info.value)
+        assert "voyage-code-3" in msg and "voyage-context-3" in msg and "docs__corpus" in msg
 
-    def test_code_export_into_knowledge_collection_raises(
-        self, populated_db: T3Database, tmp_path: Path
-    ):
-        """Importing a code__ export into knowledge__ MUST fail."""
-        out_file = tmp_path / "mismatch_knowledge.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        with pytest.raises(EmbeddingModelMismatch):
-            import_collection(
-                db=populated_db,
-                input_path=out_file,
-                target_collection="knowledge__myknowledge",
-            )
-
-    def test_code_export_into_rdr_collection_raises(
-        self, populated_db: T3Database, tmp_path: Path
-    ):
-        """Importing a code__ export into rdr__ MUST fail."""
-        out_file = tmp_path / "mismatch_rdr.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        with pytest.raises(EmbeddingModelMismatch):
-            import_collection(
-                db=populated_db,
-                input_path=out_file,
-                target_collection="rdr__decisions",
-            )
-
-    def test_knowledge_export_into_knowledge_succeeds(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """knowledge__ to knowledge__ import succeeds (same model: voyage-context-3)."""
-        ef = DefaultEmbeddingFunction()
-        col = ephemeral_db.get_or_create_collection("knowledge__src")
-        docs = ["doc a", "doc b"]
-        ids = ["ka-001", "ka-002"]
-        metas = [{"title": "A"}, {"title": "B"}]
-        embeddings = [ef([d])[0] for d in docs]
-        col.upsert(ids=ids, documents=docs, embeddings=embeddings, metadatas=metas)
-
-        out_file = tmp_path / "k_to_k.nxexp"
-        export_collection(
-            db=ephemeral_db,
-            collection_name="knowledge__src",
-            output_path=out_file,
-        )
-        result = import_collection(
-            db=ephemeral_db,
-            input_path=out_file,
-            target_collection="knowledge__dst",
+    def test_knowledge_to_knowledge_succeeds(self, ephemeral_db: T3Database, tmp_path: Path):
+        _seed_collection(ephemeral_db, "knowledge__src",
+                         ["doc a", "doc b"], ["ka-001", "ka-002"],
+                         [{"title": "A"}, {"title": "B"}])
+        _, _, result = _export_import(
+            ephemeral_db, "knowledge__src", tmp_path, target="knowledge__dst",
         )
         assert result["imported_count"] == 2
 
@@ -475,205 +246,95 @@ class TestEmbeddingModelValidation:
 
 class TestFormatVersionValidation:
     def test_current_version_accepted(self, populated_db: T3Database, tmp_path: Path):
-        """Current format version (1) is accepted without error."""
-        out_file = tmp_path / "v1.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-        # Verify the header has format_version = FORMAT_VERSION.
-        with open(out_file, "rb") as f:
+        out, _ = _export(populated_db, "code__test", tmp_path)
+        with open(out, "rb") as f:
             header = json.loads(f.readline().decode())
         assert header["format_version"] == FORMAT_VERSION
-
-        # Import should succeed.
-        result = import_collection(
-            db=populated_db,
-            input_path=out_file,
-            target_collection="code__v1_dst",
-        )
+        _, _, result = _export_import(populated_db, "code__test", tmp_path,
+                                      target="code__v1_dst", fname="v1.nxexp")
         assert result["imported_count"] == 5
 
     def test_future_version_raises(self, populated_db: T3Database, tmp_path: Path):
-        """A file with format_version > MAX_SUPPORTED_FORMAT_VERSION MUST abort."""
-        out_file = tmp_path / "future.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-
-        # Tamper with the header to simulate a future format version.
-        with open(out_file, "rb") as f:
+        out, _ = _export(populated_db, "code__test", tmp_path)
+        with open(out, "rb") as f:
             header_line = f.readline()
             rest = f.read()
-
         header = json.loads(header_line.decode())
         header["format_version"] = MAX_SUPPORTED_FORMAT_VERSION + 1
-        new_header_line = json.dumps(header).encode() + b"\n"
-
-        future_file = tmp_path / "future_tampered.nxexp"
+        future_file = tmp_path / "future.nxexp"
         with open(future_file, "wb") as f:
-            f.write(new_header_line)
+            f.write(json.dumps(header).encode() + b"\n")
             f.write(rest)
-
         with pytest.raises(FormatVersionError) as exc_info:
-            import_collection(
-                db=populated_db,
-                input_path=future_file,
-                target_collection="code__future_dst",
-            )
-        assert "format_version" in str(exc_info.value).lower()
-        assert "upgrade" in str(exc_info.value).lower()
+            import_collection(db=populated_db, input_path=future_file,
+                              target_collection="code__future_dst")
+        msg = str(exc_info.value).lower()
+        assert "format_version" in msg and "upgrade" in msg
 
 
 # ── Unit: include/exclude filters ────────────────────────────────────────────
 
 
 class TestIncludeExcludeFilters:
-    def _make_db_with_mixed_paths(self, ephemeral_db: T3Database) -> T3Database:
-        """Populate a collection with files at varying paths."""
-        ef = DefaultEmbeddingFunction()
-        col = ephemeral_db.get_or_create_collection("code__filter_test")
-        docs = [
-            "python file content",
-            "go file content",
-            "test python file",
-            "no-path entry",
-        ]
-        ids = ["py-001", "go-001", "test-001", "nopath-001"]
-        metadatas = [
-            {"source_path": "/repo/main.py"},
-            {"source_path": "/repo/main.go"},
-            {"source_path": "/repo/test_main.py"},
-            {"title": "store put entry"},  # no source_path
-        ]
-        embeddings = [ef([d])[0] for d in docs]
-        col.upsert(ids=ids, documents=docs, embeddings=embeddings, metadatas=metadatas)
+    @pytest.fixture
+    def filter_db(self, ephemeral_db: T3Database):
+        _seed_collection(
+            ephemeral_db, "code__filter_test",
+            ["python file content", "go file content", "test python file", "no-path entry"],
+            ["py-001", "go-001", "test-001", "nopath-001"],
+            [{"source_path": "/repo/main.py"}, {"source_path": "/repo/main.go"},
+             {"source_path": "/repo/test_main.py"}, {"title": "store put entry"}],
+        )
         return ephemeral_db
 
-    def test_include_filters_by_source_path(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """--include *.py exports only .py files (plus entries without source_path)."""
-        self._make_db_with_mixed_paths(ephemeral_db)
-        out_file = tmp_path / "py_only.nxexp"
-        result = export_collection(
-            db=ephemeral_db,
-            collection_name="code__filter_test",
-            output_path=out_file,
-            includes=("*.py",),
-        )
-        # 3 .py files + 1 no-path entry = 4 expected... but test_main.py also matches *.py
-        # py-001 (/repo/main.py), test-001 (/repo/test_main.py), nopath-001 (no path)
-        assert result["exported_count"] == 3  # main.py, test_main.py, no-path
-
-    def test_exclude_filters_out_matching_paths(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """--exclude */test_* excludes test files but keeps entries without source_path."""
-        self._make_db_with_mixed_paths(ephemeral_db)
-        out_file = tmp_path / "no_tests.nxexp"
-        result = export_collection(
-            db=ephemeral_db,
-            collection_name="code__filter_test",
-            output_path=out_file,
-            excludes=("*/test_*",),
-        )
-        # main.py, main.go, no-path = 3
-        assert result["exported_count"] == 3
-
-    def test_no_source_path_always_included(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """Entries without source_path pass through both include and exclude filters."""
-        self._make_db_with_mixed_paths(ephemeral_db)
-        out_file = tmp_path / "strict.nxexp"
-        result = export_collection(
-            db=ephemeral_db,
-            collection_name="code__filter_test",
-            output_path=out_file,
-            includes=("*.go",),       # only .go files + no-path
-            excludes=("*/main*",),   # but main.go is excluded
-        )
-        # Only no-path entry survives (main.go matched include but also excluded)
-        assert result["exported_count"] == 1
-
-    def test_include_and_exclude_combined(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """Combined include + exclude: include *.py, exclude */test_*."""
-        self._make_db_with_mixed_paths(ephemeral_db)
-        out_file = tmp_path / "py_no_tests.nxexp"
-        result = export_collection(
-            db=ephemeral_db,
-            collection_name="code__filter_test",
-            output_path=out_file,
-            includes=("*.py",),
-            excludes=("*/test_*",),
-        )
-        # main.py (passes include, not excluded) + no-path = 2
-        assert result["exported_count"] == 2
+    @pytest.mark.parametrize("includes,excludes,expected_count", [
+        (("*.py",), (), 3),           # main.py, test_main.py, no-path
+        ((), ("*/test_*",), 3),        # main.py, main.go, no-path
+        (("*.go",), ("*/main*",), 1),  # only no-path survives
+        (("*.py",), ("*/test_*",), 2), # main.py + no-path
+    ])
+    def test_filter_export(self, filter_db, tmp_path, includes, excludes, expected_count):
+        _, result = _export(filter_db, "code__filter_test", tmp_path,
+                            fname=f"f_{expected_count}.nxexp",
+                            includes=includes, excludes=excludes)
+        assert result["exported_count"] == expected_count
 
 
-# ── Unit: --all semantics (via CLI layer) ─────────────────────────────────────
+# ── Unit: --all semantics ────────────────────────────────────────────────────
 
 
 class TestExportAll:
     def test_export_all_produces_one_file_per_collection(
-        self, ephemeral_db: T3Database, tmp_path: Path
+        self, ephemeral_db: T3Database, tmp_path: Path,
     ):
-        """export_collection can be called per-collection to simulate --all."""
         from datetime import date
-
-        ef = DefaultEmbeddingFunction()
-        for prefix in ("code__alpha", "knowledge__beta"):
-            col = ephemeral_db.get_or_create_collection(prefix)
-            docs = ["doc a", "doc b"]
-            ids = [f"{prefix}-001", f"{prefix}-002"]
-            metas = [{"title": "A"}, {"title": "B"}]
-            embs = [ef([d])[0] for d in docs]
-            col.upsert(ids=ids, documents=docs, embeddings=embs, metadatas=metas)
-
+        for name in ("code__alpha", "knowledge__beta"):
+            _seed_collection(ephemeral_db, name, ["doc a", "doc b"],
+                             [f"{name}-001", f"{name}-002"],
+                             [{"title": "A"}, {"title": "B"}])
         today = date.today().isoformat()
-        collections = ["code__alpha", "knowledge__beta"]
-        files: list[Path] = []
-        for col_name in collections:
-            fname = f"{col_name}-{today}.nxexp"
-            out_path = tmp_path / fname
-            export_collection(
-                db=ephemeral_db,
-                collection_name=col_name,
-                output_path=out_path,
-            )
+        files = []
+        for col_name in ("code__alpha", "knowledge__beta"):
+            out_path = tmp_path / f"{col_name}-{today}.nxexp"
+            export_collection(db=ephemeral_db, collection_name=col_name, output_path=out_path)
             files.append(out_path)
 
         assert len(files) == 2
         for f in files:
             assert f.exists()
-            # Verify each file has the correct collection in header.
             with open(f, "rb") as fh:
                 header = json.loads(fh.readline().decode())
-            # The filename is {collection_name}-{YYYY-MM-DD}.nxexp
-            # Strip the .nxexp suffix, then strip the trailing -{YYYY-MM-DD}
-            stem = f.stem  # e.g. "code__alpha-2026-03-09"
-            # Date is the last 10 chars of the stem (YYYY-MM-DD)
-            expected_col = stem[:-11]  # remove "-YYYY-MM-DD" (11 chars)
+            expected_col = f.stem[:-11]  # strip "-YYYY-MM-DD"
             assert header["collection_name"] == expected_col
-
-        # Verify naming convention: {collection_name}-{date}.nxexp
         names = [f.name for f in files]
         assert f"code__alpha-{today}.nxexp" in names
         assert f"knowledge__beta-{today}.nxexp" in names
 
 
-# ── Unit: CLI layer tests ─────────────────────────────────────────────────────
+# ── Unit: CLI layer tests ────────────────────────────────────────────────────
 
 
 class TestExportImportCLI:
-    """CLI-layer tests using CliRunner and patched _t3."""
-
     @pytest.fixture
     def runner(self):
         from click.testing import CliRunner
@@ -686,215 +347,109 @@ class TestExportImportCLI:
         monkeypatch.setenv("CHROMA_TENANT", "test-tenant")
         monkeypatch.setenv("CHROMA_DATABASE", "test-db")
 
-    def test_export_missing_collection_and_all(
-        self, runner, env_creds, tmp_path
-    ):
-        """Providing neither COLLECTION nor --all fails with UsageError."""
+    @pytest.mark.parametrize("args", [
+        ["store", "export"],
+        ["store", "export", "code__test", "--all"],
+    ])
+    def test_export_mutual_exclusion(self, runner, env_creds, args):
         from unittest.mock import MagicMock, patch
         from nexus.cli import main
-
-        mock_db = MagicMock()
-        with patch("nexus.commands.store._t3", return_value=mock_db):
-            result = runner.invoke(main, ["store", "export"])
+        with patch("nexus.commands.store._t3", return_value=MagicMock()):
+            result = runner.invoke(main, args)
         assert result.exit_code != 0
 
-    def test_export_collection_and_all_exclusive(
-        self, runner, env_creds, tmp_path
-    ):
-        """Providing both COLLECTION and --all fails with UsageError."""
+    @pytest.mark.parametrize("remap_val,check_word", [
+        ("no_colon_here", "remap"),
+        (":/new/path", "remap"),
+    ])
+    def test_import_remap_bad_format(self, runner, env_creds, tmp_path, remap_val, check_word):
         from unittest.mock import MagicMock, patch
         from nexus.cli import main
-
-        mock_db = MagicMock()
-        with patch("nexus.commands.store._t3", return_value=mock_db):
-            result = runner.invoke(
-                main,
-                ["store", "export", "code__test", "--all"],
-            )
-        assert result.exit_code != 0
-
-    def test_import_remap_bad_format(self, runner, env_creds, tmp_path):
-        """--remap without colon separator fails with UsageError."""
-        from unittest.mock import MagicMock, patch
-        from nexus.cli import main
-
-        # Create a dummy .nxexp file so the click.Path(exists=True) check passes.
         dummy = tmp_path / "dummy.nxexp"
         dummy.write_bytes(b"not a real file")
-
-        mock_db = MagicMock()
-        with patch("nexus.commands.store._t3", return_value=mock_db):
-            result = runner.invoke(
-                main,
-                ["store", "import", str(dummy), "--remap", "no_colon_here"],
-            )
-        assert result.exit_code != 0
-        assert "remap" in result.output.lower() or "colon" in result.output.lower()
-
-    def test_import_remap_empty_old_prefix_rejected(self, runner, env_creds, tmp_path):
-        """--remap with an empty old prefix (e.g. ':/new/path') is rejected with a clear error."""
-        from unittest.mock import MagicMock, patch
-        from nexus.cli import main
-
-        dummy = tmp_path / "dummy.nxexp"
-        dummy.write_bytes(b"not a real file")
-
-        mock_db = MagicMock()
-        with patch("nexus.commands.store._t3", return_value=mock_db):
-            result = runner.invoke(
-                main,
-                ["store", "import", str(dummy), "--remap", ":/new/path"],
-            )
+        with patch("nexus.commands.store._t3", return_value=MagicMock()):
+            result = runner.invoke(main, ["store", "import", str(dummy), "--remap", remap_val])
         assert result.exit_code != 0
         output = result.output.lower()
-        assert "empty" in output or "remap" in output
+        assert check_word in output or "colon" in output or "empty" in output
 
     def test_export_single_collection_success(
-        self, runner, env_creds, tmp_path, populated_db: T3Database
+        self, runner, env_creds, tmp_path, populated_db: T3Database,
     ):
-        """CLI export command succeeds for a single collection."""
         from unittest.mock import patch
         from nexus.cli import main
-
         out_file = tmp_path / "out.nxexp"
         with patch("nexus.commands.store._t3", return_value=populated_db):
-            result = runner.invoke(
-                main,
-                ["store", "export", "code__test", "-o", str(out_file)],
-            )
-        assert result.exit_code == 0, result.output
-        assert out_file.exists()
-        assert "5" in result.output
+            result = runner.invoke(main, ["store", "export", "code__test", "-o", str(out_file)])
+        assert result.exit_code == 0
+        assert out_file.exists() and "5" in result.output
 
     def test_import_embedding_mismatch_shows_error(
-        self, runner, env_creds, tmp_path, populated_db: T3Database
+        self, runner, env_creds, tmp_path, populated_db: T3Database,
     ):
-        """CLI import shows error on EmbeddingModelMismatch."""
         from unittest.mock import patch
         from nexus.cli import main
-
-        # First export the code__ collection.
-        out_file = tmp_path / "code_export.nxexp"
-        export_collection(
-            db=populated_db,
-            collection_name="code__test",
-            output_path=out_file,
-        )
-
-        # Now try to import into docs__ via CLI — must fail.
+        out, _ = _export(populated_db, "code__test", tmp_path)
         with patch("nexus.commands.store._t3", return_value=populated_db):
-            result = runner.invoke(
-                main,
-                [
-                    "store",
-                    "import",
-                    str(out_file),
-                    "--collection",
-                    "docs__corpus",
-                ],
-            )
+            result = runner.invoke(main, ["store", "import", str(out), "--collection", "docs__corpus"])
         assert result.exit_code != 0
-        output = result.output.lower()
-        assert "mismatch" in output or "error" in output
+        assert "mismatch" in result.output.lower() or "error" in result.output.lower()
 
     def test_export_all_produces_files(
-        self, runner, env_creds, tmp_path, ephemeral_db: T3Database
+        self, runner, env_creds, tmp_path, ephemeral_db: T3Database,
     ):
-        """--all exports one file per collection into the output directory."""
         from unittest.mock import patch
         from nexus.cli import main
-
-        # Seed two collections.
-        ef = DefaultEmbeddingFunction()
         for name in ("code__repo1", "knowledge__notes"):
-            col = ephemeral_db.get_or_create_collection(name)
-            embs = [ef(["hello"])[0]]
-            col.upsert(ids=[f"{name}-001"], documents=["hello"], embeddings=embs, metadatas=[{"title": "t"}])
-
+            _seed_collection(ephemeral_db, name, ["hello"], [f"{name}-001"], [{"title": "t"}])
         ephemeral_db.list_collections = lambda: [
             {"name": "code__repo1", "count": 1},
             {"name": "knowledge__notes", "count": 1},
         ]
-
         out_dir = tmp_path / "exports"
         out_dir.mkdir()
         with patch("nexus.commands.store._t3", return_value=ephemeral_db):
-            result = runner.invoke(
-                main,
-                ["store", "export", "--all", "-o", str(out_dir)],
-            )
-        assert result.exit_code == 0, result.output
-        nxexp_files = list(out_dir.glob("*.nxexp"))
-        assert len(nxexp_files) == 2
+            result = runner.invoke(main, ["store", "export", "--all", "-o", str(out_dir)])
+        assert result.exit_code == 0
+        assert len(list(out_dir.glob("*.nxexp"))) == 2
 
 
-# ── Unit: error types ─────────────────────────────────────────────────────────
+# ── Unit: error types ────────────────────────────────────────────────────────
 
 
 class TestErrorTypes:
-    def test_embedding_model_mismatch_importable(self):
-        from nexus.errors import EmbeddingModelMismatch  # noqa: F401
+    @pytest.mark.parametrize("cls", [EmbeddingModelMismatch, FormatVersionError])
+    def test_importable_and_is_nexus_error(self, cls):
+        assert issubclass(cls, NexusError)
 
-    def test_format_version_error_importable(self):
-        from nexus.errors import FormatVersionError  # noqa: F401
-
-    def test_both_are_nexus_error_subclasses(self):
-        from nexus.errors import EmbeddingModelMismatch, FormatVersionError, NexusError
-        assert issubclass(EmbeddingModelMismatch, NexusError)
-        assert issubclass(FormatVersionError, NexusError)
-
-    def test_embedding_model_mismatch_message(self):
-        exc = EmbeddingModelMismatch("test message")
-        assert "test message" in str(exc)
-
-    def test_format_version_error_message(self):
-        exc = FormatVersionError("version error message")
-        assert "version error message" in str(exc)
+    @pytest.mark.parametrize("cls,msg", [
+        (EmbeddingModelMismatch, "test message"),
+        (FormatVersionError, "version error message"),
+    ])
+    def test_error_message(self, cls, msg):
+        assert msg in str(cls(msg))
 
 
-# ── Empty collection round-trip (031-S10) ────────────────────────────────────
+# ── Empty collection round-trip ──────────────────────────────────────────────
 
 
 class TestEmptyCollectionRoundTrip:
-    """Export and import an empty collection — zero records, no errors."""
-
-    def test_empty_collection_export_produces_valid_file(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """Exporting an empty collection produces a valid .nxexp with record_count 0."""
+    def test_empty_export_and_import(self, ephemeral_db: T3Database, tmp_path: Path):
         ephemeral_db.get_or_create_collection("knowledge__empty")
-        out = tmp_path / "empty.nxexp"
-        stats = export_collection(ephemeral_db, "knowledge__empty", out)
-        assert stats["exported_count"] == 0
-        assert out.exists()
-
-        # Header is valid JSON with record_count 0.
+        out, stats = _export(ephemeral_db, "knowledge__empty", tmp_path)
+        assert stats["exported_count"] == 0 and out.exists()
         with open(out, "rb") as f:
             header = json.loads(f.readline().decode())
         assert header["collection_name"] == "knowledge__empty"
-
-    def test_empty_collection_import_succeeds(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """Importing an empty .nxexp file succeeds with imported_count 0."""
-        ephemeral_db.get_or_create_collection("knowledge__empty")
-        out = tmp_path / "empty.nxexp"
-        export_collection(ephemeral_db, "knowledge__empty", out)
-
         result = import_collection(ephemeral_db, out)
         assert result["imported_count"] == 0
 
 
-# ── Corrupt msgpack body (031-S12) ───────────────────────────────────────────
+# ── Corrupt msgpack body ─────────────────────────────────────────────────────
 
 
 class TestCorruptMsgpackBody:
-    """Import fails clearly when the gzip body contains invalid msgpack."""
-
-    def test_import_corrupt_msgpack_raises_error(
-        self, ephemeral_db: T3Database, tmp_path: Path
-    ):
-        """Import of a file with valid header but garbage msgpack body raises an error."""
+    def test_import_corrupt_msgpack_raises(self, ephemeral_db: T3Database, tmp_path: Path):
         header = {
             "format_version": FORMAT_VERSION,
             "collection_name": "knowledge__corrupt",
@@ -910,7 +465,6 @@ class TestCorruptMsgpackBody:
             f.write(json.dumps(header).encode() + b"\n")
             with gzip.GzipFile(fileobj=f, mode="wb") as gz:
                 gz.write(b"this is not valid msgpack data at all!!")
-
         ephemeral_db.get_or_create_collection("knowledge__corrupt")
-        with pytest.raises(Exception):  # msgpack.UnpackValueError or similar
+        with pytest.raises(Exception):
             import_collection(ephemeral_db, out)

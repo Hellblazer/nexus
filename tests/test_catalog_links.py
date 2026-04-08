@@ -1,542 +1,349 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-
-from nexus.catalog.catalog import Catalog, CatalogEntry, CatalogLink
+from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 
-
-def _make_catalog_with_docs(tmp_path: Path) -> tuple[Catalog, Tumbler, Tumbler, Tumbler]:
-    """Create catalog with owner and 3 documents."""
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
-    owner = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
-    doc_a = cat.register(owner, "auth.py", content_type="code", file_path="auth.py")
-    doc_b = cat.register(owner, "db.py", content_type="code", file_path="db.py")
-    doc_c = cat.register(owner, "api.py", content_type="code", file_path="api.py")
-    return cat, doc_a, doc_b, doc_c
+GHOST, GHOST2 = Tumbler.parse("1.1.99"), Tumbler.parse("1.1.98")
 
 
-class TestDanglingLinkPrevention:
-    def test_link_rejects_dangling_from(self, tmp_path):
-        cat, _, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        with pytest.raises(ValueError, match="from_tumbler.*not found"):
-            cat.link(Tumbler.parse("1.1.99"), doc_b, "cites", created_by="user")
+@pytest.fixture
+def cat(tmp_path):
+    d = tmp_path / "catalog"
+    d.mkdir()
+    c = Catalog(d, d / ".catalog.db")
+    o = c.register_owner("nexus", "repo", repo_hash="571b8edd")
+    a = c.register(o, "auth.py", content_type="code", file_path="auth.py")
+    b = c.register(o, "db.py", content_type="code", file_path="db.py")
+    x = c.register(o, "api.py", content_type="code", file_path="api.py")
+    return c, a, b, x
 
-    def test_link_rejects_dangling_to(self, tmp_path):
-        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
-        with pytest.raises(ValueError, match="to_tumbler.*not found"):
-            cat.link(doc_a, Tumbler.parse("1.1.99"), "cites", created_by="user")
 
-    def test_link_allow_dangling_bypasses_check(self, tmp_path):
-        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, Tumbler.parse("1.1.99"), "cites", created_by="user", allow_dangling=True)
-        assert len(cat.links_from(doc_a)) == 1
+def _jsonl(tmp_path):
+    return [json.loads(ln) for ln in (tmp_path / "catalog" / "links.jsonl").read_text().strip().splitlines()]
 
-    def test_link_if_absent_rejects_dangling_from(self, tmp_path):
-        cat, _, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        with pytest.raises(ValueError, match="from_tumbler.*not found"):
-            cat.link_if_absent(Tumbler.parse("1.1.99"), doc_b, "cites", created_by="user")
 
-    def test_link_if_absent_rejects_dangling_to(self, tmp_path):
-        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
-        with pytest.raises(ValueError, match="to_tumbler.*not found"):
-            cat.link_if_absent(doc_a, Tumbler.parse("1.1.99"), "cites", created_by="user")
+class TestDangling:
+    @pytest.mark.parametrize("method", ["link", "link_if_absent"])
+    @pytest.mark.parametrize("ft,tk,pat", [("ghost", "b", "from_tumbler.*not found"), ("a", "ghost", "to_tumbler.*not found")])
+    def test_rejects(self, cat, method, ft, tk, pat):
+        c, a, b, _ = cat
+        with pytest.raises(ValueError, match=pat):
+            getattr(c, method)(GHOST if ft == "ghost" else a, GHOST if tk == "ghost" else b, "cites", created_by="user")
 
-    def test_link_if_absent_both_dangling(self, tmp_path):
-        cat, _, _, _ = _make_catalog_with_docs(tmp_path)
+    def test_both_dangling(self, cat):
         with pytest.raises(ValueError, match="not found"):
-            cat.link_if_absent(Tumbler.parse("1.1.98"), Tumbler.parse("1.1.99"),
-                               "cites", created_by="user")
+            cat[0].link_if_absent(GHOST2, GHOST, "cites", created_by="user")
 
-    def test_link_if_absent_existing_dangling_returns_false(self, tmp_path):
-        """Existing dangling link returns False without re-validating endpoints."""
-        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
-        ghost = Tumbler.parse("1.1.99")
-        cat.link_if_absent(doc_a, ghost, "cites", created_by="user", allow_dangling=True)
-        result = cat.link_if_absent(doc_a, ghost, "cites", created_by="user")
-        assert result is False
+    def test_allow_dangling_and_idempotent(self, cat):
+        c, a, _, _ = cat
+        c.link(a, GHOST, "cites", created_by="user", allow_dangling=True)
+        assert len(c.links_from(a)) == 1
+        assert c.link_if_absent(a, GHOST, "cites", created_by="user") is False
+        assert c.link_if_absent(a, Tumbler.parse("1.1.97"), "cites", created_by="user", allow_dangling=True) is True
 
-    def test_link_if_absent_allow_dangling(self, tmp_path):
-        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
-        result = cat.link_if_absent(doc_a, Tumbler.parse("1.1.99"), "cites",
-                                    created_by="user", allow_dangling=True)
-        assert result is True
-
-    def test_link_returns_bool_created(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        result = cat.link(doc_a, doc_b, "cites", created_by="user")
-        assert result is True  # new link
-
-    def test_link_returns_bool_merged(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        result = cat.link(doc_a, doc_b, "cites", created_by="other")
-        assert result is False  # merged
+    def test_link_returns_bool(self, cat):
+        c, a, b, _ = cat
+        assert c.link(a, b, "cites", created_by="user") is True
+        assert c.link(a, b, "cites", created_by="other") is False
 
 
-class TestLinkCreation:
-    def test_link_and_lookup(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        outgoing = cat.links_from(doc_a)
-        assert len(outgoing) == 1
-        assert outgoing[0].link_type == "cites"
-        assert outgoing[0].from_tumbler == doc_a
-        assert outgoing[0].to_tumbler == doc_b
+class TestCreation:
+    def test_lookup(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        out = c.links_from(a)
+        assert len(out) == 1
+        assert (out[0].link_type, out[0].from_tumbler, out[0].to_tumbler) == ("cites", a, b)
 
-    def test_link_persists_to_jsonl(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        jsonl = (tmp_path / "catalog" / "links.jsonl").read_text()
-        records = [json.loads(line) for line in jsonl.strip().splitlines()]
-        assert len(records) == 1
-        assert records[0]["link_type"] == "cites"
+    def test_jsonl(self, cat, tmp_path):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        recs = _jsonl(tmp_path)
+        assert len(recs) == 1 and recs[0]["link_type"] == "cites"
 
-    def test_multiple_link_types(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_b, "implements", created_by="index_hook")
-        outgoing = cat.links_from(doc_a)
-        assert len(outgoing) == 2
-        types = {lnk.link_type for lnk in outgoing}
-        assert types == {"cites", "implements"}
+    def test_multiple_types(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, b, "implements", created_by="index_hook")
+        assert {lk.link_type for lk in c.links_from(a)} == {"cites", "implements"}
 
-    def test_created_by_tracking(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
-        link = cat.links_from(doc_a)[0]
-        assert link.created_by == "bib_enricher"
+    def test_created_by_and_span(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="bib_enricher")
+        assert c.links_from(a)[0].created_by == "bib_enricher"
+        c.link(a, b, "quotes", created_by="user", from_span="3-7", to_span="1-2")
+        lk = [lk for lk in c.links_from(a) if lk.link_type == "quotes"][0]
+        assert (lk.from_span, lk.to_span) == ("3-7", "1-2")
 
-    def test_span_info(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "quotes", created_by="user", from_span="3-7", to_span="1-2")
-        link = cat.links_from(doc_a)[0]
-        assert link.from_span == "3-7"
-        assert link.to_span == "1-2"
-
-
-class TestBacklinks:
-    def test_links_to(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        incoming = cat.links_to(doc_b)
-        assert len(incoming) == 1
-        assert incoming[0].from_tumbler == doc_a
-
-    def test_links_to_type_filter(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_c, doc_b, "implements", created_by="user")
-        incoming = cat.links_to(doc_b, link_type="cites")
-        assert len(incoming) == 1
-        assert incoming[0].from_tumbler == doc_a
+    def test_backlinks(self, cat):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(x, b, "implements", created_by="user")
+        assert len(c.links_to(b)) == 2 and c.links_to(b, link_type="cites")[0].from_tumbler == a
+        assert len(c.links_to(b, link_type="cites")) == 1
 
 
 class TestUnlink:
-    def test_unlink_specific_type(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        removed = cat.unlink(doc_a, doc_b, "cites")
-        assert removed == 1
-        assert cat.links_from(doc_a) == []
+    def test_specific_type(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        assert c.unlink(a, b, "cites") == 1 and c.links_from(a) == []
 
-    def test_unlink_tombstone_in_jsonl(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.unlink(doc_a, doc_b, "cites")
+    def test_tombstone_and_provenance(self, cat, tmp_path):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="bib_enricher")
+        c.unlink(a, b, "cites")
         content = (tmp_path / "catalog" / "links.jsonl").read_text()
         assert '"_deleted": true' in content
+        assert [r for r in _jsonl(tmp_path) if r.get("_deleted")][0]["created_by"] == "bib_enricher"
 
-    def test_unlink_all_types(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_b, "implements", created_by="user")
-        removed = cat.unlink(doc_a, doc_b)
-        assert removed == 2
-        assert cat.links_from(doc_a) == []
+    def test_all_types(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, b, "implements", created_by="user")
+        assert c.unlink(a, b) == 2 and c.links_from(a) == []
 
-    def test_unlink_nonexistent_returns_zero(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        removed = cat.unlink(doc_a, doc_b, "cites")
-        assert removed == 0
+    def test_nonexistent(self, cat):
+        assert cat[0].unlink(cat[1], cat[2], "cites") == 0
 
 
-class TestIdempotentLink:
-    def test_link_idempotent_merges_co_discovered_by(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        links = cat.links_from(doc_a, link_type="cites")
-        assert len(links) == 1
-        assert links[0].created_by == "bib_enricher"  # original creator preserved
-        assert links[0].meta.get("co_discovered_by") == ["user"]
+class TestIdempotent:
+    def test_merges_co_discovered(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="bib_enricher")
+        c.link(a, b, "cites", created_by="user")
+        lks = c.links_from(a, link_type="cites")
+        assert len(lks) == 1 and lks[0].created_by == "bib_enricher"
+        assert lks[0].meta.get("co_discovered_by") == ["user"]
 
-    def test_link_idempotent_same_creator_no_co_discovered(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        links = cat.links_from(doc_a, link_type="cites")
-        assert len(links) == 1
-        assert "user" not in links[0].meta.get("co_discovered_by", [])
+    def test_same_creator_no_co_discovered(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, b, "cites", created_by="user")
+        lks = c.links_from(a, link_type="cites")
+        assert len(lks) == 1 and "user" not in lks[0].meta.get("co_discovered_by", [])
 
-    def test_link_if_absent_returns_true_on_new(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        result = cat.link_if_absent(doc_a, doc_b, "cites", created_by="user")
-        assert result is True
-        assert len(cat.links_from(doc_a)) == 1
+    @pytest.mark.parametrize("pre,expected", [(False, True), (True, False)])
+    def test_if_absent_return(self, cat, pre, expected):
+        c, a, b, _ = cat
+        if pre:
+            c.link(a, b, "cites", created_by="user")
+        assert c.link_if_absent(a, b, "cites", created_by="other" if pre else "user") is expected
+        assert len(c.links_from(a)) == 1
 
-    def test_link_if_absent_returns_false_on_duplicate(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        result = cat.link_if_absent(doc_a, doc_b, "cites", created_by="other")
-        assert result is False
-        assert len(cat.links_from(doc_a)) == 1
-
-    def test_batch_id_roundtrip(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher", batch_id="run-123")
-        link = cat.links_from(doc_a)[0]
-        assert link.meta["batch_id"] == "run-123"
+    def test_batch_id(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="bib_enricher", batch_id="run-123")
+        assert c.links_from(a)[0].meta["batch_id"] == "run-123"
 
 
-class TestUnlinkProvenance:
-    def test_unlink_tombstone_preserves_created_by(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
-        cat.unlink(doc_a, doc_b, "cites")
-        content = (tmp_path / "catalog" / "links.jsonl").read_text()
-        lines = [json.loads(l) for l in content.strip().splitlines()]
-        tombstone = [l for l in lines if l.get("_deleted")][0]
-        assert tombstone["created_by"] == "bib_enricher"
+class TestQuery:
+    @pytest.mark.parametrize("kw,count", [
+        ({"link_type": "cites"}, 1), ({"link_type": "nonexistent"}, 0), ({"created_by": "bib_enricher"}, 1),
+    ])
+    def test_single_filter(self, cat, kw, count):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="bib_enricher")
+        c.link(a, x, "implements", created_by="user")
+        assert len(c.link_query(**kw)) == count
 
+    def test_combined(self, cat):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="bib_enricher")
+        c.link(a, x, "cites", created_by="user")
+        r = c.link_query(link_type="cites", created_by="bib_enricher")
+        assert len(r) == 1 and r[0].to_tumbler == b
 
-class TestLinkQuery:
-    def test_link_query_by_type(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "implements", created_by="user")
-        results = cat.link_query(link_type="cites")
-        assert len(results) == 1
-        assert results[0].link_type == "cites"
+    def test_pagination(self, cat):
+        c, a, b, x = cat
+        for s, d in [(a, b), (a, x), (b, x)]:
+            c.link(s, d, "cites", created_by="user")
+        assert len(c.link_query(link_type="cites", limit=2, offset=0)) == 2
+        assert len(c.link_query(link_type="cites", limit=2, offset=2)) == 1
 
-    def test_link_query_by_created_by(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
-        cat.link(doc_a, doc_c, "relates", created_by="user")
-        results = cat.link_query(created_by="bib_enricher")
-        assert len(results) == 1
-        assert results[0].created_by == "bib_enricher"
+    def test_no_filter_and_limit_zero(self, cat):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, x, "relates", created_by="bib_enricher")
+        c.link(b, x, "cites", created_by="user")
+        assert len(c.link_query()) == 3
+        assert len(c.link_query(limit=0)) == 3
 
-    def test_link_query_combined_filters(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
-        cat.link(doc_a, doc_c, "cites", created_by="user")
-        results = cat.link_query(link_type="cites", created_by="bib_enricher")
-        assert len(results) == 1
-        assert results[0].to_tumbler == doc_b
+    @pytest.mark.parametrize("direction,count", [("both", 2), ("out", 1)])
+    def test_tumbler_direction(self, cat, direction, count):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(x, a, "relates", created_by="user")
+        r = c.link_query(tumbler=str(a), direction=direction)
+        assert len(r) == count
+        if direction == "out":
+            assert r[0].link_type == "cites"
 
-    def test_link_query_pagination(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "cites", created_by="user")
-        cat.link(doc_b, doc_c, "cites", created_by="user")
-        page1 = cat.link_query(link_type="cites", limit=2, offset=0)
-        page2 = cat.link_query(link_type="cites", limit=2, offset=2)
-        assert len(page1) == 2
-        assert len(page2) == 1
-
-    def test_link_query_empty_returns_empty(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        results = cat.link_query(link_type="nonexistent")
-        assert results == []
-
-    def test_link_query_by_tumbler_both_directions(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_c, doc_a, "relates", created_by="user")
-        results = cat.link_query(tumbler=str(doc_a), direction="both")
-        assert len(results) == 2
-
-    def test_link_query_created_at_before_sql(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "cites", created_by="user")
-        # Future cutoff: all links match
-        results = cat.link_query(link_type="cites", created_at_before="2099-01-01T00:00:00")
-        assert len(results) == 2
-        # Past cutoff: no links match
-        results = cat.link_query(link_type="cites", created_at_before="2000-01-01T00:00:00")
-        assert len(results) == 0
-
-    def test_link_query_no_filter_returns_all(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "relates", created_by="bib_enricher")
-        results = cat.link_query()
-        assert len(results) == 2
-
-    def test_link_query_limit_zero_returns_all(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "relates", created_by="user")
-        cat.link(doc_b, doc_c, "cites", created_by="user")
-        results = cat.link_query(limit=0)
-        assert len(results) == 3  # unlimited
-
-    def test_link_query_by_tumbler_out_only(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_c, doc_a, "relates", created_by="user")
-        results = cat.link_query(tumbler=str(doc_a), direction="out")
-        assert len(results) == 1
-        assert results[0].link_type == "cites"
+    @pytest.mark.parametrize("cutoff,expected", [("2099-01-01T00:00:00", 2), ("2000-01-01T00:00:00", 0)])
+    def test_created_at_before(self, cat, cutoff, expected):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, x, "cites", created_by="user")
+        assert len(c.link_query(link_type="cites", created_at_before=cutoff)) == expected
 
 
 class TestBulkUnlink:
-    def test_bulk_unlink_by_created_by(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
-        cat.link(doc_a, doc_c, "cites", created_by="user")
-        removed = cat.bulk_unlink(created_by="bib_enricher")
-        assert removed == 1
-        assert len(cat.link_query(created_by="bib_enricher")) == 0
-        assert len(cat.link_query(created_by="user")) == 1
+    def test_by_created_by(self, cat):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="bib_enricher")
+        c.link(a, x, "cites", created_by="user")
+        assert c.bulk_unlink(created_by="bib_enricher") == 1
+        assert len(c.link_query(created_by="bib_enricher")) == 0 and len(c.link_query(created_by="user")) == 1
 
-    def test_bulk_unlink_by_type(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "implements", created_by="user")
-        removed = cat.bulk_unlink(link_type="cites")
-        assert removed == 1
-        assert len(cat.link_query()) == 1
+    def test_by_type(self, cat):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, x, "implements", created_by="user")
+        assert c.bulk_unlink(link_type="cites") == 1 and len(c.link_query()) == 1
 
-    def test_bulk_unlink_dry_run_no_delete(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        count = cat.bulk_unlink(link_type="cites", dry_run=True)
-        assert count == 1
-        assert len(cat.link_query(link_type="cites")) == 1  # still there
+    def test_dry_run(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        assert c.bulk_unlink(link_type="cites", dry_run=True) == 1
+        assert len(c.link_query(link_type="cites")) == 1
 
-    def test_bulk_unlink_time_range(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "cites", created_by="user")
-        # All links created "now" — a future cutoff should match all
-        removed = cat.bulk_unlink(link_type="cites", created_at_before="2099-01-01T00:00:00")
-        assert removed == 2
+    @pytest.mark.parametrize("cutoff,removed,remaining", [("2099-01-01T00:00:00", 2, 0), ("2000-01-01T00:00:00", 0, 2)])
+    def test_time_range(self, cat, cutoff, removed, remaining):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, x, "cites", created_by="user")
+        assert c.bulk_unlink(link_type="cites", created_at_before=cutoff) == removed
+        assert len(c.link_query(link_type="cites")) == remaining
 
-    def test_bulk_unlink_no_filters_raises(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
+    def test_no_filters_raises(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
         with pytest.raises(ValueError, match="at least one filter"):
-            cat.bulk_unlink()
+            c.bulk_unlink()
 
-    def test_bulk_unlink_no_filters_dry_run_allowed(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        count = cat.bulk_unlink(dry_run=True)
-        assert count == 1  # counts all links
-        assert len(cat.link_query()) == 1  # nothing deleted
+    def test_no_filters_dry_run(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        assert c.bulk_unlink(dry_run=True) == 1 and len(c.link_query()) == 1
 
-    def test_bulk_unlink_time_range_excludes_past_cutoff(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "cites", created_by="user")
-        # A past cutoff should match nothing (links were created "now")
-        removed = cat.bulk_unlink(link_type="cites", created_at_before="2000-01-01T00:00:00")
-        assert removed == 0
-        assert len(cat.link_query(link_type="cites")) == 2
-
-    def test_bulk_unlink_tombstones_preserve_created_by(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
-        cat.bulk_unlink(created_by="bib_enricher")
-        content = (tmp_path / "catalog" / "links.jsonl").read_text()
-        lines = [json.loads(l) for l in content.strip().splitlines()]
-        tombstone = [l for l in lines if l.get("_deleted")][0]
-        assert tombstone["created_by"] == "bib_enricher"
+    def test_tombstone_created_by(self, cat, tmp_path):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="bib_enricher")
+        c.bulk_unlink(created_by="bib_enricher")
+        assert [r for r in _jsonl(tmp_path) if r.get("_deleted")][0]["created_by"] == "bib_enricher"
 
 
-class TestValidateLink:
-    def test_validate_link_valid_returns_empty(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        errors = cat.validate_link(doc_a, doc_b, "cites")
-        assert errors == []
+class TestValidateAndAudit:
+    def test_validate_valid(self, cat):
+        assert cat[0].validate_link(cat[1], cat[2], "cites") == []
 
-    def test_validate_link_both_endpoints_missing(self, tmp_path):
-        cat, _, _, _ = _make_catalog_with_docs(tmp_path)
-        from nexus.catalog.tumbler import Tumbler
-        errors = cat.validate_link(Tumbler.parse("1.1.99"), Tumbler.parse("1.1.98"), "cites")
-        assert len(errors) == 2
-        assert any("from_tumbler" in e for e in errors)
-        assert any("to_tumbler" in e for e in errors)
+    def test_validate_both_missing(self, cat):
+        errs = cat[0].validate_link(GHOST, GHOST2, "cites")
+        assert len(errs) == 2 and any("from_tumbler" in e for e in errs) and any("to_tumbler" in e for e in errs)
 
-    def test_validate_link_deleted_endpoint(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.delete_document(doc_a)
-        errors = cat.validate_link(doc_a, doc_b, "cites")
-        assert len(errors) == 1
-        assert "from_tumbler" in errors[0]
+    def test_validate_deleted(self, cat):
+        c, a, b, _ = cat
+        c.delete_document(a)
+        errs = c.validate_link(a, b, "cites")
+        assert len(errs) == 1 and "from_tumbler" in errs[0]
 
-    def test_validate_link_duplicate(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        errors = cat.validate_link(doc_a, doc_b, "cites")
-        assert len(errors) == 1
-        assert "duplicate" in errors[0]
+    def test_validate_duplicate(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        errs = c.validate_link(a, b, "cites")
+        assert len(errs) == 1 and "duplicate" in errs[0]
 
+    def test_audit_empty(self, cat):
+        r = cat[0].link_audit()
+        assert r["total"] == 0 and r["orphaned_count"] == 0 and r["duplicate_count"] == 0
 
-class TestLinkAudit:
-    def test_link_audit_empty_catalog(self, tmp_path):
-        cat, _, _, _ = _make_catalog_with_docs(tmp_path)
-        result = cat.link_audit()
-        assert result["total"] == 0
-        assert result["orphaned_count"] == 0
-        assert result["duplicate_count"] == 0
+    def test_audit_stats(self, cat):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="bib_enricher")
+        c.link(a, x, "cites", created_by="user")
+        c.link(b, x, "relates", created_by="user")
+        r = c.link_audit()
+        assert r["total"] == 3 and r["by_type"] == {"cites": 2, "relates": 1}
+        assert r["by_creator"] == {"bib_enricher": 1, "user": 2}
 
-    def test_link_audit_stats_by_type(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "cites", created_by="user")
-        cat.link(doc_b, doc_c, "relates", created_by="user")
-        result = cat.link_audit()
-        assert result["total"] == 3
-        assert result["by_type"]["cites"] == 2
-        assert result["by_type"]["relates"] == 1
+    def test_audit_orphaned(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        c.delete_document(a)
+        r = c.link_audit()
+        assert r["orphaned_count"] == 1 and r["orphaned"][0]["from"] == str(a)
 
-    def test_link_audit_stats_by_creator(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="bib_enricher")
-        cat.link(doc_a, doc_c, "cites", created_by="user")
-        result = cat.link_audit()
-        assert result["by_creator"]["bib_enricher"] == 1
-        assert result["by_creator"]["user"] == 1
-
-    def test_link_audit_orphaned_after_delete_document(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.delete_document(doc_a)
-        result = cat.link_audit()
-        assert result["orphaned_count"] == 1
-        assert result["orphaned"][0]["from"] == str(doc_a)
-
-    def test_link_audit_no_duplicates_with_unique_constraint(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_b, "cites", created_by="other")  # merge, not duplicate
-        result = cat.link_audit()
-        assert result["duplicate_count"] == 0
-        # Verify merge actually happened
-        links = cat.links_from(doc_a, link_type="cites")
-        assert len(links) == 1
-        assert links[0].meta.get("co_discovered_by") == ["other"]
+    def test_audit_no_dup_with_merge(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, b, "cites", created_by="other")
+        assert c.link_audit()["duplicate_count"] == 0
+        lks = c.links_from(a, link_type="cites")
+        assert len(lks) == 1 and lks[0].meta.get("co_discovered_by") == ["other"]
 
 
-class TestGraphTraversal:
-    def test_graph_includes_starting_node(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        result = cat.graph(doc_a, depth=1)
-        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
-        assert str(doc_a) in node_tumblers
-        assert str(doc_b) in node_tumblers
+class TestGraph:
+    def test_starting_node(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        assert {str(a), str(b)} <= {str(e.tumbler) for e in c.graph(a, depth=1)["nodes"]}
 
-    def test_graph_isolated_node(self, tmp_path):
-        cat, doc_a, _, _ = _make_catalog_with_docs(tmp_path)
-        result = cat.graph(doc_a, depth=1)
-        assert len(result["nodes"]) == 1
-        assert str(result["nodes"][0].tumbler) == str(doc_a)
-        assert result["edges"] == []
+    def test_isolated(self, cat):
+        c, a, _, _ = cat
+        r = c.graph(a, depth=1)
+        assert len(r["nodes"]) == 1 and str(r["nodes"][0].tumbler) == str(a) and r["edges"] == []
 
-    def test_graph_depth_clamped(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        # depth=100 is clamped to _MAX_GRAPH_DEPTH — verify same result as explicit max
-        result_clamped = cat.graph(doc_a, depth=100)
-        result_max = cat.graph(doc_a, depth=cat._MAX_GRAPH_DEPTH)
-        assert {str(n.tumbler) for n in result_clamped["nodes"]} == \
-               {str(n.tumbler) for n in result_max["nodes"]}
+    def test_depth_clamped(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user")
+        assert ({str(n.tumbler) for n in c.graph(a, depth=100)["nodes"]}
+                == {str(n.tumbler) for n in c.graph(a, depth=c._MAX_GRAPH_DEPTH)["nodes"]})
 
-    def test_graph_deleted_starting_node(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user", allow_dangling=True)
-        cat.delete_document(doc_a)
-        result = cat.graph(doc_a, depth=1)
-        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
-        assert str(doc_a) not in node_tumblers
-        assert str(doc_b) in node_tumblers
+    def test_deleted_start(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "cites", created_by="user", allow_dangling=True)
+        c.delete_document(a)
+        nodes = {str(e.tumbler) for e in c.graph(a, depth=1)["nodes"]}
+        assert str(a) not in nodes and str(b) in nodes
 
-    def test_graph_node_limit_truncates(self, tmp_path):
-        from unittest.mock import patch
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_b, doc_c, "relates", created_by="user")
-        # Cap at 1 — only starting node in visited, BFS cannot expand
-        with patch.object(type(cat), '_MAX_GRAPH_NODES', 1):
-            result = cat.graph(doc_a, depth=2)
-            assert len(result["nodes"]) == 1  # only starting node
-            assert result["edges"] == []  # no expansion happened
+    def test_node_limit(self, cat):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(b, x, "relates", created_by="user")
+        with patch.object(type(c), "_MAX_GRAPH_NODES", 1):
+            r = c.graph(a, depth=2)
+            assert len(r["nodes"]) == 1 and r["edges"] == []
 
-    def test_depth_1(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "relates", created_by="user")
-        result = cat.graph(doc_a, depth=1)
-        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
-        assert str(doc_b) in node_tumblers
-        assert str(doc_c) in node_tumblers
-        assert len(result["edges"]) == 2
+    @pytest.mark.parametrize("depth", [1, 2])
+    def test_depth_n(self, cat, depth):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a if depth == 1 else b, x, "relates" if depth == 1 else "implements", created_by="user")
+        nodes = {str(e.tumbler) for e in c.graph(a, depth=depth)["nodes"]}
+        assert str(b) in nodes and str(x) in nodes
+        if depth == 1:
+            assert len(c.graph(a, depth=1)["edges"]) == 2
 
-    def test_depth_2(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_b, doc_c, "implements", created_by="user")
-        result = cat.graph(doc_a, depth=2)
-        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
-        assert str(doc_b) in node_tumblers
-        assert str(doc_c) in node_tumblers
+    def test_no_cycles(self, cat):
+        c, a, b, _ = cat
+        c.link(a, b, "relates", created_by="user")
+        c.link(b, a, "relates", created_by="user")
+        r = c.graph(a, depth=3)
+        assert str(b) in {str(e.tumbler) for e in r["nodes"]} and len(r["edges"]) == 2
 
-    def test_no_cycles(self, tmp_path):
-        cat, doc_a, doc_b, _ = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "relates", created_by="user")
-        cat.link(doc_b, doc_a, "relates", created_by="user")
-        result = cat.graph(doc_a, depth=3)
-        # Should not loop — visited set prevents infinite traversal
-        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
-        assert str(doc_b) in node_tumblers
-        # Edges deduplicated — exactly 2 distinct directed edges
-        assert len(result["edges"]) == 2
-
-    def test_type_filter(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_a, doc_c, "implements", created_by="user")
-        result = cat.graph(doc_a, depth=1, link_type="cites")
-        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
-        assert str(doc_b) in node_tumblers
-        assert str(doc_c) not in node_tumblers
-
-    def test_direction_out(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_c, doc_a, "relates", created_by="user")
-        result = cat.graph(doc_a, depth=1, direction="out")
-        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
-        assert str(doc_b) in node_tumblers
-        assert str(doc_c) not in node_tumblers
-
-    def test_direction_in(self, tmp_path):
-        cat, doc_a, doc_b, doc_c = _make_catalog_with_docs(tmp_path)
-        cat.link(doc_a, doc_b, "cites", created_by="user")
-        cat.link(doc_c, doc_a, "relates", created_by="user")
-        result = cat.graph(doc_a, depth=1, direction="in")
-        node_tumblers = {str(e.tumbler) for e in result["nodes"]}
-        assert str(doc_c) in node_tumblers
-        assert str(doc_b) not in node_tumblers
+    def test_type_filter_and_direction(self, cat):
+        c, a, b, x = cat
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, x, "implements", created_by="user")
+        c.link(x, a, "relates", created_by="user")
+        filt = {str(e.tumbler) for e in c.graph(a, depth=1, link_type="cites")["nodes"]}
+        assert str(b) in filt and str(x) not in filt
+        out = {str(e.tumbler) for e in c.graph(a, depth=1, direction="out")["nodes"]}
+        assert str(b) in out and str(x) in out
+        inv = {str(e.tumbler) for e in c.graph(a, depth=1, direction="in")["nodes"]}
+        assert str(x) in inv and str(b) not in inv

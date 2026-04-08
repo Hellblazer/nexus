@@ -1,18 +1,22 @@
-"""Tests for nx search command — new flags: --where, -A/-B/-C, --reverse, -m."""
+# SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import chromadb
 import pytest
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from click import BadParameter
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.commands.search_cmd import _parse_where
+from nexus.db.t3 import T3Database
+from nexus.scoring import apply_hybrid_scoring
+from nexus.search_engine import search_cross_corpus
 from nexus.types import SearchResult
 
-
-@pytest.fixture
-def runner() -> CliRunner:
-    return CliRunner()
+# ── Helpers & fixtures ──────────────────────────────────────────────────────
 
 
 def _make_result(
@@ -23,675 +27,448 @@ def _make_result(
     metadata: dict | None = None,
 ) -> SearchResult:
     return SearchResult(
-        id=id,
-        content=content,
-        distance=distance,
-        collection=collection,
-        metadata=metadata or {},
+        id=id, content=content, distance=distance,
+        collection=collection, metadata=metadata or {},
     )
 
 
 def _mock_t3(collections: list[str] | None = None) -> MagicMock:
-    """Return a mock T3Database with configurable collections list."""
     mock = MagicMock()
     col_names = collections or ["knowledge__test"]
     mock.list_collections.return_value = [{"name": n} for n in col_names]
     return mock
 
 
-# ── -C short form REMOVED from --corpus ───────────────────────────────────────
+_CLOUD_ENV = {
+    "CHROMA_API_KEY": "k", "VOYAGE_API_KEY": "v",
+    "CHROMA_TENANT": "t", "CHROMA_DATABASE": "d",
+}
+_LOAD_CFG = {"embeddings": {"rerankerModel": "rerank-2.5"}}
 
 
-def test_corpus_short_form_C_is_removed(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
-    """-C is no longer accepted as short form for --corpus."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
+@pytest.fixture
+def runner() -> CliRunner:
+    return CliRunner()
 
+
+@pytest.fixture
+def cloud_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for k, v in _CLOUD_ENV.items():
+        monkeypatch.setenv(k, v)
+
+
+def _capture_ctx(collections: list[str] | None = None):
+    mock = _mock_t3(collections)
+    captured: list[dict | None] = []
+
+    def fake(query, cols, n_results, t3, where=None):
+        captured.append(where)
+        return []
+
+    return mock, captured, fake
+
+
+@pytest.fixture
+def search_ctx(cloud_env):
+    mock, captured, fake = _capture_ctx()
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        yield mock, captured
+
+
+@pytest.fixture
+def code_search_ctx(cloud_env):
+    mock, captured, fake = _capture_ctx(["code__myrepo"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        yield mock, captured
+
+
+# ── CLI flag tests ──────────────────────────────────────────────────────────
+
+
+def test_corpus_short_form_C_is_removed(runner: CliRunner, cloud_env) -> None:
     mock_t3 = _mock_t3()
     mock_t3.search.return_value = []
-
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        # -C N should now be context-lines, not corpus: using a string corpus name
-        # should fail (N would be an int argument). Providing -C knowledge would
-        # at minimum NOT be treated as corpus selection — the old behaviour is gone.
         result = runner.invoke(main, ["search", "query", "-C", "knowledge"])
-
-    # -C now expects an integer (context lines), so passing "knowledge" (non-integer)
-    # must produce an error exit code.
-    assert result.exit_code != 0, (
-        "-C should require an integer argument (context lines), not a corpus name"
-    )
+    assert result.exit_code != 0
 
 
-# ── --corpus long form still works ────────────────────────────────────────────
-
-
-def test_corpus_long_form_still_works(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
-    """--corpus long form is retained after removing -C short form."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
+def test_corpus_long_form_still_works(runner: CliRunner, cloud_env) -> None:
     mock_t3 = _mock_t3(["knowledge__test"])
     mock_t3.search.return_value = []
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
-            result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
-
-    # No results is fine; what matters is it exits cleanly (0 or "No results" message)
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
     assert "Error" not in result.output or result.exit_code == 0
 
 
-# ── -m alias for --max-results ────────────────────────────────────────────────
-
-
-def test_m_flag_limits_results(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
-    """-m N limits results to N (alias for --max-results N / --n N)."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
+def test_m_flag_limits_results(runner: CliRunner, cloud_env) -> None:
     results_pool = [
         _make_result(f"r{i}", f"line {i}", distance=float(i) * 0.1)
         for i in range(10)
     ]
-
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                result = runner.invoke(
-                    main,
-                    ["search", "query", "--no-rerank", "-m", "3", "--corpus", "knowledge"],
-                )
-
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(
+            main, ["search", "query", "--no-rerank", "-m", "3", "--corpus", "knowledge"],
+        )
     assert result.exit_code == 0, result.output
-    # With --no-rerank the round_robin_interleave[:n] path is used, so only 3 results emitted
     output_lines = [ln for ln in result.output.splitlines() if ln.strip()]
-    assert len(output_lines) <= 3, f"Expected at most 3 result lines, got: {output_lines}"
+    assert len(output_lines) <= 3
 
 
-# ── --reverse flag ─────────────────────────────────────────────────────────────
-
-
-def test_reverse_flag_reverses_output_order(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--reverse reverses the final output order (highest-scoring last)."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
+def test_reverse_flag_reverses_output_order(runner: CliRunner, cloud_env) -> None:
     results_pool = [
         _make_result("first", "alpha content", distance=0.1,
                      metadata={"source_path": "alpha.py", "line_start": 1}),
         _make_result("second", "beta content", distance=0.2,
                      metadata={"source_path": "beta.py", "line_start": 1}),
     ]
-
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                normal = runner.invoke(
-                    main,
-                    ["search", "query", "--no-rerank", "--corpus", "knowledge", "--no-color"],
-                )
-                reversed_ = runner.invoke(
-                    main,
-                    ["search", "query", "--no-rerank", "--corpus", "knowledge", "--no-color", "--reverse"],
-                )
-
-    assert normal.exit_code == 0, normal.output
-    assert reversed_.exit_code == 0, reversed_.output
-
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        normal = runner.invoke(
+            main, ["search", "query", "--no-rerank", "--corpus", "knowledge", "--no-color"],
+        )
+        reversed_ = runner.invoke(
+            main, ["search", "query", "--no-rerank", "--corpus", "knowledge", "--no-color", "--reverse"],
+        )
+    assert normal.exit_code == 0
+    assert reversed_.exit_code == 0
     normal_lines = [ln for ln in normal.output.splitlines() if ln.strip()]
     reversed_lines = [ln for ln in reversed_.output.splitlines() if ln.strip()]
-
-    assert normal_lines != reversed_lines, "--reverse should change output order"
-    assert normal_lines == list(reversed(reversed_lines)), (
-        "--reverse should produce exactly the reversed list"
-    )
+    assert normal_lines != reversed_lines
+    assert normal_lines == list(reversed(reversed_lines))
 
 
-# ── --where metadata filter ────────────────────────────────────────────────────
+# ── --where metadata filter ─────────────────────────────────────────────────
 
 
-def test_where_single_filter_passed_to_search(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--where lang=python builds a ChromaDB where dict passed to search_cross_corpus."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    mock_t3 = _mock_t3()
-
-    captured_where: list[dict | None] = []
-
-    def fake_search(query, collections, n_results, t3, where=None):
-        captured_where.append(where)
-        return []
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                result = runner.invoke(
-                    main,
-                    ["search", "query", "--corpus", "knowledge", "--where", "lang=python"],
-                )
-
-    assert result.exit_code == 0, result.output
-    assert len(captured_where) == 1
-    assert captured_where[0] == {"lang": "python"}, (
-        f"Expected where={{'lang': 'python'}}, got {captured_where[0]}"
-    )
+def test_where_single_filter_passed_to_search(runner: CliRunner, search_ctx) -> None:
+    _, captured = search_ctx
+    runner.invoke(main, ["search", "query", "--corpus", "knowledge", "--where", "lang=python"])
+    assert captured[0] == {"lang": "python"}
 
 
-def test_where_multiple_filters_anded(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Multiple --where flags are ANDed into a single ChromaDB where dict."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    mock_t3 = _mock_t3()
-
-    captured_where: list[dict | None] = []
-
-    def fake_search(query, collections, n_results, t3, where=None):
-        captured_where.append(where)
-        return []
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                result = runner.invoke(
-                    main,
-                    [
-                        "search", "query", "--corpus", "knowledge",
-                        "--where", "store_type=knowledge",
-                        "--where", "status=completed",
-                    ],
-                )
-
-    assert result.exit_code == 0, result.output
-    assert len(captured_where) == 1
-    assert captured_where[0] == {"store_type": "knowledge", "status": "completed"}, (
-        f"Multiple --where flags should be ANDed, got {captured_where[0]}"
-    )
+def test_where_multiple_filters_anded(runner: CliRunner, search_ctx) -> None:
+    _, captured = search_ctx
+    runner.invoke(main, [
+        "search", "query", "--corpus", "knowledge",
+        "--where", "store_type=knowledge", "--where", "status=completed",
+    ])
+    assert captured[0] == {"store_type": "knowledge", "status": "completed"}
 
 
-def test_where_no_flag_passes_none(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When --where is omitted, search_cross_corpus is called with where=None."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    mock_t3 = _mock_t3()
-    captured_where: list[dict | None] = []
-
-    def fake_search(query, collections, n_results, t3, where=None):
-        captured_where.append(where)
-        return []
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                result = runner.invoke(
-                    main,
-                    ["search", "query", "--corpus", "knowledge"],
-                )
-
-    assert result.exit_code == 0, result.output
-    assert captured_where[0] is None, (
-        f"Without --where, expected None, got {captured_where[0]}"
-    )
+def test_where_no_flag_passes_none(runner: CliRunner, search_ctx) -> None:
+    _, captured = search_ctx
+    runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+    assert captured[0] is None
 
 
-# ── -A / -B / -C context lines ────────────────────────────────────────────────
+# ── -A / -B / -C context lines ──────────────────────────────────────────────
 
 
-def test_context_A_shows_extra_lines_after(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """-A N shows N additional lines of chunk content after the first line."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    # 5-line chunk; default (no -A) shows only 1 line; -A 3 shows 4 lines
+def test_context_A_accepted(runner: CliRunner, cloud_env) -> None:
     content = "line1\nline2\nline3\nline4\nline5"
-    results_pool = [
-        _make_result("r1", content,
-                     metadata={"source_path": "foo.py", "line_start": 10}),
-    ]
-
+    results_pool = [_make_result("r1", content, metadata={"source_path": "foo.py", "line_start": 10})]
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                # Without -A: format_plain shows all lines already — test that
-                # -A N is accepted and does not crash
-                result = runner.invoke(
-                    main,
-                    ["search", "query", "--no-rerank", "--corpus", "knowledge",
-                     "--no-color", "-A", "3"],
-                )
-
-    assert result.exit_code == 0, result.output
-
-
-def test_context_C_sets_lines_after(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """-C N is accepted as alias for -A N (no error, integer arg)."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                result = runner.invoke(
-                    main,
-                    ["search", "query", "--corpus", "knowledge", "-C", "5"],
-                )
-
-    assert result.exit_code == 0, result.output
-
-
-def test_context_C_requires_integer(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """-C requires an integer argument; passing a string produces error."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(
-            main,
-            ["search", "query", "--corpus", "knowledge", "-C", "notanumber"],
+            main, ["search", "query", "--no-rerank", "--corpus", "knowledge", "--no-color", "-A", "3"],
         )
+    assert result.exit_code == 0, result.output
 
+
+def test_context_C_integer_accepted(runner: CliRunner, cloud_env) -> None:
+    mock_t3 = _mock_t3()
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge", "-C", "5"])
+    assert result.exit_code == 0, result.output
+
+
+def test_context_C_requires_integer(runner: CliRunner, cloud_env) -> None:
+    mock_t3 = _mock_t3()
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge", "-C", "notanumber"])
     assert result.exit_code != 0
 
 
-# ── format_plain context-aware output ────────────────────────────────────────
+# ── format_plain context-aware output ───────────────────────────────────────
 
 
 def test_format_plain_with_context_shows_correct_lines() -> None:
-    """format_plain_with_context shows first line + lines_after additional lines."""
     from nexus.formatters import format_plain_with_context
-
     content = "\n".join(f"line{i}" for i in range(10))
-    result = SearchResult(
-        id="x", content=content, distance=0.1, collection="c",
-        metadata={"source_path": "file.py", "line_start": 0},
-    )
-    lines = format_plain_with_context([result], lines_after=3)
-    # Should show 1 + 3 = 4 lines
+    r = SearchResult(id="x", content=content, distance=0.1, collection="c",
+                     metadata={"source_path": "file.py", "line_start": 0})
+    lines = format_plain_with_context([r], lines_after=3)
     content_lines = [ln for ln in lines if ln.strip()]
-    assert len(content_lines) <= 4, f"Expected ≤4 lines, got: {content_lines}"
+    assert len(content_lines) <= 4
 
 
-def test_format_plain_with_context_no_context_equals_format_plain() -> None:
-    """format_plain_with_context(0) produces same output as format_plain."""
+def test_format_plain_with_context_zero_equals_format_plain() -> None:
     from nexus.formatters import format_plain, format_plain_with_context
-
     content = "alpha\nbeta\ngamma"
-    result = SearchResult(
-        id="x", content=content, distance=0.1, collection="c",
-        metadata={"source_path": "file.py", "line_start": 5},
-    )
-    plain = format_plain([result])
-    ctx = format_plain_with_context([result], lines_after=0)
-    assert plain == ctx
+    r = SearchResult(id="x", content=content, distance=0.1, collection="c",
+                     metadata={"source_path": "file.py", "line_start": 5})
+    assert format_plain([r]) == format_plain_with_context([r], lines_after=0)
 
 
-# ── --hybrid flag triggers ripgrep ────────────────────────────────────────────
+# ── --hybrid flag triggers ripgrep ──────────────────────────────────────────
 
 
-def test_hybrid_flag_triggers_ripgrep(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    """When --hybrid is passed, search_ripgrep is invoked against cache files."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
+def test_hybrid_flag_triggers_ripgrep(runner: CliRunner, cloud_env, tmp_path) -> None:
     cache_file = tmp_path / "myrepo-abcd1234.cache"
     cache_file.write_text("/repo/main.py:1:hello world\n")
-    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
-
     mock_t3 = _mock_t3(["code__myrepo-abcd1234"])
+    rg_calls: list[int] = []
 
-    rg_call_count = []
-
-    def fake_search_ripgrep(query, cache_path, *, n_results=50, fixed_strings=True, timeout=10):
-        rg_call_count.append(1)
+    def fake_rg(query, cache_path, *, n_results=50, fixed_strings=True, timeout=10):
+        rg_calls.append(1)
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                with patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_search_ripgrep):
-                    result = runner.invoke(
-                        main,
-                        ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"],
-                    )
-
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd._CONFIG_DIR", tmp_path), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
+         patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_rg):
+        result = runner.invoke(main, ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"])
     assert result.exit_code == 0, result.output
-    assert len(rg_call_count) >= 1, "search_ripgrep should be called when --hybrid is set"
+    assert len(rg_calls) >= 1
 
 
-def test_hybrid_results_include_rg_hits(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    """With --hybrid, ripgrep hits are merged with semantic results."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
+def test_hybrid_results_include_rg_hits(runner: CliRunner, cloud_env, tmp_path) -> None:
     cache_file = tmp_path / "myrepo-abcd1234.cache"
     cache_file.write_text("/repo/main.py:1:hello world\n")
-    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
-
     mock_t3 = _mock_t3(["code__myrepo-abcd1234"])
-
     rg_hit = {
-        "file_path": "/repo/main.py",
-        "line_number": 1,
-        "line_content": "hello world",
-        "frecency_score": 0.5,
+        "file_path": "/repo/main.py", "line_number": 1,
+        "line_content": "hello world", "frecency_score": 0.5,
     }
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                with patch("nexus.commands.search_cmd.search_ripgrep", return_value=[rg_hit]):
-                    result = runner.invoke(
-                        main,
-                        ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"],
-                    )
-
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd._CONFIG_DIR", tmp_path), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
+         patch("nexus.commands.search_cmd.search_ripgrep", return_value=[rg_hit]):
+        result = runner.invoke(main, ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"])
     assert result.exit_code == 0, result.output
-    assert "/repo/main.py" in result.output, (
-        "Output should include the ripgrep-matched file path"
-    )
+    assert "/repo/main.py" in result.output
 
 
-def test_hybrid_without_cache_files_still_works(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    """When --hybrid is set but no .cache files exist, falls back to semantic-only."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    # tmp_path has no .cache files
-    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
-
+def test_hybrid_without_cache_files_still_works(runner: CliRunner, cloud_env, tmp_path) -> None:
     semantic_result = _make_result(
-        "sem1", "semantic content",
-        collection="code__myrepo",
+        "sem1", "semantic content", collection="code__myrepo",
         metadata={"source_path": "file.py", "line_start": 1},
     )
     mock_t3 = _mock_t3(["code__myrepo"])
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[semantic_result]):
-            with patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                result = runner.invoke(
-                    main,
-                    ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"],
-                )
-
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd._CONFIG_DIR", tmp_path), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[semantic_result]), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"])
     assert result.exit_code == 0, result.output
     assert "No results" not in result.output
 
 
-# ── _parse_where edge cases ──────────────────────────────────────────────────
-
-
-from nexus.commands.search_cmd import _parse_where
+# ── _parse_where ────────────────────────────────────────────────────────────
 
 
 def test_parse_where_empty_tuple_returns_none() -> None:
     assert _parse_where(()) is None
 
 
-def test_parse_where_single_pair() -> None:
-    assert _parse_where(("lang=python",)) == {"lang": "python"}
+@pytest.mark.parametrize("input_,expected", [
+    (("lang=python",), {"lang": "python"}),
+    (("key=a=b=c",), {"key": "a=b=c"}),
+    (("lang=python", "type=code"), {"lang": "python", "type": "code"}),
+    (("corpus=42",), {"corpus": "42"}),  # unknown field stays string
+])
+def test_parse_where_equality(input_: tuple[str, ...], expected: dict) -> None:
+    assert _parse_where(input_) == expected
 
 
-def test_parse_where_multiple_equals_uses_first_partition() -> None:
-    """'key=a=b=c' → key='a=b=c' (partition splits on first '=')."""
-    result = _parse_where(("key=a=b=c",))
-    assert result == {"key": "a=b=c"}
+@pytest.mark.parametrize("input_,match", [
+    (("key=",), "empty value"),
+    (("=value",), ""),
+    (("no-equals-here",), "KEY=VALUE"),
+])
+def test_parse_where_raises(input_: tuple[str, ...], match: str) -> None:
+    with pytest.raises(BadParameter, match=match):
+        _parse_where(input_)
 
 
-def test_parse_where_empty_value_raises() -> None:
-    """'key=' → rejected (empty value is not valid)."""
-    from click import BadParameter
-    with pytest.raises(BadParameter, match="empty value"):
-        _parse_where(("key=",))
-
-
-def test_parse_where_empty_key_raises() -> None:
-    """'=value' → rejected (empty key is not valid)."""
-    from click import BadParameter
-    with pytest.raises(BadParameter):
-        _parse_where(("=value",))
-
-
-def test_parse_where_missing_equals_raises() -> None:
-    from click import BadParameter
-    with pytest.raises(BadParameter, match="KEY=VALUE"):
-        _parse_where(("no-equals-here",))
-
-
-def test_parse_where_multiple_pairs_merged() -> None:
-    result = _parse_where(("lang=python", "type=code"))
-    assert result == {"lang": "python", "type": "code"}
-
-
-# ── _parse_where operator tests ──────────────────────────────────────────────
-
-
-def test_parse_where_gte_operator() -> None:
-    result = _parse_where(("bib_year>=2024",))
-    assert result == {"bib_year": {"$gte": 2024}}
-
-
-def test_parse_where_lte_operator() -> None:
-    result = _parse_where(("bib_citation_count<=100",))
-    assert result == {"bib_citation_count": {"$lte": 100}}
-
-
-def test_parse_where_gt_operator() -> None:
-    result = _parse_where(("page_count>10",))
-    assert result == {"page_count": {"$gt": 10}}
-
-
-def test_parse_where_lt_operator() -> None:
-    result = _parse_where(("chunk_index<5",))
-    assert result == {"chunk_index": {"$lt": 5}}
-
-
-def test_parse_where_ne_operator() -> None:
-    result = _parse_where(("chunk_type!=text",))
-    assert result == {"chunk_type": {"$ne": "text"}}
+@pytest.mark.parametrize("input_,expected", [
+    (("bib_year>=2024",), {"bib_year": {"$gte": 2024}}),
+    (("bib_citation_count<=100",), {"bib_citation_count": {"$lte": 100}}),
+    (("page_count>10",), {"page_count": {"$gt": 10}}),
+    (("chunk_index<5",), {"chunk_index": {"$lt": 5}}),
+    (("chunk_type!=text",), {"chunk_type": {"$ne": "text"}}),
+])
+def test_parse_where_operators(input_: tuple[str, ...], expected: dict) -> None:
+    assert _parse_where(input_) == expected
 
 
 def test_parse_where_numeric_coercion_int() -> None:
-    """Known numeric fields are coerced to int."""
     result = _parse_where(("bib_year=2024",))
     assert result == {"bib_year": 2024}
     assert isinstance(result["bib_year"], int)
 
 
-def test_parse_where_numeric_coercion_non_numeric_field() -> None:
-    """Unknown fields stay as strings even if value looks numeric."""
-    result = _parse_where(("corpus=42",))
-    assert result == {"corpus": "42"}
-    assert isinstance(result["corpus"], str)
-
-
 def test_parse_where_mixed_operators_uses_and() -> None:
-    """Multiple operator filters produce $and."""
-    result = _parse_where(("bib_year>=2020", "bib_year<=2024"))
-    assert result == {"$and": [
-        {"bib_year": {"$gte": 2020}},
-        {"bib_year": {"$lte": 2024}},
-    ]}
+    assert _parse_where(("bib_year>=2020", "bib_year<=2024")) == {
+        "$and": [{"bib_year": {"$gte": 2020}}, {"bib_year": {"$lte": 2024}}],
+    }
 
 
 def test_parse_where_equality_plus_operator_uses_and() -> None:
-    """Mix of equality and operator filters produces $and."""
-    result = _parse_where(("corpus=knowledge", "bib_year>=2020"))
-    assert result == {"$and": [
-        {"corpus": "knowledge"},
-        {"bib_year": {"$gte": 2020}},
-    ]}
+    assert _parse_where(("corpus=knowledge", "bib_year>=2020")) == {
+        "$and": [{"corpus": "knowledge"}, {"bib_year": {"$gte": 2020}}],
+    }
 
 
 def test_parse_where_value_containing_gt_not_mismatched() -> None:
-    """Value containing > is not misinterpreted as an operator."""
-    result = _parse_where(("source_path=a>b/file.py",))
-    assert result == {"source_path": "a>b/file.py"}
+    assert _parse_where(("source_path=a>b/file.py",)) == {"source_path": "a>b/file.py"}
 
 
-def test_parse_where_numeric_field_non_numeric_value_raises() -> None:
-    """Known numeric field with non-numeric value raises BadParameter."""
-    from click import BadParameter
+@pytest.mark.parametrize("input_", [
+    ("bib_year>=notanumber",),
+    ("bib_year=notanumber",),
+])
+def test_parse_where_numeric_field_non_numeric_raises(input_: tuple[str, ...]) -> None:
     with pytest.raises(BadParameter, match="requires a numeric value"):
-        _parse_where(("bib_year>=notanumber",))
-
-
-def test_parse_where_numeric_field_equality_non_numeric_raises() -> None:
-    """Known numeric field with = and non-numeric value also raises."""
-    from click import BadParameter
-    with pytest.raises(BadParameter, match="requires a numeric value"):
-        _parse_where(("bib_year=notanumber",))
+        _parse_where(input_)
 
 
 def test_parse_where_empty_value_with_operator_raises() -> None:
-    """'bib_year>=' → rejected (empty value after operator)."""
-    from click import BadParameter
     with pytest.raises(BadParameter, match="empty value"):
         _parse_where(("bib_year>=",))
 
 
-# ── --max-file-chunks ─────────────────────────────────────────────────────────
+# ── --max-file-chunks ───────────────────────────────────────────────────────
 
 
-def test_max_file_chunks_builds_chunk_count_filter(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--max-file-chunks N passes chunk_count $lte filter to search_cross_corpus."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    mock_t3 = _mock_t3(["code__myrepo"])
-    captured_where: list[dict | None] = []
-
-    def fake_search(query, collections, n_results, t3, where=None):
-        captured_where.append(where)
-        return []
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
-            with patch("nexus.commands.search_cmd.load_config",
-                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                result = runner.invoke(
-                    main,
-                    ["search", "query", "--corpus", "code", "--max-file-chunks", "17"],
-                )
-
-    assert result.exit_code == 0, result.output
-    assert len(captured_where) == 1
-    assert captured_where[0] == {"chunk_count": {"$lte": 17}}, (
-        f"Expected chunk_count $lte filter, got {captured_where[0]}"
-    )
+def test_max_file_chunks_builds_chunk_count_filter(runner: CliRunner, code_search_ctx) -> None:
+    _, captured = code_search_ctx
+    runner.invoke(main, ["search", "query", "--corpus", "code", "--max-file-chunks", "17"])
+    assert captured[0] == {"chunk_count": {"$lte": 17}}
 
 
-def test_max_file_chunks_and_where_merged_with_and(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--max-file-chunks + --where are merged using ChromaDB $and operator."""
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-
-    mock_t3 = _mock_t3(["code__myrepo"])
-    captured_where: list[dict | None] = []
-
-    def fake_search(query, collections, n_results, t3, where=None):
-        captured_where.append(where)
-        return []
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
-        with patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_search):
-            with patch("nexus.commands.search_cmd.load_config",
-                       return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
-                result = runner.invoke(
-                    main,
-                    [
-                        "search", "query", "--corpus", "code",
-                        "--max-file-chunks", "17",
-                        "--where", "lang=python",
-                    ],
-                )
-
-    assert result.exit_code == 0, result.output
-    assert len(captured_where) == 1
-    w = captured_where[0]
-    assert w is not None
-    assert "$and" in w, f"Expected $and merge, got {w}"
-    conditions = w["$and"]
-    assert {"chunk_count": {"$lte": 17}} in conditions, f"Missing chunk_count filter in {w}"
-    assert {"lang": "python"} in conditions, f"Missing lang filter in {w}"
+def test_max_file_chunks_and_where_merged_with_and(runner: CliRunner, code_search_ctx) -> None:
+    _, captured = code_search_ctx
+    runner.invoke(main, [
+        "search", "query", "--corpus", "code",
+        "--max-file-chunks", "17", "--where", "lang=python",
+    ])
+    w = captured[0]
+    assert "$and" in w
+    assert {"chunk_count": {"$lte": 17}} in w["$and"]
+    assert {"lang": "python"} in w["$and"]
 
 
-# ── corpus warning ────────────────────────────────────────────────────────────
+# ── corpus warning ──────────────────────────────────────────────────────────
 
 
 def test_search_warns_when_corpus_term_unmatched(runner: CliRunner) -> None:
-    """search emits a warning when a --corpus term matches no collection."""
     mock_t3 = _mock_t3(["knowledge__test"])
     mock_t3.search.return_value = []
-
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
         result = runner.invoke(main, [
-            "search", "foo",
-            "--corpus", "knowledge",  # matches knowledge__test
-            "--corpus", "badcorpus",  # matches nothing
+            "search", "foo", "--corpus", "knowledge", "--corpus", "badcorpus",
         ])
-
     assert "badcorpus" in result.output
+
+
+# ── Search ranking snapshots ────────────────────────────────────────────────
+
+_CODE_DOCS = [
+    ("auth_login", "def login(username, password):\n    user = db.find_user(username)\n    if not user or not verify_hash(password, user.password_hash):\n        raise AuthError('invalid credentials')\n    return create_session(user)"),
+    ("auth_logout", "def logout(session_id):\n    session = db.find_session(session_id)\n    if session:\n        db.delete_session(session_id)\n        return True\n    return False"),
+    ("auth_register", "def register(username, email, password):\n    if db.find_user(username):\n        raise ValueError('username taken')\n    hashed = hash_password(password)\n    user = User(username=username, email=email, password_hash=hashed)\n    db.save(user)\n    return user"),
+    ("db_connection", "class DatabasePool:\n    def __init__(self, dsn, min_conns=5, max_conns=20):\n        self.dsn = dsn\n        self.pool = create_pool(dsn, min_conns, max_conns)\n    def acquire(self):\n        return self.pool.get_connection()\n    def release(self, conn):\n        self.pool.return_connection(conn)"),
+    ("db_migration", "def run_migrations(db, migrations_dir):\n    applied = db.get_applied_migrations()\n    pending = discover_pending(migrations_dir, applied)\n    for migration in sorted(pending):\n        db.execute(migration.sql)\n        db.record_migration(migration.version)"),
+    ("http_handler", "class RequestHandler:\n    async def handle(self, request):\n        method = request.method\n        path = request.path\n        handler = self.router.match(method, path)\n        if not handler:\n            return Response(status=404)\n        return await handler(request)"),
+    ("cache_layer", "class CacheLayer:\n    def __init__(self, backend='redis', ttl=300):\n        self.backend = connect_cache(backend)\n        self.ttl = ttl\n    def get(self, key):\n        return self.backend.get(key)\n    def set(self, key, value):\n        self.backend.set(key, value, ex=self.ttl)"),
+    ("search_index", "def build_search_index(documents, embedding_model):\n    vectors = embedding_model.encode(documents)\n    index = create_faiss_index(vectors.shape[1])\n    index.add(vectors)\n    return index"),
+    ("config_loader", "def load_config(path='config.yml'):\n    with open(path) as f:\n        raw = yaml.safe_load(f)\n    defaults = get_defaults()\n    return deep_merge(defaults, raw)"),
+    ("logging_setup", "def setup_logging(level='INFO', json_output=False):\n    handler = logging.StreamHandler()\n    if json_output:\n        handler.setFormatter(JsonFormatter())\n    else:\n        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))\n    logging.root.addHandler(handler)\n    logging.root.setLevel(level)"),
+]
+
+_KNOWLEDGE_DOCS = [
+    ("arch_decision_001", "We chose PostgreSQL over MySQL for the main database because it supports JSONB columns, better indexing, and has superior transaction isolation semantics."),
+    ("arch_decision_002", "Redis is used as the caching layer with a 5-minute TTL. Memcached was rejected because Redis supports data structures beyond simple key-value pairs."),
+    ("deployment_guide", "Deploy the application using Docker Compose. The stack includes nginx as reverse proxy, gunicorn for WSGI, and PostgreSQL for data storage."),
+    ("api_design", "All API endpoints follow REST conventions. Authentication uses JWT tokens with a 1-hour expiry. Rate limiting is applied at 100 requests per minute per user."),
+    ("security_policy", "All passwords are stored using bcrypt with a work factor of 12. SQL injection is prevented by parameterized queries. CSRF tokens are required for all state-changing operations."),
+]
+
+_QUERIES = [
+    "user authentication login password",
+    "database connection pool management",
+    "caching strategy with TTL expiry",
+    "search and indexing with embeddings",
+    "deployment docker configuration",
+    "security password hashing bcrypt",
+]
+
+
+@pytest.fixture(scope="module")
+def search_corpus() -> T3Database:
+    client = chromadb.EphemeralClient()
+    ef = DefaultEmbeddingFunction()
+    db = T3Database(_client=client, _ef_override=ef)
+
+    code_col = db.get_or_create_collection("code__snapshot")
+    code_col.add(
+        ids=[f"code-{t}" for t, _ in _CODE_DOCS],
+        documents=[txt for _, txt in _CODE_DOCS],
+        metadatas=[{
+            "title": t, "source_path": f"/repo/{t}.py", "file_path": f"/repo/{t}.py",
+            "line_start": 1, "line_end": txt.count("\n") + 1, "frecency_score": 0.5,
+        } for t, txt in _CODE_DOCS],
+    )
+
+    know_col = db.get_or_create_collection("knowledge__snapshot")
+    know_col.add(
+        ids=[f"know-{t}" for t, _ in _KNOWLEDGE_DOCS],
+        documents=[txt for _, txt in _KNOWLEDGE_DOCS],
+        metadatas=[{
+            "title": t, "source_path": f"/docs/{t}.md", "file_path": f"/docs/{t}.md",
+            "line_start": 1, "line_end": 1, "frecency_score": 0.5,
+        } for t, txt in _KNOWLEDGE_DOCS],
+    )
+    return db
+
+
+def _format_results(results: list) -> str:
+    lines = []
+    for r in results:
+        path = r.metadata.get("source_path", "?")
+        score = f"{r.hybrid_score:.4f}" if r.hybrid_score else f"d={r.distance:.4f}"
+        lines.append(f"{score}  {r.collection}  {path}")
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("query", _QUERIES)
+def test_search_ranking_snapshot(query: str, search_corpus: T3Database, snapshot) -> None:
+    raw = search_cross_corpus(query, ["code__snapshot", "knowledge__snapshot"], n_results=5, t3=search_corpus)
+    scored = apply_hybrid_scoring(raw, hybrid=True)
+    assert _format_results(scored) == snapshot
+
+
+@pytest.mark.parametrize("query", _QUERIES[:3])
+def test_search_single_corpus_snapshot(query: str, search_corpus: T3Database, snapshot) -> None:
+    raw = search_cross_corpus(query, ["code__snapshot"], n_results=5, t3=search_corpus)
+    scored = apply_hybrid_scoring(raw, hybrid=False)
+    assert _format_results(scored) == snapshot

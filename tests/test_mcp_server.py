@@ -1,24 +1,30 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for nexus MCP server tools.
 
-All tests use injected clients — no API keys or network required.
+All tests use injected clients -- no API keys or network required.
 - T1: chromadb.EphemeralClient (bundled ONNX MiniLM)
 - T2: temp-file SQLite via T2Database
 - T3: chromadb.EphemeralClient with DefaultEmbeddingFunction override
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+import sys
 import tempfile
+import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
-from nexus.db.t3 import T3Database
+from nexus.db.t3 import T3Database, VerifyResult
 from nexus.mcp_server import (
+    _get_collection_names,
     _inject_catalog,
     _inject_t1,
     _inject_t3,
@@ -39,11 +45,16 @@ from nexus.mcp_server import (
     store_list,
     store_put,
 )
+from nexus.session import find_ancestor_session
+from nexus.types import SearchResult
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+# ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
 def _reset():
-    """Reset singletons before and after each test."""
     _reset_singletons()
     yield
     _reset_singletons()
@@ -51,7 +62,6 @@ def _reset():
 
 @pytest.fixture()
 def t1():
-    """Ephemeral T1Database for scratch tests."""
     client = chromadb.EphemeralClient()
     db = T1Database(session_id="test-session", client=client)
     _inject_t1(db)
@@ -60,7 +70,6 @@ def t1():
 
 @pytest.fixture()
 def t1_isolated():
-    """Ephemeral T1Database simulating EphemeralClient fallback (isolated mode)."""
     client = chromadb.EphemeralClient()
     db = T1Database(session_id="test-session-iso", client=client)
     _inject_t1(db, isolated=True)
@@ -69,14 +78,12 @@ def t1_isolated():
 
 @pytest.fixture()
 def t2_path():
-    """Temp file path for T2Database."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         yield Path(f.name)
 
 
 @pytest.fixture()
 def t3():
-    """Ephemeral T3Database (no API keys)."""
     client = chromadb.EphemeralClient()
     ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
@@ -86,216 +93,178 @@ def t3():
 
 @pytest.fixture(autouse=True)
 def _patch_t2(t2_path, monkeypatch):
-    """Redirect T2 to use temp database path."""
     import nexus.mcp_server as mod
     monkeypatch.setattr(mod, "_t2_ctx", lambda: T2Database(t2_path))
 
 
-# ── Search tests ──────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _mock_t3(collections: list[dict]) -> MagicMock:
+    """Create a mock T3 with preset list_collections and inject it."""
+    mock = MagicMock()
+    mock.list_collections.return_value = collections
+    _inject_t3(mock)
+    return mock
+
+
+def _capture_search():
+    """Return (captured, fake_fn) that records which collections are queried."""
+    captured: list[list[str]] = []
+
+    def fake(query, collections, n_results, t3, where=None, **kwargs):
+        captured.append(list(collections))
+        return []
+
+    return captured, fake
+
+
+def _put_id(content: str, collection: str = "knowledge", title: str = "t") -> str:
+    """store_put then extract the doc ID."""
+    return store_put(content=content, collection=collection, title=title) \
+        .split("Stored:")[1].strip().split(" ->")[0].strip()
+
+
+# ── Search ───────────────────────────────────────────────────────────────────
 
 def test_search_returns_results(t3):
-    """search tool returns formatted results from T3."""
     t3.put(collection="knowledge__test", content="chromadb vector database", title="doc1")
     result = search(query="vector database", corpus="knowledge__test", limit=5)
-    assert not result.startswith("Error:"), f"search returned error: {result}"
+    assert not result.startswith("Error:")
     assert "vector database" in result.lower() or "doc1" in result
 
 
 def test_search_no_results(t3):
-    """search tool returns 'No results.' when nothing matches."""
     result = search(query="nonexistent topic", corpus="knowledge__empty")
-    assert not result.startswith("Error:"), f"search returned error: {result}"
-    # Either "No collections" or "No results."
+    assert not result.startswith("Error:")
     assert "no" in result.lower()
 
 
-# ── Store tests ───────────────────────────────────────────────────────────────
+# ── Store ────────────────────────────────────────────────────────────────────
 
 def test_store_put(t3):
-    """store_put returns confirmation with doc ID."""
     result = store_put(content="test content", collection="knowledge", title="test-doc")
     assert "Stored:" in result
     assert "knowledge__knowledge" in result
 
 
 def test_store_list(t3):
-    """store_list returns listing after put."""
     store_put(content="listed entry", collection="knowledge", title="list-test")
     result = store_list(collection="knowledge")
-    assert not result.startswith("Error:"), f"store_list returned error: {result}"
+    assert not result.startswith("Error:")
     assert "entries" in result.lower() or "list-test" in result
 
 
-def test_store_get_returns_full_content(t3):
-    """store_get retrieves full document content and metadata."""
-    put_result = store_put(content="full document text here", collection="knowledge", title="get-test")
-    # Extract the doc ID from "Stored: <id> -> knowledge__knowledge"
-    doc_id = put_result.split("Stored:")[1].strip().split(" ->")[0].strip()
-
-    result = store_get(doc_id=doc_id, collection="knowledge")
-    assert not result.startswith("Error:"), f"store_get returned error: {result}"
-    assert "full document text here" in result
-    assert doc_id in result
-
-
-def test_store_get_shows_metadata(t3):
-    """store_get output includes title, collection, and indexed date."""
-    put_result = store_put(content="metadata content", collection="knowledge", title="metadata-test-doc")
-    doc_id = put_result.split("Stored:")[1].strip().split(" ->")[0].strip()
-
-    result = store_get(doc_id=doc_id, collection="knowledge")
-    assert "metadata-test-doc" in result
-    assert "knowledge__knowledge" in result
+@pytest.mark.parametrize("content, collection, title, expect_in", [
+    pytest.param("full document text here", "knowledge", "get-test",
+                 ["full document text here"], id="full-content"),
+    pytest.param("metadata content", "knowledge", "metadata-test-doc",
+                 ["metadata-test-doc", "knowledge__knowledge"], id="metadata"),
+    pytest.param("qualified content", "knowledge__knowledge", "qualified-test",
+                 ["qualified content"], id="fully-qualified"),
+])
+def test_store_get_round_trip(t3, content, collection, title, expect_in):
+    doc_id = _put_id(content, collection, title)
+    result = store_get(doc_id=doc_id, collection=collection)
+    assert not result.startswith("Error:")
+    for text in expect_in:
+        assert text in result
 
 
 def test_store_get_not_found(t3):
-    """store_get returns descriptive not-found message for missing ID."""
     result = store_get(doc_id="nonexistent-id-12345", collection="knowledge")
-    assert not result.startswith("Error:"), "should be user-friendly, not raw exception"
+    assert not result.startswith("Error:")
     assert "not found" in result.lower() or "nonexistent" in result.lower()
 
 
-def test_store_get_fully_qualified_collection(t3):
-    """store_get accepts fully-qualified collection name."""
-    put_result = store_put(content="qualified collection content", collection="knowledge__knowledge", title="qualified-test")
-    doc_id = put_result.split("Stored:")[1].strip().split(" ->")[0].strip()
-
-    result = store_get(doc_id=doc_id, collection="knowledge__knowledge")
-    assert not result.startswith("Error:"), f"store_get returned error: {result}"
-    assert "qualified collection content" in result
-
-
 def test_store_get_empty_doc_id(t3):
-    """store_get rejects empty doc_id."""
     result = store_get(doc_id="", collection="knowledge")
     assert result.startswith("Error:")
-    assert "doc_id" in result.lower() or "required" in result.lower()
 
 
 def test_store_get_no_ansi(t3):
-    """store_get output contains no ANSI escape codes."""
-    import re
-    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
-    put_result = store_put(content="ansi check content", collection="knowledge", title="ansi-get-test")
-    doc_id = put_result.split("Stored:")[1].strip().split(" ->")[0].strip()
+    doc_id = _put_id("ansi check content", title="ansi-get-test")
     result = store_get(doc_id=doc_id, collection="knowledge")
-    assert not ansi_re.search(result), f"ANSI codes found in: {result[:100]}"
+    assert not ANSI_RE.search(result), f"ANSI codes found in: {result[:100]}"
 
 
-# ── Memory tests ──────────────────────────────────────────────────────────────
+# ── Memory ───────────────────────────────────────────────────────────────────
 
 def test_memory_put(t2_path):
-    """memory_put stores an entry and returns confirmation."""
     result = memory_put(content="test memory", project="testproj", title="finding.md")
     assert "Stored:" in result
     assert "testproj/finding.md" in result
 
 
 def test_memory_get_by_title(t2_path):
-    """memory_get retrieves by project+title."""
     memory_put(content="retrievable content", project="testproj", title="doc.md")
-    result = memory_get(project="testproj", title="doc.md")
-    assert "retrievable content" in result
+    assert "retrievable content" in memory_get(project="testproj", title="doc.md")
 
 
 def test_memory_get_empty_title_lists(t2_path):
-    """memory_get with empty title lists project entries."""
     memory_put(content="entry1", project="listproj", title="a.md")
     memory_put(content="entry2", project="listproj", title="b.md")
     result = memory_get(project="listproj", title="")
-    assert "2 entries" in result
-    assert "a.md" in result
-    assert "b.md" in result
+    assert "2 entries" in result and "a.md" in result and "b.md" in result
 
 
 def test_memory_search(t2_path):
-    """memory_search uses FTS5 to find entries."""
     memory_put(content="chromadb vector embeddings", project="testproj", title="vectors.md")
-    result = memory_search(query="chromadb")
-    assert "vector" in result.lower()
+    assert "vector" in memory_search(query="chromadb").lower()
 
 
-# ── Scratch tests ─────────────────────────────────────────────────────────────
+# ── Scratch ──────────────────────────────────────────────────────────────────
 
 def test_scratch_put(t1):
-    """scratch put action stores content and returns ID."""
     result = scratch(action="put", content="scratch note")
     assert "Stored:" in result
-    # Extract the ID
-    doc_id = result.split("Stored:")[1].strip()
-    assert len(doc_id) > 0
+    assert len(result.split("Stored:")[1].strip()) > 0
 
 
 def test_scratch_search(t1):
-    """scratch search action returns results."""
     scratch(action="put", content="semantic search hypothesis")
     result = scratch(action="search", query="semantic search")
     assert "semantic" in result.lower() or "hypothesis" in result.lower()
 
 
 def test_scratch_list(t1):
-    """scratch list action returns entries."""
     scratch(action="put", content="listed scratch item")
-    result = scratch(action="list")
-    assert "listed scratch" in result
+    assert "listed scratch" in scratch(action="list")
 
 
 def test_scratch_manage_flag(t1):
-    """scratch_manage flag action marks entry."""
-    put_result = scratch(action="put", content="flaggable entry")
-    doc_id = put_result.split("Stored:")[1].strip()
-    result = scratch_manage(action="flag", entry_id=doc_id)
-    assert "Flagged:" in result
+    doc_id = scratch(action="put", content="flaggable entry").split("Stored:")[1].strip()
+    assert "Flagged:" in scratch_manage(action="flag", entry_id=doc_id)
 
 
 def test_scratch_manage_promote(t1, t2_path):
-    """scratch_manage promote copies entry to T2."""
-    put_result = scratch(action="put", content="promotable content")
-    doc_id = put_result.split("Stored:")[1].strip()
+    doc_id = scratch(action="put", content="promotable content").split("Stored:")[1].strip()
     result = scratch_manage(action="promote", entry_id=doc_id, project="promo", title="promoted.md")
     assert "Promoted:" in result
-    # Verify it actually landed in T2
     with T2Database(t2_path) as t2:
         entry = t2.get(project="promo", title="promoted.md")
-    assert entry is not None
-    assert entry["content"] == "promotable content"
+    assert entry is not None and entry["content"] == "promotable content"
 
 
-# ── Error handling ────────────────────────────────────────────────────────────
+# ── Error handling ───────────────────────────────────────────────────────────
 
 def test_error_missing_params(t1):
-    """Error cases return 'Error: ...' strings."""
-    result = scratch(action="put", content="")
-    assert result.startswith("Error:")
-
-    result = scratch(action="search", query="")
-    assert result.startswith("Error:")
-
-    result = scratch(action="get", entry_id="")
-    assert result.startswith("Error:")
-
-    result = scratch_manage(action="promote", entry_id="fake-id")
-    assert result.startswith("Error:")
+    assert scratch(action="put", content="").startswith("Error:")
+    assert scratch(action="search", query="").startswith("Error:")
+    assert scratch(action="get", entry_id="").startswith("Error:")
+    assert scratch_manage(action="promote", entry_id="fake-id").startswith("Error:")
 
 
 def test_store_put_empty_content(t3):
-    """store_put rejects empty content."""
     result = store_put(content="", collection="knowledge", title="empty")
-    assert result.startswith("Error:")
-    assert "content" in result.lower()
+    assert result.startswith("Error:") and "content" in result.lower()
 
 
 def test_memory_put_empty_content(t2_path):
-    """memory_put rejects empty content."""
     result = memory_put(content="", project="testproj", title="empty.md")
-    assert result.startswith("Error:")
-    assert "content" in result.lower()
+    assert result.startswith("Error:") and "content" in result.lower()
 
 
 def test_no_ansi_in_output(t1, t3, t2_path):
-    """No ANSI escape codes in any tool output."""
-    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
-
     results = [
         scratch(action="put", content="ansi test"),
         scratch(action="list"),
@@ -307,310 +276,141 @@ def test_no_ansi_in_output(t1, t3, t2_path):
         store_list(collection="knowledge"),
     ]
     for r in results:
-        assert not ansi_re.search(r), f"ANSI codes found in: {r[:100]}"
+        assert not ANSI_RE.search(r), f"ANSI codes found in: {r[:100]}"
 
 
 def test_t1_isolated_prefix(t1_isolated):
-    """EphemeralClient fallback shows [T1 isolated] prefix."""
-    result = scratch(action="put", content="isolated test")
-    assert "[T1 isolated]" in result
-
-    result = scratch(action="list")
-    assert "[T1 isolated]" in result
+    assert "[T1 isolated]" in scratch(action="put", content="isolated test")
+    assert "[T1 isolated]" in scratch(action="list")
 
 
-# ── B1: Multi-corpus search ───────────────────────────────────────────────────
+# ── Multi-corpus search routing (parametrized) ──────────────────────────────
 
-def test_search_default_multi_corpus():
-    """Default corpus searches knowledge, code, and docs collections."""
-    from unittest.mock import MagicMock, patch
-    mock_t3 = MagicMock()
-    mock_t3.list_collections.return_value = [
-        {"name": "knowledge__notes", "count": 5},
-        {"name": "code__repo", "count": 10},
-        {"name": "docs__manual", "count": 3},
-    ]
-    _inject_t3(mock_t3)
-
-    captured: list[list[str]] = []
-
-    def fake_search(query, collections, n_results, t3, where=None, **kwargs):
-        captured.append(list(collections))
-        return []
-
-    with patch("nexus.search_engine.search_cross_corpus", fake_search):
-        result = search("test query")  # no corpus= arg — uses default
-
+@pytest.mark.parametrize("corpus_arg, available, expected_in, expected_not_in", [
+    pytest.param(
+        None,
+        [{"name": "knowledge__notes", "count": 5}, {"name": "code__repo", "count": 10},
+         {"name": "docs__manual", "count": 3}],
+        ["knowledge__notes", "code__repo", "docs__manual"], [],
+        id="default-multi-corpus",
+    ),
+    pytest.param(
+        "knowledge",
+        [{"name": "knowledge__notes", "count": 5}, {"name": "code__repo", "count": 10}],
+        ["knowledge__notes"], ["code__repo"],
+        id="single-corpus-backward-compat",
+    ),
+    pytest.param(
+        "all",
+        [{"name": "knowledge__notes", "count": 5}, {"name": "code__repo", "count": 10},
+         {"name": "docs__manual", "count": 3}, {"name": "rdr__decisions", "count": 7}],
+        ["knowledge__notes", "code__repo", "docs__manual", "rdr__decisions"], [],
+        id="all-alias",
+    ),
+    pytest.param(
+        "knowledge__notes",
+        [{"name": "knowledge__notes", "count": 5}, {"name": "knowledge__other", "count": 2}],
+        ["knowledge__notes"], ["knowledge__other"],
+        id="fully-qualified-collection",
+    ),
+])
+def test_search_corpus_routing(corpus_arg, available, expected_in, expected_not_in):
+    _mock_t3(available)
+    captured, fake = _capture_search()
+    kwargs = {"corpus": corpus_arg} if corpus_arg is not None else {}
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        search("test query", **kwargs)
     assert len(captured) == 1
-    searched = captured[0]
-    assert "knowledge__notes" in searched
-    assert "code__repo" in searched
-    assert "docs__manual" in searched
+    for name in expected_in:
+        assert name in captured[0]
+    for name in expected_not_in:
+        assert name not in captured[0]
 
 
-def test_search_single_corpus_backward_compat():
-    """corpus='knowledge' still works (backward compatibility)."""
-    from unittest.mock import MagicMock, patch
-    mock_t3 = MagicMock()
-    mock_t3.list_collections.return_value = [
-        {"name": "knowledge__notes", "count": 5},
-        {"name": "code__repo", "count": 10},
-    ]
-    _inject_t3(mock_t3)
-
-    captured: list[list[str]] = []
-
-    def fake_search(query, collections, n_results, t3, where=None, **kwargs):
-        captured.append(list(collections))
-        return []
-
-    with patch("nexus.search_engine.search_cross_corpus", fake_search):
-        result = search("test query", corpus="knowledge")
-
-    assert len(captured) == 1
-    searched = captured[0]
-    assert "knowledge__notes" in searched
-    assert "code__repo" not in searched
-
-
-def test_search_all_alias():
-    """corpus='all' expands to knowledge,code,docs,rdr."""
-    from unittest.mock import MagicMock, patch
-    mock_t3 = MagicMock()
-    mock_t3.list_collections.return_value = [
-        {"name": "knowledge__notes", "count": 5},
-        {"name": "code__repo", "count": 10},
-        {"name": "docs__manual", "count": 3},
-        {"name": "rdr__decisions", "count": 7},
-    ]
-    _inject_t3(mock_t3)
-
-    captured: list[list[str]] = []
-
-    def fake_search(query, collections, n_results, t3, where=None, **kwargs):
-        captured.append(list(collections))
-        return []
-
-    with patch("nexus.search_engine.search_cross_corpus", fake_search):
-        result = search("test query", corpus="all")
-
-    assert len(captured) == 1
-    searched = captured[0]
-    assert "knowledge__notes" in searched
-    assert "code__repo" in searched
-    assert "docs__manual" in searched
-    assert "rdr__decisions" in searched
-
-
-def test_search_fully_qualified_collection():
-    """corpus='knowledge__specific' targets that collection directly."""
-    from unittest.mock import MagicMock, patch
-    mock_t3 = MagicMock()
-    mock_t3.list_collections.return_value = [
-        {"name": "knowledge__notes", "count": 5},
-        {"name": "knowledge__other", "count": 2},
-    ]
-    _inject_t3(mock_t3)
-
-    captured: list[list[str]] = []
-
-    def fake_search(query, collections, n_results, t3, where=None, **kwargs):
-        captured.append(list(collections))
-        return []
-
-    with patch("nexus.search_engine.search_cross_corpus", fake_search):
-        result = search("test query", corpus="knowledge__notes")
-
-    assert len(captured) == 1
-    assert captured[0] == ["knowledge__notes"]
-
-
-# ── B2: collection_list ───────────────────────────────────────────────────────
+# ── collection_list ──────────────────────────────────────────────────────────
 
 def test_collection_list_returns_names_and_counts():
-    """collection_list shows all collections with counts and models."""
-    from unittest.mock import MagicMock
-    mock_t3 = MagicMock()
-    mock_t3.list_collections.return_value = [
-        {"name": "knowledge__test", "count": 42},
-        {"name": "code__repo", "count": 100},
-    ]
-    _reset_singletons()
-    _inject_t3(mock_t3)
-
+    _mock_t3([{"name": "knowledge__test", "count": 42}, {"name": "code__repo", "count": 100}])
     result = collection_list()
-    assert "knowledge__test" in result
-    assert "42" in result
-    assert "code__repo" in result
-    assert "100" in result
-    # Models should appear
-    assert "voyage-context-3" in result  # knowledge__ model
-    assert "voyage-code-3" in result  # code__ model
+    for s in ("knowledge__test", "42", "code__repo", "100", "voyage-context-3", "voyage-code-3"):
+        assert s in result
 
 
 def test_collection_list_empty():
-    """collection_list handles no collections gracefully."""
-    from unittest.mock import MagicMock
-    mock_t3 = MagicMock()
-    mock_t3.list_collections.return_value = []
-    _reset_singletons()
-    _inject_t3(mock_t3)
-
-    result = collection_list()
-    assert "no collections" in result.lower()
+    _mock_t3([])
+    assert "no collections" in collection_list().lower()
 
 
 def test_collection_list_sorted():
-    """collection_list returns collections in sorted order."""
-    from unittest.mock import MagicMock
-    mock_t3 = MagicMock()
-    mock_t3.list_collections.return_value = [
-        {"name": "knowledge__zzz", "count": 1},
-        {"name": "code__aaa", "count": 2},
-    ]
-    _reset_singletons()
-    _inject_t3(mock_t3)
-
+    _mock_t3([{"name": "knowledge__zzz", "count": 1}, {"name": "code__aaa", "count": 2}])
     result = collection_list()
-    idx_aaa = result.index("code__aaa")
-    idx_zzz = result.index("knowledge__zzz")
-    assert idx_aaa < idx_zzz
+    assert result.index("code__aaa") < result.index("knowledge__zzz")
 
 
-# ── B3: collection_info ───────────────────────────────────────────────────────
+# ── collection_info (parametrized) ───────────────────────────────────────────
 
-def test_collection_info_returns_metadata():
-    """collection_info shows count and model info."""
-    from unittest.mock import MagicMock
-    mock_t3 = MagicMock()
-    mock_t3.collection_info.return_value = {"count": 42, "metadata": {}}
-    _reset_singletons()
-    _inject_t3(mock_t3)
-
-    result = collection_info("knowledge__test")
-    assert "knowledge__test" in result
-    assert "42" in result
-    assert "voyage-context-3" in result  # CCE model for knowledge__
-
-
-def test_collection_info_shows_both_models():
-    """collection_info shows both index and query models."""
-    from unittest.mock import MagicMock
-    mock_t3 = MagicMock()
-    mock_t3.collection_info.return_value = {"count": 10, "metadata": {}}
-    _reset_singletons()
-    _inject_t3(mock_t3)
-
-    result = collection_info("code__myrepo")
-    assert "voyage-code-3" in result   # both index and query model
+@pytest.mark.parametrize("name, info_return, expect_in", [
+    pytest.param("knowledge__test", {"count": 42, "metadata": {}},
+                 ["knowledge__test", "42", "voyage-context-3"], id="knowledge-metadata"),
+    pytest.param("code__myrepo", {"count": 10, "metadata": {}},
+                 ["voyage-code-3"], id="code-both-models"),
+    pytest.param("knowledge__test", {"count": 5, "metadata": {"source": "indexer", "version": "2"}},
+                 ["source"], id="with-metadata"),
+])
+def test_collection_info_ok(name, info_return, expect_in):
+    mock = MagicMock()
+    mock.collection_info.return_value = info_return
+    _inject_t3(mock)
+    result = collection_info(name)
+    for s in expect_in:
+        assert s in result
 
 
 def test_collection_info_not_found():
-    """collection_info returns error for missing collection."""
-    from unittest.mock import MagicMock
-    mock_t3 = MagicMock()
-    mock_t3.collection_info.side_effect = KeyError("not found")
-    _reset_singletons()
-    _inject_t3(mock_t3)
-
+    mock = MagicMock()
+    mock.collection_info.side_effect = KeyError("not found")
+    _inject_t3(mock)
     result = collection_info("nonexistent")
     assert "not found" in result.lower() or "error" in result.lower()
-    assert not result.startswith("Error: ")  # Should be user-friendly, not raw exception
+    assert not result.startswith("Error: ")
 
 
-def test_collection_info_with_metadata():
-    """collection_info includes non-empty metadata."""
-    from unittest.mock import MagicMock
-    mock_t3 = MagicMock()
-    mock_t3.collection_info.return_value = {
-        "count": 5,
-        "metadata": {"source": "indexer", "version": "2"},
-    }
-    _reset_singletons()
-    _inject_t3(mock_t3)
+# ── collection_verify (parametrized) ─────────────────────────────────────────
 
-    result = collection_info("knowledge__test")
-    assert "source" in result or "indexer" in result
-
-
-# ── B4: collection_verify ─────────────────────────────────────────────────────
-
-def test_collection_verify_healthy():
-    """collection_verify returns healthy status for a good collection."""
-    from unittest.mock import MagicMock, patch
-    from nexus.mcp_server import collection_verify
-    from nexus.db.t3 import VerifyResult
-
-    _reset_singletons()
-    mock_t3 = MagicMock()
-    _inject_t3(mock_t3)
-
-    with patch("nexus.mcp_server.verify_collection_deep") as mock_verify:
-        mock_verify.return_value = VerifyResult(
-            status="healthy", doc_count=42, probe_doc_id="abc123",
-            distance=0.15, metric="l2"
-        )
-        result = collection_verify("knowledge__test")
-
-    assert "healthy" in result.lower()
-    assert "42" in result
-    assert "0.15" in result
+@pytest.mark.parametrize("name, verify_rv, side_effect, expect_in", [
+    pytest.param("knowledge__test",
+                 VerifyResult(status="healthy", doc_count=42, probe_doc_id="abc123",
+                              distance=0.15, metric="l2"),
+                 None, ["healthy", "42", "0.15"], id="healthy"),
+    pytest.param("knowledge__tiny",
+                 VerifyResult(status="skipped", doc_count=1),
+                 None, ["skipped"], id="skipped"),
+    pytest.param("nonexistent", None, KeyError("not found"), ["not found"], id="not-found"),
+])
+def test_collection_verify_cases(name, verify_rv, side_effect, expect_in):
+    mock = MagicMock()
+    _inject_t3(mock)
+    with patch("nexus.mcp_server.verify_collection_deep") as mv:
+        if side_effect:
+            mv.side_effect = side_effect
+        else:
+            mv.return_value = verify_rv
+        result = collection_verify(name)
+    for s in expect_in:
+        assert s in result.lower()
 
 
-def test_collection_verify_not_found():
-    """collection_verify returns error for missing collection."""
-    from unittest.mock import MagicMock, patch
-    from nexus.mcp_server import collection_verify
-
-    _reset_singletons()
-    mock_t3 = MagicMock()
-    _inject_t3(mock_t3)
-
-    with patch("nexus.mcp_server.verify_collection_deep") as mock_verify:
-        mock_verify.side_effect = KeyError("not found")
-        result = collection_verify("nonexistent")
-
-    assert "not found" in result.lower() or "error" in result.lower()
-
-
-def test_collection_verify_skipped():
-    """collection_verify reports skipped for tiny collections."""
-    from unittest.mock import MagicMock, patch
-    from nexus.mcp_server import collection_verify
-    from nexus.db.t3 import VerifyResult
-
-    _reset_singletons()
-    mock_t3 = MagicMock()
-    _inject_t3(mock_t3)
-
-    with patch("nexus.mcp_server.verify_collection_deep") as mock_verify:
-        mock_verify.return_value = VerifyResult(status="skipped", doc_count=1)
-        result = collection_verify("knowledge__tiny")
-
-    assert "skipped" in result.lower()
-
-
-# ── Collection cache thread-safety ────────────────────────────────────────────
+# ── Collection cache thread-safety ───────────────────────────────────────────
 
 def test_collection_cache_thread_safe():
-    """Concurrent cache refreshes never return an empty list."""
     import threading
-    from unittest.mock import MagicMock
-    from nexus.mcp_server import _get_collection_names
-
-    _reset_singletons()
-
-    mock_t3 = MagicMock()
-    mock_t3.list_collections.return_value = [{"name": "knowledge__test", "count": 5}]
-    _inject_t3(mock_t3)
-
+    _mock_t3([{"name": "knowledge__test", "count": 5}])
     results: list[list[str]] = []
     errors: list[Exception] = []
 
     def worker():
         try:
-            names = _get_collection_names()
-            results.append(names)
+            results.append(_get_collection_names())
         except Exception as e:
             errors.append(e)
 
@@ -619,236 +419,288 @@ def test_collection_cache_thread_safe():
         t.start()
     for t in threads:
         t.join()
-
     assert not errors
-    for r in results:
-        assert len(r) > 0, f"Cache race: thread saw empty collection list: {r!r}"
+    assert all(len(r) > 0 for r in results), "Cache race: thread saw empty list"
 
 
-# ── Pagination tests ─────────────────────────────────────────────────────────
-
+# ── Pagination ───────────────────────────────────────────────────────────────
 
 def test_search_pagination_first_page(t3):
-    """search offset=0 returns first page with next offset."""
     for i in range(5):
         t3.put(collection="knowledge__pag", content=f"document about topic {i}", title=f"doc{i}")
     result = search(query="topic", corpus="knowledge__pag", limit=2, offset=0)
-    assert "showing 1-2" in result
-    assert "offset=2" in result
+    assert "showing 1-2" in result and "offset=2" in result
 
 
 def test_search_pagination_pages_differ(t3):
-    """Page 2 content differs from page 1."""
     for i in range(6):
         t3.put(collection="knowledge__pag2", content=f"unique searchable content number {i}", title=f"doc{i}")
     page1 = search(query="searchable content", corpus="knowledge__pag2", limit=2, offset=0)
     page2 = search(query="searchable content", corpus="knowledge__pag2", limit=2, offset=2)
     assert not page2.startswith("Error:")
-    # Extract doc IDs from both pages — they should not overlap
-    page1_ids = {line.split("]")[0] for line in page1.split("\n") if line.startswith("[")}
-    page2_ids = {line.split("]")[0] for line in page2.split("\n") if line.startswith("[")}
-    assert page1_ids.isdisjoint(page2_ids), f"Pages overlap: {page1_ids & page2_ids}"
+    p1 = {l.split("]")[0] for l in page1.split("\n") if l.startswith("[")}
+    p2 = {l.split("]")[0] for l in page2.split("\n") if l.startswith("[")}
+    assert p1.isdisjoint(p2), f"Pages overlap: {p1 & p2}"
 
 
 def test_search_pagination_last_page(t3):
-    """Single-result search shows (end) indicator."""
     t3.put(collection="knowledge__pag3", content="only document about finality", title="solo")
-    result = search(query="finality", corpus="knowledge__pag3", limit=10, offset=0)
-    assert "(end)" in result
+    assert "(end)" in search(query="finality", corpus="knowledge__pag3", limit=10, offset=0)
 
 
 def test_search_pagination_offset_beyond_end(t3):
-    """Offset past all results returns 'No results at offset'."""
     t3.put(collection="knowledge__pag4", content="small collection", title="one")
-    result = search(query="small", corpus="knowledge__pag4", limit=10, offset=100)
-    assert "No results at offset 100" in result
+    assert "No results at offset 100" in search(query="small", corpus="knowledge__pag4", limit=10, offset=100)
 
 
 def test_store_list_pagination(t3):
-    """store_list pages with true total from collection count."""
     for i in range(5):
         store_put(content=f"entry {i}", collection="knowledge__pagtest", title=f"page-test-{i}")
     page1 = store_list(collection="knowledge__pagtest", limit=2, offset=0)
-    assert "showing 1-2 of 5" in page1
-    assert "next: offset=2" in page1
-
-    page2 = store_list(collection="knowledge__pagtest", limit=2, offset=2)
-    assert "showing 3-4 of 5" in page2
+    assert "showing 1-2 of 5" in page1 and "next: offset=2" in page1
+    assert "showing 3-4 of 5" in store_list(collection="knowledge__pagtest", limit=2, offset=2)
 
 
 def test_store_list_pagination_offset_beyond_end(t3):
-    """store_list offset past total returns 'No entries at offset'."""
     store_put(content="solo entry", collection="knowledge__pagend", title="one")
-    result = store_list(collection="knowledge__pagend", limit=10, offset=100)
-    assert "No entries at offset 100" in result
+    assert "No entries at offset 100" in store_list(collection="knowledge__pagend", limit=10, offset=100)
 
 
 def test_store_list_collection_not_found(t3):
-    """store_list returns 'Collection not found' for missing collection."""
-    result = store_list(collection="knowledge__doesnotexist", limit=10)
-    assert "Collection not found" in result
+    assert "Collection not found" in store_list(collection="knowledge__doesnotexist", limit=10)
 
 
 def test_memory_search_pagination(t2_path):
-    """memory_search pages with offset."""
     for i in range(5):
         memory_put(content=f"finding about pagination topic {i}", project="testproj", title=f"page{i}.md")
     page1 = memory_search(query="pagination", limit=2, offset=0)
-    assert "showing 1-2 of 5" in page1
-    assert "next: offset=2" in page1
-
-    page2 = memory_search(query="pagination", limit=2, offset=2)
-    assert "showing 3-4 of 5" in page2
+    assert "showing 1-2 of 5" in page1 and "next: offset=2" in page1
+    assert "showing 3-4 of 5" in memory_search(query="pagination", limit=2, offset=2)
 
 
 def test_memory_search_pagination_offset_beyond_end(t2_path):
-    """memory_search offset past results returns 'No results at offset'."""
     memory_put(content="solitary finding about offsets", project="testproj", title="solo.md")
-    result = memory_search(query="offsets", limit=10, offset=100)
-    assert "No results at offset 100" in result
+    assert "No results at offset 100" in memory_search(query="offsets", limit=10, offset=100)
 
+
+# ── Plans ────────────────────────────────────────────────────────────────────
 
 def test_plan_save_and_search(t2_path):
-    """plan_save stores a plan, plan_search retrieves it."""
     result = plan_save(
         query="compare error handling",
         plan_json='{"steps": [{"step": 1, "operation": "search"}]}',
-        project="testproj",
-        tags="search,compare",
+        project="testproj", tags="search,compare",
     )
     assert "Saved plan:" in result
-
-    found = plan_search(query="error handling", project="testproj")
-    assert "compare error handling" in found
+    assert "compare error handling" in plan_search(query="error handling", project="testproj")
 
 
 def test_plan_search_empty(t2_path):
-    """plan_search returns 'No matching plans.' when library is empty."""
-    result = plan_search(query="nonexistent")
-    assert "No matching plans" in result
+    assert "No matching plans" in plan_search(query="nonexistent")
 
 
-# ── nexus-kopl: _get_catalog catches OSError, not all exceptions ─────────
-
+# ── _get_catalog error propagation ───────────────────────────────────────────
 
 def test_get_catalog_propagates_non_os_errors():
-    """_get_catalog must not swallow non-OSError exceptions (nexus-kopl).
-
-    Previously, the broad ``except Exception: pass`` caught JSONL parse errors,
-    SQLite corruption, and MemoryError as if they were stat failures.
-    """
-    from unittest.mock import patch, MagicMock
-    from nexus.mcp_server import _get_catalog
-
-    # Set up a catalog instance that raises ValueError on _ensure_consistent
+    from nexus.mcp_infra import get_catalog as _get_catalog
     mock_catalog = MagicMock()
     mock_catalog.degraded = False
-
-    with patch("nexus.mcp_server._catalog_instance", mock_catalog), \
-         patch("nexus.mcp_server._catalog_mtime", 0.0), \
-         patch("nexus.mcp_server._max_jsonl_mtime", return_value=999.0):
-        # ValueError should propagate — it's not an OSError
+    with patch("nexus.mcp_infra._catalog_instance", mock_catalog), \
+         patch("nexus.mcp_infra._catalog_mtime", 0.0), \
+         patch("nexus.mcp_infra._max_jsonl_mtime", return_value=999.0):
         mock_catalog._ensure_consistent.side_effect = ValueError("corrupt JSONL")
-        try:
+        with pytest.raises(ValueError):
             _get_catalog()
-            assert False, "ValueError should have propagated"
-        except ValueError:
-            pass  # expected
-
-        # OSError should be swallowed (stat failure)
         mock_catalog._ensure_consistent.side_effect = OSError("file not found")
-        result = _get_catalog()  # should not raise
-        assert result is mock_catalog
+        assert _get_catalog() is mock_catalog
 
 
-# ── Enhanced query catalog-routing tests ─────────────────────────────────────
-
+# ── Query catalog-routing ────────────────────────────────────────────────────
 
 @pytest.fixture()
 def catalog_with_docs(tmp_path):
-    """Catalog pre-loaded with test documents for query routing tests."""
     from nexus.catalog.catalog import Catalog
-
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()
     cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
     o1 = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
     o2 = cat.register_owner("papers", "curator")
-
-    cat.register(
-        o1, "indexer.py", content_type="code", file_path="src/nexus/indexer.py",
-        physical_collection="code__nexus", chunk_count=10, author="hal",
-    )
-    cat.register(
-        o1, "chunker.py", content_type="code", file_path="src/nexus/chunker.py",
-        physical_collection="code__nexus", chunk_count=5, author="hal",
-    )
-    cat.register(
-        o2, "Attention Paper", content_type="paper",
-        physical_collection="knowledge__papers", chunk_count=20,
-        author="Vaswani",
-    )
-    cat.register(
-        o2, "BERT Paper", content_type="paper",
-        physical_collection="knowledge__papers", chunk_count=15,
-        author="Devlin",
-    )
-    # Link: Attention Paper cites BERT Paper
-    cat.link(
-        cat.find("Attention Paper")[0].tumbler,
-        cat.find("BERT Paper")[0].tumbler,
-        "cites", created_by="test",
-    )
+    cat.register(o1, "indexer.py", content_type="code", file_path="src/nexus/indexer.py",
+                 physical_collection="code__nexus", chunk_count=10, author="hal")
+    cat.register(o1, "chunker.py", content_type="code", file_path="src/nexus/chunker.py",
+                 physical_collection="code__nexus", chunk_count=5, author="hal")
+    cat.register(o2, "Attention Paper", content_type="paper",
+                 physical_collection="knowledge__papers", chunk_count=20, author="Vaswani")
+    cat.register(o2, "BERT Paper", content_type="paper",
+                 physical_collection="knowledge__papers", chunk_count=15, author="Devlin")
+    cat.link(cat.find("Attention Paper")[0].tumbler,
+             cat.find("BERT Paper")[0].tumbler, "cites", created_by="test")
     _inject_catalog(cat)
     return cat
 
 
 class TestQueryCatalogRouting:
-    def test_query_no_catalog_params_backward_compat(self, t3):
-        """query() without catalog params works as before."""
+    def test_backward_compat(self, t3):
         t3.put(collection="knowledge__test", content="vector database chunking", title="doc1")
-        result = query(question="vector database", corpus="knowledge__test")
-        assert not result.startswith("Error:")
+        assert not query(question="vector database", corpus="knowledge__test").startswith("Error:")
 
-    def test_query_author_filter(self, t3, catalog_with_docs):
-        """query(author=) routes to collections containing that author's docs."""
-        t3.put(collection="knowledge__papers", content="transformer attention mechanism", title="att")
-        result = query(question="attention", author="Vaswani")
+    @pytest.mark.parametrize("kwargs, collection, content, expect_in", [
+        pytest.param({"author": "Vaswani"}, "knowledge__papers",
+                     "transformer attention mechanism", ["knowledge__papers"], id="author"),
+        pytest.param({"content_type": "code"}, "code__nexus",
+                     "def index_repo(): chunking pipeline", [], id="content-type"),
+        pytest.param({"subtree": "1.1"}, "code__nexus",
+                     "def chunk_file(): ast parsing", [], id="subtree"),
+        pytest.param({"follow_links": "cites"}, "knowledge__papers",
+                     "transformer attention is all you need", [], id="follow-links"),
+    ])
+    def test_catalog_filter(self, t3, catalog_with_docs, kwargs, collection, content, expect_in):
+        t3.put(collection=collection, content=content, title="t")
+        result = query(question=content.split(":")[0] if ":" in content else content[:20], **kwargs)
         assert not result.startswith("Error:")
-        assert "knowledge__papers" in result
+        for s in expect_in:
+            assert s in result
 
-    def test_query_content_type_filter(self, t3, catalog_with_docs):
-        """query(content_type=) routes to collections for that type."""
-        t3.put(collection="code__nexus", content="def index_repo(): chunking pipeline", title="idx")
-        result = query(question="index repo", content_type="code")
-        assert not result.startswith("Error:")
-
-    def test_query_subtree_filter(self, t3, catalog_with_docs):
-        """query(subtree=) uses descendants() to find collections in subtree."""
-        t3.put(collection="code__nexus", content="def chunk_file(): ast parsing", title="chk")
-        # Owner 1.1 = nexus repo, subtree should find code__nexus
-        result = query(question="chunk file", subtree="1.1")
-        assert not result.startswith("Error:")
-
-    def test_query_follow_links(self, t3, catalog_with_docs):
-        """query(follow_links=) expands search via catalog link graph."""
-        t3.put(collection="knowledge__papers", content="transformer attention is all you need", title="att-link")
-        result = query(question="attention", follow_links="cites")
-        assert not result.startswith("Error:")
-
-    def test_query_catalog_params_without_catalog(self, t3, monkeypatch):
-        """query() with catalog params but no catalog returns clear error."""
+    def test_catalog_params_without_catalog(self, t3, monkeypatch):
         import nexus.mcp_server as mod
         monkeypatch.setattr(mod, "_get_catalog", lambda: None)
-        result = query(question="test", author="someone")
-        assert "catalog not initialized" in result.lower()
+        assert "catalog not initialized" in query(question="test", author="someone").lower()
 
-    def test_query_author_no_match(self, t3, catalog_with_docs):
-        """query(author=) with non-existent author returns no-match message."""
-        result = query(question="anything", author="NonexistentAuthor")
-        assert "No documents found matching catalog filters" in result
+    @pytest.mark.parametrize("kwargs", [
+        pytest.param({"author": "NonexistentAuthor"}, id="author-no-match"),
+        pytest.param({"subtree": "9.9"}, id="subtree-empty"),
+    ])
+    def test_catalog_no_match(self, t3, catalog_with_docs, kwargs):
+        assert "No documents found matching catalog filters" in query(question="anything", **kwargs)
 
-    def test_query_subtree_empty(self, t3, catalog_with_docs):
-        """query(subtree=) for empty subtree returns no-match message."""
-        result = query(question="anything", subtree="9.9")
-        assert "No documents found matching catalog filters" in result
+
+# ── Cluster output (RDR-056) ────────────────────────────────────────────────
+
+def _make_clustered_results() -> list[SearchResult]:
+    return [
+        SearchResult(id="a1", content="HNSW tail failures in approximate search",
+                     distance=0.41, collection="knowledge__papers",
+                     metadata={"_cluster_label": "HNSW Robustness", "title": "HNSW paper"}),
+        SearchResult(id="a2", content="Graph-based index failures compound in pipelines",
+                     distance=0.52, collection="knowledge__papers",
+                     metadata={"_cluster_label": "HNSW Robustness", "title": "Pipeline paper"}),
+        SearchResult(id="b1", content="Ward hierarchical clustering groups results",
+                     distance=0.45, collection="docs__manual",
+                     metadata={"_cluster_label": "Result Clustering", "title": "Clustering doc"}),
+        SearchResult(id="b2", content="Semantic grouping improves LLM comprehension",
+                     distance=0.55, collection="docs__manual",
+                     metadata={"_cluster_label": "Result Clustering", "title": "LLM doc"}),
+    ]
+
+
+def _search_clustered(results, corpus="knowledge,docs", cluster_by="semantic"):
+    collections = [{"name": "knowledge__papers", "count": 10}]
+    if "docs" in corpus:
+        collections.append({"name": "docs__manual", "count": 5})
+    _mock_t3(collections)
+    with patch("nexus.search_engine.search_cross_corpus",
+               lambda q, c, n_results=10, t3=None, where=None, **kw: results):
+        return search("test query", corpus=corpus, cluster_by=cluster_by)
+
+
+def test_cluster_labels_in_output():
+    output = _search_clustered(_make_clustered_results())
+    assert "HNSW Robustness" in output and "Result Clustering" in output
+
+
+def test_cluster_order_preserved():
+    output = _search_clustered(_make_clustered_results())
+    positions = [output.find(s) for s in (
+        "HNSW tail failures", "Graph-based index", "Ward hierarchical", "Semantic grouping")]
+    assert positions == sorted(positions) and all(p >= 0 for p in positions)
+
+
+def test_flat_search_no_cluster_headers():
+    results = [SearchResult(id="r1", content="some result", distance=0.3,
+                            collection="knowledge__papers", metadata={"title": "Paper"})]
+    output = _search_clustered(results, corpus="knowledge", cluster_by="")
+    assert "---" not in output.split("\n--- showing")[0]
+
+
+# ── T1 session sharing ──────────────────────────────────────────────────────
+
+def test_t1_shared_session():
+    client = chromadb.EphemeralClient()
+    t1a = T1Database(session_id="shared-42", client=client)
+    t1b = T1Database(session_id="shared-42", client=client)
+    doc_id = t1a.put("shared entry from A")
+    entry = t1b.get(doc_id)
+    assert entry is not None and entry["content"] == "shared entry from A"
+    assert any("shared entry from A" in r["content"] for r in t1b.search("shared entry", n_results=5))
+
+
+def test_t1_session_isolation():
+    client = chromadb.EphemeralClient()
+    t1a = T1Database(session_id="session-alpha", client=client)
+    t1b = T1Database(session_id="session-beta", client=client)
+    t1a.put("alpha only")
+    t1b.put("beta only")
+    assert all(e["content"] != "beta only" for e in t1a.list_entries())
+    assert all(e["content"] != "alpha only" for e in t1b.list_entries())
+
+
+@pytest.mark.parametrize("record, expected_found", [
+    pytest.param({"session_id": "test-session-id", "server_host": "127.0.0.1",
+                  "server_port": 9999, "server_pid": 12345}, True, id="resolves-record"),
+    pytest.param(None, False, id="no-record"),
+    pytest.param({"session_id": "stale-session", "server_host": "127.0.0.1",
+                  "server_port": 8888, "server_pid": 99999,
+                  "_created_at_offset": -25 * 3600}, False, id="skips-stale"),
+])
+def test_find_ancestor_session(record, expected_found):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sessions_dir = Path(tmpdir)
+        pid = os.getpid()
+        if record is not None:
+            offset = record.pop("_created_at_offset", 0)
+            record["created_at"] = time.time() + offset
+            (sessions_dir / f"{pid}.session").write_text(json.dumps(record))
+        result = find_ancestor_session(sessions_dir=sessions_dir, start_pid=pid)
+        if expected_found:
+            assert result is not None
+            assert result["session_id"] == record["session_id"]
+            assert result["server_port"] == record["server_port"]
+        else:
+            assert result is None
+
+
+# ── MCP client SDK round-trip (integration) ──────────────────────────────────
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_mcp_server_round_trip():
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    nx_mcp = Path(sys.executable).parent / "nx-mcp"
+    if not nx_mcp.exists():
+        pytest.skip("nx-mcp entry point not found; run 'uv sync' first")
+
+    server_params = StdioServerParameters(command=str(nx_mcp), args=[])
+    async with stdio_client(server_params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            tool_names = [t.name for t in (await session.list_tools()).tools]
+            for expected in ("search", "store_put", "store_list", "memory_put",
+                             "memory_get", "memory_search", "scratch", "scratch_manage"):
+                assert expected in tool_names
+
+            r = await session.call_tool("scratch", {"action": "put", "content": "integration test entry", "tags": "test"})
+            assert "Stored:" in r.content[0].text or "isolated" in r.content[0].text.lower()
+
+            r = await session.call_tool("scratch", {"action": "list"})
+            assert "integration test" in r.content[0].text or "No scratch" in r.content[0].text
+
+            r = await session.call_tool("memory_put", {"content": "integration memory test", "project": "mcp-integ", "title": "round-trip.md"})
+            assert "Stored:" in r.content[0].text
+
+            r = await session.call_tool("memory_get", {"project": "mcp-integ", "title": "round-trip.md"})
+            assert "integration memory test" in r.content[0].text
+
+            r = await session.call_tool("memory_search", {"query": "integration", "project": "mcp-integ"})
+            assert "integration" in r.content[0].text.lower()

@@ -1,4 +1,4 @@
-"""T3: commands/index.py — nx index repo registration and indexing."""
+# SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -8,6 +8,8 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 
+PDF_RESULT = {"chunks": 3, "pages": [], "title": "", "author": ""}
+MD_RESULT = {"chunks": 2, "sections": 0}
 
 @pytest.fixture
 def runner() -> CliRunner:
@@ -15,227 +17,159 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture
-def index_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     return tmp_path
 
 
-def test_index_repo_registers_and_indexes(runner: CliRunner, index_home: Path) -> None:
-    """nx index repo <path> registers the repo and calls index_repository."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
+@pytest.fixture
+def repo_dir(home: Path) -> Path:
+    d = home / "myrepo"
+    d.mkdir()
+    return d
 
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = None  # not yet registered
 
+@pytest.fixture
+def fake_pdf(home: Path) -> Path:
+    p = home / "doc.pdf"
+    p.write_bytes(b"fake pdf")
+    return p
+
+
+@pytest.fixture
+def fake_md(home: Path) -> Path:
+    p = home / "doc.md"
+    p.write_text("# Hello\n\nWorld.\n")
+    return p
+
+
+@pytest.fixture
+def mock_reg():
+    reg = MagicMock()
+    reg.get.return_value = {"collection": "code__myrepo"}
+    return reg
+
+
+def _invoke_repo(runner, args, mock_reg, index_side_effect=None, index_return=None):
+    """Run `nx index repo ...` with registry + indexer mocked."""
+    kw = {}
+    if index_side_effect:
+        kw["side_effect"] = index_side_effect
+    else:
+        kw["return_value"] = index_return or {}
     with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "repo", str(repo)])
+        with patch("nexus.indexer.index_repository", **kw) as mock_idx:
+            result = runner.invoke(main, ["index", "repo"] + args)
+    return result, mock_idx
 
+
+# ── nx index repo basic ─────────────────────────────────────────────────────
+
+def test_index_repo_registers_and_indexes(runner, repo_dir, home):
+    reg = MagicMock()
+    reg.get.return_value = None
+    result, mock_idx = _invoke_repo(runner, [str(repo_dir)], reg)
     assert result.exit_code == 0
-    mock_reg.add.assert_called_once()
-    mock_index.assert_called_once()
+    reg.add.assert_called_once()
+    mock_idx.assert_called_once()
     assert "Registered" in result.output
     assert "Done" in result.output
 
 
-def test_index_repo_idempotent_when_already_registered(runner: CliRunner, index_home: Path) -> None:
-    """If repo is already registered, skip add() and just re-index."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}  # already registered
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "repo", str(repo)])
-
+def test_index_repo_idempotent_when_already_registered(runner, repo_dir, mock_reg):
+    result, mock_idx = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0
     mock_reg.add.assert_not_called()
-    mock_index.assert_called_once()
+    mock_idx.assert_called_once()
     assert "Registered" not in result.output
 
 
-def test_index_repo_invalid_path(runner: CliRunner, index_home: Path) -> None:
-    """Non-existent path produces a non-zero exit code."""
-    result = runner.invoke(main, ["index", "repo", str(index_home / "nonexistent")])
+def test_index_repo_invalid_path(runner, home):
+    result = runner.invoke(main, ["index", "repo", str(home / "nonexistent")])
     assert result.exit_code != 0
 
 
-# ── nx index pdf ──────────────────────────────────────────────────────────────
+# ── nx index pdf / md basic ──────────────────────────────────────────────────
 
-def test_index_pdf_command_indexes_file(runner: CliRunner, index_home: Path) -> None:
-    """nx index pdf <path> calls index_pdf and reports chunk count."""
-    pdf = index_home / "doc.pdf"
-    pdf.write_bytes(b"fake pdf")
-
-    with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 3, "pages": [], "title": "", "author": ""}) as mock_index:
-        result = runner.invoke(main, ["index", "pdf", str(pdf)])
-
+def test_index_pdf_command_indexes_file(runner, fake_pdf):
+    with patch("nexus.doc_indexer.index_pdf", return_value=PDF_RESULT) as m:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
     assert result.exit_code == 0, result.output
-    mock_index.assert_called_once()
+    m.assert_called_once()
     assert "3" in result.output
 
 
-def test_index_pdf_nonexistent_path_fails(runner: CliRunner, index_home: Path) -> None:
-    """Non-existent PDF path produces a non-zero exit code."""
-    result = runner.invoke(main, ["index", "pdf", str(index_home / "missing.pdf")])
-    assert result.exit_code != 0
-
-
-# ── nx index md ───────────────────────────────────────────────────────────────
-
-def test_index_md_command_indexes_file(runner: CliRunner, index_home: Path) -> None:
-    """nx index md <path> calls index_markdown and reports chunk count."""
-    md = index_home / "doc.md"
-    md.write_text("# Hello\n\nWorld.\n")
-
-    with patch("nexus.doc_indexer.index_markdown", return_value={"chunks": 2, "sections": 0}) as mock_index:
-        result = runner.invoke(main, ["index", "md", str(md)])
-
+def test_index_md_command_indexes_file(runner, fake_md):
+    with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT) as m:
+        result = runner.invoke(main, ["index", "md", str(fake_md)])
     assert result.exit_code == 0, result.output
-    mock_index.assert_called_once()
+    m.assert_called_once()
     assert "2" in result.output
 
 
-def test_index_md_nonexistent_path_fails(runner: CliRunner, index_home: Path) -> None:
-    """Non-existent markdown path produces a non-zero exit code."""
-    result = runner.invoke(main, ["index", "md", str(index_home / "missing.md")])
+@pytest.mark.parametrize("subcmd,ext", [("pdf", "pdf"), ("md", "md")])
+def test_index_nonexistent_path_fails(runner, home, subcmd, ext):
+    result = runner.invoke(main, ["index", subcmd, str(home / f"missing.{ext}")])
     assert result.exit_code != 0
 
 
-# ── --frecency-only flag ──────────────────────────────────────────────────────
+# ── --frecency-only flag ─────────────────────────────────────────────────────
 
-def test_index_repo_frecency_only_flag_passed_through(runner: CliRunner, index_home: Path) -> None:
-    """nx index repo <path> --frecency-only passes frecency_only=True to index_repository."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}  # already registered
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "repo", str(repo), "--frecency-only"])
-
+@pytest.mark.parametrize("flag,expected", [
+    (["--frecency-only"], True),
+    ([], False),
+])
+def test_index_repo_frecency_only(runner, repo_dir, mock_reg, flag, expected):
+    result, mock_idx = _invoke_repo(runner, [str(repo_dir)] + flag, mock_reg)
     assert result.exit_code == 0, result.output
-    mock_index.assert_called_once()
-    _, call_kwargs = mock_index.call_args
-    assert call_kwargs.get("frecency_only") is True
-    assert "frecency" in result.output.lower()
+    _, kw = mock_idx.call_args
+    assert kw.get("frecency_only") is expected
+    if expected:
+        assert "frecency" in result.output.lower()
 
 
-def test_index_repo_default_is_full_index(runner: CliRunner, index_home: Path) -> None:
-    """nx index repo <path> without --frecency-only passes frecency_only=False."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
+# ── --force flag ─────────────────────────────────────────────────────────────
 
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "repo", str(repo)])
-
+def test_index_repo_force_flag(runner, repo_dir, mock_reg):
+    result, mock_idx = _invoke_repo(runner, [str(repo_dir), "--force"], mock_reg)
     assert result.exit_code == 0, result.output
-    mock_index.assert_called_once()
-    _, call_kwargs = mock_index.call_args
-    assert call_kwargs.get("frecency_only") is False
-
-
-# ── --force flag ──────────────────────────────────────────────────────────────
-
-
-def test_index_repo_force_flag_passed_through(runner: CliRunner, index_home: Path) -> None:
-    """nx index repo <path> --force passes force=True to index_repository."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "repo", str(repo), "--force"])
-
-    assert result.exit_code == 0, result.output
-    mock_index.assert_called_once()
-    _, call_kwargs = mock_index.call_args
-    assert call_kwargs.get("force") is True
-
-
-def test_index_repo_force_frecency_mutual_exclusion(runner: CliRunner, index_home: Path) -> None:
-    """--force and --frecency-only are mutually exclusive on nx index repo."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        result = runner.invoke(main, ["index", "repo", str(repo), "--force", "--frecency-only"])
-
-    assert result.exit_code != 0
-    assert "mutually exclusive" in result.output.lower()
-
-
-def test_index_repo_force_output_message(runner: CliRunner, index_home: Path) -> None:
-    """nx index repo <path> --force prints 'Force-indexing' instead of 'Indexing'."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository"):
-            result = runner.invoke(main, ["index", "repo", str(repo), "--force"])
-
-    assert result.exit_code == 0, result.output
+    _, kw = mock_idx.call_args
+    assert kw.get("force") is True
     assert "Force-indexing" in result.output
 
 
-def test_index_pdf_force_flag(runner: CliRunner, index_home: Path) -> None:
-    """nx index pdf <path> --force passes force=True to index_pdf."""
-    pdf = index_home / "doc.pdf"
-    pdf.write_bytes(b"fake pdf")
-
-    with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 5, "pages": [], "title": "", "author": ""}) as mock_index:
-        result = runner.invoke(main, ["index", "pdf", str(pdf), "--force"])
-
-    assert result.exit_code == 0, result.output
-    mock_index.assert_called_once()
-    _, call_kwargs = mock_index.call_args
-    assert call_kwargs.get("force") is True
-
-
-def test_index_pdf_force_dry_run_mutual_exclusion(runner: CliRunner, index_home: Path) -> None:
-    """--force and --dry-run are mutually exclusive on nx index pdf."""
-    pdf = index_home / "doc.pdf"
-    pdf.write_bytes(b"fake pdf")
-
-    result = runner.invoke(main, ["index", "pdf", str(pdf), "--force", "--dry-run"])
-
+def test_index_repo_force_frecency_mutual_exclusion(runner, repo_dir, mock_reg):
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        result = runner.invoke(
+            main, ["index", "repo", str(repo_dir), "--force", "--frecency-only"]
+        )
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output.lower()
 
 
-def test_index_md_force_flag(runner: CliRunner, index_home: Path) -> None:
-    """nx index md <path> --force passes force=True to index_markdown."""
-    md = index_home / "doc.md"
-    md.write_text("# Hello\n\nWorld.\n")
-
-    with patch("nexus.doc_indexer.index_markdown", return_value={"chunks": 2, "sections": 0}) as mock_index:
-        result = runner.invoke(main, ["index", "md", str(md), "--force"])
-
+def test_index_pdf_force_flag(runner, fake_pdf):
+    with patch("nexus.doc_indexer.index_pdf", return_value={**PDF_RESULT, "chunks": 5}) as m:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--force"])
     assert result.exit_code == 0, result.output
-    mock_index.assert_called_once()
-    _, call_kwargs = mock_index.call_args
-    assert call_kwargs.get("force") is True
+    _, kw = m.call_args
+    assert kw.get("force") is True
 
 
-# ── --monitor flag ─────────────────────────────────────────────────────────────
+def test_index_pdf_force_dry_run_mutual_exclusion(runner, fake_pdf):
+    result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--force", "--dry-run"])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower()
+
+
+def test_index_md_force_flag(runner, fake_md):
+    with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT) as m:
+        result = runner.invoke(main, ["index", "md", str(fake_md), "--force"])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw.get("force") is True
+
+
+# ── --monitor flag ───────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("subcmd,extra_args", [
     ("repo", []),
@@ -243,18 +177,15 @@ def test_index_md_force_flag(runner: CliRunner, index_home: Path) -> None:
     ("pdf", []),
     ("md", []),
 ])
-def test_monitor_flag_accepted(
-    runner: CliRunner, index_home: Path, subcmd: str, extra_args: list[str]
-) -> None:
-    """--monitor flag is accepted by all four index subcommands (exit 0)."""
+def test_monitor_flag_accepted(runner, home, subcmd, extra_args):
     if subcmd == "repo":
-        target = index_home / "myrepo"
+        target = home / "myrepo"
         target.mkdir()
     elif subcmd in ("pdf", "md"):
-        target = index_home / f"doc.{subcmd}"
+        target = home / f"doc.{subcmd}"
         target.write_bytes(b"fake")
     else:
-        target = index_home / "myrepo"
+        target = home / "myrepo"
         rdr_dir = target / "docs" / "rdr"
         rdr_dir.mkdir(parents=True)
         (rdr_dir / "001.md").write_text("# RDR\n")
@@ -265,171 +196,104 @@ def test_monitor_flag_accepted(
         "pdf": "nexus.doc_indexer.index_pdf",
         "md": "nexus.doc_indexer.index_markdown",
     }[subcmd]
-    # pdf/md with --monitor calls return_metadata=True, so mock must return a dict
-    mock_rv: dict | int
-    if subcmd in ("repo", "rdr"):
-        mock_rv = {}
-    elif subcmd == "pdf":
-        mock_rv = {"chunks": 0, "pages": [], "title": "", "author": ""}
-    else:
-        mock_rv = {"chunks": 0, "sections": 0}
+    mock_rv = {
+        "repo": {},
+        "rdr": {},
+        "pdf": {"chunks": 0, "pages": [], "title": "", "author": ""},
+        "md": {"chunks": 0, "sections": 0},
+    }[subcmd]
 
     patches = [patch(mock_target, return_value=mock_rv)]
     if subcmd == "repo":
-        mock_reg = MagicMock()
-        mock_reg.get.return_value = {"collection": "code__x"}
-        patches.append(patch("nexus.commands.index._registry", return_value=mock_reg))
+        reg = MagicMock()
+        reg.get.return_value = {"collection": "code__x"}
+        patches.append(patch("nexus.commands.index._registry", return_value=reg))
 
     with contextlib.ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
         result = runner.invoke(main, ["index", subcmd, str(target), "--monitor"] + extra_args)
-
     assert result.exit_code == 0, f"{subcmd}: {result.output}"
 
 
-# ── index_repo_cmd monitor behaviour ──────────────────────────────────────────
+# ── repo monitor behaviour ──────────────────────────────────────────────────
 
-def test_repo_callbacks_always_passed(runner: CliRunner, index_home: Path) -> None:
-    """index_repository is called with on_start and on_file callables (even without --monitor)."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository") as mock_index:
-            result = runner.invoke(main, ["index", "repo", str(repo)])
-
+def test_repo_callbacks_always_passed(runner, repo_dir, mock_reg):
+    result, mock_idx = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0, result.output
-    _, kwargs = mock_index.call_args
-    assert callable(kwargs.get("on_start")), "on_start must be callable"
-    assert callable(kwargs.get("on_file")), "on_file must be callable"
+    _, kw = mock_idx.call_args
+    assert callable(kw.get("on_start"))
+    assert callable(kw.get("on_file"))
 
 
-def test_repo_monitor_nontty_output_format(runner: CliRunner, index_home: Path) -> None:
-    """With --monitor in non-TTY, output contains [N/total] lines."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}
-
+def _make_fake_index(files):
+    """Build a fake index_repository that calls on_start/on_file with given (path, chunks, time) tuples."""
     def fake_index(path, reg, **kwargs):
         on_start = kwargs.get("on_start")
         on_file = kwargs.get("on_file")
         if on_start:
-            on_start(2)
+            on_start(len(files))
         if on_file:
-            on_file(Path("a.py"), 5, 0.1)
-            on_file(Path("b.py"), 0, 0.05)
+            for f, c, t in files:
+                on_file(Path(f), c, t)
         return {}
+    return fake_index
 
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository", side_effect=fake_index):
-            result = runner.invoke(main, ["index", "repo", str(repo), "--monitor"])
 
+@pytest.mark.parametrize("files,expected_in_output", [
+    ([("a.py", 5, 0.1), ("b.py", 0, 0.05)], ["[1/2]", "[2/2]"]),
+    ([("skip.py", 0, 0.02)], ["skipped"]),
+    ([("code.py", 7, 0.3)], ["7 chunks"]),
+])
+def test_repo_monitor_output(runner, repo_dir, mock_reg, files, expected_in_output):
+    result, _ = _invoke_repo(
+        runner,
+        [str(repo_dir), "--monitor"],
+        mock_reg,
+        index_side_effect=_make_fake_index(files),
+    )
     assert result.exit_code == 0, result.output
-    assert "[1/2]" in result.output
-    assert "[2/2]" in result.output
+    for text in expected_in_output:
+        assert text in result.output
 
 
-def test_repo_monitor_skipped_label(runner: CliRunner, index_home: Path) -> None:
-    """on_file with chunks=0 produces 'skipped' in monitor output."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}
-
-    def fake_index(path, reg, **kwargs):
-        if kwargs.get("on_start"):
-            kwargs["on_start"](1)
-        if kwargs.get("on_file"):
-            kwargs["on_file"](Path("skip.py"), 0, 0.02)
-        return {}
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository", side_effect=fake_index):
-            result = runner.invoke(main, ["index", "repo", str(repo), "--monitor"])
-
-    assert result.exit_code == 0, result.output
-    assert "skipped" in result.output
-
-
-def test_repo_monitor_chunks_label(runner: CliRunner, index_home: Path) -> None:
-    """on_file with chunks>0 produces 'N chunks' in monitor output."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}
-
-    def fake_index(path, reg, **kwargs):
-        if kwargs.get("on_start"):
-            kwargs["on_start"](1)
-        if kwargs.get("on_file"):
-            kwargs["on_file"](Path("code.py"), 7, 0.3)
-        return {}
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository", side_effect=fake_index):
-            result = runner.invoke(main, ["index", "repo", str(repo), "--monitor"])
-
-    assert result.exit_code == 0, result.output
-    assert "7 chunks" in result.output
-
-
-def test_repo_monitor_nontty_no_cr(runner: CliRunner, index_home: Path) -> None:
-    """Non-TTY monitor output contains no carriage return characters."""
-    repo = index_home / "myrepo"
-    repo.mkdir()
-    mock_reg = MagicMock()
-    mock_reg.get.return_value = {"collection": "code__myrepo"}
-
-    def fake_index(path, reg, **kwargs):
-        if kwargs.get("on_start"):
-            kwargs["on_start"](1)
-        if kwargs.get("on_file"):
-            kwargs["on_file"](Path("f.py"), 3, 0.1)
-        return {}
-
-    with patch("nexus.commands.index._registry", return_value=mock_reg):
-        with patch("nexus.indexer.index_repository", side_effect=fake_index):
-            result = runner.invoke(main, ["index", "repo", str(repo), "--monitor"])
-
+def test_repo_monitor_nontty_no_cr(runner, repo_dir, mock_reg):
+    result, _ = _invoke_repo(
+        runner,
+        [str(repo_dir), "--monitor"],
+        mock_reg,
+        index_side_effect=_make_fake_index([("f.py", 3, 0.1)]),
+    )
     assert result.exit_code == 0, result.output
     assert "\r" not in result.output
 
 
-# ── index_rdr_cmd monitor behaviour ───────────────────────────────────────────
+# ── RDR monitor behaviour ───────────────────────────────────────────────────
 
-def test_rdr_monitor_on_file_passed(runner: CliRunner, index_home: Path) -> None:
-    """With --monitor, batch_index_markdowns is called with on_file kwarg."""
-    repo = index_home / "myrepo"
+def _make_rdr_dir(home: Path, count: int = 1) -> Path:
+    repo = home / "myrepo"
     rdr_dir = repo / "docs" / "rdr"
-    rdr_dir.mkdir(parents=True)
-    (rdr_dir / "001.md").write_text("# RDR\n")
+    rdr_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(1, count + 1):
+        (rdr_dir / f"{i:03d}.md").write_text(f"# RDR {i}\n")
+    return repo
 
-    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+
+def test_rdr_monitor_on_file_passed(runner, home):
+    repo = _make_rdr_dir(home)
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as m:
         result = runner.invoke(main, ["index", "rdr", str(repo), "--monitor"])
-
     assert result.exit_code == 0, result.output
-    _, kwargs = mock_batch.call_args
-    assert callable(kwargs.get("on_file")), "on_file must be callable"
+    _, kw = m.call_args
+    assert callable(kw.get("on_file"))
 
 
-def test_rdr_monitor_bar_total(runner: CliRunner, index_home: Path) -> None:
-    """tqdm bar is created with total=len(rdr_files)."""
-    repo = index_home / "myrepo"
-    rdr_dir = repo / "docs" / "rdr"
-    rdr_dir.mkdir(parents=True)
-    (rdr_dir / "001.md").write_text("# A\n")
-    (rdr_dir / "002.md").write_text("# B\n")
-    (rdr_dir / "003.md").write_text("# C\n")
-
+def test_rdr_monitor_bar_total(runner, home):
+    repo = _make_rdr_dir(home, count=3)
     with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}):
         with patch("nexus.commands.index.tqdm") as mock_tqdm:
             mock_tqdm.return_value = MagicMock()
             result = runner.invoke(main, ["index", "rdr", str(repo), "--monitor"])
-
     assert result.exit_code == 0, result.output
     mock_tqdm.assert_called_once()
     call_args = mock_tqdm.call_args
@@ -437,144 +301,71 @@ def test_rdr_monitor_bar_total(runner: CliRunner, index_home: Path) -> None:
     assert total == 3, f"expected total=3, got {total}"
 
 
-# ── index_pdf_cmd and index_md_cmd monitor behaviour ──────────────────────────
+# ── pdf/md monitor metadata ─────────────────────────────────────────────────
 
-def test_pdf_monitor_return_metadata(runner: CliRunner, index_home: Path) -> None:
-    """With --monitor, index_pdf is called with return_metadata=True."""
-    pdf = index_home / "doc.pdf"
-    pdf.write_bytes(b"fake pdf")
-
-    mock_result = {"chunks": 3, "pages": [1, 2, 3], "title": "Test", "author": "Author"}
-    with patch("nexus.doc_indexer.index_pdf", return_value=mock_result) as mock_index:
-        result = runner.invoke(main, ["index", "pdf", str(pdf), "--monitor"])
-
+def test_pdf_monitor_return_metadata(runner, fake_pdf):
+    rv = {"chunks": 3, "pages": [1, 2, 3], "title": "Test", "author": "Author"}
+    with patch("nexus.doc_indexer.index_pdf", return_value=rv) as m:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--monitor"])
     assert result.exit_code == 0, result.output
-    _, kwargs = mock_index.call_args
-    assert kwargs.get("return_metadata") is True
+    _, kw = m.call_args
+    assert kw.get("return_metadata") is True
     assert "Chunks: 3" in result.output
 
 
-def test_md_monitor_return_metadata(runner: CliRunner, index_home: Path) -> None:
-    """With --monitor, index_markdown is called with return_metadata=True."""
-    md = index_home / "doc.md"
-    md.write_text("# Hello\n\nWorld.\n")
-
-    mock_result = {"chunks": 2, "sections": 1}
-    with patch("nexus.doc_indexer.index_markdown", return_value=mock_result) as mock_index:
-        result = runner.invoke(main, ["index", "md", str(md), "--monitor"])
-
+def test_md_monitor_return_metadata(runner, fake_md):
+    rv = {"chunks": 2, "sections": 1}
+    with patch("nexus.doc_indexer.index_markdown", return_value=rv) as m:
+        result = runner.invoke(main, ["index", "md", str(fake_md), "--monitor"])
     assert result.exit_code == 0, result.output
-    _, kwargs = mock_index.call_args
-    assert kwargs.get("return_metadata") is True
+    _, kw = m.call_args
+    assert kw.get("return_metadata") is True
     assert "Chunks: 2" in result.output
     assert "Sections: 1" in result.output
 
 
-# ── --collection flag normalization ───────────────────────────────────────────
+# ── --collection normalization ───────────────────────────────────────────────
 
-def test_pdf_collection_flag_normalized_via_t3_collection_name(
-    runner: CliRunner, index_home: Path
-) -> None:
-    """--collection knowledge becomes knowledge__knowledge via t3_collection_name().
-
-    Regression guard: bare collection names like "knowledge" must be normalized
-    to "knowledge__knowledge" so search (which uses resolve_corpus with __
-    prefix matching) can find the indexed chunks.
-    See postmortem: docs/postmortem/2026-03-23-pdf-index-collection-mismatch.md
-    """
-    pdf = index_home / "doc.pdf"
-    pdf.write_bytes(b"fake pdf")
-
-    # Return a dict (monitor path) since CliRunner stdout is non-TTY
-    mock_result = {"chunks": 5, "pages": [1], "title": "T", "author": "A"}
-    with patch("nexus.doc_indexer.index_pdf", return_value=mock_result) as mock_index:
-        result = runner.invoke(
-            main, ["index", "pdf", str(pdf), "--collection", "knowledge"]
-        )
-
+@pytest.mark.parametrize("flag_val,expected", [
+    ("knowledge", "knowledge__knowledge"),
+    ("knowledge__delos", "knowledge__delos"),
+])
+def test_pdf_collection_flag_normalization(runner, fake_pdf, flag_val, expected):
+    rv = {"chunks": 5, "pages": [1], "title": "T", "author": "A"}
+    with patch("nexus.doc_indexer.index_pdf", return_value=rv) as m:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--collection", flag_val])
     assert result.exit_code == 0, result.output
-    _, kwargs = mock_index.call_args
-    # Must be normalized: "knowledge" → "knowledge__knowledge"
-    assert kwargs["collection_name"] == "knowledge__knowledge", (
-        f"--collection flag not normalized: got {kwargs['collection_name']!r}"
-    )
+    _, kw = m.call_args
+    assert kw["collection_name"] == expected
 
 
-def test_pdf_collection_flag_already_qualified_unchanged(
-    runner: CliRunner, index_home: Path
-) -> None:
-    """--collection knowledge__delos passes through unchanged."""
-    pdf = index_home / "doc.pdf"
-    pdf.write_bytes(b"fake pdf")
+# ── --extractor flag ─────────────────────────────────────────────────────────
 
-    mock_result = {"chunks": 3, "pages": [1], "title": "T", "author": "A"}
-    with patch("nexus.doc_indexer.index_pdf", return_value=mock_result) as mock_index:
-        result = runner.invoke(
-            main, ["index", "pdf", str(pdf), "--collection", "knowledge__delos"]
-        )
+_PDF_STUB = {"chunks": 1, "pages": [], "title": "", "author": ""}
 
+
+@pytest.mark.parametrize("extractor", ["auto", "mineru", "docling"])
+def test_extractor_valid_values(runner, fake_pdf, extractor):
+    args = ["index", "pdf", str(fake_pdf)]
+    if extractor != "auto":
+        args += ["--extractor", extractor]
+    with patch("nexus.doc_indexer.index_pdf", return_value=_PDF_STUB) as m:
+        result = runner.invoke(main, args)
     assert result.exit_code == 0, result.output
-    _, kwargs = mock_index.call_args
-    assert kwargs["collection_name"] == "knowledge__delos"
+    _, kw = m.call_args
+    assert kw["extractor"] == extractor
 
 
-# ── RDR-044 Phase 3: --extractor CLI flag ──────────────────────────────────
+def test_extractor_invalid_rejected(runner, fake_pdf):
+    result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--extractor", "magic"])
+    assert result.exit_code != 0
 
 
-class TestIndexPdfExtractorFlag:
-    """--extractor option on nx index pdf."""
-
-    def test_default_extractor_passes_auto(self, runner: CliRunner, index_home: Path) -> None:
-        """Without --extractor, index_pdf receives extractor='auto'."""
-        pdf = index_home / "doc.pdf"
-        pdf.write_bytes(b"dummy")
-
-        with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
-            result = runner.invoke(main, ["index", "pdf", str(pdf)])
-
-        assert result.exit_code == 0, result.output
-        _, kwargs = mock_index.call_args
-        assert kwargs["extractor"] == "auto"
-
-    def test_extractor_mineru(self, runner: CliRunner, index_home: Path) -> None:
-        """--extractor mineru passes extractor='mineru' to index_pdf."""
-        pdf = index_home / "doc.pdf"
-        pdf.write_bytes(b"dummy")
-
-        with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
-            result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "mineru"])
-
-        assert result.exit_code == 0, result.output
-        _, kwargs = mock_index.call_args
-        assert kwargs["extractor"] == "mineru"
-
-    def test_extractor_docling(self, runner: CliRunner, index_home: Path) -> None:
-        """--extractor docling passes extractor='docling' to index_pdf."""
-        pdf = index_home / "doc.pdf"
-        pdf.write_bytes(b"dummy")
-
-        with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 1, "pages": [], "title": "", "author": ""}) as mock_index:
-            result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "docling"])
-
-        assert result.exit_code == 0, result.output
-        _, kwargs = mock_index.call_args
-        assert kwargs["extractor"] == "docling"
-
-    def test_invalid_extractor_rejected(self, runner: CliRunner, index_home: Path) -> None:
-        """Invalid --extractor value is rejected by Click choice validation."""
-        pdf = index_home / "doc.pdf"
-        pdf.write_bytes(b"dummy")
-
-        result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "magic"])
-        assert result.exit_code != 0
-
-    def test_mineru_not_installed_gives_helpful_error(self, runner: CliRunner, index_home: Path) -> None:
-        """ImportError from MinerU produces a user-visible error message."""
-        pdf = index_home / "doc.pdf"
-        pdf.write_bytes(b"dummy")
-
-        with patch("nexus.doc_indexer.index_pdf", side_effect=ImportError("MinerU is not installed. Install with: uv pip install 'conexus[mineru]'")):
-            result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "mineru"])
-
-        assert result.exit_code != 0
-        assert "MinerU" in result.output
+def test_mineru_not_installed_gives_helpful_error(runner, fake_pdf):
+    with patch(
+        "nexus.doc_indexer.index_pdf",
+        side_effect=ImportError("MinerU is not installed. Install with: uv pip install 'conexus[mineru]'"),
+    ):
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--extractor", "mineru"])
+    assert result.exit_code != 0
+    assert "MinerU" in result.output

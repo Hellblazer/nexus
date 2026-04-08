@@ -42,45 +42,25 @@ def validate_collection_name(name: str) -> None:
         )
 
 
-def embedding_model_for_collection(collection_name: str) -> str:
-    """Return the Voyage AI model used at QUERY time for a T3 collection.
+def voyage_model_for_collection(collection_name: str) -> str:
+    """Return the Voyage AI model for a T3 collection (index and query).
 
-    The query model must match the index model to produce vectors in the
-    same space.  Mismatched models yield random noise (cosine sim ≈ 0.05).
+    The same model MUST be used at both index and query time —
+    mismatched models yield random noise (RDR-059).
 
-    code__      → voyage-code-3    (matches index model)
-    docs__      → voyage-context-3 (CCE, via contextualized_embed)
-    knowledge__ → voyage-context-3 (CCE, via contextualized_embed)
-    rdr__       → voyage-context-3 (CCE, via contextualized_embed)
-    all others  → voyage-code-3    (safe default for unknown prefixes)
+    docs__/knowledge__/rdr__ → voyage-context-3 (CCE)
+    code__ and all others    → voyage-code-3
 
-    Note: in local mode, callers bypass this function and use
-    ``LocalEmbeddingFunction().model_name`` directly.
+    In local mode, callers bypass this and use ``LocalEmbeddingFunction``.
     """
     if collection_name.startswith(("docs__", "knowledge__", "rdr__")):
         return "voyage-context-3"
-    if collection_name.startswith("code__"):
-        return "voyage-code-3"
     return "voyage-code-3"
 
 
-def index_model_for_collection(collection_name: str) -> str:
-    """Return the Voyage AI model used at INDEX time for a T3 collection.
-
-    code__      → voyage-code-3    (code-optimised; same model at query time)
-    docs__      → voyage-context-3 (CCE for richer cross-chunk context)
-    knowledge__ → voyage-context-3 (CCE for richer cross-chunk context)
-    rdr__       → voyage-context-3 (CCE for RDR decision documents)
-    all others  → voyage-code-3    (safe default)
-
-    Note: in local mode, callers bypass this function and use
-    ``LocalEmbeddingFunction().model_name`` directly.
-    """
-    if collection_name.startswith("code__"):
-        return "voyage-code-3"
-    if collection_name.startswith(("docs__", "knowledge__", "rdr__")):
-        return "voyage-context-3"
-    return "voyage-code-3"
+# Backward-compatible aliases — callers don't need to distinguish index vs query.
+embedding_model_for_collection = voyage_model_for_collection
+index_model_for_collection = voyage_model_for_collection
 
 
 def t3_collection_name(user_arg: str) -> str:
