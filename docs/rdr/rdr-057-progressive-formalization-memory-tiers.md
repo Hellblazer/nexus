@@ -77,6 +77,41 @@ RDR-055 and RDR-056 shipped infrastructure that directly serves RDR-057's phases
 
 **Net effect**: Phase 1 scope shrinks (~10 LOC for `formalizes` link + metadata field, vs building L1 classification from scratch). Phase 4 becomes integration work rather than greenfield (wire existing `cluster_results()` into `link_generator.py`). Phase 2 consolidation has empirical threshold data instead of guesswork.
 
+### RF-7: Implementation Feasibility — Schema Changes and FTS5 Consolidation
+
+**Source**: Codebase audit of `t1.py`, `t2.py`, `catalog_db.py` (post-v3.3.0)
+
+**T1 access tracking (Phase 1c)**: T1 is ChromaDB `EphemeralClient`, not SQLite. ChromaDB metadata is mutable via `col.update()` — `access_count` and `last_accessed` can be stored as metadata keys on each entry. `get()` and `search()` would call `col.update(ids=[id], metadatas=[{...existing, "access_count": n+1}])` after returning results. Cost: one extra ChromaDB call per get/search hit. No schema migration — ChromaDB metadata is schemaless.
+
+**T2 schema changes (Phase 2b/2c)**: T2 `memory` table uses `CREATE TABLE` with no `access_count` column. SQLite `ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0` is non-breaking and instant (no table rewrite). Same for `last_accessed TEXT`. The `expire()` method (line 584) uses `julianday('now') - julianday(timestamp) > ttl` — swapping to `effective_ttl = ttl / (1 + log(access_count + 1))` requires changing one SQL expression, no schema change beyond the new column.
+
+**T2 FTS5 consolidation (Phase 2b)**: `put()` currently upserts by `(project, title)` — exact key match. For semantic overlap detection, the existing `memory_fts` FTS5 table (title + content + tags) is already built with sync triggers. A pre-put similarity check would be:
+```sql
+SELECT id, title, rank FROM memory m
+JOIN memory_fts ON memory_fts.rowid = m.id
+WHERE memory_fts MATCH ? AND m.project = ?
+ORDER BY rank LIMIT 3
+```
+FTS5 `rank` is BM25 — negative values, closer to 0 = better match. **Threshold calibration needed**: BM25 scores are query-length-dependent, not absolute. A fixed threshold will false-positive on short entries and false-negative on long ones. Options: (a) normalize by query length, (b) use relative rank (top-1 rank < 0.7 * top-2 rank → likely duplicate), (c) supplement with embedding similarity from T3 if the entry exists there.
+
+**`formalizes` link type (Phase 1a)**: Link types are free-form `TEXT` — no enum, no validation table. Adding `formalizes` requires zero schema changes. Just use it in `catalog.link()` calls. The unique constraint is `(from_tumbler, to_tumbler, link_type)`, so the same document pair can have both `cites` and `formalizes` links.
+
+**`formalization_level` metadata (Phase 1b)**: Catalog `documents` table has `metadata JSON` column. `formalization_level` goes in the JSON — no ALTER TABLE needed. Queryable via `json_extract(metadata, '$.formalization_level')` in SQLite. However, `where=` in ChromaDB search expects metadata keys on chunks, not catalog entries. To make `--where formalization_level>=1` work in `nx search`, the field must be added to chunk metadata at index time (like `section_type` in RDR-055), not just catalog metadata. This means the indexing pipeline needs to read formalization_level from catalog and inject it into chunk metadata — a cross-tier dependency.
+
+**Claim annotation on links (Phase 3a)**: Links table has `metadata JSON` column. Claims can go there — no schema change. The `from_span` and `to_span` TEXT columns already exist for content-addressed span references (RDR-053). A claim annotation is a third text field: `json_extract(metadata, '$.claim')`. The `catalog_link` MCP tool already accepts arbitrary metadata via its `metadata` parameter.
+
+**Summary of migration burden**:
+| Change | Mechanism | Migration |
+|--------|-----------|-----------|
+| T1 access_count | ChromaDB metadata key | None (schemaless) |
+| T2 access_count | ALTER TABLE ADD COLUMN | Non-breaking, instant |
+| T2 effective_ttl | SQL expression change | None |
+| formalizes link | Free-form link_type | None |
+| formalization_level | Catalog JSON metadata + chunk metadata at index time | Requires indexer change |
+| claim annotation | Links JSON metadata | None |
+
+**Risk**: The `formalization_level` cross-tier dependency (catalog → indexer → chunk metadata) is the only non-trivial migration. All other changes are additive with zero schema migration.
+
 ## Proposed Design
 
 ### The Formalization Flywheel
