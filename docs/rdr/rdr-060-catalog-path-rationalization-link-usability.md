@@ -106,13 +106,54 @@ Code entries store relative paths (`src/nexus/indexer.py`), but RDR/prose entrie
 
 Nexus repo (2026-04-08):
 - 5,913 total links (5,145 implements-heuristic, 765 implements, 3 relates)
-- session.py has 133+ links (chunk duplication)
-- Filepath linker found 266 path matches but 0 new links (all pre-existed as heuristic)
-- 505 of 818 RDR file_paths across all repos point to non-existent files
+- 266 filepath matches found but 0 new links (all pre-existed as heuristic)
+- 505 of 818 RDR file_paths across all repos are absolute and point to non-existent files
 
 ### RF-2: Xanadu Tumbler Model Alignment
 
 Per RDR-053, tumblers provide stable document identity independent of filesystem location. Adding `repo_root` to the owner record completes the mapping: `tumbler → owner → repo_root → file_path → absolute path`. This is the Xanadu pattern of separating content identity from content location.
+
+### RF-3: file_path Inconsistency — 8 Call Sites, 3 Formats
+
+**Source**: Codebase analysis (2026-04-08)
+
+8 call sites set `file_path` on `catalog.register()`:
+
+| Call site | Format | Example |
+|-----------|--------|---------|
+| `indexer.py:259` | Relative to repo root | `src/nexus/corpus.py` |
+| `doc_indexer.py:831` | Absolute | `/Users/.../docs/ref.md` |
+| `pipeline_stages.py:476` | Absolute (from PDF path) | `/Users/.../paper.pdf` |
+| `mcp_server.py:1174` | User-provided (unvalidated) | varies |
+| `commands/catalog.py:395,825,901` | Mixed | varies |
+
+`catalog.register()` (`catalog.py:342-438`) applies **zero normalization** — file_path stored as-is. Idempotency check (`by_file_path`) does exact match, so the same file registered with absolute and relative paths creates duplicates.
+
+### RF-4: Owner Record Missing repo_root
+
+**Source**: `catalog/tumbler.py:135-141`
+
+`OwnerRecord` has `repo_hash` but no `repo_root` field. The owner→filesystem mapping exists only implicitly (via the registry at `src/nexus/registry.py` which maps repo_hash → Path). Adding `repo_root` to OwnerRecord enables: `tumbler → owner.repo_root / entry.file_path → absolute path`.
+
+DB schema change: add `repo_root TEXT` to owners table in `catalog_db.py:25`.
+
+### RF-5: Search Already Accepts Catalog Parameter
+
+**Source**: `search_engine.py:148-156`
+
+`search_cross_corpus()` already has `catalog: Any | None = None` parameter (line 155). Currently used only for pre-filtering (`_prefilter_from_catalog`). Link boost can be injected at line 223 (after results retrieved, before clustering) following the `apply_quality_boost` pattern in `scoring.py:130-186`.
+
+### RF-6: Link Generators Already Run on Every Index
+
+**Source**: `indexer.py:273-282`
+
+`_register_indexed_files()` calls both `generate_code_rdr_links()` and `generate_rdr_filepath_links()` after every `index_repository`. They process ALL entries every time and rely on `link_if_absent()` idempotency. Not incremental — O(n*m) scan.
+
+### RF-7: Catalog Entries Are Per-File, Not Per-Chunk
+
+**Source**: `catalog.py:48-63`, indexer call sites
+
+Catalog registers ONE entry per source file with `chunk_count` metadata. All 5 indexer paths (code, prose, PDF, doc-markdown, streaming PDF) follow this pattern. The link graph is already file-level. The earlier observation of "133 links for session.py" was measuring links across all owners, not duplicated chunks.
 
 ## Open Questions
 
