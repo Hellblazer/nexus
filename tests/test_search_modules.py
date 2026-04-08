@@ -15,6 +15,8 @@ def test_scoring_imports():
         min_max_normalize,
         hybrid_score,
         apply_hybrid_scoring,
+        quality_score,
+        apply_quality_boost,
         rerank_results,
         round_robin_interleave,
     )

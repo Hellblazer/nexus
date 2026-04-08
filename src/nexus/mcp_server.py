@@ -337,12 +337,16 @@ def search(
 
         # Fetch enough to fill the requested page
         fetch_n = offset + limit
+        clustered = bool(cluster_by)
         results = search_cross_corpus(
             query, target, n_results=fetch_n, t3=t3, where=where_dict,
             cluster_by=cluster_by or None,
             catalog=_get_catalog(),
         )
-        results.sort(key=lambda r: r.distance)
+        # Only sort by distance for flat (non-clustered) results.
+        # Clustered results arrive in cluster-grouped order from search_engine.
+        if not clustered:
+            results.sort(key=lambda r: r.distance)
         if not results:
             return "No results."
 
@@ -353,7 +357,15 @@ def search(
             return f"No results at offset {offset} (total {total})."
 
         lines: list[str] = []
+        current_cluster: str | None = None
         for r in page:
+            # Emit cluster header when group changes
+            cluster_label = r.metadata.get("_cluster_label", "")
+            if clustered and cluster_label and cluster_label != current_cluster:
+                if current_cluster is not None:
+                    lines.append("")  # blank separator between clusters
+                lines.append(f"── {cluster_label} ──")
+                current_cluster = cluster_label
             title = r.metadata.get("source_title") or r.metadata.get("title", "")
             source = r.metadata.get("source_path", "")
             dist = f"{r.distance:.4f}"

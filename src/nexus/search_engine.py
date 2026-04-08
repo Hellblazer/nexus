@@ -197,10 +197,8 @@ def search_cross_corpus(
         dropped = 0
         for r in raw:
             distance = r["distance"]
-            # RDR-055 interaction: when E2 quality_score reranking
-            # (nexus-3idt/nexus-rg6x) is active, thresholds must be applied
-            # AFTER reranking, not here. For now thresholds apply to raw
-            # distance. Re-validate after RDR-055 E1 re-indexing.
+            # RDR-055 E2 quality_boost runs after hybrid scoring in the
+            # CLI/MCP paths. Thresholds apply to raw distance here.
             if threshold is not None and distance > threshold:
                 dropped += 1
                 continue

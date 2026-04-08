@@ -329,6 +329,10 @@ def search_cmd(
         file_size_threshold=tuning.file_size_threshold,
     )
 
+    # RDR-055 E2: quality boost from bibliographic metadata (no-op when unenriched)
+    from nexus.scoring import apply_quality_boost
+    results = apply_quality_boost(results)
+
     # Reranking (skipped in local mode — no Voyage AI reranker available)
     from nexus.config import is_local_mode
     if not no_rerank and not is_local_mode() and len(set(r.collection for r in results)) > 1:
