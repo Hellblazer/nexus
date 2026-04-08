@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-14 agents, 28 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
+16 agents, 32 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
 
 ## Installation
 
@@ -36,8 +36,8 @@ Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 
 ## What You Get
 
-- **14 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **28 skills** — 6 standalone + 15 agent-delegating + 7 RDR workflow
+- **16 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
+- **32 skills** — 10 standalone + 15 agent-delegating + 7 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt

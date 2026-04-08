@@ -3,7 +3,7 @@ name: strategic-planner
 version: "2.1"
 description: Creates phased TDD-driven implementation plans and decomposes complex work into tracked beads. Use for multi-phase feature planning, dependency management, breaking vague requirements into executable tasks, or iterating on existing plans.
 model: opus
-color: purple
+color: indigo
 effort: high
 ---
 

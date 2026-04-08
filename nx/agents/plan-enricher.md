@@ -3,7 +3,7 @@ name: plan-enricher
 version: "2.0"
 description: Enriches beads with execution context — file paths, code patterns, constraints, test commands, and (when available) audit findings. Use after plan-audit in RDR planning chain, or standalone for bead enrichment within the same session.
 model: sonnet
-color: green
+color: emerald
 effort: medium
 ---
 

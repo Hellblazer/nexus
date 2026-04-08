@@ -198,7 +198,7 @@ agents:
 
   pdf-chromadb-processor:
     model: haiku
-    version: "2.0"
+    version: "3.0"
     color: coral
     skill: pdf-processing
     slash_command: /pdf-process
@@ -217,7 +217,7 @@ agents:
 
   query-planner:
     model: sonnet
-    version: "1.0"
+    version: "2.0"
     color: blue
     skill: query
     slash_command: /query
