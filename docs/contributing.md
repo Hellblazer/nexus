@@ -150,12 +150,12 @@ Every step below is **required**. Missing any one of them has caused problems in
 
 7. **Update `.claude-plugin/marketplace.json`**
    Bump the `"version"` field in **both** the `nx` and `sn` plugin entries to match the new version.
-   Also update `sn/.claude-plugin/plugin.json` to match.
-   This is what the Claude Code marketplace reads — forgetting it leaves the marketplace on the old version.
+   Also update `nx/.claude-plugin/plugin.json` and `sn/.claude-plugin/plugin.json` to match.
+   Claude Code uses each plugin's `plugin.json` version to decide whether to refresh the cache — forgetting either one leaves stale skills/agents running.
 
 8. **Commit all release artifacts directly to `main`**
    ```bash
-   git add pyproject.toml uv.lock CHANGELOG.md nx/CHANGELOG.md sn/.claude-plugin/plugin.json .claude-plugin/marketplace.json docs/
+   git add pyproject.toml uv.lock CHANGELOG.md nx/CHANGELOG.md nx/.claude-plugin/plugin.json sn/.claude-plugin/plugin.json .claude-plugin/marketplace.json docs/
    git commit -m "chore: bump version to X.Y.Z"
    git push
    ```
@@ -193,7 +193,8 @@ Every step below is **required**. Missing any one of them has caused problems in
 | `CHANGELOG.md` | move Unreleased → `[X.Y.Z]`, add empty Unreleased |
 | `nx/CHANGELOG.md` | add `[X.Y.Z]` entry |
 | `.claude-plugin/marketplace.json` | bump `"version"` in both `nx` and `sn` plugin entries |
-| `sn/.claude-plugin/plugin.json` | bump `"version"` to match |
+| `nx/.claude-plugin/plugin.json` | bump `"version"` to match — **controls nx cache refresh** |
+| `sn/.claude-plugin/plugin.json` | bump `"version"` to match — **controls sn cache refresh** |
 | `docs/cli-reference.md` | new/changed CLI flags and subcommands |
 | `docs/architecture.md` | new/changed modules |
 | `docs/repo-indexing.md` | indexing pipeline changes |

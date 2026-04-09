@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.4] - 2026-04-09
+
+### Fixed
+- **plugin.json version stuck at 3.2.3** — Claude Code uses `nx/.claude-plugin/plugin.json` version to decide cache refresh. Was never bumped since initial creation, so no nx plugin updates were reaching users. Now bumped to 3.6.4 and added to release checklist.
+
 ## [3.6.3] - 2026-04-09
 
 ### Fixed
