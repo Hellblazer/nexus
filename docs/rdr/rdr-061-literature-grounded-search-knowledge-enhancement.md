@@ -154,10 +154,12 @@ Weights: A=user-visible value 25%, B=foundation built 20%, C=leverage 25%, D=lit
 **Finding**: Excluding methods/references/acknowledgements sections from evidence extraction improves precision. Section-aware design reflects document structure where relevant content is concentrated in specific sections.
 **Nexus relevance**: Validates E1 (section-type filter). RDR-055 already indexes section_type metadata — just needs filter plumbing.
 
-### RF-061-4: Memory systems need consolidation and decay, not just storage (MEDIUM-HIGH confidence)
+### RF-061-4: Memory systems need access-aware decay, not just time-based TTL (HIGH confidence, upgraded)
 **Source**: Memory in LLM Era (2604.01707, VLDB 2026), HoldUp (2604.02655)
-**Finding**: VLDB framework identifies 10+ memory patterns. HoldUp shows working memory with relevance decay outperforms unbounded accumulation. Key insight: memories that aren't accessed should weaken, not persist indefinitely.
-**Nexus relevance**: Validates E6 (memory consolidation). T2 TTL is time-based only; needs access-based relevance decay.
+**Finding**: VLDB framework classifies memory operations into five verbs: Store, Retrieve, Update, **Forget**, **Summarize/Reflect**. Most systems implement only the first two. It identifies three Forget mechanisms: (1) time-based TTL (nexus current state), (2) access-frequency decay — items not retrieved lose salience, (3) consolidation-summarize — overlapping entries merge into summaries. The paper explicitly states time-TTL alone is insufficient because it assigns identical survival probability to a never-read entry and a heavily-consulted one. HoldUp formalizes access decay as `I(m) = recency × relevance × access_count`, decaying multiplicatively per session as `I_new = I_old × λ^(sessions_since_access)` with λ ∈ [0.7, 0.9], plus a retention floor: entries with `access_count >= 3` are never evicted.
+**Nexus T2 gap (confirmed by code inspection)**: `db/t2.py` schema has `timestamp` (write-time only, reads never update it) and `ttl` (integer days from write). No `last_accessed` column. No `access_count` column. `get()` and `search()` have zero side effects on rows. The TTL clock is write-anchored and blind to access patterns.
+**Proposed schema change**: Add `access_count INTEGER NOT NULL DEFAULT 0` and `last_accessed TEXT` (ISO, NULL = never read). Add `_touch(ids)` method called by `get()`/`search()`. Upgrade `expire()` to respect retention floor: entries with `access_count >= 3` survive even past TTL unless also idle for 30 days. Two ALTER TABLE statements, one UPDATE per read, zero migration risk (DEFAULT 0/NULL initializes existing rows).
+**Confidence upgrade justification**: VLDB explicitly names access-frequency as recommended Forget signal with comparative evidence. HoldUp provides tested formula. T2 gap confirmed by direct schema inspection. Upgraded MEDIUM-HIGH → HIGH.
 
 ### RF-061-5: Progressive formalization L0→L3 is the differentiator (HIGH confidence)
 **Source**: Semantic Ladder (2603.22136), Formalization Flywheel synthesis
@@ -174,10 +176,12 @@ Weights: A=user-visible value 25%, B=foundation built 20%, C=leverage 25%, D=lit
 **Finding**: BBC achieves 3.8x speedup at recall@0.95 for large-k ANN. Robustness-δ@K provides a formal metric for ANN stability. Both address tail-failure problems in HNSW.
 **Nexus relevance**: Background for RDR-056 (closed). No new action needed — over-fetch+threshold already addresses this.
 
-### RF-061-8: HybridRAG GraphRAG component uses entity-relation triples (HIGH confidence)
-**Source**: HybridRAG (arxiv 2408.04948)
-**Finding**: GraphRAG constructs KG from documents via entity-relation triple extraction, builds a graph database, then retrieves subgraphs relevant to queries. Critical: the KG construction is LLM-driven (not rule-based), extracting (entity, relation, entity) triples from text chunks.
-**Nexus relevance**: Strengthens E3 design. Current auto_linker uses heuristic matching (symbol names in prose). LLM-driven entity-relation extraction would produce richer cross-collection links. Consider as a Phase 2 enhancement to E3.
+### RF-061-8: LLM-driven entity-relation extraction — EvidenceNet hybrid approach preferred (HIGH confidence, deepened)
+**Source**: HybridRAG (arxiv 2408.04948), EvidenceNet (arxiv 2603.28325)
+**Finding**: HybridRAG uses a two-tiered LLM chain: Tier 1 refines chunk text, Tier 2 extracts SPO triples via prompt engineering over typed entity classes (company, financial metric, event, legal) with free-form NL predicates. Post-processed for coreference disambiguation and redundancy removal. **Key weakness**: free-form predicates don't map to nexus `follow_links` by type. EvidenceNet's hybrid strategy is more applicable: heuristics generate candidate pairs (semantic similarity + shared entity overlap), then LLM classifies uncertain pairs into a **closed relation vocabulary** (SUPPORTS, REFINES, EXTENDS, REPLICATES, CAUSAL_CHAIN) — cheaper than pure-LLM all-pairs.
+**Nexus current state (confirmed by code inspection)**: `auto_linker.py` creates zero content-derived links — purely mechanical, instantiates links pre-seeded by caller via T1 scratch `link-context`. `link_generator.py` uses three batch heuristics only: bib cross-match (`cites`), regex file-path extraction (`implements`), module-name substring match (`implements-heuristic`). No LLM involved anywhere.
+**Proposed LLM extractor for nexus**: At `store_put` time for `knowledge__*` collections: (1) heuristic pass — title/keyword overlap against catalog → candidate (doc, target) pairs; (2) LLM verification pass (uncertain candidates only) — classify as {cites, implements, supersedes, relates, none} with confidence score; (3) filter confidence >= 0.7 → call `auto_link()`. This enables content-derived link discovery without caller pre-seeding, closing the gap where auto_linker requires skills to know target tumblers in advance. Adopt EvidenceNet hybrid over HybridRAG pure-LLM to contain per-document API cost.
+**Domain adaptation**: Nexus entity types are Module, Function, Concept, Design Decision, Paper — not financial entities. Relation types map directly to existing catalog vocabulary.
 
 ## Risks
 
