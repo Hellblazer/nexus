@@ -260,6 +260,8 @@ def _flag_contradictions(
             embs = t3.get_embeddings(col, ids)
         except Exception:
             continue
+        if embs.shape[0] != len(indices):
+            continue
         norms = np.linalg.norm(embs, axis=1, keepdims=True)
         normed = embs / np.maximum(norms, 1e-9)
         for a, b in itertools.combinations(range(len(indices)), 2):
