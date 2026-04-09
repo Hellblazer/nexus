@@ -353,6 +353,23 @@ def test_get_preserves_existing_metadata(t1: T1Database) -> None:
     assert meta["access_count"] == 1
 
 
+def test_get_return_value_reflects_updated_access_count(t1: T1Database) -> None:
+    """C-1 fix: get() return value shows the incremented access_count, not stale."""
+    doc_id = t1.put(content="return value check")
+    result = t1.get(doc_id)
+    assert result["access_count"] == 1  # return value reflects the update
+    result2 = t1.get(doc_id)
+    assert result2["access_count"] == 2
+
+
+def test_promote_does_not_increment_access_count(t1: T1Database, db: T2Database) -> None:
+    """I-2 fix: promote() does not inflate access_count."""
+    doc_id = t1.put(content="promote without tracking")
+    t1.promote(doc_id, project="proj", title="p.md", t2=db)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    assert raw["metadatas"][0]["access_count"] == 0
+
+
 def test_access_count_update_failure_does_not_raise(t1: T1Database) -> None:
     """If the access count update fails, get() should still return the entry."""
     doc_id = t1.put(content="resilient entry")

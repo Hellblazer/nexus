@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -15,7 +15,7 @@ class PromotionReport:
             or 'conflicting' (reserved for Phase 3 semantic conflict detection).
     """
 
-    action: str  # Literal["new", "merged", "conflicting"]
+    action: Literal["new", "merged", "conflicting"]
     existing_title: str | None = None
     merged: bool = False
 

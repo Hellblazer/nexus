@@ -178,7 +178,7 @@ class T1Database:
             self._exec(lambda: self._col.update(ids=[id], metadatas=[updated_meta]))
         except Exception:
             _log.warning("t1_access_count_update_failed", id=id)
-        return self._to_row(result["ids"][0], result["documents"][0], result["metadatas"][0])
+        return self._to_row(result["ids"][0], result["documents"][0], updated_meta)
 
     def search(self, query: str, n_results: int = 10) -> list[dict]:
         """Semantic search using the local ONNX embedding model.
@@ -308,9 +308,11 @@ class T1Database:
         """Copy T1 entry *id* to T2 immediately. Returns a PromotionReport."""
         from nexus.types import PromotionReport
 
-        entry = self.get(id)
-        if entry is None:
+        # Fetch without incrementing access_count (promote is a write-path, not a read)
+        result = self._exec(lambda: self._col.get(ids=[id], include=["documents", "metadatas"]))
+        if not result["ids"]:
             raise KeyError(f"No scratch entry: {id!r}")
+        entry = self._to_row(result["ids"][0], result["documents"][0], result["metadatas"][0])
         # FTS5 overlap detection: first ~100 chars as search query
         snippet = entry["content"][:100]
         try:
