@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.2] - 2026-04-08
+
+### Fixed
+- **CCE oversized chunk handling** — single chunks exceeding Voyage's 32K token context window are now truncated to ~30K tokens and retried, then degraded to zero vector if still too large. No more infinite retry spam.
+- **Recursive CCE batch splitting** — batch halves now recurse through `_embed_one_batch` at all depth levels instead of calling the API directly.
+- **Classifier: data files skipped** — `.txt`, `.csv`, `.tsv`, `.dat`, `.log` files are now classified as SKIP (not PROSE). Prevents wasting API calls on non-prose data files.
+- **Catalog progress output** — `nx index repo` now shows progress lines during the catalog registration, link generation, and housekeeping phases instead of a silent pause.
+
 ## [3.6.1] - 2026-04-08
 
 ### Fixed
