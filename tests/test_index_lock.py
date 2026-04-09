@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """T1: index_repository per-repo file lock, on_locked flag, and head_hash update."""
 import fcntl
+import os
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -37,6 +39,82 @@ def lock_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect HOME so lock files land in tmp_path."""
     monkeypatch.setenv("HOME", str(tmp_path))
     return tmp_path
+
+
+# ── stale lock cleanup ────────────────────────────────────────────────────────
+
+
+def test_clear_stale_lock_removes_empty_old_file(tmp_path: Path) -> None:
+    """Empty lock files older than _LOCK_STALE_SECONDS are removed."""
+    from nexus.indexer import _clear_stale_lock, _LOCK_STALE_SECONDS
+
+    lock = tmp_path / "stale.lock"
+    lock.touch()
+    # Backdate the file so it's clearly stale
+    import os
+    old_time = time.time() - _LOCK_STALE_SECONDS - 1
+    os.utime(lock, (old_time, old_time))
+
+    _clear_stale_lock(lock)
+    assert not lock.exists()
+
+
+def test_clear_stale_lock_keeps_fresh_empty_file(tmp_path: Path) -> None:
+    """Empty lock files younger than _LOCK_STALE_SECONDS are left alone."""
+    from nexus.indexer import _clear_stale_lock
+
+    lock = tmp_path / "fresh.lock"
+    lock.touch()  # just created — mtime is now
+
+    _clear_stale_lock(lock)
+    assert lock.exists()
+
+
+def test_clear_stale_lock_removes_dead_pid(tmp_path: Path) -> None:
+    """Lock files containing a dead PID are removed."""
+    from nexus.indexer import _clear_stale_lock
+
+    lock = tmp_path / "dead.lock"
+    lock.write_text("999999999")  # PID that almost certainly doesn't exist
+
+    _clear_stale_lock(lock)
+    assert not lock.exists()
+
+
+def test_clear_stale_lock_keeps_live_pid(tmp_path: Path) -> None:
+    """Lock files containing the current (live) PID are kept."""
+    from nexus.indexer import _clear_stale_lock
+
+    lock = tmp_path / "live.lock"
+    lock.write_text(str(os.getpid()))
+
+    _clear_stale_lock(lock)
+    assert lock.exists()
+
+
+def test_sweep_stale_locks_cleans_directory(tmp_path: Path) -> None:
+    """_sweep_stale_locks removes all stale files from a directory."""
+    from nexus.indexer import _sweep_stale_locks, _LOCK_STALE_SECONDS
+
+    locks_dir = tmp_path / "locks"
+    locks_dir.mkdir()
+
+    # Create 3 stale empty lock files
+    old_time = time.time() - _LOCK_STALE_SECONDS - 1
+    for name in ["aaa.lock", "bbb.lock", "ccc.lock"]:
+        f = locks_dir / name
+        f.touch()
+        os.utime(f, (old_time, old_time))
+
+    # Create 1 fresh file that should survive
+    fresh = locks_dir / "fresh.lock"
+    fresh.touch()
+
+    _sweep_stale_locks(locks_dir)
+
+    remaining = list(locks_dir.glob("*.lock"))
+    assert len(remaining) == 1
+    assert remaining[0].name == "fresh.lock"
 
 
 # ── lock path helper ──────────────────────────────────────────────────────────

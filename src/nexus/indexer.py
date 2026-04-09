@@ -187,29 +187,50 @@ def _repo_lock_path(repo: Path) -> Path:
     return Path.home() / ".config" / "nexus" / "locks" / f"{path_hash}.lock"
 
 
+_LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
+
+
 def _clear_stale_lock(lock_path: Path) -> None:
-    """Delete *lock_path* if it contains a dead PID.
+    """Delete *lock_path* if it is stale (dead PID or old empty file).
 
-    Only removes a lock file when we can confirm the recorded PID is dead
-    (``ESRCH`` from ``os.kill(pid, 0)``).  Files with no parseable PID are
-    left alone — they may belong to an active process that hasn't written
-    its PID yet.
+    A lock file is stale when:
+    - It contains a PID that no longer exists (ESRCH), OR
+    - It has no parseable PID and is older than ``_LOCK_STALE_SECONDS``.
 
-    This is advisory only — ``fcntl.flock`` provides the real mutual exclusion.
+    The second case handles background processes (disown/&) that were killed
+    before writing their PID, leaving empty 0-byte lock files forever.
+
+    This is advisory cleanup — ``fcntl.flock`` provides the real mutual
+    exclusion.
     """
     if not lock_path.exists():
         return
     try:
         pid = int(lock_path.read_text().strip())
     except (ValueError, OSError):
-        # No readable PID — could be a just-opened lock. Leave it;
-        # flock will handle contention.
+        # No readable PID — check file age.  A just-opened lock will be
+        # younger than _LOCK_STALE_SECONDS; an orphan from a crashed
+        # process will be much older.
+        try:
+            age = time.time() - lock_path.stat().st_mtime
+        except OSError:
+            return
+        if age > _LOCK_STALE_SECONDS:
+            _remove_stale(lock_path)
         return
     try:
         os.kill(pid, 0)
     except OSError as exc:
         if exc.errno == errno.ESRCH:
             _remove_stale(lock_path)
+
+
+def _sweep_stale_locks(lock_dir: Path) -> None:
+    """Remove all stale lock files in *lock_dir*."""
+    if not lock_dir.is_dir():
+        return
+    for lock_file in lock_dir.glob("*.lock"):
+        _clear_stale_lock(lock_file)
 
 
 def _remove_stale(lock_path: Path) -> None:
@@ -434,6 +455,7 @@ def index_repository(
     if not frecency_only:
         lock_path = _repo_lock_path(repo)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        _sweep_stale_locks(lock_path.parent)
         _clear_stale_lock(lock_path)
         lock_fd = open(lock_path, "w")  # noqa: SIM115  (must stay open while locked)
         try:
