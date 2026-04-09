@@ -146,15 +146,15 @@ class TestSnHookOutput:
         assert "## Context7 MCP" in hook_output
 
     def test_serena_routing_table(self, hook_output: str) -> None:
+        # Both JetBrains and LSP variants should appear (backend-agnostic discovery)
         assert "jet_brains_find_symbol" in hook_output
+        assert "find_symbol" in hook_output
         assert "jet_brains_find_referencing_symbols" in hook_output
-        assert "jet_brains_get_symbols_overview" in hook_output
+        assert "find_referencing_symbols" in hook_output
 
-    def test_parameter_signatures_present(self, hook_output: str) -> None:
-        assert "name_path_pattern" in hook_output
-        assert "relative_path" in hook_output
-        assert "include_body" in hook_output
-        assert "substring_pattern" in hook_output
+    def test_initial_instructions_delegation(self, hook_output: str) -> None:
+        """Parameter docs are now delegated to Serena's initial_instructions tool."""
+        assert "initial_instructions" in hook_output
 
     def test_search_for_pattern_in_routing(self, hook_output: str) -> None:
         """search_for_pattern is available in claude-code context and must be documented."""
