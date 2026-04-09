@@ -263,3 +263,76 @@ def test_t1_pagination(t1: T1Database, method: str, expected: int) -> None:
         assert len(result) == expected
     else:
         assert result == expected and len(t1.list_entries()) == 0
+
+
+# ── access tracking (RDR-057 P1-1b, nexus-jpsj) ────────────────────────────
+
+
+def test_new_entry_has_access_count_zero(t1: T1Database) -> None:
+    doc_id = t1.put(content="fresh entry")
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    meta = raw["metadatas"][0]
+    assert meta["access_count"] == 0
+    assert meta["last_accessed"] == ""
+
+
+def test_get_increments_access_count(t1: T1Database) -> None:
+    doc_id = t1.put(content="trackable entry")
+    t1.get(doc_id)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    assert raw["metadatas"][0]["access_count"] == 1
+
+
+def test_get_three_times_access_count_three(t1: T1Database) -> None:
+    doc_id = t1.put(content="multi access")
+    t1.get(doc_id)
+    t1.get(doc_id)
+    t1.get(doc_id)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    assert raw["metadatas"][0]["access_count"] == 3
+
+
+def test_search_increments_access_count(t1: T1Database) -> None:
+    doc_id = t1.put(content="searchable unique content zygomorphic")
+    t1.search("zygomorphic")
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    assert raw["metadatas"][0]["access_count"] == 1
+
+
+def test_last_accessed_updated_after_get(t1: T1Database) -> None:
+    doc_id = t1.put(content="timestamp check")
+    t1.get(doc_id)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    ts = raw["metadatas"][0]["last_accessed"]
+    assert ts != ""
+    # Should be a valid ISO timestamp
+    from datetime import datetime
+    datetime.fromisoformat(ts)
+
+
+def test_get_preserves_existing_metadata(t1: T1Database) -> None:
+    """Access tracking must not wipe session_id, tags, or flagged."""
+    doc_id = t1.put(content="preserve me", tags="important")
+    t1.get(doc_id)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    meta = raw["metadatas"][0]
+    assert meta["session_id"] == _SESSION
+    assert meta["tags"] == "important"
+    assert meta["access_count"] == 1
+
+
+def test_access_count_update_failure_does_not_raise(t1: T1Database) -> None:
+    """If the access count update fails, get() should still return the entry."""
+    doc_id = t1.put(content="resilient entry")
+    original_update = t1._col.update
+
+    def broken_update(**kwargs):
+        raise RuntimeError("simulated failure")
+
+    t1._col.update = broken_update
+    try:
+        result = t1.get(doc_id)
+        assert result is not None
+        assert result["content"] == "resilient entry"
+    finally:
+        t1._col.update = original_update
