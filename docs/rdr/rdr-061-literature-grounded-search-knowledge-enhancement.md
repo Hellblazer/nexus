@@ -1,0 +1,144 @@
+---
+title: "Literature-Grounded Search and Knowledge Enhancement Roadmap"
+id: RDR-061
+type: design
+status: draft
+priority: P1
+author: Hal Hildebrand
+created: 2026-04-09
+related_issues: [RDR-055, RDR-056, RDR-057, RDR-058, RDR-049, RDR-051, RDR-052, RDR-053]
+related_notes: >
+  RDR-055 (closed): Section-type metadata — foundation for E1.
+  RDR-056 (closed): Search robustness — foundation for E1, E2.
+  RDR-057 (draft): Progressive formalization — IS E7.
+  RDR-058 (accepted): Pipeline orchestration — related to E4.
+  RDR-049/051/052/053 (closed): Catalog infrastructure — foundation for E3, E5.
+---
+
+# RDR-061: Literature-Grounded Search and Knowledge Enhancement Roadmap
+
+> Revise during planning; lock at implementation.
+> If wrong, abandon code and iterate RDR.
+
+## Problem Statement
+
+A comprehensive survey of 10 papers in the nexus T3 knowledge store (AgenticScholar, EvidenceNet, Semantic Ladder, Memory in LLM Era/VLDB 2026, HoldUp, BBC, Robustness-delta@K, DeepEye/SIGMOD 2026, LitMOF, Compass) identified 7 enhancement gaps between current nexus capabilities and the state of the art. While nexus already implements strong foundations (hybrid search, section-type metadata, typed link graph, catalog-aware routing, plan caching, 3-tier memory), several high-value improvements are grounded in published research and ready for implementation.
+
+## Design: 7 Enhancements in 3 Phases
+
+### Phase 1: Quick Wins (parallelizable, start immediately)
+
+#### E1: Section-Type Filter at Query Time
+
+- `section_type` metadata is indexed on every chunk (RDR-055) but not exposed as a search filter
+- Wire `section_type` through `filters.py` WHERE clause parsing into `search_engine.py`
+- Source: EvidenceNet excludes methods/references sections from evidence extraction
+- Key files: `src/nexus/filters.py`, `src/nexus/search_engine.py`
+- Effort: ~2 hours
+
+#### E2: Retrieval Feedback Loop (Phase 1: logging)
+
+- No signal is captured about which search results agents actually use
+- Log implicit relevance signal when a search->store_put or search->catalog_link pattern is detected within a session
+- Future phases: extend `frecency.py` to T3 chunks (Phase 2), feed back as re-ranking signal in `scoring.py` (Phase 3)
+- Source: No paper solves this well — differentiation opportunity
+- Key files: `src/nexus/db/t3.py`, `src/nexus/search_engine.py`, `src/nexus/frecency.py`, `src/nexus/scoring.py`
+- Effort: ~2 hours (Phase 1 logging only)
+
+### Phase 2: Foundation Builders (after Phase 1 review)
+
+#### E3: Cross-Collection Entity Resolution
+
+- Same concept indexed in `code__`/`docs__`/`rdr__` collections is unconnected — no cross-corpus links
+- Extend auto_linker with symbol-name matching: when a code symbol name appears in a prose chunk, create a `mentions` link in the catalog
+- Add semantic concept dedup: detect when two chunks across collections discuss the same concept
+- Source: EvidenceNet cross-document duplicate resolution, AgenticScholar taxonomy alignment
+- Key files: `src/nexus/catalog/auto_linker.py`, `src/nexus/catalog/link_generator.py`
+- Effort: ~5 hours (symbol matching + semantic dedup)
+
+#### E4: Composable Query Operators
+
+- Current `nx:query` skill decomposes into ad-hoc natural language steps, not typed operators with defined I/O
+- Define 5-6 composable operators with typed signatures:
+  - `Search(query, corpus, filters) -> ChunkSet`
+  - `Traverse(entry, link_type, depth) -> EntrySet`
+  - `Filter(set, predicate) -> Set`
+  - `Summarize(chunks, focus) -> Text`
+  - `Compare(chunk_sets[], dimensions) -> Matrix`
+  - `Generate(context, prompt) -> Text`
+- Plan library stores operator DAGs instead of prose; `nx:query` skill becomes an operator compiler
+- Source: AgenticScholar operator algebra beats raw RAG by 45-56% on NDCG
+- Key files: `src/nexus/search_engine.py`, `src/nexus/scoring.py`, new `src/nexus/operators.py`
+- Effort: ~5 hours (typed pipeline + MCP integration)
+
+### Phase 3: Differentiators (after Phase 2 review)
+
+#### E5: Automatic Taxonomy / Topic Hierarchy
+
+- Collections are flat bags of chunks with no topical organization
+- Run AgenticScholar Algorithm 3 (incremental top-down taxonomy refinement with LLM clustering) over knowledge collections
+- Use catalog tumbler tree as backbone; auto-generate topic labels for subtrees
+- Enables "what's underexplored?" queries via MatrixConstruct pattern
+- Requires: E3 (entity resolution) + E4 (operators) as prerequisites
+- Source: AgenticScholar taxonomy construction
+- Key files: new `src/nexus/taxonomy.py`, `src/nexus/catalog/catalog.py`
+- Effort: ~5 hours
+
+#### E6: Memory Consolidation and Relevance Decay
+
+- T2 memories accumulate without bound; TTL is time-based only, not relevance-based
+- Add access tracking on T2 memory entries (which are consulted by agents)
+- Flag memories not accessed in N sessions for review/consolidation
+- Merge overlapping memories covering the same topic
+- Requires: E2 (feedback loop) for access data
+- Source: HoldUp (2604.02655), Memory in LLM Era VLDB framework
+- Key files: `src/nexus/db/t2.py`, new consolidation logic
+- Effort: ~4 hours
+
+#### E7: Content Transformation on Tier Promotion
+
+- Already covered by RDR-057 (draft) — referenced here for completeness, not re-designed
+- JIT strategy decided: formalize on access rather than eagerly
+
+## Reranking Scores
+
+Weights: A=user-visible value 25%, B=foundation built 20%, C=leverage 25%, D=literature evidence 15%, E=differentiation 15%.
+
+| Rank | Enhancement | A | B | C | D | E | Composite |
+|------|------------|---|---|---|---|---|-----------|
+| 1 | E3: Cross-collection entity resolution | 4 | 4 | 5 | 4 | 4 | 4.25 |
+| 2 | E1: Section-type filter | 5 | 5 | 3 | 4 | 3 | 4.05 |
+| 3 | E7: Tier promotion (RDR-057) | 4 | 4 | 3 | 5 | 4 | 3.90 |
+| 4 | E4: Composable operators | 3 | 3 | 4 | 5 | 5 | 3.85 |
+| 5 | E2: Retrieval feedback | 3 | 3 | 5 | 3 | 5 | 3.80 |
+| 6 | E5: Taxonomy | 4 | 2 | 2 | 5 | 5 | 3.40 |
+| 7 | E6: Consolidation | 3 | 3 | 3 | 4 | 4 | 3.30 |
+
+## Dependencies
+
+- E5 requires E3 + E4
+- E6 requires E2
+- E7 is RDR-057 (separate)
+- E1 and E2 are independent (Phase 1)
+- E3 and E4 are independent (Phase 2)
+
+## Related Work
+
+- RDR-055 (closed): section-type metadata — foundation for E1
+- RDR-056 (closed): search robustness — foundation for E1, E2
+- RDR-057 (draft): progressive formalization — IS E7
+- RDR-058 (accepted): pipeline orchestration — related to E4
+- RDR-049/051/052/053 (closed): catalog infrastructure — foundation for E3, E5
+
+## Tracking
+
+- Epic bead: nexus-n94d
+- T3 synthesis: tumbler 1.10.403
+- T3 decision: decision-planner-enhancement-prioritization-2026-04-09
+
+## Risks
+
+1. E4 (composable operators) may need its own sub-RDR if the design space proves large
+2. E3 quality depends on metadata consistency across collections
+3. E5 needs enough documents per collection for meaningful clusters
+4. E6 must not penalize newly-added documents
