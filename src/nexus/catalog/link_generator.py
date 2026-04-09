@@ -125,6 +125,102 @@ def generate_rdr_filepath_links(cat: Catalog, *, new_tumblers: list[Tumbler] | N
     return count
 
 
+_MAX_ENTITY_MATCHES_PER_CODE = 10
+
+
+def _normalize_name(name: str) -> list[str]:
+    """CamelCase, snake_case, kebab-case -> list of lowercase tokens (len > 2)."""
+    # CamelCase split: insert space before uppercase preceded by lowercase
+    camel = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
+    # Replace non-alphanumeric with space
+    flat = re.sub(r"[_\-\s]+", " ", camel).strip().lower()
+    return [t for t in flat.split() if len(t) > 2]
+
+
+def generate_entity_name_links(
+    cat: Catalog,
+    *,
+    new_tumblers: list[Tumbler] | None = None,
+) -> int:
+    """Match code symbol names against knowledge/RDR titles via normalization.
+
+    Exact normalized match -> 'relates' link.
+    created_by='entity_name_matcher'.
+
+    When *new_tumblers* is provided, only those entries are evaluated
+    (incremental mode). Pass ``None`` for full-scan.
+    """
+    if new_tumblers is not None and len(new_tumblers) == 0:
+        return 0
+
+    entries = _all_entries(cat)
+    code_entries = [e for e in entries if e.content_type == "code"]
+    prose_entries = [
+        e for e in entries if e.content_type in ("knowledge", "rdr")
+    ]
+
+    if new_tumblers is not None:
+        new_set = {str(t) for t in new_tumblers}
+        new_code = [e for e in code_entries if str(e.tumbler) in new_set]
+        new_prose = [e for e in prose_entries if str(e.tumbler) in new_set]
+        # New code × all prose, plus all code × new prose (minus overlap)
+        pairs: list[tuple[CatalogEntry, list[CatalogEntry]]] = []
+        if new_code:
+            pairs.extend((c, prose_entries) for c in new_code)
+        if new_prose:
+            for code in code_entries:
+                if str(code.tumbler) in new_set:
+                    continue  # already covered
+                pairs.append((code, new_prose))
+    else:
+        pairs = [(c, prose_entries) for c in code_entries]
+
+    # Pre-normalize prose titles
+    prose_normalized: dict[int, tuple[CatalogEntry, set[str]]] = {}
+    for i, prose in enumerate(prose_entries):
+        tokens = set(_normalize_name(prose.title))
+        if tokens:
+            prose_normalized[id(prose)] = (prose, tokens)
+
+    count = 0
+    for code, prose_list in pairs:
+        code_tokens = set(_normalize_name(code.title))
+        if not code_tokens:
+            continue
+        matches_for_code = 0
+        for prose in prose_list:
+            cached = prose_normalized.get(id(prose))
+            if cached is None:
+                continue
+            _, prose_tokens = cached
+            # Exact match: all code tokens are a subset of prose tokens
+            if code_tokens.issubset(prose_tokens):
+                try:
+                    created = cat.link_if_absent(
+                        code.tumbler, prose.tumbler, "relates",
+                        created_by="entity_name_matcher",
+                    )
+                except ValueError:
+                    continue
+                if created:
+                    count += 1
+                    matches_for_code += 1
+                    _log.debug(
+                        "entity_name_link_created",
+                        code=str(code.tumbler),
+                        prose=str(prose.tumbler),
+                        code_tokens=list(code_tokens),
+                    )
+                if matches_for_code >= _MAX_ENTITY_MATCHES_PER_CODE:
+                    _log.warning(
+                        "entity_name_link_cap_reached",
+                        code=str(code.tumbler),
+                    )
+                    break
+
+    return count
+
+
 _MAX_RDR_MATCHES_PER_CODE = 5
 
 

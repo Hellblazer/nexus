@@ -106,6 +106,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
     content_rowid='id'
 );
 
+CREATE TABLE IF NOT EXISTS result_feedback (
+    id          INTEGER PRIMARY KEY,
+    query_hash  TEXT NOT NULL,
+    doc_id      TEXT NOT NULL,
+    collection  TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    session     TEXT,
+    ts          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rf_doc ON result_feedback(doc_id);
+CREATE INDEX IF NOT EXISTS idx_rf_collection ON result_feedback(collection);
+
 CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
     INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
 END;
@@ -182,6 +194,7 @@ class T2Database:
             self._migrate_fts_if_needed()
             self._migrate_plans_if_needed()
             self._migrate_plans_ttl_if_needed()
+            self._migrate_result_feedback_if_needed()
 
     def _migrate_plans_if_needed(self) -> None:
         """Add 'project' column to plans table if missing (v2.8.0 schema change).
@@ -234,6 +247,30 @@ class T2Database:
         self.conn.execute("ALTER TABLE plans ADD COLUMN ttl INTEGER")
         self.conn.commit()
         _log.info("plans ttl migration complete")
+
+    def _migrate_result_feedback_if_needed(self) -> None:
+        """Add result_feedback table if missing (v2.10 schema, RDR-061 E2)."""
+        row = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='result_feedback'"
+        ).fetchone()
+        if row is not None:
+            return
+        _log.info("Migrating T2 schema to add result_feedback table")
+        self.conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS result_feedback (
+                id          INTEGER PRIMARY KEY,
+                query_hash  TEXT NOT NULL,
+                doc_id      TEXT NOT NULL,
+                collection  TEXT NOT NULL,
+                action      TEXT NOT NULL,
+                session     TEXT,
+                ts          TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rf_doc ON result_feedback(doc_id);
+            CREATE INDEX IF NOT EXISTS idx_rf_collection ON result_feedback(collection);
+        """)
+        self.conn.commit()
+        _log.info("result_feedback migration complete")
 
     def _migrate_fts_if_needed(self) -> None:
         """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.

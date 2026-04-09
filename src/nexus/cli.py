@@ -10,6 +10,7 @@ from nexus.commands.collection import collection
 from nexus.commands.config_cmd import config_group
 from nexus.commands.doctor import doctor_cmd
 from nexus.commands.enrich import enrich
+from nexus.commands.feedback_cmd import feedback
 from nexus.commands.hook import hook_group
 from nexus.commands.hooks import hooks
 from nexus.commands.index import index
@@ -45,6 +46,7 @@ main.add_command(catalog)
 main.add_command(collection)
 main.add_command(config_group, name="config")
 main.add_command(enrich)
+main.add_command(feedback)
 main.add_command(doctor_cmd, name="doctor")
 hook_group.hidden = True
 main.add_command(hook_group, name="hook")

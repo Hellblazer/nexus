@@ -414,6 +414,8 @@ def store_put(
                 structlog.get_logger().debug("store_put_auto_linked", doc_id=doc_id, link_count=n)
         except Exception:
             pass  # auto-linking is non-fatal
+        # Implicit retrieval feedback
+        _log_implicit_feedback(doc_id, col_name, "store_put")
         return f"Stored: {doc_id} -> {col_name}"
     except Exception as e:
         return f"Error: {e}"
@@ -1269,6 +1271,8 @@ def catalog_link(
         if err:
             return {"error": err}
         created = cat.link(ft, tt, link_type, created_by, from_span=from_span, to_span=to_span)
+        if created:
+            _log_implicit_feedback(str(ft), "catalog", "catalog_link")
         return {"from": str(ft), "to": str(tt), "type": link_type, "created": created}
     except Exception as e:
         return {"error": str(e)}
@@ -1496,6 +1500,58 @@ def catalog_stats() -> dict:
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+# ── Retrieval feedback (RDR-061 E2) ──────────────────────────────────────────
+
+
+def _log_implicit_feedback(doc_id: str, collection: str, action: str) -> None:
+    """Fire-and-forget implicit feedback — non-fatal on any error."""
+    try:
+        from nexus.feedback import log_feedback
+        from nexus.session import read_claude_session_id
+
+        with _t2_ctx() as db:
+            log_feedback(
+                db,
+                doc_id=doc_id,
+                collection=collection,
+                query_hash="",
+                action=action,
+                session=read_claude_session_id(),
+            )
+    except Exception:
+        pass  # implicit feedback is non-fatal
+
+
+@mcp.tool()
+def result_used(doc_id: str, collection: str = "knowledge") -> str:
+    """Signal that a search result was useful — logs explicit retrieval feedback.
+
+    Call this after using a search result to improve future ranking.
+
+    Args:
+        doc_id: The document ID that was useful
+        collection: The collection it belongs to (default: knowledge)
+    """
+    try:
+        if not doc_id:
+            return "Error: doc_id is required"
+        from nexus.feedback import log_feedback
+        from nexus.session import read_claude_session_id
+        col_name = t3_collection_name(collection)
+        with _t2_ctx() as db:
+            row_id = log_feedback(
+                db,
+                doc_id=doc_id,
+                collection=col_name,
+                query_hash="",
+                action="explicit",
+                session=read_claude_session_id(),
+            )
+        return f"Feedback logged: {doc_id} in {col_name} (id={row_id})"
+    except Exception as e:
+        return f"Error: {e}"
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
