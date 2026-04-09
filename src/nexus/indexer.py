@@ -251,6 +251,9 @@ def _catalog_hook(
             )
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
 
+        import sys
+        _progress = sys.stderr.write
+        _progress(f"  Catalog: registering {len(indexed_files)} files…\r")
         new_tumblers = []
         for abs_path, content_type, collection_name in indexed_files:
             try:
@@ -284,20 +287,27 @@ def _catalog_hook(
                     physical_collection=collection_name,
                     meta={"content_hash": file_hash} if file_hash else None,
                 )
+        _progress(f"  Catalog: {len(new_tumblers)} new, {len(indexed_files) - len(new_tumblers)} updated\n")
+
         # Auto-generate links after registration (incremental: only new entries)
+        links_created = 0
+        if new_tumblers:
+            _progress(f"  Catalog: linking {len(new_tumblers)} new entries…\r")
         try:
             from nexus.catalog.link_generator import generate_code_rdr_links, generate_rdr_filepath_links
             link_count = generate_code_rdr_links(cat, new_tumblers=new_tumblers)
             fp_count = generate_rdr_filepath_links(cat, new_tumblers=new_tumblers)
-            total = link_count + fp_count
-            if total:
+            links_created = link_count + fp_count
+            if links_created:
                 _log.info("catalog_links_generated", heuristic=link_count, filepath=fp_count, repo=repo_name)
         except Exception:
             _log.debug("catalog_link_generation_failed", exc_info=True)
 
         # Housekeeping: detect and evict orphaned catalog entries
+        _progress(f"  Catalog: housekeeping…\r")
         indexed_set = {str(abs_path.relative_to(repo)) for abs_path, _, _ in indexed_files}
         _run_housekeeping(cat, owner, indexed_set)
+        _progress(f"  Catalog: done ({len(new_tumblers)} new, {links_created} links)\n")
     except Exception:
         _log.debug("catalog_hook_failed", exc_info=True)
 
