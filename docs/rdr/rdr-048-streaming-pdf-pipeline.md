@@ -2,7 +2,7 @@
 title: "Streaming PDF Pipeline"
 id: RDR-048
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-04-03
 priority: medium
 author: Hal Hildebrand

@@ -2,7 +2,8 @@
 title: "Pipeline Orchestration and Plan Reuse"
 id: RDR-058
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-04-09
 accepted_date: 2026-04-07
 priority: medium
 reviewed-by: self

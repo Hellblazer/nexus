@@ -2,7 +2,7 @@
 title: "Catalog Path Rationalization and Link Graph Usability"
 id: RDR-060
 type: Feature
-status: accepted
+status: closed
 accepted_date: 2026-04-08
 reviewed-by: self
 priority: high

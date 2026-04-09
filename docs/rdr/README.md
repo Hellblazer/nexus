@@ -69,7 +69,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-045](rdr-045-post-implementation-verification.md) | Post-Implementation Verification Gate | Architecture | Closed | 2026-04-01 |
 | [RDR-046](rdr-046-mineru-server-backed-extraction.md) | MinerU Server-Backed PDF Extraction | Architecture | Closed | 2026-04-02 |
 | [RDR-047](rdr-047-large-pdf-extraction-resilience.md) | Large PDF Extraction Resilience | Architecture | Closed | 2026-04-05 |
-| [RDR-048](rdr-048-streaming-pdf-pipeline.md) | Streaming PDF Pipeline | Architecture | Accepted | 2026-04-03 |
+| [RDR-048](rdr-048-streaming-pdf-pipeline.md) | Streaming PDF Pipeline | Architecture | Closed | 2026-04-03 |
 | [RDR-049](rdr-049-git-backed-catalog.md) | Git-Backed Xanadu-Inspired Catalog for T3 | Architecture | Closed | 2026-04-05 |
 | [RDR-050](rdr-050-knowledge-graph-query-planning.md) | Knowledge Graph and Catalog-Aware Query Planning | Architecture | Closed | 2026-04-05 |
 | [RDR-051](rdr-051-link-lifecycle.md) | Link Lifecycle: Full CRUD, Queryable Links, Bulk Operations | Architecture | Closed | 2026-04-05 |
@@ -79,9 +79,9 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-055](rdr-055-section-type-metadata-quality-scoring.md) | Section-Type Metadata and Quality Scoring for Knowledge Collections | Feature | Closed | 2026-04-07 |
 | [RDR-056](rdr-056-search-robustness-result-clustering.md) | Search Robustness and Result Clustering | Feature | Closed | 2026-04-07 |
 | [RDR-057](rdr-057-progressive-formalization-memory-tiers.md) | Progressive Formalization Across Memory Tiers | Feature | Draft | 2026-04-07 |
-| [RDR-058](rdr-058-pipeline-orchestration-plan-reuse.md) | Pipeline Orchestration and Plan Reuse | Feature | Accepted | 2026-04-07 |
+| [RDR-058](rdr-058-pipeline-orchestration-plan-reuse.md) | Pipeline Orchestration and Plan Reuse | Feature | Closed | 2026-04-07 |
 | [RDR-059](rdr-059-code-search-embedding-mismatch.md) | Code Search Embedding Model Mismatch | Bug | Closed | 2026-04-07 |
-| [RDR-060](rdr-060-catalog-path-rationalization-link-usability.md) | Catalog Path Rationalization and Link Graph Usability | Feature | Accepted | 2026-04-08 |
+| [RDR-060](rdr-060-catalog-path-rationalization-link-usability.md) | Catalog Path Rationalization and Link Graph Usability | Feature | Closed | 2026-04-08 |
 | [RDR-061](rdr-061-literature-grounded-search-knowledge-enhancement.md) | Literature-Grounded Search and Knowledge Enhancement Roadmap | Design | Draft | 2026-04-09 |
 
 ---
