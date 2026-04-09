@@ -47,15 +47,17 @@ _SCHEMA_SQL = """\
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS memory (
-    id        INTEGER PRIMARY KEY,
-    project   TEXT    NOT NULL,
-    title     TEXT    NOT NULL,
-    session   TEXT,
-    agent     TEXT,
-    content   TEXT    NOT NULL,
-    tags      TEXT,
-    timestamp TEXT    NOT NULL,
-    ttl       INTEGER
+    id            INTEGER PRIMARY KEY,
+    project       TEXT    NOT NULL,
+    title         TEXT    NOT NULL,
+    session       TEXT,
+    agent         TEXT,
+    content       TEXT    NOT NULL,
+    tags          TEXT,
+    timestamp     TEXT    NOT NULL,
+    ttl           INTEGER,
+    access_count  INTEGER DEFAULT 0 NOT NULL,
+    last_accessed TEXT    DEFAULT ''
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_project_title ON memory(project, title);
@@ -122,7 +124,7 @@ CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
 END;
 """
 
-_COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl")
+_COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl", "access_count", "last_accessed")
 _PLAN_COLUMNS = ("id", "project", "query", "plan_json", "outcome", "tags", "created_at", "ttl")
 
 # ── FTS5 rebuild SQL (used for migration from old schema lacking 'title') ─────
@@ -182,6 +184,7 @@ class T2Database:
             self._migrate_fts_if_needed()
             self._migrate_plans_if_needed()
             self._migrate_plans_ttl_if_needed()
+            self._migrate_access_tracking_if_needed()
 
     def _migrate_plans_if_needed(self) -> None:
         """Add 'project' column to plans table if missing (v2.8.0 schema change).
@@ -234,6 +237,24 @@ class T2Database:
         self.conn.execute("ALTER TABLE plans ADD COLUMN ttl INTEGER")
         self.conn.commit()
         _log.info("plans ttl migration complete")
+
+    def _migrate_access_tracking_if_needed(self) -> None:
+        """Add access_count and last_accessed columns to memory if missing."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(memory)").fetchall()}
+        changed = False
+        if "access_count" not in cols:
+            self.conn.execute(
+                "ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0 NOT NULL"
+            )
+            changed = True
+        if "last_accessed" not in cols:
+            self.conn.execute(
+                "ALTER TABLE memory ADD COLUMN last_accessed TEXT DEFAULT ''"
+            )
+            changed = True
+        if changed:
+            self.conn.commit()
+            _log.info("access_tracking migration complete")
 
     def _migrate_fts_if_needed(self) -> None:
         """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.
@@ -338,6 +359,12 @@ class T2Database:
                 ).fetchone()
             else:
                 raise ValueError("Provide either id or both project and title.")
+            if row:
+                self.conn.execute(
+                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                    (datetime.now(UTC).isoformat(), row[0]),
+                )
+                self.conn.commit()
         return dict(zip(_COLUMNS, row)) if row else None
 
     def search(self, query: str, project: str | None = None) -> list[dict[str, Any]]:
@@ -348,7 +375,8 @@ class T2Database:
                 if project:
                     sql = """
                         SELECT m.id, m.project, m.title, m.session, m.agent,
-                               m.content, m.tags, m.timestamp, m.ttl
+                               m.content, m.tags, m.timestamp, m.ttl,
+                               m.access_count, m.last_accessed
                         FROM memory m
                         JOIN memory_fts ON memory_fts.rowid = m.id
                         WHERE memory_fts MATCH ?
@@ -359,7 +387,8 @@ class T2Database:
                 else:
                     sql = """
                         SELECT m.id, m.project, m.title, m.session, m.agent,
-                               m.content, m.tags, m.timestamp, m.ttl
+                               m.content, m.tags, m.timestamp, m.ttl,
+                               m.access_count, m.last_accessed
                         FROM memory m
                         JOIN memory_fts ON memory_fts.rowid = m.id
                         WHERE memory_fts MATCH ?
@@ -368,6 +397,15 @@ class T2Database:
                     rows = self.conn.execute(sql, (safe,)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
+            # Batch-update access_count for all returned rows
+            if rows:
+                now = datetime.now(UTC).isoformat()
+                ids = [r[0] for r in rows]
+                self.conn.executemany(
+                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                    [(now, rid) for rid in ids],
+                )
+                self.conn.commit()
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def list_entries(
@@ -421,7 +459,8 @@ class T2Database:
         """FTS5 search scoped to projects matching a GLOB pattern (e.g. '*_rdr')."""
         sql = """
             SELECT m.id, m.project, m.title, m.session, m.agent,
-                   m.content, m.tags, m.timestamp, m.ttl
+                   m.content, m.tags, m.timestamp, m.ttl,
+                   m.access_count, m.last_accessed
             FROM memory m
             JOIN memory_fts ON memory_fts.rowid = m.id
             WHERE memory_fts MATCH ?
@@ -444,7 +483,8 @@ class T2Database:
         """
         sql = """
             SELECT m.id, m.project, m.title, m.session, m.agent,
-                   m.content, m.tags, m.timestamp, m.ttl
+                   m.content, m.tags, m.timestamp, m.ttl,
+                   m.access_count, m.last_accessed
             FROM memory m
             JOIN memory_fts ON memory_fts.rowid = m.id
             WHERE memory_fts MATCH ?
@@ -582,14 +622,36 @@ class T2Database:
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
     def expire(self) -> int:
-        """Delete TTL-expired entries. Returns the count of deleted rows."""
+        """Delete TTL-expired entries using heat-weighted effective TTL.
+
+        effective_ttl = base_ttl * (1 + log(access_count + 1))
+        Highly accessed entries survive longer. Unaccessed entries (access_count=0)
+        expire at base rate (log(1) = 0, so multiplier = 1).
+        """
+        import math
+
         with self._lock:
-            cursor = self.conn.execute(
+            rows = self.conn.execute(
                 """
-                DELETE FROM memory
+                SELECT id, access_count, ttl, timestamp
+                FROM memory
                 WHERE ttl IS NOT NULL
-                  AND julianday('now') - julianday(timestamp) > ttl
                 """
-            )
-            self.conn.commit()
-        return cursor.rowcount
+            ).fetchall()
+            now_jd = self.conn.execute("SELECT julianday('now')").fetchone()[0]
+            expired_ids: list[int] = []
+            for row_id, access_count, ttl, timestamp in rows:
+                effective_ttl = ttl * (1 + math.log(access_count + 1))
+                ts_jd = self.conn.execute(
+                    "SELECT julianday(?)", (timestamp,)
+                ).fetchone()[0]
+                age_days = now_jd - ts_jd
+                if age_days > effective_ttl:
+                    expired_ids.append(row_id)
+            if expired_ids:
+                placeholders = ",".join("?" * len(expired_ids))
+                self.conn.execute(
+                    f"DELETE FROM memory WHERE id IN ({placeholders})", expired_ids
+                )
+                self.conn.commit()
+        return len(expired_ids)
