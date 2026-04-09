@@ -441,8 +441,10 @@ def test_access_tracking_migration_idempotent(tmp_path: Path) -> None:
 def test_new_entry_access_count_zero(db: T2Database) -> None:
     """New entries start with access_count=0."""
     db.put(project="proj", title="fresh.md", content="new content")
-    entry = db.get(project="proj", title="fresh.md")
-    assert entry["access_count"] == 0
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='fresh.md'"
+    ).fetchone()
+    assert row[0] == 0
 
 
 def test_get_increments_access_count(db: T2Database) -> None:
@@ -522,3 +524,45 @@ def test_expire_permanent_entries_preserved(db: T2Database) -> None:
     db.put(project="proj", title="perm.md", content="permanent", ttl=None)
     _backdate(db, "perm.md", days=1000)
     assert db.expire() == 0
+
+
+def test_get_returns_post_increment_access_count(db: T2Database) -> None:
+    """get() return value reflects the incremented access_count, not stale."""
+    db.put(project="proj", title="fresh.md", content="data")
+    entry = db.get(project="proj", title="fresh.md")
+    assert entry["access_count"] == 1
+    entry2 = db.get(project="proj", title="fresh.md")
+    assert entry2["access_count"] == 2
+
+
+def test_get_by_id_increments_access_count(db: T2Database) -> None:
+    """get(id=...) also increments access_count."""
+    row_id = db.put(project="proj", title="byid.md", content="data")
+    db.get(id=row_id)
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE id=?", (row_id,)
+    ).fetchone()
+    assert row[0] == 1
+
+
+def test_upsert_preserves_access_count(db: T2Database) -> None:
+    """Re-putting with same key preserves accumulated access_count."""
+    db.put(project="proj", title="upsert.md", content="v1")
+    db.get(project="proj", title="upsert.md")
+    db.get(project="proj", title="upsert.md")
+    # access_count is now 2
+    db.put(project="proj", title="upsert.md", content="v2")
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='upsert.md'"
+    ).fetchone()
+    assert row[0] == 2  # preserved through upsert
+
+
+def test_search_glob_does_not_increment_access_count(db: T2Database) -> None:
+    """search_glob is an admin operation — does not track access."""
+    db.put(project="nexus_rdr", title="scan.md", content="scan content")
+    db.search_glob("scan", "*_rdr")
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='scan.md'"
+    ).fetchone()
+    assert row[0] == 0

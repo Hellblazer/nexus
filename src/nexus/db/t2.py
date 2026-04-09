@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+import math
 import os
 import sqlite3
 import threading
@@ -360,11 +361,16 @@ class T2Database:
             else:
                 raise ValueError("Provide either id or both project and title.")
             if row:
+                now = datetime.now(UTC).isoformat()
                 self.conn.execute(
                     "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                    (datetime.now(UTC).isoformat(), row[0]),
+                    (now, row[0]),
                 )
                 self.conn.commit()
+                result = dict(zip(_COLUMNS, row))
+                result["access_count"] += 1
+                result["last_accessed"] = now
+                return result
         return dict(zip(_COLUMNS, row)) if row else None
 
     def search(self, query: str, project: str | None = None) -> list[dict[str, Any]]:
@@ -628,8 +634,6 @@ class T2Database:
         Highly accessed entries survive longer. Unaccessed entries (access_count=0)
         expire at base rate (log(1) = 0, so multiplier = 1).
         """
-        import math
-
         with self._lock:
             rows = self.conn.execute(
                 """
@@ -638,14 +642,12 @@ class T2Database:
                 WHERE ttl IS NOT NULL
                 """
             ).fetchall()
-            now_jd = self.conn.execute("SELECT julianday('now')").fetchone()[0]
+            now = datetime.now(UTC)
             expired_ids: list[int] = []
             for row_id, access_count, ttl, timestamp in rows:
                 effective_ttl = ttl * (1 + math.log(access_count + 1))
-                ts_jd = self.conn.execute(
-                    "SELECT julianday(?)", (timestamp,)
-                ).fetchone()[0]
-                age_days = now_jd - ts_jd
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                age_days = (now - ts).total_seconds() / 86400.0
                 if age_days > effective_ttl:
                     expired_ids.append(row_id)
             if expired_ids:
