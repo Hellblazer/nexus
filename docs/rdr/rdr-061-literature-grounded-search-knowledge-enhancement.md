@@ -136,6 +136,49 @@ Weights: A=user-visible value 25%, B=foundation built 20%, C=leverage 25%, D=lit
 - T3 synthesis: tumbler 1.10.403
 - T3 decision: decision-planner-enhancement-prioritization-2026-04-09
 
+## Research Findings
+
+### RF-061-1: KG+Vector hybrid retrieval outperforms either alone (HIGH confidence)
+**Source**: HybridRAG (arxiv 2408.04948, Sarmah et al. 2024, BlackRock/NVIDIA)
+**Collection**: knowledge__hybridrag (50 chunks)
+**Finding**: On financial earnings call transcripts (Q&A format), HybridRAG combining KG-based GraphRAG with VectorRAG outperforms both individually at retrieval accuracy and answer generation. KG captures entity relationships and structural context that vector similarity misses; vector search captures semantic similarity that rigid graph traversal misses.
+**Nexus relevance**: Directly validates E3 (entity resolution) and E4 (composable operators). Nexus already has both a vector search engine and a catalog link graph — the missing piece is a query pipeline that fuses results from both. The composable operator `Traverse` + `Search` composition is exactly this pattern.
+
+### RF-061-2: AgenticScholar operator pipeline beats RAG by 45-56% NDCG (HIGH confidence)
+**Source**: AgenticScholar (knowledge__agentic-scholar, 172 chunks)
+**Finding**: Taxonomy-anchored KG with composable operators (Search, Traverse, FindNode, Summarize, MatrixConstruct, Generate) and plan caching achieves 0.606-0.655 NDCG@3-7 vs 0.411-0.447 for plain RAG. Key differentiator: operators have typed I/O signatures and can be composed into DAGs.
+**Nexus relevance**: Validates E4 (composable operators) and E5 (taxonomy). The plan library (plan_save/plan_search) already caches operator sequences — extend to typed operator DAGs.
+
+### RF-061-3: Section-aware chunking improves evidence extraction (HIGH confidence)
+**Source**: EvidenceNet (arxiv 2603.28325, knowledge__biomedical_kg, 136 chunks)
+**Finding**: Excluding methods/references/acknowledgements sections from evidence extraction improves precision. Section-aware design reflects document structure where relevant content is concentrated in specific sections.
+**Nexus relevance**: Validates E1 (section-type filter). RDR-055 already indexes section_type metadata — just needs filter plumbing.
+
+### RF-061-4: Memory systems need consolidation and decay, not just storage (MEDIUM-HIGH confidence)
+**Source**: Memory in LLM Era (2604.01707, VLDB 2026), HoldUp (2604.02655)
+**Finding**: VLDB framework identifies 10+ memory patterns. HoldUp shows working memory with relevance decay outperforms unbounded accumulation. Key insight: memories that aren't accessed should weaken, not persist indefinitely.
+**Nexus relevance**: Validates E6 (memory consolidation). T2 TTL is time-based only; needs access-based relevance decay.
+
+### RF-061-5: Progressive formalization L0→L3 is the differentiator (HIGH confidence)
+**Source**: Semantic Ladder (2603.22136), Formalization Flywheel synthesis
+**Finding**: "The era of store and retrieve is over." Next-gen systems must transform content as it moves through tiers — from raw text (L0) to linked entities (L1) to typed relations (L2) to formal ontology (L3).
+**Nexus relevance**: Validates E7/RDR-057. Currently T1→T2→T3 is copy, not transform.
+
+### RF-061-6: Cross-document duplicate resolution critical for multi-source KGs (HIGH confidence)
+**Source**: EvidenceNet (arxiv 2603.28325)
+**Finding**: Same evidence indexed from different documents must be deduplicated via entity normalization and semantic similarity. Without dedup, graph density inflates artificially and retrieval quality degrades.
+**Nexus relevance**: Validates E3 (entity resolution). Same concept in code__/docs__/rdr__ is currently 3 unrelated chunks.
+
+### RF-061-7: Bucket-based collection + robustness metrics for ANN search (MEDIUM confidence)
+**Source**: BBC (2604.01960), Robustness-δ@K (2507.00379)
+**Finding**: BBC achieves 3.8x speedup at recall@0.95 for large-k ANN. Robustness-δ@K provides a formal metric for ANN stability. Both address tail-failure problems in HNSW.
+**Nexus relevance**: Background for RDR-056 (closed). No new action needed — over-fetch+threshold already addresses this.
+
+### RF-061-8: HybridRAG GraphRAG component uses entity-relation triples (HIGH confidence)
+**Source**: HybridRAG (arxiv 2408.04948)
+**Finding**: GraphRAG constructs KG from documents via entity-relation triple extraction, builds a graph database, then retrieves subgraphs relevant to queries. Critical: the KG construction is LLM-driven (not rule-based), extracting (entity, relation, entity) triples from text chunks.
+**Nexus relevance**: Strengthens E3 design. Current auto_linker uses heuristic matching (symbol names in prose). LLM-driven entity-relation extraction would produce richer cross-collection links. Consider as a Phase 2 enhancement to E3.
+
 ## Risks
 
 1. E4 (composable operators) may need its own sub-RDR if the design space proves large
