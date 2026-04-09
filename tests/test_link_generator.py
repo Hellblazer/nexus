@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for link_generator.py — RDR filepath linking with resolve_path (RDR-060)."""
+"""Tests for link_generator.py — RDR filepath linking with resolve_path (RDR-060)
+and entity-name matching (RDR-061 E3a)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from nexus.catalog.catalog import Catalog
-from nexus.catalog.link_generator import generate_code_rdr_links, generate_rdr_filepath_links
+from nexus.catalog.link_generator import (
+    generate_code_rdr_links,
+    generate_entity_name_links,
+    generate_rdr_filepath_links,
+)
 
 
 class TestRdrFilepathLinks:
@@ -245,3 +250,120 @@ class TestIncrementalRdrFilepathLinking:
         # Process rdr1 explicitly — should create 1 link
         count2 = generate_rdr_filepath_links(cat, new_tumblers=[rdr1])
         assert count2 == 1
+
+
+class TestGenerateEntityNameLinks:
+    """Entity resolution via symbol-name matching (RDR-061 E3a, nexus-ggjt)."""
+
+    def _make_catalog(self, tmp_path: Path) -> Catalog:
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        (cat_dir / "owners.jsonl").touch()
+        (cat_dir / "documents.jsonl").touch()
+        (cat_dir / "links.jsonl").touch()
+        return Catalog(cat_dir, cat_dir / ".catalog.db")
+
+    def test_exact_camel_case_match(self, tmp_path: Path) -> None:
+        """Code entry 'SearchEngine' matches knowledge 'search engine architecture'."""
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc", repo_root=str(tmp_path))
+        code_t = cat.register(owner, "SearchEngine", content_type="code", file_path="src/search_engine.py")
+
+        owner_k = cat.register_owner("kbase", "curator")
+        know_t = cat.register(owner_k, "search engine architecture", content_type="knowledge")
+
+        count = generate_entity_name_links(cat)
+        assert count == 1
+
+        links = cat.links_from(code_t)
+        assert len(links) == 1
+        assert str(links[0].to_tumbler) == str(know_t)
+        assert links[0].link_type == "relates"
+
+    def test_snake_case_match(self, tmp_path: Path) -> None:
+        """Code entry 'search_engine' matches knowledge 'search engine'."""
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc", repo_root=str(tmp_path))
+        cat.register(owner, "search_engine", content_type="code", file_path="src/search_engine.py")
+
+        owner_k = cat.register_owner("kbase", "curator")
+        cat.register(owner_k, "search engine overview", content_type="knowledge")
+
+        count = generate_entity_name_links(cat)
+        assert count == 1
+
+    def test_fuzzy_below_threshold_no_link(self, tmp_path: Path) -> None:
+        """67% token overlap (2/3) is below 80% threshold — no link."""
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc", repo_root=str(tmp_path))
+        cat.register(owner, "LinkGenerator", content_type="code", file_path="src/link_generator.py")
+
+        owner_k = cat.register_owner("kbase", "curator")
+        cat.register(owner_k, "link generation pipeline", content_type="knowledge")
+
+        count = generate_entity_name_links(cat)
+        # "link" + "generator" vs "link" + "generation" + "pipeline"
+        # code tokens: {link, generator}, prose tokens: {link, generation, pipeline}
+        # intersection: {link} = 1, union: {link, generator, generation, pipeline} = 4
+        # Jaccard: 1/4 = 25% — well below 80%
+        assert count == 0
+
+    def test_no_false_positive_short_names(self, tmp_path: Path) -> None:
+        """Tokens shorter than 3 chars are filtered — 'id' should not match."""
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc", repo_root=str(tmp_path))
+        cat.register(owner, "id", content_type="code", file_path="src/id.py")
+
+        owner_k = cat.register_owner("kbase", "curator")
+        cat.register(owner_k, "identity management and id handling", content_type="knowledge")
+
+        count = generate_entity_name_links(cat)
+        assert count == 0  # "id" tokens are all too short
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        """Calling twice creates same number of links (uses link_if_absent)."""
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc", repo_root=str(tmp_path))
+        cat.register(owner, "SearchEngine", content_type="code", file_path="src/search_engine.py")
+
+        owner_k = cat.register_owner("kbase", "curator")
+        cat.register(owner_k, "search engine architecture", content_type="knowledge")
+
+        count1 = generate_entity_name_links(cat)
+        count2 = generate_entity_name_links(cat)
+        assert count1 == 1
+        assert count2 == 0  # idempotent
+
+    def test_full_scan_none_new_tumblers(self, tmp_path: Path) -> None:
+        """Full scan with new_tumblers=None processes all entries."""
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc", repo_root=str(tmp_path))
+        cat.register(owner, "SearchEngine", content_type="code", file_path="src/search_engine.py")
+        cat.register(owner, "ResultFormatter", content_type="code", file_path="src/result_formatter.py")
+
+        owner_k = cat.register_owner("kbase", "curator")
+        cat.register(owner_k, "search engine design", content_type="knowledge")
+
+        count = generate_entity_name_links(cat, new_tumblers=None)
+        assert count == 1  # only SearchEngine matches
+
+    def test_no_same_collection_links(self, tmp_path: Path) -> None:
+        """Code entries should not link to other code entries."""
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc", repo_root=str(tmp_path))
+        cat.register(owner, "SearchEngine", content_type="code", file_path="src/search_engine.py")
+        cat.register(owner, "search_engine_test", content_type="code", file_path="tests/test_search_engine.py")
+
+        count = generate_entity_name_links(cat)
+        assert count == 0  # no cross-type match
+
+    def test_code_matches_rdr_title(self, tmp_path: Path) -> None:
+        """Code entries match against RDR titles too."""
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc", repo_root=str(tmp_path))
+        cat.register(owner, "SearchEngine", content_type="code", file_path="src/search_engine.py")
+        cat.register(owner, "RDR: search engine improvements", content_type="rdr",
+                     file_path="docs/rdr/rdr-042.md")
+
+        count = generate_entity_name_links(cat)
+        assert count == 1
