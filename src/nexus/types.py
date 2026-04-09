@@ -8,6 +8,19 @@ from typing import Any
 
 
 @dataclass
+class PromotionReport:
+    """Result of promoting a T1 scratch entry to T2.
+
+    action: 'new' (no overlap), 'merged' (FTS5 found similar content),
+            or 'conflicting' (reserved for Phase 3 semantic conflict detection).
+    """
+
+    action: str  # Literal["new", "merged", "conflicting"]
+    existing_title: str | None = None
+    merged: bool = False
+
+
+@dataclass
 class SearchResult:
     """A single result returned by semantic or hybrid search."""
 

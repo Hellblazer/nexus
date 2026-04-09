@@ -97,13 +97,45 @@ def test_scratch_flag_unflag_missing_raises(t1: T1Database, method: str) -> None
 
 def test_scratch_promote_to_t2(t1: T1Database, db: T2Database) -> None:
     doc_id = t1.put("promote me to T2", tags="important")
-    t1.promote(doc_id, project="myproj", title="promoted.md", t2=db)
+    report = t1.promote(doc_id, project="myproj", title="promoted.md", t2=db)
     r = db.get(project="myproj", title="promoted.md")
     assert r is not None and r["content"] == "promote me to T2" and r["tags"] == "important"
+    assert report is not None  # PromotionReport returned
 
 def test_scratch_promote_missing_raises(t1: T1Database, db: T2Database) -> None:
     with pytest.raises(KeyError):
         t1.promote("no-such-id", project="p", title="t.md", t2=db)
+
+
+def test_promote_returns_new_when_no_overlap(t1: T1Database, db: T2Database) -> None:
+    """promote() returns action='new' when T2 has no matching content."""
+    doc_id = t1.put("completely unique content xyzzy42")
+    report = t1.promote(doc_id, project="proj", title="new.md", t2=db)
+    assert report.action == "new"
+    assert report.existing_title is None
+    assert report.merged is False
+
+
+def test_promote_returns_merged_when_fts5_overlap(t1: T1Database, db: T2Database) -> None:
+    """promote() returns action='merged' when T2 has similar content."""
+    # Pre-populate T2 with overlapping content (FTS5 is AND-of-terms)
+    db.put(project="proj", title="existing.md", content="authentication design patterns")
+    doc_id = t1.put("authentication design patterns")
+    report = t1.promote(doc_id, project="proj", title="new-auth.md", t2=db)
+    assert report.action == "merged"
+    assert report.existing_title == "existing.md"
+    assert report.merged is True
+
+
+def test_promote_writes_to_t2_regardless_of_action(t1: T1Database, db: T2Database) -> None:
+    """Content is written to T2 whether action is 'new' or 'merged'."""
+    db.put(project="proj", title="old.md", content="overlap content here")
+    doc_id = t1.put("overlap content here")
+    report = t1.promote(doc_id, project="proj", title="also-new.md", t2=db)
+    # Regardless of report.action, the entry should exist in T2
+    r = db.get(project="proj", title="also-new.md")
+    assert r is not None
+    assert r["content"] == "overlap content here"
 
 
 # ── AC6: clear ────────────────────────────────────────────────────────────────

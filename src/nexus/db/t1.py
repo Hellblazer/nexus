@@ -304,12 +304,26 @@ class T1Database:
 
     # ── Promote ───────────────────────────────────────────────────────────────
 
-    def promote(self, id: str, project: str, title: str, t2: T2Database) -> None:
-        """Copy T1 entry *id* to T2 immediately (manual promote)."""
+    def promote(self, id: str, project: str, title: str, t2: T2Database) -> "PromotionReport":
+        """Copy T1 entry *id* to T2 immediately. Returns a PromotionReport."""
+        from nexus.types import PromotionReport
+
         entry = self.get(id)
         if entry is None:
             raise KeyError(f"No scratch entry: {id!r}")
+        # FTS5 overlap detection: first ~100 chars as search query
+        snippet = entry["content"][:100]
+        try:
+            matches = t2.search(snippet, project=project)
+        except ValueError:
+            matches = []
+        if matches:
+            best = matches[0]
+            report = PromotionReport(action="merged", existing_title=best["title"], merged=True)
+        else:
+            report = PromotionReport(action="new")
         t2.put(project=project, title=title, content=entry["content"], tags=entry.get("tags", ""))
+        return report
 
 
     def delete(self, id: str) -> bool:
