@@ -167,7 +167,12 @@ def _embed_with_fallback(
         all_embeddings: list[list[float]] = []
 
         def _embed_one_batch(batch: list[str]) -> list[list[float]]:
-            """Embed a single CCE batch, splitting on failure."""
+            """Embed a single CCE batch, splitting on failure.
+
+            When a batch exceeds the 32K token limit, halves it recursively.
+            When a single chunk is too large, truncates it to ~60K chars
+            (~30K tokens) and retries once before skipping with a zero vector.
+            """
             try:
                 r = _voyage_with_retry(
                     client.contextualized_embed,
@@ -176,17 +181,34 @@ def _embed_with_fallback(
                 return r.results[0].embeddings
             except Exception as exc:
                 if len(batch) <= 1:
+                    # Single oversized chunk — truncate and retry
+                    _CCE_CHAR_LIMIT = 60_000  # ~30K tokens, under 32K context window
+                    original_len = len(batch[0])
+                    if original_len > _CCE_CHAR_LIMIT:
+                        truncated = batch[0][:_CCE_CHAR_LIMIT]
+                        _log.warning("cce_chunk_truncated",
+                                     original_chars=original_len,
+                                     truncated_chars=_CCE_CHAR_LIMIT)
+                        try:
+                            r = _voyage_with_retry(
+                                client.contextualized_embed,
+                                inputs=[[truncated]], model=model, input_type=input_type,
+                            )
+                            return r.results[0].embeddings
+                        except Exception as exc2:
+                            _log.warning("cce_chunk_skip_after_truncate",
+                                         error=str(exc2), chars=_CCE_CHAR_LIMIT)
+                            # Return zero vector — chunk is indexed but with degraded embedding
+                            dim = len(all_embeddings[0]) if all_embeddings else 1024
+                            return [[0.0] * dim]
+                    # Not a length issue — re-raise
                     raise
                 _log.warning("cce_batch_too_large_splitting",
                              error=str(exc), batch_size=len(batch))
                 mid = len(batch) // 2
                 result_embs: list[list[float]] = []
                 for half in (batch[:mid], batch[mid:]):
-                    r = _voyage_with_retry(
-                        client.contextualized_embed,
-                        inputs=[half], model=model, input_type=input_type,
-                    )
-                    result_embs.extend(r.results[0].embeddings)
+                    result_embs.extend(_embed_one_batch(half))
                 return result_embs
 
         if len(batches) >= 2:

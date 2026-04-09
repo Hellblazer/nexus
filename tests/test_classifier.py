@@ -37,7 +37,13 @@ def test_pdf_file_classified_as_pdf():
 
 def test_unknown_extension_classified_as_prose():
     from nexus.classifier import classify_file, ContentClass
-    assert classify_file(Path("notes.txt")) == ContentClass.PROSE
+    assert classify_file(Path("notes.rtf")) == ContentClass.PROSE
+
+
+def test_data_files_classified_as_skip():
+    from nexus.classifier import classify_file, ContentClass
+    for ext in (".txt", ".csv", ".tsv", ".dat", ".log"):
+        assert classify_file(Path(f"data{ext}")) == ContentClass.SKIP, f"{ext} should be SKIP"
 
 
 def test_no_extension_classified_as_skip(tmp_path: Path):

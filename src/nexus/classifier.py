@@ -39,6 +39,8 @@ _SKIP_EXTENSIONS: frozenset[str] = frozenset({
     ".cmd", ".bat", ".ps1",
     # Lock files
     ".lock",
+    # Data files (not prose — waste API calls and produce poor embeddings)
+    ".txt", ".csv", ".tsv", ".dat", ".log",
 })
 
 
