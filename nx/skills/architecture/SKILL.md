@@ -12,19 +12,19 @@ Delegates to the **architect-planner** agent (model: opus).
 
 **REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for symbol-level architecture discovery. Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
 
-- **Map system structure**: `jet_brains_get_symbols_overview` for class/interface inventories without reading files
-- **Find architectural patterns**: `jet_brains_find_referencing_symbols` to trace abstraction usage across the codebase
-- **Understand module boundaries**: `jet_brains_find_referencing_symbols` to track cross-module calls
-- **Interface analysis**: `jet_brains_type_hierarchy` to see full implementation tree
+- **Map system structure**: `get_symbols_overview` for class/interface inventories without reading files
+- **Find architectural patterns**: `find_referencing_symbols` to trace abstraction usage across the codebase
+- **Understand module boundaries**: `find_referencing_symbols` to track cross-module calls
+- **Interface analysis**: `type_hierarchy` to see full implementation tree
 - **Serena for precision, nx search for semantic discovery**
 
 ### Architecture Discovery Workflow
 ```
 1. nx search --corpus code --hybrid (30-50 results) for semantic discovery
-2. jet_brains_get_symbols_overview to map key classes in discovered files
-3. jet_brains_type_hierarchy to trace abstraction patterns
-4. jet_brains_find_referencing_symbols to understand cross-module usage
-5. Synthesize findings with `mcp__sequential-thinking__sequentialthinking`
+2. get_symbols_overview to map key classes in discovered files
+3. type_hierarchy to trace abstraction patterns
+4. find_referencing_symbols to understand cross-module usage
+5. Synthesize findings with `mcp__plugin_nx_sequential-thinking__sequentialthinking`
 6. Design architecture with clear boundaries
 ```
 
@@ -80,7 +80,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Architecture Methodology
 
-The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then `mcp__sequential-thinking__sequentialthinking`:
+The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 1. Understand system architecture and integration patterns
 2. Synthesize findings into architectural approach
 3. Define component boundaries and interfaces

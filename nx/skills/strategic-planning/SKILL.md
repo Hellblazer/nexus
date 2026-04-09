@@ -51,7 +51,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Planning Methodology
 
-The agent uses `mcp__sequential-thinking__sequentialthinking`:
+The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 1. Analyze codebase to understand context and constraints
 2. Form hypothesis about optimal architecture approach
 3. Validate approach against existing patterns

@@ -12,19 +12,19 @@ Delegates to the **debugger** agent (model: opus).
 
 **REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for all symbol-level navigation during debugging. Serena gives accurate call traces; Grep finds text matches that may be comments or strings.
 
-- **Trace call chains**: `jet_brains_find_referencing_symbols` on failing methods to find all callers
-- **Find exception sources**: `jet_brains_find_symbol` on exception types to locate definitions
-- **Understand type hierarchies**: `jet_brains_type_hierarchy` for polymorphic call resolution
-- **Class/method inventory**: `jet_brains_get_symbols_overview` before reading a file
+- **Trace call chains**: `find_referencing_symbols` on failing methods to find all callers
+- **Find exception sources**: `find_symbol` on exception types to locate definitions
+- **Understand type hierarchies**: `type_hierarchy` for polymorphic call resolution
+- **Class/method inventory**: `get_symbols_overview` before reading a file
 
 ### Debugging Workflow
 ```
 1. Identify failing test/exception
-2. jet_brains_find_symbol on failure point — locate definition
-3. jet_brains_find_referencing_symbols to trace all callers
-4. jet_brains_type_hierarchy for polymorphic dispatch questions
+2. find_symbol on failure point — locate definition
+3. find_referencing_symbols to trace all callers
+4. type_hierarchy for polymorphic dispatch questions
 5. Form hypothesis based on Serena evidence
-6. Validate with `mcp__sequential-thinking__sequentialthinking`
+6. Validate with `mcp__plugin_nx_sequential-thinking__sequentialthinking`
 ```
 
 ## When This Skill Activates
@@ -73,7 +73,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Debugging Methodology
 
-The debugger uses `mcp__sequential-thinking__sequentialthinking`:
+The debugger uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 1. Form initial hypotheses about root cause
 2. Identify evidence needed to validate/refute each hypothesis
 3. Gather evidence from code, tests, logs

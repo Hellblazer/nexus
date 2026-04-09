@@ -36,78 +36,52 @@ fi
 
 if [[ $SKIP_SERENA -eq 0 ]]; then
 cat <<'SERENA'
-## Serena MCP — LSP Code Intelligence (injected by sn plugin)
+## Serena MCP — Code Intelligence (sn plugin)
 
-Serena provides LSP-backed code intelligence. **Use Serena for symbol tasks; Grep for text tasks.**
+**Use Serena for symbol tasks; Grep for text.** Project auto-activated via `--project-from-cwd`.
 
-The `jet_brains_*` tool names are Serena's convention — they work with ANY LSP backend (Python/pyright, TypeScript, Go, Rust, etc.), not just IntelliJ. The project is auto-activated from the working directory (`--project-from-cwd`) if `.serena/project.yml` exists in the git root. No `activate_project` call needed. If Serena tools return empty results, the project may not be configured — run `serena project create /path/to/project`.
+### Setup — load tools before first use
 
-SERENA
-
-cat <<'ROUTING'
-
-### When to Use Serena vs Standard Tools
-
-| Task | Serena tool |
-|------|-------------|
-| Symbol definition | `mcp__plugin_sn_serena__jet_brains_find_symbol` |
-| All callers/references | `mcp__plugin_sn_serena__jet_brains_find_referencing_symbols` |
-| File structure overview | `mcp__plugin_sn_serena__jet_brains_get_symbols_overview` |
-| Class/type hierarchy | `mcp__plugin_sn_serena__jet_brains_type_hierarchy` |
-| Replace function body | `mcp__plugin_sn_serena__replace_symbol_body` |
-| Insert code at symbol | `mcp__plugin_sn_serena__insert_before_symbol` / `mcp__plugin_sn_serena__insert_after_symbol` |
-| Rename safely (all refs) | `mcp__plugin_sn_serena__rename_symbol` |
-| Find files by mask | `mcp__plugin_sn_serena__find_file` (gitignore-aware, unlike Glob) |
-| List directory contents | `mcp__plugin_sn_serena__list_dir` (gitignore-aware) |
-| Text/pattern search | `mcp__plugin_sn_serena__search_for_pattern` (regex, scope to file/dir) |
-
-**Use standard tools for:** broad text search (Grep), reading known files (Read), writing new files (Write).
-
-### Critical Parameter Signatures
-
-Subagents frequently get these wrong. Use exactly these signatures:
+Tool names vary by backend (JetBrains vs LSP). Load via ToolSearch with both variants — only the available ones resolve:
 
 ```
-# find_symbol — name_path_pattern is REQUIRED (not name_path)
-mcp__plugin_sn_serena__jet_brains_find_symbol(name_path_pattern="ClassName", include_body=false, depth=0)
-mcp__plugin_sn_serena__jet_brains_find_symbol(name_path_pattern="ClassName/methodName", include_body=true)
+# Symbol tools (one of each pair will resolve depending on backend)
+ToolSearch("select:mcp__plugin_sn_serena__jet_brains_find_symbol,mcp__plugin_sn_serena__find_symbol")
+ToolSearch("select:mcp__plugin_sn_serena__jet_brains_find_referencing_symbols,mcp__plugin_sn_serena__find_referencing_symbols")
+ToolSearch("select:mcp__plugin_sn_serena__jet_brains_get_symbols_overview,mcp__plugin_sn_serena__get_symbols_overview")
+ToolSearch("select:mcp__plugin_sn_serena__jet_brains_type_hierarchy,mcp__plugin_sn_serena__type_hierarchy")
+ToolSearch("select:mcp__plugin_sn_serena__jet_brains_rename,mcp__plugin_sn_serena__rename_symbol")
 
-# find_referencing_symbols — relative_path is REQUIRED (must be a FILE, not dir)
-mcp__plugin_sn_serena__jet_brains_find_referencing_symbols(
-    name_path="ClassName",
-    relative_path="path/to/ClassName.py"  # MUST be the file containing the symbol
-)
-# NO include_body parameter. NO name_path_pattern. Use name_path + relative_path.
-
-# get_symbols_overview — takes relative_path to a FILE
-mcp__plugin_sn_serena__jet_brains_get_symbols_overview(relative_path="path/to/File.py")
-
-# search_for_pattern — uses substring_pattern (regex, not literal)
-mcp__plugin_sn_serena__search_for_pattern(substring_pattern="searchText", relative_path="optional/dir")
-
-# find_file — gitignore-aware file search
-mcp__plugin_sn_serena__find_file(file_mask="*.py", relative_path="src/")
+# These names are the same on both backends
+ToolSearch("select:mcp__plugin_sn_serena__replace_symbol_body,mcp__plugin_sn_serena__insert_before_symbol,mcp__plugin_sn_serena__insert_after_symbol")
+ToolSearch("select:mcp__plugin_sn_serena__search_for_pattern,mcp__plugin_sn_serena__find_file,mcp__plugin_sn_serena__list_dir")
 ```
+
+Then call `mcp__plugin_sn_serena__initial_instructions` for full backend-specific usage guidance.
+
+### Task → Tool Mapping
+
+| Task | Tool (use whichever resolved above) |
+|------|-------------------------------------|
+| Find symbol definition | `find_symbol` / `jet_brains_find_symbol` |
+| Find all callers/references | `find_referencing_symbols` / `jet_brains_find_referencing_symbols` |
+| File structure overview | `get_symbols_overview` / `jet_brains_get_symbols_overview` |
+| Class/type hierarchy | `type_hierarchy` / `jet_brains_type_hierarchy` |
+| Replace function body | `replace_symbol_body` |
+| Insert code at symbol | `insert_before_symbol` / `insert_after_symbol` |
+| Rename across codebase | `rename_symbol` / `jet_brains_rename` |
+| Find files (gitignore-aware) | `find_file` |
+| List directory (gitignore-aware) | `list_dir` |
+| Text/pattern search | `search_for_pattern` |
+
+Standard tools for: broad text search (Grep), reading known files (Read), writing new files (Write).
 
 ### Rules
 
-- `get_symbols_overview` before reading whole files — ~10x context savings.
-- `find_referencing_symbols` before any signature change — LSP-accurate, catches aliases.
+- `get_symbols_overview` before reading whole files.
+- `find_referencing_symbols` before any signature change.
 - `find_symbol(include_body=false)` first, `true` only when you need the body.
-- `find_file` over Glob when you want gitignore filtering.
-
-### Serena Memories
-
-Serena has its own persistent memory system (separate from nx T2). Use for project-specific code navigation notes:
-
-```
-mcp__plugin_sn_serena__write_memory(memory_name="auth/login_flow", content="...")
-mcp__plugin_sn_serena__read_memory(memory_name="auth/login_flow")
-mcp__plugin_sn_serena__list_memories(topic="auth")
-```
-
-Use "/" in names to organize by topic. Prefer nx T2 memory for project decisions; use Serena memories for code structure notes that help future symbol navigation.
-ROUTING
+SERENA
 fi
 
 if [[ $SKIP_CONTEXT7 -eq 0 ]]; then

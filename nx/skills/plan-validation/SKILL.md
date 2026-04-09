@@ -46,7 +46,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Validation Methodology
 
-The plan-auditor agent uses `mcp__sequential-thinking__sequentialthinking`:
+The plan-auditor agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 1. Extract key components and assumptions from plan
 2. Form hypothesis about each assumption's validity
 3. Verify each component against actual codebase

@@ -423,7 +423,7 @@ standalone_skills:
       - "understand file structure before editing"
       - "symbol-level code navigation"
       - "impact analysis before refactoring"
-    tools: [ToolSearch, mcp__plugin_serena_serena__activate_project, mcp__plugin_serena_serena__jet_brains_find_symbol, mcp__plugin_serena_serena__jet_brains_find_referencing_symbols, mcp__plugin_serena_serena__jet_brains_get_symbols_overview, mcp__plugin_serena_serena__jet_brains_type_hierarchy, mcp__plugin_serena_serena__rename_symbol, mcp__plugin_serena_serena__replace_symbol_body, mcp__plugin_serena_serena__insert_before_symbol, mcp__plugin_serena_serena__insert_after_symbol]
+    tools: [ToolSearch, mcp__plugin_sn_serena__jet_brains_find_symbol, mcp__plugin_sn_serena__find_symbol, mcp__plugin_sn_serena__jet_brains_find_referencing_symbols, mcp__plugin_sn_serena__find_referencing_symbols, mcp__plugin_sn_serena__jet_brains_get_symbols_overview, mcp__plugin_sn_serena__get_symbols_overview, mcp__plugin_sn_serena__jet_brains_type_hierarchy, mcp__plugin_sn_serena__type_hierarchy, mcp__plugin_sn_serena__jet_brains_rename, mcp__plugin_sn_serena__rename_symbol, mcp__plugin_sn_serena__replace_symbol_body, mcp__plugin_sn_serena__insert_before_symbol, mcp__plugin_sn_serena__insert_after_symbol, mcp__plugin_sn_serena__search_for_pattern, mcp__plugin_sn_serena__find_file, mcp__plugin_sn_serena__list_dir]
 
   cli-controller:
     description: "Expert guidance for controlling interactive CLI applications using tmux-cli"

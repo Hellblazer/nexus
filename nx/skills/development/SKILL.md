@@ -12,19 +12,19 @@ Delegates to the **developer** agent (sonnet). See [registry.yaml](../../registr
 
 **REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for all symbol-level navigation — finding definitions, callers, type hierarchies, and surgical edits. Serena replaces text-pattern Grep for any symbol task.
 
-- **Before modifying interfaces**: `jet_brains_find_referencing_symbols` to find all implementers and callers
-- **Before refactoring methods**: `jet_brains_find_referencing_symbols` to find all callers
-- **Class structure**: `jet_brains_get_symbols_overview` for method/field inventory without reading the file
-- **Finding method definitions**: `jet_brains_find_symbol` instead of Grep
+- **Before modifying interfaces**: `find_referencing_symbols` to find all implementers and callers
+- **Before refactoring methods**: `find_referencing_symbols` to find all callers
+- **Class structure**: `get_symbols_overview` for method/field inventory without reading the file
+- **Finding method definitions**: `find_symbol` instead of Grep
 - **Replacing a method body**: `replace_symbol_body` — no line arithmetic, immune to drift
 
 ### Example Workflow
 ```
 1. Read plan requirement
-2. jet_brains_get_symbols_overview to understand existing class structure
-3. jet_brains_find_symbol to locate dependencies
+2. get_symbols_overview to understand existing class structure
+3. find_symbol to locate dependencies
 4. Write failing test (TDD)
-5. jet_brains_find_referencing_symbols to check impact of changes
+5. find_referencing_symbols to check impact of changes
 6. Implement with replace_symbol_body or insert_before/after_symbol
 ```
 

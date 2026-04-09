@@ -29,7 +29,7 @@ description: Thorough analysis of complex problems using deep-analyst agent
 
   echo "### Tip"
   echo ""
-  echo "The deep-analyst uses mcp__sequential-thinking__sequentialthinking: hypothesis → evidence → evaluation → conclusion."
+  echo "The deep-analyst uses mcp__plugin_nx_sequential-thinking__sequentialthinking: hypothesis → evidence → evaluation → conclusion."
   echo "For cross-cutting issues, this agent explores multiple components before converging on root cause."
 
 }
