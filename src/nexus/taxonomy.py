@@ -58,6 +58,70 @@ def assign_topic(db: "T2Database", doc_id: str, topic_id: int) -> None:
         db.conn.commit()
 
 
+def get_topic_docs(
+    db: "T2Database",
+    topic_id: int,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return doc_ids and titles assigned to a topic."""
+    with db._lock:
+        rows = db.conn.execute(
+            """
+            SELECT ta.doc_id, m.title, m.project
+            FROM topic_assignments ta
+            LEFT JOIN memory m ON m.title = ta.doc_id AND m.project = (
+                SELECT collection FROM topics WHERE id = ta.topic_id
+            )
+            WHERE ta.topic_id = ?
+            LIMIT ?
+            """,
+            (topic_id, limit),
+        ).fetchall()
+    return [{"doc_id": r[0], "title": r[1] or r[0], "project": r[2] or ""} for r in rows]
+
+
+def get_topic_tree(
+    db: "T2Database",
+    collection: str = "",
+    *,
+    max_depth: int = 2,
+) -> list[dict[str, Any]]:
+    """Return topics as a nested tree structure.
+
+    Each node: {id, label, doc_count, children: [...]}.
+    Filtered by collection when provided.
+    """
+    with db._lock:
+        if collection:
+            roots = db.conn.execute(
+                "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                "FROM topics WHERE parent_id IS NULL AND collection = ? ORDER BY doc_count DESC",
+                (collection,),
+            ).fetchall()
+        else:
+            roots = db.conn.execute(
+                "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                "FROM topics WHERE parent_id IS NULL ORDER BY doc_count DESC"
+            ).fetchall()
+
+    def _build_node(row: tuple, depth: int) -> dict[str, Any]:
+        node = {"id": row[0], "label": row[1], "collection": row[3], "doc_count": row[5]}
+        if depth < max_depth:
+            with db._lock:
+                children = db.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                    "FROM topics WHERE parent_id = ? ORDER BY doc_count DESC",
+                    (row[0],),
+                ).fetchall()
+            node["children"] = [_build_node(c, depth + 1) for c in children]
+        else:
+            node["children"] = []
+        return node
+
+    return [_build_node(r, 0) for r in roots]
+
+
 def cluster_and_persist(
     db: "T2Database",
     project: str,
