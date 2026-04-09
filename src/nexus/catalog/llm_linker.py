@@ -127,8 +127,8 @@ def llm_verify_candidates(
         )
         try:
             result = llm.classify_relation(prompt)
-        except Exception:
-            _log.debug("llm_verify_failed", source=pair.source.title, target=pair.target.title)
+        except Exception as exc:
+            _log.warning("llm_verify_failed", source=pair.source.title, target=pair.target.title, exc=str(exc))
             continue
 
         relation = result.get("relation", "none")
