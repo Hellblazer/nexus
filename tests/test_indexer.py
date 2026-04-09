@@ -317,7 +317,8 @@ def test_run_index_mixed_repo(tmp_path):
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "main.py").write_text("print('hello')\n")
     (repo / "README.md").write_text("# Project\n\nA simple project.\n")
-    (repo / "notes.txt").write_text("Some notes about the project.\n")
+    (repo / "notes.rst").write_text("Some notes about the project.\n")
+    (repo / "data.txt").write_text("Should be skipped.\n")
     db, ups, _ = _tracking_db()
     with _patches(db, extra={
         "nexus.chunker.chunk_file": {"return_value": [_chunk(text="print('hello')")]},
@@ -327,7 +328,8 @@ def test_run_index_mixed_repo(tmp_path):
         _run_index(repo, _reg())
     assert any("main.py" in m["source_path"] for m in ups["code__repo"])
     dp = {m["source_path"] for m in ups["docs__repo"]}
-    assert any("README.md" in p for p in dp) and any("notes.txt" in p for p in dp)
+    assert any("README.md" in p for p in dp) and any("notes.rst" in p for p in dp)
+    assert not any("data.txt" in p for p in dp), ".txt files should be SKIP"
 
 
 # ── Prune helpers ────────────────────────────────────────────────────────────
