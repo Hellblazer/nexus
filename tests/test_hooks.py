@@ -1,6 +1,7 @@
 """Session hook tests: session_start and session_end lifecycle."""
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -224,6 +225,60 @@ def test_session_end_db_error_doesnt_crash(tmp_path: Path) -> None:
         output = session_end()
 
     assert "Session ended" in output
+
+
+# ── session lock stale cleanup ───────────────────────────────────────────────
+
+
+def test_session_start_writes_pid_to_lock(tmp_path: Path) -> None:
+    """session_start writes its PID into session.lock for stale detection."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+
+    with (
+        patch("nexus.hooks.SESSIONS_DIR", sessions),
+        patch("nexus.hooks.sweep_stale_sessions"),
+        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.write_claude_session_id"),
+        patch("nexus.hooks.start_t1_server", return_value=("127.0.0.1", 51823, 9900, "/tmp/x")),
+        patch("nexus.hooks.write_session_record"),
+        patch("nexus.hooks.generate_session_id", return_value="lock-test-uuid"),
+    ):
+        session_start()
+
+    lock_file = sessions / "session.lock"
+    assert lock_file.exists()
+    pid_text = lock_file.read_text().strip()
+    assert pid_text == str(os.getpid())
+
+
+def test_session_start_clears_stale_lock(tmp_path: Path) -> None:
+    """session_start removes a stale session.lock before acquiring."""
+    from nexus.indexer import _LOCK_STALE_SECONDS
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+
+    # Create stale empty lock file
+    lock_file = sessions / "session.lock"
+    lock_file.touch()
+    old_time = time.time() - _LOCK_STALE_SECONDS - 1
+    os.utime(lock_file, (old_time, old_time))
+
+    with (
+        patch("nexus.hooks.SESSIONS_DIR", sessions),
+        patch("nexus.hooks.sweep_stale_sessions"),
+        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.write_claude_session_id"),
+        patch("nexus.hooks.start_t1_server", return_value=("127.0.0.1", 51823, 9900, "/tmp/x")),
+        patch("nexus.hooks.write_session_record"),
+        patch("nexus.hooks.generate_session_id", return_value="lock-test-uuid"),
+    ):
+        session_start()  # must not deadlock on stale lock
+
+    # Lock file should now contain current PID, not be stale
+    assert lock_file.exists()
+    assert lock_file.read_text().strip() == str(os.getpid())
 
 
 # ── _infer_repo ──────────────────────────────────────────────────────────────

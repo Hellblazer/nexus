@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.5] - 2026-04-09
+
+### Fixed
+- Version bump only — no nx plugin changes in this release.
+
 ## [3.6.4] - 2026-04-09
 
 ### Fixed

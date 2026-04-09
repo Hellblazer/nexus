@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.5] - 2026-04-09
+
+### Fixed
+- **Stale lock file cleanup** — Background indexers launched by git hooks (`disown`/`&`) that crash before writing their PID left empty 0-byte lock files in `~/.config/nexus/locks/` that accumulated indefinitely. `_clear_stale_lock()` now uses age-based detection for empty files (>5s = stale). Added `_sweep_stale_locks()` to clean the entire locks directory on each index run.
+- **Session lock hardening** — `session.lock` now writes PID for stale detection and clears stale locks before acquiring, using the same defensive pattern as the indexer.
+
 ## [3.6.4] - 2026-04-09
 
 ### Fixed

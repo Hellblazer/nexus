@@ -80,8 +80,13 @@ def session_start(claude_session_id: str | None = None) -> str:
     # sibling agents (same parent PID, both see ancestor=None simultaneously)
     # from each starting their own ChromaDB server and orphaning the first.
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock_fd = os.open(str(SESSIONS_DIR / "session.lock"), os.O_CREAT | os.O_WRONLY, 0o600)
+    _session_lock = SESSIONS_DIR / "session.lock"
+    from nexus.indexer import _clear_stale_lock
+    _clear_stale_lock(_session_lock)
+    lock_fd = os.open(str(_session_lock), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
+        os.write(lock_fd, str(os.getpid()).encode())
+        os.fsync(lock_fd)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         ancestor = find_ancestor_session(SESSIONS_DIR)
         if ancestor:
