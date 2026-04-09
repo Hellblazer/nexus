@@ -65,6 +65,16 @@ def test_merge_cleans_fts_index(db: T2Database) -> None:
     assert db.search("unique_zygomorphic_keyword") == []
 
 
+def test_merge_updates_fts_for_kept_entry(db: T2Database) -> None:
+    """After merge, the merged content is findable via FTS search."""
+    id1 = db.put(project="proj", title="keep.md", content="original boring content")
+    id2 = db.put(project="proj", title="gone.md", content="other stuff")
+    db.merge_memories(keep_id=id1, delete_ids=[id2], merged_content="unique_merged_phrase_xyz")
+    results = db.search("unique_merged_phrase_xyz")
+    assert len(results) == 1
+    assert results[0]["title"] == "keep.md"
+
+
 def test_merge_multiple_entries(db: T2Database) -> None:
     """Can merge 3+ entries into one."""
     id1 = db.put(project="proj", title="keep.md", content="base")

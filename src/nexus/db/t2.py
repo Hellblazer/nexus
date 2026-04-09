@@ -799,7 +799,7 @@ class T2Database:
         Uses ``last_accessed`` when available (non-empty), falls back to
         ``timestamp`` for entries that have never been accessed.
         """
-        cutoff = (datetime.now(UTC) - timedelta(days=idle_days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=idle_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._lock:
             rows = self.conn.execute(
                 """

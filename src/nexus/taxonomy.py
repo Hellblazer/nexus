@@ -27,11 +27,10 @@ def get_topics(
     *,
     parent_id: int | None = ...,  # sentinel: ... means "filter roots", None means no filter
 ) -> list[dict[str, Any]]:
-    """Return topics, optionally filtered by parent_id.
+    """Return topics filtered by parent.
 
-    - ``parent_id=...`` (default): return root topics (parent_id IS NULL).
+    - ``parent_id=None`` (default) or ``...``: return root topics (parent_id IS NULL).
     - ``parent_id=<int>``: return children of that topic.
-    - Call with explicit ``parent_id=None`` for roots.
     """
     with db._lock:
         if parent_id is ... or parent_id is None:
