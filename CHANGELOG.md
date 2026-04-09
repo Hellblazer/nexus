@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.3] - 2026-04-09
+
+### Fixed
+- **Phantom Serena tool names eradicated** — `rename_symbol` (not a real JetBrains backend tool) replaced with `jet_brains_rename` in session-start.sh, mcp-inject.sh, and serena-code-nav skill.
+- **Wrong MCP prefix** — `mcp__plugin_serena_serena__` corrected to `mcp__plugin_sn_serena__` in serena-code-nav skill and registry.yaml.
+- **Sequential thinking prefix** — `mcp__sequential-thinking__` corrected to `mcp__plugin_nx_sequential-thinking__` in 7 skills and 1 command.
+- **Phantom tools removed** — `restart_language_server`, `get_current_config`, and `activate_project` references removed from serena-code-nav skill (not exposed in `--context claude-code` MCP mode).
+
+### Changed
+- **Backend-agnostic Serena discovery** — mcp-inject.sh SubagentStart hook now uses dual-variant ToolSearch (JetBrains + LSP names) so the sn plugin works regardless of Serena backend. Delegates parameter docs to `initial_instructions`.
+- **Generic tool names in skills** — debugging, development, and architecture skills use backend-neutral short names in pseudocode instead of hardcoded `jet_brains_*` names.
+
 ## [3.6.2] - 2026-04-08
 
 ### Fixed

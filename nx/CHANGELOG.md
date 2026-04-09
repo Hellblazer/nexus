@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.3] - 2026-04-09
+
+### Fixed
+- **Phantom Serena tool names** — `rename_symbol`, `restart_language_server`, `get_current_config`, `activate_project` replaced or removed across serena-code-nav skill, registry.yaml, and 3 downstream skills.
+- **Wrong MCP prefixes** — `mcp__plugin_serena_serena__` → `mcp__plugin_sn_serena__` in serena-code-nav and registry; `mcp__sequential-thinking__` → `mcp__plugin_nx_sequential-thinking__` in 7 skills + 1 command.
+
+### Changed
+- **Backend-agnostic Serena injection** — SubagentStart hook discovers tools via dual-variant ToolSearch (JetBrains + LSP) and delegates parameter docs to Serena's `initial_instructions`. Works for both backend configurations.
+- **Generic Serena names in skills** — debugging, development, architecture skills use backend-neutral names in pseudocode.
+
 ## [3.6.1] - 2026-04-08
 
 ### Fixed
