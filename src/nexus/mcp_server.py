@@ -29,13 +29,16 @@ from nexus.mcp.catalog import (  # noqa: F401
 # Injection helpers — tests import these with underscore aliases
 from nexus.mcp_infra import (  # noqa: F401
     catalog_auto_link as _catalog_auto_link,
+    clear_search_traces as _clear_search_traces,
     get_catalog as _get_catalog,
     get_collection_names as _get_collection_names,
+    get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
     get_t3 as _get_t3,
     inject_catalog as _inject_catalog,
     inject_t1 as _inject_t1,
     inject_t3 as _inject_t3,
+    record_search_trace as _record_search_trace,
     require_catalog as _require_catalog,
     reset_singletons as _reset_singletons,
     resolve_tumbler_mcp as _resolve_tumbler_mcp,

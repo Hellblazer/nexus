@@ -203,6 +203,7 @@ class T2Database:
             self._migrate_plans_ttl_if_needed()
             self._migrate_access_tracking_if_needed()
             self._migrate_topics_if_needed()
+            self._migrate_relevance_log_if_needed()
 
     def _migrate_plans_if_needed(self) -> None:
         """Add 'project' column to plans table if missing (v2.8.0 schema change).
@@ -282,6 +283,38 @@ class T2Database:
         """)
         self.conn.commit()
         _log.info("topics migration complete")
+
+    def _migrate_relevance_log_if_needed(self) -> None:
+        """Add relevance_log table if missing (RDR-061 E2).
+
+        Records (query, chunk_id, action) triples when an agent acts on
+        search results within a session. Used by future re-ranking.
+        """
+        row = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='relevance_log'"
+        ).fetchone()
+        if row is not None:
+            return
+        _log.info("Migrating T2 schema to add relevance_log table")
+        self.conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS relevance_log (
+                id         INTEGER PRIMARY KEY,
+                query      TEXT NOT NULL,
+                chunk_id   TEXT NOT NULL,
+                collection TEXT,
+                action     TEXT NOT NULL,
+                session_id TEXT,
+                timestamp  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_relevance_log_query
+                ON relevance_log(query);
+            CREATE INDEX IF NOT EXISTS idx_relevance_log_chunk
+                ON relevance_log(chunk_id);
+            CREATE INDEX IF NOT EXISTS idx_relevance_log_session
+                ON relevance_log(session_id);
+        """)
+        self.conn.commit()
+        _log.info("relevance_log migration complete")
 
     def _migrate_access_tracking_if_needed(self) -> None:
         """Add access_count and last_accessed columns to memory if missing."""
@@ -668,6 +701,64 @@ class T2Database:
         with self._lock:
             rows = self.conn.execute(sql, params_l).fetchall()
         return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
+
+    # ── Relevance log (RDR-061 E2) ────────────────────────────────────────────
+
+    def log_relevance(
+        self,
+        query: str,
+        chunk_id: str,
+        action: str,
+        session_id: str = "",
+        collection: str = "",
+    ) -> int:
+        """Record a (query, chunk_id, action) triple in the relevance log.
+
+        Called by MCP tools when an agent acts on search results (store_put,
+        catalog_link). Returns the new row id.
+        """
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            cur = self.conn.execute(
+                "INSERT INTO relevance_log (query, chunk_id, collection, action, session_id, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (query, chunk_id, collection, action, session_id, now),
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def get_relevance_log(
+        self,
+        query: str = "",
+        chunk_id: str = "",
+        action: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Query the relevance log by filters. All filters optional.
+
+        Returns rows as dicts ordered by most recent first.
+        """
+        conditions = ["1=1"]
+        params: list = []
+        if query:
+            conditions.append("query = ?")
+            params.append(query)
+        if chunk_id:
+            conditions.append("chunk_id = ?")
+            params.append(chunk_id)
+        if action:
+            conditions.append("action = ?")
+            params.append(action)
+        sql = (
+            "SELECT id, query, chunk_id, collection, action, session_id, timestamp "
+            f"FROM relevance_log WHERE {' AND '.join(conditions)} "
+            "ORDER BY timestamp DESC LIMIT ?"
+        )
+        params.append(limit)
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        cols = ("id", "query", "chunk_id", "collection", "action", "session_id", "timestamp")
+        return [dict(zip(cols, row)) for row in rows]
 
     # ── Housekeeping ──────────────────────────────────────────────────────────
 

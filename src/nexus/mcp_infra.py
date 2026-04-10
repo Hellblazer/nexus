@@ -28,6 +28,58 @@ _catalog_instance = None
 _catalog_lock = threading.Lock()
 _catalog_mtime: float = 0.0
 
+# ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
+# Session-keyed cache of recent search results. Populated by the search tool,
+# consumed by store_put and catalog_link to correlate agent actions with the
+# queries that likely led to them.
+_search_traces: dict[str, list[dict]] = {}
+_search_traces_lock = threading.Lock()
+_SEARCH_TRACE_TTL_SECONDS = 600  # 10 minutes
+_SEARCH_TRACE_MAX_PER_SESSION = 20
+
+
+def record_search_trace(
+    session_id: str,
+    query: str,
+    chunks: list[tuple[str, str]],
+) -> None:
+    """Record a search result set for later correlation (RDR-061 E2).
+
+    chunks: list of (chunk_id, collection) tuples from the search results.
+    """
+    if not session_id or not chunks:
+        return
+    trace = {
+        "query": query,
+        "chunks": chunks,
+        "timestamp": time.monotonic(),
+    }
+    with _search_traces_lock:
+        bucket = _search_traces.setdefault(session_id, [])
+        bucket.append(trace)
+        # Trim old entries (both by age and count)
+        now = time.monotonic()
+        bucket[:] = [
+            t for t in bucket
+            if now - t["timestamp"] < _SEARCH_TRACE_TTL_SECONDS
+        ][-_SEARCH_TRACE_MAX_PER_SESSION:]
+
+
+def get_recent_search_traces(session_id: str) -> list[dict]:
+    """Return non-expired search traces for this session (RDR-061 E2)."""
+    if not session_id:
+        return []
+    with _search_traces_lock:
+        bucket = _search_traces.get(session_id, [])
+        now = time.monotonic()
+        return [t for t in bucket if now - t["timestamp"] < _SEARCH_TRACE_TTL_SECONDS]
+
+
+def clear_search_traces() -> None:
+    """Clear all search traces (test helper)."""
+    with _search_traces_lock:
+        _search_traces.clear()
+
 
 def get_t1():
     """Return (T1Database, is_isolated) — lazy init on first call."""
@@ -166,6 +218,7 @@ def reset_singletons():
     _collections_cache = ([], 0.0)
     _catalog_instance = None
     _catalog_mtime = 0.0
+    clear_search_traces()
 
 
 def inject_t1(t1, *, isolated: bool = False):

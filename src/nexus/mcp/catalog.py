@@ -9,9 +9,12 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from nexus.mcp_infra import (
+    get_recent_search_traces as _get_recent_search_traces,
+    get_t1 as _get_t1,
     get_t3 as _get_t3,
     require_catalog as _require_catalog,
     resolve_tumbler_mcp as _resolve_tumbler_mcp,
+    t2_ctx as _t2_ctx,
 )
 
 mcp = FastMCP("nexus-catalog")
@@ -317,6 +320,30 @@ def catalog_link(
         if err:
             return {"error": err}
         created = cat.link(ft, tt, link_type, created_by, from_span=from_span, to_span=to_span)
+        # RDR-061 E2: log relevance correlation for recent searches in this session.
+        # If the target document's physical collection matches a chunk in a recent
+        # search result, this link is likely the result of that search.
+        try:
+            t1, _ = _get_t1()
+            session_id = getattr(t1, "_session_id", "") or ""
+            traces = _get_recent_search_traces(session_id) if session_id else []
+            if traces:
+                target_entry = cat.resolve(tt)
+                target_col = target_entry.physical_collection if target_entry else ""
+                if target_col:
+                    with _t2_ctx() as db:
+                        for trace in traces:
+                            for chunk_id, chunk_col in trace["chunks"]:
+                                if chunk_col == target_col:
+                                    db.log_relevance(
+                                        query=trace["query"],
+                                        chunk_id=chunk_id,
+                                        action="linked",
+                                        session_id=session_id,
+                                        collection=chunk_col,
+                                    )
+        except Exception:
+            pass  # relevance logging is non-fatal
         return {"from": str(ft), "to": str(tt), "type": link_type, "created": created}
     except Exception as e:
         return {"error": str(e)}

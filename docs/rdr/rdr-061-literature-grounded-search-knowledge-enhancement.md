@@ -32,12 +32,12 @@ A comprehensive survey of 10+ papers in the nexus T3 knowledge store (AgenticSch
 
 ### Phase 1: Quick Win (start immediately)
 
-#### E2: Retrieval Feedback Loop (Phase 1: logging) — DEFERRED
+#### E2: Retrieval Feedback Loop (Phase 1: logging) — IMPLEMENTED
 
-> **Status**: Deferred. RDR-057's `access_count` tracking (T1 + T2) provides a proxy
-> for retrieval signal. The richer session-correlation logging (`relevance_log` table)
-> is deferred until access_count data validates the need. E6 (memory consolidation)
-> shipped using RDR-057's access_count schema instead of E2's relevance_log.
+> **Status**: Implemented. Session-keyed search trace cache in `mcp_infra.py`
+> records search results; `store_put` and `catalog_link` consume traces to log
+> (query, chunk_id, action) triples to T2 `relevance_log`. The `catalog_link`
+> hook filters by collection match to avoid noise. See `tests/test_relevance_log.py`.
 
 - No signal is captured about which search results agents actually use
 - Log implicit relevance signal when a search->store_put or search->catalog_link pattern is detected within a session

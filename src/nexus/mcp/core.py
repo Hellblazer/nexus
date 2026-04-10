@@ -20,11 +20,13 @@ from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
     get_collection_names as _get_collection_names,
+    get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
     get_t3 as _get_t3,
     inject_catalog as _inject_catalog,
     inject_t1 as _inject_t1,
     inject_t3 as _inject_t3,
+    record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
     t2_ctx as _t2_ctx,
 )
@@ -104,6 +106,20 @@ def search(
         page = results[offset:offset + limit]
         if not page:
             return f"No results at offset {offset} (total {total})."
+
+        # Record search trace for RDR-061 E2 retrieval feedback correlation.
+        # Non-fatal — session may be unavailable in test contexts.
+        try:
+            t1, _ = _get_t1()
+            session_id = getattr(t1, "_session_id", "") or ""
+            if session_id:
+                _record_search_trace(
+                    session_id,
+                    query,
+                    [(r.id, r.collection) for r in page],
+                )
+        except Exception:
+            pass
 
         lines: list[str] = []
         current_cluster: str | None = None
@@ -418,6 +434,24 @@ def store_put(
                 structlog.get_logger().debug("store_put_auto_linked", doc_id=doc_id, link_count=n)
         except Exception:
             pass  # auto-linking is non-fatal
+        # RDR-061 E2: log relevance correlation for recent searches in this session
+        try:
+            t1, _ = _get_t1()
+            session_id = getattr(t1, "_session_id", "") or ""
+            traces = _get_recent_search_traces(session_id) if session_id else []
+            if traces:
+                with _t2_ctx() as db:
+                    for trace in traces:
+                        for chunk_id, chunk_col in trace["chunks"]:
+                            db.log_relevance(
+                                query=trace["query"],
+                                chunk_id=chunk_id,
+                                action="stored",
+                                session_id=session_id,
+                                collection=chunk_col,
+                            )
+        except Exception:
+            pass  # relevance logging is non-fatal
         return f"Stored: {doc_id} -> {col_name}"
     except Exception as e:
         return f"Error: {e}"
