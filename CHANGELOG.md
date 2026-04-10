@@ -6,6 +6,68 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.1] - 2026-04-10
+
+Patch release: four bug fixes from a live shakeout of v3.8.0. Every
+user-visible feature from RDRs 057 / 061 / 062 / 063 was exercised
+end-to-end against the shipped CLI, MCP servers, and SQLite store.
+Three real bugs and one doc drift were found and fixed. **3466
+non-integration tests passing** (+8 new regression pins), **20
+integration tests passing**.
+
+### Fixed
+
+- **RDR-057 `overlap_detected` logic bug** — `T1.promote()` used the
+  scratch entry's full first-100-char snippet as an FTS5 MATCH query.
+  FTS5 MATCH is implicit-AND, so any scratch content containing even
+  one token not present in the candidate returned zero matches — and
+  by construction a similar-but-not-identical entry always has at
+  least one new token. The feature was effectively unreachable for
+  its intended use case. Rewrote the overlap detection to use the
+  same two-phase pattern as `MemoryStore.find_overlapping_memories`:
+  (1) pull the first 3 non-stopword content tokens as the FTS5
+  candidate query, (2) confirm with Jaccard similarity ≥ 0.5 on the
+  full non-stopword word sets. Threshold is 0.5 (more permissive than
+  `find_overlapping_memories`' 0.7) because `promote()` is advisory —
+  the row is written either way — while consolidation uses the higher
+  bar for destructive merges. Four regression tests in
+  `tests/test_scratch.py` pin the v3.8.0 shakeout failure plus edges
+  (subset below threshold, too-short content, unrelated content).
+
+- **`nx memory delete` taxonomy cascade** — deleting memory entries
+  (via `--title`, `--all`, or `--id`) left dangling
+  `topic_assignments` rows pointing to the deleted `doc_id`. Orphan
+  topics surfaced in `nx taxonomy list` and `nx taxonomy show` as
+  ghost entries referencing nonexistent docs. Added
+  `CatalogTaxonomy.purge_assignments_for_doc(project, title)` that
+  deletes matching assignments (scoped by collection) and drops any
+  topics whose assignment count reaches zero. `T2Database.delete()`
+  calls it after a successful memory row delete — cross-domain
+  coordination lives in the facade (RDR-063 Phase 2 boundary).
+  When the caller used `--id`, the facade resolves `(project,
+  title)` via a direct SELECT on `memory.conn` before the delete so
+  the cascade can scope correctly, avoiding the access-count side
+  effect of `memory.get(id=...)` on a dying row. Four regression
+  tests in `tests/test_taxonomy.py` cover the cascade, empty-topic
+  cleanup, cross-project scoping, and delete-by-id.
+
+### Docs
+
+- **`nx catalog link --help` missing `formalizes`** — the built-in
+  link types list was out of date; `formalizes` (added in RDR-057)
+  was missing. The creation path accepts it correctly; only the help
+  text was stale. One-line docstring update in
+  `src/nexus/commands/catalog.py`.
+
+- **`docs/mcp-servers.md` `nx catalog link-bulk` command name** —
+  `docs/mcp-servers.md` listed `nx catalog link-bulk` as a CLI-only
+  demoted tool. The actual command is `nx catalog link-bulk-delete`
+  (hidden) and it is a bulk *delete* by filter, not a bulk create.
+  Updated the demoted-tools table to use the real name and clarify
+  the semantics. CHANGELOG entries for 3.7.0 and 3.8.0 use the
+  Python function name `catalog_link_bulk` which is accurate —
+  those are intentionally left as historical records.
+
 ## [3.8.0] - 2026-04-10
 
 Ships **RDR-063 (T2 domain split)** — the Phase 1/Phase 2 refactor that was

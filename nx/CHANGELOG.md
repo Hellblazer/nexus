@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.1] - 2026-04-10
+
+Plugin version aligned with Nexus CLI 3.8.1. Patch release — bug
+fixes only, no plugin-level functional changes. All four fixes are
+internal to the core CLI and MCP servers:
+
+- T1.promote() overlap detection no longer misses similar-but-not-
+  identical content (RDR-057 fix)
+- T2Database.delete() now cascades to taxonomy topic_assignments
+  so nx memory delete no longer leaves orphan rows
+- nx catalog link --help lists `formalizes` among built-in types
+- docs/mcp-servers.md corrects the `link-bulk` / `link-bulk-delete`
+  command name
+
 ## [3.8.0] - 2026-04-10
 
 Plugin version aligned with Nexus CLI 3.8.0 (RDR-063: T2 Domain Split).
