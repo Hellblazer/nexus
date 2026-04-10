@@ -91,13 +91,13 @@ Concrete grounding data captured during v3.7.0 release (2026-04-10). All numbers
 
 **Source**: `src/nexus/taxonomy.py`
 
-**Direct T2 internal access**: 19 references to `db._lock` and `db.conn.execute` across 6 functions:
-- `get_topics()` (43–54) — 2 queries + `_lock`
-- `assign_topic()` (58–65) — 2 INSERT/UPDATE + `_lock`
-- `get_topic_docs()` (68–104) — 1 multi-table LEFT JOIN + `_lock`
-- `get_topic_tree()` (107–145) — 4 recursive queries + `_lock`
-- `clear_project_topics()` (230–239) — 2 DELETE + `_lock`
-- `cluster_and_persist()` (148–244) — ~4 `db.get_all()` + INSERT sequences
+**Direct T2 internal access**: 22 references to `db._lock`, `db.conn.execute`, and `db.conn.commit` across 6 functions (verified via `grep -cE 'db\._lock|db\.conn\.' src/nexus/taxonomy.py`):
+- `get_topics()` (43–54) — 2 queries + `_lock` (3 refs)
+- `assign_topic()` (58–65) — INSERT/UPDATE + `_lock` + `commit` (4 refs)
+- `get_topic_docs()` (88–104) — 1 multi-table LEFT JOIN + `_lock` (2 refs)
+- `get_topic_tree()` (117–145) — 4 recursive queries + 2 `_lock` contexts (6 refs; the inner `_lock` at line 134 is a nested re-entry, requiring transaction-scope review during the rewrite)
+- `cluster_and_persist()` (211–228) — INSERT sequence + `_lock` + `commit` (5 refs)
+- `clear_project_topics()` (235–239) — 2 DELETE + `_lock` + `commit` (4 refs)
 
 **The critical JOIN** (lines 92–103):
 ```sql
@@ -302,7 +302,13 @@ Phase 2 also changes no schema — just lock topology. Any test that held assump
 
 ### Alternative A: Do nothing, keep T2 monolithic
 
-**Rejected**: The problems are growing, not shrinking. Each new feature adds more coupling. Memory consolidation already depends on access tracking from a different RDR. Taxonomy joins memory by title. Fix it now at ~10 hours of work, or fix it later at 30+ hours when the implicit contracts have calcified.
+**Rejected**: The grounded case for acting now (not a cost comparison):
+
+1. **Cross-schema contamination is already here** (Problem 2, RF-063-4). The `get_topic_docs` JOIN already couples taxonomy to memory via an undocumented contract. Every feature added to T2 while this coupling is implicit makes the eventual split harder.
+2. **T2 has already absorbed four distinct domains** (RF-063-1: memory, plans, topics, relevance_log). "Do nothing" means the next domain lands in T2 by default, not by design.
+3. **Phase 1 is mechanical and reversible** (RF-063-4: only one cross-domain JOIN; RF-063-7: domain boundaries already exist implicitly in 2 files). The cost to split now is low; the cost to unwind a bad split is also low.
+
+No future-cost estimate is offered here — calcification is a real phenomenon in implicit contracts, but the specific "10 hours now vs 30+ hours later" framing would be motivated reasoning. The honest argument is (1)–(3) above: the coupling already exists, it's already low-cost to fix, and deferring only adds more domains to untangle.
 
 ### Alternative B: Move taxonomy to T3
 
@@ -409,6 +415,8 @@ Not committed in this RDR. Revisit if Phase 2 load testing shows lock contention
 | Scope creep into Phase 3 | Explicitly deferred. Phase 3 requires its own RDR if pursued. |
 | Topics/taxonomy coupling to memory.title fragile | Already fragile pre-split — Phase 1 makes it explicit via `from .memory_store import MemoryStore` in `catalog_taxonomy.py`. Visibility is the fix. |
 | Concurrent RDR-061 E6 (memory consolidation) work conflicts with step 2 | `find_overlapping_memories` and `merge_memories` are both moving to `memory_store.py`. If RDR-061 E6 follow-up work is in flight during the refactor window, coordinate branch strategy before cutting the Phase 1 bead to avoid merge conflicts on those methods. |
+| RDR-057 heat-weighted expiry in `expire()` spans memory + relevance_log purge | `T2Database.expire()` currently calls both memory TTL scanning and `expire_relevance_log()` in sequence. Phase 1 splits these concerns across `memory_store.expire()` and `telemetry.expire()`. The facade's `expire()` must call both in sequence to preserve the single-call semantics. Risk: if the facade forgets one, silent telemetry accumulation. Mitigation: explicit test in `test_t2_facade.py::test_expire_calls_all_domains`. |
+| T1 reconnect does not interact with T2 split | T1 uses ChromaDB, not SQLite — no shared state with T2. T1 reconnect (RDR-057 RF-14) affects only T1's ChromaDB client. Included here explicitly so future readers don't look for a coupling that doesn't exist. |
 
 ## Open Questions
 
