@@ -178,6 +178,14 @@ END;
 from nexus.session import read_session_id as _read_session_id
 
 
+# ── Per-process migration guard (RDR-062 follow-up) ─────────────────────────
+# Migrations only need to run once per DB path per process. The MCP server
+# opens a fresh T2Database on every tool call; without this guard, each call
+# probes all 6 migrations.
+_migrated_paths: set[str] = set()
+_migrated_lock = threading.Lock()
+
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 class T2Database:
@@ -187,9 +195,9 @@ class T2Database:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self._init_schema()
+        self._init_schema(str(path))
 
-    def _init_schema(self) -> None:
+    def _init_schema(self, path_key: str) -> None:
         with self._lock:
             # Note: executescript() implicitly COMMITs any open transaction.
             # Safe here because _init_schema runs only during __init__ with no prior transaction.
@@ -198,12 +206,19 @@ class T2Database:
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
             if result and result[0].lower() != "wal":
                 _log.warning("WAL mode not available", actual_mode=result[0])
+            # Skip migration probes if this path was already migrated in this process.
+            with _migrated_lock:
+                already_migrated = path_key in _migrated_paths
+            if already_migrated:
+                return
             self._migrate_fts_if_needed()
             self._migrate_plans_if_needed()
             self._migrate_plans_ttl_if_needed()
             self._migrate_access_tracking_if_needed()
             self._migrate_topics_if_needed()
             self._migrate_relevance_log_if_needed()
+            with _migrated_lock:
+                _migrated_paths.add(path_key)
 
     def _migrate_plans_if_needed(self) -> None:
         """Add 'project' column to plans table if missing (v2.8.0 schema change).
@@ -437,18 +452,18 @@ class T2Database:
                 ).fetchone()
             else:
                 raise ValueError("Provide either id or both project and title.")
-            if row:
-                now = datetime.now(UTC).isoformat()
-                self.conn.execute(
-                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                    (now, row[0]),
-                )
-                self.conn.commit()
-                result = dict(zip(_COLUMNS, row))
-                result["access_count"] += 1
-                result["last_accessed"] = now
-                return result
-        return dict(zip(_COLUMNS, row)) if row else None
+            if row is None:
+                return None
+            now = datetime.now(UTC).isoformat()
+            self.conn.execute(
+                "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                (now, row[0]),
+            )
+            self.conn.commit()
+            result = dict(zip(_COLUMNS, row))
+            result["access_count"] += 1
+            result["last_accessed"] = now
+            return result
 
     def search(self, query: str, project: str | None = None) -> list[dict[str, Any]]:
         """FTS5 keyword search. Returns rows ordered by relevance."""
@@ -818,6 +833,22 @@ class T2Database:
                 )
                 self.conn.commit()
         return len(expired_ids)
+
+    def expire_relevance_log(self, days: int = 90) -> int:
+        """Delete relevance_log entries older than *days* days (RDR-061 E2).
+
+        The relevance_log accumulates on every store_put/catalog_link.
+        Without periodic purge it grows unboundedly. Default retention:
+        90 days — enough for re-ranking signal, bounded for disk use.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM relevance_log WHERE timestamp < ?",
+                (cutoff,),
+            )
+            self.conn.commit()
+        return cur.rowcount
 
     # ── Memory consolidation (RDR-061 E6) ────────────────────────────────────
 

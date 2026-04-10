@@ -116,19 +116,23 @@ def test_promote_returns_new_when_no_overlap(t1: T1Database, db: T2Database) -> 
     assert report.merged is False
 
 
-def test_promote_returns_merged_when_fts5_overlap(t1: T1Database, db: T2Database) -> None:
-    """promote() returns action='merged' when T2 has similar content."""
+def test_promote_returns_overlap_detected_when_fts5_overlap(t1: T1Database, db: T2Database) -> None:
+    """promote() returns action='overlap_detected' when T2 has similar content.
+
+    Note: merged=False because the new entry is written as a separate row;
+    the agent must decide whether to actually merge.
+    """
     # Pre-populate T2 with overlapping content (FTS5 is AND-of-terms)
     db.put(project="proj", title="existing.md", content="authentication design patterns")
     doc_id = t1.put("authentication design patterns")
     report = t1.promote(doc_id, project="proj", title="new-auth.md", t2=db)
-    assert report.action == "merged"
+    assert report.action == "overlap_detected"
     assert report.existing_title == "existing.md"
-    assert report.merged is True
+    assert report.merged is False  # overlap detected, not actually merged
 
 
 def test_promote_writes_to_t2_regardless_of_action(t1: T1Database, db: T2Database) -> None:
-    """Content is written to T2 whether action is 'new' or 'merged'."""
+    """Content is written to T2 whether action is 'new' or 'overlap_detected'."""
     db.put(project="proj", title="old.md", content="overlap content here")
     doc_id = t1.put("overlap content here")
     report = t1.promote(doc_id, project="proj", title="also-new.md", t2=db)

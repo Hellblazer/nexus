@@ -11,11 +11,18 @@ from typing import Any, Literal
 class PromotionReport:
     """Result of promoting a T1 scratch entry to T2.
 
-    action: 'new' (no overlap), 'merged' (FTS5 found similar content),
-            or 'conflicting' (reserved for Phase 3 semantic conflict detection).
+    action:
+      - 'new': no similar T2 entry found — clean write
+      - 'overlap_detected': FTS5 found similar content under a different title;
+        the entry was still written to T2 as a separate row. The agent must
+        decide whether to merge/dedupe manually.
+      - 'conflicting': reserved for Phase 3 semantic conflict detection
+
+    Note: 'overlap_detected' does NOT mean merge was performed. T2.put() always
+    writes the row; the report only signals that a similar entry may exist.
     """
 
-    action: Literal["new", "merged", "conflicting"]
+    action: Literal["new", "overlap_detected", "conflicting"]
     existing_title: str | None = None
     merged: bool = False
 

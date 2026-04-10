@@ -526,6 +526,30 @@ def test_expire_permanent_entries_preserved(db: T2Database) -> None:
     assert db.expire() == 0
 
 
+def test_expire_relevance_log_purges_old_entries(db: T2Database) -> None:
+    """expire_relevance_log() deletes entries older than the retention window."""
+    # Insert rows with timestamps spanning fresh and stale
+    db.log_relevance("q1", "c1", "stored", session_id="s1")
+    db.log_relevance("q2", "c2", "stored", session_id="s1")
+    # Backdate one row to 100 days ago
+    db.conn.execute(
+        "UPDATE relevance_log SET timestamp = datetime('now', '-100 days') WHERE chunk_id = ?",
+        ("c1",),
+    )
+    db.conn.commit()
+
+    purged = db.expire_relevance_log(days=90)
+    assert purged == 1
+    remaining = db.get_relevance_log()
+    assert len(remaining) == 1
+    assert remaining[0]["chunk_id"] == "c2"
+
+
+def test_expire_relevance_log_no_op_when_empty(db: T2Database) -> None:
+    """expire_relevance_log() on empty table returns 0."""
+    assert db.expire_relevance_log(days=90) == 0
+
+
 def test_get_returns_post_increment_access_count(db: T2Database) -> None:
     """get() return value reflects the incremented access_count, not stale."""
     db.put(project="proj", title="fresh.md", content="data")

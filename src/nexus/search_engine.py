@@ -225,8 +225,10 @@ def search_cross_corpus(
         from nexus.scoring import apply_link_boost
         all_results = apply_link_boost(all_results, catalog)
 
-    # Contradiction detection (opt-in via search.contradiction_check config)
-    if cfg.get("search", {}).get("contradiction_check", False) and all_results:
+    # Contradiction detection (RDR-057 Phase 3a). Default-on; opt out via
+    # search.contradiction_check=false in .nexus.yml. The check fetches
+    # embeddings for flagged candidates — see configuration.md for cost.
+    if cfg.get("search", {}).get("contradiction_check", True) and all_results:
         all_results = _flag_contradictions(all_results, t3)
 
     if cluster_by == "semantic" and all_results:
@@ -300,11 +302,21 @@ def _apply_clustering(results: list[SearchResult], t3: Any) -> list[SearchResult
     for idx, r in enumerate(results):
         col_groups.setdefault(r.collection, []).append(idx)
 
-    # Fetch embeddings per collection, assemble in result order
+    # Fetch embeddings per collection, assemble in result order.
+    # Guard: if T3 returns fewer rows than requested (e.g., deleted chunks),
+    # skip clustering and return the unclustered results rather than raising.
     embeddings = np.zeros((len(results), 0), dtype=np.float32)
     for col, indices in col_groups.items():
         ids = [results[i].id for i in indices]
         col_emb = t3.get_embeddings(col, ids)
+        if col_emb.shape[0] != len(indices):
+            _log.warning(
+                "clustering_skipped_shape_mismatch",
+                collection=col,
+                requested=len(indices),
+                got=col_emb.shape[0],
+            )
+            return results
         if embeddings.shape[1] == 0:
             embeddings = np.zeros((len(results), col_emb.shape[1]), dtype=np.float32)
         for local_idx, global_idx in enumerate(indices):

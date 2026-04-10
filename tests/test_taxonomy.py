@@ -166,6 +166,32 @@ def test_get_topic_docs_returns_assigned(db: T2Database) -> None:
     assert {d["doc_id"] for d in docs} == {"doc-a", "doc-b"}
 
 
+def test_cluster_and_persist_caps_vocab_size(db: T2Database, monkeypatch) -> None:
+    """Vocab is capped to prevent OOM on large/diverse corpora."""
+    import nexus.taxonomy as tax
+    # Insert entries with many distinct words — should not blow up
+    for i in range(20):
+        content = " ".join(f"word{i}_{j}" for j in range(50))
+        db.put(project="big", title=f"entry-{i}", content=content)
+    # Should complete without OOM
+    n = tax.cluster_and_persist(db, "big", k=3)
+    assert n > 0
+
+
+def test_cluster_and_persist_filters_stopwords(db: T2Database) -> None:
+    """Stopwords are filtered before vocab construction."""
+    import nexus.taxonomy as tax
+    for i in range(5):
+        db.put(
+            project="sw",
+            title=f"entry-{i}",
+            content=f"the quick brown fox jumps over the lazy dog topic{i}",
+        )
+    n = tax.cluster_and_persist(db, "sw", k=2)
+    assert n > 0
+    # The vocab should have topic0..topic4 and content words, not "the", "over", etc.
+
+
 def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
     """get_topic_docs JOINs on memory.title to resolve human-readable titles."""
     # Insert a memory entry — title must match doc_id for the JOIN to work

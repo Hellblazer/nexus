@@ -21,6 +21,14 @@ _log = structlog.get_logger()
 
 _TOPIC_COLUMNS = ("id", "label", "parent_id", "collection", "centroid_hash", "doc_count", "created_at")
 
+_STOPWORDS = frozenset({
+    "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
+    "it", "that", "this", "with", "on", "at", "by", "from", "as", "be", "not",
+    "but", "have", "has", "had", "will", "would", "can", "could", "should",
+    "may", "might", "must", "shall", "do", "does", "did", "been", "being",
+    "if", "then", "else", "when", "where", "which", "who", "what", "how",
+})
+
 
 def get_topics(
     db: "T2Database",
@@ -140,22 +148,30 @@ def cluster_and_persist(
     if len(entries) < 3:
         return 0
 
-    # Build simple word-frequency vectors for clustering
-    vocab: dict[str, int] = {}
+    # Build word-frequency vectors capped to top-N most frequent words.
+    # Without a cap, vocab grows unboundedly with content size (1000 entries
+    # × 500 words ≈ 2GB float32 matrix).
+    MAX_VOCAB = 2000
+    word_counts: dict[str, int] = {}
     for e in entries:
         for word in e.get("content", "").lower().split():
-            if word not in vocab and len(word) > 2:
-                vocab[word] = len(vocab)
+            if len(word) > 2 and word not in _STOPWORDS:
+                word_counts[word] = word_counts.get(word, 0) + 1
 
-    if not vocab:
+    if not word_counts:
         return 0
+
+    # Keep top-N by frequency, then assign stable indices
+    top_words = sorted(word_counts.items(), key=lambda kv: -kv[1])[:MAX_VOCAB]
+    vocab: dict[str, int] = {word: i for i, (word, _) in enumerate(top_words)}
 
     dim = len(vocab)
     embeddings = np.zeros((len(entries), dim), dtype=np.float32)
     for i, e in enumerate(entries):
         for word in e.get("content", "").lower().split():
-            if word in vocab:
-                embeddings[i, vocab[word]] += 1.0
+            idx = vocab.get(word)
+            if idx is not None:
+                embeddings[i, idx] += 1.0
 
     # Normalize rows
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)

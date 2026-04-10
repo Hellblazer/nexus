@@ -194,7 +194,7 @@ class T1Database:
         """
         session_filter = {"session_id": self._session_id}
 
-        def _do() -> list[dict]:
+        def _query() -> list[dict]:
             # Count session-scoped documents to avoid n_results > matching count error.
             session_docs = self._col.get(where=session_filter, include=[])
             session_count = len(session_docs["ids"])
@@ -207,7 +207,7 @@ class T1Database:
                 where=session_filter,
                 include=["documents", "metadatas", "distances"],
             )
-            rows = [
+            return [
                 {"id": did, "content": doc, "distance": dist, **meta}
                 for did, doc, meta, dist in zip(
                     results["ids"][0],
@@ -216,26 +216,29 @@ class T1Database:
                     results["distances"][0],
                 )
             ]
-            # Batch update access_count for all returned IDs
-            now = _now_iso()
-            for row in rows:
-                existing_meta = {
-                    k: v for k, v in row.items()
-                    if k not in ("id", "content", "distance")
-                }
-                updated_meta = {
-                    **existing_meta,
-                    "access_count": existing_meta.get("access_count", 0) + 1,
-                    "last_accessed": now,
-                }
-                try:
-                    rid = row["id"]
-                    self._col.update(ids=[rid], metadatas=[updated_meta])
-                except Exception:
-                    _log.warning("t1_access_count_update_failed", id=row["id"])
-            return rows
 
-        return self._exec(_do)
+        # Phase 1: fetch results via _exec (reconnect-safe)
+        rows = self._exec(_query)
+
+        # Phase 2: update access_count per row — each update gets its own _exec
+        # so a reconnect retries only the failed update, not the whole query.
+        now = _now_iso()
+        for row in rows:
+            existing_meta = {
+                k: v for k, v in row.items()
+                if k not in ("id", "content", "distance")
+            }
+            updated_meta = {
+                **existing_meta,
+                "access_count": existing_meta.get("access_count", 0) + 1,
+                "last_accessed": now,
+            }
+            rid = row["id"]
+            try:
+                self._exec(lambda: self._col.update(ids=[rid], metadatas=[updated_meta]))
+            except Exception:
+                _log.warning("t1_access_count_update_failed", id=rid)
+        return rows
 
     def list_entries(self) -> list[dict]:
         """Return all entries belonging to this session.
@@ -326,7 +329,13 @@ class T1Database:
             matches = []
         if matches:
             best = matches[0]
-            report = PromotionReport(action="merged", existing_title=best["title"], merged=True)
+            # merged=False: T2.put() writes the new entry as a separate row.
+            # The agent must explicitly merge if that's the intent.
+            report = PromotionReport(
+                action="overlap_detected",
+                existing_title=best["title"],
+                merged=False,
+            )
         else:
             report = PromotionReport(action="new")
         t2.put(project=project, title=title, content=entry["content"], tags=entry.get("tags", ""))

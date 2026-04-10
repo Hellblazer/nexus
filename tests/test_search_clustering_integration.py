@@ -11,6 +11,16 @@ from nexus.search_engine import search_cross_corpus
 from nexus.types import SearchResult
 
 
+@pytest.fixture(autouse=True)
+def _disable_contradiction_check(monkeypatch):
+    """These tests exercise clustering only — disable contradiction check
+    (default-on in prod) to keep embedding fetches isolated to clustering."""
+    monkeypatch.setattr(
+        "nexus.search_engine.load_config",
+        lambda: {"search": {"contradiction_check": False}},
+    )
+
+
 class _FakeT3:
     """Fake T3 that returns canned results and tracks get_embeddings calls."""
 
@@ -56,6 +66,30 @@ class TestClusterByNone:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
         search_cross_corpus("q", ["code__test"], 10, t3)
         assert t3.get_embeddings_calls == []
+
+
+class TestClusterShapeGuard:
+    """Regression: _apply_clustering must not raise when get_embeddings
+    returns fewer rows than requested (e.g., deleted chunks)."""
+
+    def test_shape_mismatch_falls_through_to_unclustered(self) -> None:
+        class _ShortT3:
+            _voyage_client = "fake"
+
+            def search(self, query, collection_names, n_results=10, where=None):
+                return _low_distance_results(collection_names[0], 5)
+
+            def get_embeddings(self, collection_name: str, ids: list[str]) -> np.ndarray:
+                # Simulate T3 returning fewer rows than requested
+                return np.zeros((len(ids) - 1, 4), dtype=np.float32)
+
+        t3 = _ShortT3()
+        # Should NOT raise IndexError — should return unclustered results
+        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic")
+        assert len(results) == 5
+        # No cluster labels — clustering was skipped
+        for r in results:
+            assert "_cluster_label" not in r.metadata
 
 
 class TestClusterBySemantic:
