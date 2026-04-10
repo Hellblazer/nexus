@@ -320,30 +320,29 @@ def catalog_link(
         if err:
             return {"error": err}
         created = cat.link(ft, tt, link_type, created_by, from_span=from_span, to_span=to_span)
-        # RDR-061 E2: log relevance correlation for recent searches in this session.
-        # If the target document's physical collection matches a chunk in a recent
-        # search result, this link is likely the result of that search.
+        # RDR-061 E2: log relevance correlation for the most recent search.
+        # Filter chunks by collection match to the link target — a coarse
+        # but cheap signal that the search likely led to this link.
         try:
             t1, _ = _get_t1()
-            session_id = getattr(t1, "_session_id", "") or ""
+            session_id = t1.session_id if hasattr(t1, "session_id") else ""
             traces = _get_recent_search_traces(session_id) if session_id else []
             if traces:
                 target_entry = cat.resolve(tt)
                 target_col = target_entry.physical_collection if target_entry else ""
                 if target_col:
-                    with _t2_ctx() as db:
-                        for trace in traces:
-                            for chunk_id, chunk_col in trace["chunks"]:
-                                if chunk_col == target_col:
-                                    db.log_relevance(
-                                        query=trace["query"],
-                                        chunk_id=chunk_id,
-                                        action="linked",
-                                        session_id=session_id,
-                                        collection=chunk_col,
-                                    )
+                    latest = traces[-1]
+                    rows = [
+                        (latest["query"], chunk_id, chunk_col, "linked", session_id)
+                        for chunk_id, chunk_col in latest["chunks"]
+                        if chunk_col == target_col
+                    ]
+                    if rows:
+                        with _t2_ctx() as db:
+                            db.log_relevance_batch(rows)
         except Exception:
-            pass  # relevance logging is non-fatal
+            import structlog
+            structlog.get_logger().debug("relevance_log_link_failed", exc_info=True)
         return {"from": str(ft), "to": str(tt), "type": link_type, "created": created}
     except Exception as e:
         return {"error": str(e)}

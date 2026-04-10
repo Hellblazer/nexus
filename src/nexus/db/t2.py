@@ -715,7 +715,8 @@ class T2Database:
         """Record a (query, chunk_id, action) triple in the relevance log.
 
         Called by MCP tools when an agent acts on search results (store_put,
-        catalog_link). Returns the new row id.
+        catalog_link). Returns the new row id. Prefer ``log_relevance_batch``
+        when writing multiple rows — it uses a single transaction.
         """
         now = datetime.now(UTC).isoformat()
         with self._lock:
@@ -727,11 +728,33 @@ class T2Database:
             self.conn.commit()
             return cur.lastrowid
 
+    def log_relevance_batch(
+        self,
+        rows: list[tuple[str, str, str, str, str]],
+    ) -> int:
+        """Insert multiple (query, chunk_id, collection, action, session_id) rows.
+
+        Single transaction for all rows. Returns the number of rows inserted.
+        """
+        if not rows:
+            return 0
+        now = datetime.now(UTC).isoformat()
+        params = [(*r, now) for r in rows]
+        with self._lock:
+            self.conn.executemany(
+                "INSERT INTO relevance_log (query, chunk_id, collection, action, session_id, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                params,
+            )
+            self.conn.commit()
+        return len(rows)
+
     def get_relevance_log(
         self,
         query: str = "",
         chunk_id: str = "",
         action: str = "",
+        session_id: str = "",
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Query the relevance log by filters. All filters optional.
@@ -749,6 +772,9 @@ class T2Database:
         if action:
             conditions.append("action = ?")
             params.append(action)
+        if session_id:
+            conditions.append("session_id = ?")
+            params.append(session_id)
         sql = (
             "SELECT id, query, chunk_id, collection, action, session_id, timestamp "
             f"FROM relevance_log WHERE {' AND '.join(conditions)} "

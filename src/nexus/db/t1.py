@@ -111,6 +111,11 @@ class T1Database:
 
         self._col = self._client.get_or_create_collection(_COLLECTION)
 
+    @property
+    def session_id(self) -> str:
+        """Public accessor for the T1 session identifier."""
+        return self._session_id
+
     def _exec(self, op: Callable[[], _T]) -> _T:
         """Execute a ChromaDB operation, reconnecting once on connection error."""
         try:

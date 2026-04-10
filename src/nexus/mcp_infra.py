@@ -59,20 +59,34 @@ def record_search_trace(
         bucket.append(trace)
         # Trim old entries (both by age and count)
         now = time.monotonic()
-        bucket[:] = [
+        trimmed = [
             t for t in bucket
             if now - t["timestamp"] < _SEARCH_TRACE_TTL_SECONDS
         ][-_SEARCH_TRACE_MAX_PER_SESSION:]
+        if trimmed:
+            _search_traces[session_id] = trimmed
+        else:
+            _search_traces.pop(session_id, None)
 
 
 def get_recent_search_traces(session_id: str) -> list[dict]:
-    """Return non-expired search traces for this session (RDR-061 E2)."""
+    """Return non-expired search traces for this session (RDR-061 E2).
+
+    Evicts the session key if all traces have expired.
+    """
     if not session_id:
         return []
     with _search_traces_lock:
         bucket = _search_traces.get(session_id, [])
         now = time.monotonic()
-        return [t for t in bucket if now - t["timestamp"] < _SEARCH_TRACE_TTL_SECONDS]
+        alive = [t for t in bucket if now - t["timestamp"] < _SEARCH_TRACE_TTL_SECONDS]
+        if alive:
+            if len(alive) != len(bucket):
+                _search_traces[session_id] = alive
+            return alive
+        # All expired — evict the key
+        _search_traces.pop(session_id, None)
+        return []
 
 
 def clear_search_traces() -> None:

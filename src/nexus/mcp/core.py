@@ -111,7 +111,7 @@ def search(
         # Non-fatal — session may be unavailable in test contexts.
         try:
             t1, _ = _get_t1()
-            session_id = getattr(t1, "_session_id", "") or ""
+            session_id = t1.session_id if hasattr(t1, "session_id") else ""
             if session_id:
                 _record_search_trace(
                     session_id,
@@ -119,7 +119,8 @@ def search(
                     [(r.id, r.collection) for r in page],
                 )
         except Exception:
-            pass
+            import structlog
+            structlog.get_logger().debug("relevance_trace_record_failed", exc_info=True)
 
         lines: list[str] = []
         current_cluster: str | None = None
@@ -434,24 +435,24 @@ def store_put(
                 structlog.get_logger().debug("store_put_auto_linked", doc_id=doc_id, link_count=n)
         except Exception:
             pass  # auto-linking is non-fatal
-        # RDR-061 E2: log relevance correlation for recent searches in this session
+        # RDR-061 E2: log relevance correlation for the most recent search in
+        # this session. Only the newest trace is used to minimize noise —
+        # older traces are unlikely to have driven this store_put.
         try:
             t1, _ = _get_t1()
-            session_id = getattr(t1, "_session_id", "") or ""
+            session_id = t1.session_id if hasattr(t1, "session_id") else ""
             traces = _get_recent_search_traces(session_id) if session_id else []
             if traces:
+                latest = traces[-1]
+                rows = [
+                    (latest["query"], chunk_id, chunk_col, "stored", session_id)
+                    for chunk_id, chunk_col in latest["chunks"]
+                ]
                 with _t2_ctx() as db:
-                    for trace in traces:
-                        for chunk_id, chunk_col in trace["chunks"]:
-                            db.log_relevance(
-                                query=trace["query"],
-                                chunk_id=chunk_id,
-                                action="stored",
-                                session_id=session_id,
-                                collection=chunk_col,
-                            )
+                    db.log_relevance_batch(rows)
         except Exception:
-            pass  # relevance logging is non-fatal
+            import structlog
+            structlog.get_logger().debug("relevance_log_store_failed", exc_info=True)
         return f"Stored: {doc_id} -> {col_name}"
     except Exception as e:
         return f"Error: {e}"

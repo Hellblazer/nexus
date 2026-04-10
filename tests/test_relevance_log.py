@@ -237,3 +237,152 @@ def test_store_put_without_search_trace_no_log(t1, tmp_path, monkeypatch):
     with T2Database(t2_path) as db:
         rows = db.get_relevance_log()
     assert rows == []
+
+
+def test_store_put_only_logs_latest_trace(t1, tmp_path, monkeypatch):
+    """Multiple search traces — store_put only correlates with the newest one."""
+    from nexus.mcp.core import store_put
+
+    t2_path = tmp_path / "t2.db"
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: T2Database(t2_path))
+
+    mock_t3 = MagicMock()
+    mock_t3.put.return_value = "new-doc-id"
+    from nexus.mcp_infra import inject_t3
+    inject_t3(mock_t3)
+
+    record_search_trace("test-session-e2", "old query", [("c-old", "knowledge__a")])
+    record_search_trace("test-session-e2", "newer query", [("c-new-1", "knowledge__a"), ("c-new-2", "knowledge__a")])
+
+    store_put(content="notes", collection="knowledge")
+
+    with T2Database(t2_path) as db:
+        rows = db.get_relevance_log()
+    # Only 2 rows (from the latest trace), not 3
+    assert len(rows) == 2
+    assert {r["query"] for r in rows} == {"newer query"}
+    assert {r["chunk_id"] for r in rows} == {"c-new-1", "c-new-2"}
+
+
+def test_get_relevance_log_filter_by_session(t2):
+    """get_relevance_log() filters by session_id."""
+    t2.log_relevance("q1", "c1", "stored", session_id="sess-a")
+    t2.log_relevance("q2", "c2", "stored", session_id="sess-b")
+    rows = t2.get_relevance_log(session_id="sess-a")
+    assert len(rows) == 1
+    assert rows[0]["query"] == "q1"
+
+
+def test_log_relevance_batch(t2):
+    """log_relevance_batch inserts multiple rows in one transaction."""
+    rows = [
+        ("q1", "c1", "knowledge__a", "stored", "sess-1"),
+        ("q1", "c2", "knowledge__a", "stored", "sess-1"),
+        ("q2", "c3", "knowledge__b", "linked", "sess-1"),
+    ]
+    count = t2.log_relevance_batch(rows)
+    assert count == 3
+    all_rows = t2.get_relevance_log()
+    assert len(all_rows) == 3
+
+
+def test_log_relevance_batch_empty_is_noop(t2):
+    """Empty batch returns 0 and writes nothing."""
+    assert t2.log_relevance_batch([]) == 0
+    assert t2.get_relevance_log() == []
+
+
+def test_search_trace_cache_evicts_empty_session_keys():
+    """When all traces expire, the session key is removed from the cache."""
+    from nexus.mcp_infra import _search_traces, _SEARCH_TRACE_TTL_SECONDS
+
+    record_search_trace("sess-ephemeral", "q", [("c", "col")])
+    assert "sess-ephemeral" in _search_traces
+
+    # Backdate the trace beyond TTL
+    _search_traces["sess-ephemeral"][0]["timestamp"] -= _SEARCH_TRACE_TTL_SECONDS + 10
+
+    # Read should evict the key
+    traces = get_recent_search_traces("sess-ephemeral")
+    assert traces == []
+    assert "sess-ephemeral" not in _search_traces
+
+
+def test_t1_public_session_id_property(t1):
+    """T1Database exposes session_id as a public property."""
+    assert t1.session_id == "test-session-e2"
+
+
+def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeypatch):
+    """catalog_link logs relevance when target collection matches a recent search chunk."""
+    from nexus.catalog import Catalog
+    from nexus.catalog.tumbler import Tumbler
+    from nexus.mcp.catalog import catalog_link
+    from nexus.mcp_infra import inject_catalog
+
+    # Set up a catalog with two documents in the same collection
+    catalog_dir = tmp_path / "catalog"
+    cat = Catalog.init(catalog_dir)
+    owner = cat.register_owner("test", "proj")
+    doc_a = cat.register(owner, "source", content_type="knowledge",
+                         physical_collection="knowledge__ml")
+    doc_b = cat.register(owner, "target", content_type="knowledge",
+                         physical_collection="knowledge__ml")
+    inject_catalog(cat)
+
+    t2_path = tmp_path / "t2.db"
+    monkeypatch.setattr("nexus.mcp.catalog._t2_ctx", lambda: T2Database(t2_path))
+
+    # Record a search trace with a chunk in knowledge__ml
+    record_search_trace(
+        "test-session-e2",
+        "ml concepts",
+        [("chunk-1", "knowledge__ml"), ("chunk-2", "knowledge__other")],
+    )
+
+    # Create a link — target is in knowledge__ml, matches chunk-1
+    result = catalog_link(
+        from_tumbler=str(doc_a),
+        to_tumbler=str(doc_b),
+        link_type="cites",
+    )
+    assert "created" in result
+
+    # Only chunk-1 should be logged (collection match filter)
+    with T2Database(t2_path) as db:
+        rows = db.get_relevance_log(action="linked")
+    assert len(rows) == 1
+    assert rows[0]["chunk_id"] == "chunk-1"
+    assert rows[0]["query"] == "ml concepts"
+
+
+def test_catalog_link_no_log_when_collection_mismatch(t1, tmp_path, monkeypatch):
+    """catalog_link does NOT log when no trace chunks match the target collection."""
+    from nexus.catalog import Catalog
+    from nexus.mcp.catalog import catalog_link
+    from nexus.mcp_infra import inject_catalog
+
+    catalog_dir = tmp_path / "catalog"
+    cat = Catalog.init(catalog_dir)
+    owner = cat.register_owner("test", "proj")
+    doc_a = cat.register(owner, "src", content_type="knowledge",
+                         physical_collection="knowledge__ml")
+    doc_b = cat.register(owner, "dst", content_type="knowledge",
+                         physical_collection="knowledge__ml")
+    inject_catalog(cat)
+
+    t2_path = tmp_path / "t2.db"
+    monkeypatch.setattr("nexus.mcp.catalog._t2_ctx", lambda: T2Database(t2_path))
+
+    # Search was in a different collection
+    record_search_trace(
+        "test-session-e2",
+        "unrelated",
+        [("chunk-x", "knowledge__other")],
+    )
+
+    catalog_link(from_tumbler=str(doc_a), to_tumbler=str(doc_b), link_type="cites")
+
+    with T2Database(t2_path) as db:
+        rows = db.get_relevance_log()
+    assert rows == []
