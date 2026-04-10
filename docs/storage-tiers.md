@@ -13,6 +13,45 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
 
+## Progressive Formalization (RDR-057)
+
+Nexus treats the three tiers as stages in a progression, not independent
+silos. An idea enters at T1 as a working hypothesis, is promoted to T2
+when it outlives the session, and is promoted to T3 when it becomes
+institutional knowledge. Several RDR-057 features work together to make
+this progression observable and to reward information that proves useful
+over time:
+
+- **Access tracking** on T1 and T2 — every successful read bumps
+  `access_count` and `last_accessed`, so the system can see which entries
+  actually get used.
+- **Heat-weighted TTL** on T2 — frequently-accessed notes survive longer
+  than their nominal TTL. The formula is
+  `effective_ttl = base_ttl * (1 + log(access_count + 1))`. See
+  [Configuration § Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
+- **`PromotionReport`** on `nx scratch promote` and `T1.promote()` — the
+  promotion result reports `action=new` when the T2 destination is clean
+  or `action=overlap_detected` when an FTS5 scan finds a similar entry
+  under a different title. The promoted row is still written; the report
+  only signals that a manual merge may be warranted.
+- **Contradiction flagging** during T3 search — `search_cross_corpus`
+  adds `[CONTRADICTS ANOTHER RESULT]` to any result pair where two
+  high-similarity chunks come from different `source_agent` provenance,
+  surfacing inconsistencies for human review. Default-on; opt out via
+  `search.contradiction_check: false`. See
+  [Querying Guide § Contradiction detection](querying-guide.md#contradiction-detection-rdr-057-phase-3a).
+- **`formalizes` catalog link type** — when a higher-abstraction
+  representation (extracted entities, RDF triples, structured notes) is
+  derived from a raw text chunk, link the two with type `formalizes` so
+  the multi-representation relationship is explicit in the graph. See
+  [Document Catalog § Link Types](catalog.md#link-types).
+
+Together these features let Nexus reward useful information without
+rigidly deleting the rest: frequently-read entries stick around, the
+promotion path from scratch to memory to knowledge is auditable, and
+contradictory claims bubble up during retrieval instead of silently
+coexisting.
+
 ## T1 -- Session Scratch
 
 Backed by a per-session `chromadb.HttpClient` connecting to a ChromaDB server process started by the `SessionStart` hook. Uses `DefaultEmbeddingFunction` (MiniLM-L6-v2, local ONNX). No API keys required.

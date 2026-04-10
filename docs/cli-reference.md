@@ -437,12 +437,27 @@ nx scratch put "hypothesis: cache invalidation is stale"
 | `delete ID` | Delete one entry by ID prefix (no prompt) |
 | `flag ID` | Mark for auto-flush to T2 at session end |
 | `unflag ID` | Remove flush mark |
-| `promote ID --project NAME --title NAME` | Promote to T2 |
+| `promote ID --project NAME --title NAME` | Promote to T2, report `action=new` or `overlap_detected` |
 | `clear` | Delete all scratch notes |
 
 **`put` flags:** `--tags` (comma-separated), `--persist` (auto-flush to T2), `-p` / `--project` / `-t` / `--title` (explicit T2 destination)
 
 **`flag` flags:** `-p` / `--project` / `-t` / `--title` (explicit T2 destination)
+
+**`promote` output and semantics (RDR-057):** `nx scratch promote` echoes the
+promotion result as `Promoted <id> -> <project>/<title> (action=<ACTION>)`.
+Two actions are possible today:
+
+- `action=new` — no similar entry found under the target project. Clean write.
+- `action=overlap_detected` — an FTS5 keyword scan found a similar entry in the
+  target project under a different title. The new row is **still** written to
+  T2 as a separate entry — the report is an advisory, not a rejection.
+  Agents should decide whether to manually merge via `memory_consolidate(action="merge", ...)`.
+
+The underlying `T1.promote()` method returns a full `PromotionReport` dataclass
+with `action`, `existing_title`, and `merged` fields. The CLI surfaces only the
+`action` field; the full report is available to agents through `scratch_manage`
+and Python API callers. See [Storage Tiers § Progressive Formalization](storage-tiers.md#progressive-formalization-rdr-057).
 
 ---
 
