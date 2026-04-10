@@ -1,6 +1,7 @@
 ---
 title: "RDR-063: T2 Domain Split — Separating Memory, Plans, Catalog, and Telemetry"
-status: draft
+status: accepted
+accepted_date: 2026-04-10
 type: architecture
 priority: P2
 created: 2026-04-09
