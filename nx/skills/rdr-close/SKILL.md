@@ -90,7 +90,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to capture implementation provenance:
 
-1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically. Review with `nx catalog links <rdr-tumbler> --type implements-heuristic` — promote high-confidence ones to `implements` via `catalog_link` for link-boost scoring benefit (heuristic links have zero search boost weight).
+1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically. Review with `nx catalog links <rdr-tumbler> --type implements-heuristic` — promote high-confidence ones to `implements` via `mcp__plugin_nx_nexus-catalog__link` for link-boost scoring benefit (heuristic links have zero search boost weight).
 
 2. **RDR→prior-RDR links**: If the RDR's T2 record has a `supersedes` field, create the catalog link:
    ```
@@ -100,7 +100,7 @@ After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to cap
 3. **RDR→research links**: If research findings reference indexed papers, create `cites` links:
    - Read T2 research findings for this RDR
    - For each finding with a URL or paper title as source, search catalog: `mcp__plugin_nx_nexus-catalog__search(query="<source>")`
-   - If found, resolve the RDR tumbler (`catalog_search(query="RDR-NNN")`), then: `mcp__plugin_nx_nexus-catalog__link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
+   - If found, resolve the RDR tumbler (`mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN")`), then: `mcp__plugin_nx_nexus-catalog__link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
 
 Skip all catalog steps silently if catalog is not initialized. The T2 record and markdown are the authorities — catalog links are supplementary graph enrichment.
 

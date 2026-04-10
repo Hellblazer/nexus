@@ -72,9 +72,9 @@ mcp__plugin_nx_nexus-catalog__link(
 )
 
 # By title (resolve first)
-# 1. Search for source: catalog_search(query="scoring.py") → tumbler "1.1.115"
-# 2. Search for target: catalog_search(query="RDR-060") → tumbler "1.1.440"
-# 3. Link: catalog_link(from_tumbler="1.1.115", to_tumbler="1.1.440", ...)
+# 1. Search for source: mcp__plugin_nx_nexus-catalog__search(query="scoring.py") → tumbler "1.1.115"
+# 2. Search for target: mcp__plugin_nx_nexus-catalog__search(query="RDR-060") → tumbler "1.1.440"
+# 3. Link: mcp__plugin_nx_nexus-catalog__link(from_tumbler="1.1.115", to_tumbler="1.1.440", ...)
 ```
 
 **Link types** (use the right one):
@@ -84,6 +84,7 @@ mcp__plugin_nx_nexus-catalog__link(
 | `cites` | Document references another | Paper citing another paper or RDR |
 | `relates` | General relationship | Two related docs without directional meaning |
 | `supersedes` | Replaces an older version | New RDR superseding old one |
+| `formalizes` | Higher abstraction → raw source | Extracted entities / triples pointing back to an L0 text chunk (RDR-057) |
 
 Do NOT use `implements-heuristic` — that's for the automated linker only.
 

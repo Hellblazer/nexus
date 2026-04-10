@@ -148,7 +148,7 @@ Parse the JSON plan from the response. The planner returns a fenced ` ```json ` 
 
 For each step in `plan["steps"]` in order:
 
-**catalog_search / catalog_links / catalog_resolve**: Execute via the corresponding MCP tool. Write results to T1 scratch with tag `query-step,step-{N},{operation}`. Extract `physical_collection` values into `$step_N.collections`.
+**catalog search / links / resolve** (via `mcp__plugin_nx_nexus-catalog__search`, `mcp__plugin_nx_nexus-catalog__links`, `mcp__plugin_nx_nexus-catalog__resolve`): Execute via the corresponding MCP tool on the nexus-catalog server. Write results to T1 scratch with tag `query-step,step-{N},{operation}`. Extract `physical_collection` values into `$step_N.collections`.
 
 **search**: Execute via `mcp__plugin_nx_nexus__search`. Write results to T1 scratch.
 
@@ -214,8 +214,8 @@ T1 scratch is the cross-dispatch persistence mechanism for Path 3. Every step ou
 | Tag pattern | Written by | Read by |
 |-------------|-----------|---------|
 | `query-step,step-{N},search` | Skill (after search MCP call) | Skill (resolving $step_N) |
-| `query-step,step-{N},catalog_search` | Skill (after catalog_search) | Skill ($step_N and $step_N.collections) |
-| `query-step,step-{N},catalog_links` | Skill (after catalog_links) | Skill ($step_N and $step_N.collections) |
+| `query-step,step-{N},catalog_search` | Skill (after `mcp__plugin_nx_nexus-catalog__search`) | Skill ($step_N and $step_N.collections) |
+| `query-step,step-{N},catalog_links` | Skill (after `mcp__plugin_nx_nexus-catalog__links`) | Skill ($step_N and $step_N.collections) |
 | `query-step,step-{N},{operation}` | analytical-operator + Skill | Skill (resolving $step_N) |
 | `query-step,step-{N},error` | Skill (on operator failure) | Skill (partial failure tracking) |
 

@@ -200,13 +200,13 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | T1/T2/T3 storage (core) | `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_search`, `memory_delete`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search` |
+| `nexus` | T1/T2/T3 storage (core) | `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_search`, `memory_delete`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search` |
 | `nexus-catalog` | Catalog access (RDR-062) | `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus core server exposes 14 MCP tools and the nexus-catalog server exposes 10 catalog tools, for 24 registered tools total (6 tools demoted to Python-only). These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 15 MCP tools and the nexus-catalog server exposes 10 catalog tools, for 25 registered tools total (6 tools demoted to Python-only). These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 

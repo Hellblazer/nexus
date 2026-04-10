@@ -46,7 +46,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
    ```
    mcp__plugin_nx_nexus-catalog__search(query="<source title or keywords>")
    ```
-   If a matching catalog entry is found, resolve the RDR's tumbler too (`catalog_search(query="RDR-NNN")`), then link:
+   If a matching catalog entry is found, resolve the RDR's tumbler too (`mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN")`), then link:
    ```
    mcp__plugin_nx_nexus-catalog__link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-research")
    ```
