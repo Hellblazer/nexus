@@ -47,7 +47,7 @@ class TestNxPermissionHook:
     """nx plugin auto-approves mcp__plugin_nx_* tools."""
 
     def test_approves_nexus_catalog_tool(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_nx_nexus__catalog_search")
+        output = _run_hook(NX_SCRIPT, "mcp__plugin_nx_nexus-catalog__catalog_search")
         assert _parse_decision(output) == "allow"
 
     def test_approves_nexus_search_tool(self) -> None:
