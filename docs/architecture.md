@@ -28,10 +28,12 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │
     ├── Catalog: JSONL truth → SQLite cache → typed link graph
     │     documents: tumbler addressing (1.owner.doc), FTS5 search
-    │     links: cites, implements-heuristic, supersedes, relates
+    │     links: cites, implements-heuristic, supersedes, relates, formalizes
     │     auto-generate: citation links (bib metadata), code-RDR (heuristic)
-    │     MCP: catalog_search, catalog_show, catalog_links, catalog_link, catalog_link_query, catalog_link_audit
+    │     MCP: nexus-catalog server — search, show, list, register, update,
+    │          link, links, link_query, resolve, stats (short names, RDR-062)
     │     CLI: nx catalog setup/search/show/links/link/unlink/stats
+    │     Demoted to CLI-only: catalog_unlink, catalog_link_audit, catalog_link_bulk
     │
     └── Storage tiers
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
@@ -94,7 +96,7 @@ Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of st
 | **Search** | `search_engine.py`, `search_clusterer.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py`, `filters.py` | Query, rank, rerank, Ward hierarchical clustering, shared where-filter parsing |
 | **Hooks** | `commands/hooks.py` | Git hook install/uninstall/status, sentinel-bounded stanza management |
 | **Verification** | `config.py` (verification section), `nx/hooks/scripts/stop_verification_hook.sh`, `nx/hooks/scripts/pre_close_verification_hook.sh`, `nx/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Configuration — Verification](configuration.md#verification) |
-| **MCP Server** | `mcp_server.py`, `mcp_infra.py` | FastMCP server: tool definitions in `mcp_server.py`, infrastructure (singletons, caching, test injection) in `mcp_infra.py`. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth). Storage: `search`, `store_put`, `store_list`, `memory_*`, `scratch_*`, `collection_*`, `plan_*`. Catalog: `catalog_search`, `catalog_show`, `catalog_links`, `catalog_link`, `catalog_unlink`, `catalog_link_query`, `catalog_link_audit`, `catalog_link_bulk`, `catalog_resolve` |
+| **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Dual-server FastMCP architecture (RDR-062). **Core server (`nexus`, 15 tools)**: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`. **Catalog server (`nexus-catalog`, 10 tools)**: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` (short names — the `catalog_` prefix is dropped since the server namespace already provides context). **Demoted to CLI-only (6 tools)**: `store_delete`, `collection_info`, `collection_verify`, `catalog_unlink`, `catalog_link_audit`, `catalog_link_bulk`. Backward-compat shim at `mcp_server.py` re-exports all 30 functions. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth). Singletons and test injection in `mcp_infra.py` |
 | **Enrichment** | `bib_enricher.py`, `commands/enrich.py` | Semantic Scholar bibliographic metadata lookup + `nx enrich` CLI backfill command |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py` | Configuration, naming, formatting, session lifecycle, transient-error retry |
 

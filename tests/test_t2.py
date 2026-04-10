@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -420,3 +421,359 @@ def test_fts_migration_is_idempotent(tmp_path: Path) -> None:
     with T2Database(db_path) as db:
         results = db.search("existing-entry")
         assert len(results) == 1 and results[0]["title"] == "existing-entry.md"
+
+
+# ── T2 access tracking (RDR-057 P2-2a, nexus-b4x0) ────────────────────────
+
+
+def test_access_tracking_columns_exist(db: T2Database) -> None:
+    """access_count and last_accessed columns are present after init."""
+    db.conn.execute("SELECT access_count FROM memory LIMIT 0")
+    db.conn.execute("SELECT last_accessed FROM memory LIMIT 0")
+
+
+def test_access_tracking_migration_idempotent(tmp_path: Path) -> None:
+    """Opening DB twice doesn't fail (migration is safe to re-run)."""
+    db_path = tmp_path / "migrate.db"
+    T2Database(db_path).close()
+    T2Database(db_path).close()  # second open = idempotent migration
+
+
+def test_new_entry_access_count_zero(db: T2Database) -> None:
+    """New entries start with access_count=0."""
+    db.put(project="proj", title="fresh.md", content="new content")
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='fresh.md'"
+    ).fetchone()
+    assert row[0] == 0
+
+
+def test_get_increments_access_count(db: T2Database) -> None:
+    """get() increments access_count by 1."""
+    db.put(project="proj", title="tracked.md", content="trackable")
+    db.get(project="proj", title="tracked.md")
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='tracked.md'"
+    ).fetchone()
+    assert row[0] == 1
+
+
+def test_get_increments_access_count_three_times(db: T2Database) -> None:
+    """Three get() calls → access_count=3."""
+    db.put(project="proj", title="multi.md", content="accessed many times")
+    db.get(project="proj", title="multi.md")
+    db.get(project="proj", title="multi.md")
+    db.get(project="proj", title="multi.md")
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='multi.md'"
+    ).fetchone()
+    assert row[0] == 3
+
+
+def test_search_increments_access_count(db: T2Database) -> None:
+    """search() increments access_count for returned entries."""
+    db.put(project="proj", title="searchable.md", content="unique xyzzy keyword")
+    db.search("xyzzy")
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='searchable.md'"
+    ).fetchone()
+    assert row[0] == 1
+
+
+def test_get_sets_last_accessed(db: T2Database) -> None:
+    """get() updates last_accessed to a non-empty ISO timestamp."""
+    db.put(project="proj", title="ts.md", content="timestamp check")
+    db.get(project="proj", title="ts.md")
+    row = db.conn.execute(
+        "SELECT last_accessed FROM memory WHERE title='ts.md'"
+    ).fetchone()
+    assert row[0] != ""
+    from datetime import datetime
+    datetime.fromisoformat(row[0])  # validates format
+
+
+# ── heat-weighted expiry ────────────────────────────────────────────────────
+
+
+def test_expire_unaccessed_entry_base_behavior(db: T2Database) -> None:
+    """access_count=0, base_ttl=1, backdated 2 days → expires (unchanged behavior)."""
+    db.put(project="proj", title="cold.md", content="never accessed", ttl=1)
+    _backdate(db, "cold.md", days=2)
+    assert db.expire() == 1
+
+
+def test_expire_hot_entry_survives_past_base_ttl(db: T2Database) -> None:
+    """access_count=9 → effective_ttl ≈ 3.3 days. Entry at 1.5 days survives."""
+    db.put(project="proj", title="hot.md", content="frequently accessed", ttl=1)
+    db.conn.execute("UPDATE memory SET access_count=9 WHERE title='hot.md'")
+    db.conn.commit()
+    _backdate(db, "hot.md", days=1.5)
+    assert db.expire() == 0  # survives due to heat
+
+
+def test_expire_hot_entry_eventually_expires(db: T2Database) -> None:
+    """access_count=9, effective_ttl ≈ 3.3 days. Entry at 4 days expires."""
+    db.put(project="proj", title="hot-old.md", content="hot but stale", ttl=1)
+    db.conn.execute("UPDATE memory SET access_count=9 WHERE title='hot-old.md'")
+    db.conn.commit()
+    _backdate(db, "hot-old.md", days=4)
+    assert db.expire() == 1
+
+
+def test_expire_permanent_entries_preserved(db: T2Database) -> None:
+    """Entries with ttl=None are permanent — never expire regardless of age."""
+    db.put(project="proj", title="perm.md", content="permanent", ttl=None)
+    _backdate(db, "perm.md", days=1000)
+    assert db.expire() == 0
+
+
+def test_expire_relevance_log_purges_old_entries(db: T2Database) -> None:
+    """expire_relevance_log() deletes entries older than the retention window."""
+    # Insert rows with timestamps spanning fresh and stale
+    db.log_relevance("q1", "c1", "stored", session_id="s1")
+    db.log_relevance("q2", "c2", "stored", session_id="s1")
+    # Backdate one row to 100 days ago
+    db.conn.execute(
+        "UPDATE relevance_log SET timestamp = datetime('now', '-100 days') WHERE chunk_id = ?",
+        ("c1",),
+    )
+    db.conn.commit()
+
+    purged = db.expire_relevance_log(days=90)
+    assert purged == 1
+    remaining = db.get_relevance_log()
+    assert len(remaining) == 1
+    assert remaining[0]["chunk_id"] == "c2"
+
+
+def test_expire_relevance_log_no_op_when_empty(db: T2Database) -> None:
+    """expire_relevance_log() on empty table returns 0."""
+    assert db.expire_relevance_log(days=90) == 0
+
+
+def test_expire_relevance_log_partial_purge(db: T2Database) -> None:
+    """Partial purge: some rows stale, some fresh."""
+    # Insert 4 rows
+    for i in range(4):
+        db.log_relevance(f"q{i}", f"c{i}", "stored", session_id="s1")
+    # Backdate rows 0 and 1 to 100 days ago
+    db.conn.execute(
+        "UPDATE relevance_log SET timestamp = datetime('now', '-100 days') "
+        "WHERE chunk_id IN ('c0', 'c1')"
+    )
+    db.conn.commit()
+
+    purged = db.expire_relevance_log(days=90)
+    assert purged == 2
+    remaining = db.get_relevance_log()
+    assert len(remaining) == 2
+    assert {r["chunk_id"] for r in remaining} == {"c2", "c3"}
+
+
+def test_expire_relevance_log_days_zero_purges_all(db: T2Database) -> None:
+    """days=0 cutoff is "now", so every pre-existing row is purged."""
+    db.log_relevance("q1", "c1", "stored")
+    db.log_relevance("q2", "c2", "stored")
+    purged = db.expire_relevance_log(days=0)
+    assert purged == 2
+    assert db.get_relevance_log() == []
+
+
+def test_expire_relevance_log_days_negative_purges_all(db: T2Database) -> None:
+    """Negative days means cutoff is in the future — all rows are stale."""
+    db.log_relevance("q1", "c1", "stored")
+    purged = db.expire_relevance_log(days=-1)
+    assert purged == 1
+
+
+def test_expire_also_purges_relevance_log(db: T2Database) -> None:
+    """expire() calls expire_relevance_log() to purge telemetry."""
+    # Stale relevance_log row
+    db.log_relevance("q", "c", "stored", session_id="s1")
+    db.conn.execute(
+        "UPDATE relevance_log SET timestamp = datetime('now', '-100 days')"
+    )
+    db.conn.commit()
+
+    db.expire()  # default relevance_log_days=90
+
+    assert db.get_relevance_log() == []
+
+
+def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) -> None:
+    """Two T2Database instances on the same path do not re-run migrations sequentially."""
+    from nexus.db import t2 as t2_module
+
+    # Clear any prior migration state for this path. The guard keys on the
+    # resolved path, so discard the resolved form (important on macOS where
+    # /var and /private/var resolve differently).
+    path = tmp_path / "sequential.db"
+    with t2_module._migrated_lock:
+        t2_module._migrated_paths.discard(str(path.resolve()))
+
+    call_count = {"n": 0}
+    original = T2Database._migrate_plans_if_needed
+
+    def counting(self):
+        call_count["n"] += 1
+        return original(self)
+
+    monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
+
+    db1 = T2Database(path)
+    assert call_count["n"] == 1
+    # Second instance on the same path: migration must NOT run again
+    db2 = T2Database(path)
+    assert call_count["n"] == 1, (
+        "Migration ran a second time — the _migrated_paths guard failed"
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.symlink requires admin/developer mode on Windows",
+)
+def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None:
+    """Two paths resolving to the same file share a guard key via symlink.
+
+    Python's ``Path`` collapses ``.`` segments at construction, so a naive
+    ``base / "." / "file.db"`` produces the same string as ``base / "file.db"``
+    and doesn't exercise normalization. This test uses a real symlink so the
+    two string paths genuinely differ — only ``resolve()`` can reconcile them.
+    """
+    import os
+
+    from nexus.db import t2 as t2_module
+
+    base = tmp_path / "real"
+    base.mkdir()
+    canonical = base / "norm.db"
+
+    # Create a symlinked alias pointing at the same parent directory
+    link_parent = tmp_path / "via_symlink"
+    os.symlink(base, link_parent)
+    via_symlink = link_parent / "norm.db"
+
+    # Sanity: the two path strings genuinely differ
+    assert str(canonical) != str(via_symlink)
+    # But resolve() converges them
+    assert canonical.resolve() == via_symlink.resolve()
+
+    with t2_module._migrated_lock:
+        t2_module._migrated_paths.discard(str(canonical.resolve()))
+
+    call_count = {"n": 0}
+    original = T2Database._migrate_plans_if_needed
+
+    def counting(self):
+        call_count["n"] += 1
+        return original(self)
+
+    monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
+
+    # First construction via canonical path
+    T2Database(canonical)
+    assert call_count["n"] == 1
+
+    # Second construction via symlinked path that resolves to the same file.
+    # Without path.resolve() in __init__, the guard would see a different key
+    # and re-run migrations.
+    T2Database(via_symlink)
+    assert call_count["n"] == 1, (
+        "Migration ran again for a symlinked path resolving to the same "
+        "file — path normalization in _init_schema failed"
+    )
+
+
+def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None:
+    """10 threads constructing T2Database on the same path run migrations exactly once.
+
+    This is the regression test for F2 (round 2) — the race where two
+    concurrent constructors could both enter the migration functions.
+    """
+    import threading
+
+    from nexus.db import t2 as t2_module
+
+    path = tmp_path / "concurrent.db"
+    with t2_module._migrated_lock:
+        t2_module._migrated_paths.discard(str(path.resolve()))
+
+    call_count = {"n": 0}
+    count_lock = threading.Lock()
+    original = T2Database._migrate_plans_if_needed
+
+    def counting(self):
+        with count_lock:
+            call_count["n"] += 1
+        return original(self)
+
+    monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
+
+    barrier = threading.Barrier(10, timeout=10)
+    errors: list[Exception] = []
+    dbs: list[T2Database] = []
+    dbs_lock = threading.Lock()
+
+    def worker():
+        try:
+            barrier.wait()
+            db = T2Database(path)
+            with dbs_lock:
+                dbs.append(db)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"Concurrent construction raised: {errors}"
+    assert call_count["n"] == 1, (
+        f"Migration ran {call_count['n']} times across 10 concurrent "
+        f"constructions — expected exactly 1 (the guard lock failed)"
+    )
+
+
+def test_get_returns_post_increment_access_count(db: T2Database) -> None:
+    """get() return value reflects the incremented access_count, not stale."""
+    db.put(project="proj", title="fresh.md", content="data")
+    entry = db.get(project="proj", title="fresh.md")
+    assert entry["access_count"] == 1
+    entry2 = db.get(project="proj", title="fresh.md")
+    assert entry2["access_count"] == 2
+
+
+def test_get_by_id_increments_access_count(db: T2Database) -> None:
+    """get(id=...) also increments access_count."""
+    row_id = db.put(project="proj", title="byid.md", content="data")
+    db.get(id=row_id)
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE id=?", (row_id,)
+    ).fetchone()
+    assert row[0] == 1
+
+
+def test_upsert_preserves_access_count(db: T2Database) -> None:
+    """Re-putting with same key preserves accumulated access_count."""
+    db.put(project="proj", title="upsert.md", content="v1")
+    db.get(project="proj", title="upsert.md")
+    db.get(project="proj", title="upsert.md")
+    # access_count is now 2
+    db.put(project="proj", title="upsert.md", content="v2")
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='upsert.md'"
+    ).fetchone()
+    assert row[0] == 2  # preserved through upsert
+
+
+def test_search_glob_does_not_increment_access_count(db: T2Database) -> None:
+    """search_glob is an admin operation — does not track access."""
+    db.put(project="nexus_rdr", title="scan.md", content="scan content")
+    db.search_glob("scan", "*_rdr")
+    row = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='scan.md'"
+    ).fetchone()
+    assert row[0] == 0

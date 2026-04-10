@@ -293,3 +293,5 @@ class TestCatalogAutoLinkIntegration:
         assert len(cat.links_from(doc2_t, link_type="relates")) == 1
 
         _reset_singletons()
+
+

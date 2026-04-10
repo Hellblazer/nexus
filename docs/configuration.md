@@ -72,6 +72,7 @@ Used by `nx enrich` to fetch bibliographic metadata (year, venue, authors, citat
 | `search.distance_threshold.rdr` | — | `0.65` | Maximum distance for RDR corpus results |
 | `search.distance_threshold.default` | — | `0.55` | Maximum distance for unknown corpus types |
 | `search.cluster_by` | — | `null` | Set to `semantic` to group search results by Ward hierarchical clustering. Disabled by default |
+| `search.contradiction_check` | — | `true` | JIT contradiction detection (RDR-057). Flags result pairs with high similarity but different `source_agent` provenance. Adds `[CONTRADICTS ANOTHER RESULT]` to search output. Set to `false` to disable — the check fetches embeddings for flagged candidates and adds a network round-trip per flagged collection |
 
 Embedding models are selected automatically based on collection type (see [Storage Tiers](storage-tiers.md)): `voyage-code-3` for code, `voyage-context-3` (CCE) for docs/rdr/knowledge. All collections use the same model for both index and query.
 
@@ -136,6 +137,28 @@ tuning:
 | `tuning.timeouts.ripgrep` | `10` | Timeout (seconds) for `rg` subprocess in hybrid search |
 
 These values are exposed as a `TuningConfig` dataclass in `nexus.config`. The search command, indexer, and scoring modules all read from this config — changes take effect on the next invocation without restarting anything.
+
+## Heat-Weighted T2 Expiry
+
+T2 memory entries use a heat-weighted effective TTL (RDR-057 Phase 2a):
+
+```
+effective_ttl = base_ttl * (1 + log(access_count + 1))
+```
+
+Highly-accessed entries survive longer than their nominal TTL. Unaccessed entries (`access_count=0`) expire at the base rate (`log(1) = 0`, so multiplier = 1). Every `memory_get` or `memory_search` hit increments `access_count` and updates `last_accessed`.
+
+| access_count | Multiplier | Effective TTL (base 30 days) |
+|--------------|------------|------------------------------|
+| 0 | 1.00 | 30 days |
+| 1 | 1.69 | ~51 days |
+| 5 | 2.79 | ~84 days |
+| 10 | 3.40 | ~102 days |
+| 50 | 4.93 | ~148 days |
+
+**Note**: This differs from the paper (Memory in the LLM Era) which uses division for relevance-decay. Nexus uses multiplication for heat-based survival — entries agents keep touching stick around longer. If you need strict time-bounded expiry regardless of access, use `ttl=None` (permanent) and explicit `memory_delete` instead.
+
+Periodic purge runs via `T2Database.expire(relevance_log_days=90)`, which also purges the `relevance_log` telemetry table (RDR-061 E2) of entries older than 90 days.
 
 ## Verification
 

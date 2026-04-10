@@ -229,3 +229,27 @@ When metadata filters have high selectivity (<5% of documents match), Nexus pre-
 ### Multi-probe collection health
 
 `nx collection verify --deep` probes up to 5 documents per collection and reports a hit rate. A hit rate below 100% indicates degraded retrieval quality — run `nx doctor --fix` (local mode) or re-index the collection.
+
+### Contradiction detection (RDR-057 Phase 3a)
+
+When two results from the same collection have near-identical embeddings
+(cosine distance < 0.3) but different `source_agent` provenance, both are
+flagged with `_contradiction_flag` in their metadata. The MCP `search` tool
+renders this as a `[CONTRADICTS ANOTHER RESULT]` suffix in the result line:
+
+```
+[0.1234] Caching strategy notes [CONTRADICTS ANOTHER RESULT]
+  The authoritative cache layer is Redis with 24h TTL...
+[0.1267] Caching strategy notes [CONTRADICTS ANOTHER RESULT]
+  We use Memcached for session cache with 1h expiry...
+```
+
+When you see this flag, two agents recorded conflicting claims about the
+same topic. Investigate and consolidate — the flag is purely informational;
+neither result is dropped.
+
+**Enabled by default.** Opt out via `search.contradiction_check: false` in
+`.nexus.yml`. The check adds one extra embedding fetch per collection
+(shared with clustering when both are enabled — the helper fetches
+embeddings once and passes them to both features). See
+[Configuration](configuration.md) for the config key.

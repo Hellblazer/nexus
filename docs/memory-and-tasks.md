@@ -17,6 +17,54 @@ nx memory search "JWT" --project myrepo
 That's the whole model. Store whatever context you need — design notes,
 active decisions, working state — and retrieve it by project and title.
 
+**Access tracking (RDR-057)**: Every `memory_get` and `memory_search` hit
+increments `access_count` and updates `last_accessed` on the returned rows.
+This drives heat-weighted TTL — frequently-accessed entries survive longer
+than their nominal `ttl`. See
+[Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry)
+for the formula and retention math. Internal scans (like `find_overlapping_memories`)
+pass `access="silent"` to avoid contaminating the staleness signal.
+
+## Consolidation (RDR-061 E6)
+
+T2 grows with every note an agent writes. Over time, near-duplicate entries
+accumulate — different titles, similar content. The `memory_consolidate` MCP
+tool provides three hygiene operations:
+
+```
+# Find overlapping pairs (Jaccard > 0.7)
+mcp__plugin_nx_nexus__memory_consolidate(action="find-overlaps", project="myrepo")
+
+# Flag entries not accessed in 30+ days
+mcp__plugin_nx_nexus__memory_consolidate(action="flag-stale", project="myrepo", idle_days=30)
+
+# Preview a merge (dry run)
+mcp__plugin_nx_nexus__memory_consolidate(
+    action="merge", project="myrepo",
+    keep_id=42, delete_ids="43", merged_content="...",
+    dry_run=True)
+
+# Execute the merge (single delete — no confirm required)
+mcp__plugin_nx_nexus__memory_consolidate(
+    action="merge", project="myrepo",
+    keep_id=42, delete_ids="43", merged_content="...")
+
+# Multi-entry merge (confirm required)
+mcp__plugin_nx_nexus__memory_consolidate(
+    action="merge", project="myrepo",
+    keep_id=42, delete_ids="43,44,45", merged_content="...",
+    confirm_destructive=True)
+```
+
+**Safety**: Merges use SQLite's write lock via `with self.conn:` to ensure
+UPDATE and DELETE are atomic. If `keep_id` was deleted by a concurrent
+`expire()` call, the merge raises `KeyError` and `delete_ids` survive —
+preventing silent data loss when the consolidation scan races with TTL
+expiry.
+
+The `/nx:query` skill and the knowledge-tidier agent both use these
+operations during periodic memory hygiene.
+
 ## Session Integration
 
 The plugin's SessionStart hooks automatically surface T2 memory context so

@@ -25,8 +25,8 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
-mcp__plugin_nx_nexus__catalog_search(query="...", content_type="knowledge")
-mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="codebase-deep-analyzer", from_span="chash:...", to_span="chash:...")
+mcp__plugin_nx_nexus-catalog__search(query="...", content_type="knowledge")
+mcp__plugin_nx_nexus-catalog__link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="codebase-deep-analyzer", from_span="chash:...", to_span="chash:...")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -58,7 +58,7 @@ T2 memory context is auto-injected by SessionStart and SubagentStart hooks. Chec
 
 Check T1 scratch for existing `link-context` entries via `mcp__plugin_nx_nexus__scratch(action="list")`. If none tagged `link-context`, seed it yourself:
 1. Extract RDR references, document titles, or topic keywords from your task
-2. Resolve to tumblers: `mcp__plugin_nx_nexus__catalog_search(query="<reference>")`
+2. Resolve to tumblers: `mcp__plugin_nx_nexus-catalog__search(query="<reference>")`
 3. Seed: `mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "relates"}], "source_agent": "codebase-deep-analyzer"}', tags="link-context")`
 4. If nothing resolves, skip
 
@@ -207,9 +207,9 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Technical Debt**: Create chore beads for significant debt
 - **Pattern Catalog**: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="pattern-codebase-{name}", tags="pattern"
 - **Catalog Links** (if catalog tools available): After storing architecture maps or pattern catalogs:
-  1. `mcp__plugin_nx_nexus__catalog_search(query="{scope} architecture", content_type="knowledge")` — find related prior analyses
-  2. For related architecture maps on interconnected modules: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="{this-map-title}", to_tumbler="{related-map-title}", link_type="relates", created_by="codebase-deep-analyzer")`
-  3. When replacing a stale analysis: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="{new-analysis-title}", to_tumbler="{old-analysis-title}", link_type="supersedes", created_by="codebase-deep-analyzer")`
+  1. `mcp__plugin_nx_nexus-catalog__search(query="{scope} architecture", content_type="knowledge")` — find related prior analyses
+  2. For related architecture maps on interconnected modules: `mcp__plugin_nx_nexus-catalog__link(from_tumbler="{this-map-title}", to_tumbler="{related-map-title}", link_type="relates", created_by="codebase-deep-analyzer")`
+  3. When replacing a stale analysis: `mcp__plugin_nx_nexus-catalog__link(from_tumbler="{new-analysis-title}", to_tumbler="{old-analysis-title}", link_type="supersedes", created_by="codebase-deep-analyzer")`
   Skip silently if catalog tools not available.
 - **Per-Subtask Findings**: Use T1 scratch to track findings during parallel subtask analysis:
   Store subtask finding:

@@ -41,7 +41,7 @@ Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — nexus (T1/T2/T3 storage tools) and sequential-thinking via `.mcp.json`
+- **Two bundled MCP servers** — `nexus` (15 core tools: storage, memory, scratch, plans, consolidation) and `nexus-catalog` (10 catalog tools: search, show, link, resolve, stats) — plus `sequential-thinking` fetched via npx
 
 ### Pick your entry point
 
@@ -200,16 +200,17 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | T1/T2/T3 storage + catalog access (RDR-034) | `search`, `query`, `store_put`, `store_get`, `store_list`, `store_delete`, `memory_put`, `memory_get`, `memory_search`, `memory_delete`, `scratch`, `scratch_manage`, `collection_list`, `collection_info`, `collection_verify`, `plan_save`, `plan_search`, `catalog_search`, `catalog_show`, `catalog_list`, `catalog_register`, `catalog_update`, `catalog_link`, `catalog_links`, `catalog_unlink`, `catalog_link_audit`, `catalog_link_bulk`, `catalog_link_query`, `catalog_resolve`, `catalog_stats` |
+| `nexus` | T1/T2/T3 storage (core) | `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_search`, `memory_delete`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search` |
+| `nexus-catalog` | Catalog access (RDR-062) | `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
-### Nexus MCP Server (`nx-mcp`)
+### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus server exposes 30 MCP tools that give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 15 MCP tools and the nexus-catalog server exposes 10 catalog tools, for 25 registered tools total (6 tools demoted to Python-only). These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 
-**Tool names** follow Claude Code's naming convention: `mcp__plugin_nx_nexus__<tool_name>` (e.g., `mcp__plugin_nx_nexus__search`).
+**Tool names** follow Claude Code's naming convention: `mcp__plugin_nx_nexus__<tool_name>` for core tools, `mcp__plugin_nx_nexus-catalog__<tool_name>` for catalog tools.
 
 **Resource management**:
 - T1 and T3 use thread-safe lazy singletons (expensive to initialize, reused across the session)
@@ -259,7 +260,7 @@ When skills delegate to agents, they use a standardized relay format defined in 
 
 The permission hook auto-approves safe operations:
 
-- **nexus MCP tools**: all `mcp__plugin_nx_nexus__*` tools (search, store, memory, scratch)
+- **nexus MCP tools**: all `mcp__plugin_nx_nexus__*` core tools and `mcp__plugin_nx_nexus-catalog__*` catalog tools
 - **sequential thinking**: `mcp__plugin_nx_sequential-thinking__sequentialthinking`
 - **beads**: `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
 - **git**: `git log`, `git diff`, `git status`, `git show`, `git branch -a`

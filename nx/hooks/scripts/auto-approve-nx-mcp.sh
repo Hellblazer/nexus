@@ -12,31 +12,26 @@ case "$TOOL_NAME" in
   mcp__plugin_nx_nexus__store_put|\
   mcp__plugin_nx_nexus__store_get|\
   mcp__plugin_nx_nexus__store_list|\
-  mcp__plugin_nx_nexus__store_delete|\
   mcp__plugin_nx_nexus__memory_put|\
   mcp__plugin_nx_nexus__memory_get|\
   mcp__plugin_nx_nexus__memory_search|\
   mcp__plugin_nx_nexus__memory_delete|\
+  mcp__plugin_nx_nexus__memory_consolidate|\
   mcp__plugin_nx_nexus__scratch|\
   mcp__plugin_nx_nexus__scratch_manage|\
   mcp__plugin_nx_nexus__collection_list|\
-  mcp__plugin_nx_nexus__collection_info|\
-  mcp__plugin_nx_nexus__collection_verify|\
   mcp__plugin_nx_nexus__plan_save|\
   mcp__plugin_nx_nexus__plan_search|\
-  mcp__plugin_nx_nexus__catalog_search|\
-  mcp__plugin_nx_nexus__catalog_show|\
-  mcp__plugin_nx_nexus__catalog_list|\
-  mcp__plugin_nx_nexus__catalog_register|\
-  mcp__plugin_nx_nexus__catalog_update|\
-  mcp__plugin_nx_nexus__catalog_link|\
-  mcp__plugin_nx_nexus__catalog_links|\
-  mcp__plugin_nx_nexus__catalog_unlink|\
-  mcp__plugin_nx_nexus__catalog_link_audit|\
-  mcp__plugin_nx_nexus__catalog_link_bulk|\
-  mcp__plugin_nx_nexus__catalog_link_query|\
-  mcp__plugin_nx_nexus__catalog_resolve|\
-  mcp__plugin_nx_nexus__catalog_stats|\
+  mcp__plugin_nx_nexus-catalog__search|\
+  mcp__plugin_nx_nexus-catalog__show|\
+  mcp__plugin_nx_nexus-catalog__list|\
+  mcp__plugin_nx_nexus-catalog__register|\
+  mcp__plugin_nx_nexus-catalog__update|\
+  mcp__plugin_nx_nexus-catalog__link|\
+  mcp__plugin_nx_nexus-catalog__links|\
+  mcp__plugin_nx_nexus-catalog__link_query|\
+  mcp__plugin_nx_nexus-catalog__resolve|\
+  mcp__plugin_nx_nexus-catalog__stats|\
   mcp__plugin_nx_sequential-thinking__sequentialthinking)
     python3 -c "
 import json

@@ -21,9 +21,9 @@ effort: low
 5. **Read research findings** (if available): mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="" and filter titles matching `NNN-research-*`
 6. **Catalog links** (if catalog initialized): Search for this RDR in the catalog and display graph relationships:
    ```
-   mcp__plugin_nx_nexus__catalog_search(query="<rdr-title>", content_type="rdr")
+   mcp__plugin_nx_nexus-catalog__search(query="<rdr-title>", content_type="rdr")
    ```
-   If found, call: `mcp__plugin_nx_nexus__catalog_links(tumbler="<tumbler>", depth=1)`
+   If found, call: `mcp__plugin_nx_nexus-catalog__links(tumbler="<tumbler>", depth=1)`
    Display inbound and outbound links from the result. Skip silently if catalog not initialized.
 
 7. **Display unified view**:

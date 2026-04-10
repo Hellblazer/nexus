@@ -32,14 +32,19 @@ A comprehensive survey of 10+ papers in the nexus T3 knowledge store (AgenticSch
 
 ### Phase 1: Quick Win (start immediately)
 
-#### E2: Retrieval Feedback Loop (Phase 1: logging)
+#### E2: Retrieval Feedback Loop (Phase 1: logging) — IMPLEMENTED
+
+> **Status**: Implemented. Session-keyed search trace cache in `mcp_infra.py`
+> records search results; `store_put` and `catalog_link` consume traces to log
+> (query, chunk_id, action) triples to T2 `relevance_log`. The `catalog_link`
+> hook filters by collection match to avoid noise. See `tests/test_relevance_log.py`.
 
 - No signal is captured about which search results agents actually use
 - Log implicit relevance signal when a search->store_put or search->catalog_link pattern is detected within a session
 - **Detection point**: T1 scratch correlation — when `store_put` or `catalog_link` is called, check T1 for recent search results in the same session; if overlap detected, log the (query, chunk_id, action) triple to a new `relevance_log` table in T2
 - Future phases: extend `frecency.py` to T3 chunks (Phase 2), feed back as re-ranking signal in `scoring.py` (Phase 3)
 - Source: No paper solves this well — differentiation opportunity
-- Key files: `src/nexus/mcp_server.py` (store_put/catalog_link entry points), `src/nexus/db/t2.py` (relevance_log table), `src/nexus/db/t1.py` (recent search lookup)
+- Key files: `src/nexus/mcp/core.py` (store_put/catalog_link entry points), `src/nexus/db/t2.py` (relevance_log table), `src/nexus/db/t1.py` (recent search lookup)
 - Effort: ~3 hours
 
 ### Phase 2: Foundation Builders (after Phase 1 review)
@@ -48,10 +53,10 @@ A comprehensive survey of 10+ papers in the nexus T3 knowledge store (AgenticSch
 
 - Same concept indexed in `code__`/`docs__`/`rdr__` collections is unconnected — no cross-corpus links
 - **Phase 2a — Symbol-name matching** (~3h): Extend `link_generator.py` with a new batch linker that scans prose/RDR chunks for code symbol names (function, class, module names from `code__` collections) and creates `mentions` links in the catalog
-- **Phase 2b — LLM-driven hybrid extraction** (~4h): At `store_put` time for `knowledge__*` collections, run the EvidenceNet-inspired hybrid pipeline (see RF-061-8): (1) heuristic pass — title/keyword overlap against catalog → candidate (doc, target) pairs; (2) LLM verification pass (uncertain candidates only) — classify as {cites, implements, supersedes, relates, none} with confidence score; (3) filter confidence >= 0.7 → call `auto_link()`. Adopt EvidenceNet hybrid over HybridRAG pure-LLM to contain per-document API cost. Nexus entity types: Module, Function, Concept, Design Decision, Paper.
+- **Phase 2b — LLM-driven hybrid extraction — CUT**: The `llm_linker.py` module was built, tested, and never wired to any call site. It added a write-time LLM dependency at `store_put` time that conflicts with RDR-057 RF-11 ("cheap at write, expensive at query") and introduced per-document API cost with no measured benefit. Module removed; tests removed. If cross-collection LLM extraction is needed in the future, it should be a query-time (JIT) facility with a dedicated RDR.
 - Source: EvidenceNet cross-document duplicate resolution (RF-061-6), HybridRAG KG+vector fusion (RF-061-1), LLM entity extraction (RF-061-8)
 - Key files: `src/nexus/catalog/auto_linker.py`, `src/nexus/catalog/link_generator.py`
-- Effort: ~7 hours (3h symbol matching + 4h LLM hybrid)
+- Effort: ~3 hours (Phase 2a only)
 
 #### E4: Composable Query Operators
 

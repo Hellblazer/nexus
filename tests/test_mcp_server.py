@@ -93,7 +93,7 @@ def t3():
 
 @pytest.fixture(autouse=True)
 def _patch_t2(t2_path, monkeypatch):
-    import nexus.mcp_server as mod
+    import nexus.mcp.core as mod
     monkeypatch.setattr(mod, "_t2_ctx", lambda: T2Database(t2_path))
 
 
@@ -390,7 +390,7 @@ def test_collection_info_not_found():
 def test_collection_verify_cases(name, verify_rv, side_effect, expect_in):
     mock = MagicMock()
     _inject_t3(mock)
-    with patch("nexus.mcp_server.verify_collection_deep") as mv:
+    with patch("nexus.mcp.core.verify_collection_deep") as mv:
         if side_effect:
             mv.side_effect = side_effect
         else:
@@ -562,7 +562,7 @@ class TestQueryCatalogRouting:
             assert s in result
 
     def test_catalog_params_without_catalog(self, t3, monkeypatch):
-        import nexus.mcp_server as mod
+        import nexus.mcp.core as mod
         monkeypatch.setattr(mod, "_get_catalog", lambda: None)
         assert "catalog not initialized" in query(question="test", author="someone").lower()
 
@@ -686,9 +686,23 @@ async def test_mcp_server_round_trip():
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             tool_names = [t.name for t in (await session.list_tools()).tools]
-            for expected in ("search", "store_put", "store_list", "memory_put",
-                             "memory_get", "memory_search", "scratch", "scratch_manage"):
-                assert expected in tool_names
+            # All 15 core tools must be present
+            expected_core_tools = {
+                "search", "query", "store_put", "store_get", "store_list",
+                "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
+                "scratch", "scratch_manage", "collection_list",
+                "plan_save", "plan_search",
+            }
+            for expected in expected_core_tools:
+                assert expected in tool_names, f"core tool missing: {expected}"
+
+            # Demoted tools must NOT be registered
+            for demoted in ("store_delete", "collection_info", "collection_verify"):
+                assert demoted not in tool_names, f"demoted tool registered: {demoted}"
+
+            # Catalog-only tools must NOT appear in core server
+            for catalog_tool in ("show", "register", "links", "link_query", "resolve", "stats"):
+                assert catalog_tool not in tool_names, f"catalog tool in core: {catalog_tool}"
 
             r = await session.call_tool("scratch", {"action": "put", "content": "integration test entry", "tags": "test"})
             assert "Stored:" in r.content[0].text or "isolated" in r.content[0].text.lower()
@@ -704,3 +718,61 @@ async def test_mcp_server_round_trip():
 
             r = await session.call_tool("memory_search", {"query": "integration", "project": "mcp-integ"})
             assert "integration" in r.content[0].text.lower()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_mcp_catalog_server_round_trip():
+    """Verify nexus-catalog server registers exactly the 10 catalog tools."""
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    nx_mcp_catalog = Path(sys.executable).parent / "nx-mcp-catalog"
+    if not nx_mcp_catalog.exists():
+        pytest.skip("nx-mcp-catalog entry point not found; run 'uv sync && scripts/reinstall-tool.sh'")
+
+    server_params = StdioServerParameters(command=str(nx_mcp_catalog), args=[])
+    async with stdio_client(server_params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            tool_names = [t.name for t in (await session.list_tools()).tools]
+
+            expected_catalog_tools = {
+                "search", "show", "list",
+                "register", "update",
+                "link", "links", "link_query",
+                "resolve", "stats",
+            }
+            for expected in expected_catalog_tools:
+                assert expected in tool_names, f"catalog tool missing: {expected}"
+
+            # Demoted catalog tools must NOT be registered (check both old and short names)
+            for demoted in ("catalog_unlink", "catalog_link_audit", "catalog_link_bulk",
+                            "unlink", "link_audit", "link_bulk"):
+                assert demoted not in tool_names, f"demoted tool registered: {demoted}"
+
+            # Core-specific tools must NOT appear in catalog server
+            for core_tool in ("query", "store_put", "memory_put", "scratch"):
+                assert core_tool not in tool_names, f"core tool in catalog: {core_tool}"
+
+            # Smoke test
+            r = await session.call_tool("stats", {})
+            assert r.content[0].text
+
+
+def test_mcp_shim_imports():
+    """Verify mcp_server.py shim re-exports all expected symbols."""
+    from nexus.mcp_server import (
+        search, query, store_put, store_get, store_list, store_delete,
+        memory_put, memory_get, memory_delete, memory_search, memory_consolidate,
+        scratch, scratch_manage, collection_list, collection_info,
+        collection_verify, plan_save, plan_search,
+        catalog_search, catalog_show, catalog_list, catalog_register,
+        catalog_update, catalog_link, catalog_links, catalog_unlink,
+        catalog_link_audit, catalog_link_bulk, catalog_link_query,
+        catalog_resolve, catalog_stats,
+        _inject_t1, _inject_t3, _inject_catalog, _reset_singletons,
+        _get_t1, _get_t3, _get_catalog,
+    )
+    for fn in (search, query, store_put, catalog_search, _inject_t1, _reset_singletons):
+        assert callable(fn)

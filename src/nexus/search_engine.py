@@ -3,6 +3,7 @@
 """Search engine: cross-corpus orchestration."""
 from __future__ import annotations
 
+import itertools
 import sqlite3
 from typing import Any
 
@@ -224,37 +225,193 @@ def search_cross_corpus(
         from nexus.scoring import apply_link_boost
         all_results = apply_link_boost(all_results, catalog)
 
-    if cluster_by == "semantic" and all_results:
-        all_results = _apply_clustering(all_results, t3)
+    # Fetch embeddings once if either contradiction detection OR clustering
+    # needs them — avoids double fetching (F1 fix). Per-collection failures
+    # are isolated: failed indices are excluded from feature processing but
+    # do not suppress the features for successfully-fetched collections (R3-1).
+    contradiction_enabled = cfg.get("search", {}).get("contradiction_check", True)
+    needs_embeddings = (contradiction_enabled or cluster_by == "semantic") and all_results
+    fetched_embeddings = None
+    failed_indices: set[int] = set()
+    if needs_embeddings:
+        fetched_embeddings, failed_indices = _fetch_embeddings_for_results(all_results, t3)
+
+    # Contradiction detection (RDR-057 Phase 3a). Default-on; opt out via
+    # search.contradiction_check=false in .nexus.yml.
+    if contradiction_enabled and all_results and fetched_embeddings is not None:
+        all_results = _flag_contradictions(all_results, fetched_embeddings, failed_indices)
+
+    if cluster_by == "semantic" and all_results and fetched_embeddings is not None:
+        # Clustering cannot partially-cluster — if any collection fetch
+        # failed, fall through to unclustered results rather than corrupting
+        # the cluster assignment by excluding some results.
+        if not failed_indices:
+            all_results = _apply_clustering(all_results, fetched_embeddings)
+        else:
+            _log.warning(
+                "clustering_skipped_partial_failure",
+                failed_indices=len(failed_indices),
+                total_results=len(all_results),
+                reason="cannot partially cluster — some collection fetches failed",
+            )
 
     return all_results
 
 
-def _apply_clustering(results: list[SearchResult], t3: Any) -> list[SearchResult]:
-    """Post-fetch embeddings and cluster results, returning flat list with labels."""
+def _fetch_embeddings_for_results(
+    results: list[SearchResult],
+    t3: Any,
+) -> "tuple[np.ndarray | None, set[int]]":
+    """Fetch embeddings for all results in one pass, grouped by collection.
+
+    Returns ``(embeddings, failed_indices)`` where:
+    - ``embeddings`` is a float32 ndarray of shape ``(len(results), emb_dim)``
+      with zero rows for any position in ``failed_indices``
+    - ``failed_indices`` is the set of result indices whose collection fetch
+      failed or had a shape mismatch
+
+    When ALL collections fail, returns ``(None, all_indices)``.
+    Callers must skip ``failed_indices`` when processing — feature logic
+    (contradiction check, clustering) continues for successfully-fetched
+    collections rather than being suppressed entirely (R3-1 fix).
+    """
     import numpy as np
 
-    from nexus.search_clusterer import cluster_results
-
-    # Group result indices by collection for batched embedding fetch
     col_groups: dict[str, list[int]] = {}
     for idx, r in enumerate(results):
         col_groups.setdefault(r.collection, []).append(idx)
 
-    # Fetch embeddings per collection, assemble in result order
-    embeddings = np.zeros((len(results), 0), dtype=np.float32)
+    embeddings: "np.ndarray | None" = None
+    failed_indices: set[int] = set()
+
+    # First pass: determine emb_dim from a successful fetch so we can
+    # allocate the output array. Collect per-collection results as we go.
+    col_fetched: dict[str, "np.ndarray"] = {}
+    emb_dim: int | None = None
     for col, indices in col_groups.items():
         ids = [results[i].id for i in indices]
-        col_emb = t3.get_embeddings(col, ids)
-        if embeddings.shape[1] == 0:
-            embeddings = np.zeros((len(results), col_emb.shape[1]), dtype=np.float32)
+        try:
+            col_emb = t3.get_embeddings(col, ids)
+        except Exception as exc:
+            _log.warning(
+                "embedding_fetch_failed",
+                collection=col,
+                requested=len(indices),
+                exc_info=exc,
+            )
+            failed_indices.update(indices)
+            continue
+        if col_emb.shape[0] != len(indices):
+            _log.warning(
+                "embedding_fetch_shape_mismatch",
+                collection=col,
+                requested=len(indices),
+                got=col_emb.shape[0],
+            )
+            failed_indices.update(indices)
+            continue
+        col_fetched[col] = col_emb
+        if emb_dim is None:
+            emb_dim = col_emb.shape[1]
+
+    # If nothing fetched, nothing to assemble
+    if emb_dim is None:
+        return None, failed_indices
+
+    embeddings = np.zeros((len(results), emb_dim), dtype=np.float32)
+    for col, col_emb in col_fetched.items():
+        indices = col_groups[col]
         for local_idx, global_idx in enumerate(indices):
             embeddings[global_idx] = col_emb[local_idx]
+
+    return embeddings, failed_indices
+
+
+def _flag_contradictions(
+    results: list[SearchResult],
+    embeddings: "np.ndarray",
+    failed_indices: set[int] | None = None,
+) -> list[SearchResult]:
+    """Flag results where same-collection pairs have different source_agent and close distance.
+
+    Two results from the same collection, with different non-empty source_agent
+    provenance and cosine distance < 0.3, get ``_contradiction_flag=True`` in
+    their metadata. Purely retrieval-time, no LLM calls.
+
+    Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
+    duplicate ChromaDB round-trips when clustering also runs.
+
+    ``failed_indices`` are excluded from the check — their embeddings are
+    zero-filled placeholders from the shared fetch helper and must not be
+    compared against valid rows.
+    """
+    import numpy as np
+
+    failed_indices = failed_indices or set()
+    col_groups: dict[str, list[int]] = {}
+    for idx, r in enumerate(results):
+        if idx in failed_indices:
+            continue
+        col_groups.setdefault(r.collection, []).append(idx)
+
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    normed = embeddings / np.maximum(norms, 1e-9)
+
+    flagged: set[int] = set()
+    pairs_checked = 0
+    for col, indices in col_groups.items():
+        if len(indices) < 2:
+            continue
+        for a, b in itertools.combinations(indices, 2):
+            pairs_checked += 1
+            dist = 1.0 - float(np.dot(normed[a], normed[b]))
+            if dist >= 0.3:
+                continue
+            agent_a = results[a].metadata.get("source_agent", "")
+            agent_b = results[b].metadata.get("source_agent", "")
+            if agent_a and agent_b and agent_a != agent_b:
+                flagged.add(a)
+                flagged.add(b)
+
+    _log.debug(
+        "contradiction_check",
+        collections=len(col_groups),
+        results=len(results),
+        pairs_checked=pairs_checked,
+        flagged=len(flagged),
+    )
+
+    out: list[SearchResult] = []
+    for idx, r in enumerate(results):
+        if idx in flagged:
+            meta = dict(r.metadata)
+            meta["_contradiction_flag"] = True
+            out.append(SearchResult(
+                id=r.id, content=r.content, distance=r.distance,
+                collection=r.collection, metadata=meta,
+                hybrid_score=r.hybrid_score,
+            ))
+        else:
+            out.append(r)
+    return out
+
+
+def _apply_clustering(
+    results: list[SearchResult],
+    embeddings: "np.ndarray",
+) -> list[SearchResult]:
+    """Cluster results using pre-fetched embeddings, returning flat list with labels.
+
+    Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
+    duplicate ChromaDB round-trips when contradiction detection also runs.
+    """
+    from nexus.search_clusterer import cluster_results
 
     # Convert SearchResults to dicts for cluster_results API
     result_dicts = [
         {"id": r.id, "content": r.content, "distance": r.distance,
-         "collection": r.collection, "metadata": dict(r.metadata)}
+         "collection": r.collection, "metadata": dict(r.metadata),
+         "hybrid_score": r.hybrid_score}
         for r in results
     ]
 
@@ -273,5 +430,6 @@ def _apply_clustering(results: list[SearchResult], t3: Any) -> list[SearchResult
                 distance=rd["distance"],
                 collection=rd["collection"],
                 metadata=meta,
+                hybrid_score=rd.get("hybrid_score", 0.0),
             ))
     return out

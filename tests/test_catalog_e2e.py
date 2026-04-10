@@ -273,7 +273,7 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
     cat = Catalog.init(catalog_dir)
     cat.register_owner("knowledge", "curator")
     _reset_singletons()
-    with patch("nexus.mcp_server._get_t3") as mock_t3:
+    with patch("nexus.mcp.core._get_t3") as mock_t3:
         mock_db = MagicMock()
         mock_db.put.return_value = "doc-abc123"
         mock_t3.return_value = mock_db
@@ -420,3 +420,35 @@ def test_catalog_plan_templates_exist(db):
         "SELECT count(*) FROM plans WHERE tags LIKE '%catalog%'"
     ).fetchall()
     assert isinstance(rows, list) and rows[0][0] >= 0
+
+
+# ── 'formalizes' link type (RDR-057 P1-1a, nexus-807l) ─────────────────────
+
+
+class TestFormalizesLinkType:
+    """Verify catalog accepts 'formalizes' as a link type — no schema changes needed."""
+
+    def test_formalizes_link_roundtrip(self, tmp_path):
+        cat = Catalog.init(tmp_path / "catalog")
+        owner = cat.register_owner("test", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "scratch-note", content_type="knowledge")
+        doc_b = cat.register(owner, "formal-entry", content_type="knowledge")
+
+        created = cat.link(doc_a, doc_b, "formalizes", created_by="test")
+        assert created is True
+
+        links = cat.link_query(link_type="formalizes")
+        assert len(links) == 1
+        assert str(links[0].from_tumbler) == str(doc_a)
+        assert str(links[0].to_tumbler) == str(doc_b)
+        assert links[0].link_type == "formalizes"
+
+    def test_formalizes_link_if_absent_idempotent(self, tmp_path):
+        cat = Catalog.init(tmp_path / "catalog")
+        owner = cat.register_owner("test", "repo", repo_hash="abc123")
+        doc_a = cat.register(owner, "scratch-note", content_type="knowledge")
+        doc_b = cat.register(owner, "formal-entry", content_type="knowledge")
+
+        assert cat.link_if_absent(doc_a, doc_b, "formalizes", created_by="test") is True
+        assert cat.link_if_absent(doc_a, doc_b, "formalizes", created_by="test") is False
+        assert len(cat.link_query(link_type="formalizes")) == 1
