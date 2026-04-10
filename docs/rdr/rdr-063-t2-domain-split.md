@@ -68,6 +68,136 @@ Rationale for rejecting the alternatives:
 
 Action for Phase 1: update `get_topic_docs()` docstring to explicitly state the T2-only scope. Add a regression test (already present: `test_get_topic_docs_known_defect_project_collection_mismatch`) that documents the behavior. No schema change.
 
+## Research Findings
+
+Concrete grounding data captured during v3.7.0 release (2026-04-10). All numbers are file-line facts, not estimates. This section calibrates the Phase 1 scope before a bead is cut.
+
+### RF-063-1: T2 module size breakdown
+
+**Source**: `src/nexus/db/t2.py` (1,052 LOC total)
+
+| Domain | LOC | Location |
+|--------|-----|----------|
+| Memory | ~250 | Schema 55–97 + `put`/`search`/`search_glob`/`search_by_tag`/`get_all`/`find_overlapping_memories`/`merge_memories`/`flag_stale_memories` |
+| Plans | ~80 | Schema 98–130 + `save_plan`/`search_plans`/`list_plans` |
+| Topics / topic_assignments | ~15 | Schema 132–146 only — **all behavior lives in `taxonomy.py`** |
+| Relevance log | ~60 | Schema + `log_relevance`/`log_relevance_batch`/`get_relevance_log`/`expire_relevance_log` |
+| Migration functions | ~169 | 6 functions: `_migrate_fts_if_needed` (40), `_migrate_plans_if_needed` (42), `_migrate_topics_if_needed` (27), `_migrate_relevance_log_if_needed` (32), `_migrate_access_tracking_if_needed` (18), `_migrate_plans_ttl_if_needed` (10) |
+| Infrastructure | ~200 | FTS5 helpers, `_SCHEMA_SQL`, `_sanitize_fts5`, `__init__`, `_init_schema`, `close`, context manager, `expire` |
+
+**Implication**: Memory is the largest domain and deserves its own file on merit alone. Plans is small but architecturally distinct (TTL-based, no access tracking). Relevance_log is smallest and isolated — an easy early extraction target. Migrations add ~169 LOC that must be distributed correctly to preserve the per-domain guard keys.
+
+### RF-063-2: taxonomy.py coupling to T2 internals
+
+**Source**: `src/nexus/taxonomy.py`
+
+**Direct T2 internal access**: 19 references to `db._lock` and `db.conn.execute` across 6 functions:
+- `get_topics()` (43–54) — 2 queries + `_lock`
+- `assign_topic()` (58–65) — 2 INSERT/UPDATE + `_lock`
+- `get_topic_docs()` (68–104) — 1 multi-table LEFT JOIN + `_lock`
+- `get_topic_tree()` (107–145) — 4 recursive queries + `_lock`
+- `clear_project_topics()` (230–239) — 2 DELETE + `_lock`
+- `cluster_and_persist()` (148–244) — ~4 `db.get_all()` + INSERT sequences
+
+**The critical JOIN** (lines 92–103):
+```sql
+SELECT ta.doc_id, m.title, m.project
+FROM topic_assignments ta
+LEFT JOIN memory m ON m.title = ta.doc_id AND m.project = (
+    SELECT collection FROM topics WHERE id = ta.topic_id
+)
+WHERE ta.topic_id = ?
+```
+
+This JOIN assumes `memory.title == topic_assignments.doc_id` AND `memory.project == topics.collection`. It breaks for T3-origin topics (known defect, documented in RDR-063 Known Defect section).
+
+**Implication for Phase 1 step 4**: `taxonomy.py` does not use a public T2 API — it reaches through `db._lock` and `db.conn.execute` directly. Leaving these references intact defeats Phase 2's goal of separate per-domain connection locks. The move from `taxonomy.py` → `catalog_taxonomy.py` must rewrite every call site to use the new module's own connection, not `T2Database`'s.
+
+### RF-063-3: Test inventory for characterization baseline
+
+**Source**: `grep -rl "T2Database\|taxonomy\." tests/` (captured 2026-04-10)
+
+**Files instantiating `T2Database`**: 18 of 130 total test files (13.8%)
+
+**Key test counts** (union of T2 + consolidation + taxonomy + relevance_log coverage):
+- `tests/test_t2.py` — 58 tests (primary T2 suite)
+- `tests/test_memory.py` — 28 tests
+- `tests/test_memory_consolidation.py` — 28 tests (incl. MCP integration)
+- `tests/test_relevance_log.py` — 24 tests (incl. contract tests)
+- `tests/test_taxonomy.py` — 14 tests
+- `tests/test_schema.py` — 1 test
+
+**Total**: ~153 tests across 6 files exercise T2 directly. The Phase 1 characterization test (`tests/test_t2_facade.py`) must preserve the behavioral contract these 153 tests already verify.
+
+**Files patching T2 internals** (will need updating during refactor):
+- `_t2_ctx`: 24 monkeypatch references (mostly `test_memory_consolidation.py`)
+- `_migrate_*`: 7 references (migration guard counting tests)
+- `_migrated_paths`: 4 references (per-process guard tests)
+- `_init_schema`: 1 reference
+
+**No `:memory:` databases used** — all tests use `tmp_path` with file-based SQLite. Phase 2's multi-connection model is safe from the `:memory:` incompatibility footgun.
+
+### RF-063-4: Cross-domain coupling points
+
+**Source**: grep across `src/nexus/` for cross-table SQL
+
+Only ONE true cross-domain JOIN exists: the `topic_assignments ↔ memory ↔ topics` query in `taxonomy.get_topic_docs()` (RF-063-2).
+
+**Other "cross-domain" references** that turn out to be single-table:
+- `plans` table has 1 external reference in `commands/catalog.py:94` (reads for builtin-template filtering) — not a JOIN, just a SELECT
+- Relevance_log: zero external references; pure write-aggregation
+
+**FTS5 triggers**: intra-domain only. `memory_fts` triggers fire only on `memory` INSERT/UPDATE/DELETE. `plans_fts` triggers are isolated. No cross-domain trigger chains.
+
+**Implication**: Phase 1's module split is structurally safe. Only one JOIN crosses domain boundaries, and it's already identified as a Known Defect. All other SQL is single-table and can be confined to its owning module.
+
+### RF-063-5: Caller distribution — who calls what?
+
+**Source**: grep for `db.<method>` across `src/` and `tests/`
+
+| Method | Production call sites | Test call sites | Callers |
+|--------|----------------------|-----------------|---------|
+| `db.put` | 11 | 293 | hooks.py, mcp/core.py, commands/{memory,store,scratch}.py |
+| `db.search` | 14 | 76 | catalog/catalog.py, mcp/core.py, commands/memory.py, search_engine.py, doc_indexer.py |
+| `db.save_plan` | 2 | 26 | mcp/core.py, commands/catalog.py |
+| `db.log_relevance` / `log_relevance_batch` | 2 | 23 | mcp/core.py, mcp/catalog.py |
+| `db.find_overlapping_memories` | 1 | 4 | mcp/core.py |
+| `taxonomy.get_topic_docs` | 3 | 6 | commands/taxonomy_cmd.py, taxonomy.py (internal), tests |
+| `taxonomy.cluster_and_persist` | 2 | 3 | taxonomy.py (internal), search_engine.py |
+
+**Implication**: Memory has the largest call-site footprint (11 prod + 293 test). Phase 1's facade must preserve `T2Database.put`, `T2Database.search`, `T2Database.get`, `T2Database.delete` as public methods delegating to `MemoryStore`. Plans has only 2 production callers — cheaper to migrate. Relevance_log has only 2 production callers (both in MCP hooks) — easiest.
+
+### RF-063-6: Migration guard current state
+
+**Source**: `src/nexus/db/t2.py` lines 181–233
+
+```python
+_migrated_paths: set[str] = set()
+_migrated_lock = threading.Lock()
+```
+
+**Thread safety**: Guarded by `_migrated_lock` held across the full check-run-add sequence (round 2 fix). Two concurrent `T2Database` constructors on the same path cannot both enter the migration functions.
+
+**Path canonicalization**: `path.resolve()` at `__init__` time resolves symlinks and `.` segments (round 3 fix). Prevents two T2Database instances on different path strings pointing at the same file from bypassing each other's guard.
+
+**Runtime cost**: MCP server opens a fresh `T2Database` per tool call (via `_t2_ctx()` in `mcp_infra.py`). Without the guard, each call would re-probe all 6 migrations. With the guard, only the first call in a process pays that cost.
+
+**Implication for Phase 1**: Each domain module will need its own guard set (per Open Question 3, already resolved: `memory_store._migrated_paths`, `plan_library._migrated_paths`, etc.). The current single-set design must be split, not shared, or a future migration added to one domain will trigger re-probing of all domains.
+
+### RF-063-7: Per-domain SQL touch distribution
+
+**Source**: `grep -rn "FROM <table>" src/nexus/`
+
+| Table | References in `src/nexus/` | Distribution |
+|-------|---------------------------|--------------|
+| `memory` | 15 | All in `db/t2.py` |
+| `plans` | 6 | 5 in `db/t2.py`, 1 in `commands/catalog.py:94` |
+| `topics` | 9 | All in `taxonomy.py` |
+| `topic_assignments` | 4 | All in `taxonomy.py` |
+| `relevance_log` | 4 | All in `db/t2.py` |
+
+**Implication**: All domain SQL is already confined to 2 files (`db/t2.py` + `taxonomy.py`). The only external references are the single `commands/catalog.py:94` read for plan template filtering, which is trivial to redirect through the facade. This is strong evidence that Phase 1 is a low-risk mechanical refactor: the domain boundaries already exist implicitly; the refactor just makes them explicit in the module structure.
+
 ## Proposed Solution
 
 ### Phase 1: Internal module split (no file change)
