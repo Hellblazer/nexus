@@ -166,6 +166,28 @@ def test_get_topic_docs_returns_assigned(db: T2Database) -> None:
     assert {d["doc_id"] for d in docs} == {"doc-a", "doc-b"}
 
 
+def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
+    """get_topic_docs JOINs on memory.title to resolve human-readable titles."""
+    # Insert a memory entry — title must match doc_id for the JOIN to work
+    db.put(project="test", title="my-research-note", content="some content")
+
+    db.conn.execute(
+        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+        ("topic", "test", 1, "2026-01-01T00:00:00Z"),
+    )
+    topic_id = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.conn.execute(
+        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+        ("my-research-note", topic_id),
+    )
+    db.conn.commit()
+
+    docs = get_topic_docs(db, topic_id)
+    assert len(docs) == 1
+    assert docs[0]["doc_id"] == "my-research-note"
+    assert docs[0]["title"] == "my-research-note"
+
+
 def test_cli_taxonomy_list(db: T2Database) -> None:
     """CLI taxonomy list outputs topic labels."""
     from click.testing import CliRunner

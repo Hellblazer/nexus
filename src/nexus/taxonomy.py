@@ -25,15 +25,15 @@ _TOPIC_COLUMNS = ("id", "label", "parent_id", "collection", "centroid_hash", "do
 def get_topics(
     db: "T2Database",
     *,
-    parent_id: int | None = ...,  # sentinel: ... means "filter roots", None means no filter
+    parent_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return topics filtered by parent.
 
-    - ``parent_id=None`` (default) or ``...``: return root topics (parent_id IS NULL).
+    - ``parent_id=None`` (default): return root topics (parent_id IS NULL).
     - ``parent_id=<int>``: return children of that topic.
     """
     with db._lock:
-        if parent_id is ... or parent_id is None:
+        if parent_id is None:
             rows = db.conn.execute(
                 "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
                 "FROM topics WHERE parent_id IS NULL ORDER BY doc_count DESC"
@@ -161,7 +161,9 @@ def cluster_and_persist(
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     embeddings = embeddings / np.maximum(norms, 1e-9)
 
-    # Build result dicts for cluster_results API
+    # Build result dicts for cluster_results API.
+    # IMPORTANT: "id" must equal memory.title — get_topic_docs() JOINs
+    # topic_assignments.doc_id against memory.title to resolve titles.
     result_dicts = [
         {"id": e["title"], "content": e.get("content", ""),
          "distance": 0.0, "metadata": {"title": e["title"]}}

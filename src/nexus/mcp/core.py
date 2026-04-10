@@ -38,6 +38,9 @@ _DEFAULT_PAGE_SIZE = 10
 # ── Registered tools ─────────────────────────────────────────────────────────
 
 
+# Note: catalog server also registers a "search" tool. No collision — Claude Code
+# disambiguates by server prefix (mcp__plugin_nx_nexus__search vs
+# mcp__plugin_nx_nexus-catalog__search).
 @mcp.tool()
 def search(
     query: str,

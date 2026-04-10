@@ -313,7 +313,8 @@ def _apply_clustering(results: list[SearchResult], t3: Any) -> list[SearchResult
     # Convert SearchResults to dicts for cluster_results API
     result_dicts = [
         {"id": r.id, "content": r.content, "distance": r.distance,
-         "collection": r.collection, "metadata": dict(r.metadata)}
+         "collection": r.collection, "metadata": dict(r.metadata),
+         "hybrid_score": r.hybrid_score}
         for r in results
     ]
 
@@ -332,5 +333,6 @@ def _apply_clustering(results: list[SearchResult], t3: Any) -> list[SearchResult
                 distance=rd["distance"],
                 collection=rd["collection"],
                 metadata=meta,
+                hybrid_score=rd.get("hybrid_score", 0.0),
             ))
     return out

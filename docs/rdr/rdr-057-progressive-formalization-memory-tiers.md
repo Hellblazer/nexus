@@ -45,7 +45,7 @@ L0 (free text) → L1 (entity-linked, vocabulary-tagged) → L2 (RDF subject-pre
 
 **Source**: Memory in the LLM Era (arxiv 2604.01707)
 
-The paper's new SOTA method promotes entries based on heat score: `heat = f(access_frequency, recency)`. Relevance-decay expiry: `effective_ttl = base_ttl / (1 + log(access_count + 1))` — highly accessed entries survive longer. Entries never accessed expire sooner.
+The paper's new SOTA method promotes entries based on heat score: `heat = f(access_frequency, recency)`. The paper uses `effective_ttl = base_ttl / (1 + log(access_count + 1))` — a relevance-decay formula where access shortens TTL. Our implementation inverts this for heat-based survival: `effective_ttl = base_ttl * (1 + log(access_count + 1))` — highly accessed entries survive longer.
 
 ### RF-4: Schema Evolution Convergence
 
@@ -85,7 +85,7 @@ RDR-055 and RDR-056 shipped infrastructure that directly serves RDR-057's phases
 
 **T1 access tracking (Phase 1c)**: T1 is ChromaDB `EphemeralClient`, not SQLite. ChromaDB metadata is mutable via `col.update()` — `access_count` and `last_accessed` can be stored as metadata keys on each entry. `get()` and `search()` would call `col.update(ids=[id], metadatas=[{...existing, "access_count": n+1}])` after returning results. Cost: one extra ChromaDB call per get/search hit. No schema migration — ChromaDB metadata is schemaless.
 
-**T2 schema changes (Phase 2b/2c)**: T2 `memory` table uses `CREATE TABLE` with no `access_count` column. SQLite `ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0` is non-breaking and instant (no table rewrite). Same for `last_accessed TEXT`. The `expire()` method (line 584) uses `julianday('now') - julianday(timestamp) > ttl` — swapping to `effective_ttl = ttl / (1 + log(access_count + 1))` requires changing one SQL expression, no schema change beyond the new column.
+**T2 schema changes (Phase 2b/2c)**: T2 `memory` table uses `CREATE TABLE` with no `access_count` column. SQLite `ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0` is non-breaking and instant (no table rewrite). Same for `last_accessed TEXT`. The `expire()` method (line 584) uses `julianday('now') - julianday(timestamp) > ttl` — swapping to `effective_ttl = ttl * (1 + log(access_count + 1))` requires changing one SQL expression, no schema change beyond the new column.
 
 **T2 FTS5 consolidation (Phase 2b)**: `put()` currently upserts by `(project, title)` — exact key match. For semantic overlap detection, the existing `memory_fts` FTS5 table (title + content + tags) is already built with sync triggers. A pre-put similarity check would be:
 ```sql
@@ -187,7 +187,7 @@ Verified exact injection points for all three phases:
 | 1b | `db/t1.py` | `search()` | 164–196 | Returns results, no side effects | Add `col.update()` for access_count on hits |
 | 1c | `db/t1.py` | `promote()` | 270–275 | Returns `None`, calls `t2.put()` verbatim | FTS5 overlap check before put, return `PromotionReport` |
 | 2a | `db/t2.py` | schema | 49–59 | No `access_count` column | `ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0` |
-| 2a | `db/t2.py` | `expire()` | 584–595 | `julianday('now') - julianday(timestamp) > ttl` | Replace with `> ttl / (1 + log(access_count + 1))` |
+| 2a | `db/t2.py` | `expire()` | 584–595 | `julianday('now') - julianday(timestamp) > ttl` | Replace with `> ttl * (1 + log(access_count + 1))` |
 | 3a | `search_engine.py` | `search_cross_corpus()` | 206–225 | Builds SearchResult list | After link_boost (line 225), before clustering: pairwise contradiction check |
 
 T1 metadata is schemaless (ChromaDB) — `access_count` and `last_accessed` are new keys, no migration. T2 ALTER TABLE is non-breaking and instant. `formalizes` link type is free-form TEXT, zero schema changes. All changes are additive.
@@ -238,7 +238,7 @@ The agent decides whether to proceed, merge, or abort.
 `ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0` (non-breaking, instant).
 Track in `get()` and `search()`. Modify `expire()`:
 ```python
-effective_ttl = base_ttl / (1 + math.log(access_count + 1))
+effective_ttl = base_ttl * (1 + math.log(access_count + 1))
 ```
 
 ### Phase 3: Retrieval-Time Contradiction Flag (days)

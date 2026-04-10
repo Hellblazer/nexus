@@ -72,6 +72,7 @@ Used by `nx enrich` to fetch bibliographic metadata (year, venue, authors, citat
 | `search.distance_threshold.rdr` | — | `0.65` | Maximum distance for RDR corpus results |
 | `search.distance_threshold.default` | — | `0.55` | Maximum distance for unknown corpus types |
 | `search.cluster_by` | — | `null` | Set to `semantic` to group search results by Ward hierarchical clustering. Disabled by default |
+| `search.contradiction_check` | — | `false` | Enable JIT contradiction detection (RDR-057). Flags result pairs with high similarity but different `source_agent` provenance. Adds `[CONTRADICTS ANOTHER RESULT]` to search output |
 
 Embedding models are selected automatically based on collection type (see [Storage Tiers](storage-tiers.md)): `voyage-code-3` for code, `voyage-context-3` (CCE) for docs/rdr/knowledge. All collections use the same model for both index and query.
 

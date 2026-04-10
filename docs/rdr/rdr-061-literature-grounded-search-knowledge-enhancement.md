@@ -32,14 +32,19 @@ A comprehensive survey of 10+ papers in the nexus T3 knowledge store (AgenticSch
 
 ### Phase 1: Quick Win (start immediately)
 
-#### E2: Retrieval Feedback Loop (Phase 1: logging)
+#### E2: Retrieval Feedback Loop (Phase 1: logging) — DEFERRED
+
+> **Status**: Deferred. RDR-057's `access_count` tracking (T1 + T2) provides a proxy
+> for retrieval signal. The richer session-correlation logging (`relevance_log` table)
+> is deferred until access_count data validates the need. E6 (memory consolidation)
+> shipped using RDR-057's access_count schema instead of E2's relevance_log.
 
 - No signal is captured about which search results agents actually use
 - Log implicit relevance signal when a search->store_put or search->catalog_link pattern is detected within a session
 - **Detection point**: T1 scratch correlation — when `store_put` or `catalog_link` is called, check T1 for recent search results in the same session; if overlap detected, log the (query, chunk_id, action) triple to a new `relevance_log` table in T2
 - Future phases: extend `frecency.py` to T3 chunks (Phase 2), feed back as re-ranking signal in `scoring.py` (Phase 3)
 - Source: No paper solves this well — differentiation opportunity
-- Key files: `src/nexus/mcp_server.py` (store_put/catalog_link entry points), `src/nexus/db/t2.py` (relevance_log table), `src/nexus/db/t1.py` (recent search lookup)
+- Key files: `src/nexus/mcp/core.py` (store_put/catalog_link entry points), `src/nexus/db/t2.py` (relevance_log table), `src/nexus/db/t1.py` (recent search lookup)
 - Effort: ~3 hours
 
 ### Phase 2: Foundation Builders (after Phase 1 review)
