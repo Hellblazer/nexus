@@ -26,6 +26,7 @@ from typing import Any
 import structlog
 
 from nexus.db.t2._connection import SharedConnection
+from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 from nexus.db.t2.memory_store import (
     AccessPolicy,
     MemoryStore,
@@ -39,6 +40,7 @@ _log = structlog.get_logger()
 # ``tests/test_t2.py`` still ``from nexus.db.t2 import _sanitize_fts5``.
 __all__ = [
     "AccessPolicy",
+    "CatalogTaxonomy",
     "MemoryStore",
     "PlanLibrary",
     "SharedConnection",
@@ -47,28 +49,15 @@ __all__ = [
 ]
 
 
-# ── Residual schema (topics, topic_assignments) ──────────────────────────────
+# ── Residual schema ──────────────────────────────────────────────────────────
 # Memory schema lives in memory_store._MEMORY_SCHEMA_SQL.
 # Plans schema lives in plan_library._PLANS_SCHEMA_SQL.
-# Taxonomy schema (topics + topic_assignments) will migrate out in nexus-u29l.
+# Taxonomy schema (topics + topic_assignments) lives in
+# catalog_taxonomy._TAXONOMY_SCHEMA_SQL.
+# Only the WAL pragma + relevance_log (telemetry) remain in the facade
+# until ``nexus-yjww`` extracts telemetry.
 _RESIDUAL_SCHEMA_SQL = """\
 PRAGMA journal_mode=WAL;
-
-CREATE TABLE IF NOT EXISTS topics (
-    id            INTEGER PRIMARY KEY,
-    label         TEXT NOT NULL,
-    parent_id     INTEGER REFERENCES topics(id),
-    collection    TEXT NOT NULL,
-    centroid_hash TEXT,
-    doc_count     INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS topic_assignments (
-    doc_id    TEXT NOT NULL,
-    topic_id  INTEGER NOT NULL REFERENCES topics(id),
-    PRIMARY KEY (doc_id, topic_id)
-);
 """
 
 
@@ -106,6 +95,11 @@ class T2Database:
         self._shared = SharedConnection(conn=self.conn, lock=self._lock)
         self.memory: MemoryStore = MemoryStore(self._shared)
         self.plans: PlanLibrary = PlanLibrary(self._shared)
+        # CatalogTaxonomy takes a MemoryStore reference because
+        # cluster_and_persist reads memory entries to build word vectors.
+        # The cross-domain dependency is intentionally explicit at the
+        # constructor signature (RDR-063 §Cross-Domain Contracts).
+        self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(self._shared, self.memory)
         # Canonicalize path for the migration guard key: /foo/./bar and
         # /foo/bar must hash to the same entry or the guard is bypassed.
         try:
@@ -118,10 +112,14 @@ class T2Database:
         with self._lock:
             # Note: executescript() implicitly COMMITs any open transaction.
             # Safe here because _init_schema runs only during __init__ with
-            # no prior transaction. Memory and plans DDL run first (lock-naive
-            # helpers on the domain stores), then the residual topics DDL.
+            # no prior transaction. Memory, plans, and taxonomy DDL run via
+            # lock-naive helpers on the domain stores; the residual script
+            # only contains the WAL pragma in Phase 1 step 4 (telemetry
+            # extraction in nexus-yjww will absorb the relevance_log
+            # migration too).
             self.memory.init_schema_unlocked()
             self.plans.init_schema_unlocked()
+            self.taxonomy.init_schema_unlocked()
             self.conn.executescript(_RESIDUAL_SCHEMA_SQL)
             self.conn.commit()
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
@@ -138,36 +136,9 @@ class T2Database:
                 self.plans._migrate_plans_if_needed()
                 self.plans._migrate_plans_ttl_if_needed()
                 self.memory._migrate_access_tracking_if_needed()
-                self._migrate_topics_if_needed()
+                self.taxonomy._migrate_topics_if_needed()
                 self._migrate_relevance_log_if_needed()
                 _migrated_paths.add(path_key)
-
-    def _migrate_topics_if_needed(self) -> None:
-        """Add topics and topic_assignments tables if missing."""
-        row = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"
-        ).fetchone()
-        if row is not None:
-            return
-        _log.info("Migrating T2 schema to add topics tables")
-        self.conn.executescript("""\
-            CREATE TABLE IF NOT EXISTS topics (
-                id            INTEGER PRIMARY KEY,
-                label         TEXT NOT NULL,
-                parent_id     INTEGER REFERENCES topics(id),
-                collection    TEXT NOT NULL,
-                centroid_hash TEXT,
-                doc_count     INTEGER NOT NULL DEFAULT 0,
-                created_at    TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS topic_assignments (
-                doc_id    TEXT NOT NULL,
-                topic_id  INTEGER NOT NULL REFERENCES topics(id),
-                PRIMARY KEY (doc_id, topic_id)
-            );
-        """)
-        self.conn.commit()
-        _log.info("topics migration complete")
 
     def _migrate_relevance_log_if_needed(self) -> None:
         """Add relevance_log table if missing (RDR-061 E2).

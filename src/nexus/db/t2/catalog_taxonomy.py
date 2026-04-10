@@ -1,32 +1,424 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""CatalogTaxonomy — topics + topic_assignments (RDR-063 Phase 1).
+"""CatalogTaxonomy — topics + topic_assignments domain (RDR-063 Phase 1).
 
-This module is a placeholder stub. The actual migration of
-:mod:`nexus.taxonomy` (7 top-level functions, 26 internal T2 refs — see
-RF-063-2 plus the auditor's correction adding ``rebuild_taxonomy`` to
-the list) into a proper ``CatalogTaxonomy`` class happens in bead
-``nexus-u29l`` (Phase 1 steps 4-5). That bead is tagged NON-MECHANICAL
-(~3-4h) because:
+Owns the ``topics`` and ``topic_assignments`` tables. Extracted from
+the legacy ``nexus.taxonomy`` module + the monolithic ``T2Database``
+in RDR-063 Phase 1 steps 4-5 (bead ``nexus-u29l``).
 
-1. ``taxonomy.py`` reaches through ``db._lock`` and ``db.conn.execute``
-   directly — every call site must be rewritten onto this module's
-   connection instead of the monolithic T2 lock.
-2. ``get_topic_tree()`` at line 134 re-enters the lock inside a nested
-   traversal; transaction-scope review is required (not a mechanical
-   rewrite).
-3. The Known Defect in ``get_topic_docs()`` (JOIN across
-   ``topic_assignments.doc_id = memory.title`` with
-   ``project = topics.collection``) is documented, not fixed — per
-   RDR-063 Open Question 1 resolution (Option 3: document T2-only
-   scope).
+Why this is non-mechanical: the old ``nexus.taxonomy`` module reached
+through ``db._lock`` / ``db.conn.execute(...)`` directly across 7
+top-level functions (22 grep hits, 7 lock acquisitions, 12 execute
+calls, 3 commits). Each function has its own transaction shape — one
+or two reads under one lock, multi-statement writes with explicit
+``commit()``, etc. The translation onto ``self._lock`` / ``self.conn``
+preserves each function's shape exactly; do not collapse "two queries
+under one lock" into one query.
 
-After ``nexus-u29l`` lands, ``src/nexus/taxonomy.py`` becomes a
-deprecation shim that re-exports from this module. The shim is removed
-in the first PR after Phase 2 merges.
+Cross-domain dependency (RDR-063 §Cross-Domain Contracts):
+
+- ``cluster_and_persist`` reads memory entries via :class:`MemoryStore`
+  to build word-frequency vectors. The dependency is made explicit by
+  injecting a ``MemoryStore`` reference at construction; the JOIN that
+  binds ``topic_assignments.doc_id`` to ``memory.title`` continues to
+  live in SQL inside :meth:`get_topic_docs` (single SQLite file in
+  Phase 1, multiple connections in Phase 2 — the JOIN works in both).
+- ``get_topic_docs`` carries the **Known Defect** (per RDR-063 Open
+  Question 1, Option 3): when topics were clustered from a T3
+  collection (``code__*``, ``knowledge__*``, …) the
+  ``topics.collection`` value does not match any ``memory.project``,
+  so the LEFT JOIN finds no row and the returned ``title`` falls back
+  to the raw ``doc_id``. This is documented, not fixed — the docstring
+  on :meth:`get_topic_docs` is the contract and
+  ``test_get_topic_docs_known_defect_project_collection_mismatch``
+  pins it.
+
+Lock ownership convention (matches MemoryStore / PlanLibrary):
+
+- Public methods acquire ``self._lock`` themselves.
+- ``init_schema_unlocked`` and ``_migrate_topics_if_needed`` are
+  lock-naive — caller holds ``self._lock`` and ``_migrated_lock``.
+- ``get_topic_tree`` deliberately acquires the lock once for the root
+  fetch and once *per recursive child fetch*. This matches the
+  pre-split behavior: a snapshot per query, with the lock released
+  between queries so concurrent writers (e.g. another agent calling
+  ``cluster_and_persist``) are not blocked for the duration of the
+  walk. The recursive ``_build_node`` calls are made with the lock
+  released, so there is no re-entry — ``threading.Lock`` is
+  non-reentrant, and any nesting would have deadlocked the existing
+  test suite.
 """
 
 from __future__ import annotations
 
-# Per-domain migration guard (RDR-063 Open Question 3).
+import math
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import structlog
+
+if TYPE_CHECKING:
+    from nexus.db.t2._connection import SharedConnection
+    from nexus.db.t2.memory_store import MemoryStore
+
+_log = structlog.get_logger()
+
+
+# Per-domain migration guard placeholder — see memory_store.py for the
+# rationale. The authoritative guard still lives at the facade level in
+# Phase 1 (nexus.db.t2._migrated_paths).
 _migrated_paths: set[str] = set()
+
+
+# ── Schema SQL ────────────────────────────────────────────────────────────────
+
+_TAXONOMY_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS topics (
+    id            INTEGER PRIMARY KEY,
+    label         TEXT NOT NULL,
+    parent_id     INTEGER REFERENCES topics(id),
+    collection    TEXT NOT NULL,
+    centroid_hash TEXT,
+    doc_count     INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS topic_assignments (
+    doc_id    TEXT NOT NULL,
+    topic_id  INTEGER NOT NULL REFERENCES topics(id),
+    PRIMARY KEY (doc_id, topic_id)
+);
+"""
+
+_TOPIC_COLUMNS = (
+    "id",
+    "label",
+    "parent_id",
+    "collection",
+    "centroid_hash",
+    "doc_count",
+    "created_at",
+)
+
+# Stopword list distinct from MemoryStore._STOPWORDS — taxonomy clustering
+# operates on natural-language word vectors and benefits from a longer
+# stop list. MemoryStore's list (22 words) targets short title-fragment
+# matching for find_overlapping_memories.
+_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
+        "it", "that", "this", "with", "on", "at", "by", "from", "as", "be", "not",
+        "but", "have", "has", "had", "will", "would", "can", "could", "should",
+        "may", "might", "must", "shall", "do", "does", "did", "been", "being",
+        "if", "then", "else", "when", "where", "which", "who", "what", "how",
+    }
+)
+
+
+# ── CatalogTaxonomy ───────────────────────────────────────────────────────────
+
+
+class CatalogTaxonomy:
+    """Owns the ``topics`` and ``topic_assignments`` tables.
+
+    Constructor takes a :class:`MemoryStore` reference because
+    :meth:`cluster_and_persist` reads memory entries to build the
+    word-frequency vectors that drive Ward clustering. This makes the
+    Taxonomy → Memory coupling visible in the constructor signature
+    (RDR-063 §Cross-Domain Contracts).
+    """
+
+    def __init__(self, shared: "SharedConnection", memory: "MemoryStore") -> None:
+        self._shared = shared
+        self._memory = memory
+        # Legacy aliases — Phase 1 stores all share the same lock/conn,
+        # so any caller that reached through .conn / ._lock continues to
+        # work. Phase 2 will give each store its own pair.
+        self._lock = shared.lock
+        self.conn = shared.conn
+
+    # ── Schema / migrations ───────────────────────────────────────────────
+
+    def init_schema_unlocked(self) -> None:
+        """Create topics + topic_assignments tables. Caller holds the lock."""
+        self.conn.executescript(_TAXONOMY_SCHEMA_SQL)
+
+    def _migrate_topics_if_needed(self) -> None:
+        """Add topics and topic_assignments tables if missing.
+
+        Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
+        Kept as a separate migration distinct from ``init_schema_unlocked``
+        because some pre-RDR-061 databases predate the topics tables and
+        the migration log emits a structured event when it fires.
+        """
+        row = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"
+        ).fetchone()
+        if row is not None:
+            return
+        _log.info("Migrating T2 schema to add topics tables")
+        self.conn.executescript(
+            """\
+            CREATE TABLE IF NOT EXISTS topics (
+                id            INTEGER PRIMARY KEY,
+                label         TEXT NOT NULL,
+                parent_id     INTEGER REFERENCES topics(id),
+                collection    TEXT NOT NULL,
+                centroid_hash TEXT,
+                doc_count     INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS topic_assignments (
+                doc_id    TEXT NOT NULL,
+                topic_id  INTEGER NOT NULL REFERENCES topics(id),
+                PRIMARY KEY (doc_id, topic_id)
+            );
+        """
+        )
+        self.conn.commit()
+        _log.info("topics migration complete")
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def get_topics(
+        self,
+        *,
+        parent_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return topics filtered by parent.
+
+        - ``parent_id=None`` (default): return root topics (parent_id IS NULL).
+        - ``parent_id=<int>``: return children of that topic.
+
+        Two SELECT branches (root vs. child) inside one lock acquisition,
+        same as the pre-split implementation.
+        """
+        with self._lock:
+            if parent_id is None:
+                rows = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                    "FROM topics WHERE parent_id IS NULL ORDER BY doc_count DESC"
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                    "FROM topics WHERE parent_id = ? ORDER BY doc_count DESC",
+                    (parent_id,),
+                ).fetchall()
+        return [dict(zip(_TOPIC_COLUMNS, row)) for row in rows]
+
+    def assign_topic(self, doc_id: str, topic_id: int) -> None:
+        """Assign a document to a topic (idempotent via INSERT OR IGNORE)."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                (doc_id, topic_id),
+            )
+            self.conn.commit()
+
+    def get_topic_docs(
+        self,
+        topic_id: int,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return doc_ids and titles assigned to a topic.
+
+        KNOWN LIMITATION (RDR-063): The JOIN resolves ``doc_id`` via
+        ``memory.title`` using ``topics.collection`` as the project scope.
+        This only works when the taxonomy was built from T2 memory entries
+        (where ``project == topics.collection``). Topics clustered from T3
+        collections (``code__*``, ``knowledge__*``, etc.) will return
+        ``title`` equal to ``doc_id`` (the JOIN finds no match and falls
+        back to the raw identifier).
+
+        Rationale: T3 chunk titles live in T3/catalog metadata, not in T2
+        memory. If T3-origin title resolution is needed, route through the
+        catalog (``CatalogEntry.title``), not through this function.
+
+        See ``test_get_topic_docs_known_defect_project_collection_mismatch``
+        for the mechanical documentation of this behavior.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT ta.doc_id, m.title, m.project
+                FROM topic_assignments ta
+                LEFT JOIN memory m ON m.title = ta.doc_id AND m.project = (
+                    SELECT collection FROM topics WHERE id = ta.topic_id
+                )
+                WHERE ta.topic_id = ?
+                LIMIT ?
+                """,
+                (topic_id, limit),
+            ).fetchall()
+        return [{"doc_id": r[0], "title": r[1] or r[0], "project": r[2] or ""} for r in rows]
+
+    def get_topic_tree(
+        self,
+        collection: str = "",
+        *,
+        max_depth: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Return topics as a nested tree structure.
+
+        Each node: ``{id, label, doc_count, children: [...]}``. Filtered
+        by collection when provided.
+
+        Lock pattern (preserved from the pre-split implementation):
+          1. One lock acquisition fetches the root rows.
+          2. The recursive ``_build_node`` walk runs WITH THE LOCK
+             RELEASED. Each child fetch acquires the lock independently.
+          3. ``threading.Lock`` is non-reentrant; the recursive structure
+             is intentionally arranged so the lock is never re-entered.
+             Concurrent writes between fetches are tolerated — callers
+             accept that the returned tree is a multi-snapshot view, not
+             a single-snapshot transaction.
+        """
+        with self._lock:
+            if collection:
+                roots = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                    "FROM topics WHERE parent_id IS NULL AND collection = ? ORDER BY doc_count DESC",
+                    (collection,),
+                ).fetchall()
+            else:
+                roots = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                    "FROM topics WHERE parent_id IS NULL ORDER BY doc_count DESC"
+                ).fetchall()
+
+        def _build_node(row: tuple, depth: int) -> dict[str, Any]:
+            node = {"id": row[0], "label": row[1], "collection": row[3], "doc_count": row[5]}
+            if depth < max_depth:
+                with self._lock:
+                    children = self.conn.execute(
+                        "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                        "FROM topics WHERE parent_id = ? ORDER BY doc_count DESC",
+                        (row[0],),
+                    ).fetchall()
+                # Recurse OUTSIDE the lock — see method docstring.
+                node["children"] = [_build_node(c, depth + 1) for c in children]
+            else:
+                node["children"] = []
+            return node
+
+        return [_build_node(r, 0) for r in roots]
+
+    def cluster_and_persist(
+        self,
+        project: str,
+        *,
+        k: int | None = None,
+    ) -> int:
+        """Cluster memory entries by content word vectors, persist topics to T2.
+
+        Uses simple word-frequency vectors (no external embeddings required)
+        and the existing :func:`nexus.search_clusterer.cluster_results`
+        engine.
+
+        Cross-domain read: pulls memory entries via the injected
+        :class:`MemoryStore` reference. The taxonomy → memory coupling is
+        explicit at the constructor signature.
+
+        Returns number of topics created.
+        """
+        from nexus.search_clusterer import cluster_results
+
+        entries = self._memory.get_all(project)
+        if len(entries) < 3:
+            return 0
+
+        # Build word-frequency vectors capped to top-N most frequent words.
+        # Without a cap, vocab grows unboundedly with content size (1000 entries
+        # × 500 words ≈ 2GB float32 matrix).
+        MAX_VOCAB = 2000
+        word_counts: dict[str, int] = {}
+        for e in entries:
+            for word in e.get("content", "").lower().split():
+                if len(word) > 2 and word not in _STOPWORDS:
+                    word_counts[word] = word_counts.get(word, 0) + 1
+
+        if not word_counts:
+            return 0
+
+        # Keep top-N by frequency, then assign stable indices
+        top_words = sorted(word_counts.items(), key=lambda kv: -kv[1])[:MAX_VOCAB]
+        vocab: dict[str, int] = {word: i for i, (word, _) in enumerate(top_words)}
+
+        dim = len(vocab)
+        embeddings = np.zeros((len(entries), dim), dtype=np.float32)
+        for i, e in enumerate(entries):
+            for word in e.get("content", "").lower().split():
+                idx = vocab.get(word)
+                if idx is not None:
+                    embeddings[i, idx] += 1.0
+
+        # Normalize rows
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = embeddings / np.maximum(norms, 1e-9)
+
+        # Build result dicts for cluster_results API.
+        # IMPORTANT: "id" must equal memory.title — get_topic_docs() JOINs
+        # topic_assignments.doc_id against memory.title to resolve titles.
+        result_dicts = [
+            {
+                "id": e["title"],
+                "content": e.get("content", ""),
+                "distance": 0.0,
+                "metadata": {"title": e["title"]},
+            }
+            for e in entries
+        ]
+
+        if k is None:
+            k = max(2, math.ceil(len(entries) / 5))
+
+        clusters = cluster_results(result_dicts, embeddings, k=k)
+
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        count = 0
+        with self._lock:
+            for cluster in clusters:
+                if not cluster:
+                    continue
+                label = cluster[0].get("_cluster_label", f"topic-{count}")
+                self.conn.execute(
+                    "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+                    (label, project, len(cluster), now),
+                )
+                topic_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                for r in cluster:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                        (r["id"], topic_id),
+                    )
+                count += 1
+            self.conn.commit()
+
+        return count
+
+    def rebuild_taxonomy(
+        self,
+        project: str,
+        *,
+        k: int | None = None,
+    ) -> int:
+        """Full rebuild: delete existing topics for project, recluster.
+
+        DELETE topic_assignments and topics for the project in one
+        transaction (single lock acquisition + commit), then call
+        :meth:`cluster_and_persist` AFTER the lock is released. The
+        re-cluster takes its own lock for the new INSERTs — never nested
+        with the DELETE lock.
+        """
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM topic_assignments WHERE topic_id IN "
+                "(SELECT id FROM topics WHERE collection = ?)",
+                (project,),
+            )
+            self.conn.execute("DELETE FROM topics WHERE collection = ?", (project,))
+            self.conn.commit()
+        return self.cluster_and_persist(project, k=k)
