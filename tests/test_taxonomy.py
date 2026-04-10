@@ -249,12 +249,18 @@ def test_get_topic_docs_known_defect_project_collection_mismatch(db: T2Database)
     assert len(docs) == 1
     assert docs[0]["doc_id"] == "t3-chunk-id"
     # Because the JOIN fails (project != collection AND title != doc_id),
-    # title falls back to doc_id. When the defect is fixed, title should
-    # resolve via the catalog path and differ from doc_id.
+    # title falls back to doc_id and project falls back to empty string.
+    # When the defect is fixed, both fields should carry resolved values
+    # that differ from these fallbacks — the test will fail and must be
+    # rewritten alongside removing the Known Defect section from RDR-063.
     assert docs[0]["title"] == "t3-chunk-id", (
         "Known defect regression: get_topic_docs() now resolves T3-origin "
         "titles. Update this test to assert the new resolved title value "
         "and remove the Known Defect section from RDR-063."
+    )
+    assert docs[0]["project"] == "", (
+        "Known defect regression: get_topic_docs() now resolves T3-origin "
+        "project. Update this test alongside the title assertion."
     )
 
 

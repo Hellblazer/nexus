@@ -980,52 +980,49 @@ class T2Database:
 
         Raises ValueError if keep_id appears in delete_ids — that would
         silently discard the kept entry (UPDATE then DELETE on same row).
-        Raises KeyError if keep_id does not exist (prevents silent data loss
-        when expire() races with merge — if keep_id was deleted between
-        find-overlaps and merge, the UPDATE affects 0 rows and the DELETE
-        would otherwise proceed, destroying both copies of the content).
+        Raises KeyError if keep_id does not exist — prevents silent data
+        loss when expire() races with merge. If keep_id was deleted between
+        the caller's find-overlaps and this call, the UPDATE affects 0 rows
+        and we raise BEFORE the DELETE runs, preserving the delete_ids.
 
-        Uses BEGIN IMMEDIATE to establish a write lock before the UPDATE,
-        preventing racing writers from deleting keep_id mid-transaction.
+        Atomicity: UPDATE and DELETE run inside a single `with self.conn:`
+        block — the connection context manager commits on success and
+        rolls back on any exception. Under SQLite's default DEFERRED
+        isolation (which Python's sqlite3 uses), the UPDATE acquires a
+        write lock when it executes; that lock blocks other writers
+        (including expire()) until the block exits, so the DELETE runs
+        while still holding the lock. If a concurrent writer held the
+        lock when we started, the UPDATE waits (or raises OperationalError
+        on busy timeout) — either way, no interleaving is possible.
         """
         if keep_id in delete_ids:
             raise ValueError(
                 f"keep_id ({keep_id}) must not be in delete_ids — "
                 "would discard the entry meant to be kept"
             )
-        with self._lock:
-            # BEGIN IMMEDIATE upgrades to a write lock immediately, blocking
-            # other writers (including expire()) until we commit.
-            self.conn.execute("BEGIN IMMEDIATE")
-            try:
-                cur = self.conn.execute(
-                    "UPDATE memory SET content = ? WHERE id = ?",
-                    (merged_content, keep_id),
+        # Ordering: self._lock first (in-process serialization), then
+        # self.conn (SQLite transaction). On exception the connection
+        # context manager rolls back BEFORE the lock is released.
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE memory SET content = ? WHERE id = ?",
+                (merged_content, keep_id),
+            )
+            if cur.rowcount == 0:
+                # keep_id does not exist — likely deleted by a concurrent
+                # expire() or was stale when the caller selected it. Raise
+                # BEFORE running DELETE so delete_ids survive the race.
+                # The with-block rolls back the (no-op) UPDATE.
+                raise KeyError(
+                    f"keep_id {keep_id} not found — aborted merge to "
+                    "prevent data loss (delete_ids left intact)"
                 )
-                if cur.rowcount == 0:
-                    # keep_id does not exist — likely deleted by a concurrent
-                    # expire() or was stale when the caller selected it.
-                    # ABORT the transaction to prevent destroying delete_ids.
-                    self.conn.execute("ROLLBACK")
-                    raise KeyError(
-                        f"keep_id {keep_id} not found — aborted merge to "
-                        "prevent data loss (delete_ids left intact)"
-                    )
-                if delete_ids:
-                    placeholders = ",".join("?" * len(delete_ids))
-                    self.conn.execute(
-                        f"DELETE FROM memory WHERE id IN ({placeholders})",
-                        delete_ids,
-                    )
-                self.conn.commit()
-            except Exception:
-                # Ensure rollback on any error (except KeyError which already
-                # rolled back above).
-                try:
-                    self.conn.execute("ROLLBACK")
-                except sqlite3.OperationalError:
-                    pass  # already rolled back
-                raise
+            if delete_ids:
+                placeholders = ",".join("?" * len(delete_ids))
+                self.conn.execute(
+                    f"DELETE FROM memory WHERE id IN ({placeholders})",
+                    delete_ids,
+                )
 
     def flag_stale_memories(
         self,

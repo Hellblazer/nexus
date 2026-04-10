@@ -174,7 +174,7 @@ def test_clustering_skipped_partial_failure_event(monkeypatch):
             return np.array([[1.0, 0.0]] * len(ids), dtype=np.float32)
 
     with capture_logs() as logs:
-        search_cross_corpus(
+        results = search_cross_corpus(
             "q", ["code__good", "code__broken"], 10,
             _PartialT3(), cluster_by="semantic",
         )
@@ -182,3 +182,10 @@ def test_clustering_skipped_partial_failure_event(monkeypatch):
     assert len(events) == 1
     assert events[0]["failed_indices"] >= 1
     assert "total_results" in events[0]
+    # Results are returned (fall-through succeeded) and carry no cluster labels
+    assert len(results) > 0
+    for r in results:
+        assert "_cluster_label" not in r.metadata, (
+            "Clustering was skipped but results still carry _cluster_label — "
+            "the fall-through path is broken"
+        )

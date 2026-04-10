@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -628,6 +629,10 @@ def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) ->
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.symlink requires admin/developer mode on Windows",
+)
 def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None:
     """Two paths resolving to the same file share a guard key via symlink.
 

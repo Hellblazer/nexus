@@ -273,6 +273,96 @@ def test_merge_memories_raises_when_keep_id_not_found(db: T2Database) -> None:
     )
 
 
+def test_merge_memories_concurrent_expire_race(tmp_path) -> None:
+    """R5-1: two threads — one deletes keep_id, the other merges.
+
+    Validates that the atomicity guarantee holds. Without the rowcount
+    check, the racing thread could delete keep_id between our UPDATE
+    (which would silently affect 0 rows) and DELETE, destroying the
+    contents of delete_ids. With the rowcount check + single transaction,
+    either the merge completes atomically OR it raises KeyError and
+    leaves delete_ids intact.
+
+    Uses two T2Database instances on the same file to exercise SQLite's
+    write-lock serialization (not just Python's threading.Lock).
+    """
+    import threading
+
+    from nexus.db.t2 import T2Database
+
+    db_path = tmp_path / "race.db"
+
+    # Seed the DB
+    seed = T2Database(db_path)
+    id_a = seed.put(project="proj", title="a.md", content="to be merged")
+    id_b = seed.put(project="proj", title="b.md", content="also to be merged")
+    seed.close()
+
+    # Open two separate connections (simulating separate threads/processes)
+    db_merge = T2Database(db_path)
+    db_delete = T2Database(db_path)
+
+    # Synchronize: thread 1 deletes keep_id, thread 2 attempts merge.
+    # Possible legitimate orderings:
+    #   - merge first: UPDATE a, DELETE b, commit → then delete runs DELETE a.
+    #     Final: a gone, b gone (both writes succeeded in sequence)
+    #   - delete first: DELETE a, commit → merge UPDATE a sees rowcount=0
+    #     → merge raises KeyError, b survives. Final: a gone, b present.
+    # Data-loss bug would be: merge UPDATE sees rowcount=0 BUT still runs
+    # DELETE b anyway. The only way to distinguish legitimate "both gone"
+    # from data loss is to track whether merge raised KeyError.
+    errors: list[Exception] = []
+    merge_raised_keyerror = {"value": False}
+    barrier = threading.Barrier(2, timeout=5)
+
+    def do_delete():
+        try:
+            barrier.wait()
+            db_delete.delete(project="proj", title="a.md")
+        except Exception as exc:
+            errors.append(exc)
+
+    def do_merge():
+        try:
+            barrier.wait()
+            db_merge.merge_memories(
+                keep_id=id_a,
+                delete_ids=[id_b],
+                merged_content="merged content",
+            )
+        except KeyError:
+            merge_raised_keyerror["value"] = True
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=do_delete)
+    t2 = threading.Thread(target=do_merge)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not errors, f"Unexpected errors in race test: {errors}"
+
+    # Post-race check: if merge raised KeyError (delete won the race),
+    # b.md MUST still exist — the DELETE must NOT have run. This is the
+    # R5-1 data-loss invariant.
+    db_check = T2Database(db_path)
+    a_exists = db_check.get(id=id_a) is not None
+    b_exists = db_check.get(id=id_b) is not None
+    db_check.close()
+    db_merge.close()
+    db_delete.close()
+
+    if merge_raised_keyerror["value"]:
+        assert b_exists, (
+            "R5-1 data loss: merge_memories raised KeyError (keep_id was "
+            "missing) but delete_ids were destroyed anyway. The DELETE ran "
+            "despite the rowcount check — atomicity guarantee failed."
+        )
+        assert not a_exists  # delete won — a should be gone
+
+
 def test_mcp_memory_consolidate_merge_empty_delete_ids(db: T2Database, monkeypatch) -> None:
     """Whitespace-only delete_ids is rejected (not silently no-op)."""
     from nexus.mcp.core import memory_consolidate
