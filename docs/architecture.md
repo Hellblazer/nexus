@@ -94,12 +94,12 @@ mutex is gone); concurrent writes across domains still serialize at
 SQLite's single-writer WAL lock, but `busy_timeout=5000` absorbs the
 brief contention without raising `OperationalError`.
 
-| Store      | Class             | Attribute       | Responsibility                                         |
-|------------|-------------------|-----------------|--------------------------------------------------------|
-| Memory     | `MemoryStore`     | `db.memory`     | Persistent notes, project context, FTS5 search         |
-| Plans      | `PlanLibrary`     | `db.plans`      | Plan templates, plan search, plan TTL                  |
-| Taxonomy   | `CatalogTaxonomy` | `db.taxonomy`   | Topic clustering, topic assignment                     |
-| Telemetry  | `Telemetry`       | `db.telemetry`  | Relevance logs, access tracking                        |
+| Store      | Class             | Attribute       | Responsibility                                                             |
+|------------|-------------------|-----------------|----------------------------------------------------------------------------|
+| Memory     | `MemoryStore`     | `db.memory`     | Persistent notes, project context, FTS5 search, access tracking, TTL       |
+| Plans      | `PlanLibrary`     | `db.plans`      | Plan templates, plan search, plan TTL                                      |
+| Taxonomy   | `CatalogTaxonomy` | `db.taxonomy`   | Topic clustering, topic assignment                                         |
+| Telemetry  | `Telemetry`       | `db.telemetry`  | Relevance log (query/chunk/action triples), retention-based expiry         |
 
 `T2Database` is a composing facade: it constructs the four stores in
 order (memory → plans → taxonomy → telemetry), re-exposes their public

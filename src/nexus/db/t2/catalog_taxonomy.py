@@ -264,6 +264,20 @@ class CatalogTaxonomy:
 
         See ``test_get_topic_docs_known_defect_project_collection_mismatch``
         for the mechanical documentation of this behavior.
+
+        PHASE 3 FRAGILITY (RDR-063): This JOIN runs on the taxonomy
+        connection and still finds the ``memory`` table because Phase 2
+        keeps all four T2 domains in a single SQLite file — any
+        connection can see any table. If RDR-063 Phase 3 (physical file
+        split) ever proceeds, the taxonomy connection will no longer see
+        the ``memory`` table, the JOIN will silently return empty rows,
+        and every result will fall back to ``title=doc_id``. That
+        failure mode is indistinguishable from the known-defect path
+        above. Phase 3 must replace this JOIN with a two-step fetch:
+        pull topic_assignments from ``self.conn``, then resolve titles
+        via ``self._memory.get(...)`` on the MemoryStore reference. Do
+        not touch this method in Phase 1/2 — it's correct for
+        single-file T2. Flag it in the Phase 3 RDR.
         """
         with self._lock:
             rows = self.conn.execute(

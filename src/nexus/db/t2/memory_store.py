@@ -184,12 +184,28 @@ _COLUMNS = (
 _DEFAULT_BUSY_MS = 5000
 
 # Disabled busy_timeout used only around the best-effort access-count
-# UPDATE in ``search(access="track")``. The access counter is a
-# statistical signal and must fail-fast rather than block the search
-# on the write lock when another store is writing. ``busy_timeout = 0``
-# disables the busy handler, so SQLITE_BUSY fires on the first
-# contention and we skip the update in the except branch.
+# UPDATE in ``search(access="track")`` and ``get()``. The access counter
+# is a statistical signal and must fail-fast rather than block the
+# caller on the write lock when another store is writing.
+# ``busy_timeout = 0`` disables the busy handler, so SQLITE_BUSY fires
+# on the first contention and we skip the update in the except branch.
 _ACCESS_TRACK_BUSY_MS = 0
+
+
+def _is_sqlite_busy(exc: sqlite3.OperationalError) -> bool:
+    """Return True iff ``exc`` is a SQLITE_BUSY (database-locked) error.
+
+    Python 3.11+ exposes ``sqlite_errorcode`` on OperationalError; we
+    use it when available so the match is precise. For older builds or
+    edge cases where the errorcode is missing, fall back to a substring
+    match on ``"locked"``. The access-tracking fast-fail path only
+    swallows BUSY — SQLITE_CORRUPT / SQLITE_IOERR / SQLITE_CANTOPEN
+    propagate through so real storage failures are not silenced.
+    """
+    errorcode = getattr(exc, "sqlite_errorcode", None)
+    if errorcode is not None:
+        return errorcode == sqlite3.SQLITE_BUSY
+    return "locked" in str(exc).lower()
 
 
 # ── MemoryStore ───────────────────────────────────────────────────────────────
@@ -367,7 +383,16 @@ class MemoryStore:
         title: str | None = None,
         id: int | None = None,
     ) -> dict[str, Any] | None:
-        """Retrieve a single entry by (project, title) or by numeric ID."""
+        """Retrieve a single entry by (project, title) or by numeric ID.
+
+        Access tracking (``access_count`` + ``last_accessed``) runs as a
+        best-effort side-effect after the read — see ``search()`` for the
+        rationale. Under sustained cross-domain write load the UPDATE is
+        allowed to fail-fast on ``SQLITE_BUSY`` (logged as
+        ``memory.access_tracking.skipped``) rather than block the caller
+        on the full 5-second ``busy_timeout``. The row itself is always
+        returned; only the counter side-effect may be skipped.
+        """
         with self._lock:
             if id is not None:
                 row = self.conn.execute("SELECT * FROM memory WHERE id = ?", (id,)).fetchone()
@@ -380,14 +405,42 @@ class MemoryStore:
             if row is None:
                 return None
             now = datetime.now(UTC).isoformat()
-            self.conn.execute(
-                "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                (now, row[0]),
-            )
-            self.conn.commit()
+            tracked = False
+            try:
+                self.conn.execute(
+                    f"PRAGMA busy_timeout = {_ACCESS_TRACK_BUSY_MS}"
+                )
+                self.conn.execute(
+                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                    (now, row[0]),
+                )
+                self.conn.commit()
+                tracked = True
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_busy(exc):
+                    raise
+                # SQLITE_BUSY: best-effort side-effect skipped. Roll back
+                # the implicit write transaction so the connection is
+                # clean, log, and return the row without the counter
+                # increment reflected in the returned dict.
+                try:
+                    self.conn.rollback()
+                except sqlite3.OperationalError:  # pragma: no cover
+                    pass
+                _log.warning(
+                    "memory.access_tracking.skipped",
+                    reason=str(exc),
+                    row_id=row[0],
+                    method="get",
+                )
+            finally:
+                self.conn.execute(
+                    f"PRAGMA busy_timeout = {_DEFAULT_BUSY_MS}"
+                )
             result = dict(zip(_COLUMNS, row))
-            result["access_count"] += 1
-            result["last_accessed"] = now
+            if tracked:
+                result["access_count"] += 1
+                result["last_accessed"] = now
             return result
 
     def search(
@@ -459,7 +512,7 @@ class MemoryStore:
                     )
                     self.conn.commit()
                 except sqlite3.OperationalError as exc:
-                    if "locked" not in str(exc).lower():
+                    if not _is_sqlite_busy(exc):
                         raise
                     # SQLITE_BUSY: the fast-fail retry was skipped.
                     # Roll back the implicit write transaction so the
@@ -474,6 +527,7 @@ class MemoryStore:
                         "memory.access_tracking.skipped",
                         reason=str(exc),
                         row_count=len(ids),
+                        method="search",
                     )
                 finally:
                     self.conn.execute(

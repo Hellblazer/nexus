@@ -184,6 +184,114 @@ def test_single_threaded_memory_search_baseline(tmp_path: Path) -> None:
     assert p95 < 500, f"p95={p95:.2f}ms exceeds sanity bound (500ms)"
 
 
+def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
+    """memory.get() p95 must stay within 1.5x baseline under write load.
+
+    Same acceptance gate as ``memory.search``: ``get()`` runs
+    ``SELECT`` → ``UPDATE access_count`` → ``commit`` inside the memory
+    store's lock, which the Phase 1 global mutex used to serialize
+    behind all other writes. Phase 2 removes that serialization so
+    ``get()``'s write leg contends with telemetry / plan writers at
+    the SQLite WAL layer; the same best-effort fast-fail treatment
+    applied to ``search`` also applies to ``get``. This test proves it.
+    """
+    db_path = tmp_path / "get_underload.db"
+    db = T2Database(db_path)
+    try:
+        # Seed entries and remember the row ids so we can probe get(id=...)
+        # directly — cheaper than get(project, title) lookups and isolates
+        # the access-tracking write leg from the lookup cost.
+        row_ids: list[int] = []
+        for i in range(200):
+            row_ids.append(
+                db.put(project="load", title=f"entry{i}", content=f"content {i}")
+            )
+
+        # --- Phase A: single-threaded baseline ---
+        baseline: list[float] = []
+        for i in range(100):
+            start = time.perf_counter()
+            db.memory.get(id=row_ids[i % len(row_ids)])
+            baseline.append((time.perf_counter() - start) * 1000)
+        baseline.sort()
+        baseline_p95 = baseline[94]
+
+        # --- Phase B: same measurement, under concurrent write load ---
+        stop_writers = threading.Event()
+        writer_errors: list[BaseException] = []
+
+        def telemetry_writer() -> None:
+            i = 0
+            try:
+                while not stop_writers.is_set():
+                    db.log_relevance(
+                        query=f"q{i}",
+                        chunk_id=f"c{i}",
+                        action="click",
+                        session_id="load",
+                        collection="knowledge__load",
+                    )
+                    i += 1
+            except BaseException as exc:  # pragma: no cover
+                writer_errors.append(exc)
+
+        def plan_writer() -> None:
+            i = 0
+            try:
+                while not stop_writers.is_set():
+                    db.save_plan(
+                        query=f"plan {i}",
+                        plan_json='{"step":"x"}',
+                        tags="load",
+                    )
+                    i += 1
+            except BaseException as exc:  # pragma: no cover
+                writer_errors.append(exc)
+
+        writers = [
+            threading.Thread(target=telemetry_writer, daemon=True),
+            threading.Thread(target=plan_writer, daemon=True),
+        ]
+        for t in writers:
+            t.start()
+
+        # Let writers warm up
+        time.sleep(0.05)
+
+        under_load: list[float] = []
+        for i in range(100):
+            start = time.perf_counter()
+            db.memory.get(id=row_ids[i % len(row_ids)])
+            under_load.append((time.perf_counter() - start) * 1000)
+
+        stop_writers.set()
+        for t in writers:
+            t.join(timeout=5)
+    finally:
+        db.close()
+
+    assert not writer_errors, f"Background writers raised: {writer_errors}"
+
+    under_load.sort()
+    load_p50 = statistics.median(under_load)
+    load_p95 = under_load[94]
+    load_p99 = under_load[98]
+    ratio = load_p95 / baseline_p95 if baseline_p95 else float("inf")
+
+    print(
+        f"\n[rdr-063 under-load] memory_get n=100 entries=200 "
+        f"baseline_p95={baseline_p95:.2f}ms "
+        f"load_p50={load_p50:.2f}ms load_p95={load_p95:.2f}ms "
+        f"load_p99={load_p99:.2f}ms ratio={ratio:.2f}x"
+    )
+
+    assert load_p95 < baseline_p95 * 1.5, (
+        f"memory.get p95 inflated under concurrent write load: "
+        f"baseline_p95={baseline_p95:.2f}ms load_p95={load_p95:.2f}ms "
+        f"ratio={ratio:.2f}x (threshold 1.5x)"
+    )
+
+
 def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
     """memory_search p95 must stay within 1.5x baseline under write load.
 
