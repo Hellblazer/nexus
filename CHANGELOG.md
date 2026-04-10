@@ -6,11 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Next release ships **RDR-063 (T2 domain split)** — the Phase 1/Phase 2 refactor
-that was drafted and gate-ready in 3.7.0. T2 is now a four-store package with
-per-store `sqlite3.Connection` + `threading.Lock`; cross-domain reads no longer
-block on unrelated writes. 3457 non-integration tests passing (+1 for
-`test_t2_concurrency.py`), concurrency acceptance gates all green.
+## [3.8.0] - 2026-04-10
+
+Ships **RDR-063 (T2 domain split)** — the Phase 1/Phase 2 refactor that was
+drafted and gate-ready in 3.7.0. T2 is now a four-store package with per-store
+`sqlite3.Connection` + `threading.Lock`; cross-domain reads no longer block on
+unrelated writes. **3458 non-integration tests passing** (+2 for the new
+`test_t2_concurrency.py` suite), **20 integration tests passing**, concurrency
+acceptance gates all green.
 
 ### Added
 

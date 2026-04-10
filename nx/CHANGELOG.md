@@ -6,7 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Plugin version aligned with Nexus CLI next release (RDR-063: T2 Domain Split).
+## [3.8.0] - 2026-04-10
+
+Plugin version aligned with Nexus CLI 3.8.0 (RDR-063: T2 Domain Split).
 No plugin-level functional changes — the T2 refactor is internal to the core
 CLI and MCP servers. Documentation and README precision fixes only.
 
