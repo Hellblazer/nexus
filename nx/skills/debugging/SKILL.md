@@ -39,7 +39,7 @@ Delegates to the **debugger** agent (model: opus).
 
 Before dispatching the debugger agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
 
-1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_nx_nexus-catalog__catalog_search(query="RDR-NNN")`
+1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN")`
 2. Check T1 scratch for `rdr-planning-context`
 3. Write link context to scratch:
    ```

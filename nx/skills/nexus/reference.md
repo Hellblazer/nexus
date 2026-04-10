@@ -12,7 +12,7 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 Core tools are prefixed `mcp__plugin_nx_nexus__`; catalog tools are prefixed `mcp__plugin_nx_nexus-catalog__`.
 
 There are 14 core tools: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`.
-There are 10 catalog tools (nexus-catalog server): `catalog_search`, `catalog_show`, `catalog_list`, `catalog_register`, `catalog_update`, `catalog_link`, `catalog_links`, `catalog_link_query`, `catalog_resolve`, `catalog_stats`.
+There are 10 catalog tools (nexus-catalog server): `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`.
 
 ### search
 

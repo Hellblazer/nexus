@@ -20,7 +20,7 @@ Delegates to the **knowledge-tidier** agent (haiku). See [registry.yaml](../../r
 
 Before dispatching the knowledge-tidier agent, seed T1 scratch with link targets so the auto-linker creates catalog links when the agent calls `store_put`. See `/nx:catalog` skill for full reference.
 
-1. If the task references an RDR or source document, resolve it: `mcp__plugin_nx_nexus-catalog__catalog_search(query="<reference>")`
+1. If the task references an RDR or source document, resolve it: `mcp__plugin_nx_nexus-catalog__search(query="<reference>")`
 2. Check T1 scratch for existing `link-context` (may already be seeded by a predecessor skill like research-synthesis)
 3. If no link-context exists, seed: `mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "relates"}], "source_agent": "knowledge-tidier"}', tags="link-context")`
 4. If no document reference found, skip seeding (auto-linker handles empty context gracefully)
@@ -74,7 +74,7 @@ If contradictions found with existing knowledge:
 2. Identify which is more current/accurate
 3. Re-store with corrected content, then create a `supersedes` link from the new entry to the old:
    ```
-   mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="<new-entry-tumbler>", to_tumbler="<old-entry-tumbler>", link_type="supersedes", created_by="knowledge-tidier")
+   mcp__plugin_nx_nexus-catalog__link(from_tumbler="<new-entry-tumbler>", to_tumbler="<old-entry-tumbler>", link_type="supersedes", created_by="knowledge-tidier")
    ```
    This preserves the history chain and prevents the old entry from appearing in link-boosted results.
 

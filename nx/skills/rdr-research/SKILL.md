@@ -44,11 +44,11 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 4. **Catalog citation link** (optional, if catalog initialized and source is a paper/URL):
    If the source references a paper title or URL that may be indexed in the knowledge store:
    ```
-   mcp__plugin_nx_nexus-catalog__catalog_search(query="<source title or keywords>")
+   mcp__plugin_nx_nexus-catalog__search(query="<source title or keywords>")
    ```
    If a matching catalog entry is found, resolve the RDR's tumbler too (`catalog_search(query="RDR-NNN")`), then link:
    ```
-   mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-research")
+   mcp__plugin_nx_nexus-catalog__link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-research")
    ```
    Skip silently if catalog not initialized, RDR not indexed, or no match found. This enriches the citation graph incrementally as research findings are added.
 
@@ -84,7 +84,7 @@ When the user asks to *investigate* something (not just record a finding):
 
 Before dispatching an agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
 
-1. Resolve the RDR's tumbler: `mcp__plugin_nx_nexus-catalog__catalog_search(query="RDR-NNN", content_type="rdr")`
+1. Resolve the RDR's tumbler: `mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN", content_type="rdr")`
 2. Write link context to scratch:
    ```
    mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "cites"}], "source_agent": "rdr-research"}', tags="link-context")

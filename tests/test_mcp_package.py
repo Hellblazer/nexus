@@ -35,14 +35,14 @@ def test_core_registered_tools():
 
 
 def test_catalog_registered_tools():
-    """10 catalog tools are registered with @mcp.tool()."""
+    """10 catalog tools are registered with short names (no catalog_ prefix)."""
     from nexus.mcp.catalog import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
     expected = {
-        "catalog_search", "catalog_show", "catalog_list", "catalog_register",
-        "catalog_update", "catalog_link", "catalog_links", "catalog_link_query",
-        "catalog_resolve", "catalog_stats",
+        "search", "show", "list", "register",
+        "update", "link", "links", "link_query",
+        "resolve", "stats",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

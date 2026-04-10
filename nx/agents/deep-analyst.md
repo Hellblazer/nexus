@@ -25,8 +25,8 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
-mcp__plugin_nx_nexus-catalog__catalog_search(query="...", content_type="knowledge")
-mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="deep-analyst", from_span="chash:...", to_span="chash:...")
+mcp__plugin_nx_nexus-catalog__search(query="...", content_type="knowledge")
+mcp__plugin_nx_nexus-catalog__link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="deep-analyst", from_span="chash:...", to_span="chash:...")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -58,7 +58,7 @@ T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
 Check T1 scratch for existing `link-context` entries via `mcp__plugin_nx_nexus__scratch(action="list")`. If none tagged `link-context`, seed it yourself:
 1. Extract RDR references, document titles, or topic keywords from your task
-2. Resolve to tumblers: `mcp__plugin_nx_nexus-catalog__catalog_search(query="<reference>")`
+2. Resolve to tumblers: `mcp__plugin_nx_nexus-catalog__search(query="<reference>")`
 3. Seed: `mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "relates"}], "source_agent": "deep-analyst"}', tags="link-context")`
 4. If nothing resolves, skip
 
@@ -188,8 +188,8 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Relationship Maps**: Include as `--tags` in nx store documents
 - **Recommendations**: Include in output as "Recommended Next Step" for caller to dispatch
 - **Catalog Links** (if catalog tools available): After storing analysis findings:
-  1. `mcp__plugin_nx_nexus-catalog__catalog_search(query="{component} analysis architecture debug")` — find prior analyses, architecture maps, or debug findings on the same component
-  2. For each related document: `mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="{this-analysis-title}", to_tumbler="{related-title}", link_type="relates", created_by="deep-analyst")`
+  1. `mcp__plugin_nx_nexus-catalog__search(query="{component} analysis architecture debug")` — find prior analyses, architecture maps, or debug findings on the same component
+  2. For each related document: `mcp__plugin_nx_nexus-catalog__link(from_tumbler="{this-analysis-title}", to_tumbler="{related-title}", link_type="relates", created_by="deep-analyst")`
   This connects the analysis graph across agents — deep-analyst findings link to debugger findings and codebase-analyzer architecture maps on the same components.
   Skip silently if catalog tools not available.
 - **Analysis Chain**: Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for hypothesis-driven investigation of complex behaviors.

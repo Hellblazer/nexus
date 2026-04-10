@@ -102,7 +102,7 @@ nx MCP tools use the full prefix `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_
 | T1 | scratch | Session (ephemeral) | `scratch`, `scratch_manage` | Working notes, hypotheses, debug traces | Wiped on SessionEnd (flag to survive) |
 | T2 | memory | Per-project, persistent | `memory_put`, `memory_get`, `memory_delete`, `memory_search` | Session state, project context, agent relay, active work | 30d default; `permanent` available |
 | T3 | store / search | Permanent, cross-session | `search`, `query`, `store_put`, `store_get`, `store_list` | Research findings, architectural decisions, validated patterns. Results include `chunk_text_hash` metadata | `permanent` or explicit TTL |
-| Catalog | document registry | Permanent, cross-session | `catalog_search`, `catalog_show`, `catalog_links`, `catalog_link`, `catalog_resolve` | Author/corpus/provenance queries; typed links between documents; content-addressed span references | Permanent |
+| Catalog | document registry | Permanent, cross-session | `search`, `show`, `links`, `link`, `resolve` | Author/corpus/provenance queries; typed links between documents; content-addressed span references | Permanent |
 
 ## Pagination
 

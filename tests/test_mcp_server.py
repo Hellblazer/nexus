@@ -700,8 +700,8 @@ async def test_mcp_server_round_trip():
             for demoted in ("store_delete", "collection_info", "collection_verify"):
                 assert demoted not in tool_names, f"demoted tool registered: {demoted}"
 
-            # Catalog tools must NOT appear in core server
-            for catalog_tool in ("catalog_search", "catalog_show", "catalog_list", "catalog_stats"):
+            # Catalog-only tools must NOT appear in core server
+            for catalog_tool in ("show", "register", "links", "link_query", "resolve", "stats"):
                 assert catalog_tool not in tool_names, f"catalog tool in core: {catalog_tool}"
 
             r = await session.call_tool("scratch", {"action": "put", "content": "integration test entry", "tags": "test"})
@@ -738,24 +738,25 @@ async def test_mcp_catalog_server_round_trip():
             tool_names = [t.name for t in (await session.list_tools()).tools]
 
             expected_catalog_tools = {
-                "catalog_search", "catalog_show", "catalog_list",
-                "catalog_register", "catalog_update",
-                "catalog_link", "catalog_links", "catalog_link_query",
-                "catalog_resolve", "catalog_stats",
+                "search", "show", "list",
+                "register", "update",
+                "link", "links", "link_query",
+                "resolve", "stats",
             }
             for expected in expected_catalog_tools:
                 assert expected in tool_names, f"catalog tool missing: {expected}"
 
-            # Demoted catalog tools must NOT be registered
-            for demoted in ("catalog_unlink", "catalog_link_audit", "catalog_link_bulk"):
+            # Demoted catalog tools must NOT be registered (check both old and short names)
+            for demoted in ("catalog_unlink", "catalog_link_audit", "catalog_link_bulk",
+                            "unlink", "link_audit", "link_bulk"):
                 assert demoted not in tool_names, f"demoted tool registered: {demoted}"
 
-            # Core tools must NOT appear in catalog server
-            for core_tool in ("search", "query", "store_put", "memory_put", "scratch"):
+            # Core-specific tools must NOT appear in catalog server
+            for core_tool in ("query", "store_put", "memory_put", "scratch"):
                 assert core_tool not in tool_names, f"core tool in catalog: {core_tool}"
 
             # Smoke test
-            r = await session.call_tool("catalog_stats", {})
+            r = await session.call_tool("stats", {})
             assert r.content[0].text
 
 

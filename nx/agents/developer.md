@@ -25,8 +25,8 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
-mcp__plugin_nx_nexus-catalog__catalog_search(query="...", content_type="knowledge")
-mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="...", to_tumbler="...", link_type="implements", created_by="developer", from_span="chash:...", to_span="chash:...")
+mcp__plugin_nx_nexus-catalog__search(query="...", content_type="knowledge")
+mcp__plugin_nx_nexus-catalog__link(from_tumbler="...", to_tumbler="...", link_type="implements", created_by="developer", from_span="chash:...", to_span="chash:...")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -154,8 +154,8 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
   Do not store: routine implementation steps, things directly readable from code, standard
   library behavior.
 - **Catalog Links** (if catalog tools available): After storing an insight:
-  1. If working on an RDR-driven bead (check T1 scratch for `rdr-planning-context`): `mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="{insight-title}", to_tumbler="{rdr-title}", link_type="implements", created_by="developer")`
-  2. Search for related prior insights: `mcp__plugin_nx_nexus-catalog__catalog_search(query="{component}")` — if found, create `relates` links to prior insights on the same module.
+  1. If working on an RDR-driven bead (check T1 scratch for `rdr-planning-context`): `mcp__plugin_nx_nexus-catalog__link(from_tumbler="{insight-title}", to_tumbler="{rdr-title}", link_type="implements", created_by="developer")`
+  2. Search for related prior insights: `mcp__plugin_nx_nexus-catalog__search(query="{component}")` — if found, create `relates` links to prior insights on the same module.
   Skip silently if catalog tools not available.
 
 Store using these naming conventions:

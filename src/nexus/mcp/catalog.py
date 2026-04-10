@@ -22,7 +22,7 @@ _BULK_DELETE_CONFIRM_THRESHOLD = 10
 # ── Registered tools ─────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(name="search")
 def catalog_search(
     query: str = "",
     content_type: str = "",
@@ -113,7 +113,7 @@ def catalog_search(
         return [{"error": str(e)}]
 
 
-@mcp.tool()
+@mcp.tool(name="show")
 def catalog_show(
     tumbler: str = "",
     title: str = "",
@@ -147,7 +147,7 @@ def catalog_show(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@mcp.tool(name="list")
 def catalog_list(
     owner: str = "",
     content_type: str = "",
@@ -198,7 +198,7 @@ def catalog_list(
         return [{"error": str(e)}]
 
 
-@mcp.tool()
+@mcp.tool(name="register")
 def catalog_register(
     title: str,
     owner: str,
@@ -247,7 +247,7 @@ def catalog_register(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@mcp.tool(name="update")
 def catalog_update(
     tumbler: str,
     title: str = "",
@@ -287,7 +287,7 @@ def catalog_update(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@mcp.tool(name="link")
 def catalog_link(
     from_tumbler: str,
     to_tumbler: str,
@@ -319,7 +319,7 @@ def catalog_link(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@mcp.tool(name="links")
 def catalog_links(
     tumbler: str,
     direction: str = "both",
@@ -348,7 +348,7 @@ def catalog_links(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@mcp.tool(name="link_query")
 def catalog_link_query(
     from_tumbler: str = "",
     to_tumbler: str = "",
@@ -391,7 +391,7 @@ def catalog_link_query(
         return [{"error": str(e)}]
 
 
-@mcp.tool()
+@mcp.tool(name="resolve")
 def catalog_resolve(
     tumbler: str = "",
     owner: str = "",
@@ -428,7 +428,7 @@ def catalog_resolve(
         return [f"Error: {e}"]
 
 
-@mcp.tool()
+@mcp.tool(name="stats")
 def catalog_stats() -> dict:
     """Catalog health summary: owner/document/link counts by type."""
     cat, err = _require_catalog()

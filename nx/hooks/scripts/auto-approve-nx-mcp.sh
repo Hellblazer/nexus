@@ -21,16 +21,16 @@ case "$TOOL_NAME" in
   mcp__plugin_nx_nexus__collection_list|\
   mcp__plugin_nx_nexus__plan_save|\
   mcp__plugin_nx_nexus__plan_search|\
-  mcp__plugin_nx_nexus-catalog__catalog_search|\
-  mcp__plugin_nx_nexus-catalog__catalog_show|\
-  mcp__plugin_nx_nexus-catalog__catalog_list|\
-  mcp__plugin_nx_nexus-catalog__catalog_register|\
-  mcp__plugin_nx_nexus-catalog__catalog_update|\
-  mcp__plugin_nx_nexus-catalog__catalog_link|\
-  mcp__plugin_nx_nexus-catalog__catalog_links|\
-  mcp__plugin_nx_nexus-catalog__catalog_link_query|\
-  mcp__plugin_nx_nexus-catalog__catalog_resolve|\
-  mcp__plugin_nx_nexus-catalog__catalog_stats|\
+  mcp__plugin_nx_nexus-catalog__search|\
+  mcp__plugin_nx_nexus-catalog__show|\
+  mcp__plugin_nx_nexus-catalog__list|\
+  mcp__plugin_nx_nexus-catalog__register|\
+  mcp__plugin_nx_nexus-catalog__update|\
+  mcp__plugin_nx_nexus-catalog__link|\
+  mcp__plugin_nx_nexus-catalog__links|\
+  mcp__plugin_nx_nexus-catalog__link_query|\
+  mcp__plugin_nx_nexus-catalog__resolve|\
+  mcp__plugin_nx_nexus-catalog__stats|\
   mcp__plugin_nx_sequential-thinking__sequentialthinking)
     python3 -c "
 import json

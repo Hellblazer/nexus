@@ -25,9 +25,9 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
-mcp__plugin_nx_nexus-catalog__catalog_search(query="...", content_type="knowledge")
-mcp__plugin_nx_nexus-catalog__catalog_links(tumbler="...", direction="both")
-mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="deep-research-synthesizer", from_span="chash:...", to_span="chash:...")
+mcp__plugin_nx_nexus-catalog__search(query="...", content_type="knowledge")
+mcp__plugin_nx_nexus-catalog__links(tumbler="...", direction="both")
+mcp__plugin_nx_nexus-catalog__link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="deep-research-synthesizer", from_span="chash:...", to_span="chash:...")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -64,7 +64,7 @@ mcp__plugin_nx_nexus__scratch(action="list")
 If no `link-context` tag is present, seed it yourself:
 
 1. Extract RDR references (`RDR-\d+`), document titles, or topic keywords from your task prompt
-2. Resolve to tumblers: `mcp__plugin_nx_nexus-catalog__catalog_search(query="<reference>")`
+2. Resolve to tumblers: `mcp__plugin_nx_nexus-catalog__search(query="<reference>")`
 3. If found, seed scratch:
    ```
    mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}', tags="link-context")
@@ -207,16 +207,16 @@ You will begin every research task by:
 ### Catalog Discovery (always — before any T3 search)
 Start every research task by checking what the catalog already knows about the topic:
 
-1. `mcp__plugin_nx_nexus-catalog__catalog_search(query="<research topic keywords>")` — discover existing documents on this topic
-2. If results found, check their link graph: `mcp__plugin_nx_nexus-catalog__catalog_links(tumbler="<result>", direction="both")` to find related documents, citations, and prior research
+1. `mcp__plugin_nx_nexus-catalog__search(query="<research topic keywords>")` — discover existing documents on this topic
+2. If results found, check their link graph: `mcp__plugin_nx_nexus-catalog__links(tumbler="<result>", direction="both")` to find related documents, citations, and prior research
 3. Use discovered `physical_collection` values to scope subsequent T3 searches instead of blind corpus-wide search
 
 For author/citation-specific questions ("what did Fagin write", "what cites X"):
-- Use `mcp__plugin_nx_nexus-catalog__catalog_search(author="...", corpus="...")` for targeted metadata search
-- Use `mcp__plugin_nx_nexus-catalog__catalog_links(tumbler="...", direction="in", link_type="cites")` for citation traversal
+- Use `mcp__plugin_nx_nexus-catalog__search(author="...", corpus="...")` for targeted metadata search
+- Use `mcp__plugin_nx_nexus-catalog__links(tumbler="...", direction="in", link_type="cites")` for citation traversal
   - Returns `{"nodes": [...], "edges": [...]}` — nodes include physical_collection for T3 resolution
   - Link types: `cites`, `implements-heuristic`, `supersedes`, `relates`
-- Resolve to T3 collections via `mcp__plugin_nx_nexus-catalog__catalog_resolve(owner="...", corpus="...")`
+- Resolve to T3 collections via `mcp__plugin_nx_nexus-catalog__resolve(owner="...", corpus="...")`
 
 Skip catalog only if tools are not available (not injected by SubagentStart hook).
 
@@ -261,7 +261,7 @@ You will automatically:
 3. Update existing documents with new insights while preserving version history
 4. **Create catalog citation links** (if catalog tools available): For each stored research document, create `cites` links to its primary sources:
    ```
-   mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="<research-doc-title>", to_tumbler="<source-paper-title>", link_type="cites", created_by="deep-research-synthesizer")
+   mcp__plugin_nx_nexus-catalog__link(from_tumbler="<research-doc-title>", to_tumbler="<source-paper-title>", link_type="cites", created_by="deep-research-synthesizer")
    ```
    This enriches the citation graph so future researchers can discover "what was this finding based on?"
 5. Archive outdated information with clear timestamps

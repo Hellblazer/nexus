@@ -25,8 +25,8 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
-mcp__plugin_nx_nexus-catalog__catalog_search(query="...", content_type="knowledge")
-mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="debugger", from_span="chash:...", to_span="chash:...")
+mcp__plugin_nx_nexus-catalog__search(query="...", content_type="knowledge")
+mcp__plugin_nx_nexus-catalog__link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="debugger", from_span="chash:...", to_span="chash:...")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -58,7 +58,7 @@ T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 
 Check T1 scratch for existing `link-context` entries via `mcp__plugin_nx_nexus__scratch(action="list")`. If none tagged `link-context`, seed it yourself:
 1. Extract RDR references, document titles, or topic keywords from your task
-2. Resolve to tumblers: `mcp__plugin_nx_nexus-catalog__catalog_search(query="<reference>")`
+2. Resolve to tumblers: `mcp__plugin_nx_nexus-catalog__search(query="<reference>")`
 3. Seed: `mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "relates"}], "source_agent": "debugger"}', tags="link-context")`
 4. If nothing resolves, skip
 
@@ -203,9 +203,9 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Fix Recommendations**: Include in output as "Recommended Next Step" for caller to dispatch developer
 - **Prevention Patterns**: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="pattern-prevention-{topic}", tags="pattern,prevention"
 - **Catalog Links** (if catalog tools available): After storing a root cause analysis or prevention pattern, search for related prior findings and create links:
-  1. `mcp__plugin_nx_nexus-catalog__catalog_search(query="{component} debug finding")` — find prior findings on same component
-  2. For each match: `mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="{this-finding-title}", to_tumbler="{prior-finding-title}", link_type="relates", created_by="debugger")`
-  3. If a prevention pattern was created from a root cause: `mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="{pattern-title}", to_tumbler="{finding-title}", link_type="implements", created_by="debugger")`
+  1. `mcp__plugin_nx_nexus-catalog__search(query="{component} debug finding")` — find prior findings on same component
+  2. For each match: `mcp__plugin_nx_nexus-catalog__link(from_tumbler="{this-finding-title}", to_tumbler="{prior-finding-title}", link_type="relates", created_by="debugger")`
+  3. If a prevention pattern was created from a root cause: `mcp__plugin_nx_nexus-catalog__link(from_tumbler="{pattern-title}", to_tumbler="{finding-title}", link_type="implements", created_by="debugger")`
   Skip silently if catalog tools not available.
 - **Hypothesis Chain**: Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for structured hypothesis-driven investigation
 
