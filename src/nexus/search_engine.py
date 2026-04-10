@@ -247,6 +247,13 @@ def search_cross_corpus(
         # the cluster assignment by excluding some results.
         if not failed_indices:
             all_results = _apply_clustering(all_results, fetched_embeddings)
+        else:
+            _log.warning(
+                "clustering_skipped_partial_failure",
+                failed_indices=len(failed_indices),
+                total_results=len(all_results),
+                reason="cannot partially cluster — some collection fetches failed",
+            )
 
     return all_results
 

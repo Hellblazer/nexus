@@ -71,7 +71,23 @@ def get_topic_docs(
     *,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Return doc_ids and titles assigned to a topic."""
+    """Return doc_ids and titles assigned to a topic.
+
+    KNOWN LIMITATION (RDR-063): The JOIN resolves ``doc_id`` via
+    ``memory.title`` using ``topics.collection`` as the project scope.
+    This only works when the taxonomy was built from T2 memory entries
+    (where ``project == topics.collection``). Topics clustered from T3
+    collections (``code__*``, ``knowledge__*``, etc.) will return
+    ``title`` equal to ``doc_id`` (the JOIN finds no match and falls
+    back to the raw identifier).
+
+    Rationale: T3 chunk titles live in T3/catalog metadata, not in T2
+    memory. If T3-origin title resolution is needed, route through the
+    catalog (``CatalogEntry.title``), not through this function.
+
+    See ``test_get_topic_docs_known_defect_project_collection_mismatch``
+    for the mechanical documentation of this behavior.
+    """
     with db._lock:
         rows = db.conn.execute(
             """

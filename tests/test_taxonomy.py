@@ -219,14 +219,18 @@ def test_get_topic_docs_known_defect_project_collection_mismatch(db: T2Database)
 
     This test DOCUMENTS the defect: when a topic's ``collection`` is a T3
     collection name (e.g. ``code__myrepo``) and the memory entry's ``project``
-    is the T2 project name (e.g. ``myrepo``), the JOIN fails and ``title``
-    returns as the unresolved ``doc_id`` fallback.
+    is the T2 project name (e.g. ``myrepo``), the JOIN fails because the
+    project ≠ collection comparison is false.
 
-    This test will fail when the defect is fixed — at which point, rewrite
-    the assertions to verify proper resolution.
+    The assertion uses a doc_id that does NOT match any memory.title, so
+    the JOIN can't short-circuit. When the defect is fixed (JOIN semantics
+    changed), this test will fail and must be rewritten.
     """
-    # Memory entry in a T2 project
-    db.put(project="myrepo", title="chunk-abc", content="code content")
+    # Memory entry with a DIFFERENT title from the topic's doc_id — so even
+    # if the project/collection match, the title JOIN cannot find a hit.
+    # This ensures we're testing the project-vs-collection mismatch, not
+    # accidentally matching via title == doc_id.
+    db.put(project="myrepo", title="unrelated-memory-title", content="some notes")
 
     # Topic associated with a T3 collection name (NOT the T2 project name)
     db.conn.execute(
@@ -234,17 +238,24 @@ def test_get_topic_docs_known_defect_project_collection_mismatch(db: T2Database)
         ("code topic", "code__myrepo", 1, "2026-01-01T00:00:00Z"),
     )
     topic_id = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    # doc_id = "t3-chunk-id" — does NOT match any memory.title in the DB
     db.conn.execute(
         "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-        ("chunk-abc", topic_id),
+        ("t3-chunk-id", topic_id),
     )
     db.conn.commit()
 
     docs = get_topic_docs(db, topic_id)
     assert len(docs) == 1
-    # The JOIN fails → title falls back to doc_id value
-    # (when fixed, title should be "chunk-abc" via a successful JOIN instead of a fallback)
-    assert docs[0]["doc_id"] == "chunk-abc"
+    assert docs[0]["doc_id"] == "t3-chunk-id"
+    # Because the JOIN fails (project != collection AND title != doc_id),
+    # title falls back to doc_id. When the defect is fixed, title should
+    # resolve via the catalog path and differ from doc_id.
+    assert docs[0]["title"] == "t3-chunk-id", (
+        "Known defect regression: get_topic_docs() now resolves T3-origin "
+        "titles. Update this test to assert the new resolved title value "
+        "and remove the Known Defect section from RDR-063."
+    )
 
 
 def test_cli_taxonomy_list(db: T2Database) -> None:

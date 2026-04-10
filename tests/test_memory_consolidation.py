@@ -260,6 +260,19 @@ def test_merge_memories_raises_when_keep_in_delete(db: T2Database) -> None:
     assert db.get(id=id_a) is not None
 
 
+def test_merge_memories_raises_when_keep_id_not_found(db: T2Database) -> None:
+    """R4-1: merge aborts if keep_id doesn't exist (prevents data loss on expire race)."""
+    id_b = db.put(project="proj", title="b.md", content="b content")
+    # Try to merge into a non-existent keep_id (simulates expire() deletion)
+    with pytest.raises(KeyError, match="not found"):
+        db.merge_memories(keep_id=99999, delete_ids=[id_b], merged_content="merged")
+    # Critically: id_b must still exist — the DELETE should NOT have run
+    assert db.get(id=id_b) is not None, (
+        "R4-1 regression: merge_memories deleted delete_ids even though "
+        "keep_id was missing — silent data loss"
+    )
+
+
 def test_mcp_memory_consolidate_merge_empty_delete_ids(db: T2Database, monkeypatch) -> None:
     """Whitespace-only delete_ids is rejected (not silently no-op)."""
     from nexus.mcp.core import memory_consolidate

@@ -128,12 +128,16 @@ class TestFullPipeline:
                 ]
 
             def get_embeddings(self, collection_name, ids):
-                # Near-identical vectors — cosine distance < 0.3
-                return np.array([
-                    [1.0, 0.0, 0.0, 0.0],
-                    [0.99, 0.01, 0.0, 0.0],
-                    [0.0, 0.0, 1.0, 0.0],  # c is far from a/b
-                ], dtype=np.float32)
+                # Return exactly one row per requested ID, matched by ID so
+                # index alignment bugs in _fetch_embeddings_for_results
+                # would produce a wrong mapping rather than a silent pass.
+                vec_for = {
+                    "chunk-a": [1.0, 0.0, 0.0, 0.0],
+                    "chunk-b": [0.99, 0.01, 0.0, 0.0],
+                    "chunk-c": [0.0, 0.0, 1.0, 0.0],
+                }
+                rows = [vec_for[i] for i in ids]
+                return np.array(rows, dtype=np.float32)
 
         t3 = _ContradictingT3()
         results = search_cross_corpus(

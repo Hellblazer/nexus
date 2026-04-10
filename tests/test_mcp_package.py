@@ -128,7 +128,13 @@ def test_destructive_bulk_tools_have_safety_gates():
 
     Regression guard for R3-5: the memory_consolidate(merge) tool was
     originally missing these parameters (caught in round 3 review).
-    Any future bulk destructive tool must follow the same pattern.
+    Any future bulk destructive tool must follow the same pattern:
+    - dry_run: bool defaulting to False (opt-in preview)
+    - confirm_destructive: bool defaulting to False (opt-in proceed)
+
+    Defaults matter: a tool with dry_run=True by default would silently
+    skip all writes; a tool with confirm_destructive=True by default would
+    defeat the safety gate entirely.
     """
     import importlib
     import inspect
@@ -137,14 +143,24 @@ def test_destructive_bulk_tools_have_safety_gates():
         module = importlib.import_module(module_name)
         fn = getattr(module, fn_name)
         sig = inspect.signature(fn)
-        params = set(sig.parameters.keys())
+        params = sig.parameters
+
         assert "dry_run" in params, (
             f"{module_name}.{fn_name} is a destructive bulk tool but has no "
             f"dry_run parameter — add one (see memory_consolidate or "
             f"catalog_link_bulk for the pattern)"
         )
+        assert params["dry_run"].default is False, (
+            f"{module_name}.{fn_name}.dry_run default is "
+            f"{params['dry_run'].default!r} — must be False (opt-in preview)"
+        )
+
         assert "confirm_destructive" in params, (
             f"{module_name}.{fn_name} is a destructive bulk tool but has no "
             f"confirm_destructive parameter — required to prevent "
             f"accidental multi-row deletes"
+        )
+        assert params["confirm_destructive"].default is False, (
+            f"{module_name}.{fn_name}.confirm_destructive default is "
+            f"{params['confirm_destructive'].default!r} — must be False"
         )

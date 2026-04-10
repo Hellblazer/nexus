@@ -603,10 +603,12 @@ def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) ->
     """Two T2Database instances on the same path do not re-run migrations sequentially."""
     from nexus.db import t2 as t2_module
 
-    # Clear any prior migration state for this path
+    # Clear any prior migration state for this path. The guard keys on the
+    # resolved path, so discard the resolved form (important on macOS where
+    # /var and /private/var resolve differently).
     path = tmp_path / "sequential.db"
     with t2_module._migrated_lock:
-        t2_module._migrated_paths.discard(str(path))
+        t2_module._migrated_paths.discard(str(path.resolve()))
 
     call_count = {"n": 0}
     original = T2Database._migrate_plans_if_needed
@@ -627,15 +629,32 @@ def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) ->
 
 
 def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None:
-    """Paths with ./ or .. segments resolve to the same guard key."""
+    """Two paths resolving to the same file share a guard key via symlink.
+
+    Python's ``Path`` collapses ``.`` segments at construction, so a naive
+    ``base / "." / "file.db"`` produces the same string as ``base / "file.db"``
+    and doesn't exercise normalization. This test uses a real symlink so the
+    two string paths genuinely differ — only ``resolve()`` can reconcile them.
+    """
+    import os
+
     from nexus.db import t2 as t2_module
 
-    base = tmp_path / "sub"
+    base = tmp_path / "real"
     base.mkdir()
     canonical = base / "norm.db"
 
+    # Create a symlinked alias pointing at the same parent directory
+    link_parent = tmp_path / "via_symlink"
+    os.symlink(base, link_parent)
+    via_symlink = link_parent / "norm.db"
+
+    # Sanity: the two path strings genuinely differ
+    assert str(canonical) != str(via_symlink)
+    # But resolve() converges them
+    assert canonical.resolve() == via_symlink.resolve()
+
     with t2_module._migrated_lock:
-        t2_module._migrated_paths.discard(str(canonical))
         t2_module._migrated_paths.discard(str(canonical.resolve()))
 
     call_count = {"n": 0}
@@ -651,12 +670,13 @@ def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None
     T2Database(canonical)
     assert call_count["n"] == 1
 
-    # Second construction via non-canonical path pointing at the same file
-    noncanonical = base / "." / "norm.db"
-    T2Database(noncanonical)
+    # Second construction via symlinked path that resolves to the same file.
+    # Without path.resolve() in __init__, the guard would see a different key
+    # and re-run migrations.
+    T2Database(via_symlink)
     assert call_count["n"] == 1, (
-        "Migration ran again for a non-canonical path pointing at the "
-        "same file — path normalization in _init_schema failed"
+        "Migration ran again for a symlinked path resolving to the same "
+        "file — path normalization in _init_schema failed"
     )
 
 
@@ -672,7 +692,7 @@ def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None
 
     path = tmp_path / "concurrent.db"
     with t2_module._migrated_lock:
-        t2_module._migrated_paths.discard(str(path))
+        t2_module._migrated_paths.discard(str(path.resolve()))
 
     call_count = {"n": 0}
     count_lock = threading.Lock()
@@ -685,7 +705,7 @@ def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
 
-    barrier = threading.Barrier(10)
+    barrier = threading.Barrier(10, timeout=10)
     errors: list[Exception] = []
     dbs: list[T2Database] = []
     dbs_lock = threading.Lock()

@@ -875,11 +875,14 @@ class T2Database:
                     f"DELETE FROM memory WHERE id IN ({placeholders})", expired_ids
                 )
                 self.conn.commit()
+        extra: dict[str, Any] = {}
+        if log_error is not None:
+            extra["relevance_log_error"] = log_error
         _log.info(
             "expire_complete",
             memory_deleted=len(expired_ids),
             relevance_log_deleted=log_deleted,
-            relevance_log_error=log_error,
+            **extra,
         )
         return len(expired_ids)
 
@@ -977,6 +980,13 @@ class T2Database:
 
         Raises ValueError if keep_id appears in delete_ids — that would
         silently discard the kept entry (UPDATE then DELETE on same row).
+        Raises KeyError if keep_id does not exist (prevents silent data loss
+        when expire() races with merge — if keep_id was deleted between
+        find-overlaps and merge, the UPDATE affects 0 rows and the DELETE
+        would otherwise proceed, destroying both copies of the content).
+
+        Uses BEGIN IMMEDIATE to establish a write lock before the UPDATE,
+        preventing racing writers from deleting keep_id mid-transaction.
         """
         if keep_id in delete_ids:
             raise ValueError(
@@ -984,17 +994,38 @@ class T2Database:
                 "would discard the entry meant to be kept"
             )
         with self._lock:
-            self.conn.execute(
-                "UPDATE memory SET content = ? WHERE id = ?",
-                (merged_content, keep_id),
-            )
-            if delete_ids:
-                placeholders = ",".join("?" * len(delete_ids))
-                self.conn.execute(
-                    f"DELETE FROM memory WHERE id IN ({placeholders})",
-                    delete_ids,
+            # BEGIN IMMEDIATE upgrades to a write lock immediately, blocking
+            # other writers (including expire()) until we commit.
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self.conn.execute(
+                    "UPDATE memory SET content = ? WHERE id = ?",
+                    (merged_content, keep_id),
                 )
-            self.conn.commit()
+                if cur.rowcount == 0:
+                    # keep_id does not exist — likely deleted by a concurrent
+                    # expire() or was stale when the caller selected it.
+                    # ABORT the transaction to prevent destroying delete_ids.
+                    self.conn.execute("ROLLBACK")
+                    raise KeyError(
+                        f"keep_id {keep_id} not found — aborted merge to "
+                        "prevent data loss (delete_ids left intact)"
+                    )
+                if delete_ids:
+                    placeholders = ",".join("?" * len(delete_ids))
+                    self.conn.execute(
+                        f"DELETE FROM memory WHERE id IN ({placeholders})",
+                        delete_ids,
+                    )
+                self.conn.commit()
+            except Exception:
+                # Ensure rollback on any error (except KeyError which already
+                # rolled back above).
+                try:
+                    self.conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass  # already rolled back
+                raise
 
     def flag_stale_memories(
         self,
