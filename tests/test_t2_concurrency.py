@@ -182,3 +182,110 @@ def test_single_threaded_memory_search_baseline(tmp_path: Path) -> None:
     )
     # Sanity — generous bound. The real threshold is set in nexus-s8o5.
     assert p95 < 500, f"p95={p95:.2f}ms exceeds sanity bound (500ms)"
+
+
+def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
+    """memory_search p95 must stay within 1.5x baseline under write load.
+
+    This is the RDR-063 Phase 2 acceptance gate (nexus-s8o5 F5): with the
+    per-store connection architecture, concurrent telemetry + plan writes
+    must not inflate memory_search latency by more than 50%.
+
+    The test measures the baseline and the under-load p95 in the same
+    process to eliminate platform variance — the assertion is a ratio,
+    not an absolute bound.
+    """
+    db_path = tmp_path / "underload.db"
+    db = T2Database(db_path)
+    try:
+        for i in range(200):
+            db.put(
+                project="load",
+                title=f"entry{i}",
+                content=f"content {i} keyword lorem ipsum",
+            )
+
+        # --- Phase A: single-threaded baseline ---
+        baseline: list[float] = []
+        for _ in range(100):
+            start = time.perf_counter()
+            db.search(query="keyword", project="load")
+            baseline.append((time.perf_counter() - start) * 1000)
+        baseline.sort()
+        baseline_p95 = baseline[94]
+
+        # --- Phase B: same measurement, under concurrent write load ---
+        stop_writers = threading.Event()
+        writer_errors: list[BaseException] = []
+
+        def telemetry_writer() -> None:
+            i = 0
+            try:
+                while not stop_writers.is_set():
+                    db.log_relevance(
+                        query=f"q{i}",
+                        chunk_id=f"c{i}",
+                        action="click",
+                        session_id="load",
+                        collection="knowledge__load",
+                    )
+                    i += 1
+            except BaseException as exc:  # pragma: no cover
+                writer_errors.append(exc)
+
+        def plan_writer() -> None:
+            i = 0
+            try:
+                while not stop_writers.is_set():
+                    db.save_plan(
+                        query=f"plan {i}",
+                        plan_json='{"step":"x"}',
+                        tags="load",
+                    )
+                    i += 1
+            except BaseException as exc:  # pragma: no cover
+                writer_errors.append(exc)
+
+        writers = [
+            threading.Thread(target=telemetry_writer, daemon=True),
+            threading.Thread(target=plan_writer, daemon=True),
+        ]
+        for t in writers:
+            t.start()
+
+        # Give writers a beat to actually start hammering before we measure.
+        time.sleep(0.05)
+
+        under_load: list[float] = []
+        for _ in range(100):
+            start = time.perf_counter()
+            db.search(query="keyword", project="load")
+            under_load.append((time.perf_counter() - start) * 1000)
+
+        stop_writers.set()
+        for t in writers:
+            t.join(timeout=5)
+    finally:
+        db.close()
+
+    assert not writer_errors, f"Background writers raised: {writer_errors}"
+
+    under_load.sort()
+    load_p50 = statistics.median(under_load)
+    load_p95 = under_load[94]
+    load_p99 = under_load[98]
+    ratio = load_p95 / baseline_p95 if baseline_p95 else float("inf")
+
+    print(
+        f"\n[rdr-063 under-load] memory_search n=100 entries=200 "
+        f"baseline_p95={baseline_p95:.2f}ms "
+        f"load_p50={load_p50:.2f}ms load_p95={load_p95:.2f}ms "
+        f"load_p99={load_p99:.2f}ms ratio={ratio:.2f}x"
+    )
+
+    # The acceptance gate: <1.5x baseline.
+    assert load_p95 < baseline_p95 * 1.5, (
+        f"memory_search p95 inflated under concurrent write load: "
+        f"baseline_p95={baseline_p95:.2f}ms load_p95={load_p95:.2f}ms "
+        f"ratio={ratio:.2f}x (threshold 1.5x)"
+    )

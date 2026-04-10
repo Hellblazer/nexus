@@ -178,6 +178,20 @@ _COLUMNS = (
 )
 
 
+# Default busy_timeout for the memory store's connection. 5 seconds is
+# well beyond any schema-creation or migration window and absorbs normal
+# cross-domain write-lock contention.
+_DEFAULT_BUSY_MS = 5000
+
+# Disabled busy_timeout used only around the best-effort access-count
+# UPDATE in ``search(access="track")``. The access counter is a
+# statistical signal and must fail-fast rather than block the search
+# on the write lock when another store is writing. ``busy_timeout = 0``
+# disables the busy handler, so SQLITE_BUSY fires on the first
+# contention and we skip the update in the except branch.
+_ACCESS_TRACK_BUSY_MS = 0
+
+
 # ── MemoryStore ───────────────────────────────────────────────────────────────
 
 
@@ -207,7 +221,7 @@ class MemoryStore:
         # lock instead of raising OperationalError. 5 seconds is well
         # beyond any schema-creation or migration window observed in the
         # migration-guard regression tests.
-        self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute(f"PRAGMA busy_timeout = {_DEFAULT_BUSY_MS}")
         try:
             canonical_key = str(path.resolve())
         except OSError:
@@ -422,15 +436,43 @@ class MemoryStore:
                     rows = self.conn.execute(sql, (safe,)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-            # Batch-update access_count for all returned rows (skip when access="silent")
+            # Batch-update access_count for all returned rows (skip when
+            # access="silent"). Access tracking is a best-effort statistical
+            # signal — missing a few increments under heavy cross-domain
+            # write contention is acceptable. We run the UPDATE with a short
+            # busy_timeout so contention fails fast (and we skip the update)
+            # instead of hanging the caller on the full 5-second write-lock
+            # wait, then restore the long timeout for subsequent operations.
             if rows and access == "track":
                 now = datetime.now(UTC).isoformat()
                 ids = [r[0] for r in rows]
-                self.conn.executemany(
-                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                    [(now, rid) for rid in ids],
+                self.conn.execute(
+                    f"PRAGMA busy_timeout = {_ACCESS_TRACK_BUSY_MS}"
                 )
-                self.conn.commit()
+                try:
+                    self.conn.executemany(
+                        "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                        [(now, rid) for rid in ids],
+                    )
+                    self.conn.commit()
+                except sqlite3.OperationalError as exc:
+                    # Roll back the implicit write transaction so the
+                    # connection is clean for the next search. Log at
+                    # warning so the signal isn't lost, but don't surface
+                    # the error to the caller.
+                    try:
+                        self.conn.rollback()
+                    except sqlite3.OperationalError:  # pragma: no cover
+                        pass
+                    _log.warning(
+                        "memory.access_tracking.skipped",
+                        reason=str(exc),
+                        row_count=len(ids),
+                    )
+                finally:
+                    self.conn.execute(
+                        f"PRAGMA busy_timeout = {_DEFAULT_BUSY_MS}"
+                    )
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def list_entries(
