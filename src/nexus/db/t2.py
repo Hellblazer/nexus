@@ -6,7 +6,12 @@ import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+# Access policy for T2 read operations (R3-4):
+# - "track": increment access_count + update last_accessed (default for user-facing reads)
+# - "silent": do not touch access metadata (internal scans, consolidation)
+AccessPolicy = Literal["track", "silent"]
 
 import structlog
 
@@ -195,7 +200,13 @@ class T2Database:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self._init_schema(str(path))
+        # Canonicalize path for the migration guard key: /foo/./bar and
+        # /foo/bar must hash to the same entry or the guard is bypassed.
+        try:
+            canonical_key = str(path.resolve())
+        except OSError:
+            canonical_key = str(path)
+        self._init_schema(canonical_key)
 
     def _init_schema(self, path_key: str) -> None:
         with self._lock:
@@ -470,17 +481,19 @@ class T2Database:
         self,
         query: str,
         project: str | None = None,
-        track_access: bool = True,
+        access: AccessPolicy = "track",
     ) -> list[dict[str, Any]]:
         """FTS5 keyword search. Returns rows ordered by relevance.
 
         Args:
             query: FTS5 query string
             project: Optional project filter
-            track_access: When True (default), increments access_count and
-                updates last_accessed on every returned row. Set to False for
-                internal scans (e.g. consolidation) that must not contaminate
-                the staleness signal.
+            access: Access tracking policy (R3-4):
+                - ``"track"`` (default): increments access_count and
+                  updates last_accessed on every returned row — normal reads.
+                - ``"silent"``: does not touch access metadata — internal
+                  scans (consolidation, audit) that must not contaminate
+                  the staleness signal.
         """
         safe = _sanitize_fts5(query)
         with self._lock:
@@ -510,8 +523,8 @@ class T2Database:
                     rows = self.conn.execute(sql, (safe,)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-            # Batch-update access_count for all returned rows (skip when track_access=False)
-            if rows and track_access:
+            # Batch-update access_count for all returned rows (skip when access="silent")
+            if rows and access == "track":
                 now = datetime.now(UTC).isoformat()
                 ids = [r[0] for r in rows]
                 self.conn.executemany(
@@ -926,9 +939,9 @@ class T2Database:
             if not snippet:
                 continue
             try:
-                # track_access=False: consolidation scan must not bump
+                # access="silent": consolidation scan must not bump
                 # access_count/last_accessed (would contaminate flag-stale)
-                candidates = self.search(snippet, project=project, track_access=False)
+                candidates = self.search(snippet, project=project, access="silent")
             except ValueError:
                 continue
             w1 = _words(e1.get("content", ""))

@@ -58,13 +58,15 @@ LEFT JOIN memory m ON m.title = ta.doc_id AND m.project = (
 
 This conflates `topics.collection` (a T3 ChromaDB collection name, e.g. `knowledge__research`) with `memory.project` (a T2 project scope). The JOIN silently returns empty results for any taxonomy clustered from T3 collections — which is the primary RDR-061 E5 use case.
 
-**This is a pre-existing defect, not introduced by the split.** RDR-063 acknowledges it here so the split does not inadvertently canonize the broken JOIN as an "explicit contract." A fix belongs in a separate bead before or during Phase 1. Options:
+**This is a pre-existing defect, not introduced by the split.** RDR-063 acknowledges it here so the split does not inadvertently canonize the broken JOIN as an "explicit contract."
 
-1. Add a `memory_project` column to `topics` distinct from `collection`
-2. Change the JOIN to use `topic_assignments.doc_id` as a catalog tumbler and resolve via the catalog, not T2 memory
-3. Accept that `get_topic_docs()` only works for T2-clustered projects and document the restriction
+**Decision**: Option 3 — **accept the restriction and document it**. `get_topic_docs()` is a convenience view for T2-clustered projects. T3 collection taxonomies do not need `memory.title` resolution because chunk titles live in T3 metadata, not T2. When a future feature needs T3 chunk title resolution, it should go through the catalog (`CatalogEntry.title`), not T2 memory.
 
-Deciding between these is out of scope for RDR-063 but should be tracked as a blocker for Phase 1.
+Rationale for rejecting the alternatives:
+1. **memory_project column on topics**: adds schema complexity for a feature no current caller exercises. T3-origin topics are only used by `cluster_and_persist` which clusters over T2 memory entries — the JOIN already works for that path.
+2. **Change JOIN to catalog lookup**: couples `catalog_taxonomy` to the catalog module, deepening cross-module coupling at the exact moment the split is trying to reduce it.
+
+Action for Phase 1: update `get_topic_docs()` docstring to explicitly state the T2-only scope. Add a regression test (already present: `test_get_topic_docs_known_defect_project_collection_mismatch`) that documents the behavior. No schema change.
 
 ## Proposed Solution
 
@@ -182,7 +184,7 @@ Phase 2 also changes no schema — just lock topology. Any test that held assump
 1. Create `src/nexus/db/t2/` package with `__init__.py` exposing `T2Database`
 2. Move `memory` table schema + methods (`put`, `get`, `search`, `list_entries`, `delete`, `expire`, `find_overlapping_memories`, `merge_memories`, `flag_stale_memories`) to `memory_store.py`
 3. Move `plans` table schema + methods (`save_plan`, `search_plans`, `list_plans`) to `plan_library.py`
-4. **Migrate `taxonomy.py` into `catalog_taxonomy.py`**. The existing `taxonomy.py` functions (`get_topics`, `get_topic_tree`, `get_topic_docs`, `assign_topic`, `cluster_and_persist`, `rebuild_taxonomy`) directly access `db._lock` and `db.conn.execute()`. Leaving them as a separate module defeats the split's purpose — Phase 2's separate-connection benefit cannot apply while taxonomy reaches through into the monolithic lock. Move both schema ownership AND the query functions into `catalog_taxonomy.py`. Add explicit deprecation shim: `taxonomy.py` re-exports from `catalog_taxonomy` for one release, then remove.
+4. **Migrate `taxonomy.py` into `catalog_taxonomy.py`**. The existing `taxonomy.py` functions (`get_topics`, `get_topic_tree`, `get_topic_docs`, `assign_topic`, `cluster_and_persist`, `rebuild_taxonomy`) directly access `db._lock` and `db.conn.execute()`. Leaving them as a separate module defeats the split's purpose — Phase 2's separate-connection benefit cannot apply while taxonomy reaches through into the monolithic lock. Move both schema ownership AND the query functions into `catalog_taxonomy.py`. Add explicit deprecation shim: `taxonomy.py` re-exports from `catalog_taxonomy` for backward compat. Remove the shim in the first PR after Phase 2 is merged (concrete, not calendar-based).
 5. Move `topics` + `topic_assignments` schema to `catalog_taxonomy.py` (combined with step 4)
 6. Move `relevance_log` schema + methods (`log_relevance`, `log_relevance_batch`, `get_relevance_log`, `expire_relevance_log`) to `telemetry.py`
 7. Move `_migrate_*` functions to their respective domain modules
@@ -194,10 +196,43 @@ Phase 2 also changes no schema — just lock topology. Any test that held assump
 - Resolve the `get_topic_docs()` JOIN defect (see "Known Defect" section). Either decide the JOIN semantics upfront or explicitly track it as a follow-up bead. Doing the refactor without deciding risks the split enshrining the broken JOIN.
 
 **Phase 1 test strategy**:
-- Before starting: enumerate all tests that instantiate `T2Database` or call `taxonomy.py` functions. These are the behavioral contract baseline.
-- Any test failure during the refactor is a regression, not a "patching internals" update — the refactor must preserve all observable behavior.
-- Add a characterization test (`tests/test_t2_facade.py`) that creates a T2Database, exercises one method from each domain (put/search/save_plan/cluster_and_persist/log_relevance), and asserts the return values match the pre-split behavior. This test becomes the contract.
-- Run the full suite (`uv run pytest -m 'not integration'`) before and after. Diff should be zero.
+
+First bead of Phase 1: create `tests/test_t2_facade.py` characterization test. Exercise one method from each domain and assert return values match pre-split behavior. This is the behavioral contract the refactor must preserve.
+
+Baseline test inventory (captured 2026-04-10 via `grep -rl "T2Database\|taxonomy\." tests/`):
+
+Primary T2Database exercises:
+- `tests/test_t2.py` — memory CRUD, expire, FTS, access tracking, relevance log, migration guard
+- `tests/test_memory_consolidation.py` — find_overlapping, merge_memories, flag_stale, MCP tool
+- `tests/test_taxonomy.py` — topics schema, cluster_and_persist, get_topic_docs, rebuild, CLI
+- `tests/test_mcp_server.py` — T2 patched as mcp.core._t2_ctx
+- `tests/test_relevance_log.py` — log_relevance + batch + expire
+- `tests/test_scratch.py` — promote() calls T2.put
+- `tests/test_catalog_e2e.py` — catalog store_put hook writes to T2 catalog
+- `tests/test_rdr052_verification.py` — catalog routing via T2
+
+Taxonomy-specific:
+- `tests/test_taxonomy.py` — all taxonomy.py functions
+- `tests/test_memory_consolidation.py` — shares T2 with taxonomy via find_overlapping
+- `tests/test_t2.py::test_expire_*` — T2.expire() interacts with taxonomy tables only via the shared schema
+
+Process:
+1. Create `tests/test_t2_facade.py` with the characterization tests before touching any source
+2. Run the full suite: `uv run pytest -m 'not integration' -q` — record pass count baseline
+3. Execute Phase 1 refactor
+4. Re-run the same command — diff must be zero failures
+5. Any test failure during the refactor is a regression, not a "patching internals" update
+
+Key structlog events to preserve during refactor (tests/monitoring may key off them):
+- `expire_complete` (memory_deleted, relevance_log_deleted, relevance_log_error)
+- `embedding_fetch_failed` / `embedding_fetch_shape_mismatch` (collection, requested)
+- `contradiction_check` (collections, results, pairs_checked, flagged)
+- `expire_relevance_log_failed`
+- `relevance_log_store_failed`
+- `t1_access_count_update_failed` (id)
+- `catalog_prefilter_applied` (paths)
+
+Add new events but preserve field names on existing ones.
 
 ### Phase 2 — Separate connections (~4 hours)
 

@@ -392,6 +392,56 @@ def test_mcp_memory_consolidate_merge_single_delete_no_confirm(
     assert db.get(id=id_b) is None
 
 
+def test_mcp_memory_consolidate_with_real_t2_ctx(tmp_path, monkeypatch) -> None:
+    """Integration test using the real T2Database construction path.
+
+    Unlike the other tests which use _NonClosingT2Ctx to keep a shared
+    fixture alive, this test exercises the real _t2_ctx() behavior: each
+    MCP call opens/closes a fresh connection. Catches bugs that would only
+    surface with real connection lifecycle (schema visibility, migration
+    guard behavior on reopened paths, etc.).
+    """
+    from nexus.db.t2 import T2Database
+    from nexus.mcp.core import memory_consolidate
+
+    db_path = tmp_path / "real_t2.db"
+
+    # Seed the DB with a few entries, then close — the MCP tool will
+    # reopen it fresh via _t2_ctx.
+    seed_db = T2Database(db_path)
+    # Near-identical content so Jaccard similarity exceeds 0.7
+    seed_db.put(project="proj", title="a.md",
+                content="search engine architecture design patterns optimization benchmarks indexing")
+    seed_db.put(project="proj", title="b.md",
+                content="search engine architecture design patterns optimization benchmarks retrieval")
+    seed_db.close()
+
+    # Real _t2_ctx — fresh connection each call
+    monkeypatch.setattr(
+        "nexus.mcp.core._t2_ctx",
+        lambda: T2Database(db_path),
+    )
+
+    # find-overlaps on a re-opened DB
+    result = memory_consolidate(action="find-overlaps", project="proj")
+    assert "overlapping pair" in result
+    assert "a.md" in result
+
+    # Backdate a.md so flag-stale has something to find
+    backdate_db = T2Database(db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    backdate_db.conn.execute(
+        "UPDATE memory SET timestamp=?, last_accessed='' WHERE title='a.md'",
+        (old_ts,),
+    )
+    backdate_db.conn.commit()
+    backdate_db.close()
+
+    # flag-stale on the same re-opened DB
+    result = memory_consolidate(action="flag-stale", project="proj", idle_days=30)
+    assert "a.md" in result
+
+
 def test_find_overlapping_does_not_bump_access_count(db: T2Database) -> None:
     """find_overlapping_memories must NOT contaminate the staleness signal."""
     db.put(project="proj", title="a.md",

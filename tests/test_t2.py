@@ -569,6 +569,22 @@ def test_expire_relevance_log_partial_purge(db: T2Database) -> None:
     assert {r["chunk_id"] for r in remaining} == {"c2", "c3"}
 
 
+def test_expire_relevance_log_days_zero_purges_all(db: T2Database) -> None:
+    """days=0 cutoff is "now", so every pre-existing row is purged."""
+    db.log_relevance("q1", "c1", "stored")
+    db.log_relevance("q2", "c2", "stored")
+    purged = db.expire_relevance_log(days=0)
+    assert purged == 2
+    assert db.get_relevance_log() == []
+
+
+def test_expire_relevance_log_days_negative_purges_all(db: T2Database) -> None:
+    """Negative days means cutoff is in the future — all rows are stale."""
+    db.log_relevance("q1", "c1", "stored")
+    purged = db.expire_relevance_log(days=-1)
+    assert purged == 1
+
+
 def test_expire_also_purges_relevance_log(db: T2Database) -> None:
     """expire() calls expire_relevance_log() to purge telemetry."""
     # Stale relevance_log row
@@ -607,6 +623,40 @@ def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) ->
     db2 = T2Database(path)
     assert call_count["n"] == 1, (
         "Migration ran a second time — the _migrated_paths guard failed"
+    )
+
+
+def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None:
+    """Paths with ./ or .. segments resolve to the same guard key."""
+    from nexus.db import t2 as t2_module
+
+    base = tmp_path / "sub"
+    base.mkdir()
+    canonical = base / "norm.db"
+
+    with t2_module._migrated_lock:
+        t2_module._migrated_paths.discard(str(canonical))
+        t2_module._migrated_paths.discard(str(canonical.resolve()))
+
+    call_count = {"n": 0}
+    original = T2Database._migrate_plans_if_needed
+
+    def counting(self):
+        call_count["n"] += 1
+        return original(self)
+
+    monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
+
+    # First construction via canonical path
+    T2Database(canonical)
+    assert call_count["n"] == 1
+
+    # Second construction via non-canonical path pointing at the same file
+    noncanonical = base / "." / "norm.db"
+    T2Database(noncanonical)
+    assert call_count["n"] == 1, (
+        "Migration ran again for a non-canonical path pointing at the "
+        "same file — path normalization in _init_schema failed"
     )
 
 

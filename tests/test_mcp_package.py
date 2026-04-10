@@ -105,3 +105,46 @@ def test_helper_moved_with_store_list():
     """_store_list_docs helper is co-located with store_list in core.py."""
     from nexus.mcp.core import _store_list_docs
     assert callable(_store_list_docs)
+
+
+# ── Destructive tool safety meta-test (R3-5) ─────────────────────────────────
+
+
+# Tools that perform bulk / multi-row destructive operations MUST expose a
+# dry_run parameter and confirm_destructive gate. Single-row delete tools
+# (memory_delete, store_delete) are exempt because they operate on a single
+# explicit ID supplied by the caller — the caller already committed to the
+# target. Bulk / merge operations need a preview path because the CALLER
+# may not realize how many rows will be affected.
+_DESTRUCTIVE_BULK_TOOLS = {
+    # (module, function_name)
+    ("nexus.mcp.core", "memory_consolidate"),           # merge action
+    ("nexus.mcp.catalog", "catalog_link_bulk"),         # demoted but still a function
+}
+
+
+def test_destructive_bulk_tools_have_safety_gates():
+    """Every bulk/merge destructive tool must expose dry_run + confirm_destructive.
+
+    Regression guard for R3-5: the memory_consolidate(merge) tool was
+    originally missing these parameters (caught in round 3 review).
+    Any future bulk destructive tool must follow the same pattern.
+    """
+    import importlib
+    import inspect
+
+    for module_name, fn_name in _DESTRUCTIVE_BULK_TOOLS:
+        module = importlib.import_module(module_name)
+        fn = getattr(module, fn_name)
+        sig = inspect.signature(fn)
+        params = set(sig.parameters.keys())
+        assert "dry_run" in params, (
+            f"{module_name}.{fn_name} is a destructive bulk tool but has no "
+            f"dry_run parameter — add one (see memory_consolidate or "
+            f"catalog_link_bulk for the pattern)"
+        )
+        assert "confirm_destructive" in params, (
+            f"{module_name}.{fn_name} is a destructive bulk tool but has no "
+            f"confirm_destructive parameter — required to prevent "
+            f"accidental multi-row deletes"
+        )
