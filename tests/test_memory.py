@@ -96,10 +96,13 @@ def test_malformed_fts5_query_raises_valueerror(db: T2Database, method: str, arg
 
 
 def test_t2_uses_session_module_for_session_id(db: T2Database) -> None:
-    import nexus.db.t2 as t2_mod
+    # After RDR-063 Phase 1 step 2, memory-domain methods (including put())
+    # live in nexus.db.t2.memory_store, so the session-id import binding
+    # moved with them. Patch the new location to verify the wiring.
+    import nexus.db.t2.memory_store as mem_mod
     import nexus.session as sess_mod
-    assert t2_mod._read_session_id is sess_mod.read_session_id
-    with patch("nexus.db.t2._read_session_id", return_value="test-sid-xyz"):
+    assert mem_mod._read_session_id is sess_mod.read_session_id
+    with patch("nexus.db.t2.memory_store._read_session_id", return_value="test-sid-xyz"):
         row_id = db.put(project="p", title="t.md", content="x")
     assert db.get(id=row_id)["session"] == "test-sid-xyz"
 

@@ -1,99 +1,49 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-import math
-import os
+"""T2 SQLite memory bank — facade over the domain stores.
+
+Phase 1 of RDR-063 extracts the monolithic ``T2Database`` into domain
+stores (``MemoryStore``, ``PlanLibrary``, ``CatalogTaxonomy``,
+``Telemetry``). This module is the facade: it opens the single
+``sqlite3.Connection``, wraps it in a :class:`SharedConnection`, and
+instantiates the domain stores around it. All legacy public API calls
+(``put``, ``search``, ``save_plan``, ``log_relevance``, ``expire``, …)
+are preserved as thin delegating methods so no caller needs to change.
+
+Step 2 (bead ``nexus-vx3c``) moved memory-domain state and methods into
+:mod:`nexus.db.t2.memory_store`. Plan, taxonomy, and telemetry code
+still lives here and will move in later Phase 1 steps.
+"""
+
+from __future__ import annotations
+
 import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
-
-# Access policy for T2 read operations (R3-4):
-# - "track": increment access_count + update last_accessed (default for user-facing reads)
-# - "silent": do not touch access metadata (internal scans, consolidation)
-AccessPolicy = Literal["track", "silent"]
+from typing import Any
 
 import structlog
 
+from nexus.db.t2._connection import SharedConnection
+from nexus.db.t2.memory_store import (
+    AccessPolicy,
+    MemoryStore,
+    _sanitize_fts5,  # re-exported for nexus.catalog.catalog_db
+)
+
 _log = structlog.get_logger()
 
-# ── FTS5 helpers ──────────────────────────────────────────────────────────────
-
-# FTS5 special characters that cause OperationalError when unquoted:
-#   -  (column filter: "col-name" → look in column "col" for "name")
-#   :  (explicit column filter: "col:term")
-#   (  )  ^  "  (grouping / phrase / boost — crash if unbalanced)
-# Note: trailing * is a valid FTS5 prefix wildcard (e.g. auth*) — NOT included here.
-_FTS5_SPECIAL = set('-:()"^~.*+/')
+# Re-export for backward compatibility — ``catalog/catalog_db.py`` and
+# ``tests/test_t2.py`` still ``from nexus.db.t2 import _sanitize_fts5``.
+__all__ = ["AccessPolicy", "MemoryStore", "SharedConnection", "T2Database", "_sanitize_fts5"]
 
 
-def _sanitize_fts5(query: str) -> str:
-    """Escape a user-supplied query for FTS5 MATCH.
-
-    Splits on whitespace and wraps any token that contains FTS5 special
-    characters in double quotes, with internal double-quotes escaped as '""'.
-    Plain tokens (letters and digits only) are passed through unchanged so
-    that FTS5 AND-of-terms semantics and boolean operators (AND, OR, NOT)
-    still work for well-formed queries.
-    """
-    tokens = query.split()
-    parts: list[str] = []
-    for token in tokens:
-        if any(ch in _FTS5_SPECIAL for ch in token):
-            escaped = token.replace('"', '""')
-            parts.append(f'"{escaped}"')
-        else:
-            parts.append(token)
-    return " ".join(parts)
-
-
-# ── Schema SQL ────────────────────────────────────────────────────────────────
-
-_SCHEMA_SQL = """\
+# ── Residual schema (plans, topics, topic_assignments) ───────────────────────
+# Memory schema lives in memory_store._MEMORY_SCHEMA_SQL.
+# Plan/taxonomy schema will migrate out in the next beads.
+_RESIDUAL_SCHEMA_SQL = """\
 PRAGMA journal_mode=WAL;
-
-CREATE TABLE IF NOT EXISTS memory (
-    id            INTEGER PRIMARY KEY,
-    project       TEXT    NOT NULL,
-    title         TEXT    NOT NULL,
-    session       TEXT,
-    agent         TEXT,
-    content       TEXT    NOT NULL,
-    tags          TEXT,
-    timestamp     TEXT    NOT NULL,
-    ttl           INTEGER,
-    access_count  INTEGER DEFAULT 0 NOT NULL,
-    last_accessed TEXT    DEFAULT ''
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_project_title ON memory(project, title);
-CREATE INDEX        IF NOT EXISTS idx_memory_project       ON memory(project);
-CREATE INDEX        IF NOT EXISTS idx_memory_agent         ON memory(agent);
-CREATE INDEX        IF NOT EXISTS idx_memory_timestamp     ON memory(timestamp);
-CREATE INDEX        IF NOT EXISTS idx_memory_ttl_timestamp ON memory(ttl, timestamp);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    title,
-    content,
-    tags,
-    content='memory',
-    content_rowid='id'
-);
-
-CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
-    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN
-    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
-        VALUES ('delete', old.id, old.title, old.content, old.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
-    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
-        VALUES ('delete', old.id, old.title, old.content, old.tags);
-    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
-END;
 
 CREATE TABLE IF NOT EXISTS plans (
     id         INTEGER PRIMARY KEY,
@@ -146,60 +96,42 @@ CREATE TABLE IF NOT EXISTS topic_assignments (
 );
 """
 
-_COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl", "access_count", "last_accessed")
 _PLAN_COLUMNS = ("id", "project", "query", "plan_json", "outcome", "tags", "created_at", "ttl")
 
-# ── FTS5 rebuild SQL (used for migration from old schema lacking 'title') ─────
-# These statements recreate only the FTS5 virtual table and its triggers after
-# the old (title-less) table has been dropped during _migrate_fts_if_needed().
-_FTS_REBUILD_SQL = """\
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    title,
-    content,
-    tags,
-    content='memory',
-    content_rowid='id'
-);
 
-CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
-    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN
-    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
-        VALUES ('delete', old.id, old.title, old.content, old.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
-    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
-        VALUES ('delete', old.id, old.title, old.content, old.tags);
-    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
-END;
-"""
-
-
-# ── Session discovery ─────────────────────────────────────────────────────────
-
-from nexus.session import read_session_id as _read_session_id
-
-
-# ── Per-process migration guard (RDR-062 follow-up) ─────────────────────────
+# ── Per-process migration guard ──────────────────────────────────────────────
 # Migrations only need to run once per DB path per process. The MCP server
 # opens a fresh T2Database on every tool call; without this guard, each call
 # probes all 6 migrations.
+#
+# This lives at the facade level in Phase 1; RDR-063 §Open Question 3
+# (per-domain guards) will split it in a later Phase 1 step. The existing
+# regression tests ``test_migration_guard_concurrent_threads`` access this
+# module attribute directly.
 _migrated_paths: set[str] = set()
 _migrated_lock = threading.Lock()
 
 
-# ── Database ──────────────────────────────────────────────────────────────────
+# ── Database facade ───────────────────────────────────────────────────────────
+
 
 class T2Database:
-    """T2 SQLite memory bank with FTS5 full-text search."""
+    """T2 SQLite memory bank with FTS5 full-text search.
+
+    Phase 1 facade: holds a single :class:`SharedConnection` and delegates
+    memory-domain calls to :class:`MemoryStore`. Plan, taxonomy, and
+    telemetry methods remain inlined until their extraction beads land.
+    """
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        # Wrap the connection + lock in a SharedConnection for the domain
+        # stores. Both self._lock / self.conn and the SharedConnection's
+        # fields point at the same objects — Phase 2 will split them.
+        self._shared = SharedConnection(conn=self.conn, lock=self._lock)
+        self.memory: MemoryStore = MemoryStore(self._shared)
         # Canonicalize path for the migration guard key: /foo/./bar and
         # /foo/bar must hash to the same entry or the guard is bypassed.
         try:
@@ -211,8 +143,11 @@ class T2Database:
     def _init_schema(self, path_key: str) -> None:
         with self._lock:
             # Note: executescript() implicitly COMMITs any open transaction.
-            # Safe here because _init_schema runs only during __init__ with no prior transaction.
-            self.conn.executescript(_SCHEMA_SQL)
+            # Safe here because _init_schema runs only during __init__ with
+            # no prior transaction. Memory DDL runs first (lock-naive helper
+            # on MemoryStore), then the residual plans/topics DDL.
+            self.memory.init_schema_unlocked()
+            self.conn.executescript(_RESIDUAL_SCHEMA_SQL)
             self.conn.commit()
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
             if result and result[0].lower() != "wal":
@@ -224,10 +159,10 @@ class T2Database:
             with _migrated_lock:
                 if path_key in _migrated_paths:
                     return
-                self._migrate_fts_if_needed()
+                self.memory._migrate_fts_if_needed()
                 self._migrate_plans_if_needed()
                 self._migrate_plans_ttl_if_needed()
-                self._migrate_access_tracking_if_needed()
+                self.memory._migrate_access_tracking_if_needed()
                 self._migrate_topics_if_needed()
                 self._migrate_relevance_log_if_needed()
                 _migrated_paths.add(path_key)
@@ -343,53 +278,6 @@ class T2Database:
         self.conn.commit()
         _log.info("relevance_log migration complete")
 
-    def _migrate_access_tracking_if_needed(self) -> None:
-        """Add access_count and last_accessed columns to memory if missing."""
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(memory)").fetchall()}
-        changed = False
-        if "access_count" not in cols:
-            self.conn.execute(
-                "ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0 NOT NULL"
-            )
-            changed = True
-        if "last_accessed" not in cols:
-            self.conn.execute(
-                "ALTER TABLE memory ADD COLUMN last_accessed TEXT DEFAULT ''"
-            )
-            changed = True
-        if changed:
-            self.conn.commit()
-            _log.info("access_tracking migration complete")
-
-    def _migrate_fts_if_needed(self) -> None:
-        """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.
-
-        Safe to call multiple times — no-op when 'title' is already present.
-        FTS5 content tables are pure indexes; the authoritative data lives in
-        the ``memory`` table and is unaffected by dropping/recreating the FTS table.
-        """
-        row = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
-        ).fetchone()
-        if row is None or "title" in row[0]:
-            # Table missing (fresh DB handled by _SCHEMA_SQL) or already up to date
-            return
-
-        _log.info("Migrating memory_fts to include title column")
-        # Drop old triggers first (they reference the old column list)
-        self.conn.executescript("""\
-            DROP TRIGGER IF EXISTS memory_ai;
-            DROP TRIGGER IF EXISTS memory_ad;
-            DROP TRIGGER IF EXISTS memory_au;
-            DROP TABLE  IF EXISTS memory_fts;
-        """)
-        # Recreate with new schema + triggers
-        self.conn.executescript(_FTS_REBUILD_SQL)
-        # Rebuild the FTS index from the authoritative memory table
-        self.conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
-        self.conn.commit()
-        _log.info("memory_fts migration complete")
-
     def __enter__(self) -> "T2Database":
         return self
 
@@ -400,7 +288,11 @@ class T2Database:
         with self._lock:
             self.conn.close()
 
-    # ── Write ─────────────────────────────────────────────────────────────────
+    # ── Memory delegation (RDR-063 Phase 1 step 2) ────────────────────────────
+    # Every memory-domain method delegates to self.memory. Signatures and
+    # behavior are identical to the pre-split monolithic T2Database — these
+    # delegates exist solely so callers that hold a T2Database (facade) do
+    # not need to change their import or call sites.
 
     def put(
         self,
@@ -412,41 +304,15 @@ class T2Database:
         agent: str | None = None,
         session: str | None = None,
     ) -> int:
-        """Upsert a memory entry keyed by (project, title). Returns the row ID."""
-        if agent is None:
-            agent = os.environ.get("NX_AGENT")
-        if session is None:
-            session = _read_session_id()
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        with self._lock:
-            cursor = self.conn.execute(
-                """
-                INSERT INTO memory (project, title, session, agent, content, tags, timestamp, ttl)
-                VALUES (:project, :title, :session, :agent, :content, :tags, :timestamp, :ttl)
-                ON CONFLICT(project, title) DO UPDATE SET
-                    session   = excluded.session,
-                    agent     = excluded.agent,
-                    content   = excluded.content,
-                    tags      = excluded.tags,
-                    timestamp = excluded.timestamp,
-                    ttl       = excluded.ttl
-                """,
-                {
-                    "project": project,
-                    "title": title,
-                    "session": session,
-                    "agent": agent,
-                    "content": content,
-                    "tags": tags,
-                    "timestamp": timestamp,
-                    "ttl": ttl,
-                },
-            )
-            self.conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
-
-    # ── Read ──────────────────────────────────────────────────────────────────
+        return self.memory.put(
+            project=project,
+            title=title,
+            content=content,
+            tags=tags,
+            ttl=ttl,
+            agent=agent,
+            session=session,
+        )
 
     def get(
         self,
@@ -454,28 +320,7 @@ class T2Database:
         title: str | None = None,
         id: int | None = None,
     ) -> dict[str, Any] | None:
-        """Retrieve a single entry by (project, title) or by numeric ID."""
-        with self._lock:
-            if id is not None:
-                row = self.conn.execute("SELECT * FROM memory WHERE id = ?", (id,)).fetchone()
-            elif project is not None and title is not None:
-                row = self.conn.execute(
-                    "SELECT * FROM memory WHERE project = ? AND title = ?", (project, title)
-                ).fetchone()
-            else:
-                raise ValueError("Provide either id or both project and title.")
-            if row is None:
-                return None
-            now = datetime.now(UTC).isoformat()
-            self.conn.execute(
-                "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                (now, row[0]),
-            )
-            self.conn.commit()
-            result = dict(zip(_COLUMNS, row))
-            result["access_count"] += 1
-            result["last_accessed"] = now
-            return result
+        return self.memory.get(project=project, title=title, id=id)
 
     def search(
         self,
@@ -483,158 +328,26 @@ class T2Database:
         project: str | None = None,
         access: AccessPolicy = "track",
     ) -> list[dict[str, Any]]:
-        """FTS5 keyword search. Returns rows ordered by relevance.
-
-        Args:
-            query: FTS5 query string
-            project: Optional project filter
-            access: Access tracking policy (R3-4):
-                - ``"track"`` (default): increments access_count and
-                  updates last_accessed on every returned row — normal reads.
-                - ``"silent"``: does not touch access metadata — internal
-                  scans (consolidation, audit) that must not contaminate
-                  the staleness signal.
-        """
-        safe = _sanitize_fts5(query)
-        with self._lock:
-            try:
-                if project:
-                    sql = """
-                        SELECT m.id, m.project, m.title, m.session, m.agent,
-                               m.content, m.tags, m.timestamp, m.ttl,
-                               m.access_count, m.last_accessed
-                        FROM memory m
-                        JOIN memory_fts ON memory_fts.rowid = m.id
-                        WHERE memory_fts MATCH ?
-                          AND m.project = ?
-                        ORDER BY rank
-                    """
-                    rows = self.conn.execute(sql, (safe, project)).fetchall()
-                else:
-                    sql = """
-                        SELECT m.id, m.project, m.title, m.session, m.agent,
-                               m.content, m.tags, m.timestamp, m.ttl,
-                               m.access_count, m.last_accessed
-                        FROM memory m
-                        JOIN memory_fts ON memory_fts.rowid = m.id
-                        WHERE memory_fts MATCH ?
-                        ORDER BY rank
-                    """
-                    rows = self.conn.execute(sql, (safe,)).fetchall()
-            except sqlite3.OperationalError as exc:
-                raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-            # Batch-update access_count for all returned rows (skip when access="silent")
-            if rows and access == "track":
-                now = datetime.now(UTC).isoformat()
-                ids = [r[0] for r in rows]
-                self.conn.executemany(
-                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                    [(now, rid) for rid in ids],
-                )
-                self.conn.commit()
-        return [dict(zip(_COLUMNS, row)) for row in rows]
+        return self.memory.search(query, project=project, access=access)
 
     def list_entries(
         self,
         project: str | None = None,
         agent: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List entries ordered by timestamp descending. Optionally filtered.
-
-        Returns a summary view with columns: id, project, title, agent, timestamp.
-        Use get() or get_all() for full row content including the text body.
-        """
-        conditions: list[str] = []
-        params: list[Any] = []
-        if project:
-            conditions.append("project = ?")
-            params.append(project)
-        if agent:
-            conditions.append("agent = ?")
-            params.append(agent)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sql = f"SELECT id, project, title, agent, timestamp FROM memory {where} ORDER BY timestamp DESC"
-        with self._lock:
-            rows = self.conn.execute(sql, params).fetchall()
-        return [dict(zip(("id", "project", "title", "agent", "timestamp"), row)) for row in rows]
+        return self.memory.list_entries(project=project, agent=agent)
 
     def get_projects_with_prefix(self, prefix: str) -> list[dict[str, Any]]:
-        """Return all distinct project namespaces whose name starts with *prefix*.
-
-        Each row has ``project`` and ``last_updated`` (MAX timestamp for that namespace).
-        Results are ordered by ``last_updated`` DESC — most-recently-updated first.
-
-        LIKE metacharacters (``%``, ``_``, ``\\``) in *prefix* are escaped so they are
-        matched literally — a repo named ``my_project`` will not match ``myXproject``.
-        """
-        if not prefix:
-            return []
-        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        sql = """
-            SELECT project, MAX(timestamp) AS last_updated
-            FROM memory
-            WHERE project LIKE ? ESCAPE '\\'
-            GROUP BY project
-            ORDER BY MAX(timestamp) DESC
-        """
-        with self._lock:
-            rows = self.conn.execute(sql, (f"{escaped}%",)).fetchall()
-        return [{"project": row[0], "last_updated": row[1]} for row in rows]
+        return self.memory.get_projects_with_prefix(prefix)
 
     def search_glob(self, query: str, project_glob: str) -> list[dict[str, Any]]:
-        """FTS5 search scoped to projects matching a GLOB pattern (e.g. '*_rdr')."""
-        sql = """
-            SELECT m.id, m.project, m.title, m.session, m.agent,
-                   m.content, m.tags, m.timestamp, m.ttl,
-                   m.access_count, m.last_accessed
-            FROM memory m
-            JOIN memory_fts ON memory_fts.rowid = m.id
-            WHERE memory_fts MATCH ?
-              AND m.project GLOB ?
-            ORDER BY rank
-        """
-        safe = _sanitize_fts5(query)
-        with self._lock:
-            try:
-                rows = self.conn.execute(sql, (safe, project_glob)).fetchall()
-            except sqlite3.OperationalError as exc:
-                raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-        return [dict(zip(_COLUMNS, row)) for row in rows]
+        return self.memory.search_glob(query, project_glob)
 
     def search_by_tag(self, query: str, tag: str) -> list[dict[str, Any]]:
-        """FTS5 search scoped to entries whose tags contain *tag*.
-
-        Uses boundary matching via ``(',' || tags || ',') LIKE '%,{tag},%'``
-        to avoid false positives (e.g. 'rdr' matching 'rdr-archived').
-        """
-        sql = """
-            SELECT m.id, m.project, m.title, m.session, m.agent,
-                   m.content, m.tags, m.timestamp, m.ttl,
-                   m.access_count, m.last_accessed
-            FROM memory m
-            JOIN memory_fts ON memory_fts.rowid = m.id
-            WHERE memory_fts MATCH ?
-              AND (',' || m.tags || ',') LIKE ?
-            ORDER BY rank
-        """
-        like_pattern = f"%,{tag},%"
-        safe = _sanitize_fts5(query)
-        with self._lock:
-            try:
-                rows = self.conn.execute(sql, (safe, like_pattern)).fetchall()
-            except sqlite3.OperationalError as exc:
-                raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-        return [dict(zip(_COLUMNS, row)) for row in rows]
-
+        return self.memory.search_by_tag(query, tag)
 
     def get_all(self, project: str) -> list[dict[str, Any]]:
-        """Return all entries for *project* with full column data."""
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT * FROM memory WHERE project = ? ORDER BY timestamp DESC",
-                (project,),
-            ).fetchall()
-        return [dict(zip(_COLUMNS, row)) for row in rows]
+        return self.memory.get_all(project)
 
     def delete(
         self,
@@ -642,23 +355,32 @@ class T2Database:
         title: str | None = None,
         id: int | None = None,
     ) -> bool:
-        """Delete an entry by (project, title) or by numeric id.
+        return self.memory.delete(project=project, title=title, id=id)
 
-        Returns True if a row was deleted.  Raises ValueError when neither
-        a valid (project, title) pair nor an id is supplied.
-        """
-        if id is not None:
-            sql = "DELETE FROM memory WHERE id = ?"
-            params: tuple = (id,)
-        elif project is not None and title is not None:
-            sql = "DELETE FROM memory WHERE project = ? AND title = ?"
-            params = (project, title)
-        else:
-            raise ValueError("Provide either id or both project and title.")
-        with self._lock:
-            cursor = self.conn.execute(sql, params)
-            self.conn.commit()
-        return cursor.rowcount > 0
+    def find_overlapping_memories(
+        self,
+        project: str,
+        min_similarity: float = 0.7,
+        limit: int = 50,
+    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        return self.memory.find_overlapping_memories(
+            project, min_similarity=min_similarity, limit=limit
+        )
+
+    def merge_memories(
+        self,
+        keep_id: int,
+        delete_ids: list[int],
+        merged_content: str,
+    ) -> None:
+        return self.memory.merge_memories(keep_id, delete_ids, merged_content)
+
+    def flag_stale_memories(
+        self,
+        project: str,
+        idle_days: int = 30,
+    ) -> list[dict[str, Any]]:
+        return self.memory.flag_stale_memories(project, idle_days=idle_days)
 
     # ── Plan Library ──────────────────────────────────────────────────────────
 
@@ -845,7 +567,7 @@ class T2Database:
         ``expire_relevance_log_failed``).
         """
         # Purge relevance_log (RDR-061 E2 telemetry retention).
-        # Call outside the main lock — expire_relevance_log acquires its own.
+        # Call outside the memory lock — expire_relevance_log acquires its own.
         log_deleted = 0
         log_error: str | None = None
         try:
@@ -853,28 +575,7 @@ class T2Database:
         except Exception as exc:
             log_error = type(exc).__name__
             _log.warning("expire_relevance_log_failed", exc_info=exc)
-        with self._lock:
-            rows = self.conn.execute(
-                """
-                SELECT id, access_count, ttl, timestamp
-                FROM memory
-                WHERE ttl IS NOT NULL
-                """
-            ).fetchall()
-            now = datetime.now(UTC)
-            expired_ids: list[int] = []
-            for row_id, access_count, ttl, timestamp in rows:
-                effective_ttl = ttl * (1 + math.log(access_count + 1))
-                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                age_days = (now - ts).total_seconds() / 86400.0
-                if age_days > effective_ttl:
-                    expired_ids.append(row_id)
-            if expired_ids:
-                placeholders = ",".join("?" * len(expired_ids))
-                self.conn.execute(
-                    f"DELETE FROM memory WHERE id IN ({placeholders})", expired_ids
-                )
-                self.conn.commit()
+        expired_ids = self.memory.expire()
         extra: dict[str, Any] = {}
         if log_error is not None:
             extra["relevance_log_error"] = log_error
@@ -901,152 +602,3 @@ class T2Database:
             )
             self.conn.commit()
         return cur.rowcount
-
-    # ── Memory consolidation (RDR-061 E6) ────────────────────────────────────
-
-    _STOPWORDS = frozenset({
-        "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
-        "it", "that", "this", "with", "on", "at", "by", "from", "as", "be", "not",
-    })
-
-    def find_overlapping_memories(
-        self,
-        project: str,
-        min_similarity: float = 0.7,
-        limit: int = 50,
-    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-        """Return pairs of memory entries with high word-set overlap.
-
-        Uses FTS5 to find candidates, then Jaccard similarity on word sets
-        (after stopword removal) to confirm overlap.
-        """
-        entries = self.get_all(project)
-        if len(entries) < 2:
-            return []
-
-        def _words(text: str) -> set[str]:
-            return {
-                w.lower() for w in text.split()
-                if len(w) > 2 and w.lower() not in self._STOPWORDS
-            }
-
-        seen: set[tuple[int, int]] = set()
-        pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
-
-        for e1 in entries:
-            # Use first few content words for FTS5 candidate retrieval — AND-of-terms
-            # means too many words kills recall. Jaccard on full content handles precision.
-            words = [w for w in e1.get("content", "").split()[:5]
-                     if w.lower() not in self._STOPWORDS and len(w) > 2]
-            snippet = " ".join(words[:3])
-            if not snippet:
-                continue
-            try:
-                # access="silent": consolidation scan must not bump
-                # access_count/last_accessed (would contaminate flag-stale)
-                candidates = self.search(snippet, project=project, access="silent")
-            except ValueError:
-                continue
-            w1 = _words(e1.get("content", ""))
-            if not w1:
-                continue
-            for e2 in candidates:
-                if e2["id"] == e1["id"]:
-                    continue
-                pair_key = tuple(sorted((e1["id"], e2["id"])))
-                if pair_key in seen:
-                    continue
-                seen.add(pair_key)
-                w2 = _words(e2.get("content", ""))
-                if not w2:
-                    continue
-                jaccard = len(w1 & w2) / len(w1 | w2)
-                if jaccard >= min_similarity:
-                    pairs.append((e1, e2))
-                    if len(pairs) >= limit:
-                        return pairs
-        return pairs
-
-    def merge_memories(
-        self,
-        keep_id: int,
-        delete_ids: list[int],
-        merged_content: str,
-    ) -> None:
-        """Merge multiple entries into *keep_id*, delete the rest.
-
-        Updates content of *keep_id* and deletes all *delete_ids*.
-        FTS5 triggers handle index cleanup automatically.
-
-        Raises ValueError if keep_id appears in delete_ids — that would
-        silently discard the kept entry (UPDATE then DELETE on same row).
-        Raises KeyError if keep_id does not exist — prevents silent data
-        loss when expire() races with merge. If keep_id was deleted between
-        the caller's find-overlaps and this call, the UPDATE affects 0 rows
-        and we raise BEFORE the DELETE runs, preserving the delete_ids.
-
-        Atomicity: UPDATE and DELETE run inside a single `with self.conn:`
-        block — the connection context manager commits on success and
-        rolls back on any exception. Under SQLite's default DEFERRED
-        isolation (which Python's sqlite3 uses), the UPDATE acquires a
-        write lock when it executes; that lock blocks other writers
-        (including expire()) until the block exits, so the DELETE runs
-        while still holding the lock. If a concurrent writer held the
-        lock when we started, the UPDATE waits (or raises OperationalError
-        on busy timeout) — either way, no interleaving is possible.
-        """
-        if keep_id in delete_ids:
-            raise ValueError(
-                f"keep_id ({keep_id}) must not be in delete_ids — "
-                "would discard the entry meant to be kept"
-            )
-        # Ordering: self._lock first (in-process serialization), then
-        # self.conn (SQLite transaction). On exception the connection
-        # context manager rolls back BEFORE the lock is released.
-        with self._lock, self.conn:
-            cur = self.conn.execute(
-                "UPDATE memory SET content = ? WHERE id = ?",
-                (merged_content, keep_id),
-            )
-            if cur.rowcount == 0:
-                # keep_id does not exist — likely deleted by a concurrent
-                # expire() or was stale when the caller selected it. Raise
-                # BEFORE running DELETE so delete_ids survive the race.
-                # The with-block rolls back the (no-op) UPDATE.
-                raise KeyError(
-                    f"keep_id {keep_id} not found — aborted merge to "
-                    "prevent data loss (delete_ids left intact)"
-                )
-            if delete_ids:
-                placeholders = ",".join("?" * len(delete_ids))
-                self.conn.execute(
-                    f"DELETE FROM memory WHERE id IN ({placeholders})",
-                    delete_ids,
-                )
-
-    def flag_stale_memories(
-        self,
-        project: str,
-        idle_days: int = 30,
-    ) -> list[dict[str, Any]]:
-        """Return memories not accessed in *idle_days*.
-
-        Uses ``last_accessed`` when available (non-empty), falls back to
-        ``timestamp`` for entries that have never been accessed.
-        """
-        cutoff = (datetime.now(UTC) - timedelta(days=idle_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._lock:
-            rows = self.conn.execute(
-                """
-                SELECT id, project, title, session, agent, content, tags,
-                       timestamp, ttl, access_count, last_accessed
-                FROM memory
-                WHERE project = ?
-                  AND CASE
-                      WHEN last_accessed != '' THEN last_accessed < ?
-                      ELSE timestamp < ?
-                  END
-                """,
-                (project, cutoff, cutoff),
-            ).fetchall()
-        return [dict(zip(_COLUMNS, row)) for row in rows]
