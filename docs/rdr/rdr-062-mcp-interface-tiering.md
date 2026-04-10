@@ -105,7 +105,13 @@ src/nexus/
 
 ### Tool Name Migration
 
-Catalog tools change prefix from `mcp__plugin_nx_nexus__catalog_*` to `mcp__plugin_nx_nexus-catalog__catalog_*`. This affects ~100 occurrences across ~24 agent/skill/hook files.
+Catalog tools moved from the `nexus` server to the `nexus-catalog` server with the redundant `catalog_` prefix dropped. The MCP tool names are now bare (`search`, `show`, `link`, `stats`, etc.) within the `nexus-catalog` namespace — e.g., `mcp__plugin_nx_nexus-catalog__search` (was `mcp__plugin_nx_nexus__catalog_search`). Python function names retain the `catalog_` prefix for backward compatibility via the shim.
+
+This required two mechanical renames across ~24 agent/skill/hook files:
+1. `mcp__plugin_nx_nexus__catalog_*` → `mcp__plugin_nx_nexus-catalog__catalog_*` (server prefix change)
+2. `mcp__plugin_nx_nexus-catalog__catalog_*` → `mcp__plugin_nx_nexus-catalog__*` (drop redundant `catalog_` within namespace)
+
+**Decision log**: The prefix drop was a post-acceptance refinement. With tools on their own server, `catalog_search` on the `nexus-catalog` server is redundant — `search` is unambiguous in context.
 
 ## Implementation Plan
 
@@ -114,7 +120,7 @@ Catalog tools change prefix from `mcp__plugin_nx_nexus__catalog_*` to `mcp__plug
 1. Create `src/nexus/mcp/` package with `core.py` and `catalog.py`
 2. Move `FastMCP` instantiation from `mcp_infra.py` into each server module
 3. Move core tools → `core.py`, catalog tools → `catalog.py`
-4. Drop 8 demoted tools from MCP entirely (CLI commands unchanged)
+4. Drop 6 demoted tools from MCP entirely (CLI commands unchanged)
 5. Update `mcp_server.py` as backward-compat shim for test imports
 6. Update `pyproject.toml` entry points
 7. Update `nx/.mcp.json`, auto-approve hook, subagent-start hook
