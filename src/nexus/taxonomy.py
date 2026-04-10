@@ -5,11 +5,12 @@
 RDR-063 Phase 1 step 4 (bead ``nexus-u29l``) extracted the topic
 taxonomy implementation out of this module into the new
 :mod:`nexus.db.t2.catalog_taxonomy` package, where it lives as a
-:class:`CatalogTaxonomy` class with proper lock ownership over its own
-``SharedConnection`` (Phase 1) / dedicated connection (Phase 2). The
-old module-level functions reached through ``db._lock`` and
-``db.conn.execute(...)`` directly, which defeated the goal of giving
-the taxonomy domain its own connection in Phase 2.
+:class:`CatalogTaxonomy` class with its own dedicated
+``sqlite3.Connection`` and ``threading.Lock`` (promoted to an
+independent connection in Phase 2, bead ``nexus-3d3k``). The old
+module-level functions reached through the monolithic ``T2Database``'s
+lock and connection directly, which defeated the goal of giving the
+taxonomy domain its own connection.
 
 This file remains as a thin compatibility shim so existing import
 sites continue to work without modification:

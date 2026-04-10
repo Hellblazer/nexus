@@ -3,7 +3,9 @@ from nexus.db.t2 import T2Database
 
 
 def test_schema_creation(db: T2Database) -> None:
-    cur = db.conn.cursor()
+    # Phase 2: the memory table, memory_fts, indexes, and triggers all
+    # live on the memory store's dedicated connection.
+    cur = db.memory.conn.cursor()
 
     # WAL mode
     cur.execute("PRAGMA journal_mode")

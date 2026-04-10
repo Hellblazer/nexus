@@ -24,7 +24,7 @@ def test_save_plan(plan_db: T2Database) -> None:
     assert isinstance(row_id, int)
     assert row_id > 0
 
-    row = plan_db.conn.execute("SELECT query, outcome, tags FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT query, outcome, tags FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row is not None
     assert row[0] == "how to index code"
     assert row[1] == "success"
@@ -36,7 +36,7 @@ def test_save_plan_json_stored(plan_db: T2Database) -> None:
     json_payload = '{"steps": ["step1", "step2"], "meta": {"version": 2}}'
     row_id = plan_db.save_plan(query="complex query", plan_json=json_payload)
 
-    row = plan_db.conn.execute("SELECT plan_json FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT plan_json FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row is not None
     assert row[0] == json_payload
 
@@ -78,13 +78,13 @@ def test_list_plans_ordered(plan_db: T2Database) -> None:
     results = plan_db.list_plans()
     assert len(results) == 3
     # Backdate first two to ensure deterministic ordering
-    plan_db.conn.execute(
+    plan_db.plans.conn.execute(
         "UPDATE plans SET created_at='2020-01-01T00:00:00Z' WHERE query='first plan'"
     )
-    plan_db.conn.execute(
+    plan_db.plans.conn.execute(
         "UPDATE plans SET created_at='2020-01-02T00:00:00Z' WHERE query='second plan'"
     )
-    plan_db.conn.commit()
+    plan_db.plans.conn.commit()
 
     results = plan_db.list_plans()
     assert results[0]["query"] == "third plan"
@@ -114,7 +114,7 @@ def test_save_plan_with_project(plan_db: T2Database) -> None:
         plan_json='{"steps":[]}',
         project="nexus",
     )
-    row = plan_db.conn.execute("SELECT project FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT project FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row[0] == "nexus"
 
 
@@ -150,14 +150,14 @@ def test_save_plan_with_ttl(plan_db: T2Database) -> None:
         plan_json='{"steps":[]}',
         ttl=30,
     )
-    row = plan_db.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row[0] == 30
 
 
 def test_save_plan_ttl_none_by_default(plan_db: T2Database) -> None:
     """save_plan() without ttl stores NULL (permanent)."""
     row_id = plan_db.save_plan(query="permanent plan", plan_json='{}')
-    row = plan_db.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row[0] is None
 
 

@@ -6,33 +6,24 @@ Owns the ``memory`` and ``memory_fts`` tables plus all methods that
 query or mutate them. Extracted from the monolithic ``T2Database`` in
 RDR-063 Phase 1 step 2 (bead ``nexus-vx3c``).
 
-In Phase 1 the store holds a :class:`SharedConnection` — a passive
-wrapper around the facade's single ``sqlite3.Connection`` and
-``threading.Lock``. All schema DDL, migrations, and queries live here,
-but the actual connection is still opened by
-:class:`nexus.db.t2.T2Database`. Phase 2 (bead ``nexus-3d3k``) will
-give MemoryStore its own dedicated connection and lock.
+As of Phase 2 (bead ``nexus-3d3k``) the store owns its own
+``sqlite3.Connection`` and ``threading.Lock`` against the SQLite file.
+The former :class:`SharedConnection` indirection has been removed —
+each domain store is now a self-contained owner of its table(s) and
+can be locked, migrated, and closed independently of its siblings.
 
 Lock ownership convention:
   * Public mutators / readers (``put``, ``get``, ``search``, etc.)
     acquire ``self._lock`` themselves.
-  * ``init_schema_unlocked`` and the private migration methods
+  * ``_init_schema`` runs under ``self._lock`` during ``__init__``
+    and invokes the private migration methods
     (``_migrate_fts_if_needed`` / ``_migrate_access_tracking_if_needed``)
-    are "lock-naive" — the caller (currently
-    :meth:`T2Database._init_schema`) is required to hold ``self._lock``
-    and ``_migrated_lock`` before calling them. This matches the
-    original single-lock race-free semantics of the guard and keeps
-    the double-lock acquisition path identical to pre-split behavior.
+    under the per-domain ``_migrated_lock`` guard.
 
-Access patterns preserved from the pre-split layout:
-  * ``self._lock`` and ``self.conn`` are aliased into instance state
-    from the :class:`SharedConnection` so legacy call sites (``catalog.py``,
-    ``taxonomy.py``, existing tests) that reach through the T2 facade
-    onto ``_lock`` / ``conn`` continue to work without change.
-  * ``_sanitize_fts5`` and ``_FTS5_SPECIAL`` live here (they are only
-    used by memory search methods and the catalog FTS helper); the
-    facade re-exports ``_sanitize_fts5`` so
-    ``from nexus.db.t2 import _sanitize_fts5`` still resolves.
+``_sanitize_fts5`` and ``_FTS5_SPECIAL`` live here (they are only used
+by memory search methods and the catalog FTS helper); the facade
+re-exports ``_sanitize_fts5`` so ``from nexus.db.t2 import _sanitize_fts5``
+still resolves.
 """
 
 from __future__ import annotations
@@ -40,15 +31,14 @@ from __future__ import annotations
 import math
 import os
 import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from pathlib import Path
+from typing import Any, Literal
 
 import structlog
 
 from nexus.session import read_session_id as _read_session_id
-
-if TYPE_CHECKING:
-    from nexus.db.t2._connection import SharedConnection
 
 _log = structlog.get_logger()
 
@@ -59,13 +49,13 @@ _log = structlog.get_logger()
 AccessPolicy = Literal["track", "silent"]
 
 
-# Per-domain migration guard (RDR-063 Open Question 3) — placeholder.
-# Phase 1 step 2 keeps the authoritative guard at the facade
-# (``nexus.db.t2._migrated_paths``) so the existing regression tests on
-# ``test_migration_guard_concurrent_threads`` and friends continue to
-# verify the single-lock semantics. This set is populated in a future
-# step when the per-domain guard split lands.
+# Per-domain migration guard (RDR-063 Open Question 3 — Phase 2 resolution).
+# Each store owns its own ``_migrated_paths`` set and ``_migrated_lock`` so
+# adding a new migration to one domain never triggers re-probing of unrelated
+# domains. The MCP server opens a fresh ``T2Database`` per tool call; without
+# this guard, each call would re-probe both migrations on every construction.
 _migrated_paths: set[str] = set()
+_migrated_lock = threading.Lock()
 
 
 # ── FTS5 helpers ──────────────────────────────────────────────────────────────
@@ -194,10 +184,10 @@ _COLUMNS = (
 class MemoryStore:
     """Owns the ``memory`` and ``memory_fts`` tables.
 
-    In Phase 1 the constructor receives a :class:`SharedConnection` whose
-    ``conn`` / ``lock`` fields are the same instances used by the rest of
-    the T2 facade; in Phase 2 each store will open its own connection and
-    lock.
+    The store opens its own ``sqlite3.Connection`` and guards it with
+    its own ``threading.Lock``. All four T2 stores open the same SQLite
+    file; WAL mode + ``busy_timeout`` let the per-domain connections
+    coordinate at the SQLite layer without sharing Python-level state.
     """
 
     # Common English stopwords — used by find_overlapping_memories' Jaccard
@@ -209,27 +199,51 @@ class MemoryStore:
         }
     )
 
-    def __init__(self, shared: "SharedConnection") -> None:
-        self._shared = shared
-        # Legacy aliases: external call sites and the facade itself still
-        # reach through to ``._lock`` and ``.conn`` on the object that
-        # "owns" the memory table. Keep them pointing at the shared
-        # instances so nothing observes a second lock or a detached
-        # connection in Phase 1.
-        self._lock = shared.lock
-        self.conn = shared.conn
+    def __init__(self, path: Path) -> None:
+        self._lock = threading.Lock()
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        # busy_timeout lets concurrent writers (e.g. a second T2Database
+        # constructor racing this one) wait on SQLite's file-level write
+        # lock instead of raising OperationalError. 5 seconds is well
+        # beyond any schema-creation or migration window observed in the
+        # migration-guard regression tests.
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            canonical_key = str(path.resolve())
+        except OSError:
+            canonical_key = str(path)
+        self._init_schema(canonical_key)
+
+    def close(self) -> None:
+        """Close the dedicated connection (idempotent under ``self._lock``)."""
+        with self._lock:
+            self.conn.close()
 
     # ── Schema / migrations ───────────────────────────────────────────────
 
-    def init_schema_unlocked(self) -> None:
-        """Create the ``memory`` table + FTS + triggers. Caller holds the lock.
+    def _init_schema(self, path_key: str) -> None:
+        """Create the memory tables and run any pending migrations.
 
-        Called from :meth:`T2Database._init_schema` while holding
-        ``self._lock``. Does not commit — the caller will ``commit`` once
-        after all domain stores have run their schema DDL in a single
-        transaction.
+        Runs under ``self._lock`` so concurrent writers wait on schema
+        setup; the migration block additionally runs under
+        ``_migrated_lock`` so two constructors on the same path cannot
+        both enter the ``_migrate_*_if_needed`` methods (ALTER TABLE ADD
+        COLUMN is NOT idempotent — double-application raises
+        OperationalError).
         """
-        self.conn.executescript(_MEMORY_SCHEMA_SQL)
+        with self._lock:
+            self.conn.executescript(_MEMORY_SCHEMA_SQL)
+            self.conn.executescript("PRAGMA journal_mode=WAL;")
+            self.conn.commit()
+            result = self.conn.execute("PRAGMA journal_mode").fetchone()
+            if result and result[0].lower() != "wal":
+                _log.warning("WAL mode not available", actual_mode=result[0])
+            with _migrated_lock:
+                if path_key in _migrated_paths:
+                    return
+                self._migrate_fts_if_needed()
+                self._migrate_access_tracking_if_needed()
+                _migrated_paths.add(path_key)
 
     def _migrate_fts_if_needed(self) -> None:
         """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.

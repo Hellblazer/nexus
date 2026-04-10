@@ -23,7 +23,7 @@ from nexus.taxonomy import (
 def test_topics_table_created(db: T2Database) -> None:
     """topics and topic_assignments tables exist after T2Database init."""
     tables = {
-        r[0] for r in db.conn.execute(
+        r[0] for r in db.taxonomy.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
@@ -58,16 +58,16 @@ def test_cluster_and_persist_creates_topics(db: T2Database) -> None:
 def test_assign_topic(db: T2Database) -> None:
     """Assign a doc_id to a topic."""
     # Create a topic first
-    db.conn.execute(
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
         ("test-topic", "proj", 0, "2026-01-01T00:00:00Z"),
     )
-    db.conn.commit()
-    topic_id = db.conn.execute("SELECT id FROM topics LIMIT 1").fetchone()[0]
+    db.taxonomy.conn.commit()
+    topic_id = db.taxonomy.conn.execute("SELECT id FROM topics LIMIT 1").fetchone()[0]
 
     assign_topic(db, "doc-123", topic_id)
 
-    row = db.conn.execute(
+    row = db.taxonomy.conn.execute(
         "SELECT * FROM topic_assignments WHERE doc_id='doc-123'"
     ).fetchone()
     assert row is not None
@@ -76,17 +76,17 @@ def test_assign_topic(db: T2Database) -> None:
 
 def test_assign_topic_idempotent(db: T2Database) -> None:
     """Assigning same doc to same topic twice doesn't error."""
-    db.conn.execute(
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
         ("test-topic", "proj", 0, "2026-01-01T00:00:00Z"),
     )
-    db.conn.commit()
-    topic_id = db.conn.execute("SELECT id FROM topics LIMIT 1").fetchone()[0]
+    db.taxonomy.conn.commit()
+    topic_id = db.taxonomy.conn.execute("SELECT id FROM topics LIMIT 1").fetchone()[0]
 
     assign_topic(db, "doc-123", topic_id)
     assign_topic(db, "doc-123", topic_id)  # no error
 
-    count = db.conn.execute(
+    count = db.taxonomy.conn.execute(
         "SELECT count(*) FROM topic_assignments WHERE doc_id='doc-123'"
     ).fetchone()[0]
     assert count == 1
@@ -107,16 +107,16 @@ def test_rebuild_taxonomy_clears_and_recreates(db: T2Database) -> None:
 
 def test_get_topics_filtered_by_parent(db: T2Database) -> None:
     """get_topics(parent_id=None) returns only root topics."""
-    db.conn.execute(
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
         ("root-topic", "proj", 5, "2026-01-01T00:00:00Z"),
     )
-    root_id = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.conn.execute(
+    root_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, parent_id, collection, doc_count, created_at) VALUES (?, ?, ?, ?, ?)",
         ("child-topic", root_id, "proj", 2, "2026-01-01T00:00:00Z"),
     )
-    db.conn.commit()
+    db.taxonomy.conn.commit()
 
     roots = get_topics(db, parent_id=None)
     assert len(roots) == 1
@@ -132,16 +132,16 @@ def test_get_topics_filtered_by_parent(db: T2Database) -> None:
 
 def test_get_topic_tree_structure(db: T2Database) -> None:
     """get_topic_tree returns nested dicts with children."""
-    db.conn.execute(
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
         ("root", "proj", 10, "2026-01-01T00:00:00Z"),
     )
-    root_id = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.conn.execute(
+    root_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, parent_id, collection, doc_count, created_at) VALUES (?, ?, ?, ?, ?)",
         ("child", root_id, "proj", 3, "2026-01-01T00:00:00Z"),
     )
-    db.conn.commit()
+    db.taxonomy.conn.commit()
 
     tree = get_topic_tree(db, "proj")
     assert len(tree) == 1
@@ -152,14 +152,14 @@ def test_get_topic_tree_structure(db: T2Database) -> None:
 
 def test_get_topic_docs_returns_assigned(db: T2Database) -> None:
     """get_topic_docs returns doc_ids assigned to the topic."""
-    db.conn.execute(
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
         ("test", "proj", 2, "2026-01-01T00:00:00Z"),
     )
-    topic_id = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.conn.execute("INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)", ("doc-a", topic_id))
-    db.conn.execute("INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)", ("doc-b", topic_id))
-    db.conn.commit()
+    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.taxonomy.conn.execute("INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)", ("doc-a", topic_id))
+    db.taxonomy.conn.execute("INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)", ("doc-b", topic_id))
+    db.taxonomy.conn.commit()
 
     docs = get_topic_docs(db, topic_id)
     assert len(docs) == 2
@@ -197,16 +197,16 @@ def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
     # Insert a memory entry — title must match doc_id AND project must match collection
     db.put(project="test", title="my-research-note", content="some content")
 
-    db.conn.execute(
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
         ("topic", "test", 1, "2026-01-01T00:00:00Z"),
     )
-    topic_id = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.conn.execute(
+    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.taxonomy.conn.execute(
         "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
         ("my-research-note", topic_id),
     )
-    db.conn.commit()
+    db.taxonomy.conn.commit()
 
     docs = get_topic_docs(db, topic_id)
     assert len(docs) == 1
@@ -233,17 +233,17 @@ def test_get_topic_docs_known_defect_project_collection_mismatch(db: T2Database)
     db.put(project="myrepo", title="unrelated-memory-title", content="some notes")
 
     # Topic associated with a T3 collection name (NOT the T2 project name)
-    db.conn.execute(
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
         ("code topic", "code__myrepo", 1, "2026-01-01T00:00:00Z"),
     )
-    topic_id = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     # doc_id = "t3-chunk-id" — does NOT match any memory.title in the DB
-    db.conn.execute(
+    db.taxonomy.conn.execute(
         "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
         ("t3-chunk-id", topic_id),
     )
-    db.conn.commit()
+    db.taxonomy.conn.commit()
 
     docs = get_topic_docs(db, topic_id)
     assert len(docs) == 1
@@ -269,11 +269,11 @@ def test_cli_taxonomy_list(db: T2Database) -> None:
     from click.testing import CliRunner
     from nexus.commands.taxonomy_cmd import taxonomy
 
-    db.conn.execute(
+    db.taxonomy.conn.execute(
         "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
         ("Search Methods", "proj", 5, "2026-01-01T00:00:00Z"),
     )
-    db.conn.commit()
+    db.taxonomy.conn.commit()
 
     runner = CliRunner()
     # Patch default_db_path to point at our test db — not needed for unit test

@@ -2,36 +2,45 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """T2 SQLite memory bank — facade over the domain stores.
 
-Phase 1 of RDR-063 extracts the monolithic ``T2Database`` into domain
-stores (``MemoryStore``, ``PlanLibrary``, ``CatalogTaxonomy``,
-``Telemetry``). This module is the facade: it opens the single
-``sqlite3.Connection``, wraps it in a :class:`SharedConnection`, and
-instantiates the domain stores around it. All legacy public API calls
-(``put``, ``search``, ``save_plan``, ``log_relevance``, ``expire``, …)
-are preserved as thin delegating methods so no caller needs to change.
+RDR-063 Phase 1 extracted the monolithic ``T2Database`` into four
+domain stores (``MemoryStore``, ``PlanLibrary``, ``CatalogTaxonomy``,
+``Telemetry``), each living in its own module under ``nexus.db.t2``.
+Phase 2 (bead ``nexus-3d3k``) promoted each store to open its own
+``sqlite3.Connection`` and ``threading.Lock`` against the shared
+SQLite file and removed the Phase 1 ``SharedConnection`` dataclass.
 
-All four domain extractions are complete as of Phase 1 step 6:
-  * ``nexus-vx3c`` — MemoryStore
-  * ``nexus-kpe7`` — PlanLibrary (+ Landmine 1 fix in commands/catalog.py)
-  * ``nexus-u29l`` — CatalogTaxonomy (+ taxonomy.py deprecation shim)
-  * ``nexus-yjww`` — Telemetry
+The facade is now pure composition: it creates each store with the
+database path, re-exposes their public API as thin delegating methods
+for backward compatibility, and owns the cross-domain ``expire()``
+composition and the context manager. It holds no database connection
+of its own — callers that previously reached through ``T2Database.conn``
+or ``T2Database._lock`` must go through ``db.memory.conn``,
+``db.plans.conn``, ``db.taxonomy.conn``, or ``db.telemetry.conn``
+depending on which table they touch.
 
-The facade now contains only the connection lifecycle, the migration
-guard, the ``expire()`` composition, and per-domain delegate methods.
-Phase 2 (``nexus-3d3k``) will replace the single ``SharedConnection``
-with four per-domain connections + locks and remove ``_connection.py``.
+Phase 2 concurrency model:
+  * ``memory`` + ``plans`` share a read-heavy lock profile (agent-paced
+    writes), each on its own connection and lock.
+  * ``telemetry`` writes from MCP hooks run on their own connection
+    and no longer block ``memory_search``.
+  * ``catalog_taxonomy`` cluster rebuilds run on their own connection
+    and no longer freeze interactive memory access.
+
+All four stores open the same SQLite file. WAL mode + a 5-second
+``busy_timeout`` let the per-domain connections coordinate at the
+SQLite layer without sharing Python-level locks. Per-domain migration
+guards (RDR-063 §Open Question 3, Option B) live in each store module
+— see e.g. ``nexus.db.t2.plan_library._migrated_paths`` — and are
+checked under per-domain ``_migrated_lock`` objects.
 """
 
 from __future__ import annotations
 
-import sqlite3
-import threading
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from nexus.db.t2._connection import SharedConnection
 from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 from nexus.db.t2.memory_store import (
     AccessPolicy,
@@ -50,37 +59,10 @@ __all__ = [
     "CatalogTaxonomy",
     "MemoryStore",
     "PlanLibrary",
-    "SharedConnection",
     "T2Database",
     "Telemetry",
     "_sanitize_fts5",
 ]
-
-
-# ── Residual schema ──────────────────────────────────────────────────────────
-# All domain DDL has moved into the corresponding store modules:
-#   * memory   → memory_store._MEMORY_SCHEMA_SQL
-#   * plans    → plan_library._PLANS_SCHEMA_SQL
-#   * taxonomy → catalog_taxonomy._TAXONOMY_SCHEMA_SQL
-#   * telemetry→ telemetry._TELEMETRY_SCHEMA_SQL
-# Only the WAL pragma remains — it is a connection-level setting, not a
-# per-domain DDL, so it stays on the facade alongside ``sqlite3.connect``.
-_RESIDUAL_SCHEMA_SQL = """\
-PRAGMA journal_mode=WAL;
-"""
-
-
-# ── Per-process migration guard ──────────────────────────────────────────────
-# Migrations only need to run once per DB path per process. The MCP server
-# opens a fresh T2Database on every tool call; without this guard, each call
-# probes all 6 migrations.
-#
-# This lives at the facade level in Phase 1; RDR-063 §Open Question 3
-# (per-domain guards) will split it in a later Phase 1 step. The existing
-# regression tests ``test_migration_guard_concurrent_threads`` access this
-# module attribute directly.
-_migrated_paths: set[str] = set()
-_migrated_lock = threading.Lock()
 
 
 # ── Database facade ───────────────────────────────────────────────────────────
@@ -89,71 +71,30 @@ _migrated_lock = threading.Lock()
 class T2Database:
     """T2 SQLite memory bank with FTS5 full-text search.
 
-    Phase 1 facade: holds a single :class:`SharedConnection` and delegates
-    memory-domain calls to :class:`MemoryStore`. Plan, taxonomy, and
-    telemetry methods remain inlined until their extraction beads land.
+    Pure composition over the four domain stores. Each store owns its
+    own connection, lock, schema init, and migration guard; the facade
+    forwards legacy public methods to the appropriate store and owns
+    only the cross-domain ``expire()`` composition and the context
+    manager.
     """
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        # Wrap the connection + lock in a SharedConnection for the domain
-        # stores. Both self._lock / self.conn and the SharedConnection's
-        # fields point at the same objects — Phase 2 will split them.
-        self._shared = SharedConnection(conn=self.conn, lock=self._lock)
-        self.memory: MemoryStore = MemoryStore(self._shared)
-        self.plans: PlanLibrary = PlanLibrary(self._shared)
+        # Order matters for WAL setup: MemoryStore runs first and
+        # transitions the SQLite file into WAL mode. Subsequent stores
+        # re-issue ``PRAGMA journal_mode=WAL`` on their own connections,
+        # which is a no-op once the file is already in WAL. The
+        # per-store ``busy_timeout=5000`` absorbs the brief write-lock
+        # contention that can occur while four connections race through
+        # their initial CREATE TABLE IF NOT EXISTS scripts.
+        self.memory: MemoryStore = MemoryStore(path)
+        self.plans: PlanLibrary = PlanLibrary(path)
         # CatalogTaxonomy takes a MemoryStore reference because
         # cluster_and_persist reads memory entries to build word vectors.
         # The cross-domain dependency is intentionally explicit at the
         # constructor signature (RDR-063 §Cross-Domain Contracts).
-        self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(self._shared, self.memory)
-        self.telemetry: Telemetry = Telemetry(self._shared)
-        # Canonicalize path for the migration guard key: /foo/./bar and
-        # /foo/bar must hash to the same entry or the guard is bypassed.
-        try:
-            canonical_key = str(path.resolve())
-        except OSError:
-            canonical_key = str(path)
-        self._init_schema(canonical_key)
-
-    def _init_schema(self, path_key: str) -> None:
-        with self._lock:
-            # Note: executescript() implicitly COMMITs any open transaction.
-            # Safe here because _init_schema runs only during __init__ with
-            # no prior transaction. All four domains run their lock-naive
-            # init_schema_unlocked helpers; the residual script only carries
-            # the WAL pragma now that every domain owns its own DDL.
-            self.memory.init_schema_unlocked()
-            self.plans.init_schema_unlocked()
-            self.taxonomy.init_schema_unlocked()
-            self.telemetry.init_schema_unlocked()
-            self.conn.executescript(_RESIDUAL_SCHEMA_SQL)
-            self.conn.commit()
-            result = self.conn.execute("PRAGMA journal_mode").fetchone()
-            if result and result[0].lower() != "wal":
-                _log.warning("WAL mode not available", actual_mode=result[0])
-            # Migration guard: hold _migrated_lock across the full check-run-add
-            # sequence so two concurrent T2Database constructors on the same path
-            # cannot both enter the migration functions (ALTER TABLE ADD COLUMN
-            # is NOT idempotent — double-application raises OperationalError).
-            #
-            # The relevance_log "migration" was historically a one-shot
-            # CREATE-IF-MISSING because the table was added in a later release
-            # than memory/plans. Now that telemetry.init_schema_unlocked()
-            # creates the table at every construction (idempotent via
-            # IF NOT EXISTS), the legacy migration is dead code and has been
-            # removed.
-            with _migrated_lock:
-                if path_key in _migrated_paths:
-                    return
-                self.memory._migrate_fts_if_needed()
-                self.plans._migrate_plans_if_needed()
-                self.plans._migrate_plans_ttl_if_needed()
-                self.memory._migrate_access_tracking_if_needed()
-                self.taxonomy._migrate_topics_if_needed()
-                _migrated_paths.add(path_key)
+        self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
+        self.telemetry: Telemetry = Telemetry(path)
 
     def __enter__(self) -> "T2Database":
         return self
@@ -162,8 +103,16 @@ class T2Database:
         self.close()
 
     def close(self) -> None:
-        with self._lock:
-            self.conn.close()
+        """Close all four domain connections.
+
+        Each store closes its own connection under its own lock. The
+        close order is reverse of construction so that the most
+        recently opened connection (telemetry) is released first.
+        """
+        self.telemetry.close()
+        self.taxonomy.close()
+        self.plans.close()
+        self.memory.close()
 
     # ── Memory delegation (RDR-063 Phase 1 step 2) ────────────────────────────
     # Every memory-domain method delegates to self.memory. Signatures and

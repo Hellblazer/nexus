@@ -1,48 +1,51 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""PlanLibrary — reusable query-plan storage (RDR-063 Phase 1).
+"""PlanLibrary — reusable query-plan storage (RDR-063).
 
 Owns the ``plans`` and ``plans_fts`` tables and all methods that query
 or mutate them. Extracted from the monolithic ``T2Database`` in
-RDR-063 Phase 1 step 3 (bead ``nexus-kpe7``).
+RDR-063 Phase 1 step 3 (bead ``nexus-kpe7``); promoted to own its
+dedicated ``sqlite3.Connection`` and ``threading.Lock`` in Phase 2
+(bead ``nexus-3d3k``).
 
 Lock ownership convention mirrors :mod:`nexus.db.t2.memory_store`:
   * Public methods (``save_plan``, ``search_plans``, ``list_plans``,
     ``plan_exists``) acquire ``self._lock`` themselves.
-  * ``init_schema_unlocked`` and the private migration methods
+  * ``_init_schema`` runs under ``self._lock`` during ``__init__`` and
+    invokes the private migration methods
     (``_migrate_plans_if_needed`` / ``_migrate_plans_ttl_if_needed``)
-    are lock-naive — the caller (currently
-    :meth:`T2Database._init_schema`) holds ``self._lock`` and
-    ``_migrated_lock`` for the whole sequence.
+    under the per-domain ``_migrated_lock`` guard.
 
 Landmine 1 fix (audit finding F2): :func:`plan_exists` exists so that
 ``src/nexus/commands/catalog.py:_seed_plan_templates`` no longer needs
-to reach through the facade's private ``.conn`` attribute. After
-Phase 2 each store gets its own connection and ``T2Database.conn``
-goes away; without this method the builtin-template seeding would
-break in production.
+to reach through the facade's private ``.conn`` attribute. Phase 2
+removed ``T2Database.conn``; without this method the builtin-template
+seeding would break in production.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import structlog
 
 from nexus.db.t2.memory_store import _sanitize_fts5
 
-if TYPE_CHECKING:
-    from nexus.db.t2._connection import SharedConnection
-
 _log = structlog.get_logger()
 
 
-# Per-domain migration guard placeholder — see memory_store.py for the
-# rationale. The authoritative guard still lives at the facade level in
-# Phase 1 (nexus.db.t2._migrated_paths).
+# Per-domain migration guard (RDR-063 Open Question 3 — Phase 2 resolution).
+# Each store owns its own ``_migrated_paths`` set and ``_migrated_lock`` so
+# adding a new migration to one domain never triggers re-probing of the
+# others. PlanLibrary carries two migrations (``_migrate_plans_if_needed``
+# for the ``project`` column and ``_migrate_plans_ttl_if_needed`` for the
+# ``ttl`` column), both protected by this guard.
 _migrated_paths: set[str] = set()
+_migrated_lock = threading.Lock()
 
 
 # ── Schema SQL ────────────────────────────────────────────────────────────────
@@ -95,19 +98,40 @@ class PlanLibrary:
     See module docstring for the lock-ownership convention.
     """
 
-    def __init__(self, shared: "SharedConnection") -> None:
-        self._shared = shared
-        # Legacy aliases — Phase 1 stores all share the same lock/conn,
-        # so any caller that reached through .conn / ._lock continues to
-        # work. Phase 2 will give each store its own pair.
-        self._lock = shared.lock
-        self.conn = shared.conn
+    def __init__(self, path: Path) -> None:
+        self._lock = threading.Lock()
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            canonical_key = str(path.resolve())
+        except OSError:
+            canonical_key = str(path)
+        self._init_schema(canonical_key)
+
+    def close(self) -> None:
+        """Close the dedicated connection (idempotent under ``self._lock``)."""
+        with self._lock:
+            self.conn.close()
 
     # ── Schema / migrations ───────────────────────────────────────────────
 
-    def init_schema_unlocked(self) -> None:
-        """Create the ``plans`` table + FTS + triggers. Caller holds the lock."""
-        self.conn.executescript(_PLANS_SCHEMA_SQL)
+    def _init_schema(self, path_key: str) -> None:
+        """Create the plans tables and run any pending migrations.
+
+        Runs the plans DDL under ``self._lock`` and then the two
+        migrations under ``_migrated_lock`` so two constructors on the
+        same path cannot both enter ALTER TABLE ADD COLUMN.
+        """
+        with self._lock:
+            self.conn.executescript(_PLANS_SCHEMA_SQL)
+            self.conn.executescript("PRAGMA journal_mode=WAL;")
+            self.conn.commit()
+            with _migrated_lock:
+                if path_key in _migrated_paths:
+                    return
+                self._migrate_plans_if_needed()
+                self._migrate_plans_ttl_if_needed()
+                _migrated_paths.add(path_key)
 
     def _migrate_plans_if_needed(self) -> None:
         """Add 'project' column to plans table if missing (v2.8.0 schema change).

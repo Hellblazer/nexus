@@ -16,7 +16,7 @@ from nexus.db.t2 import T2Database
 def test_memory_put_upsert(db: T2Database) -> None:
     db.put(project="proj", title="file.md", content="first")
     db.put(project="proj", title="file.md", content="updated")
-    row = db.conn.execute(
+    row = db.memory.conn.execute(
         "SELECT COUNT(*), MAX(content) FROM memory WHERE project='proj' AND title='file.md'"
     ).fetchone()
     assert row == (1, "updated")
@@ -57,19 +57,19 @@ def test_memory_search_scoped_to_project(db: T2Database) -> None:
 def test_memory_expire_ttl(db: T2Database) -> None:
     db.put(project="proj", title="old.md", content="stale", ttl=1)
     past = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.conn.execute("UPDATE memory SET timestamp=? WHERE title='old.md'", (past,))
-    db.conn.commit()
+    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE title='old.md'", (past,))
+    db.memory.conn.commit()
     assert db.expire() == 1
-    assert db.conn.execute("SELECT COUNT(*) FROM memory WHERE title='old.md'").fetchone()[0] == 0
+    assert db.memory.conn.execute("SELECT COUNT(*) FROM memory WHERE title='old.md'").fetchone()[0] == 0
 
 
 def test_memory_expire_permanent_not_deleted(db: T2Database) -> None:
     db.put(project="proj", title="perm.md", content="keep forever", ttl=None)
     past = (datetime.now(UTC) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.conn.execute("UPDATE memory SET timestamp=? WHERE title='perm.md'", (past,))
-    db.conn.commit()
+    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE title='perm.md'", (past,))
+    db.memory.conn.commit()
     db.expire()
-    assert db.conn.execute("SELECT COUNT(*) FROM memory WHERE title='perm.md'").fetchone()[0] == 1
+    assert db.memory.conn.execute("SELECT COUNT(*) FROM memory WHERE title='perm.md'").fetchone()[0] == 1
 
 
 def test_memory_list_by_project(db: T2Database) -> None:
@@ -247,8 +247,8 @@ def test_promote_missing_database(runner: CliRunner, mem_home: Path, db: T2Datab
 def test_promote_expires_at_from_t2_timestamp(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
     row_id = db.put(project="proj", title="dated.md", content="content", ttl=10)
     past = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.conn.execute("UPDATE memory SET timestamp=? WHERE id=?", (past, row_id))
-    db.conn.commit()
+    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE id=?", (past, row_id))
+    db.memory.conn.commit()
     result, mt3 = _promote(runner, db, row_id)
     assert result.exit_code == 0, result.output
     kw = mt3.put.call_args.kwargs

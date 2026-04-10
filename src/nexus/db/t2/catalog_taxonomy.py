@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""CatalogTaxonomy — topics + topic_assignments domain (RDR-063 Phase 1).
+"""CatalogTaxonomy — topics + topic_assignments domain (RDR-063).
 
 Owns the ``topics`` and ``topic_assignments`` tables. Extracted from
 the legacy ``nexus.taxonomy`` module + the monolithic ``T2Database``
-in RDR-063 Phase 1 steps 4-5 (bead ``nexus-u29l``).
+in RDR-063 Phase 1 steps 4-5 (bead ``nexus-u29l``); promoted to own
+its dedicated ``sqlite3.Connection`` and ``threading.Lock`` in Phase 2
+(bead ``nexus-3d3k``).
 
-Why this is non-mechanical: the old ``nexus.taxonomy`` module reached
-through ``db._lock`` / ``db.conn.execute(...)`` directly across 7
-top-level functions (22 grep hits, 7 lock acquisitions, 12 execute
-calls, 3 commits). Each function has its own transaction shape — one
-or two reads under one lock, multi-statement writes with explicit
-``commit()``, etc. The translation onto ``self._lock`` / ``self.conn``
-preserves each function's shape exactly; do not collapse "two queries
-under one lock" into one query.
+Why the Phase 1 extraction was non-mechanical: the old
+``nexus.taxonomy`` module reached through the monolithic T2's lock and
+connection directly across 7 top-level functions (22 grep hits, 7
+lock acquisitions, 12 execute calls, 3 commits). Each function had
+its own transaction shape — one or two reads under one lock,
+multi-statement writes with explicit ``commit()``, etc. The
+translation onto ``self._lock`` / ``self.conn`` preserves each
+function's shape exactly; do not collapse "two queries under one lock"
+into one query.
 
 Cross-domain dependency (RDR-063 §Cross-Domain Contracts):
 
@@ -21,8 +24,9 @@ Cross-domain dependency (RDR-063 §Cross-Domain Contracts):
   to build word-frequency vectors. The dependency is made explicit by
   injecting a ``MemoryStore`` reference at construction; the JOIN that
   binds ``topic_assignments.doc_id`` to ``memory.title`` continues to
-  live in SQL inside :meth:`get_topic_docs` (single SQLite file in
-  Phase 1, multiple connections in Phase 2 — the JOIN works in both).
+  live in SQL inside :meth:`get_topic_docs`. After the per-store
+  connection split the JOIN still works — it runs on this store's own
+  connection against the single SQLite file shared by all domains.
 - ``get_topic_docs`` carries the **Known Defect** (per RDR-063 Open
   Question 1, Option 3): when topics were clustered from a T3
   collection (``code__*``, ``knowledge__*``, …) the
@@ -36,8 +40,9 @@ Cross-domain dependency (RDR-063 §Cross-Domain Contracts):
 Lock ownership convention (matches MemoryStore / PlanLibrary):
 
 - Public methods acquire ``self._lock`` themselves.
-- ``init_schema_unlocked`` and ``_migrate_topics_if_needed`` are
-  lock-naive — caller holds ``self._lock`` and ``_migrated_lock``.
+- ``_init_schema`` runs under ``self._lock`` during ``__init__`` and
+  runs ``_migrate_topics_if_needed`` under the per-domain
+  ``_migrated_lock`` guard.
 - ``get_topic_tree`` deliberately acquires the lock once for the root
   fetch and once *per recursive child fetch*. This matches the
   pre-split behavior: a snapshot per query, with the lock released
@@ -52,23 +57,27 @@ Lock ownership convention (matches MemoryStore / PlanLibrary):
 from __future__ import annotations
 
 import math
+import sqlite3
+import threading
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import structlog
 
 if TYPE_CHECKING:
-    from nexus.db.t2._connection import SharedConnection
     from nexus.db.t2.memory_store import MemoryStore
 
 _log = structlog.get_logger()
 
 
-# Per-domain migration guard placeholder — see memory_store.py for the
-# rationale. The authoritative guard still lives at the facade level in
-# Phase 1 (nexus.db.t2._migrated_paths).
+# Per-domain migration guard (RDR-063 Open Question 3 — Phase 2 resolution).
+# Each store owns its own ``_migrated_paths`` set and ``_migrated_lock``.
+# CatalogTaxonomy has a single migration (``_migrate_topics_if_needed``)
+# for pre-RDR-061 databases that predate the ``topics`` tables.
 _migrated_paths: set[str] = set()
+_migrated_lock = threading.Lock()
 
 
 # ── Schema SQL ────────────────────────────────────────────────────────────────
@@ -129,28 +138,44 @@ class CatalogTaxonomy:
     (RDR-063 §Cross-Domain Contracts).
     """
 
-    def __init__(self, shared: "SharedConnection", memory: "MemoryStore") -> None:
-        self._shared = shared
+    def __init__(self, path: Path, memory: "MemoryStore") -> None:
         self._memory = memory
-        # Legacy aliases — Phase 1 stores all share the same lock/conn,
-        # so any caller that reached through .conn / ._lock continues to
-        # work. Phase 2 will give each store its own pair.
-        self._lock = shared.lock
-        self.conn = shared.conn
+        self._lock = threading.Lock()
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            canonical_key = str(path.resolve())
+        except OSError:
+            canonical_key = str(path)
+        self._init_schema(canonical_key)
+
+    def close(self) -> None:
+        """Close the dedicated connection (idempotent under ``self._lock``)."""
+        with self._lock:
+            self.conn.close()
 
     # ── Schema / migrations ───────────────────────────────────────────────
 
-    def init_schema_unlocked(self) -> None:
-        """Create topics + topic_assignments tables. Caller holds the lock."""
-        self.conn.executescript(_TAXONOMY_SCHEMA_SQL)
+    def _init_schema(self, path_key: str) -> None:
+        """Create the topics tables and run the topics migration if needed."""
+        with self._lock:
+            self.conn.executescript(_TAXONOMY_SCHEMA_SQL)
+            self.conn.executescript("PRAGMA journal_mode=WAL;")
+            self.conn.commit()
+            with _migrated_lock:
+                if path_key in _migrated_paths:
+                    return
+                self._migrate_topics_if_needed()
+                _migrated_paths.add(path_key)
 
     def _migrate_topics_if_needed(self) -> None:
         """Add topics and topic_assignments tables if missing.
 
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
-        Kept as a separate migration distinct from ``init_schema_unlocked``
-        because some pre-RDR-061 databases predate the topics tables and
-        the migration log emits a structured event when it fires.
+        Kept as a separate migration path distinct from the base
+        ``_TAXONOMY_SCHEMA_SQL`` script because some pre-RDR-061
+        databases predate the topics tables and the migration log
+        emits a structured event when it fires.
         """
         row = self.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"

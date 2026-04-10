@@ -1,40 +1,38 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Telemetry — search relevance log (RDR-063 Phase 1).
+"""Telemetry — search relevance log (RDR-063).
 
 Owns the ``relevance_log`` table and all methods that query or mutate
 it. Extracted from the monolithic ``T2Database`` in RDR-063 Phase 1
-step 6 (bead ``nexus-yjww``).
-
-This is the last domain extraction in Phase 1; after this commit the
-facade only contains the connection lifecycle, the migration guard,
-the cross-domain ``expire()`` composition, and the per-domain delegate
-methods. Domain DDL is fully owned by the four store modules.
+step 6 (bead ``nexus-yjww``); promoted to own its dedicated
+``sqlite3.Connection`` and ``threading.Lock`` in Phase 2 (bead
+``nexus-3d3k``).
 
 The ``relevance_log`` table tracks ``(query, chunk_id, action,
 session_id, collection, timestamp)`` rows whenever an MCP tool acts
 on search results (``store_put``, ``catalog_link``). Used by the
 RDR-061 retrieval feedback loop and future re-ranking work. The table
 is intentionally append-heavy with periodic time-based purge — the
-write profile is a strong candidate for the dedicated connection that
-Phase 2 (``nexus-3d3k``) will give it.
+write profile is the strongest candidate for the dedicated connection
+that Phase 2 gives it. High-frequency MCP hook writes no longer block
+agent-paced memory reads.
 
 Schema-creation history: prior to Phase 1 step 6, the relevance_log
-table did not have a base entry in T2Database's _SCHEMA_SQL — it was
-created on first construction by ``_migrate_relevance_log_if_needed``,
-which was a one-shot "create if missing" disguised as a migration
-because relevance_log was added in a later release than memory/plans.
-This module replaces that pattern with a normal
-``init_schema_unlocked`` (CREATE TABLE IF NOT EXISTS …) called from
-the facade's _init_schema sequence. Behavior is identical for both
-fresh and legacy databases — IF NOT EXISTS makes both cases no-op
-on subsequent construction.
+table did not have a base entry in T2Database's ``_SCHEMA_SQL`` — it
+was created on first construction by
+``_migrate_relevance_log_if_needed``, a one-shot "create if missing"
+disguised as a migration because relevance_log was added in a later
+release than memory/plans. This module replaced that pattern with a
+normal ``CREATE TABLE IF NOT EXISTS`` in ``_init_schema``. Behavior is
+identical for fresh and legacy databases — IF NOT EXISTS makes both
+cases no-op on subsequent construction. Telemetry therefore has no
+migration block and no ``_migrated_lock``.
 
 Lock convention (mirrors the other domain stores):
   * Public methods (``log_relevance``, ``log_relevance_batch``,
     ``get_relevance_log``, ``expire_relevance_log``) acquire
     ``self._lock`` themselves.
-  * ``init_schema_unlocked`` is lock-naive — caller holds the lock.
+  * ``_init_schema`` runs under ``self._lock`` during ``__init__``.
 
 Facade contract preserved (``test_structlog_events.py`` pin):
   * The facade keeps ``expire_relevance_log`` as a method that
@@ -49,19 +47,15 @@ Facade contract preserved (``test_structlog_events.py`` pin):
 
 from __future__ import annotations
 
+import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import structlog
 
-if TYPE_CHECKING:
-    from nexus.db.t2._connection import SharedConnection
-
 _log = structlog.get_logger()
-
-
-# Per-domain migration guard placeholder — see memory_store.py.
-_migrated_paths: set[str] = set()
 
 
 # ── Schema SQL ────────────────────────────────────────────────────────────────
@@ -106,19 +100,30 @@ class Telemetry:
     contract preservation.
     """
 
-    def __init__(self, shared: "SharedConnection") -> None:
-        self._shared = shared
-        # Legacy aliases — Phase 1 stores all share the same lock/conn,
-        # so any caller that reached through .conn / ._lock continues to
-        # work. Phase 2 will give each store its own pair.
-        self._lock = shared.lock
-        self.conn = shared.conn
+    def __init__(self, path: Path) -> None:
+        self._lock = threading.Lock()
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        self._init_schema()
+
+    def close(self) -> None:
+        """Close the dedicated connection (idempotent under ``self._lock``)."""
+        with self._lock:
+            self.conn.close()
 
     # ── Schema ────────────────────────────────────────────────────────────
 
-    def init_schema_unlocked(self) -> None:
-        """Create the ``relevance_log`` table + indexes. Caller holds the lock."""
-        self.conn.executescript(_TELEMETRY_SCHEMA_SQL)
+    def _init_schema(self) -> None:
+        """Create the ``relevance_log`` table + indexes under ``self._lock``.
+
+        Telemetry has no migrations — the table is pure ``CREATE IF NOT
+        EXISTS`` so repeated construction is idempotent without needing
+        a migration guard.
+        """
+        with self._lock:
+            self.conn.executescript(_TELEMETRY_SCHEMA_SQL)
+            self.conn.executescript("PRAGMA journal_mode=WAL;")
+            self.conn.commit()
 
     # ── Public API ────────────────────────────────────────────────────────
 

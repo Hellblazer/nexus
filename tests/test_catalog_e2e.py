@@ -416,7 +416,7 @@ def test_spans_overlap(s1, e1, s2, e2, expected):
 
 
 def test_catalog_plan_templates_exist(db):
-    rows = db.conn.execute(
+    rows = db.plans.conn.execute(
         "SELECT count(*) FROM plans WHERE tags LIKE '%catalog%'"
     ).fetchall()
     assert isinstance(rows, list) and rows[0][0] >= 0
