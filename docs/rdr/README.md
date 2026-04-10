@@ -83,6 +83,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-059](rdr-059-code-search-embedding-mismatch.md) | Code Search Embedding Model Mismatch | Bug | Closed | 2026-04-07 |
 | [RDR-060](rdr-060-catalog-path-rationalization-link-usability.md) | Catalog Path Rationalization and Link Graph Usability | Feature | Closed | 2026-04-08 |
 | [RDR-061](rdr-061-literature-grounded-search-knowledge-enhancement.md) | Literature-Grounded Search and Knowledge Enhancement Roadmap | Design | Accepted | 2026-04-09 |
+| [RDR-062](rdr-062-mcp-interface-tiering.md) | MCP Interface Tiering — Core + Catalog Server Split | Architecture | Accepted | 2026-04-09 |
 
 ---
 
