@@ -68,7 +68,8 @@ Documentation = "https://github.com/Hellblazer/nexus/tree/main/docs"
 
 [project.scripts]
 nx = "nexus.cli:main"
-nx-mcp = "nexus.mcp_server:main"
+nx-mcp = "nexus.mcp.core:main"
+nx-mcp-catalog = "nexus.mcp.catalog:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nexus"]

@@ -10,11 +10,7 @@ import threading
 import time
 import warnings
 
-from mcp.server.fastmcp import FastMCP
-
 from nexus.commands._helpers import default_db_path
-
-mcp = FastMCP("nexus")
 
 # ── Lazy singletons ──────────────────────────────────────────────────────────
 

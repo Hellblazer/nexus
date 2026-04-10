@@ -6,5 +6,9 @@
   "nexus": {
     "command": "nx-mcp",
     "args": []
+  },
+  "nexus-catalog": {
+    "command": "nx-mcp-catalog",
+    "args": []
   }
 }

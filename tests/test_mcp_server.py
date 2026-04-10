@@ -93,7 +93,7 @@ def t3():
 
 @pytest.fixture(autouse=True)
 def _patch_t2(t2_path, monkeypatch):
-    import nexus.mcp_server as mod
+    import nexus.mcp.core as mod
     monkeypatch.setattr(mod, "_t2_ctx", lambda: T2Database(t2_path))
 
 
@@ -390,7 +390,7 @@ def test_collection_info_not_found():
 def test_collection_verify_cases(name, verify_rv, side_effect, expect_in):
     mock = MagicMock()
     _inject_t3(mock)
-    with patch("nexus.mcp_server.verify_collection_deep") as mv:
+    with patch("nexus.mcp.core.verify_collection_deep") as mv:
         if side_effect:
             mv.side_effect = side_effect
         else:
@@ -562,7 +562,7 @@ class TestQueryCatalogRouting:
             assert s in result
 
     def test_catalog_params_without_catalog(self, t3, monkeypatch):
-        import nexus.mcp_server as mod
+        import nexus.mcp.core as mod
         monkeypatch.setattr(mod, "_get_catalog", lambda: None)
         assert "catalog not initialized" in query(question="test", author="someone").lower()
 
