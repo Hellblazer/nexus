@@ -117,7 +117,8 @@ def search(
             dist = f"{r.distance:.4f}"
             label = title or source or r.id
             snippet = r.content[:200].replace("\n", " ")
-            lines.append(f"[{dist}] {label}\n  {snippet}")
+            flag = " [CONTRADICTS ANOTHER RESULT]" if r.metadata.get("_contradiction_flag") else ""
+            lines.append(f"[{dist}] {label}{flag}\n  {snippet}")
 
         # Pagination footer
         shown_end = offset + len(page)

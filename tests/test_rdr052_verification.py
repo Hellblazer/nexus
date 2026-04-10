@@ -108,7 +108,7 @@ class TestPathRouting:
         assert "1.1" in result
 
     def test_catalog_params_without_catalog_returns_error(self, t3, monkeypatch):
-        import nexus.mcp_server as mod
+        import nexus.mcp.core as mod
         monkeypatch.setattr(mod, "_get_catalog", lambda: None)
         result = query(question="test", author="someone")
         assert "catalog not initialized" in result.lower()
