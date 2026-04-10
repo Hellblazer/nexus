@@ -5,14 +5,14 @@
 The T2 tier is split into four domain stores, each owning its own set
 of tables in a shared SQLite file:
 
-====================  ==========================  ============================
+====================  ==========================  =================================================================
 Attribute             Class                       Responsibility
-====================  ==========================  ============================
-``db.memory``         ``MemoryStore``             Persistent notes, project context, FTS5 search
+====================  ==========================  =================================================================
+``db.memory``         ``MemoryStore``             Persistent notes, FTS5 search, access tracking, heat-weighted TTL
 ``db.plans``          ``PlanLibrary``             Plan templates, plan search, plan TTL
 ``db.taxonomy``       ``CatalogTaxonomy``         Topic clustering, topic assignment
-``db.telemetry``      ``Telemetry``               Relevance logs, access tracking
-====================  ==========================  ============================
+``db.telemetry``      ``Telemetry``               Relevance log (query/chunk/action), retention-based expiry
+====================  ==========================  =================================================================
 
 ``T2Database`` is a facade: it constructs the four stores and re-exposes
 their public methods as thin delegates for backward compatibility.

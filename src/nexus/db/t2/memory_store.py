@@ -195,16 +195,36 @@ _ACCESS_TRACK_BUSY_MS = 0
 def _is_sqlite_busy(exc: sqlite3.OperationalError) -> bool:
     """Return True iff ``exc`` is a SQLITE_BUSY (database-locked) error.
 
-    Python 3.11+ exposes ``sqlite_errorcode`` on OperationalError; we
-    use it when available so the match is precise. For older builds or
-    edge cases where the errorcode is missing, fall back to a substring
-    match on ``"locked"``. The access-tracking fast-fail path only
-    swallows BUSY — SQLITE_CORRUPT / SQLITE_IOERR / SQLITE_CANTOPEN
-    propagate through so real storage failures are not silenced.
+    The project targets Python 3.12+, which populates
+    ``exc.sqlite_errorcode`` on any ``OperationalError`` raised by
+    the CPython C layer during a real database operation. That is the
+    primary production path: compare the numeric errorcode to
+    ``sqlite3.SQLITE_BUSY`` (5) for a precise match, so we don't
+    swallow unrelated ``OperationalError`` subclasses like
+    SQLITE_CORRUPT (11), SQLITE_IOERR (10), or SQLITE_CANTOPEN (14).
+
+    The substring fallback exists for tests that monkey-patch a
+    raise with ``sqlite3.OperationalError("database is locked")``
+    constructed from Python — those synthetic exceptions do not have
+    ``sqlite_errorcode`` populated because the C layer never touched
+    them. The fallback keeps test-injection patterns working without
+    forcing tests to synthesize a full C-layer errorcode.
+
+    Extended codes — ``SQLITE_BUSY_SNAPSHOT`` (517),
+    ``SQLITE_BUSY_RECOVERY`` (261), ``SQLITE_BUSY_TIMEOUT`` (773) —
+    are **intentionally NOT swallowed** by this helper. They indicate
+    a different class of failure (snapshot staleness, recovery in
+    progress, statement-level timeout) where silently skipping the
+    access-tracking UPDATE is not necessarily safe; let them
+    propagate so the caller sees the real failure mode. The
+    access-tracking fast-fail path only absorbs pure write-lock
+    contention, which is always bare SQLITE_BUSY in this codebase's
+    WAL access pattern.
     """
     errorcode = getattr(exc, "sqlite_errorcode", None)
     if errorcode is not None:
         return errorcode == sqlite3.SQLITE_BUSY
+    # Fallback for test-injected exceptions without errorcode.
     return "locked" in str(exc).lower()
 
 
