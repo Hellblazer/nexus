@@ -161,6 +161,35 @@ Six boundaries where signals cross in the formalization system:
 
 3. **Contradiction detection belongs at retrieval too, not just write.** The proposed design checks for contradictions only at the T2→T3 write boundary. But two contradictory entries may both enter T3 via different paths (direct indexing, different agents). The retrieval boundary (search/query) should flag when contradictory entries appear together in results — aligning with RF-11's JIT formalization. Cost: one embedding similarity check between returned chunks, ~2ms for N=10.
 
+### RF-13: RDR-062 MCP Split — No Blocking Impact on Phases 1–3
+
+**Source**: Codebase audit post-RDR-062 implementation (2026-04-09)
+
+RDR-062 split the monolithic MCP server into `nexus` (14 core tools) and `nexus-catalog` (10 catalog tools). All three RDR-057 phases route through existing core-server tools with no cross-server dependencies:
+
+- **Phase 1c** (promote feedback): `scratch_manage` in `mcp/core.py` calls `t1.promote()` at line 783. When `promote()` returns a `PromotionReport`, `scratch_manage` renders it in its response string. No catalog-server involvement.
+- **Phase 3a** (contradiction flag): `search` in `mcp/core.py` calls `search_cross_corpus()`. Results with `_contradiction_flag` metadata render inline. No catalog-server involvement.
+- **Phase 1a** (`formalizes` link type): `link` tool on the catalog server accepts free-form link types — `formalizes` works today with zero code changes. Agents call `mcp__plugin_nx_nexus-catalog__link(link_type="formalizes")`.
+
+Net: the server split is transparent to RDR-057. No design changes needed.
+
+### RF-14: Current Injection Points — Verified Line Numbers
+
+**Source**: Codebase audit of t1.py, t2.py, search_engine.py (v3.6.5)
+
+Verified exact injection points for all three phases:
+
+| Phase | File | Method | Line | Current State | Change |
+|-------|------|--------|------|---------------|--------|
+| 1b | `db/t1.py` | `get()` | 157–162 | Returns entry, no side effects | Add `col.update()` for access_count |
+| 1b | `db/t1.py` | `search()` | 164–196 | Returns results, no side effects | Add `col.update()` for access_count on hits |
+| 1c | `db/t1.py` | `promote()` | 270–275 | Returns `None`, calls `t2.put()` verbatim | FTS5 overlap check before put, return `PromotionReport` |
+| 2a | `db/t2.py` | schema | 49–59 | No `access_count` column | `ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0` |
+| 2a | `db/t2.py` | `expire()` | 584–595 | `julianday('now') - julianday(timestamp) > ttl` | Replace with `> ttl / (1 + log(access_count + 1))` |
+| 3a | `search_engine.py` | `search_cross_corpus()` | 206–225 | Builds SearchResult list | After link_boost (line 225), before clustering: pairwise contradiction check |
+
+T1 metadata is schemaless (ChromaDB) — `access_count` and `last_accessed` are new keys, no migration. T2 ALTER TABLE is non-breaking and instant. `formalizes` link type is free-form TEXT, zero schema changes. All changes are additive.
+
 ## Proposed Design
 
 > **Scope note (post-critique):** The substantive critique identified that none of the four
