@@ -10,9 +10,16 @@ instantiates the domain stores around it. All legacy public API calls
 (``put``, ``search``, ``save_plan``, ``log_relevance``, ``expire``, …)
 are preserved as thin delegating methods so no caller needs to change.
 
-Step 2 (bead ``nexus-vx3c``) moved memory-domain state and methods into
-:mod:`nexus.db.t2.memory_store`. Plan, taxonomy, and telemetry code
-still lives here and will move in later Phase 1 steps.
+All four domain extractions are complete as of Phase 1 step 6:
+  * ``nexus-vx3c`` — MemoryStore
+  * ``nexus-kpe7`` — PlanLibrary (+ Landmine 1 fix in commands/catalog.py)
+  * ``nexus-u29l`` — CatalogTaxonomy (+ taxonomy.py deprecation shim)
+  * ``nexus-yjww`` — Telemetry
+
+The facade now contains only the connection lifecycle, the migration
+guard, the ``expire()`` composition, and per-domain delegate methods.
+Phase 2 (``nexus-3d3k``) will replace the single ``SharedConnection``
+with four per-domain connections + locks and remove ``_connection.py``.
 """
 
 from __future__ import annotations
@@ -51,12 +58,13 @@ __all__ = [
 
 
 # ── Residual schema ──────────────────────────────────────────────────────────
-# Memory schema lives in memory_store._MEMORY_SCHEMA_SQL.
-# Plans schema lives in plan_library._PLANS_SCHEMA_SQL.
-# Taxonomy schema (topics + topic_assignments) lives in
-# catalog_taxonomy._TAXONOMY_SCHEMA_SQL.
-# Only the WAL pragma + relevance_log (telemetry) remain in the facade
-# until ``nexus-yjww`` extracts telemetry.
+# All domain DDL has moved into the corresponding store modules:
+#   * memory   → memory_store._MEMORY_SCHEMA_SQL
+#   * plans    → plan_library._PLANS_SCHEMA_SQL
+#   * taxonomy → catalog_taxonomy._TAXONOMY_SCHEMA_SQL
+#   * telemetry→ telemetry._TELEMETRY_SCHEMA_SQL
+# Only the WAL pragma remains — it is a connection-level setting, not a
+# per-domain DDL, so it stays on the facade alongside ``sqlite3.connect``.
 _RESIDUAL_SCHEMA_SQL = """\
 PRAGMA journal_mode=WAL;
 """
@@ -355,13 +363,20 @@ class T2Database:
 
         Also purges relevance_log rows older than ``relevance_log_days`` days
         (default 90) to prevent unbounded growth of the telemetry table.
-        Return value counts only memory rows deleted. Log purge count and
-        errors are surfaced via structured logs (``expire_complete`` /
-        ``expire_relevance_log_failed``).
+        Return value counts only memory rows deleted.
 
-        The call goes through ``self.expire_relevance_log`` (the facade's own
-        delegate), NOT ``self.telemetry.expire_relevance_log`` directly, so
-        that ``test_expire_complete_includes_error_when_log_purge_fails``'s
+        Emits the ``expire_complete`` structured log event with fields:
+          * ``memory_deleted`` (int) — number of memory rows deleted
+          * ``relevance_log_deleted`` (int) — number of relevance_log rows
+            purged; 0 when the purge succeeded but had nothing to delete
+          * ``relevance_log_error`` (str, optional) — exception class name
+            (``type(exc).__name__``, NOT the full message or traceback) —
+            present ONLY when the log purge raised. Absent on success.
+
+        The log purge call goes through ``self.expire_relevance_log`` (the
+        facade's own delegate), NOT ``self.telemetry.expire_relevance_log``
+        directly, so that
+        ``test_expire_complete_includes_error_when_log_purge_fails``'s
         instance-attribute monkeypatch still injects faults correctly.
         """
         # Purge relevance_log (RDR-061 E2 telemetry retention).

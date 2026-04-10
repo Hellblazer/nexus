@@ -259,13 +259,28 @@ class PlanLibrary:
         return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
 
     def plan_exists(self, query: str, tag: str) -> bool:
-        """Return True if any plan with *query* has *tag* among its tags.
+        """Return True if any plan with *query* has *tag* as a comma-separated token.
 
         Used by ``commands/catalog.py:_seed_plan_templates`` to skip
         already-seeded builtin templates without reaching through the
-        facade's private ``.conn`` attribute. The tag match is a
-        substring LIKE on the comma-separated ``tags`` column — same
-        semantics as the original ``catalog.py:93`` query.
+        facade's private ``.conn`` attribute.
+
+        Tag matching uses the comma-boundary pattern
+        ``(',' || tags || ',') LIKE '%,<tag>,%'`` — matches only when
+        *tag* appears as a whole token in the comma-separated ``tags``
+        column. This is the same boundary-safe pattern used by
+        :meth:`MemoryStore.search_by_tag` and avoids substring false
+        positives like ``"builtin-template-v2"`` or
+        ``"not-builtin-template"``.
+
+        Note that this is a tighter contract than the original
+        pre-split query at ``commands/catalog.py:93`` which did a raw
+        substring ``LIKE '%builtin-template%'``. Both patterns give the
+        same result for the 5 seeded builtin templates (their tag
+        strings all have ``builtin-template`` as a comma-separated
+        token), so the Landmine 1 fix remains semantically equivalent
+        for the current call site. Tightening the contract here
+        prevents new callers from getting unexpected false positives.
 
         Audit finding F2 / Landmine 1: this method exists so that
         Phase 2's separate-connection split (which removes
@@ -274,7 +289,8 @@ class PlanLibrary:
         """
         with self._lock:
             row = self.conn.execute(
-                "SELECT 1 FROM plans WHERE query = ? AND tags LIKE ? LIMIT 1",
-                (query, f"%{tag}%"),
+                "SELECT 1 FROM plans "
+                "WHERE query = ? AND (',' || tags || ',') LIKE ? LIMIT 1",
+                (query, f"%,{tag},%"),
             ).fetchone()
         return row is not None
