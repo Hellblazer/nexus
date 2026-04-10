@@ -97,13 +97,45 @@ def test_scratch_flag_unflag_missing_raises(t1: T1Database, method: str) -> None
 
 def test_scratch_promote_to_t2(t1: T1Database, db: T2Database) -> None:
     doc_id = t1.put("promote me to T2", tags="important")
-    t1.promote(doc_id, project="myproj", title="promoted.md", t2=db)
+    report = t1.promote(doc_id, project="myproj", title="promoted.md", t2=db)
     r = db.get(project="myproj", title="promoted.md")
     assert r is not None and r["content"] == "promote me to T2" and r["tags"] == "important"
+    assert report is not None  # PromotionReport returned
 
 def test_scratch_promote_missing_raises(t1: T1Database, db: T2Database) -> None:
     with pytest.raises(KeyError):
         t1.promote("no-such-id", project="p", title="t.md", t2=db)
+
+
+def test_promote_returns_new_when_no_overlap(t1: T1Database, db: T2Database) -> None:
+    """promote() returns action='new' when T2 has no matching content."""
+    doc_id = t1.put("completely unique content xyzzy42")
+    report = t1.promote(doc_id, project="proj", title="new.md", t2=db)
+    assert report.action == "new"
+    assert report.existing_title is None
+    assert report.merged is False
+
+
+def test_promote_returns_merged_when_fts5_overlap(t1: T1Database, db: T2Database) -> None:
+    """promote() returns action='merged' when T2 has similar content."""
+    # Pre-populate T2 with overlapping content (FTS5 is AND-of-terms)
+    db.put(project="proj", title="existing.md", content="authentication design patterns")
+    doc_id = t1.put("authentication design patterns")
+    report = t1.promote(doc_id, project="proj", title="new-auth.md", t2=db)
+    assert report.action == "merged"
+    assert report.existing_title == "existing.md"
+    assert report.merged is True
+
+
+def test_promote_writes_to_t2_regardless_of_action(t1: T1Database, db: T2Database) -> None:
+    """Content is written to T2 whether action is 'new' or 'merged'."""
+    db.put(project="proj", title="old.md", content="overlap content here")
+    doc_id = t1.put("overlap content here")
+    report = t1.promote(doc_id, project="proj", title="also-new.md", t2=db)
+    # Regardless of report.action, the entry should exist in T2
+    r = db.get(project="proj", title="also-new.md")
+    assert r is not None
+    assert r["content"] == "overlap content here"
 
 
 # ── AC6: clear ────────────────────────────────────────────────────────────────
@@ -263,3 +295,93 @@ def test_t1_pagination(t1: T1Database, method: str, expected: int) -> None:
         assert len(result) == expected
     else:
         assert result == expected and len(t1.list_entries()) == 0
+
+
+# ── access tracking (RDR-057 P1-1b, nexus-jpsj) ────────────────────────────
+
+
+def test_new_entry_has_access_count_zero(t1: T1Database) -> None:
+    doc_id = t1.put(content="fresh entry")
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    meta = raw["metadatas"][0]
+    assert meta["access_count"] == 0
+    assert meta["last_accessed"] == ""
+
+
+def test_get_increments_access_count(t1: T1Database) -> None:
+    doc_id = t1.put(content="trackable entry")
+    t1.get(doc_id)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    assert raw["metadatas"][0]["access_count"] == 1
+
+
+def test_get_three_times_access_count_three(t1: T1Database) -> None:
+    doc_id = t1.put(content="multi access")
+    t1.get(doc_id)
+    t1.get(doc_id)
+    t1.get(doc_id)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    assert raw["metadatas"][0]["access_count"] == 3
+
+
+def test_search_increments_access_count(t1: T1Database) -> None:
+    doc_id = t1.put(content="searchable unique content zygomorphic")
+    t1.search("zygomorphic")
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    assert raw["metadatas"][0]["access_count"] == 1
+
+
+def test_last_accessed_updated_after_get(t1: T1Database) -> None:
+    doc_id = t1.put(content="timestamp check")
+    t1.get(doc_id)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    ts = raw["metadatas"][0]["last_accessed"]
+    assert ts != ""
+    # Should be a valid ISO timestamp
+    from datetime import datetime
+    datetime.fromisoformat(ts)
+
+
+def test_get_preserves_existing_metadata(t1: T1Database) -> None:
+    """Access tracking must not wipe session_id, tags, or flagged."""
+    doc_id = t1.put(content="preserve me", tags="important")
+    t1.get(doc_id)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    meta = raw["metadatas"][0]
+    assert meta["session_id"] == _SESSION
+    assert meta["tags"] == "important"
+    assert meta["access_count"] == 1
+
+
+def test_get_return_value_reflects_updated_access_count(t1: T1Database) -> None:
+    """C-1 fix: get() return value shows the incremented access_count, not stale."""
+    doc_id = t1.put(content="return value check")
+    result = t1.get(doc_id)
+    assert result["access_count"] == 1  # return value reflects the update
+    result2 = t1.get(doc_id)
+    assert result2["access_count"] == 2
+
+
+def test_promote_does_not_increment_access_count(t1: T1Database, db: T2Database) -> None:
+    """I-2 fix: promote() does not inflate access_count."""
+    doc_id = t1.put(content="promote without tracking")
+    t1.promote(doc_id, project="proj", title="p.md", t2=db)
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    assert raw["metadatas"][0]["access_count"] == 0
+
+
+def test_access_count_update_failure_does_not_raise(t1: T1Database) -> None:
+    """If the access count update fails, get() should still return the entry."""
+    doc_id = t1.put(content="resilient entry")
+    original_update = t1._col.update
+
+    def broken_update(**kwargs):
+        raise RuntimeError("simulated failure")
+
+    t1._col.update = broken_update
+    try:
+        result = t1.get(doc_id)
+        assert result is not None
+        assert result["content"] == "resilient entry"
+    finally:
+        t1._col.update = original_update

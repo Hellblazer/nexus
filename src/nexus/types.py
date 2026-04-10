@@ -4,7 +4,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+
+@dataclass
+class PromotionReport:
+    """Result of promoting a T1 scratch entry to T2.
+
+    action: 'new' (no overlap), 'merged' (FTS5 found similar content),
+            or 'conflicting' (reserved for Phase 3 semantic conflict detection).
+    """
+
+    action: Literal["new", "merged", "conflicting"]
+    existing_title: str | None = None
+    merged: bool = False
 
 
 @dataclass

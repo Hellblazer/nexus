@@ -3,6 +3,7 @@
 """Search engine: cross-corpus orchestration."""
 from __future__ import annotations
 
+import itertools
 import sqlite3
 from typing import Any
 
@@ -224,10 +225,68 @@ def search_cross_corpus(
         from nexus.scoring import apply_link_boost
         all_results = apply_link_boost(all_results, catalog)
 
+    # Contradiction detection (opt-in via search.contradiction_check config)
+    if cfg.get("search", {}).get("contradiction_check", False) and all_results:
+        all_results = _flag_contradictions(all_results, t3)
+
     if cluster_by == "semantic" and all_results:
         all_results = _apply_clustering(all_results, t3)
 
     return all_results
+
+
+def _flag_contradictions(
+    results: list[SearchResult],
+    t3: Any,
+) -> list[SearchResult]:
+    """Flag results where same-collection pairs have different source_agent and close distance.
+
+    Two results from the same collection, with different non-empty source_agent
+    provenance and cosine distance < 0.3, get ``_contradiction_flag=True`` in
+    their metadata. Purely retrieval-time, no LLM calls.
+    """
+    import numpy as np
+
+    col_groups: dict[str, list[int]] = {}
+    for idx, r in enumerate(results):
+        col_groups.setdefault(r.collection, []).append(idx)
+
+    flagged: set[int] = set()
+    for col, indices in col_groups.items():
+        if len(indices) < 2:
+            continue
+        ids = [results[i].id for i in indices]
+        try:
+            embs = t3.get_embeddings(col, ids)
+        except Exception:
+            continue
+        if embs.shape[0] != len(indices):
+            continue
+        norms = np.linalg.norm(embs, axis=1, keepdims=True)
+        normed = embs / np.maximum(norms, 1e-9)
+        for a, b in itertools.combinations(range(len(indices)), 2):
+            dist = 1.0 - float(np.dot(normed[a], normed[b]))
+            if dist >= 0.3:
+                continue
+            agent_a = results[indices[a]].metadata.get("source_agent", "")
+            agent_b = results[indices[b]].metadata.get("source_agent", "")
+            if agent_a and agent_b and agent_a != agent_b:
+                flagged.add(indices[a])
+                flagged.add(indices[b])
+
+    out: list[SearchResult] = []
+    for idx, r in enumerate(results):
+        if idx in flagged:
+            meta = dict(r.metadata)
+            meta["_contradiction_flag"] = True
+            out.append(SearchResult(
+                id=r.id, content=r.content, distance=r.distance,
+                collection=r.collection, metadata=meta,
+                hybrid_score=r.hybrid_score,
+            ))
+        else:
+            out.append(r)
+    return out
 
 
 def _apply_clustering(results: list[SearchResult], t3: Any) -> list[SearchResult]:

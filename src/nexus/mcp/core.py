@@ -780,8 +780,8 @@ def scratch_manage(
             if not project or not title:
                 return "Error: project and title are required for promote"
             with _t2_ctx() as t2:
-                t1.promote(entry_id, project=project, title=title, t2=t2)
-            return f"{prefix}Promoted: {entry_id} -> {project}/{title}"
+                report = t1.promote(entry_id, project=project, title=title, t2=t2)
+            return f"{prefix}Promoted: {entry_id} -> {project}/{title} (action={report.action})"
 
         else:
             return f"Error: unknown action {action!r}. Use: flag, promote"

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+import math
 import os
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -47,15 +48,17 @@ _SCHEMA_SQL = """\
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS memory (
-    id        INTEGER PRIMARY KEY,
-    project   TEXT    NOT NULL,
-    title     TEXT    NOT NULL,
-    session   TEXT,
-    agent     TEXT,
-    content   TEXT    NOT NULL,
-    tags      TEXT,
-    timestamp TEXT    NOT NULL,
-    ttl       INTEGER
+    id            INTEGER PRIMARY KEY,
+    project       TEXT    NOT NULL,
+    title         TEXT    NOT NULL,
+    session       TEXT,
+    agent         TEXT,
+    content       TEXT    NOT NULL,
+    tags          TEXT,
+    timestamp     TEXT    NOT NULL,
+    ttl           INTEGER,
+    access_count  INTEGER DEFAULT 0 NOT NULL,
+    last_accessed TEXT    DEFAULT ''
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_project_title ON memory(project, title);
@@ -120,9 +123,25 @@ CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
         VALUES ('delete', old.id, old.query, old.tags, old.project);
     INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
 END;
+
+CREATE TABLE IF NOT EXISTS topics (
+    id            INTEGER PRIMARY KEY,
+    label         TEXT NOT NULL,
+    parent_id     INTEGER REFERENCES topics(id),
+    collection    TEXT NOT NULL,
+    centroid_hash TEXT,
+    doc_count     INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS topic_assignments (
+    doc_id    TEXT NOT NULL,
+    topic_id  INTEGER NOT NULL REFERENCES topics(id),
+    PRIMARY KEY (doc_id, topic_id)
+);
 """
 
-_COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl")
+_COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl", "access_count", "last_accessed")
 _PLAN_COLUMNS = ("id", "project", "query", "plan_json", "outcome", "tags", "created_at", "ttl")
 
 # ── FTS5 rebuild SQL (used for migration from old schema lacking 'title') ─────
@@ -182,6 +201,8 @@ class T2Database:
             self._migrate_fts_if_needed()
             self._migrate_plans_if_needed()
             self._migrate_plans_ttl_if_needed()
+            self._migrate_access_tracking_if_needed()
+            self._migrate_topics_if_needed()
 
     def _migrate_plans_if_needed(self) -> None:
         """Add 'project' column to plans table if missing (v2.8.0 schema change).
@@ -234,6 +255,51 @@ class T2Database:
         self.conn.execute("ALTER TABLE plans ADD COLUMN ttl INTEGER")
         self.conn.commit()
         _log.info("plans ttl migration complete")
+
+    def _migrate_topics_if_needed(self) -> None:
+        """Add topics and topic_assignments tables if missing."""
+        row = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"
+        ).fetchone()
+        if row is not None:
+            return
+        _log.info("Migrating T2 schema to add topics tables")
+        self.conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS topics (
+                id            INTEGER PRIMARY KEY,
+                label         TEXT NOT NULL,
+                parent_id     INTEGER REFERENCES topics(id),
+                collection    TEXT NOT NULL,
+                centroid_hash TEXT,
+                doc_count     INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS topic_assignments (
+                doc_id    TEXT NOT NULL,
+                topic_id  INTEGER NOT NULL REFERENCES topics(id),
+                PRIMARY KEY (doc_id, topic_id)
+            );
+        """)
+        self.conn.commit()
+        _log.info("topics migration complete")
+
+    def _migrate_access_tracking_if_needed(self) -> None:
+        """Add access_count and last_accessed columns to memory if missing."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(memory)").fetchall()}
+        changed = False
+        if "access_count" not in cols:
+            self.conn.execute(
+                "ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0 NOT NULL"
+            )
+            changed = True
+        if "last_accessed" not in cols:
+            self.conn.execute(
+                "ALTER TABLE memory ADD COLUMN last_accessed TEXT DEFAULT ''"
+            )
+            changed = True
+        if changed:
+            self.conn.commit()
+            _log.info("access_tracking migration complete")
 
     def _migrate_fts_if_needed(self) -> None:
         """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.
@@ -338,6 +404,17 @@ class T2Database:
                 ).fetchone()
             else:
                 raise ValueError("Provide either id or both project and title.")
+            if row:
+                now = datetime.now(UTC).isoformat()
+                self.conn.execute(
+                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                    (now, row[0]),
+                )
+                self.conn.commit()
+                result = dict(zip(_COLUMNS, row))
+                result["access_count"] += 1
+                result["last_accessed"] = now
+                return result
         return dict(zip(_COLUMNS, row)) if row else None
 
     def search(self, query: str, project: str | None = None) -> list[dict[str, Any]]:
@@ -348,7 +425,8 @@ class T2Database:
                 if project:
                     sql = """
                         SELECT m.id, m.project, m.title, m.session, m.agent,
-                               m.content, m.tags, m.timestamp, m.ttl
+                               m.content, m.tags, m.timestamp, m.ttl,
+                               m.access_count, m.last_accessed
                         FROM memory m
                         JOIN memory_fts ON memory_fts.rowid = m.id
                         WHERE memory_fts MATCH ?
@@ -359,7 +437,8 @@ class T2Database:
                 else:
                     sql = """
                         SELECT m.id, m.project, m.title, m.session, m.agent,
-                               m.content, m.tags, m.timestamp, m.ttl
+                               m.content, m.tags, m.timestamp, m.ttl,
+                               m.access_count, m.last_accessed
                         FROM memory m
                         JOIN memory_fts ON memory_fts.rowid = m.id
                         WHERE memory_fts MATCH ?
@@ -368,6 +447,15 @@ class T2Database:
                     rows = self.conn.execute(sql, (safe,)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
+            # Batch-update access_count for all returned rows
+            if rows:
+                now = datetime.now(UTC).isoformat()
+                ids = [r[0] for r in rows]
+                self.conn.executemany(
+                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                    [(now, rid) for rid in ids],
+                )
+                self.conn.commit()
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def list_entries(
@@ -421,7 +509,8 @@ class T2Database:
         """FTS5 search scoped to projects matching a GLOB pattern (e.g. '*_rdr')."""
         sql = """
             SELECT m.id, m.project, m.title, m.session, m.agent,
-                   m.content, m.tags, m.timestamp, m.ttl
+                   m.content, m.tags, m.timestamp, m.ttl,
+                   m.access_count, m.last_accessed
             FROM memory m
             JOIN memory_fts ON memory_fts.rowid = m.id
             WHERE memory_fts MATCH ?
@@ -444,7 +533,8 @@ class T2Database:
         """
         sql = """
             SELECT m.id, m.project, m.title, m.session, m.agent,
-                   m.content, m.tags, m.timestamp, m.ttl
+                   m.content, m.tags, m.timestamp, m.ttl,
+                   m.access_count, m.last_accessed
             FROM memory m
             JOIN memory_fts ON memory_fts.rowid = m.id
             WHERE memory_fts MATCH ?
@@ -582,14 +672,146 @@ class T2Database:
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
     def expire(self) -> int:
-        """Delete TTL-expired entries. Returns the count of deleted rows."""
+        """Delete TTL-expired entries using heat-weighted effective TTL.
+
+        effective_ttl = base_ttl * (1 + log(access_count + 1))
+        Highly accessed entries survive longer. Unaccessed entries (access_count=0)
+        expire at base rate (log(1) = 0, so multiplier = 1).
+        """
         with self._lock:
-            cursor = self.conn.execute(
+            rows = self.conn.execute(
                 """
-                DELETE FROM memory
+                SELECT id, access_count, ttl, timestamp
+                FROM memory
                 WHERE ttl IS NOT NULL
-                  AND julianday('now') - julianday(timestamp) > ttl
                 """
+            ).fetchall()
+            now = datetime.now(UTC)
+            expired_ids: list[int] = []
+            for row_id, access_count, ttl, timestamp in rows:
+                effective_ttl = ttl * (1 + math.log(access_count + 1))
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                age_days = (now - ts).total_seconds() / 86400.0
+                if age_days > effective_ttl:
+                    expired_ids.append(row_id)
+            if expired_ids:
+                placeholders = ",".join("?" * len(expired_ids))
+                self.conn.execute(
+                    f"DELETE FROM memory WHERE id IN ({placeholders})", expired_ids
+                )
+                self.conn.commit()
+        return len(expired_ids)
+
+    # ── Memory consolidation (RDR-061 E6) ────────────────────────────────────
+
+    _STOPWORDS = frozenset({
+        "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
+        "it", "that", "this", "with", "on", "at", "by", "from", "as", "be", "not",
+    })
+
+    def find_overlapping_memories(
+        self,
+        project: str,
+        min_similarity: float = 0.7,
+        limit: int = 50,
+    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        """Return pairs of memory entries with high word-set overlap.
+
+        Uses FTS5 to find candidates, then Jaccard similarity on word sets
+        (after stopword removal) to confirm overlap.
+        """
+        entries = self.get_all(project)
+        if len(entries) < 2:
+            return []
+
+        def _words(text: str) -> set[str]:
+            return {
+                w.lower() for w in text.split()
+                if len(w) > 2 and w.lower() not in self._STOPWORDS
+            }
+
+        seen: set[tuple[int, int]] = set()
+        pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+        for e1 in entries:
+            # Use first few content words for FTS5 candidate retrieval — AND-of-terms
+            # means too many words kills recall. Jaccard on full content handles precision.
+            words = [w for w in e1.get("content", "").split()[:5]
+                     if w.lower() not in self._STOPWORDS and len(w) > 2]
+            snippet = " ".join(words[:3])
+            if not snippet:
+                continue
+            try:
+                candidates = self.search(snippet, project=project)
+            except ValueError:
+                continue
+            w1 = _words(e1.get("content", ""))
+            if not w1:
+                continue
+            for e2 in candidates:
+                if e2["id"] == e1["id"]:
+                    continue
+                pair_key = tuple(sorted((e1["id"], e2["id"])))
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+                w2 = _words(e2.get("content", ""))
+                if not w2:
+                    continue
+                jaccard = len(w1 & w2) / len(w1 | w2)
+                if jaccard >= min_similarity:
+                    pairs.append((e1, e2))
+                    if len(pairs) >= limit:
+                        return pairs
+        return pairs
+
+    def merge_memories(
+        self,
+        keep_id: int,
+        delete_ids: list[int],
+        merged_content: str,
+    ) -> None:
+        """Merge multiple entries into *keep_id*, delete the rest.
+
+        Updates content of *keep_id* and deletes all *delete_ids*.
+        FTS5 triggers handle index cleanup automatically.
+        """
+        with self._lock:
+            self.conn.execute(
+                "UPDATE memory SET content = ? WHERE id = ?",
+                (merged_content, keep_id),
             )
+            if delete_ids:
+                placeholders = ",".join("?" * len(delete_ids))
+                self.conn.execute(
+                    f"DELETE FROM memory WHERE id IN ({placeholders})",
+                    delete_ids,
+                )
             self.conn.commit()
-        return cursor.rowcount
+
+    def flag_stale_memories(
+        self,
+        project: str,
+        idle_days: int = 30,
+    ) -> list[dict[str, Any]]:
+        """Return memories not accessed in *idle_days*.
+
+        Uses ``last_accessed`` when available (non-empty), falls back to
+        ``timestamp`` for entries that have never been accessed.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=idle_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT id, project, title, session, agent, content, tags,
+                       timestamp, ttl, access_count, last_accessed
+                FROM memory
+                WHERE project = ?
+                  AND CASE
+                      WHEN last_accessed != '' THEN last_accessed < ?
+                      ELSE timestamp < ?
+                  END
+                """,
+                (project, cutoff, cutoff),
+            ).fetchall()
+        return [dict(zip(_COLUMNS, row)) for row in rows]

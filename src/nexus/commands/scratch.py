@@ -113,10 +113,10 @@ def promote_cmd(entry_id: str, project: str, title: str) -> None:
     t1 = _t1()
     with T2Database(_default_db_path()) as t2:
         try:
-            t1.promote(entry_id, project=project, title=title, t2=t2)
+            report = t1.promote(entry_id, project=project, title=title, t2=t2)
         except KeyError as exc:
             raise click.ClickException(str(exc)) from exc
-    click.echo(f"Promoted {entry_id} -> {project}/{title}")
+    click.echo(f"Promoted {entry_id} -> {project}/{title} (action={report.action})")
 
 
 

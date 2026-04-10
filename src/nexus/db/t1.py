@@ -11,7 +11,13 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+from datetime import UTC, datetime
+
 from nexus.db.t2 import T2Database
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 from nexus.session import SESSIONS_DIR, find_ancestor_session
 
 _T = TypeVar("_T")
@@ -148,6 +154,8 @@ class T1Database:
             "flagged": persist,
             "flush_project": flush_project,
             "flush_title": flush_title,
+            "access_count": 0,
+            "last_accessed": "",
         }
         self._exec(lambda: self._col.add(ids=[doc_id], documents=[content], metadatas=[meta]))
         return doc_id
@@ -159,7 +167,18 @@ class T1Database:
         result = self._exec(lambda: self._col.get(ids=[id], include=["documents", "metadatas"]))
         if not result["ids"]:
             return None
-        return self._to_row(result["ids"][0], result["documents"][0], result["metadatas"][0])
+        # Update access tracking (F-3: preserve existing metadata)
+        existing = result["metadatas"][0] or {}
+        updated_meta = {
+            **existing,
+            "access_count": existing.get("access_count", 0) + 1,
+            "last_accessed": _now_iso(),
+        }
+        try:
+            self._exec(lambda: self._col.update(ids=[id], metadatas=[updated_meta]))
+        except Exception:
+            _log.warning("t1_access_count_update_failed", id=id)
+        return self._to_row(result["ids"][0], result["documents"][0], updated_meta)
 
     def search(self, query: str, n_results: int = 10) -> list[dict]:
         """Semantic search using the local ONNX embedding model.
@@ -183,7 +202,7 @@ class T1Database:
                 where=session_filter,
                 include=["documents", "metadatas", "distances"],
             )
-            return [
+            rows = [
                 {"id": did, "content": doc, "distance": dist, **meta}
                 for did, doc, meta, dist in zip(
                     results["ids"][0],
@@ -192,6 +211,24 @@ class T1Database:
                     results["distances"][0],
                 )
             ]
+            # Batch update access_count for all returned IDs
+            now = _now_iso()
+            for row in rows:
+                existing_meta = {
+                    k: v for k, v in row.items()
+                    if k not in ("id", "content", "distance")
+                }
+                updated_meta = {
+                    **existing_meta,
+                    "access_count": existing_meta.get("access_count", 0) + 1,
+                    "last_accessed": now,
+                }
+                try:
+                    rid = row["id"]
+                    self._col.update(ids=[rid], metadatas=[updated_meta])
+                except Exception:
+                    _log.warning("t1_access_count_update_failed", id=row["id"])
+            return rows
 
         return self._exec(_do)
 
@@ -267,12 +304,28 @@ class T1Database:
 
     # ── Promote ───────────────────────────────────────────────────────────────
 
-    def promote(self, id: str, project: str, title: str, t2: T2Database) -> None:
-        """Copy T1 entry *id* to T2 immediately (manual promote)."""
-        entry = self.get(id)
-        if entry is None:
+    def promote(self, id: str, project: str, title: str, t2: T2Database) -> "PromotionReport":
+        """Copy T1 entry *id* to T2 immediately. Returns a PromotionReport."""
+        from nexus.types import PromotionReport
+
+        # Fetch without incrementing access_count (promote is a write-path, not a read)
+        result = self._exec(lambda: self._col.get(ids=[id], include=["documents", "metadatas"]))
+        if not result["ids"]:
             raise KeyError(f"No scratch entry: {id!r}")
+        entry = self._to_row(result["ids"][0], result["documents"][0], result["metadatas"][0])
+        # FTS5 overlap detection: first ~100 chars as search query
+        snippet = entry["content"][:100]
+        try:
+            matches = t2.search(snippet, project=project)
+        except ValueError:
+            matches = []
+        if matches:
+            best = matches[0]
+            report = PromotionReport(action="merged", existing_title=best["title"], merged=True)
+        else:
+            report = PromotionReport(action="new")
         t2.put(project=project, title=title, content=entry["content"], tags=entry.get("tags", ""))
+        return report
 
 
     def delete(self, id: str) -> bool:
