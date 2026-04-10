@@ -17,13 +17,21 @@ nx memory search "JWT" --project myrepo
 That's the whole model. Store whatever context you need — design notes,
 active decisions, working state — and retrieve it by project and title.
 
-**Access tracking (RDR-057)**: Every `memory_get` and `memory_search` hit
-increments `access_count` and updates `last_accessed` on the returned rows.
+**Access tracking (RDR-057)**: `memory_get` and `memory_search` hits
+increment `access_count` and update `last_accessed` on the returned rows.
 This drives heat-weighted TTL — frequently-accessed entries survive longer
 than their nominal `ttl`. See
 [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry)
 for the formula and retention math. Internal scans (like `find_overlapping_memories`)
 pass `access="silent"` to avoid contaminating the staleness signal.
+
+Under sustained concurrent cross-domain write load (RDR-063 Phase 2 interaction),
+the access-count increment runs as a best-effort side-effect: roughly 5–10% of
+updates can be skipped during heavy indexing and are logged at warning as
+`memory.access_tracking.skipped`. The returned row content is unaffected; only
+the counter update may be skipped. See
+[Storage Tiers — Heat-Weighted Expiry](storage-tiers.md#t2----memory-bank) for the
+full explanation.
 
 ## Consolidation (RDR-061 E6)
 

@@ -8,7 +8,7 @@
     {
       "name": "nx",
       "source": "./nx",
-      "description": "Self-hosted three-tier knowledge management with 17 specialized agents, analytical query pipelines, semantic search, and RDR decision tracking for Claude Code.",
+      "description": "Self-hosted three-tier knowledge management with 16 specialized agents, analytical query pipelines, semantic search, and RDR decision tracking for Claude Code.",
       "version": "3.7.0"
     },
     {

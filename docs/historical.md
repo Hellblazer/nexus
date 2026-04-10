@@ -29,7 +29,7 @@ The project has grown significantly beyond the original spec. Key additions sinc
 - **31-language AST chunking** via tree-sitter (RDR-028)
 - **PDF extraction pipeline** with auto-detect routing: Docling, MinerU, PyMuPDF (RDR-044)
 - **Contextualized embeddings** (CCE) via Voyage AI for prose and knowledge collections
-- **Agent ecosystem**: 17 specialized agents orchestrated by skills, with structured relay protocol
+- **Agent ecosystem**: 16 specialized agents orchestrated by skills, with structured relay protocol
 - **Beads**: Dolt-backed issue tracker for multi-session work with dependency tracking
 
 For current architecture, see [architecture.md](architecture.md). For the RDR decision record, see [docs/rdr/](rdr/).
