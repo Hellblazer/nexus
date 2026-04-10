@@ -6,6 +6,101 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-04-10
+
+Three accepted RDRs ship together in a single release: RDR-057 (progressive
+formalization), RDR-061 (literature-grounded search enhancement), and RDR-062
+(MCP interface tiering). RDR-063 (T2 domain split) is drafted and gate-ready
+for the next release. Six rounds of parallel multi-agent code review, 55+
+findings addressed, 3426 unit tests + 20 integration tests passing.
+
+### Added
+
+- **RDR-062: MCP interface tiering (dual-server split)** — Single 30-tool
+  `nexus` MCP server split into `nexus` (15 core tools) +
+  `nexus-catalog` (10 catalog tools with short names — no `catalog_` prefix).
+  New `nx-mcp-catalog` entry point. Six admin tools demoted to CLI-only:
+  `store_delete`, `collection_info`, `collection_verify`, `catalog_unlink`,
+  `catalog_link_audit`, `catalog_link_bulk`. Backward-compat shim at
+  `nexus.mcp_server` re-exports all 30 functions for existing callers.
+- **RDR-057: Progressive formalization across memory tiers**
+  - T1 access tracking via ChromaDB metadata (`access_count`, `last_accessed`)
+  - `PromotionReport` return type from `T1.promote()` with `new` / `overlap_detected` actions
+  - T2 heat-weighted TTL: `effective_ttl = base_ttl * (1 + log(access_count + 1))` — highly-accessed entries survive longer
+  - JIT contradiction detection in `search_cross_corpus`: flags same-collection result pairs with different `source_agent` provenance and cosine distance < 0.3 as `[CONTRADICTS ANOTHER RESULT]` in search output. Default-on; opt out via `search.contradiction_check: false`
+  - New `formalizes` catalog link type for multi-representation equivalence
+- **RDR-061: Literature-grounded search enhancement**
+  - `memory_consolidate` MCP tool with `find-overlaps`, `merge`, `flag-stale` actions. Merge has `dry_run` + `confirm_destructive` safety gates. Uses SQLite `with self.conn:` context manager for atomic UPDATE+DELETE; raises `KeyError` if `keep_id` is missing (prevents silent data loss on `expire()` race)
+  - Retrieval feedback loop (E2): new T2 `relevance_log` table records `(query, chunk_id, action)` triples when agents act on search results. Session-keyed in-process trace cache in `mcp_infra`. Purged by `T2Database.expire(relevance_log_days=90)`
+  - Persistent taxonomy CLI (E5): `nx taxonomy list/rebuild/show` — Ward hierarchical clustering over T2 memory entries, capped vocab + stopword filter. CLI-only by design, no MCP tool
+  - Memory consolidation helpers: `find_overlapping_memories`, `merge_memories`, `flag_stale_memories`
+- **RDR-063: T2 domain split (drafted)** — Architecture RDR proposing a 3-phase
+  refactor of `src/nexus/db/t2.py` into domain modules (memory, plans, catalog
+  taxonomy, telemetry) with a facade preserving backward compatibility. Gate-ready.
+- **Structured log event contracts** — `expire_complete`, `embedding_fetch_failed`,
+  `embedding_fetch_shape_mismatch`, `contradiction_check`,
+  `clustering_skipped_partial_failure` with field-level regression tests in
+  `test_structlog_events.py`
+
+### Changed
+
+- **`T2Database.expire()`** now takes a `relevance_log_days: int = 90`
+  parameter and purges the telemetry table alongside memory TTL expiry.
+  Emits structured `expire_complete` log with `memory_deleted`,
+  `relevance_log_deleted`, and optional `relevance_log_error` fields.
+- **`T2Database.search()`** now takes `access: Literal["track", "silent"]`
+  parameter (default `"track"`) replacing the former implicit access-count
+  bump. `find_overlapping_memories` passes `access="silent"` to prevent
+  consolidation scans from contaminating the staleness signal.
+- **`search_cross_corpus()`** shares a single embedding fetch between
+  contradiction detection and clustering via the new
+  `_fetch_embeddings_for_results` helper. Partial per-collection failures
+  now return `(embeddings, failed_indices)` so features process successful
+  collections rather than being suppressed whole.
+- **Migration guard** — T2 schema migrations run once per process per path
+  via module-level `_migrated_paths` set, with the lock held across the
+  full check-run-add sequence to prevent concurrent construction races.
+  Path is canonicalized via `resolve()` to deduplicate symlinked aliases.
+
+### Fixed
+
+- **R4-1 (critical) merge_memories TOCTOU data loss** — `T2.merge_memories`
+  now runs UPDATE + DELETE atomically via `with self.conn:` context manager;
+  raises `KeyError` and rolls back when `keep_id` has 0 rowcount
+  (prevents `delete_ids` from being destroyed when a concurrent `expire()`
+  deletes `keep_id` mid-merge)
+- **C2/F2 merge data loss guards** — `merge_memories` raises `ValueError`
+  when `keep_id` appears in `delete_ids` (previously silently destroyed
+  the kept entry)
+- **R3-1 fail-per-collection embedding fetch** — One broken collection
+  no longer suppresses contradiction flags or clustering for all other
+  collections in a cross-corpus search
+- **R4-2 clustering partial-failure observability** — Emits
+  `clustering_skipped_partial_failure` warning when clustering is skipped
+  due to a failed embedding fetch
+
+### Removed
+
+- **`src/nexus/catalog/llm_linker.py`** — 207-line dormant module (RDR-061
+  E3 Phase 2b). Complete and tested but never wired to a call site,
+  conflicting with RDR-057 RF-11 ("cheap at write, expensive at query").
+  Cut with rationale recorded in RDR-061.
+- **Monolithic `mcp_server.py`** — Replaced with a backward-compat shim.
+  All tool definitions moved to `src/nexus/mcp/core.py` and
+  `src/nexus/mcp/catalog.py`.
+
+### Docs
+
+- Comprehensive user-facing documentation audit: README, `docs/architecture.md`,
+  `docs/catalog.md`, `docs/cli-reference.md`, `docs/configuration.md`,
+  `docs/memory-and-tasks.md`, `docs/querying-guide.md`, `docs/storage-tiers.md`,
+  `nx/README.md`, `nx/agents/_shared/CONTEXT_PROTOCOL.md`,
+  `nx/skills/nexus/reference.md` updated for the dual-server architecture,
+  new tools, heat-weighted TTL, contradiction detection, consolidation
+  workflow, taxonomy CLI, and `formalizes` link type
+- Plugin audit: skills, agents, commands, hooks, and plugin config all
+  verified for stale MCP tool references (zero remaining)
+
 ## [3.6.5] - 2026-04-09
 
 ### Fixed

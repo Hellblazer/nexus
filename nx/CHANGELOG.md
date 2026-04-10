@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-04-10
+
+### Added
+- **MCP dual-server architecture (RDR-062)** — Plugin now bundles two MCP
+  servers instead of one: `nexus` (15 core tools: search, query, store,
+  memory, scratch, plans, consolidation) and `nexus-catalog` (10 catalog
+  tools with short names: search, show, list, register, update, link,
+  links, link_query, resolve, stats — no `catalog_` prefix). Total 25
+  registered tools (down from 30, with 6 admin operations demoted to
+  CLI-only). Auto-approve hook updated; agents and skills migrated to
+  new full tool names.
+- **`memory_consolidate` tool** documentation in `nx/skills/nexus/reference.md`
+  with `dry_run` and `confirm_destructive` safety gates explained
+- **`formalizes` link type** added to catalog skill documentation
+- **Contradiction flag rendering** in search output: `[CONTRADICTS ANOTHER RESULT]`
+  labels surface when same-collection results have conflicting provenance
+- **PromotionReport return format** documented under `scratch_manage` tool
+
+### Changed
+- All skills and agents using catalog tools migrated from
+  `mcp__plugin_nx_nexus__catalog_*` to `mcp__plugin_nx_nexus-catalog__*`
+  (24 files touched by mechanical sed + 6 manual content cleanups)
+- Agent CONTEXT_PROTOCOL updated: T2 row mentions `memory_consolidate`
+  and heat-weighted TTL; catalog row uses short tool names
+- Session-start and subagent-start hooks inject capability summaries
+  reflecting the new dual-server layout
+
+### Fixed
+- Permission auto-approve hook now covers all 15 core + 10 catalog tools
+  (previously 14 core — missing `memory_consolidate`)
+- Plugin audit: all stale references to demoted tools
+  (`store_delete`, `collection_info`, `collection_verify`, `catalog_unlink`,
+  `catalog_link_audit`, `catalog_link_bulk`) removed from live agent and
+  skill guidance
+- Known-defect regression test for `get_topic_docs()` JOIN bug
+
 ## [3.6.5] - 2026-04-09
 
 ### Fixed

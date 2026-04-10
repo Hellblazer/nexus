@@ -1,6 +1,6 @@
 {
   "name": "nx",
-  "version": "3.6.5",
+  "version": "3.7.0",
   "description": "Self-hosted three-tier knowledge management with specialized agents, analytical query pipelines, semantic search, and RDR decision tracking for Claude Code.",
   "author": {
     "name": "Hal Hildebrand",
