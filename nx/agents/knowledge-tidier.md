@@ -26,9 +26,9 @@ mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
 mcp__plugin_nx_nexus__scratch(action="put", content="...")
 mcp__plugin_nx_nexus__memory_get(project="...", title="")
-mcp__plugin_nx_nexus__catalog_search(query="...", content_type="knowledge")
-mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="knowledge-tidier", from_span="chash:...", to_span="chash:...")
-mcp__plugin_nx_nexus__catalog_links(tumbler="...", direction="both")
+mcp__plugin_nx_nexus-catalog__catalog_search(query="...", content_type="knowledge")
+mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="...", to_tumbler="...", link_type="relates", created_by="knowledge-tidier", from_span="chash:...", to_span="chash:...")
+mcp__plugin_nx_nexus-catalog__catalog_links(tumbler="...", direction="both")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -146,17 +146,17 @@ After corrections, create catalog links to capture the relationships discovered 
 
 1. **Merged documents**: When two documents are consolidated into one, create a `supersedes` link:
    ```
-   mcp__plugin_nx_nexus__catalog_link(from_tumbler="<new-consolidated-title>", to_tumbler="<old-title>", link_type="supersedes", created_by="knowledge-tidier")
+   mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="<new-consolidated-title>", to_tumbler="<old-title>", link_type="supersedes", created_by="knowledge-tidier")
    ```
 
 2. **Related documents**: When Phase 2 identifies documents that are related but not duplicates:
    ```
-   mcp__plugin_nx_nexus__catalog_link(from_tumbler="<doc-a-title>", to_tumbler="<doc-b-title>", link_type="relates", created_by="knowledge-tidier")
+   mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="<doc-a-title>", to_tumbler="<doc-b-title>", link_type="relates", created_by="knowledge-tidier")
    ```
 
 3. **Archived documents**: Before archiving, create a link from the archive to the original:
    ```
-   mcp__plugin_nx_nexus__catalog_link(from_tumbler="<archived-title>", to_tumbler="<original-title>", link_type="supersedes", created_by="knowledge-tidier")
+   mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="<archived-title>", to_tumbler="<original-title>", link_type="supersedes", created_by="knowledge-tidier")
    ```
 
 Skip all catalog steps silently if tools are not available or entries not found. Use title-based resolution (catalog accepts titles or tumblers).

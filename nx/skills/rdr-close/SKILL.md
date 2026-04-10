@@ -94,13 +94,13 @@ After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to cap
 
 2. **RDR→prior-RDR links**: If the RDR's T2 record has a `supersedes` field, create the catalog link:
    ```
-   mcp__plugin_nx_nexus__catalog_link(from_tumbler="<this-rdr-title>", to_tumbler="<superseded-rdr-title>", link_type="supersedes", created_by="rdr-close")
+   mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="<this-rdr-title>", to_tumbler="<superseded-rdr-title>", link_type="supersedes", created_by="rdr-close")
    ```
 
 3. **RDR→research links**: If research findings reference indexed papers, create `cites` links:
    - Read T2 research findings for this RDR
-   - For each finding with a URL or paper title as source, search catalog: `mcp__plugin_nx_nexus__catalog_search(query="<source>")`
-   - If found, resolve the RDR tumbler (`catalog_search(query="RDR-NNN")`), then: `mcp__plugin_nx_nexus__catalog_link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
+   - For each finding with a URL or paper title as source, search catalog: `mcp__plugin_nx_nexus-catalog__catalog_search(query="<source>")`
+   - If found, resolve the RDR tumbler (`catalog_search(query="RDR-NNN")`), then: `mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
 
 Skip all catalog steps silently if catalog is not initialized. The T2 record and markdown are the authorities — catalog links are supplementary graph enrichment.
 
@@ -137,7 +137,7 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 4. **Catalog link** (if catalog initialized): Create `supersedes` link in the catalog so the graph reflects the relationship:
    ```
    # Find both RDRs by title in catalog
-   mcp__plugin_nx_nexus__catalog_link(from_tumbler="<new-rdr-title>", to_tumbler="<old-rdr-title>", link_type="supersedes", created_by="rdr-close")
+   mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="<new-rdr-title>", to_tumbler="<old-rdr-title>", link_type="supersedes", created_by="rdr-close")
    ```
    If catalog is not initialized or either RDR is not found, skip silently — the T2 record is the authority.
 5. Regenerate index

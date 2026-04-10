@@ -141,11 +141,7 @@ T3 knowledge — permanent, semantic search:
     AUTO-LINKING: store_put checks T1 scratch for link-context (tag: "link-context") and auto-creates catalog links.
     If no link-context in scratch, self-seed: catalog_search your task references → scratch put with targets.
     You MUST call store_put before returning — findings not stored are findings lost.
-  Tool: mcp__plugin_nx_nexus__store_delete
-    store_delete(doc_id="...", collection="knowledge")
   Tool: mcp__plugin_nx_nexus__collection_list
-  Tool: mcp__plugin_nx_nexus__collection_info
-    collection_info(name="knowledge__art")
 
 Plan library (T2):
   Tool: mcp__plugin_nx_nexus__plan_search
@@ -188,25 +184,21 @@ if echo "$TASK_TEXT" | grep -qiE "author|cit(e|ation|es|ed)|who wrote|what did.*
 Use catalog tools for metadata-first queries: author, corpus, title, citations, provenance, references.
 The `/nx:query` skill handles full catalog-aware plan execution.
 
-  mcp__plugin_nx_nexus__catalog_search(query="...", author="...", corpus="...", owner="...", file_path="...", content_type="...")
-  mcp__plugin_nx_nexus__catalog_show(tumbler="1.2.5")  — full entry with links_from + links_to
-  mcp__plugin_nx_nexus__catalog_links(tumbler="1.2.5", direction="in", link_type="cites", depth=2)
+  mcp__plugin_nx_nexus-catalog__catalog_search(query="...", author="...", corpus="...", owner="...", file_path="...", content_type="...")
+  mcp__plugin_nx_nexus-catalog__catalog_show(tumbler="1.2.5")  — full entry with links_from + links_to
+  mcp__plugin_nx_nexus-catalog__catalog_links(tumbler="1.2.5", direction="in", link_type="cites", depth=2)
     Returns {"nodes": [CatalogEntry dicts], "edges": [link dicts]}.
-    Only live documents — deleted nodes excluded. Use mcp__plugin_nx_nexus__catalog_link_query for all links.
-  mcp__plugin_nx_nexus__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="agent-name",
+    Only live documents — deleted nodes excluded. Use mcp__plugin_nx_nexus-catalog__catalog_link_query for all links.
+  mcp__plugin_nx_nexus-catalog__catalog_link(from_tumbler="...", to_tumbler="...", link_type="cites", created_by="agent-name",
     from_span="chash:<sha256hex>", to_span="chash:<sha256hex>")
     Accepts titles or tumblers. Returns {"from", "to", "type", "created": true/false}.
     SPAN FORMAT (preferred): "chash:<64-char-hex>" — content-addressed, survives re-indexing.
     Sub-chunk precision: "chash:<64-char-hex>:<start>-<end>" — character range within a chunk.
     Get chunk hashes from search result metadata: each chunk has chunk_text_hash field.
     Fallback spans: "42-57" (line range) or "3:100-250" (chunk:char) — positional, may go stale.
-  mcp__plugin_nx_nexus__catalog_link_query(link_type="cites", created_by="bib_enricher", created_at_before="...", limit=50)
+  mcp__plugin_nx_nexus-catalog__catalog_link_query(link_type="cites", created_by="bib_enricher", created_at_before="...", limit=50)
     All links including orphans. Admin/audit — not a planner step.
-  mcp__plugin_nx_nexus__catalog_link_audit()  — orphans, stale positional spans, stale chash spans.
-    Each stale_chash entry has reason: "missing", "document_deleted", or "error".
-  mcp__plugin_nx_nexus__catalog_link_bulk(link_type="cites", dry_run=True)  — bulk delete preview.
-    Requires confirm_destructive=True for >10 link deletions.
-  mcp__plugin_nx_nexus__catalog_resolve(owner="1.1", corpus="schema-evolution")  — → collection names
+  mcp__plugin_nx_nexus-catalog__catalog_resolve(owner="1.1", corpus="schema-evolution")  — → collection names
   Link types: cites, implements-heuristic, supersedes, quotes, relates, comments, implements
 CATALOG
   fi

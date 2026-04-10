@@ -5,13 +5,14 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 **Three storage tiers:**
 - **T1 scratch** — session-scoped (`scratch`, `scratch_manage` tools)
 - **T2 memory** — local SQLite, survives restarts (`memory_put`, `memory_get`, `memory_delete`, `memory_search` tools)
-- **T3 knowledge** — ChromaDB cloud + Voyage AI, permanent (`search`, `store_put`, `store_get`, `store_list`, `store_delete` tools)
+- **T3 knowledge** — ChromaDB cloud + Voyage AI, permanent (`search`, `store_put`, `store_get`, `store_list` tools)
 
 ## MCP Tool Reference
 
-All nexus MCP tools are prefixed `mcp__plugin_nx_nexus__` in Claude Code.
+Core tools are prefixed `mcp__plugin_nx_nexus__`; catalog tools are prefixed `mcp__plugin_nx_nexus-catalog__`.
 
-There are 17 tools: `search`, `query`, `store_put`, `store_get`, `store_list`, `store_delete`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `scratch`, `scratch_manage`, `collection_list`, `collection_info`, `collection_verify`, `plan_save`, `plan_search`.
+There are 14 core tools: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`.
+There are 10 catalog tools (nexus-catalog server): `catalog_search`, `catalog_show`, `catalog_list`, `catalog_register`, `catalog_update`, `catalog_link`, `catalog_links`, `catalog_link_query`, `catalog_resolve`, `catalog_stats`.
 
 ### search
 
@@ -106,19 +107,6 @@ List entries in a T3 knowledge collection.
 mcp__plugin_nx_nexus__store_list(collection="knowledge"
 mcp__plugin_nx_nexus__store_list(collection="knowledge__art", docs=true       # document-level view
 mcp__plugin_nx_nexus__store_list(collection="knowledge__notes", limit=50, offset=100
-```
-
-### store_delete
-
-Delete a T3 knowledge entry by document ID.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `doc_id` | str | required | Document ID to delete |
-| `collection` | str | `"knowledge"` | Collection name or prefix |
-
-```
-mcp__plugin_nx_nexus__store_delete(doc_id="a1b2c3d4e5f6g7h8", collection="knowledge"
 ```
 
 ### memory_put
@@ -235,35 +223,6 @@ mcp__plugin_nx_nexus__collection_list()
 ```
 
 Returns collection names, document counts, and embedding models for every collection in the T3 database.
-
-### collection_info
-
-Get detailed information about a T3 collection (count, models, sample entries).
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `name` | str | required | Full collection name (e.g. `knowledge__notes`) |
-
-```
-mcp__plugin_nx_nexus__collection_info(name="knowledge__notes"
-mcp__plugin_nx_nexus__collection_info(name="code__myrepo"
-```
-
-Returns count, index/query models, and a peek at the first few entry titles for discoverability.
-
-### collection_verify
-
-Verify a collection's retrieval health via known-document probe.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `name` | str | required | Full collection name to verify |
-
-Probes up to 5 documents from the collection, queries each back, and reports a probe hit rate. Status: `healthy` (100%), `degraded` (partial hits), `broken` (0%). Also reports distance and metric for the last successful probe.
-
-```
-Use collection_verify tool: name="knowledge__notes"
-```
 
 ### plan_save
 

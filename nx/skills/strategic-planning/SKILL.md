@@ -20,7 +20,7 @@ Delegates to the **strategic-planner** agent. See [registry.yaml](../../registry
 
 Before dispatching the strategic-planner agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores planning artifacts. See `/nx:catalog` skill for full reference.
 
-1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_nx_nexus__catalog_search(query="RDR-NNN")`
+1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_nx_nexus-catalog__catalog_search(query="RDR-NNN")`
 2. Check T1 scratch for `rdr-planning-context` (set by rdr-accept for RDR-driven plans)
 3. Seed: `mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "relates"}], "source_agent": "strategic-planner"}', tags="link-context")`
 4. If no RDR/document reference found, skip seeding (auto-linker handles empty context gracefully)

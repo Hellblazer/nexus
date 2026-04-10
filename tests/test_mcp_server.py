@@ -686,9 +686,23 @@ async def test_mcp_server_round_trip():
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             tool_names = [t.name for t in (await session.list_tools()).tools]
-            for expected in ("search", "store_put", "store_list", "memory_put",
-                             "memory_get", "memory_search", "scratch", "scratch_manage"):
-                assert expected in tool_names
+            # All 14 core tools must be present
+            expected_core_tools = {
+                "search", "query", "store_put", "store_get", "store_list",
+                "memory_put", "memory_get", "memory_delete", "memory_search",
+                "scratch", "scratch_manage", "collection_list",
+                "plan_save", "plan_search",
+            }
+            for expected in expected_core_tools:
+                assert expected in tool_names, f"core tool missing: {expected}"
+
+            # Demoted tools must NOT be registered
+            for demoted in ("store_delete", "collection_info", "collection_verify"):
+                assert demoted not in tool_names, f"demoted tool registered: {demoted}"
+
+            # Catalog tools must NOT appear in core server
+            for catalog_tool in ("catalog_search", "catalog_show", "catalog_list", "catalog_stats"):
+                assert catalog_tool not in tool_names, f"catalog tool in core: {catalog_tool}"
 
             r = await session.call_tool("scratch", {"action": "put", "content": "integration test entry", "tags": "test"})
             assert "Stored:" in r.content[0].text or "isolated" in r.content[0].text.lower()
@@ -704,3 +718,60 @@ async def test_mcp_server_round_trip():
 
             r = await session.call_tool("memory_search", {"query": "integration", "project": "mcp-integ"})
             assert "integration" in r.content[0].text.lower()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_mcp_catalog_server_round_trip():
+    """Verify nexus-catalog server registers exactly the 10 catalog tools."""
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    nx_mcp_catalog = Path(sys.executable).parent / "nx-mcp-catalog"
+    if not nx_mcp_catalog.exists():
+        pytest.skip("nx-mcp-catalog entry point not found; run 'uv sync && scripts/reinstall-tool.sh'")
+
+    server_params = StdioServerParameters(command=str(nx_mcp_catalog), args=[])
+    async with stdio_client(server_params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            tool_names = [t.name for t in (await session.list_tools()).tools]
+
+            expected_catalog_tools = {
+                "catalog_search", "catalog_show", "catalog_list",
+                "catalog_register", "catalog_update",
+                "catalog_link", "catalog_links", "catalog_link_query",
+                "catalog_resolve", "catalog_stats",
+            }
+            for expected in expected_catalog_tools:
+                assert expected in tool_names, f"catalog tool missing: {expected}"
+
+            # Demoted catalog tools must NOT be registered
+            for demoted in ("catalog_unlink", "catalog_link_audit", "catalog_link_bulk"):
+                assert demoted not in tool_names, f"demoted tool registered: {demoted}"
+
+            # Core tools must NOT appear in catalog server
+            for core_tool in ("search", "query", "store_put", "memory_put", "scratch"):
+                assert core_tool not in tool_names, f"core tool in catalog: {core_tool}"
+
+            # Smoke test
+            r = await session.call_tool("catalog_stats", {})
+            assert r.content[0].text
+
+
+def test_mcp_shim_imports():
+    """Verify mcp_server.py shim re-exports all expected symbols."""
+    from nexus.mcp_server import (
+        search, query, store_put, store_get, store_list, store_delete,
+        memory_put, memory_get, memory_delete, memory_search,
+        scratch, scratch_manage, collection_list, collection_info,
+        collection_verify, plan_save, plan_search,
+        catalog_search, catalog_show, catalog_list, catalog_register,
+        catalog_update, catalog_link, catalog_links, catalog_unlink,
+        catalog_link_audit, catalog_link_bulk, catalog_link_query,
+        catalog_resolve, catalog_stats,
+        _inject_t1, _inject_t3, _inject_catalog, _reset_singletons,
+        _get_t1, _get_t3, _get_catalog,
+    )
+    for fn in (search, query, store_put, catalog_search, _inject_t1, _reset_singletons):
+        assert callable(fn)

@@ -46,7 +46,7 @@ strategic-planner -> plan-auditor -> architect-planner -> developer
 
 Before dispatching the architect-planner agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
 
-1. If the task references an RDR (pattern `RDR-\d+`) or a known document, resolve it: `mcp__plugin_nx_nexus__catalog_search(query="RDR-NNN or document title")`
+1. If the task references an RDR (pattern `RDR-\d+`) or a known document, resolve it: `mcp__plugin_nx_nexus-catalog__catalog_search(query="RDR-NNN or document title")`
 2. Check T1 scratch for `rdr-planning-context`
 3. Write link context to scratch:
    ```

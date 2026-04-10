@@ -50,7 +50,7 @@ The enhanced `query` MCP tool handles catalog-aware routing internally. Use this
 
 **Detection**: The question has explicit catalog handles (author, content type, subtree, citation/link signals) without analytical signals. Or: no catalog handles but a catalog probe returns a match.
 
-**Catalog probe**: Call `mcp__plugin_nx_nexus__catalog_search(query="{question}", limit=1)`. Route to Path 1 only if the result's `title` or `author` field contains a token from the question (not just any FTS5 match).
+**Catalog probe**: Call `mcp__plugin_nx_nexus-catalog__catalog_search(query="{question}", limit=1)`. Route to Path 1 only if the result's `title` or `author` field contains a token from the question (not just any FTS5 match).
 
 **Execution**: Call `query()` MCP directly with appropriate catalog params:
 
