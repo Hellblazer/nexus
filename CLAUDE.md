@@ -102,7 +102,7 @@ src/nexus/           # Core package
     tumbler.py       # Hierarchical addresses (depth, ancestors, lca) + JSONL readers with resilience
     auto_linker.py    # Storage-boundary auto-linking from T1 scratch link-context
     link_generator.py # Post-hoc batch linkers: citation, code-RDR heuristic, RDR file-path
-  db/                # t1.py, t2.py, t3.py — tier implementations; local_ef.py — local ONNX embeddings
+  db/                # t1.py, t2/ (package: memory/plans/taxonomy/telemetry domain stores), t3.py — tier implementations; local_ef.py — local ONNX embeddings
   indexer.py         # Repo indexing pipeline (classify → chunk → embed → store)
   classifier.py      # File classification: CODE / PROSE / PDF / SKIP
   chunker.py         # Tree-sitter AST chunking (31 languages)

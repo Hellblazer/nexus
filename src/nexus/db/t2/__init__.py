@@ -1,37 +1,51 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""T2 SQLite memory bank — facade over the domain stores.
+"""T2 SQLite memory bank — four domain stores behind a composing facade.
 
-RDR-063 Phase 1 extracted the monolithic ``T2Database`` into four
-domain stores (``MemoryStore``, ``PlanLibrary``, ``CatalogTaxonomy``,
-``Telemetry``), each living in its own module under ``nexus.db.t2``.
-Phase 2 (bead ``nexus-3d3k``) promoted each store to open its own
-``sqlite3.Connection`` and ``threading.Lock`` against the shared
-SQLite file and removed the Phase 1 ``SharedConnection`` dataclass.
+The T2 tier is split into four domain stores, each owning its own set
+of tables in a shared SQLite file:
 
-The facade is now pure composition: it creates each store with the
-database path, re-exposes their public API as thin delegating methods
-for backward compatibility, and owns the cross-domain ``expire()``
-composition and the context manager. It holds no database connection
-of its own — callers that previously reached through ``T2Database.conn``
-or ``T2Database._lock`` must go through ``db.memory.conn``,
-``db.plans.conn``, ``db.taxonomy.conn``, or ``db.telemetry.conn``
-depending on which table they touch.
+====================  ==========================  ============================
+Attribute             Class                       Responsibility
+====================  ==========================  ============================
+``db.memory``         ``MemoryStore``             Persistent notes, project context, FTS5 search
+``db.plans``          ``PlanLibrary``             Plan templates, plan search, plan TTL
+``db.taxonomy``       ``CatalogTaxonomy``         Topic clustering, topic assignment
+``db.telemetry``      ``Telemetry``               Relevance logs, access tracking
+====================  ==========================  ============================
 
-Phase 2 concurrency model:
-  * ``memory`` + ``plans`` share a read-heavy lock profile (agent-paced
-    writes), each on its own connection and lock.
-  * ``telemetry`` writes from MCP hooks run on their own connection
-    and no longer block ``memory_search``.
-  * ``catalog_taxonomy`` cluster rebuilds run on their own connection
-    and no longer freeze interactive memory access.
+``T2Database`` is a facade: it constructs the four stores and re-exposes
+their public methods as thin delegates for backward compatibility.
+``expire()`` runs the cross-domain sweep that each store registers, and
+the context manager / ``close()`` tear the stores down in reverse
+construction order. The facade itself holds no database connection.
 
-All four stores open the same SQLite file. WAL mode + a 5-second
-``busy_timeout`` let the per-domain connections coordinate at the
-SQLite layer without sharing Python-level locks. Per-domain migration
-guards (RDR-063 §Open Question 3, Option B) live in each store module
-— see e.g. ``nexus.db.t2.plan_library._migrated_paths`` — and are
-checked under per-domain ``_migrated_lock`` objects.
+New code should prefer the domain methods over the facade:
+
+.. code-block:: python
+
+    db = T2Database(path)
+    db.memory.search("project", "query")   # preferred
+    db.search("query", project="project")  # facade delegate — also works
+
+Concurrency model (RDR-063 Phase 2):
+
+* Each store opens its own ``sqlite3.Connection`` against the shared
+  file and guards it with its own ``threading.Lock``. Writes against
+  different stores never block each other at the Python layer.
+* All connections run in WAL mode with a 5-second ``busy_timeout``,
+  so cross-domain coordination happens in SQLite rather than Python.
+* Telemetry writes from MCP hooks no longer block ``memory.search``.
+* ``taxonomy.cluster_and_persist`` no longer freezes interactive
+  memory access while rebuilding clusters.
+
+Schema migrations are per-domain and idempotent: each store runs its
+own migration guard the first time it sees a given database path, so
+independent stores can initialize concurrently.
+
+See ``docs/architecture.md`` § T2 Domain Stores for the full picture
+and ``docs/contributing.md`` § Adding a T2 Domain Feature for how to
+extend the tier.
 """
 
 from __future__ import annotations
