@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,7 @@ from nexus.db.t2.memory_store import (
     _sanitize_fts5,  # re-exported for nexus.catalog.catalog_db
 )
 from nexus.db.t2.plan_library import PlanLibrary
+from nexus.db.t2.telemetry import Telemetry
 
 _log = structlog.get_logger()
 
@@ -45,6 +45,7 @@ __all__ = [
     "PlanLibrary",
     "SharedConnection",
     "T2Database",
+    "Telemetry",
     "_sanitize_fts5",
 ]
 
@@ -100,6 +101,7 @@ class T2Database:
         # The cross-domain dependency is intentionally explicit at the
         # constructor signature (RDR-063 §Cross-Domain Contracts).
         self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(self._shared, self.memory)
+        self.telemetry: Telemetry = Telemetry(self._shared)
         # Canonicalize path for the migration guard key: /foo/./bar and
         # /foo/bar must hash to the same entry or the guard is bypassed.
         try:
@@ -112,14 +114,13 @@ class T2Database:
         with self._lock:
             # Note: executescript() implicitly COMMITs any open transaction.
             # Safe here because _init_schema runs only during __init__ with
-            # no prior transaction. Memory, plans, and taxonomy DDL run via
-            # lock-naive helpers on the domain stores; the residual script
-            # only contains the WAL pragma in Phase 1 step 4 (telemetry
-            # extraction in nexus-yjww will absorb the relevance_log
-            # migration too).
+            # no prior transaction. All four domains run their lock-naive
+            # init_schema_unlocked helpers; the residual script only carries
+            # the WAL pragma now that every domain owns its own DDL.
             self.memory.init_schema_unlocked()
             self.plans.init_schema_unlocked()
             self.taxonomy.init_schema_unlocked()
+            self.telemetry.init_schema_unlocked()
             self.conn.executescript(_RESIDUAL_SCHEMA_SQL)
             self.conn.commit()
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
@@ -129,6 +130,13 @@ class T2Database:
             # sequence so two concurrent T2Database constructors on the same path
             # cannot both enter the migration functions (ALTER TABLE ADD COLUMN
             # is NOT idempotent — double-application raises OperationalError).
+            #
+            # The relevance_log "migration" was historically a one-shot
+            # CREATE-IF-MISSING because the table was added in a later release
+            # than memory/plans. Now that telemetry.init_schema_unlocked()
+            # creates the table at every construction (idempotent via
+            # IF NOT EXISTS), the legacy migration is dead code and has been
+            # removed.
             with _migrated_lock:
                 if path_key in _migrated_paths:
                     return
@@ -137,40 +145,7 @@ class T2Database:
                 self.plans._migrate_plans_ttl_if_needed()
                 self.memory._migrate_access_tracking_if_needed()
                 self.taxonomy._migrate_topics_if_needed()
-                self._migrate_relevance_log_if_needed()
                 _migrated_paths.add(path_key)
-
-    def _migrate_relevance_log_if_needed(self) -> None:
-        """Add relevance_log table if missing (RDR-061 E2).
-
-        Records (query, chunk_id, action) triples when an agent acts on
-        search results within a session. Used by future re-ranking.
-        """
-        row = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='relevance_log'"
-        ).fetchone()
-        if row is not None:
-            return
-        _log.info("Migrating T2 schema to add relevance_log table")
-        self.conn.executescript("""\
-            CREATE TABLE IF NOT EXISTS relevance_log (
-                id         INTEGER PRIMARY KEY,
-                query      TEXT NOT NULL,
-                chunk_id   TEXT NOT NULL,
-                collection TEXT,
-                action     TEXT NOT NULL,
-                session_id TEXT,
-                timestamp  TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_relevance_log_query
-                ON relevance_log(query);
-            CREATE INDEX IF NOT EXISTS idx_relevance_log_chunk
-                ON relevance_log(chunk_id);
-            CREATE INDEX IF NOT EXISTS idx_relevance_log_session
-                ON relevance_log(session_id);
-        """)
-        self.conn.commit()
-        _log.info("relevance_log migration complete")
 
     def __enter__(self) -> "T2Database":
         return self
@@ -317,7 +292,16 @@ class T2Database:
         """
         return self.plans.plan_exists(query, tag)
 
-    # ── Relevance log (RDR-061 E2) ────────────────────────────────────────────
+    # ── Telemetry delegation (RDR-063 Phase 1 step 6) ─────────────────────────
+    # These delegates exist for two reasons:
+    # 1. Public-API stability — callers that hold a T2Database keep using the
+    #    same method names without reaching into self.telemetry.
+    # 2. Monkeypatch surface — tests/test_structlog_events.py:68 patches
+    #    expire_relevance_log on the T2Database instance and expects expire()
+    #    to call the patched version. The facade's expire() therefore calls
+    #    self.expire_relevance_log(...) (its own method), NOT
+    #    self.telemetry.expire_relevance_log(...) directly. Routing through the
+    #    facade method preserves the instance-attribute monkeypatch shape.
 
     def log_relevance(
         self,
@@ -327,42 +311,19 @@ class T2Database:
         session_id: str = "",
         collection: str = "",
     ) -> int:
-        """Record a (query, chunk_id, action) triple in the relevance log.
-
-        Called by MCP tools when an agent acts on search results (store_put,
-        catalog_link). Returns the new row id. Prefer ``log_relevance_batch``
-        when writing multiple rows — it uses a single transaction.
-        """
-        now = datetime.now(UTC).isoformat()
-        with self._lock:
-            cur = self.conn.execute(
-                "INSERT INTO relevance_log (query, chunk_id, collection, action, session_id, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (query, chunk_id, collection, action, session_id, now),
-            )
-            self.conn.commit()
-            return cur.lastrowid
+        return self.telemetry.log_relevance(
+            query=query,
+            chunk_id=chunk_id,
+            action=action,
+            session_id=session_id,
+            collection=collection,
+        )
 
     def log_relevance_batch(
         self,
         rows: list[tuple[str, str, str, str, str]],
     ) -> int:
-        """Insert multiple (query, chunk_id, collection, action, session_id) rows.
-
-        Single transaction for all rows. Returns the number of rows inserted.
-        """
-        if not rows:
-            return 0
-        now = datetime.now(UTC).isoformat()
-        params = [(*r, now) for r in rows]
-        with self._lock:
-            self.conn.executemany(
-                "INSERT INTO relevance_log (query, chunk_id, collection, action, session_id, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                params,
-            )
-            self.conn.commit()
-        return len(rows)
+        return self.telemetry.log_relevance_batch(rows)
 
     def get_relevance_log(
         self,
@@ -372,34 +333,16 @@ class T2Database:
         session_id: str = "",
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Query the relevance log by filters. All filters optional.
-
-        Returns rows as dicts ordered by most recent first.
-        """
-        conditions = ["1=1"]
-        params: list = []
-        if query:
-            conditions.append("query = ?")
-            params.append(query)
-        if chunk_id:
-            conditions.append("chunk_id = ?")
-            params.append(chunk_id)
-        if action:
-            conditions.append("action = ?")
-            params.append(action)
-        if session_id:
-            conditions.append("session_id = ?")
-            params.append(session_id)
-        sql = (
-            "SELECT id, query, chunk_id, collection, action, session_id, timestamp "
-            f"FROM relevance_log WHERE {' AND '.join(conditions)} "
-            "ORDER BY timestamp DESC LIMIT ?"
+        return self.telemetry.get_relevance_log(
+            query=query,
+            chunk_id=chunk_id,
+            action=action,
+            session_id=session_id,
+            limit=limit,
         )
-        params.append(limit)
-        with self._lock:
-            rows = self.conn.execute(sql, params).fetchall()
-        cols = ("id", "query", "chunk_id", "collection", "action", "session_id", "timestamp")
-        return [dict(zip(cols, row)) for row in rows]
+
+    def expire_relevance_log(self, days: int = 90) -> int:
+        return self.telemetry.expire_relevance_log(days=days)
 
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
@@ -415,9 +358,13 @@ class T2Database:
         Return value counts only memory rows deleted. Log purge count and
         errors are surfaced via structured logs (``expire_complete`` /
         ``expire_relevance_log_failed``).
+
+        The call goes through ``self.expire_relevance_log`` (the facade's own
+        delegate), NOT ``self.telemetry.expire_relevance_log`` directly, so
+        that ``test_expire_complete_includes_error_when_log_purge_fails``'s
+        instance-attribute monkeypatch still injects faults correctly.
         """
         # Purge relevance_log (RDR-061 E2 telemetry retention).
-        # Call outside the memory lock — expire_relevance_log acquires its own.
         log_deleted = 0
         log_error: str | None = None
         try:
@@ -436,19 +383,3 @@ class T2Database:
             **extra,
         )
         return len(expired_ids)
-
-    def expire_relevance_log(self, days: int = 90) -> int:
-        """Delete relevance_log entries older than *days* days (RDR-061 E2).
-
-        The relevance_log accumulates on every store_put/catalog_link.
-        Without periodic purge it grows unboundedly. Default retention:
-        90 days — enough for re-ranking signal, bounded for disk use.
-        """
-        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-        with self._lock:
-            cur = self.conn.execute(
-                "DELETE FROM relevance_log WHERE timestamp < ?",
-                (cutoff,),
-            )
-            self.conn.commit()
-        return cur.rowcount
