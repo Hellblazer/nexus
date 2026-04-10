@@ -16,6 +16,7 @@ case "$TOOL_NAME" in
   mcp__plugin_nx_nexus__memory_get|\
   mcp__plugin_nx_nexus__memory_search|\
   mcp__plugin_nx_nexus__memory_delete|\
+  mcp__plugin_nx_nexus__memory_consolidate|\
   mcp__plugin_nx_nexus__scratch|\
   mcp__plugin_nx_nexus__scratch_manage|\
   mcp__plugin_nx_nexus__collection_list|\

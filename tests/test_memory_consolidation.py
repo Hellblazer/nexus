@@ -129,3 +129,104 @@ def test_flag_stale_skips_recent_entries(db: T2Database) -> None:
     db.put(project="proj", title="new.md", content="just added")
     stale = db.flag_stale_memories("proj", idle_days=14)
     assert len(stale) == 0
+
+
+# ── MCP tool integration (RDR-061 E6) ────────────────────────────────────────
+
+
+class _NonClosingT2Ctx:
+    """Context manager wrapping a T2Database without closing on exit.
+
+    Used in tests so the same db fixture can be reused across MCP tool calls.
+    """
+    def __init__(self, db: T2Database) -> None:
+        self._db = db
+
+    def __enter__(self) -> T2Database:
+        return self._db
+
+    def __exit__(self, *_: object) -> None:
+        pass  # intentionally do not close
+
+
+def test_mcp_memory_consolidate_find_overlaps(db: T2Database, tmp_path, monkeypatch) -> None:
+    """memory_consolidate(action='find-overlaps') returns overlapping pairs."""
+    from nexus.mcp.core import memory_consolidate
+
+    db.put(project="proj", title="a.md",
+           content="search engine architecture design patterns optimization")
+    db.put(project="proj", title="b.md",
+           content="search engine architecture design patterns optimization benchmarks")
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    result = memory_consolidate(action="find-overlaps", project="proj")
+    assert "overlapping pair" in result
+    assert "a.md" in result and "b.md" in result
+
+
+def test_mcp_memory_consolidate_find_overlaps_none(db: T2Database, monkeypatch) -> None:
+    """memory_consolidate returns friendly no-overlap message."""
+    from nexus.mcp.core import memory_consolidate
+
+    db.put(project="proj", title="a.md", content="completely unique xyzzy42 content")
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    result = memory_consolidate(action="find-overlaps", project="proj")
+    assert "No overlapping" in result
+
+
+def test_mcp_memory_consolidate_flag_stale(db: T2Database, monkeypatch) -> None:
+    """memory_consolidate(action='flag-stale') lists stale entries."""
+    from nexus.mcp.core import memory_consolidate
+
+    db.put(project="proj", title="old.md", content="stale")
+    old_ts = (datetime.now(UTC) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.conn.execute(
+        "UPDATE memory SET timestamp=?, last_accessed='' WHERE title='old.md'",
+        (old_ts,),
+    )
+    db.conn.commit()
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    result = memory_consolidate(action="flag-stale", project="proj", idle_days=30)
+    assert "old.md" in result
+
+
+def test_mcp_memory_consolidate_merge(db: T2Database, monkeypatch) -> None:
+    """memory_consolidate(action='merge') merges entries and deletes the others."""
+    from nexus.mcp.core import memory_consolidate
+
+    id_a = db.put(project="proj", title="a.md", content="content a")
+    id_b = db.put(project="proj", title="b.md", content="content b")
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    result = memory_consolidate(
+        action="merge",
+        project="proj",
+        keep_id=id_a,
+        delete_ids=str(id_b),
+        merged_content="merged content from a and b",
+    )
+    assert "Merged" in result
+    assert db.get(id=id_b) is None
+    kept = db.get(id=id_a)
+    assert kept is not None
+    assert "merged content" in kept["content"]
+
+
+def test_mcp_memory_consolidate_invalid_action(db: T2Database, monkeypatch) -> None:
+    """Invalid action returns an error."""
+    from nexus.mcp.core import memory_consolidate
+
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+    result = memory_consolidate(action="bogus", project="proj")
+    assert "Error" in result and "unknown action" in result
+
+
+def test_mcp_memory_consolidate_missing_project(db: T2Database, monkeypatch) -> None:
+    """find-overlaps requires project."""
+    from nexus.mcp.core import memory_consolidate
+
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+    result = memory_consolidate(action="find-overlaps", project="")
+    assert "Error" in result

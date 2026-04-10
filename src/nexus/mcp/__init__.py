@@ -11,6 +11,7 @@ from nexus.mcp.core import (  # noqa: F401
     memory_get,
     memory_delete,
     memory_search,
+    memory_consolidate,
     scratch,
     scratch_manage,
     collection_list,

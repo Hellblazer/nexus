@@ -53,10 +53,10 @@ A comprehensive survey of 10+ papers in the nexus T3 knowledge store (AgenticSch
 
 - Same concept indexed in `code__`/`docs__`/`rdr__` collections is unconnected — no cross-corpus links
 - **Phase 2a — Symbol-name matching** (~3h): Extend `link_generator.py` with a new batch linker that scans prose/RDR chunks for code symbol names (function, class, module names from `code__` collections) and creates `mentions` links in the catalog
-- **Phase 2b — LLM-driven hybrid extraction** (~4h): At `store_put` time for `knowledge__*` collections, run the EvidenceNet-inspired hybrid pipeline (see RF-061-8): (1) heuristic pass — title/keyword overlap against catalog → candidate (doc, target) pairs; (2) LLM verification pass (uncertain candidates only) — classify as {cites, implements, supersedes, relates, none} with confidence score; (3) filter confidence >= 0.7 → call `auto_link()`. Adopt EvidenceNet hybrid over HybridRAG pure-LLM to contain per-document API cost. Nexus entity types: Module, Function, Concept, Design Decision, Paper.
+- **Phase 2b — LLM-driven hybrid extraction — CUT**: The `llm_linker.py` module was built, tested, and never wired to any call site. It added a write-time LLM dependency at `store_put` time that conflicts with RDR-057 RF-11 ("cheap at write, expensive at query") and introduced per-document API cost with no measured benefit. Module removed; tests removed. If cross-collection LLM extraction is needed in the future, it should be a query-time (JIT) facility with a dedicated RDR.
 - Source: EvidenceNet cross-document duplicate resolution (RF-061-6), HybridRAG KG+vector fusion (RF-061-1), LLM entity extraction (RF-061-8)
 - Key files: `src/nexus/catalog/auto_linker.py`, `src/nexus/catalog/link_generator.py`
-- Effort: ~7 hours (3h symbol matching + 4h LLM hybrid)
+- Effort: ~3 hours (Phase 2a only)
 
 #### E4: Composable Query Operators
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from nexus.mcp.core import (  # noqa: F401
     search, query,
     store_put, store_get, store_list, store_delete,
-    memory_put, memory_get, memory_delete, memory_search,
+    memory_put, memory_get, memory_delete, memory_search, memory_consolidate,
     scratch, scratch_manage,
     collection_list, collection_info, collection_verify,
     plan_save, plan_search,

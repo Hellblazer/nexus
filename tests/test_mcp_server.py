@@ -686,10 +686,10 @@ async def test_mcp_server_round_trip():
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             tool_names = [t.name for t in (await session.list_tools()).tools]
-            # All 14 core tools must be present
+            # All 15 core tools must be present
             expected_core_tools = {
                 "search", "query", "store_put", "store_get", "store_list",
-                "memory_put", "memory_get", "memory_delete", "memory_search",
+                "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
                 "scratch", "scratch_manage", "collection_list",
                 "plan_save", "plan_search",
             }
@@ -764,7 +764,7 @@ def test_mcp_shim_imports():
     """Verify mcp_server.py shim re-exports all expected symbols."""
     from nexus.mcp_server import (
         search, query, store_put, store_get, store_list, store_delete,
-        memory_put, memory_get, memory_delete, memory_search,
+        memory_put, memory_get, memory_delete, memory_search, memory_consolidate,
         scratch, scratch_manage, collection_list, collection_info,
         collection_verify, plan_save, plan_search,
         catalog_search, catalog_show, catalog_list, catalog_register,

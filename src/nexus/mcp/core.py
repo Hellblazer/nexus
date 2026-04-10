@@ -710,6 +710,80 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
 
 
 @mcp.tool()
+def memory_consolidate(
+    action: str,
+    project: str,
+    min_similarity: float = 0.7,
+    idle_days: int = 30,
+    keep_id: int = 0,
+    delete_ids: str = "",
+    merged_content: str = "",
+    limit: int = 50,
+) -> str:
+    """Memory consolidation tools (RDR-061 E6): find overlaps, merge entries, flag stale.
+
+    Args:
+        action: One of "find-overlaps", "merge", "flag-stale"
+        project: T2 project namespace to operate on
+        min_similarity: Jaccard threshold for find-overlaps (default 0.7)
+        idle_days: Staleness threshold for flag-stale (default 30)
+        keep_id: Entry ID to keep when merging
+        delete_ids: Comma-separated IDs to delete during merge
+        merged_content: Replacement content for kept entry during merge
+        limit: Max results for find-overlaps (default 50)
+    """
+    try:
+        if action == "find-overlaps":
+            if not project:
+                return "Error: project is required for find-overlaps"
+            with _t2_ctx() as db:
+                pairs = db.find_overlapping_memories(
+                    project=project,
+                    min_similarity=min_similarity,
+                    limit=limit,
+                )
+            if not pairs:
+                return f"No overlapping memories in {project!r} (min_similarity={min_similarity})"
+            lines = [f"Found {len(pairs)} overlapping pair(s) in {project!r}:"]
+            for a, b in pairs:
+                lines.append(f"  [{a['id']}] {a['title']}  ↔  [{b['id']}] {b['title']}")
+            return "\n".join(lines)
+
+        elif action == "merge":
+            if not keep_id or not delete_ids or not merged_content:
+                return "Error: merge requires keep_id, delete_ids, and merged_content"
+            try:
+                del_ids = [int(x.strip()) for x in delete_ids.split(",") if x.strip()]
+            except ValueError:
+                return "Error: delete_ids must be comma-separated integers"
+            with _t2_ctx() as db:
+                db.merge_memories(
+                    keep_id=keep_id,
+                    delete_ids=del_ids,
+                    merged_content=merged_content,
+                )
+            return f"Merged: kept [{keep_id}], deleted {del_ids}"
+
+        elif action == "flag-stale":
+            if not project:
+                return "Error: project is required for flag-stale"
+            with _t2_ctx() as db:
+                stale = db.flag_stale_memories(project=project, idle_days=idle_days)
+            if not stale:
+                return f"No stale entries in {project!r} (idle > {idle_days} days)"
+            lines = [f"Stale entries in {project!r} (idle > {idle_days} days):"]
+            for e in stale:
+                last = e.get("last_accessed") or e.get("timestamp", "")
+                lines.append(f"  [{e['id']}] {e['title']}  last: {last[:10]}")
+            return "\n".join(lines)
+
+        else:
+            return f"Error: unknown action {action!r}. Use: find-overlaps, merge, flag-stale"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def scratch(
     action: str,
     content: str = "",
