@@ -24,6 +24,87 @@ _T = TypeVar("_T")
 
 _COLLECTION = "scratch"
 
+# Common English stopwords — shared with MemoryStore._STOPWORDS for
+# consistency across the two overlap-detection helpers.
+_PROMOTE_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
+        "it", "that", "this", "with", "on", "at", "by", "from", "as", "be", "not",
+    }
+)
+
+# Jaccard threshold for promote() overlap confirmation. Matches the
+# default used by MemoryStore.find_overlapping_memories (RDR-061 E6) but
+# is slightly more permissive (0.5 vs 0.7) because the promote path
+# flags advisorily — the row is still written — while consolidation
+# uses the higher bar for destructive merges.
+_PROMOTE_OVERLAP_JACCARD = 0.5
+
+
+def _promote_content_words(text: str) -> set[str]:
+    """Return the set of non-stopword content tokens (length > 2) in *text*.
+
+    Lowercased for case-insensitive comparison. Shared between the FTS5
+    candidate query builder and the Jaccard confirmation step.
+    """
+    return {
+        w.lower() for w in text.split()
+        if len(w) > 2 and w.lower() not in _PROMOTE_STOPWORDS
+    }
+
+
+def _find_promote_overlap_candidates(
+    content: str,
+    project: str,
+    t2: T2Database,
+) -> list[dict]:
+    """Return existing T2 entries under *project* that overlap with *content*.
+
+    Two-phase match mirroring ``MemoryStore.find_overlapping_memories``:
+
+    1. Pull the first 3 content tokens (non-stopword, length > 2) and use
+       them as the FTS5 MATCH query for candidate retrieval. Keeping the
+       query small is critical: FTS5 defaults to implicit AND, so using
+       the full content would require every token to appear in the
+       candidate (making detection impossible for similar-but-not-identical
+       content).
+    2. Compute Jaccard similarity on the full non-stopword word sets and
+       keep only candidates at or above ``_PROMOTE_OVERLAP_JACCARD``.
+
+    Returns an empty list when no candidates exceed the threshold, or
+    when the content has fewer than 3 usable tokens.
+    """
+    words = [
+        w for w in content.split()
+        if len(w) > 2 and w.lower() not in _PROMOTE_STOPWORDS
+    ]
+    if len(words) < 3:
+        # Not enough content to compute a meaningful similarity — trust
+        # the caller's intent and report no overlap. Very short scratch
+        # entries (< 3 non-stopword tokens) don't benefit from overlap
+        # detection anyway.
+        return []
+    snippet = " ".join(words[:3])
+    try:
+        candidates = t2.memory.search(snippet, project=project, access="silent")
+    except ValueError:
+        return []
+    if not candidates:
+        return []
+    w_new = _promote_content_words(content)
+    if not w_new:
+        return []
+    hits: list[tuple[float, dict]] = []
+    for cand in candidates:
+        w_cand = _promote_content_words(cand.get("content", ""))
+        if not w_cand:
+            continue
+        jaccard = len(w_new & w_cand) / len(w_new | w_cand)
+        if jaccard >= _PROMOTE_OVERLAP_JACCARD:
+            hits.append((jaccard, cand))
+    hits.sort(key=lambda x: -x[0])
+    return [cand for _, cand in hits]
+
 
 class T1Database:
     """T1 ChromaDB session scratch — shared across all agents in a session tree.
@@ -318,7 +399,23 @@ class T1Database:
     # ── Promote ───────────────────────────────────────────────────────────────
 
     def promote(self, id: str, project: str, title: str, t2: T2Database) -> "PromotionReport":
-        """Copy T1 entry *id* to T2 immediately. Returns a PromotionReport."""
+        """Copy T1 entry *id* to T2 immediately. Returns a PromotionReport.
+
+        Overlap detection (RDR-057): pulls the first few non-stopword content
+        tokens from the scratch entry and FTS5-searches T2 for any existing
+        entry under the same project that matches them. If candidates come
+        back, confirms with Jaccard similarity (≥ 0.5) on the non-stopword
+        word sets before reporting ``overlap_detected``.
+
+        Why not MATCH the full snippet: FTS5 MATCH uses implicit AND, so a
+        full-content query requires every token in the new entry to also
+        appear in the existing entry. By construction, similar-but-not-
+        identical content always has at least one new token, making the
+        full-snippet approach unable to detect the common case (v3.8.0
+        shakeout finding). Using a small token prefix for candidate
+        retrieval plus Jaccard for precision matches the pattern already
+        used by ``find_overlapping_memories`` (memory_store.py).
+        """
         from nexus.types import PromotionReport
 
         # Fetch without incrementing access_count (promote is a write-path, not a read)
@@ -326,12 +423,8 @@ class T1Database:
         if not result["ids"]:
             raise KeyError(f"No scratch entry: {id!r}")
         entry = self._to_row(result["ids"][0], result["documents"][0], result["metadatas"][0])
-        # FTS5 overlap detection: first ~100 chars as search query
-        snippet = entry["content"][:100]
-        try:
-            matches = t2.search(snippet, project=project)
-        except ValueError:
-            matches = []
+
+        matches = _find_promote_overlap_candidates(entry["content"], project, t2)
         if matches:
             best = matches[0]
             # merged=False: T2.put() writes the new entry as a separate row.

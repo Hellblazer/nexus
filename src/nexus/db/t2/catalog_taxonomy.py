@@ -438,6 +438,63 @@ class CatalogTaxonomy:
 
         return count
 
+    def purge_assignments_for_doc(self, project: str, title: str) -> int:
+        """Remove topic_assignments for a deleted memory entry, empty topics.
+
+        Called by ``T2Database.delete()`` after a successful memory row
+        deletion to prevent orphan ``topic_assignments`` rows (v3.8.0
+        shakeout finding). The ``topic_assignments.doc_id`` column
+        references ``memory.title`` by value, not by SQL foreign key, so
+        deleting a memory row by itself leaves dangling assignments that
+        show up in ``nx taxonomy list`` and ``nx taxonomy show`` as
+        ghost entries.
+
+        This method is idempotent and scoped: it only affects topics in
+        the given ``project`` (taxonomy's ``collection`` column) to
+        avoid accidentally touching unrelated taxonomies that might
+        reference the same title under a different project.
+
+        Two-step operation under ``self._lock``:
+
+        1. DELETE matching ``topic_assignments`` rows (``doc_id = title``
+           AND parent topic's ``collection = project``).
+        2. DELETE any topics in that collection whose ``doc_count``
+           implicit count has dropped to zero — i.e. topics that now
+           have no remaining assignments.
+
+        Returns the number of ``topic_assignments`` rows removed. The
+        count of cleaned-up topics is not returned because it is
+        derivable by the caller if needed and the common case is
+        "either 0 or exactly 1 assignment removed".
+        """
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                DELETE FROM topic_assignments
+                WHERE doc_id = ?
+                  AND topic_id IN (
+                      SELECT id FROM topics WHERE collection = ?
+                  )
+                """,
+                (title, project),
+            )
+            removed = cursor.rowcount
+            # Drop topics in this collection that no longer have any
+            # assignments. Scoped by collection so we don't disturb
+            # siblings from other projects.
+            self.conn.execute(
+                """
+                DELETE FROM topics
+                WHERE collection = ?
+                  AND id NOT IN (
+                      SELECT DISTINCT topic_id FROM topic_assignments
+                  )
+                """,
+                (project,),
+            )
+            self.conn.commit()
+        return removed
+
     def rebuild_taxonomy(
         self,
         project: str,

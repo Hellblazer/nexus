@@ -512,7 +512,8 @@ def link_cmd(
 
     Both FROM and TO accept tumblers (1.1.5) or titles. Built-in link types:
     cites, implements, implements-heuristic, supersedes, relates, quotes,
-    comments. Custom types are also accepted. Duplicate links are merged.
+    comments, formalizes. Custom types are also accepted. Duplicate links
+    are merged.
 
     \b
     Spans (optional) identify the specific passage being referenced:

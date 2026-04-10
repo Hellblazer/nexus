@@ -112,7 +112,7 @@ than agent convenience.
 | `nx collection verify` | Full-collection scan; expensive and rarely needed by agents |
 | `nx catalog unlink` | Destructive edge removal |
 | `nx catalog link-audit` | Full-graph scan; expensive and human-oriented |
-| `nx catalog link-bulk` | Bulk link creation; high blast radius if misused |
+| `nx catalog link-bulk-delete` (hidden) | Bulk link deletion by filter; high blast radius if misused |
 
 The underlying Python functions still exist under the same names inside
 `src/nexus/mcp/core.py` and `src/nexus/mcp/catalog.py` — they're just no
