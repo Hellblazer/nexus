@@ -224,12 +224,21 @@ src/nexus/db/
 - `T2Database` becomes a thin facade that exposes the existing public API by delegating to the underlying stores (`self.memory.put(...)`, `self.plans.save_plan(...)`).
 - Public method signatures are preserved: `memory_put`, `memory_search`, etc. keep working.
 
+**Connection model**: `t2/_connection.py` in Phase 1 exports a minimal `SharedConnection` dataclass:
+```python
+@dataclass(slots=True)
+class SharedConnection:
+    conn: sqlite3.Connection
+    lock: threading.Lock
+```
+All four stores receive a reference to the same `SharedConnection` instance in their constructors. Phase 1 = one connection, four stores sharing it. Phase 2 promotes each store to open its own `sqlite3.Connection` (and its own `threading.Lock`) and discard the shared object — the `SharedConnection` dataclass becomes a Phase 1-only artifact. Specifying this upfront prevents the Phase 1 bead from inventing a singleton that Phase 2 would then have to unwind.
+
 **Benefits of Phase 1**:
 - Each domain's schema, migrations, and queries live in one file (~150-300 LOC per module instead of 900+ in `t2.py`).
 - Tests can instantiate a single store in isolation (e.g., `MemoryStore(conn)` without also setting up plans/topics/telemetry).
 - Cross-domain joins become explicit (a file importing two modules signals the coupling).
 
-**Cost of Phase 1**: ~6 hours of mechanical refactoring, no behavior change, no migration.
+**Cost of Phase 1**: ~8-9 hours total. Steps 1-3 and 5-10 are ~5 hours of mechanical refactoring (no behavior change, no migration). Step 4 (taxonomy.py rewrite) is ~3-4 hours because it is NOT mechanical: each of taxonomy.py's 6 functions accesses `db._lock`/`db.conn.execute` directly (RF-063-2), and moving them onto a per-store connection requires reviewing each function's transaction scope — some functions use `with db._lock` at entry, others nest lock acquisition inside loops (e.g., `get_topic_tree`). Do not rush step 4.
 
 ### Phase 2: Separate connections per domain
 
@@ -309,7 +318,7 @@ Phase 2 also changes no schema — just lock topology. Any test that held assump
 
 ## Implementation Plan
 
-### Phase 1 — Logical split (~8 hours)
+### Phase 1 — Logical split (~8-9 hours)
 
 1. Create `src/nexus/db/t2/` package with `__init__.py` exposing `T2Database`
 2. Move `memory` table schema + methods (`put`, `get`, `search`, `list_entries`, `delete`, `expire`, `find_overlapping_memories`, `merge_memories`, `flag_stale_memories`) to `memory_store.py`
@@ -327,7 +336,9 @@ Phase 2 also changes no schema — just lock topology. Any test that held assump
 
 **Phase 1 test strategy**:
 
-First bead of Phase 1: create `tests/test_t2_facade.py` characterization test. Exercise one method from each domain and assert return values match pre-split behavior. This is the behavioral contract the refactor must preserve.
+The characterization test (`tests/test_t2_facade.py`) is a **smoke-test**, not the behavioral contract. The real contract is the existing 153 tests across 8 files — they must all pass unchanged (except those patching internals). `test_t2_facade.py` exists only to catch obvious facade wiring bugs (e.g., a method not delegated) before the full suite runs. Do not promote it to "the contract" — that would provide false confidence.
+
+First bead of Phase 1: create `tests/test_t2_facade.py` smoke-test. Exercise one method from each domain through the facade and assert return values are non-error. The assertion is "did the delegation happen?" not "did behavior match pre-split exactly."
 
 Baseline test inventory (captured 2026-04-10 via `grep -rl "T2Database\|taxonomy\." tests/`):
 
@@ -397,6 +408,7 @@ Not committed in this RDR. Revisit if Phase 2 load testing shows lock contention
 | Multi-connection SQLite locks become a new bug source | Phase 2 includes concurrency tests. WAL mode is production-tested for multi-writer. |
 | Scope creep into Phase 3 | Explicitly deferred. Phase 3 requires its own RDR if pursued. |
 | Topics/taxonomy coupling to memory.title fragile | Already fragile pre-split — Phase 1 makes it explicit via `from .memory_store import MemoryStore` in `catalog_taxonomy.py`. Visibility is the fix. |
+| Concurrent RDR-061 E6 (memory consolidation) work conflicts with step 2 | `find_overlapping_memories` and `merge_memories` are both moving to `memory_store.py`. If RDR-061 E6 follow-up work is in flight during the refactor window, coordinate branch strategy before cutting the Phase 1 bead to avoid merge conflicts on those methods. |
 
 ## Open Questions
 
