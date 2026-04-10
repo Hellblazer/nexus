@@ -88,8 +88,11 @@ Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of st
 
 `src/nexus/db/t2/` is a Python package split into four domain-specific
 stores. Each store owns its own tables in a shared SQLite file and runs
-against its own `sqlite3.Connection` in WAL mode, so writes in one
-domain never block writes in another.
+against its own `sqlite3.Connection` in WAL mode. Reads in one domain
+are never blocked by writes in another (the Phase 1 global Python
+mutex is gone); concurrent writes across domains still serialize at
+SQLite's single-writer WAL lock, but `busy_timeout=5000` absorbs the
+brief contention without raising `OperationalError`.
 
 | Store      | Class             | Attribute       | Responsibility                                         |
 |------------|-------------------|-----------------|--------------------------------------------------------|
@@ -109,9 +112,9 @@ through a specific domain store.
 
 ```python
 db = T2Database(path)
-db.memory.search("project", "query")      # domain method
-db.plans.save_plan(query, plan_json)      # domain method
-db.telemetry.log_relevance(query, ...)    # domain method
+db.memory.search("fts query", project="myproj")   # domain method
+db.plans.save_plan(query, plan_json)               # domain method
+db.telemetry.log_relevance(query, ...)             # domain method
 ```
 
 Existing call sites that use `db.search(...)`, `db.save_plan(...)`,
@@ -128,24 +131,32 @@ Phase 2 replaced a single shared connection with per-store connections:
 
 Phase 2 consequences:
 
-- **Concurrent domain writes don't block**: a `memory_put` and a
-  `plan_save` on two threads run in parallel against their own
-  connections. SQLite's WAL + `busy_timeout=5000` absorbs any brief
-  contention on the write-ahead log.
+- **Cross-domain reads no longer block on unrelated writes**: a
+  `memory_search` on one thread and a `plan_save` on another run in
+  parallel because the Phase 1 shared Python mutex is gone. Concurrent
+  *writes* across domains still serialize at SQLite's single-writer
+  WAL lock, but `busy_timeout=5000` absorbs the brief queue so callers
+  do not see `OperationalError: database is locked`.
 - **Telemetry no longer interferes with search**: MCP relevance-log
   writes run on the telemetry connection, so `memory_search` is not
   blocked by access-tracking hooks.
 - **Cluster rebuilds don't freeze memory**: `taxonomy.cluster_and_persist`
-  runs on the taxonomy connection, so interactive memory operations
-  continue during background re-clustering.
-- **Parallel writes to the same store are still serialized** by that
-  store's own `threading.Lock`, so callers never see
-  `OperationalError: database is locked`.
+  runs on the taxonomy connection; the long numpy clustering phase holds
+  no T2 locks, so interactive memory operations continue during the
+  bulk of the rebuild. (The initial `memory.get_all()` snapshot read
+  still briefly acquires `memory`'s lock, as any read does.)
+- **Parallel writes to the same store are serialized** by that store's
+  own `threading.Lock` plus the SQLite file-level write lock — callers
+  never see `OperationalError: database is locked`.
 
 **Migrations**: Each store owns its schema-migration guards and runs
-them the first time it opens a given database path. Because the guards
-are per-domain, independent stores can initialize in parallel without
-coordinating through a single global migration lock.
+them the first time it opens a given database path. The guards are
+per-domain, so concurrent `T2Database` constructors on the same path
+can each reach their own `_init_schema` without coordinating through a
+single global migration lock. (`T2Database.__init__` itself constructs
+the four stores sequentially in dependency order — the per-domain
+guard matters for multi-process / multi-constructor races, not for the
+sequential initialization inside a single `T2Database`.)
 
 **In-memory SQLite**: Tests that want an ephemeral database should use
 a temp file path, not `":memory:"` — `:memory:` databases are

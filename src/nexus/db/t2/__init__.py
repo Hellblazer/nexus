@@ -25,16 +25,20 @@ New code should prefer the domain methods over the facade:
 .. code-block:: python
 
     db = T2Database(path)
-    db.memory.search("project", "query")   # preferred
-    db.search("query", project="project")  # facade delegate — also works
+    db.memory.search("fts query", project="myproj")   # preferred
+    db.search("fts query", project="myproj")          # facade delegate
 
 Concurrency model (RDR-063 Phase 2):
 
 * Each store opens its own ``sqlite3.Connection`` against the shared
-  file and guards it with its own ``threading.Lock``. Writes against
-  different stores never block each other at the Python layer.
+  file and guards it with its own ``threading.Lock``. Reads in one
+  domain are never blocked by writes in another domain (the Phase 1
+  global Python mutex is gone). Concurrent writes across domains
+  still serialize at SQLite's single-writer WAL lock — ``busy_timeout``
+  absorbs brief contention without raising ``OperationalError``.
 * All connections run in WAL mode with a 5-second ``busy_timeout``,
-  so cross-domain coordination happens in SQLite rather than Python.
+  so cross-domain write coordination happens in SQLite rather than
+  Python.
 * Telemetry writes from MCP hooks no longer block ``memory.search``.
 * ``taxonomy.cluster_and_persist`` no longer freezes interactive
   memory access while rebuilding clusters.

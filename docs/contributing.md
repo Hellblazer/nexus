@@ -73,7 +73,8 @@ for the map.
 2. If the feature needs a new table or column, add a per-store
    migration that runs the first time that store opens a database
    path (the existing stores show the pattern — a module-level
-   guard dict + lock, checked in `__init__`).
+   `_migrated_paths: set[str]` guard + `_migrated_lock`, checked
+   in `__init__`).
 3. If external callers should be able to use the method via the
    `T2Database` facade for backward compatibility, add a one-line
    delegate on `T2Database` in `src/nexus/db/t2/__init__.py`.
