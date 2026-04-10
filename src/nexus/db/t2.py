@@ -827,13 +827,18 @@ class T2Database:
 
         Also purges relevance_log rows older than ``relevance_log_days`` days
         (default 90) to prevent unbounded growth of the telemetry table.
-        The return value counts only memory rows deleted, not log rows.
+        Return value counts only memory rows deleted. Log purge count and
+        errors are surfaced via structured logs (``expire_complete`` /
+        ``expire_relevance_log_failed``).
         """
         # Purge relevance_log (RDR-061 E2 telemetry retention).
         # Call outside the main lock — expire_relevance_log acquires its own.
+        log_deleted = 0
+        log_error: str | None = None
         try:
-            self.expire_relevance_log(days=relevance_log_days)
+            log_deleted = self.expire_relevance_log(days=relevance_log_days)
         except Exception as exc:
+            log_error = type(exc).__name__
             _log.warning("expire_relevance_log_failed", exc_info=exc)
         with self._lock:
             rows = self.conn.execute(
@@ -857,6 +862,12 @@ class T2Database:
                     f"DELETE FROM memory WHERE id IN ({placeholders})", expired_ids
                 )
                 self.conn.commit()
+        _log.info(
+            "expire_complete",
+            memory_deleted=len(expired_ids),
+            relevance_log_deleted=log_deleted,
+            relevance_log_error=log_error,
+        )
         return len(expired_ids)
 
     def expire_relevance_log(self, days: int = 90) -> int:

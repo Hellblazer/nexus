@@ -583,16 +583,15 @@ def test_expire_also_purges_relevance_log(db: T2Database) -> None:
     assert db.get_relevance_log() == []
 
 
-def test_migration_guard_concurrent_construction(tmp_path: Path) -> None:
-    """Two T2Database instances on the same path do not re-run migrations concurrently."""
+def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) -> None:
+    """Two T2Database instances on the same path do not re-run migrations sequentially."""
     from nexus.db import t2 as t2_module
 
     # Clear any prior migration state for this path
-    path = tmp_path / "concurrent.db"
+    path = tmp_path / "sequential.db"
     with t2_module._migrated_lock:
         t2_module._migrated_paths.discard(str(path))
 
-    # First instance: migrations should run once
     call_count = {"n": 0}
     original = T2Database._migrate_plans_if_needed
 
@@ -600,17 +599,67 @@ def test_migration_guard_concurrent_construction(tmp_path: Path) -> None:
         call_count["n"] += 1
         return original(self)
 
-    T2Database._migrate_plans_if_needed = counting
-    try:
-        db1 = T2Database(path)
-        assert call_count["n"] == 1
-        # Second instance on the same path: migration must NOT run again
-        db2 = T2Database(path)
-        assert call_count["n"] == 1, (
-            "Migration ran a second time — the _migrated_paths guard failed"
-        )
-    finally:
-        T2Database._migrate_plans_if_needed = original
+    monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
+
+    db1 = T2Database(path)
+    assert call_count["n"] == 1
+    # Second instance on the same path: migration must NOT run again
+    db2 = T2Database(path)
+    assert call_count["n"] == 1, (
+        "Migration ran a second time — the _migrated_paths guard failed"
+    )
+
+
+def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None:
+    """10 threads constructing T2Database on the same path run migrations exactly once.
+
+    This is the regression test for F2 (round 2) — the race where two
+    concurrent constructors could both enter the migration functions.
+    """
+    import threading
+
+    from nexus.db import t2 as t2_module
+
+    path = tmp_path / "concurrent.db"
+    with t2_module._migrated_lock:
+        t2_module._migrated_paths.discard(str(path))
+
+    call_count = {"n": 0}
+    count_lock = threading.Lock()
+    original = T2Database._migrate_plans_if_needed
+
+    def counting(self):
+        with count_lock:
+            call_count["n"] += 1
+        return original(self)
+
+    monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
+
+    barrier = threading.Barrier(10)
+    errors: list[Exception] = []
+    dbs: list[T2Database] = []
+    dbs_lock = threading.Lock()
+
+    def worker():
+        try:
+            barrier.wait()
+            db = T2Database(path)
+            with dbs_lock:
+                dbs.append(db)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"Concurrent construction raised: {errors}"
+    assert call_count["n"] == 1, (
+        f"Migration ran {call_count['n']} times across 10 concurrent "
+        f"constructions — expected exactly 1 (the guard lock failed)"
+    )
 
 
 def test_get_returns_post_increment_access_count(db: T2Database) -> None:

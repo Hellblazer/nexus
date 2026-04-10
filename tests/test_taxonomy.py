@@ -194,7 +194,7 @@ def test_cluster_and_persist_filters_stopwords(db: T2Database) -> None:
 
 def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
     """get_topic_docs JOINs on memory.title to resolve human-readable titles."""
-    # Insert a memory entry — title must match doc_id for the JOIN to work
+    # Insert a memory entry — title must match doc_id AND project must match collection
     db.put(project="test", title="my-research-note", content="some content")
 
     db.conn.execute(
@@ -212,6 +212,39 @@ def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
     assert len(docs) == 1
     assert docs[0]["doc_id"] == "my-research-note"
     assert docs[0]["title"] == "my-research-note"
+
+
+def test_get_topic_docs_known_defect_project_collection_mismatch(db: T2Database) -> None:
+    """RDR-063 Known Defect: get_topic_docs() JOIN conflates T3 collection with T2 project.
+
+    This test DOCUMENTS the defect: when a topic's ``collection`` is a T3
+    collection name (e.g. ``code__myrepo``) and the memory entry's ``project``
+    is the T2 project name (e.g. ``myrepo``), the JOIN fails and ``title``
+    returns as the unresolved ``doc_id`` fallback.
+
+    This test will fail when the defect is fixed — at which point, rewrite
+    the assertions to verify proper resolution.
+    """
+    # Memory entry in a T2 project
+    db.put(project="myrepo", title="chunk-abc", content="code content")
+
+    # Topic associated with a T3 collection name (NOT the T2 project name)
+    db.conn.execute(
+        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+        ("code topic", "code__myrepo", 1, "2026-01-01T00:00:00Z"),
+    )
+    topic_id = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.conn.execute(
+        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+        ("chunk-abc", topic_id),
+    )
+    db.conn.commit()
+
+    docs = get_topic_docs(db, topic_id)
+    assert len(docs) == 1
+    # The JOIN fails → title falls back to doc_id value
+    # (when fixed, title should be "chunk-abc" via a successful JOIN instead of a fallback)
+    assert docs[0]["doc_id"] == "chunk-abc"
 
 
 def test_cli_taxonomy_list(db: T2Database) -> None:

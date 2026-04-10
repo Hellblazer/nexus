@@ -226,20 +226,27 @@ def search_cross_corpus(
         all_results = apply_link_boost(all_results, catalog)
 
     # Fetch embeddings once if either contradiction detection OR clustering
-    # needs them — avoids double fetching (F1 fix).
+    # needs them — avoids double fetching (F1 fix). Per-collection failures
+    # are isolated: failed indices are excluded from feature processing but
+    # do not suppress the features for successfully-fetched collections (R3-1).
     contradiction_enabled = cfg.get("search", {}).get("contradiction_check", True)
     needs_embeddings = (contradiction_enabled or cluster_by == "semantic") and all_results
     fetched_embeddings = None
+    failed_indices: set[int] = set()
     if needs_embeddings:
-        fetched_embeddings = _fetch_embeddings_for_results(all_results, t3)
+        fetched_embeddings, failed_indices = _fetch_embeddings_for_results(all_results, t3)
 
     # Contradiction detection (RDR-057 Phase 3a). Default-on; opt out via
     # search.contradiction_check=false in .nexus.yml.
     if contradiction_enabled and all_results and fetched_embeddings is not None:
-        all_results = _flag_contradictions(all_results, fetched_embeddings)
+        all_results = _flag_contradictions(all_results, fetched_embeddings, failed_indices)
 
     if cluster_by == "semantic" and all_results and fetched_embeddings is not None:
-        all_results = _apply_clustering(all_results, fetched_embeddings)
+        # Clustering cannot partially-cluster — if any collection fetch
+        # failed, fall through to unclustered results rather than corrupting
+        # the cluster assignment by excluding some results.
+        if not failed_indices:
+            all_results = _apply_clustering(all_results, fetched_embeddings)
 
     return all_results
 
@@ -247,12 +254,19 @@ def search_cross_corpus(
 def _fetch_embeddings_for_results(
     results: list[SearchResult],
     t3: Any,
-) -> "np.ndarray | None":
+) -> "tuple[np.ndarray | None, set[int]]":
     """Fetch embeddings for all results in one pass, grouped by collection.
 
-    Returns a float32 ndarray of shape (len(results), emb_dim) where each row
-    corresponds to results[i]. Returns None on shape mismatch or fetch failure
-    (so callers fall through to unclustered / unflagged behavior).
+    Returns ``(embeddings, failed_indices)`` where:
+    - ``embeddings`` is a float32 ndarray of shape ``(len(results), emb_dim)``
+      with zero rows for any position in ``failed_indices``
+    - ``failed_indices`` is the set of result indices whose collection fetch
+      failed or had a shape mismatch
+
+    When ALL collections fail, returns ``(None, all_indices)``.
+    Callers must skip ``failed_indices`` when processing — feature logic
+    (contradiction check, clustering) continues for successfully-fetched
+    collections rather than being suppressed entirely (R3-1 fix).
     """
     import numpy as np
 
@@ -261,6 +275,12 @@ def _fetch_embeddings_for_results(
         col_groups.setdefault(r.collection, []).append(idx)
 
     embeddings: "np.ndarray | None" = None
+    failed_indices: set[int] = set()
+
+    # First pass: determine emb_dim from a successful fetch so we can
+    # allocate the output array. Collect per-collection results as we go.
+    col_fetched: dict[str, "np.ndarray"] = {}
+    emb_dim: int | None = None
     for col, indices in col_groups.items():
         ids = [results[i].id for i in indices]
         try:
@@ -272,7 +292,8 @@ def _fetch_embeddings_for_results(
                 requested=len(indices),
                 exc_info=exc,
             )
-            return None
+            failed_indices.update(indices)
+            continue
         if col_emb.shape[0] != len(indices):
             _log.warning(
                 "embedding_fetch_shape_mismatch",
@@ -280,17 +301,29 @@ def _fetch_embeddings_for_results(
                 requested=len(indices),
                 got=col_emb.shape[0],
             )
-            return None
-        if embeddings is None:
-            embeddings = np.zeros((len(results), col_emb.shape[1]), dtype=np.float32)
+            failed_indices.update(indices)
+            continue
+        col_fetched[col] = col_emb
+        if emb_dim is None:
+            emb_dim = col_emb.shape[1]
+
+    # If nothing fetched, nothing to assemble
+    if emb_dim is None:
+        return None, failed_indices
+
+    embeddings = np.zeros((len(results), emb_dim), dtype=np.float32)
+    for col, col_emb in col_fetched.items():
+        indices = col_groups[col]
         for local_idx, global_idx in enumerate(indices):
             embeddings[global_idx] = col_emb[local_idx]
-    return embeddings
+
+    return embeddings, failed_indices
 
 
 def _flag_contradictions(
     results: list[SearchResult],
     embeddings: "np.ndarray",
+    failed_indices: set[int] | None = None,
 ) -> list[SearchResult]:
     """Flag results where same-collection pairs have different source_agent and close distance.
 
@@ -300,11 +333,18 @@ def _flag_contradictions(
 
     Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
     duplicate ChromaDB round-trips when clustering also runs.
+
+    ``failed_indices`` are excluded from the check — their embeddings are
+    zero-filled placeholders from the shared fetch helper and must not be
+    compared against valid rows.
     """
     import numpy as np
 
+    failed_indices = failed_indices or set()
     col_groups: dict[str, list[int]] = {}
     for idx, r in enumerate(results):
+        if idx in failed_indices:
+            continue
         col_groups.setdefault(r.collection, []).append(idx)
 
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)

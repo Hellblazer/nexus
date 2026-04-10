@@ -311,6 +311,87 @@ def test_mcp_memory_consolidate_keep_id_zero_rejected(db: T2Database, monkeypatc
     assert "keep_id>0" in result
 
 
+def test_mcp_memory_consolidate_merge_dry_run(db: T2Database, monkeypatch) -> None:
+    """dry_run=True returns a preview without modifying T2."""
+    from nexus.mcp.core import memory_consolidate
+
+    id_a = db.put(project="proj", title="a.md", content="content a")
+    id_b = db.put(project="proj", title="b.md", content="content b")
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    result = memory_consolidate(
+        action="merge",
+        project="proj",
+        keep_id=id_a,
+        delete_ids=str(id_b),
+        merged_content="merged preview",
+        dry_run=True,
+    )
+    assert "[DRY RUN]" in result
+    assert "a.md" in result
+    # No modification occurred
+    assert db.get(id=id_a)["content"] == "content a"
+    assert db.get(id=id_b) is not None
+
+
+def test_mcp_memory_consolidate_merge_multi_requires_confirm(
+    db: T2Database, monkeypatch
+) -> None:
+    """Merging more than one entry requires confirm_destructive=True."""
+    from nexus.mcp.core import memory_consolidate
+
+    id_a = db.put(project="proj", title="a.md", content="a")
+    id_b = db.put(project="proj", title="b.md", content="b")
+    id_c = db.put(project="proj", title="c.md", content="c")
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    # Without confirm — rejected
+    result = memory_consolidate(
+        action="merge",
+        project="proj",
+        keep_id=id_a,
+        delete_ids=f"{id_b},{id_c}",
+        merged_content="merged",
+    )
+    assert "Error" in result
+    assert "confirm_destructive" in result
+    assert db.get(id=id_b) is not None  # untouched
+
+    # With confirm — proceeds
+    result = memory_consolidate(
+        action="merge",
+        project="proj",
+        keep_id=id_a,
+        delete_ids=f"{id_b},{id_c}",
+        merged_content="merged",
+        confirm_destructive=True,
+    )
+    assert "Merged" in result
+    assert db.get(id=id_b) is None
+    assert db.get(id=id_c) is None
+
+
+def test_mcp_memory_consolidate_merge_single_delete_no_confirm(
+    db: T2Database, monkeypatch
+) -> None:
+    """Merging a single entry does NOT require confirm_destructive."""
+    from nexus.mcp.core import memory_consolidate
+
+    id_a = db.put(project="proj", title="a.md", content="a")
+    id_b = db.put(project="proj", title="b.md", content="b")
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    result = memory_consolidate(
+        action="merge",
+        project="proj",
+        keep_id=id_a,
+        delete_ids=str(id_b),
+        merged_content="merged",
+    )
+    assert "Merged" in result
+    assert db.get(id=id_b) is None
+
+
 def test_find_overlapping_does_not_bump_access_count(db: T2Database) -> None:
     """find_overlapping_memories must NOT contaminate the staleness signal."""
     db.put(project="proj", title="a.md",

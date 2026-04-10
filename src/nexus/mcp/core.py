@@ -719,6 +719,8 @@ def memory_consolidate(
     delete_ids: str = "",
     merged_content: str = "",
     limit: int = 50,
+    dry_run: bool = False,
+    confirm_destructive: bool = False,
 ) -> str:
     """Memory consolidation tools (RDR-061 E6): find overlaps, merge entries, flag stale.
 
@@ -731,6 +733,8 @@ def memory_consolidate(
         delete_ids: Comma-separated IDs to delete during merge
         merged_content: Replacement content for kept entry during merge
         limit: Max results for find-overlaps (default 50)
+        dry_run: For merge, return a preview without modifying T2 (default False)
+        confirm_destructive: Required when merge would delete >1 entry (default False)
     """
     try:
         if action == "find-overlaps":
@@ -760,6 +764,26 @@ def memory_consolidate(
                 return "Error: delete_ids must contain at least one integer ID"
             if keep_id in del_ids:
                 return f"Error: keep_id ({keep_id}) must not appear in delete_ids"
+            # Safety gate: merges deleting more than one entry require
+            # explicit confirmation. Dry-run returns a preview without
+            # modifying T2 (matches catalog_link_bulk's pattern).
+            if dry_run:
+                with _t2_ctx() as db:
+                    keep_entry = db.get(id=keep_id)
+                if keep_entry is None:
+                    return f"Error: keep_id {keep_id} not found"
+                preview = (
+                    f"[DRY RUN] Would merge:\n"
+                    f"  keep: [{keep_id}] {keep_entry['title']}\n"
+                    f"  delete: {del_ids}\n"
+                    f"  new content: {merged_content[:200]}"
+                )
+                return preview
+            if len(del_ids) > 1 and not confirm_destructive:
+                return (
+                    f"Error: would delete {len(del_ids)} entries — set "
+                    f"confirm_destructive=True to proceed, or dry_run=True to preview"
+                )
             with _t2_ctx() as db:
                 db.merge_memories(
                     keep_id=keep_id,

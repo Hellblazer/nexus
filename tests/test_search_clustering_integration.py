@@ -68,6 +68,136 @@ class TestClusterByNone:
         assert t3.get_embeddings_calls == []
 
 
+class TestFullPipeline:
+    """End-to-end tests covering contradiction + clustering + link_boost together.
+
+    These tests bypass the _disable_contradiction_check autouse fixture by
+    constructing their own test context. They ensure the full search pipeline
+    exercises all features simultaneously, catching regressions like F1 (double
+    embedding fetch) and interaction bugs like metadata flag propagation.
+    """
+
+    def test_single_fetch_when_contradiction_and_clustering_both_enabled(
+        self, monkeypatch
+    ) -> None:
+        """Regression for F1: both features share one embedding fetch per collection."""
+        monkeypatch.setattr(
+            "nexus.search_engine.load_config",
+            lambda: {"search": {"contradiction_check": True}},
+        )
+
+        # Two collections, 3 results each so clustering has material to work with
+        t3 = _FakeT3({
+            "code__a": _low_distance_results("code__a", 3),
+            "docs__b": _low_distance_results("docs__b", 3),
+        })
+        search_cross_corpus(
+            "q",
+            ["code__a", "docs__b"],
+            10,
+            t3,
+            cluster_by="semantic",
+        )
+        # Exactly ONE fetch per collection, not TWO (F1 fix)
+        fetched_cols = [c[0] for c in t3.get_embeddings_calls]
+        assert fetched_cols.count("code__a") == 1
+        assert fetched_cols.count("docs__b") == 1
+        assert len(t3.get_embeddings_calls) == 2
+
+    def test_contradiction_flag_survives_clustering(self, monkeypatch) -> None:
+        """R3-5 regression: clustering must preserve _contradiction_flag in metadata."""
+        monkeypatch.setattr(
+            "nexus.search_engine.load_config",
+            lambda: {"search": {"contradiction_check": True}},
+        )
+
+        # Craft close embeddings so contradiction fires.
+        # Note: search_cross_corpus builds SearchResult.metadata from all keys
+        # except id/content/distance — so source_agent must be a top-level key.
+        class _ContradictingT3:
+            _voyage_client = "fake"
+
+            def search(self, query, collection_names, n_results=10, where=None):
+                return [
+                    {"id": "chunk-a", "content": "text", "distance": 0.1,
+                     "source_agent": "agent-alpha"},
+                    {"id": "chunk-b", "content": "text", "distance": 0.15,
+                     "source_agent": "agent-beta"},
+                    {"id": "chunk-c", "content": "text", "distance": 0.2,
+                     "source_agent": "agent-gamma"},
+                ]
+
+            def get_embeddings(self, collection_name, ids):
+                # Near-identical vectors — cosine distance < 0.3
+                return np.array([
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.99, 0.01, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],  # c is far from a/b
+                ], dtype=np.float32)
+
+        t3 = _ContradictingT3()
+        results = search_cross_corpus(
+            "q", ["code__test"], 10, t3, cluster_by="semantic",
+        )
+        # At least one result should still carry the contradiction flag after clustering
+        flagged = [r for r in results if r.metadata.get("_contradiction_flag")]
+        assert len(flagged) >= 2, (
+            "Clustering dropped _contradiction_flag — the metadata-preservation "
+            "invariant between _flag_contradictions and _apply_clustering broke"
+        )
+
+    def test_partial_collection_failure_does_not_suppress_other_flags(
+        self, monkeypatch
+    ) -> None:
+        """R3-1 regression: one failing collection does not suppress features for others."""
+        monkeypatch.setattr(
+            "nexus.search_engine.load_config",
+            lambda: {"search": {"contradiction_check": True}},
+        )
+
+        class _PartialT3:
+            _voyage_client = "fake"
+            get_embeddings_calls = []
+
+            def search(self, query, collection_names, n_results=10, where=None):
+                col = collection_names[0]
+                if col == "code__good":
+                    return [
+                        {"id": "a", "content": "t", "distance": 0.1,
+                         "source_agent": "alpha"},
+                        {"id": "b", "content": "t", "distance": 0.15,
+                         "source_agent": "beta"},
+                    ]
+                return [
+                    {"id": "c", "content": "t", "distance": 0.1,
+                     "source_agent": "gamma"},
+                    {"id": "d", "content": "t", "distance": 0.15,
+                     "source_agent": "delta"},
+                ]
+
+            def get_embeddings(self, collection_name, ids):
+                self.get_embeddings_calls.append((collection_name, ids))
+                if collection_name == "code__broken":
+                    raise RuntimeError("simulated collection fault")
+                # good collection: identical vectors → contradiction
+                return np.array([
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.99, 0.01, 0.0, 0.0],
+                ], dtype=np.float32)
+
+        t3 = _PartialT3()
+        results = search_cross_corpus(
+            "q", ["code__good", "code__broken"], 10, t3,
+        )
+        # good collection should still have contradiction flags despite broken one
+        good_results = [r for r in results if r.collection == "code__good"]
+        flagged_good = [r for r in good_results if r.metadata.get("_contradiction_flag")]
+        assert len(flagged_good) >= 2, (
+            "R3-1 regression: partial collection failure suppressed contradiction "
+            "flags on successfully-fetched collections"
+        )
+
+
 class TestClusterShapeGuard:
     """Regression: _apply_clustering must not raise when get_embeddings
     returns fewer rows than requested (e.g., deleted chunks)."""
