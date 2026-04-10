@@ -105,6 +105,15 @@ def test_get_relevance_log_ordered_most_recent_first(t2):
 
 
 @pytest.fixture(autouse=True)
+def _git_identity(monkeypatch):
+    """Catalog.init() runs git; CI runners have no identity configured."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+
+
+@pytest.fixture(autouse=True)
 def _clear_traces():
     clear_search_traces()
     yield
