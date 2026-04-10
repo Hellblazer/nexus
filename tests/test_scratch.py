@@ -142,6 +142,88 @@ def test_promote_writes_to_t2_regardless_of_action(t1: T1Database, db: T2Databas
     assert r["content"] == "overlap content here"
 
 
+def test_promote_overlap_detected_on_superset_content(t1: T1Database, db: T2Database) -> None:
+    """Regression (v3.8.0 shakeout): superset content triggers overlap_detected.
+
+    Pre-v3.8.1, ``T1.promote()`` used the scratch entry's full first-100-char
+    snippet as an FTS5 MATCH query. FTS5 MATCH is implicit-AND, so any
+    scratch content with even one token not present in the existing T2
+    entry would return zero matches and falsely report ``action=new``.
+
+    The fix uses only the first 3 non-stopword tokens for candidate
+    retrieval and then confirms with Jaccard similarity on the full
+    word sets. This test pins the superset case that was the v3.8.0
+    shakeout failure: scratch content contains all of the existing T2
+    entry's words plus one extra.
+    """
+    db.put(
+        project="proj",
+        title="base.md",
+        content="alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+    )
+    doc_id = t1.put(
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda EXTRA"
+    )
+    report = t1.promote(doc_id, project="proj", title="superset.md", t2=db)
+    assert report.action == "overlap_detected", (
+        f"superset content should fire overlap_detected, got {report.action}"
+    )
+    assert report.existing_title == "base.md"
+    assert report.merged is False
+
+
+def test_promote_returns_new_when_jaccard_below_threshold(
+    t1: T1Database, db: T2Database,
+) -> None:
+    """Short subset content reports new, not overlap_detected.
+
+    Three non-stopword tokens against an 11-token base entry gives a
+    Jaccard of 3/11 ≈ 0.27 which is below the 0.5 promote threshold.
+    The content is "similar" by containment but semantically distinct
+    — a 3-word summary vs an 11-word paragraph — so ``new`` is the
+    honest answer.
+    """
+    db.put(
+        project="proj",
+        title="paragraph.md",
+        content="alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+    )
+    doc_id = t1.put("alpha beta gamma")
+    report = t1.promote(doc_id, project="proj", title="short.md", t2=db)
+    assert report.action == "new", (
+        f"3-of-11 subset is below Jaccard 0.5 threshold, should be new, got {report.action}"
+    )
+
+
+def test_promote_returns_new_when_content_too_short(
+    t1: T1Database, db: T2Database,
+) -> None:
+    """Scratch content with fewer than 3 non-stopword tokens always returns new.
+
+    Very short entries (one or two words) don't benefit from overlap
+    detection — there's not enough signal to compute a meaningful
+    Jaccard or a sensible FTS5 query. Return ``new`` without a search.
+    """
+    db.put(project="proj", title="existing.md", content="some existing content")
+    doc_id = t1.put("hi")  # 1 token, below the 3-token minimum
+    report = t1.promote(doc_id, project="proj", title="tiny.md", t2=db)
+    assert report.action == "new"
+
+
+def test_promote_overlap_ignores_unrelated_content(
+    t1: T1Database, db: T2Database,
+) -> None:
+    """Completely unrelated content under the same project reports new."""
+    db.put(
+        project="proj",
+        title="auth.md",
+        content="authentication design patterns using JWT with refresh rotation",
+    )
+    doc_id = t1.put("completely unrelated kubernetes scheduling topology constraints")
+    report = t1.promote(doc_id, project="proj", title="k8s.md", t2=db)
+    assert report.action == "new"
+
+
 # ── AC6: clear ────────────────────────────────────────────────────────────────
 
 def test_scratch_clear_removes_all(t1: T1Database) -> None:

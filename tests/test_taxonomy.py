@@ -264,6 +264,149 @@ def test_get_topic_docs_known_defect_project_collection_mismatch(db: T2Database)
     )
 
 
+# ── Cascade on memory delete (v3.8.1) ─────────────────────────────────────
+
+
+def test_memory_delete_cascades_topic_assignments(db: T2Database) -> None:
+    """Deleting a memory entry removes its topic_assignments (v3.8.1 fix).
+
+    Regression pin: pre-v3.8.1, ``nx memory delete`` left dangling
+    ``topic_assignments`` rows whose ``doc_id`` referenced the deleted
+    entry. Those orphans surfaced in ``nx taxonomy list`` / ``nx
+    taxonomy show`` as ghost entries. The fix adds a cascade in the
+    facade ``T2Database.delete()`` that calls
+    ``CatalogTaxonomy.purge_assignments_for_doc()``.
+    """
+    # Seed memory entries for a project
+    db.put(project="proj", title="doc-a", content="alpha content here")
+    db.put(project="proj", title="doc-b", content="beta content here")
+
+    # Seed a topic with both entries assigned
+    db.taxonomy.conn.execute(
+        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+        ("test-topic", "proj", 2, "2026-01-01T00:00:00Z"),
+    )
+    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.taxonomy.conn.executemany(
+        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+        [("doc-a", topic_id), ("doc-b", topic_id)],
+    )
+    db.taxonomy.conn.commit()
+
+    # Sanity: both assignments present
+    pre = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
+    ).fetchone()[0]
+    assert pre == 2
+
+    # Delete doc-a via the facade — should cascade-purge its assignment
+    assert db.delete(project="proj", title="doc-a") is True
+
+    post = db.taxonomy.conn.execute(
+        "SELECT doc_id FROM topic_assignments WHERE topic_id = ? ORDER BY doc_id",
+        (topic_id,),
+    ).fetchall()
+    assert [r[0] for r in post] == ["doc-b"], (
+        "cascade should have removed doc-a's assignment but kept doc-b's"
+    )
+
+    # Topic still exists because doc-b still references it
+    topics_remaining = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topics WHERE collection = 'proj'"
+    ).fetchone()[0]
+    assert topics_remaining == 1
+
+
+def test_memory_delete_drops_empty_topics(db: T2Database) -> None:
+    """Deleting the last memory entry in a topic also drops the topic."""
+    db.put(project="proj", title="solo-doc", content="lonely content")
+    db.taxonomy.conn.execute(
+        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+        ("solo-topic", "proj", 1, "2026-01-01T00:00:00Z"),
+    )
+    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.taxonomy.conn.execute(
+        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+        ("solo-doc", topic_id),
+    )
+    db.taxonomy.conn.commit()
+
+    assert db.delete(project="proj", title="solo-doc") is True
+
+    # Assignment gone
+    ta_count = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
+    ).fetchone()[0]
+    assert ta_count == 0
+
+    # Topic also gone (empty after the cascade)
+    topic_count = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topics WHERE id = ?", (topic_id,)
+    ).fetchone()[0]
+    assert topic_count == 0
+
+
+def test_memory_delete_cascade_scoped_to_project(db: T2Database) -> None:
+    """Cascade only touches topics in the deleted entry's project.
+
+    If two projects happen to have a memory entry with the same title,
+    deleting one must not cascade-remove the other's topic assignment.
+    """
+    # Same title under two projects
+    db.put(project="proj-a", title="shared-title", content="content under proj-a")
+    db.put(project="proj-b", title="shared-title", content="content under proj-b")
+
+    # Two topics, one per project, both assigning the shared title
+    db.taxonomy.conn.executemany(
+        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+        [
+            ("topic-a", "proj-a", 1, "2026-01-01T00:00:00Z"),
+            ("topic-b", "proj-b", 1, "2026-01-01T00:00:00Z"),
+        ],
+    )
+    topic_a_id, topic_b_id = [
+        r[0] for r in db.taxonomy.conn.execute(
+            "SELECT id FROM topics ORDER BY id DESC LIMIT 2"
+        ).fetchall()
+    ][::-1]
+    db.taxonomy.conn.executemany(
+        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+        [("shared-title", topic_a_id), ("shared-title", topic_b_id)],
+    )
+    db.taxonomy.conn.commit()
+
+    # Delete only the proj-a entry
+    assert db.delete(project="proj-a", title="shared-title") is True
+
+    # topic-a's assignment removed, topic-b's assignment untouched
+    remaining = db.taxonomy.conn.execute(
+        "SELECT topic_id FROM topic_assignments WHERE doc_id = 'shared-title'"
+    ).fetchall()
+    assert [r[0] for r in remaining] == [topic_b_id]
+
+
+def test_memory_delete_by_id_cascades(db: T2Database) -> None:
+    """Facade resolves project/title from --id before cascading."""
+    row_id = db.put(project="proj", title="by-id", content="delete via numeric id")
+    db.taxonomy.conn.execute(
+        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+        ("id-topic", "proj", 1, "2026-01-01T00:00:00Z"),
+    )
+    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.taxonomy.conn.execute(
+        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+        ("by-id", topic_id),
+    )
+    db.taxonomy.conn.commit()
+
+    assert db.delete(id=row_id) is True
+
+    ta_count = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments"
+    ).fetchone()[0]
+    assert ta_count == 0
+
+
 def test_cli_taxonomy_list(db: T2Database) -> None:
     """CLI taxonomy list outputs topic labels."""
     from click.testing import CliRunner
