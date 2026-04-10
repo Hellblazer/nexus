@@ -230,3 +230,110 @@ def test_mcp_memory_consolidate_missing_project(db: T2Database, monkeypatch) -> 
     monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
     result = memory_consolidate(action="find-overlaps", project="")
     assert "Error" in result
+
+
+def test_mcp_memory_consolidate_merge_rejects_keep_in_delete(db: T2Database, monkeypatch) -> None:
+    """merge must reject keep_id appearing in delete_ids (would silently delete the kept row)."""
+    from nexus.mcp.core import memory_consolidate
+
+    id_a = db.put(project="proj", title="a.md", content="content")
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    result = memory_consolidate(
+        action="merge",
+        project="proj",
+        keep_id=id_a,
+        delete_ids=str(id_a),
+        merged_content="x",
+    )
+    assert "Error" in result
+    assert "must not appear" in result
+    # The kept row must still exist
+    assert db.get(id=id_a) is not None
+
+
+def test_merge_memories_raises_when_keep_in_delete(db: T2Database) -> None:
+    """T2Database.merge_memories raises ValueError if keep_id is in delete_ids."""
+    id_a = db.put(project="proj", title="a.md", content="content")
+    with pytest.raises(ValueError, match="must not be in delete_ids"):
+        db.merge_memories(keep_id=id_a, delete_ids=[id_a], merged_content="x")
+    assert db.get(id=id_a) is not None
+
+
+def test_mcp_memory_consolidate_merge_empty_delete_ids(db: T2Database, monkeypatch) -> None:
+    """Whitespace-only delete_ids is rejected (not silently no-op)."""
+    from nexus.mcp.core import memory_consolidate
+
+    id_a = db.put(project="proj", title="a.md", content="content")
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    result = memory_consolidate(
+        action="merge",
+        project="proj",
+        keep_id=id_a,
+        delete_ids="   ",
+        merged_content="x",
+    )
+    assert "Error" in result
+
+
+def test_mcp_memory_consolidate_merge_non_numeric_delete_ids(db: T2Database, monkeypatch) -> None:
+    """Non-numeric delete_ids returns a parse error."""
+    from nexus.mcp.core import memory_consolidate
+
+    id_a = db.put(project="proj", title="a.md", content="content")
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+
+    result = memory_consolidate(
+        action="merge",
+        project="proj",
+        keep_id=id_a,
+        delete_ids="abc,def",
+        merged_content="x",
+    )
+    assert "Error" in result
+    assert "integer" in result
+
+
+def test_mcp_memory_consolidate_keep_id_zero_rejected(db: T2Database, monkeypatch) -> None:
+    """keep_id=0 is explicitly rejected (not implicitly via falsy check)."""
+    from nexus.mcp.core import memory_consolidate
+
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
+    result = memory_consolidate(
+        action="merge",
+        project="proj",
+        keep_id=0,
+        delete_ids="1",
+        merged_content="x",
+    )
+    assert "Error" in result
+    assert "keep_id>0" in result
+
+
+def test_find_overlapping_does_not_bump_access_count(db: T2Database) -> None:
+    """find_overlapping_memories must NOT contaminate the staleness signal."""
+    db.put(project="proj", title="a.md",
+           content="search engine architecture design patterns")
+    db.put(project="proj", title="b.md",
+           content="search engine architecture design implementation")
+
+    # Snapshot access_count before the scan
+    before_a = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='a.md'"
+    ).fetchone()[0]
+    before_b = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='b.md'"
+    ).fetchone()[0]
+
+    db.find_overlapping_memories("proj")
+
+    after_a = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='a.md'"
+    ).fetchone()[0]
+    after_b = db.conn.execute(
+        "SELECT access_count FROM memory WHERE title='b.md'"
+    ).fetchone()[0]
+
+    assert after_a == before_a
+    assert after_b == before_b

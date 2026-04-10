@@ -750,12 +750,16 @@ def memory_consolidate(
             return "\n".join(lines)
 
         elif action == "merge":
-            if not keep_id or not delete_ids or not merged_content:
-                return "Error: merge requires keep_id, delete_ids, and merged_content"
+            if keep_id <= 0 or not delete_ids or not merged_content:
+                return "Error: merge requires keep_id>0, delete_ids, and merged_content"
             try:
                 del_ids = [int(x.strip()) for x in delete_ids.split(",") if x.strip()]
             except ValueError:
                 return "Error: delete_ids must be comma-separated integers"
+            if not del_ids:
+                return "Error: delete_ids must contain at least one integer ID"
+            if keep_id in del_ids:
+                return f"Error: keep_id ({keep_id}) must not appear in delete_ids"
             with _t2_ctx() as db:
                 db.merge_memories(
                     keep_id=keep_id,

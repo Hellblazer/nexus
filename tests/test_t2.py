@@ -550,6 +550,69 @@ def test_expire_relevance_log_no_op_when_empty(db: T2Database) -> None:
     assert db.expire_relevance_log(days=90) == 0
 
 
+def test_expire_relevance_log_partial_purge(db: T2Database) -> None:
+    """Partial purge: some rows stale, some fresh."""
+    # Insert 4 rows
+    for i in range(4):
+        db.log_relevance(f"q{i}", f"c{i}", "stored", session_id="s1")
+    # Backdate rows 0 and 1 to 100 days ago
+    db.conn.execute(
+        "UPDATE relevance_log SET timestamp = datetime('now', '-100 days') "
+        "WHERE chunk_id IN ('c0', 'c1')"
+    )
+    db.conn.commit()
+
+    purged = db.expire_relevance_log(days=90)
+    assert purged == 2
+    remaining = db.get_relevance_log()
+    assert len(remaining) == 2
+    assert {r["chunk_id"] for r in remaining} == {"c2", "c3"}
+
+
+def test_expire_also_purges_relevance_log(db: T2Database) -> None:
+    """expire() calls expire_relevance_log() to purge telemetry."""
+    # Stale relevance_log row
+    db.log_relevance("q", "c", "stored", session_id="s1")
+    db.conn.execute(
+        "UPDATE relevance_log SET timestamp = datetime('now', '-100 days')"
+    )
+    db.conn.commit()
+
+    db.expire()  # default relevance_log_days=90
+
+    assert db.get_relevance_log() == []
+
+
+def test_migration_guard_concurrent_construction(tmp_path: Path) -> None:
+    """Two T2Database instances on the same path do not re-run migrations concurrently."""
+    from nexus.db import t2 as t2_module
+
+    # Clear any prior migration state for this path
+    path = tmp_path / "concurrent.db"
+    with t2_module._migrated_lock:
+        t2_module._migrated_paths.discard(str(path))
+
+    # First instance: migrations should run once
+    call_count = {"n": 0}
+    original = T2Database._migrate_plans_if_needed
+
+    def counting(self):
+        call_count["n"] += 1
+        return original(self)
+
+    T2Database._migrate_plans_if_needed = counting
+    try:
+        db1 = T2Database(path)
+        assert call_count["n"] == 1
+        # Second instance on the same path: migration must NOT run again
+        db2 = T2Database(path)
+        assert call_count["n"] == 1, (
+            "Migration ran a second time — the _migrated_paths guard failed"
+        )
+    finally:
+        T2Database._migrate_plans_if_needed = original
+
+
 def test_get_returns_post_increment_access_count(db: T2Database) -> None:
     """get() return value reflects the incremented access_count, not stale."""
     db.put(project="proj", title="fresh.md", content="data")

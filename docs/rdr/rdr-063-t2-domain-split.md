@@ -22,7 +22,7 @@ T2 was originally defined as a single-purpose store: **per-project persistent me
 
 The problems this causes are concrete, not theoretical:
 
-1. **Mixed concurrency regimes**: `memory` sees interactive writes (agent actions at human pace). `relevance_log` sees automated writes (one batch per `store_put`, potentially many per second during indexing). They share a single SQLite file and a single `threading.Lock`. A long `find_overlapping_memories` scan blocks `relevance_log` inserts for the duration.
+1. **Mixed concurrency regimes (forward-looking)**: `memory` sees interactive writes (agent actions at human pace). `relevance_log` sees automated writes (one batch per `store_put`, potentially many per second during indexing). They share a single SQLite file and a single `threading.Lock`. A long `find_overlapping_memories` scan will block `relevance_log` inserts for the duration. This is currently microseconds for small memory tables (<500 rows) and has not been observed as a bottleneck; it is a forward-looking design concern as projects accumulate memory entries past O(1000). Phase 2 resolves this preemptively.
 
 2. **Cross-schema assumption leaks**: `topic_assignments.doc_id` joins against `memory.title` — an implicit contract between two tables that belong to different domains. The join only works when T2 memory entries are the universe of clusterable documents, which is neither stated in schema nor enforced. Documents indexed via `store_put` (T3) cannot participate.
 
@@ -45,6 +45,26 @@ The problems this causes are concrete, not theoretical:
 - **Not a rewrite of T2's API**: `memory_put`, `memory_search`, `plan_save`, etc. keep their signatures. Callers should not need to change.
 - **Not a multi-file database rearrangement today**: The split may eventually mean separate SQLite files, but the first step is logical separation inside `nexus.db` — module boundaries, type boundaries, lock boundaries.
 - **Not a redefinition of tiers**: T1/T2/T3 as storage tiers remain. This is about the *internal structure* of T2, not the tier model.
+
+## Known Defect (must be acknowledged, not canonized by the split)
+
+`taxonomy.get_topic_docs()` builds its JOIN as:
+
+```sql
+LEFT JOIN memory m ON m.title = ta.doc_id AND m.project = (
+    SELECT collection FROM topics WHERE id = ta.topic_id
+)
+```
+
+This conflates `topics.collection` (a T3 ChromaDB collection name, e.g. `knowledge__research`) with `memory.project` (a T2 project scope). The JOIN silently returns empty results for any taxonomy clustered from T3 collections — which is the primary RDR-061 E5 use case.
+
+**This is a pre-existing defect, not introduced by the split.** RDR-063 acknowledges it here so the split does not inadvertently canonize the broken JOIN as an "explicit contract." A fix belongs in a separate bead before or during Phase 1. Options:
+
+1. Add a `memory_project` column to `topics` distinct from `collection`
+2. Change the JOIN to use `topic_assignments.doc_id` as a catalog tumbler and resolve via the catalog, not T2 memory
+3. Accept that `get_topic_docs()` only works for T2-clustered projects and document the restriction
+
+Deciding between these is out of scope for RDR-063 but should be tracked as a blocker for Phase 1.
 
 ## Proposed Solution
 
@@ -157,17 +177,27 @@ Phase 2 also changes no schema — just lock topology. Any test that held assump
 
 ## Implementation Plan
 
-### Phase 1 — Logical split (~6 hours)
+### Phase 1 — Logical split (~8 hours)
 
 1. Create `src/nexus/db/t2/` package with `__init__.py` exposing `T2Database`
 2. Move `memory` table schema + methods (`put`, `get`, `search`, `list_entries`, `delete`, `expire`, `find_overlapping_memories`, `merge_memories`, `flag_stale_memories`) to `memory_store.py`
 3. Move `plans` table schema + methods (`save_plan`, `search_plans`, `list_plans`) to `plan_library.py`
-4. Move `topics` + `topic_assignments` schema + all helper methods to `catalog_taxonomy.py` (note: the topics helpers live in `taxonomy.py` today, not `t2.py` — this phase leaves them there and only moves the schema ownership)
-5. Move `relevance_log` schema + methods (`log_relevance`, `log_relevance_batch`, `get_relevance_log`, `expire_relevance_log`) to `telemetry.py`
-6. Move `_migrate_*` functions to their respective domain modules
-7. Keep `T2Database` as a facade in `t2/__init__.py` delegating to composed stores
-8. Shim: keep `from nexus.db.t2 import T2Database` working
-9. Update tests where they patch internal `_init_schema` or `_migrate_*`
+4. **Migrate `taxonomy.py` into `catalog_taxonomy.py`**. The existing `taxonomy.py` functions (`get_topics`, `get_topic_tree`, `get_topic_docs`, `assign_topic`, `cluster_and_persist`, `rebuild_taxonomy`) directly access `db._lock` and `db.conn.execute()`. Leaving them as a separate module defeats the split's purpose — Phase 2's separate-connection benefit cannot apply while taxonomy reaches through into the monolithic lock. Move both schema ownership AND the query functions into `catalog_taxonomy.py`. Add explicit deprecation shim: `taxonomy.py` re-exports from `catalog_taxonomy` for one release, then remove.
+5. Move `topics` + `topic_assignments` schema to `catalog_taxonomy.py` (combined with step 4)
+6. Move `relevance_log` schema + methods (`log_relevance`, `log_relevance_batch`, `get_relevance_log`, `expire_relevance_log`) to `telemetry.py`
+7. Move `_migrate_*` functions to their respective domain modules
+8. Keep `T2Database` as a facade in `t2/__init__.py` delegating to composed stores
+9. Shim: keep `from nexus.db.t2 import T2Database` working
+10. Update tests where they patch internal `_init_schema` or `_migrate_*`
+
+**Phase 1 prerequisites (must resolve before starting)**:
+- Resolve the `get_topic_docs()` JOIN defect (see "Known Defect" section). Either decide the JOIN semantics upfront or explicitly track it as a follow-up bead. Doing the refactor without deciding risks the split enshrining the broken JOIN.
+
+**Phase 1 test strategy**:
+- Before starting: enumerate all tests that instantiate `T2Database` or call `taxonomy.py` functions. These are the behavioral contract baseline.
+- Any test failure during the refactor is a regression, not a "patching internals" update — the refactor must preserve all observable behavior.
+- Add a characterization test (`tests/test_t2_facade.py`) that creates a T2Database, exercises one method from each domain (put/search/save_plan/cluster_and_persist/log_relevance), and asserts the return values match the pre-split behavior. This test becomes the contract.
+- Run the full suite (`uv run pytest -m 'not integration'`) before and after. Diff should be zero.
 
 ### Phase 2 — Separate connections (~4 hours)
 
@@ -175,6 +205,10 @@ Phase 2 also changes no schema — just lock topology. Any test that held assump
 2. Each store has its own `threading.Lock`
 3. Concurrency tests in `tests/test_t2_concurrency.py` verify memory reads aren't blocked by telemetry writes under load
 4. Document the WAL + multi-connection pattern in `docs/contributing.md`
+
+**Phase 2 incompatibility: `:memory:` databases.** SQLite `:memory:` databases are not shared across connections — each `sqlite3.connect(":memory:")` creates a distinct in-memory database. Phase 2's multi-connection model breaks any test or caller using `T2Database(path=":memory:")`. Mitigation: either (a) disallow `:memory:` in Phase 2 and migrate test fixtures to `tmp_path / "t2.db"`, or (b) use `file::memory:?cache=shared` URI mode. Decide before starting Phase 2. Current tests use tmp_path, so impact is low.
+
+**Phase 2 prerequisite**: Phase 1 step 4 (migrate `taxonomy.py` into `catalog_taxonomy.py`) must be complete. Without it, taxonomy queries still reach through `db._lock` and Phase 2's separate-connection benefit for taxonomy cannot be realized.
 
 ### Phase 3 — Physical file split (deferred)
 
@@ -205,7 +239,7 @@ Not committed in this RDR. Revisit if Phase 2 load testing shows lock contention
 
 2. **Should the facade expose stores as attributes (`db.memory.put(...)`) or methods (`db.put(...)`)?** For backward compat, keep methods. New callers can reach through via `db.memory` if they want to hold a reference.
 
-3. **Migration guard per domain or per file?** The RDR-062 follow-up guard (`_migrated_paths`) treats the whole file as one. After Phase 1, each domain should have its own guard key so adding a new migration doesn't re-probe unrelated tables.
+3. **Migration guard per domain or per file?** **Resolved**: use per-domain guard keys of the form `(path, domain_name)`. Each domain module owns its own guard set (`memory_store._migrated_paths`, `plan_library._migrated_paths`, etc.) so adding a new migration to one domain doesn't trigger re-probing of unrelated domains. The Phase 1 implementation must preserve the current race-free single-lock semantics per domain.
 
 ## Related RDRs
 

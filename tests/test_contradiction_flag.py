@@ -26,36 +26,24 @@ def _make_result(
     )
 
 
-class _FakeT3:
-    """Minimal T3 stub that returns controllable embeddings."""
-
-    def __init__(self, embeddings: dict[str, dict[str, list[float]]]):
-        """embeddings: {collection: {doc_id: [float, ...]}}"""
-        self._embs = embeddings
-
-    def get_embeddings(self, collection_name: str, ids: list[str]) -> np.ndarray:
-        col = self._embs.get(collection_name, {})
-        rows = [col.get(did, [0.0, 0.0, 0.0]) for did in ids]
-        return np.array(rows, dtype=np.float32)
+def _embeddings(vectors: list[list[float]]) -> np.ndarray:
+    return np.array(vectors, dtype=np.float32)
 
 
 class TestFlagContradictions:
-    """Unit tests for _flag_contradictions()."""
+    """Unit tests for _flag_contradictions() (takes pre-fetched embeddings)."""
 
     def test_same_collection_different_agent_close_distance(self) -> None:
         """Two results, same collection, different source_agent, distance < 0.3 → flagged."""
         from nexus.search_engine import _flag_contradictions
 
         # Nearly identical embeddings → cosine distance ≈ 0
-        t3 = _FakeT3({"code__x": {
-            "a": [1.0, 0.0, 0.0],
-            "b": [0.99, 0.01, 0.0],
-        }})
+        embs = _embeddings([[1.0, 0.0, 0.0], [0.99, 0.01, 0.0]])
         results = [
             _make_result("a", "code__x", source_agent="agent-alpha"),
             _make_result("b", "code__x", source_agent="agent-beta"),
         ]
-        out = _flag_contradictions(results, t3)
+        out = _flag_contradictions(results, embs)
         assert out[0].metadata.get("_contradiction_flag") is True
         assert out[1].metadata.get("_contradiction_flag") is True
 
@@ -63,15 +51,12 @@ class TestFlagContradictions:
         """Same source_agent → no flag (same provenance)."""
         from nexus.search_engine import _flag_contradictions
 
-        t3 = _FakeT3({"code__x": {
-            "a": [1.0, 0.0, 0.0],
-            "b": [0.99, 0.01, 0.0],
-        }})
+        embs = _embeddings([[1.0, 0.0, 0.0], [0.99, 0.01, 0.0]])
         results = [
             _make_result("a", "code__x", source_agent="same-agent"),
             _make_result("b", "code__x", source_agent="same-agent"),
         ]
-        out = _flag_contradictions(results, t3)
+        out = _flag_contradictions(results, embs)
         assert "_contradiction_flag" not in out[0].metadata
         assert "_contradiction_flag" not in out[1].metadata
 
@@ -80,15 +65,12 @@ class TestFlagContradictions:
         from nexus.search_engine import _flag_contradictions
 
         # Orthogonal embeddings → cosine distance = 1.0
-        t3 = _FakeT3({"code__x": {
-            "a": [1.0, 0.0, 0.0],
-            "b": [0.0, 1.0, 0.0],
-        }})
+        embs = _embeddings([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
         results = [
             _make_result("a", "code__x", source_agent="agent-alpha"),
             _make_result("b", "code__x", source_agent="agent-beta"),
         ]
-        out = _flag_contradictions(results, t3)
+        out = _flag_contradictions(results, embs)
         assert "_contradiction_flag" not in out[0].metadata
         assert "_contradiction_flag" not in out[1].metadata
 
@@ -96,15 +78,12 @@ class TestFlagContradictions:
         """Cross-collection pairs → no flag (different scopes)."""
         from nexus.search_engine import _flag_contradictions
 
-        t3 = _FakeT3({
-            "code__x": {"a": [1.0, 0.0, 0.0]},
-            "docs__y": {"b": [0.99, 0.01, 0.0]},
-        })
+        embs = _embeddings([[1.0, 0.0, 0.0], [0.99, 0.01, 0.0]])
         results = [
             _make_result("a", "code__x", source_agent="agent-alpha"),
             _make_result("b", "docs__y", source_agent="agent-beta"),
         ]
-        out = _flag_contradictions(results, t3)
+        out = _flag_contradictions(results, embs)
         assert "_contradiction_flag" not in out[0].metadata
         assert "_contradiction_flag" not in out[1].metadata
 
@@ -112,26 +91,26 @@ class TestFlagContradictions:
         """Single result → nothing to compare."""
         from nexus.search_engine import _flag_contradictions
 
-        t3 = _FakeT3({"code__x": {"a": [1.0, 0.0, 0.0]}})
+        embs = _embeddings([[1.0, 0.0, 0.0]])
         results = [_make_result("a", "code__x", source_agent="agent-alpha")]
-        out = _flag_contradictions(results, t3)
+        out = _flag_contradictions(results, embs)
         assert "_contradiction_flag" not in out[0].metadata
 
     def test_three_results_only_contradicting_pair_flagged(self) -> None:
         """A and B contradict; C does not → only A and B flagged."""
         from nexus.search_engine import _flag_contradictions
 
-        t3 = _FakeT3({"code__x": {
-            "a": [1.0, 0.0, 0.0],
-            "b": [0.99, 0.01, 0.0],  # close to a
-            "c": [0.0, 1.0, 0.0],    # far from both
-        }})
+        embs = _embeddings([
+            [1.0, 0.0, 0.0],
+            [0.99, 0.01, 0.0],  # close to a
+            [0.0, 1.0, 0.0],    # far from both
+        ])
         results = [
             _make_result("a", "code__x", source_agent="agent-alpha"),
             _make_result("b", "code__x", source_agent="agent-beta"),
             _make_result("c", "code__x", source_agent="agent-gamma"),
         ]
-        out = _flag_contradictions(results, t3)
+        out = _flag_contradictions(results, embs)
         assert out[0].metadata.get("_contradiction_flag") is True   # a
         assert out[1].metadata.get("_contradiction_flag") is True   # b
         assert "_contradiction_flag" not in out[2].metadata         # c
@@ -140,31 +119,62 @@ class TestFlagContradictions:
         """Empty source_agent → no provenance conflict."""
         from nexus.search_engine import _flag_contradictions
 
-        t3 = _FakeT3({"code__x": {
-            "a": [1.0, 0.0, 0.0],
-            "b": [0.99, 0.01, 0.0],
-        }})
+        embs = _embeddings([[1.0, 0.0, 0.0], [0.99, 0.01, 0.0]])
         results = [
             _make_result("a", "code__x"),  # no source_agent
             _make_result("b", "code__x"),
         ]
-        out = _flag_contradictions(results, t3)
+        out = _flag_contradictions(results, embs)
         assert "_contradiction_flag" not in out[0].metadata
         assert "_contradiction_flag" not in out[1].metadata
 
-    def test_get_embeddings_exception_skipped(self) -> None:
-        """If get_embeddings raises, that collection is skipped gracefully."""
-        from nexus.search_engine import _flag_contradictions
+
+class TestFetchEmbeddingsForResults:
+    """Tests for the shared embedding-fetch helper (F1 fix)."""
+
+    def test_fetch_returns_none_on_exception(self) -> None:
+        """Fetch failure returns None so callers fall through."""
+        from nexus.search_engine import _fetch_embeddings_for_results
 
         class _BrokenT3:
             def get_embeddings(self, col, ids):
                 raise RuntimeError("simulated failure")
 
+        results = [_make_result("a", "code__x"), _make_result("b", "code__x")]
+        out = _fetch_embeddings_for_results(results, _BrokenT3())
+        assert out is None
+
+    def test_fetch_returns_none_on_shape_mismatch(self) -> None:
+        """Fetch returning fewer rows than requested returns None."""
+        from nexus.search_engine import _fetch_embeddings_for_results
+
+        class _ShortT3:
+            def get_embeddings(self, col, ids):
+                # Return fewer rows than requested
+                return np.zeros((len(ids) - 1, 4), dtype=np.float32)
+
+        results = [_make_result("a", "code__x"), _make_result("b", "code__x")]
+        out = _fetch_embeddings_for_results(results, _ShortT3())
+        assert out is None
+
+    def test_fetch_assembles_multi_collection_in_result_order(self) -> None:
+        """Multi-collection fetch preserves result order."""
+        from nexus.search_engine import _fetch_embeddings_for_results
+
+        class _SplitT3:
+            def get_embeddings(self, col, ids):
+                if col == "code__x":
+                    return np.array([[1.0, 0.0]], dtype=np.float32)
+                if col == "docs__y":
+                    return np.array([[0.0, 1.0]], dtype=np.float32)
+                raise KeyError(col)
+
         results = [
-            _make_result("a", "code__x", source_agent="agent-alpha"),
-            _make_result("b", "code__x", source_agent="agent-beta"),
+            _make_result("a", "code__x"),
+            _make_result("b", "docs__y"),
         ]
-        out = _flag_contradictions(results, _BrokenT3())
-        # No crash, no flags
-        assert "_contradiction_flag" not in out[0].metadata
-        assert "_contradiction_flag" not in out[1].metadata
+        out = _fetch_embeddings_for_results(results, _SplitT3())
+        assert out is not None
+        assert out.shape == (2, 2)
+        assert out[0].tolist() == [1.0, 0.0]
+        assert out[1].tolist() == [0.0, 1.0]

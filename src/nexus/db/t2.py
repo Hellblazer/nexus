@@ -206,18 +206,19 @@ class T2Database:
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
             if result and result[0].lower() != "wal":
                 _log.warning("WAL mode not available", actual_mode=result[0])
-            # Skip migration probes if this path was already migrated in this process.
+            # Migration guard: hold _migrated_lock across the full check-run-add
+            # sequence so two concurrent T2Database constructors on the same path
+            # cannot both enter the migration functions (ALTER TABLE ADD COLUMN
+            # is NOT idempotent — double-application raises OperationalError).
             with _migrated_lock:
-                already_migrated = path_key in _migrated_paths
-            if already_migrated:
-                return
-            self._migrate_fts_if_needed()
-            self._migrate_plans_if_needed()
-            self._migrate_plans_ttl_if_needed()
-            self._migrate_access_tracking_if_needed()
-            self._migrate_topics_if_needed()
-            self._migrate_relevance_log_if_needed()
-            with _migrated_lock:
+                if path_key in _migrated_paths:
+                    return
+                self._migrate_fts_if_needed()
+                self._migrate_plans_if_needed()
+                self._migrate_plans_ttl_if_needed()
+                self._migrate_access_tracking_if_needed()
+                self._migrate_topics_if_needed()
+                self._migrate_relevance_log_if_needed()
                 _migrated_paths.add(path_key)
 
     def _migrate_plans_if_needed(self) -> None:
@@ -465,8 +466,22 @@ class T2Database:
             result["last_accessed"] = now
             return result
 
-    def search(self, query: str, project: str | None = None) -> list[dict[str, Any]]:
-        """FTS5 keyword search. Returns rows ordered by relevance."""
+    def search(
+        self,
+        query: str,
+        project: str | None = None,
+        track_access: bool = True,
+    ) -> list[dict[str, Any]]:
+        """FTS5 keyword search. Returns rows ordered by relevance.
+
+        Args:
+            query: FTS5 query string
+            project: Optional project filter
+            track_access: When True (default), increments access_count and
+                updates last_accessed on every returned row. Set to False for
+                internal scans (e.g. consolidation) that must not contaminate
+                the staleness signal.
+        """
         safe = _sanitize_fts5(query)
         with self._lock:
             try:
@@ -495,8 +510,8 @@ class T2Database:
                     rows = self.conn.execute(sql, (safe,)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-            # Batch-update access_count for all returned rows
-            if rows:
+            # Batch-update access_count for all returned rows (skip when track_access=False)
+            if rows and track_access:
                 now = datetime.now(UTC).isoformat()
                 ids = [r[0] for r in rows]
                 self.conn.executemany(
@@ -803,13 +818,23 @@ class T2Database:
 
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
-    def expire(self) -> int:
+    def expire(self, relevance_log_days: int = 90) -> int:
         """Delete TTL-expired entries using heat-weighted effective TTL.
 
         effective_ttl = base_ttl * (1 + log(access_count + 1))
         Highly accessed entries survive longer. Unaccessed entries (access_count=0)
         expire at base rate (log(1) = 0, so multiplier = 1).
+
+        Also purges relevance_log rows older than ``relevance_log_days`` days
+        (default 90) to prevent unbounded growth of the telemetry table.
+        The return value counts only memory rows deleted, not log rows.
         """
+        # Purge relevance_log (RDR-061 E2 telemetry retention).
+        # Call outside the main lock — expire_relevance_log acquires its own.
+        try:
+            self.expire_relevance_log(days=relevance_log_days)
+        except Exception as exc:
+            _log.warning("expire_relevance_log_failed", exc_info=exc)
         with self._lock:
             rows = self.conn.execute(
                 """
@@ -890,7 +915,9 @@ class T2Database:
             if not snippet:
                 continue
             try:
-                candidates = self.search(snippet, project=project)
+                # track_access=False: consolidation scan must not bump
+                # access_count/last_accessed (would contaminate flag-stale)
+                candidates = self.search(snippet, project=project, track_access=False)
             except ValueError:
                 continue
             w1 = _words(e1.get("content", ""))
@@ -923,7 +950,15 @@ class T2Database:
 
         Updates content of *keep_id* and deletes all *delete_ids*.
         FTS5 triggers handle index cleanup automatically.
+
+        Raises ValueError if keep_id appears in delete_ids — that would
+        silently discard the kept entry (UPDATE then DELETE on same row).
         """
+        if keep_id in delete_ids:
+            raise ValueError(
+                f"keep_id ({keep_id}) must not be in delete_ids — "
+                "would discard the entry meant to be kept"
+            )
         with self._lock:
             self.conn.execute(
                 "UPDATE memory SET content = ? WHERE id = ?",

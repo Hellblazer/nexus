@@ -235,7 +235,12 @@ class T1Database:
             }
             rid = row["id"]
             try:
-                self._exec(lambda: self._col.update(ids=[rid], metadatas=[updated_meta]))
+                # Bind loop variables via default args to avoid late-binding
+                # closure bug if this is ever refactored to collect lambdas.
+                self._exec(
+                    lambda r=rid, m=updated_meta:
+                    self._col.update(ids=[r], metadatas=[m])
+                )
             except Exception:
                 _log.warning("t1_access_count_update_failed", id=rid)
         return rows
