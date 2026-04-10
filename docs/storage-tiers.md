@@ -13,6 +13,45 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
 
+## Progressive Formalization (RDR-057)
+
+Nexus treats the three tiers as stages in a progression, not independent
+silos. An idea enters at T1 as a working hypothesis, is promoted to T2
+when it outlives the session, and is promoted to T3 when it becomes
+institutional knowledge. Several RDR-057 features work together to make
+this progression observable and to reward information that proves useful
+over time:
+
+- **Access tracking** on T1 and T2 — every successful read bumps
+  `access_count` and `last_accessed`, so the system can see which entries
+  actually get used.
+- **Heat-weighted TTL** on T2 — frequently-accessed notes survive longer
+  than their nominal TTL. The formula is
+  `effective_ttl = base_ttl * (1 + log(access_count + 1))`. See
+  [Configuration § Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
+- **`PromotionReport`** on `nx scratch promote` and `T1.promote()` — the
+  promotion result reports `action=new` when the T2 destination is clean
+  or `action=overlap_detected` when an FTS5 scan finds a similar entry
+  under a different title. The promoted row is still written; the report
+  only signals that a manual merge may be warranted.
+- **Contradiction flagging** during T3 search — `search_cross_corpus`
+  adds `[CONTRADICTS ANOTHER RESULT]` to any result pair where two
+  high-similarity chunks come from different `source_agent` provenance,
+  surfacing inconsistencies for human review. Default-on; opt out via
+  `search.contradiction_check: false`. See
+  [Querying Guide § Contradiction detection](querying-guide.md#contradiction-detection-rdr-057-phase-3a).
+- **`formalizes` catalog link type** — when a higher-abstraction
+  representation (extracted entities, RDF triples, structured notes) is
+  derived from a raw text chunk, link the two with type `formalizes` so
+  the multi-representation relationship is explicit in the graph. See
+  [Document Catalog § Link Types](catalog.md#link-types).
+
+Together these features let Nexus reward useful information without
+rigidly deleting the rest: frequently-read entries stick around, the
+promotion path from scratch to memory to knowledge is auditable, and
+contradictory claims bubble up during retrieval instead of silently
+coexisting.
+
 ## T1 -- Session Scratch
 
 Backed by a per-session `chromadb.HttpClient` connecting to a ChromaDB server process started by the `SessionStart` hook. Uses `DefaultEmbeddingFunction` (MiniLM-L6-v2, local ONNX). No API keys required.
@@ -44,11 +83,13 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 **Heat-weighted expiry (RDR-057 Phase 2a)**: T2 `access_count` and `last_accessed` columns track usage. Effective TTL becomes `base_ttl * (1 + log(access_count + 1))` — frequently-accessed entries survive longer. See [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
 
+> **Note (RDR-063 interaction)**: Under sustained concurrent cross-domain write load (e.g. a large `nx index repo` run generating dense telemetry writes while an agent is actively using memory), the access-count increment inside `memory.search` and `memory.get` is a best-effort side-effect. If the write leg cannot acquire the SQLite write lock immediately, the counter update is skipped and logged at warning as `memory.access_tracking.skipped`. In practice this drops roughly 5–10% of increments during heavy indexing. Heat-weighted TTL is therefore approximate: heavily-accessed entries may accumulate slightly lower `access_count` values than their true read frequency would suggest, which modestly compresses their effective TTL. The trade-off is an intentional Phase 2 choice — keeping search/get latency stable under load is worth the loss of a fraction of statistical signal.
+
 **Consolidation (RDR-061 E6)**: `memory_consolidate` MCP tool provides `find-overlaps`, `merge` (with `dry_run` and `confirm_destructive` safety gates), and `flag-stale` operations. See [Memory and Tasks — Consolidation](memory-and-tasks.md#consolidation-rdr-061-e6).
 
 **Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry — not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
 
-**Upcoming (RDR-063 draft)**: T2 is being considered for a domain split into `memory_store`, `plan_library`, `catalog_taxonomy`, and `telemetry` modules. See `docs/rdr/rdr-063-t2-domain-split.md`. Current implementation uses a single shared SQLite file.
+**Domain split (RDR-063)**: T2 is implemented as four domain stores under `src/nexus/db/t2/` — `MemoryStore` (memory table), `PlanLibrary` (plans table), `CatalogTaxonomy` (topics + topic_assignments), and `Telemetry` (relevance_log). Each store opens its own `sqlite3.Connection` against the shared SQLite file in WAL mode with `busy_timeout=5000`, so reads in one domain are never blocked by writes in another. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls continue to work via method delegation, and new code can reach the domain stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
 
 ## T3 -- Permanent Knowledge
 

@@ -1,11 +1,14 @@
 ---
 title: "RDR-063: T2 Domain Split — Separating Memory, Plans, Catalog, and Telemetry"
-status: accepted
+status: closed
 accepted_date: 2026-04-10
+closed_date: 2026-04-10
+close_reason: implemented
 type: architecture
 priority: P2
 created: 2026-04-09
 reviewed-by: self
+post_mortem: docs/rdr/post-mortem/063-t2-domain-split.md
 ---
 
 # RDR-063: T2 Domain Split — Separating Memory, Plans, Catalog, and Telemetry

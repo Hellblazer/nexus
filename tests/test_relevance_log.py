@@ -40,7 +40,7 @@ def t2():
 
 def test_relevance_log_table_exists(t2):
     """Migration creates the relevance_log table with correct columns."""
-    cols = {r[1] for r in t2.conn.execute("PRAGMA table_info(relevance_log)").fetchall()}
+    cols = {r[1] for r in t2.telemetry.conn.execute("PRAGMA table_info(relevance_log)").fetchall()}
     assert cols == {"id", "query", "chunk_id", "collection", "action", "session_id", "timestamp"}
 
 
@@ -54,7 +54,7 @@ def test_log_relevance_inserts_row(t2):
         collection="knowledge__notes",
     )
     assert row_id is not None
-    rows = t2.conn.execute("SELECT query, chunk_id, action FROM relevance_log").fetchall()
+    rows = t2.telemetry.conn.execute("SELECT query, chunk_id, action FROM relevance_log").fetchall()
     assert rows == [("vector search", "chunk-abc", "stored")]
 
 

@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-16 agents, 32 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
+16 agents, 33 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
 
 ## Installation
 
@@ -37,7 +37,7 @@ Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 ## What You Get
 
 - **16 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **32 skills** — 10 standalone + 15 agent-delegating + 7 RDR workflow
+- **33 skills** — 11 standalone + 15 agent-delegating + 7 RDR workflow
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
@@ -67,21 +67,28 @@ nx/
 │   │   ├── MAINTENANCE.md       # How to maintain/update agents
 │   │   ├── README.md            # _shared directory guide (this section)
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
-│   └── *.md                 # 14 specialized agent definitions (+ 2 internal)
+│   └── *.md                 # 14 command-invoked + 2 query-dispatched = 16 agent definitions
 ├── commands/
 │   └── *.md                 # Slash commands (/nx:research, /nx:create-plan, /nx:review-code, etc.)
 ├── hooks/
-│   ├── hooks.json           # Hook event → script wiring
+│   ├── hooks.json                     # Hook event → script wiring (source of truth)
 │   └── scripts/
-│       ├── rdr_hook.py               # RDR file↔T2 status reconciliation
-│       ├── session_start_hook.py     # Surface T2 memory, beads, scratch context
-│       ├── subagent-start.sh         # Context prep for spawned subagents
-│       └── t2_prefix_scan.py         # T2 multi-namespace prefix scan (shared)
+│       ├── session_start_hook.py      # SessionStart: surface T2 memory, beads, scratch context
+│       ├── rdr_hook.py                # SessionStart: RDR file↔T2 status reconciliation
+│       ├── post_compact_hook.sh       # PostCompact: re-prime context after /compact
+│       ├── stop_failure_hook.py       # StopFailure: advisory on session-end failures
+│       ├── stop_verification_hook.sh  # Stop: opt-in session-end verification (tests, git)
+│       ├── pre_close_verification_hook.sh  # PreToolUse (Bash): bd-close gate
+│       ├── subagent-start.sh          # SubagentStart: inject context for spawned subagents
+│       ├── auto-approve-nx-mcp.sh     # PermissionRequest: auto-approve nx MCP tools
+│       ├── t2_prefix_scan.py          # Shared helper: T2 multi-namespace prefix scan
+│       └── read_verification_config.py # Shared helper: read .nexus.yml verification block
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
 ├── CHANGELOG.md             # Version history (Keep a Changelog format)
 └── skills/
     ├── brainstorming-gate/  # Standalone: design gate before implementation
+    ├── catalog/             # Standalone: catalog operations + link graph patterns
     ├── cli-controller/      # Standalone: tmux-based interactive CLI control
     ├── nexus/               # Standalone: nx CLI reference (all tiers)
     ├── serena-code-nav/     # Standalone: navigate code by symbol (definitions, callers, renames)
@@ -111,13 +118,14 @@ nx/
     └── rdr-show/            # RDR workflow: show RDR details
 ```
 
-## Standalone Skills (10)
+## Standalone Skills (11)
 
 Skills that provide guidance directly without delegating to an agent.
 
 | Skill | Purpose |
 |-------|---------|
 | brainstorming-gate | Design gate — requires exploration and user approval before implementation |
+| catalog | Catalog operations + link graph patterns — resolve, link, context, seed |
 | cli-controller | Expert guidance for controlling interactive CLI applications via tmux |
 | finishing-branch | Guide branch completion — verify tests, present merge/PR/keep/discard options |
 | git-worktrees | Isolated workspace setup via git worktrees with safety verification |
@@ -163,15 +171,20 @@ Defined in `registry.yaml`:
 
 ## Hooks
 
+See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` as the plugin root.
+
 | Event | Script | Purpose |
 |-------|--------|---------|
-| `SessionStart` | `nx hook session-start` | Initialize T1 server, sweep stale sessions |
-| `SessionStart` | `session_start_hook.py` | Surface T2 memory, beads, scratch context |
-| `SessionStart` | `rdr_hook.py` | RDR file↔T2 status reconciliation |
-| `SessionStart` | `bd prime` | Load beads context into session |
-| `SessionStart` | `using-nx-skills/SKILL.md` | Inject skill invocation discipline |
-| `PreCompact` | `bd prime` | Re-prime bead context before compact |
-| `SubagentStart` | `subagent-start.sh` | Inject context for spawned subagents |
+| `SessionStart` | `nx hook session-start` | Initialize per-session T1 ChromaDB server, sweep stale sessions |
+| `SessionStart` | `hooks/scripts/session_start_hook.py` | Surface T2 memory, ready beads, and scratch context at session start |
+| `SessionStart` | `hooks/scripts/rdr_hook.py` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
+| `SessionStart` | `skills/using-nx-skills/SKILL.md` | Inject skill invocation discipline reminder |
+| `PostCompact` | `hooks/scripts/post_compact_hook.sh` | Re-prime context (memory, beads, scratch) after `/compact` |
+| `Stop` | `hooks/scripts/stop_verification_hook.sh` | Opt-in session-end verification: tests + git state (see [Configuration § Verification](../docs/configuration.md#verification)) |
+| `StopFailure` | `hooks/scripts/stop_failure_hook.py` | Advisory on abnormal session termination |
+| `PreToolUse` (`Bash`) | `hooks/scripts/pre_close_verification_hook.sh` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
+| `SubagentStart` | `hooks/scripts/subagent-start.sh` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
+| `PermissionRequest` (`mcp__plugin_nx_.*`) | `hooks/scripts/auto-approve-nx-mcp.sh` | Auto-approve nexus and nexus-catalog MCP tool calls |
 
 ## Slash Commands
 

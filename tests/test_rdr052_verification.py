@@ -163,7 +163,7 @@ class TestPlanTTL:
     def test_save_plan_ttl(self, tmp_path, ttl, expected_ttl):
         db = T2Database(tmp_path / "t2.db")
         row_id = db.save_plan(query="plan", plan_json='{}', **({} if ttl is None else {"ttl": ttl}))
-        row = db.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
+        row = db.plans.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
         assert row[0] == expected_ttl
         db.close()
 
@@ -182,16 +182,16 @@ class TestPlanTTLEnforcement:
     def test_expired_plan_excluded(self, tmp_path, method):
         db = T2Database(tmp_path / "t2.db")
         row_id = db.save_plan(query="old cached plan", plan_json='{}', ttl=1)
-        db.conn.execute("UPDATE plans SET created_at = datetime('now', '-10 days') WHERE id = ?", (row_id,))
-        db.conn.commit()
+        db.plans.conn.execute("UPDATE plans SET created_at = datetime('now', '-10 days') WHERE id = ?", (row_id,))
+        db.plans.conn.commit()
         results = getattr(db, method)("old cached plan") if method == "search_plans" else getattr(db, method)()
         assert len(results) == 0
 
     def test_permanent_plan_never_expires(self, tmp_path):
         db = T2Database(tmp_path / "t2.db")
         db.save_plan(query="permanent plan", plan_json='{}')
-        db.conn.execute("UPDATE plans SET created_at = datetime('now', '-365 days') WHERE id = 1")
-        db.conn.commit()
+        db.plans.conn.execute("UPDATE plans SET created_at = datetime('now', '-365 days') WHERE id = 1")
+        db.plans.conn.commit()
         assert len(db.list_plans()) == 1
 
     def test_fresh_plan_with_ttl_included(self, tmp_path):

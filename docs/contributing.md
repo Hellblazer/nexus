@@ -58,6 +58,59 @@ See [architecture.md](architecture.md) for the full module map.
 3. Add tests in `tests/test_your_cmd.py`
 4. Document in `docs/cli-reference.md`
 
+## Adding a T2 Domain Feature
+
+T2 is split into four domain stores under `src/nexus/db/t2/`:
+`memory_store.py`, `plan_library.py`, `catalog_taxonomy.py`, and
+`telemetry.py`. See [architecture.md § T2 Domain Stores](architecture.md#t2-domain-stores)
+for the map.
+
+**Adding a method to an existing store** (the common case):
+
+1. Add the method to the store's class in its own module — use the
+   store's own connection via its internal methods; do not reach out
+   to the facade.
+2. If the feature needs a new table or column, add a per-store
+   migration that runs the first time that store opens a database
+   path (the existing stores show the pattern — a module-level
+   `_migrated_paths: set[str]` guard + `_migrated_lock`, checked
+   in `__init__`).
+3. If external callers should be able to use the method via the
+   `T2Database` facade for backward compatibility, add a one-line
+   delegate on `T2Database` in `src/nexus/db/t2/__init__.py`.
+   Otherwise prefer the domain call style: `db.memory.your_method(...)`.
+4. Tests go in the matching file — `tests/test_memory.py`,
+   `tests/test_plan_library.py`, `tests/test_taxonomy.py`,
+   or `tests/test_t2.py` for cross-domain cases.
+
+**Adding a whole new domain store** (rare):
+
+1. Create `src/nexus/db/t2/<your_domain>.py` with a store class that
+   takes a `Path` and opens its own `sqlite3.Connection` in WAL mode
+   with `PRAGMA busy_timeout = 5000`.
+2. Add a `threading.Lock` on the store and guard every write with it.
+3. Add the store to `T2Database.__init__` in construction order
+   (stores created later may depend on earlier ones — `CatalogTaxonomy`
+   holds a reference to `MemoryStore`, for example).
+4. Make sure `T2Database.close()` tears your store down in reverse
+   construction order.
+5. If your store registers cross-domain expiry work, add it to
+   `T2Database.expire()`.
+6. Add concurrency coverage to `tests/test_t2_concurrency.py`.
+
+**Concurrency rules**:
+
+- Never share a connection across threads outside of that store's own
+  lock — the whole point of Phase 2 is that each store owns its own
+  connection and coordinates with other domains at the SQLite WAL
+  layer, not through a shared Python mutex.
+- Do not add a global T2 lock. If two domains genuinely need to
+  coordinate (rare), prefer a targeted SQLite transaction at a single
+  store and document the constraint in that store's module.
+- Tests that exercise multi-store behaviour should use a temp file
+  path, not `":memory:"`. `:memory:` databases are per-connection, so
+  the four stores would each see their own empty database.
+
 ## Adding an Agent or Skill
 
 See `nx/README.md` for the plugin structure. Skills live in `nx/skills/<name>/SKILL.md`, agents in `nx/agents/<name>.md`, and both are registered in `nx/registry.yaml`.

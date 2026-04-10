@@ -1,5 +1,33 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""MemoryStore — agent memory table, FTS5 search, TTL expire, consolidation.
+
+Owns the ``memory`` and ``memory_fts`` tables plus all methods that
+query or mutate them. Extracted from the monolithic ``T2Database`` in
+RDR-063 Phase 1 step 2 (bead ``nexus-vx3c``).
+
+As of Phase 2 (bead ``nexus-3d3k``) the store owns its own
+``sqlite3.Connection`` and ``threading.Lock`` against the SQLite file.
+The former :class:`SharedConnection` indirection has been removed —
+each domain store is now a self-contained owner of its table(s) and
+can be locked, migrated, and closed independently of its siblings.
+
+Lock ownership convention:
+  * Public mutators / readers (``put``, ``get``, ``search``, etc.)
+    acquire ``self._lock`` themselves.
+  * ``_init_schema`` runs under ``self._lock`` during ``__init__``
+    and invokes the private migration methods
+    (``_migrate_fts_if_needed`` / ``_migrate_access_tracking_if_needed``)
+    under the per-domain ``_migrated_lock`` guard.
+
+``_sanitize_fts5`` and ``_FTS5_SPECIAL`` live here (they are only used
+by memory search methods and the catalog FTS helper); the facade
+re-exports ``_sanitize_fts5`` so ``from nexus.db.t2 import _sanitize_fts5``
+still resolves.
+"""
+
+from __future__ import annotations
+
 import math
 import os
 import sqlite3
@@ -8,14 +36,27 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import structlog
+
+from nexus.session import read_session_id as _read_session_id
+
+_log = structlog.get_logger()
+
+
 # Access policy for T2 read operations (R3-4):
 # - "track": increment access_count + update last_accessed (default for user-facing reads)
 # - "silent": do not touch access metadata (internal scans, consolidation)
 AccessPolicy = Literal["track", "silent"]
 
-import structlog
 
-_log = structlog.get_logger()
+# Per-domain migration guard (RDR-063 Open Question 3 — Phase 2 resolution).
+# Each store owns its own ``_migrated_paths`` set and ``_migrated_lock`` so
+# adding a new migration to one domain never triggers re-probing of unrelated
+# domains. The MCP server opens a fresh ``T2Database`` per tool call; without
+# this guard, each call would re-probe both migrations on every construction.
+_migrated_paths: set[str] = set()
+_migrated_lock = threading.Lock()
+
 
 # ── FTS5 helpers ──────────────────────────────────────────────────────────────
 
@@ -47,11 +88,9 @@ def _sanitize_fts5(query: str) -> str:
     return " ".join(parts)
 
 
-# ── Schema SQL ────────────────────────────────────────────────────────────────
+# ── Schema SQL (memory + memory_fts + triggers) ───────────────────────────────
 
-_SCHEMA_SQL = """\
-PRAGMA journal_mode=WAL;
-
+_MEMORY_SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS memory (
     id            INTEGER PRIMARY KEY,
     project       TEXT    NOT NULL,
@@ -94,60 +133,7 @@ CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
         VALUES ('delete', old.id, old.title, old.content, old.tags);
     INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
 END;
-
-CREATE TABLE IF NOT EXISTS plans (
-    id         INTEGER PRIMARY KEY,
-    project    TEXT NOT NULL DEFAULT '',
-    query      TEXT NOT NULL,
-    plan_json  TEXT NOT NULL,
-    outcome    TEXT DEFAULT 'success',
-    tags       TEXT DEFAULT '',
-    created_at TEXT NOT NULL,
-    ttl        INTEGER
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
-    query,
-    tags,
-    project,
-    content=plans,
-    content_rowid='id'
-);
-
-CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
-    INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-END;
-
-CREATE TRIGGER IF NOT EXISTS plans_ad AFTER DELETE ON plans BEGIN
-    INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-        VALUES ('delete', old.id, old.query, old.tags, old.project);
-END;
-
-CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
-    INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-        VALUES ('delete', old.id, old.query, old.tags, old.project);
-    INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-END;
-
-CREATE TABLE IF NOT EXISTS topics (
-    id            INTEGER PRIMARY KEY,
-    label         TEXT NOT NULL,
-    parent_id     INTEGER REFERENCES topics(id),
-    collection    TEXT NOT NULL,
-    centroid_hash TEXT,
-    doc_count     INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS topic_assignments (
-    doc_id    TEXT NOT NULL,
-    topic_id  INTEGER NOT NULL REFERENCES topics(id),
-    PRIMARY KEY (doc_id, topic_id)
-);
 """
-
-_COLUMNS = ("id", "project", "title", "session", "agent", "content", "tags", "timestamp", "ttl", "access_count", "last_accessed")
-_PLAN_COLUMNS = ("id", "project", "query", "plan_json", "outcome", "tags", "created_at", "ttl")
 
 # ── FTS5 rebuild SQL (used for migration from old schema lacking 'title') ─────
 # These statements recreate only the FTS5 virtual table and its triggers after
@@ -177,174 +163,176 @@ CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
 END;
 """
 
+_COLUMNS = (
+    "id",
+    "project",
+    "title",
+    "session",
+    "agent",
+    "content",
+    "tags",
+    "timestamp",
+    "ttl",
+    "access_count",
+    "last_accessed",
+)
 
-# ── Session discovery ─────────────────────────────────────────────────────────
 
-from nexus.session import read_session_id as _read_session_id
+# Default busy_timeout for the memory store's connection. 5 seconds is
+# well beyond any schema-creation or migration window and absorbs normal
+# cross-domain write-lock contention.
+_DEFAULT_BUSY_MS = 5000
+
+# Disabled busy_timeout used only around the best-effort access-count
+# UPDATE in ``search(access="track")`` and ``get()``. The access counter
+# is a statistical signal and must fail-fast rather than block the
+# caller on the write lock when another store is writing.
+# ``busy_timeout = 0`` disables the busy handler, so SQLITE_BUSY fires
+# on the first contention and we skip the update in the except branch.
+_ACCESS_TRACK_BUSY_MS = 0
 
 
-# ── Per-process migration guard (RDR-062 follow-up) ─────────────────────────
-# Migrations only need to run once per DB path per process. The MCP server
-# opens a fresh T2Database on every tool call; without this guard, each call
-# probes all 6 migrations.
-_migrated_paths: set[str] = set()
-_migrated_lock = threading.Lock()
+def _is_sqlite_busy(exc: sqlite3.OperationalError) -> bool:
+    """Return True iff ``exc`` is a SQLITE_BUSY (database-locked) error.
+
+    The project targets Python 3.12+, which populates
+    ``exc.sqlite_errorcode`` on any ``OperationalError`` raised by
+    the CPython C layer during a real database operation. That is the
+    primary production path: compare the numeric errorcode to
+    ``sqlite3.SQLITE_BUSY`` (5) for a precise match, so we don't
+    swallow unrelated ``OperationalError`` subclasses like
+    SQLITE_CORRUPT (11), SQLITE_IOERR (10), or SQLITE_CANTOPEN (14).
+
+    The substring fallback exists for tests that monkey-patch a
+    raise with ``sqlite3.OperationalError("database is locked")``
+    constructed from Python — those synthetic exceptions do not have
+    ``sqlite_errorcode`` populated because the C layer never touched
+    them. The fallback keeps test-injection patterns working without
+    forcing tests to synthesize a full C-layer errorcode.
+
+    Extended codes — ``SQLITE_BUSY_SNAPSHOT`` (517),
+    ``SQLITE_BUSY_RECOVERY`` (261), ``SQLITE_BUSY_TIMEOUT`` (773) —
+    are **intentionally NOT swallowed** by this helper. They indicate
+    a different class of failure (snapshot staleness, recovery in
+    progress, statement-level timeout) where silently skipping the
+    access-tracking UPDATE is not necessarily safe; let them
+    propagate so the caller sees the real failure mode. The
+    access-tracking fast-fail path only absorbs pure write-lock
+    contention, which is always bare SQLITE_BUSY in this codebase's
+    WAL access pattern.
+    """
+    errorcode = getattr(exc, "sqlite_errorcode", None)
+    if errorcode is not None:
+        return errorcode == sqlite3.SQLITE_BUSY
+    # Fallback for test-injected exceptions without errorcode.
+    return "locked" in str(exc).lower()
 
 
-# ── Database ──────────────────────────────────────────────────────────────────
+# ── MemoryStore ───────────────────────────────────────────────────────────────
 
-class T2Database:
-    """T2 SQLite memory bank with FTS5 full-text search."""
+
+class MemoryStore:
+    """Owns the ``memory`` and ``memory_fts`` tables.
+
+    The store opens its own ``sqlite3.Connection`` and guards it with
+    its own ``threading.Lock``. All four T2 stores open the same SQLite
+    file; WAL mode + ``busy_timeout`` let the per-domain connections
+    coordinate at the SQLite layer without sharing Python-level state.
+    """
+
+    # Common English stopwords — used by find_overlapping_memories' Jaccard
+    # similarity to avoid trivial matches on filler words.
+    _STOPWORDS = frozenset(
+        {
+            "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
+            "it", "that", "this", "with", "on", "at", "by", "from", "as", "be", "not",
+        }
+    )
 
     def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        # Canonicalize path for the migration guard key: /foo/./bar and
-        # /foo/bar must hash to the same entry or the guard is bypassed.
+        # busy_timeout lets concurrent writers (e.g. a second T2Database
+        # constructor racing this one) wait on SQLite's file-level write
+        # lock instead of raising OperationalError. 5 seconds is well
+        # beyond any schema-creation or migration window observed in the
+        # migration-guard regression tests.
+        self.conn.execute(f"PRAGMA busy_timeout = {_DEFAULT_BUSY_MS}")
         try:
             canonical_key = str(path.resolve())
         except OSError:
             canonical_key = str(path)
         self._init_schema(canonical_key)
 
-    def _init_schema(self, path_key: str) -> None:
+    def close(self) -> None:
+        """Close the dedicated connection (idempotent under ``self._lock``)."""
         with self._lock:
-            # Note: executescript() implicitly COMMITs any open transaction.
-            # Safe here because _init_schema runs only during __init__ with no prior transaction.
-            self.conn.executescript(_SCHEMA_SQL)
+            self.conn.close()
+
+    # ── Schema / migrations ───────────────────────────────────────────────
+
+    def _init_schema(self, path_key: str) -> None:
+        """Create the memory tables and run any pending migrations.
+
+        Runs under ``self._lock`` so concurrent writers wait on schema
+        setup; the migration block additionally runs under
+        ``_migrated_lock`` so two constructors on the same path cannot
+        both enter the ``_migrate_*_if_needed`` methods (ALTER TABLE ADD
+        COLUMN is NOT idempotent — double-application raises
+        OperationalError).
+        """
+        with self._lock:
+            self.conn.executescript(_MEMORY_SCHEMA_SQL)
+            self.conn.executescript("PRAGMA journal_mode=WAL;")
             self.conn.commit()
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
             if result and result[0].lower() != "wal":
                 _log.warning("WAL mode not available", actual_mode=result[0])
-            # Migration guard: hold _migrated_lock across the full check-run-add
-            # sequence so two concurrent T2Database constructors on the same path
-            # cannot both enter the migration functions (ALTER TABLE ADD COLUMN
-            # is NOT idempotent — double-application raises OperationalError).
             with _migrated_lock:
                 if path_key in _migrated_paths:
                     return
                 self._migrate_fts_if_needed()
-                self._migrate_plans_if_needed()
-                self._migrate_plans_ttl_if_needed()
                 self._migrate_access_tracking_if_needed()
-                self._migrate_topics_if_needed()
-                self._migrate_relevance_log_if_needed()
                 _migrated_paths.add(path_key)
 
-    def _migrate_plans_if_needed(self) -> None:
-        """Add 'project' column to plans table if missing (v2.8.0 schema change).
+    def _migrate_fts_if_needed(self) -> None:
+        """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.
 
-        Safe to call multiple times — no-op when 'project' is already present
-        or when the plans table doesn't exist yet.
+        Safe to call multiple times — no-op when 'title' is already present.
+        FTS5 content tables are pure indexes; the authoritative data lives in
+        the ``memory`` table and is unaffected by dropping/recreating the FTS table.
+
+        Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
         """
         row = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='plans'"
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
         ).fetchone()
-        if row is None or "project" in row[0]:
+        if row is None or "title" in row[0]:
+            # Table missing (fresh DB handled by _MEMORY_SCHEMA_SQL) or already up to date
             return
 
-        _log.info("Migrating plans table to add project column")
-        self.conn.execute("ALTER TABLE plans ADD COLUMN project TEXT NOT NULL DEFAULT ''")
-        # Recreate FTS + triggers with project column
-        self.conn.executescript("""\
-            DROP TRIGGER IF EXISTS plans_ai;
-            DROP TRIGGER IF EXISTS plans_ad;
-            DROP TRIGGER IF EXISTS plans_au;
-            DROP TABLE  IF EXISTS plans_fts;
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
-                query, tags, project, content=plans, content_rowid='id'
-            );
-
-            CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
-                INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-            END;
-            CREATE TRIGGER IF NOT EXISTS plans_ad AFTER DELETE ON plans BEGIN
-                INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-                    VALUES ('delete', old.id, old.query, old.tags, old.project);
-            END;
-            CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
-                INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-                    VALUES ('delete', old.id, old.query, old.tags, old.project);
-                INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-            END;
-        """)
-        self.conn.execute("INSERT INTO plans_fts(plans_fts) VALUES('rebuild')")
-        self.conn.commit()
-        _log.info("plans migration complete (added project column)")
-
-    def _migrate_plans_ttl_if_needed(self) -> None:
-        """Add 'ttl' column to plans table if missing."""
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(plans)").fetchall()}
-        if not cols or "ttl" in cols:
-            return
-        _log.info("Migrating plans table to add ttl column")
-        self.conn.execute("ALTER TABLE plans ADD COLUMN ttl INTEGER")
-        self.conn.commit()
-        _log.info("plans ttl migration complete")
-
-    def _migrate_topics_if_needed(self) -> None:
-        """Add topics and topic_assignments tables if missing."""
-        row = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"
-        ).fetchone()
-        if row is not None:
-            return
-        _log.info("Migrating T2 schema to add topics tables")
-        self.conn.executescript("""\
-            CREATE TABLE IF NOT EXISTS topics (
-                id            INTEGER PRIMARY KEY,
-                label         TEXT NOT NULL,
-                parent_id     INTEGER REFERENCES topics(id),
-                collection    TEXT NOT NULL,
-                centroid_hash TEXT,
-                doc_count     INTEGER NOT NULL DEFAULT 0,
-                created_at    TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS topic_assignments (
-                doc_id    TEXT NOT NULL,
-                topic_id  INTEGER NOT NULL REFERENCES topics(id),
-                PRIMARY KEY (doc_id, topic_id)
-            );
-        """)
-        self.conn.commit()
-        _log.info("topics migration complete")
-
-    def _migrate_relevance_log_if_needed(self) -> None:
-        """Add relevance_log table if missing (RDR-061 E2).
-
-        Records (query, chunk_id, action) triples when an agent acts on
-        search results within a session. Used by future re-ranking.
+        _log.info("Migrating memory_fts to include title column")
+        # Drop old triggers first (they reference the old column list)
+        self.conn.executescript(
+            """\
+            DROP TRIGGER IF EXISTS memory_ai;
+            DROP TRIGGER IF EXISTS memory_ad;
+            DROP TRIGGER IF EXISTS memory_au;
+            DROP TABLE  IF EXISTS memory_fts;
         """
-        row = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='relevance_log'"
-        ).fetchone()
-        if row is not None:
-            return
-        _log.info("Migrating T2 schema to add relevance_log table")
-        self.conn.executescript("""\
-            CREATE TABLE IF NOT EXISTS relevance_log (
-                id         INTEGER PRIMARY KEY,
-                query      TEXT NOT NULL,
-                chunk_id   TEXT NOT NULL,
-                collection TEXT,
-                action     TEXT NOT NULL,
-                session_id TEXT,
-                timestamp  TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_relevance_log_query
-                ON relevance_log(query);
-            CREATE INDEX IF NOT EXISTS idx_relevance_log_chunk
-                ON relevance_log(chunk_id);
-            CREATE INDEX IF NOT EXISTS idx_relevance_log_session
-                ON relevance_log(session_id);
-        """)
+        )
+        # Recreate with new schema + triggers
+        self.conn.executescript(_FTS_REBUILD_SQL)
+        # Rebuild the FTS index from the authoritative memory table
+        self.conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
         self.conn.commit()
-        _log.info("relevance_log migration complete")
+        _log.info("memory_fts migration complete")
 
     def _migrate_access_tracking_if_needed(self) -> None:
-        """Add access_count and last_accessed columns to memory if missing."""
+        """Add access_count and last_accessed columns to memory if missing.
+
+        Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
+        """
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(memory)").fetchall()}
         changed = False
         if "access_count" not in cols:
@@ -361,46 +349,7 @@ class T2Database:
             self.conn.commit()
             _log.info("access_tracking migration complete")
 
-    def _migrate_fts_if_needed(self) -> None:
-        """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.
-
-        Safe to call multiple times — no-op when 'title' is already present.
-        FTS5 content tables are pure indexes; the authoritative data lives in
-        the ``memory`` table and is unaffected by dropping/recreating the FTS table.
-        """
-        row = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
-        ).fetchone()
-        if row is None or "title" in row[0]:
-            # Table missing (fresh DB handled by _SCHEMA_SQL) or already up to date
-            return
-
-        _log.info("Migrating memory_fts to include title column")
-        # Drop old triggers first (they reference the old column list)
-        self.conn.executescript("""\
-            DROP TRIGGER IF EXISTS memory_ai;
-            DROP TRIGGER IF EXISTS memory_ad;
-            DROP TRIGGER IF EXISTS memory_au;
-            DROP TABLE  IF EXISTS memory_fts;
-        """)
-        # Recreate with new schema + triggers
-        self.conn.executescript(_FTS_REBUILD_SQL)
-        # Rebuild the FTS index from the authoritative memory table
-        self.conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
-        self.conn.commit()
-        _log.info("memory_fts migration complete")
-
-    def __enter__(self) -> "T2Database":
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        self.close()
-
-    def close(self) -> None:
-        with self._lock:
-            self.conn.close()
-
-    # ── Write ─────────────────────────────────────────────────────────────────
+    # ── Write ─────────────────────────────────────────────────────────────
 
     def put(
         self,
@@ -446,7 +395,7 @@ class T2Database:
             self.conn.commit()
         return cursor.lastrowid  # type: ignore[return-value]
 
-    # ── Read ──────────────────────────────────────────────────────────────────
+    # ── Read ──────────────────────────────────────────────────────────────
 
     def get(
         self,
@@ -454,7 +403,16 @@ class T2Database:
         title: str | None = None,
         id: int | None = None,
     ) -> dict[str, Any] | None:
-        """Retrieve a single entry by (project, title) or by numeric ID."""
+        """Retrieve a single entry by (project, title) or by numeric ID.
+
+        Access tracking (``access_count`` + ``last_accessed``) runs as a
+        best-effort side-effect after the read — see ``search()`` for the
+        rationale. Under sustained cross-domain write load the UPDATE is
+        allowed to fail-fast on ``SQLITE_BUSY`` (logged as
+        ``memory.access_tracking.skipped``) rather than block the caller
+        on the full 5-second ``busy_timeout``. The row itself is always
+        returned; only the counter side-effect may be skipped.
+        """
         with self._lock:
             if id is not None:
                 row = self.conn.execute("SELECT * FROM memory WHERE id = ?", (id,)).fetchone()
@@ -467,14 +425,42 @@ class T2Database:
             if row is None:
                 return None
             now = datetime.now(UTC).isoformat()
-            self.conn.execute(
-                "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                (now, row[0]),
-            )
-            self.conn.commit()
+            tracked = False
+            try:
+                self.conn.execute(
+                    f"PRAGMA busy_timeout = {_ACCESS_TRACK_BUSY_MS}"
+                )
+                self.conn.execute(
+                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                    (now, row[0]),
+                )
+                self.conn.commit()
+                tracked = True
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_busy(exc):
+                    raise
+                # SQLITE_BUSY: best-effort side-effect skipped. Roll back
+                # the implicit write transaction so the connection is
+                # clean, log, and return the row without the counter
+                # increment reflected in the returned dict.
+                try:
+                    self.conn.rollback()
+                except sqlite3.OperationalError:  # pragma: no cover
+                    pass
+                _log.warning(
+                    "memory.access_tracking.skipped",
+                    reason=str(exc),
+                    row_id=row[0],
+                    method="get",
+                )
+            finally:
+                self.conn.execute(
+                    f"PRAGMA busy_timeout = {_DEFAULT_BUSY_MS}"
+                )
             result = dict(zip(_COLUMNS, row))
-            result["access_count"] += 1
-            result["last_accessed"] = now
+            if tracked:
+                result["access_count"] += 1
+                result["last_accessed"] = now
             return result
 
     def search(
@@ -523,15 +509,50 @@ class T2Database:
                     rows = self.conn.execute(sql, (safe,)).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-            # Batch-update access_count for all returned rows (skip when access="silent")
+            # Batch-update access_count for all returned rows (skip when
+            # access="silent"). Access tracking is a best-effort statistical
+            # signal — missing a few increments under heavy cross-domain
+            # write contention is acceptable. We run the UPDATE with a short
+            # busy_timeout so SQLITE_BUSY fails fast (and we skip the update)
+            # instead of hanging the caller on the full 5-second write-lock
+            # wait, then restore the long timeout for subsequent operations.
+            # Only SQLITE_BUSY ("database is locked") is swallowed — other
+            # OperationalError subclasses (SQLITE_CORRUPT, SQLITE_IOERR,
+            # SQLITE_CANTOPEN) indicate real problems and must propagate.
             if rows and access == "track":
                 now = datetime.now(UTC).isoformat()
                 ids = [r[0] for r in rows]
-                self.conn.executemany(
-                    "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                    [(now, rid) for rid in ids],
-                )
-                self.conn.commit()
+                try:
+                    self.conn.execute(
+                        f"PRAGMA busy_timeout = {_ACCESS_TRACK_BUSY_MS}"
+                    )
+                    self.conn.executemany(
+                        "UPDATE memory SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                        [(now, rid) for rid in ids],
+                    )
+                    self.conn.commit()
+                except sqlite3.OperationalError as exc:
+                    if not _is_sqlite_busy(exc):
+                        raise
+                    # SQLITE_BUSY: the fast-fail retry was skipped.
+                    # Roll back the implicit write transaction so the
+                    # connection is clean for the next search, log at
+                    # warning so the signal isn't lost, and return the
+                    # rows we already fetched.
+                    try:
+                        self.conn.rollback()
+                    except sqlite3.OperationalError:  # pragma: no cover
+                        pass
+                    _log.warning(
+                        "memory.access_tracking.skipped",
+                        reason=str(exc),
+                        row_count=len(ids),
+                        method="search",
+                    )
+                finally:
+                    self.conn.execute(
+                        f"PRAGMA busy_timeout = {_DEFAULT_BUSY_MS}"
+                    )
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def list_entries(
@@ -626,7 +647,6 @@ class T2Database:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
-
     def get_all(self, project: str) -> list[dict[str, Any]]:
         """Return all entries for *project* with full column data."""
         with self._lock:
@@ -660,199 +680,18 @@ class T2Database:
             self.conn.commit()
         return cursor.rowcount > 0
 
-    # ── Plan Library ──────────────────────────────────────────────────────────
+    # ── Housekeeping ──────────────────────────────────────────────────────
 
-    def save_plan(
-        self,
-        query: str,
-        plan_json: str,
-        outcome: str = "success",
-        tags: str = "",
-        project: str = "",
-        ttl: int | None = None,
-    ) -> int:
-        """Insert a plan record. Returns the new row ID.
-
-        Args:
-            ttl: Time-to-live in days. None means permanent (no expiry).
-        """
-        created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._lock:
-            cursor = self.conn.execute(
-                """
-                INSERT INTO plans (project, query, plan_json, outcome, tags, created_at, ttl)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (project, query, plan_json, outcome, tags, created_at, ttl),
-            )
-            self.conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
-
-    def search_plans(self, query: str, limit: int = 5, project: str = "") -> list[dict[str, Any]]:
-        """FTS5 search over plans (query + tags). Returns plans ordered by rank.
-
-        Expired plans (ttl set and created_at + ttl days < now) are excluded.
-        """
-        safe = _sanitize_fts5(query)
-        ttl_filter = (
-            "AND (p.ttl IS NULL OR julianday('now') - julianday(p.created_at) <= p.ttl)"
-        )
-        if project:
-            sql = f"""
-                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
-                FROM plans p
-                JOIN plans_fts ON plans_fts.rowid = p.id
-                WHERE plans_fts MATCH ? AND p.project = ?
-                {ttl_filter}
-                ORDER BY rank
-                LIMIT ?
-            """
-            params: tuple = (safe, project, limit)
-        else:
-            sql = f"""
-                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
-                FROM plans p
-                JOIN plans_fts ON plans_fts.rowid = p.id
-                WHERE plans_fts MATCH ?
-                {ttl_filter}
-                ORDER BY rank
-                LIMIT ?
-            """
-            params = (safe, limit)
-        with self._lock:
-            try:
-                rows = self.conn.execute(sql, params).fetchall()
-            except sqlite3.OperationalError as exc:
-                raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-        return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
-
-    def list_plans(self, limit: int = 20, project: str = "") -> list[dict[str, Any]]:
-        """Return most recent non-expired plans ordered by created_at DESC."""
-        ttl_filter = "(ttl IS NULL OR julianday('now') - julianday(created_at) <= ttl)"
-        if project:
-            sql = f"""
-                SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
-                FROM plans WHERE project = ? AND {ttl_filter} ORDER BY created_at DESC LIMIT ?
-            """
-            params_l: tuple = (project, limit)
-        else:
-            sql = f"""
-                SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
-                FROM plans WHERE {ttl_filter} ORDER BY created_at DESC LIMIT ?
-            """
-            params_l = (limit,)
-        with self._lock:
-            rows = self.conn.execute(sql, params_l).fetchall()
-        return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
-
-    # ── Relevance log (RDR-061 E2) ────────────────────────────────────────────
-
-    def log_relevance(
-        self,
-        query: str,
-        chunk_id: str,
-        action: str,
-        session_id: str = "",
-        collection: str = "",
-    ) -> int:
-        """Record a (query, chunk_id, action) triple in the relevance log.
-
-        Called by MCP tools when an agent acts on search results (store_put,
-        catalog_link). Returns the new row id. Prefer ``log_relevance_batch``
-        when writing multiple rows — it uses a single transaction.
-        """
-        now = datetime.now(UTC).isoformat()
-        with self._lock:
-            cur = self.conn.execute(
-                "INSERT INTO relevance_log (query, chunk_id, collection, action, session_id, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (query, chunk_id, collection, action, session_id, now),
-            )
-            self.conn.commit()
-            return cur.lastrowid
-
-    def log_relevance_batch(
-        self,
-        rows: list[tuple[str, str, str, str, str]],
-    ) -> int:
-        """Insert multiple (query, chunk_id, collection, action, session_id) rows.
-
-        Single transaction for all rows. Returns the number of rows inserted.
-        """
-        if not rows:
-            return 0
-        now = datetime.now(UTC).isoformat()
-        params = [(*r, now) for r in rows]
-        with self._lock:
-            self.conn.executemany(
-                "INSERT INTO relevance_log (query, chunk_id, collection, action, session_id, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                params,
-            )
-            self.conn.commit()
-        return len(rows)
-
-    def get_relevance_log(
-        self,
-        query: str = "",
-        chunk_id: str = "",
-        action: str = "",
-        session_id: str = "",
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Query the relevance log by filters. All filters optional.
-
-        Returns rows as dicts ordered by most recent first.
-        """
-        conditions = ["1=1"]
-        params: list = []
-        if query:
-            conditions.append("query = ?")
-            params.append(query)
-        if chunk_id:
-            conditions.append("chunk_id = ?")
-            params.append(chunk_id)
-        if action:
-            conditions.append("action = ?")
-            params.append(action)
-        if session_id:
-            conditions.append("session_id = ?")
-            params.append(session_id)
-        sql = (
-            "SELECT id, query, chunk_id, collection, action, session_id, timestamp "
-            f"FROM relevance_log WHERE {' AND '.join(conditions)} "
-            "ORDER BY timestamp DESC LIMIT ?"
-        )
-        params.append(limit)
-        with self._lock:
-            rows = self.conn.execute(sql, params).fetchall()
-        cols = ("id", "query", "chunk_id", "collection", "action", "session_id", "timestamp")
-        return [dict(zip(cols, row)) for row in rows]
-
-    # ── Housekeeping ──────────────────────────────────────────────────────────
-
-    def expire(self, relevance_log_days: int = 90) -> int:
-        """Delete TTL-expired entries using heat-weighted effective TTL.
+    def expire(self) -> list[int]:
+        """Delete TTL-expired memory entries using heat-weighted effective TTL.
 
         effective_ttl = base_ttl * (1 + log(access_count + 1))
-        Highly accessed entries survive longer. Unaccessed entries (access_count=0)
-        expire at base rate (log(1) = 0, so multiplier = 1).
+        Highly accessed entries survive longer. Unaccessed entries
+        (access_count=0) expire at base rate (log(1) = 0, so multiplier = 1).
 
-        Also purges relevance_log rows older than ``relevance_log_days`` days
-        (default 90) to prevent unbounded growth of the telemetry table.
-        Return value counts only memory rows deleted. Log purge count and
-        errors are surfaced via structured logs (``expire_complete`` /
-        ``expire_relevance_log_failed``).
+        Returns the list of deleted row IDs so the facade can aggregate
+        metrics across domain stores (memory + telemetry).
         """
-        # Purge relevance_log (RDR-061 E2 telemetry retention).
-        # Call outside the main lock — expire_relevance_log acquires its own.
-        log_deleted = 0
-        log_error: str | None = None
-        try:
-            log_deleted = self.expire_relevance_log(days=relevance_log_days)
-        except Exception as exc:
-            log_error = type(exc).__name__
-            _log.warning("expire_relevance_log_failed", exc_info=exc)
         with self._lock:
             rows = self.conn.execute(
                 """
@@ -875,39 +714,9 @@ class T2Database:
                     f"DELETE FROM memory WHERE id IN ({placeholders})", expired_ids
                 )
                 self.conn.commit()
-        extra: dict[str, Any] = {}
-        if log_error is not None:
-            extra["relevance_log_error"] = log_error
-        _log.info(
-            "expire_complete",
-            memory_deleted=len(expired_ids),
-            relevance_log_deleted=log_deleted,
-            **extra,
-        )
-        return len(expired_ids)
+        return expired_ids
 
-    def expire_relevance_log(self, days: int = 90) -> int:
-        """Delete relevance_log entries older than *days* days (RDR-061 E2).
-
-        The relevance_log accumulates on every store_put/catalog_link.
-        Without periodic purge it grows unboundedly. Default retention:
-        90 days — enough for re-ranking signal, bounded for disk use.
-        """
-        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-        with self._lock:
-            cur = self.conn.execute(
-                "DELETE FROM relevance_log WHERE timestamp < ?",
-                (cutoff,),
-            )
-            self.conn.commit()
-        return cur.rowcount
-
-    # ── Memory consolidation (RDR-061 E6) ────────────────────────────────────
-
-    _STOPWORDS = frozenset({
-        "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
-        "it", "that", "this", "with", "on", "at", "by", "from", "as", "be", "not",
-    })
+    # ── Memory consolidation (RDR-061 E6) ─────────────────────────────────
 
     def find_overlapping_memories(
         self,
@@ -936,8 +745,11 @@ class T2Database:
         for e1 in entries:
             # Use first few content words for FTS5 candidate retrieval — AND-of-terms
             # means too many words kills recall. Jaccard on full content handles precision.
-            words = [w for w in e1.get("content", "").split()[:5]
-                     if w.lower() not in self._STOPWORDS and len(w) > 2]
+            words = [
+                w
+                for w in e1.get("content", "").split()[:5]
+                if w.lower() not in self._STOPWORDS and len(w) > 2
+            ]
             snippet = " ".join(words[:3])
             if not snippet:
                 continue

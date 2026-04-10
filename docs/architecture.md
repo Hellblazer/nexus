@@ -84,13 +84,96 @@ Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of st
 
 **CCE single-chunk note**: For CCE collections (`docs__*`, `rdr__*`, `knowledge__*`), documents with only one chunk are embedded via `contextualized_embed(inputs=[[chunk]])`.
 
+## T2 Domain Stores
+
+`src/nexus/db/t2/` is a Python package split into four domain-specific
+stores. Each store owns its own tables in a shared SQLite file and runs
+against its own `sqlite3.Connection` in WAL mode. Reads in one domain
+are never blocked by writes in another (the Phase 1 global Python
+mutex is gone); concurrent writes across domains still serialize at
+SQLite's single-writer WAL lock, but `busy_timeout=5000` absorbs the
+brief contention without raising `OperationalError`.
+
+| Store      | Class             | Attribute       | Responsibility                                                             |
+|------------|-------------------|-----------------|----------------------------------------------------------------------------|
+| Memory     | `MemoryStore`     | `db.memory`     | Persistent notes, project context, FTS5 search, access tracking, TTL       |
+| Plans      | `PlanLibrary`     | `db.plans`      | Plan templates, plan search, plan TTL                                      |
+| Taxonomy   | `CatalogTaxonomy` | `db.taxonomy`   | Topic clustering, topic assignment                                         |
+| Telemetry  | `Telemetry`       | `db.telemetry`  | Relevance log (query/chunk/action triples), retention-based expiry         |
+
+`T2Database` is a composing facade: it constructs the four stores in
+order (memory → plans → taxonomy → telemetry), re-exposes their public
+methods as thin delegates for backward compatibility, and runs
+cross-domain operations like `expire()` over all of them. The facade
+holds no database connection of its own — every SQL statement runs
+through a specific domain store.
+
+**Preferred call style for new code**:
+
+```python
+db = T2Database(path)
+db.memory.search("fts query", project="myproj")   # domain method
+db.plans.save_plan(query, plan_json)               # domain method
+db.telemetry.log_relevance(query, ...)             # domain method
+```
+
+Existing call sites that use `db.search(...)`, `db.save_plan(...)`,
+etc. continue to work via facade delegation — no migration required.
+
+### Concurrency Model (RDR-063 Phase 2)
+
+Phase 2 replaced a single shared connection with per-store connections:
+
+| Phase      | Connection                | Lock                          | Cross-domain writes     |
+|------------|---------------------------|-------------------------------|-------------------------|
+| Phase 1    | one `SharedConnection`    | one `threading.Lock`          | serialized in Python    |
+| Phase 2    | one per store             | one `threading.Lock` per store | coordinated in SQLite   |
+
+Phase 2 consequences:
+
+- **Cross-domain reads no longer block on unrelated writes**: a
+  `memory_search` on one thread and a `plan_save` on another run in
+  parallel because the Phase 1 shared Python mutex is gone. Concurrent
+  *writes* across domains still serialize at SQLite's single-writer
+  WAL lock, but `busy_timeout=5000` absorbs the brief queue so callers
+  do not see `OperationalError: database is locked`.
+- **Telemetry no longer interferes with search**: MCP relevance-log
+  writes run on the telemetry connection, so `memory_search` is not
+  blocked by access-tracking hooks.
+- **Cluster rebuilds don't freeze memory**: `taxonomy.cluster_and_persist`
+  runs on the taxonomy connection; the long numpy clustering phase holds
+  no T2 locks, so interactive memory operations continue during the
+  bulk of the rebuild. (The initial `memory.get_all()` snapshot read
+  still briefly acquires `memory`'s lock, as any read does.)
+- **Parallel writes to the same store are serialized** by that store's
+  own `threading.Lock` plus the SQLite file-level write lock — callers
+  never see `OperationalError: database is locked`.
+
+**Migrations**: Each store owns its schema-migration guards and runs
+them the first time it opens a given database path. The guards are
+per-domain, so concurrent `T2Database` constructors on the same path
+can each reach their own `_init_schema` without coordinating through a
+single global migration lock. (`T2Database.__init__` itself constructs
+the four stores sequentially in dependency order — the per-domain
+guard matters for multi-process / multi-constructor races, not for the
+sequential initialization inside a single `T2Database`.)
+
+**In-memory SQLite**: Tests that want an ephemeral database should use
+a temp file path, not `":memory:"` — `:memory:` databases are
+per-connection, so the four stores would each see a distinct empty
+database and `test_t2_concurrency.py` would no longer exercise the
+cross-domain WAL path.
+
+See `src/nexus/db/t2/__init__.py` for the facade source and
+`tests/test_t2_concurrency.py` for the concurrency test suite.
+
 ## Module Map
 
 | Area | Files | What they do |
 |------|-------|-------------|
 | **Entry** | `cli.py`, `commands/` | Click CLI, one file per command group |
 | **Catalog** | `catalog/catalog.py`, `catalog_db.py`, `tumbler.py`, `link_generator.py`, `auto_linker.py` | Git-backed document registry + typed link graph (JSONL + SQLite). Tumbler addressing, `descendants()`/`ancestors()`/`lca()` hierarchy helpers, `resolve_chunk()` ghost element resolution, idempotent link upsert, composable query, bulk ops, audit. Auto-linker creates links from T1 link-context on every `store_put` |
-| **Storage** | `db/t1.py`, `db/t2.py`, `db/t3.py` | Tier implementations. Plans table has `ttl` column for auto-expiry |
+| **Storage** | `db/t1.py`, `db/t2/`, `db/t3.py` | Tier implementations. T2 is a package split into four domain stores (see § T2 Domain Stores). Plans table has `ttl` column for auto-expiry |
 | **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py`, `pipeline_buffer.py`, `pipeline_stages.py`, `checkpoint.py` | Repo indexing pipeline (decomposed per RDR-032). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` auto-detects math-heavy PDFs via FormulaItem counting and routes to MinerU (optional `conexus[mineru]` extra) for superior LaTeX extraction, falling back through enriched Docling to PyMuPDF normalized. MinerU processes large PDFs in 5-page subprocess batches for memory isolation (prevents OOM on formula-dense documents). Chunk metadata includes `has_formulas` boolean. `pipeline_buffer.py` provides a WAL-mode SQLite buffer for the three-stage streaming pipeline (RDR-048); `pipeline_stages.py` implements the concurrent extractor/chunker/uploader stages and orchestrator; `checkpoint.py` handles batch-path crash recovery for smaller documents (RDR-047) |
 | **Export** | `exporter.py` | Collection export/import for T3 backup and migration (.nxexp format) |
 | **Search** | `search_engine.py`, `search_clusterer.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py`, `filters.py` | Query, rank, rerank, Ward hierarchical clustering, shared where-filter parsing |

@@ -90,11 +90,11 @@ def _seed_plan_templates() -> int:
     seeded = 0
     with T2Database(default_db_path()) as db:
         for tmpl in _PLAN_TEMPLATES:
-            exists = db.conn.execute(
-                "SELECT 1 FROM plans WHERE query = ? AND tags LIKE '%builtin-template%' LIMIT 1",
-                (tmpl["query"],),
-            ).fetchone()
-            if exists:
+            # RDR-063 Phase 1 step 3 (Landmine 1 / audit F2): use the
+            # public plan_exists() method instead of reaching through
+            # db.conn directly. After Phase 2 the facade no longer
+            # exposes a single .conn — each domain store has its own.
+            if db.plan_exists(tmpl["query"], "builtin-template"):
                 continue
             db.save_plan(
                 query=tmpl["query"],

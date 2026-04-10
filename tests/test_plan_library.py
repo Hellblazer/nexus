@@ -24,7 +24,7 @@ def test_save_plan(plan_db: T2Database) -> None:
     assert isinstance(row_id, int)
     assert row_id > 0
 
-    row = plan_db.conn.execute("SELECT query, outcome, tags FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT query, outcome, tags FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row is not None
     assert row[0] == "how to index code"
     assert row[1] == "success"
@@ -36,7 +36,7 @@ def test_save_plan_json_stored(plan_db: T2Database) -> None:
     json_payload = '{"steps": ["step1", "step2"], "meta": {"version": 2}}'
     row_id = plan_db.save_plan(query="complex query", plan_json=json_payload)
 
-    row = plan_db.conn.execute("SELECT plan_json FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT plan_json FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row is not None
     assert row[0] == json_payload
 
@@ -78,13 +78,13 @@ def test_list_plans_ordered(plan_db: T2Database) -> None:
     results = plan_db.list_plans()
     assert len(results) == 3
     # Backdate first two to ensure deterministic ordering
-    plan_db.conn.execute(
+    plan_db.plans.conn.execute(
         "UPDATE plans SET created_at='2020-01-01T00:00:00Z' WHERE query='first plan'"
     )
-    plan_db.conn.execute(
+    plan_db.plans.conn.execute(
         "UPDATE plans SET created_at='2020-01-02T00:00:00Z' WHERE query='second plan'"
     )
-    plan_db.conn.commit()
+    plan_db.plans.conn.commit()
 
     results = plan_db.list_plans()
     assert results[0]["query"] == "third plan"
@@ -114,7 +114,7 @@ def test_save_plan_with_project(plan_db: T2Database) -> None:
         plan_json='{"steps":[]}',
         project="nexus",
     )
-    row = plan_db.conn.execute("SELECT project FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT project FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row[0] == "nexus"
 
 
@@ -150,14 +150,14 @@ def test_save_plan_with_ttl(plan_db: T2Database) -> None:
         plan_json='{"steps":[]}',
         ttl=30,
     )
-    row = plan_db.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row[0] == 30
 
 
 def test_save_plan_ttl_none_by_default(plan_db: T2Database) -> None:
     """save_plan() without ttl stores NULL (permanent)."""
     row_id = plan_db.save_plan(query="permanent plan", plan_json='{}')
-    row = plan_db.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
     assert row[0] is None
 
 
@@ -175,3 +175,93 @@ def test_list_plans_includes_ttl(plan_db: T2Database) -> None:
     results = plan_db.list_plans()
     assert len(results) == 1
     assert results[0]["ttl"] == 14
+
+
+# ── plan_exists (RDR-063 Landmine 1 fix) ────────────────────────────────────
+
+
+def test_plan_exists_returns_false_on_empty_db(plan_db: T2Database) -> None:
+    """plan_exists() returns False when the plans table is empty."""
+    assert plan_db.plan_exists("any query", "any-tag") is False
+
+
+def test_plan_exists_matches_query_and_tag(plan_db: T2Database) -> None:
+    """plan_exists() returns True when a plan has both the query and tag."""
+    plan_db.save_plan(
+        query="seed query",
+        plan_json='{}',
+        tags="builtin-template,catalog,author",
+    )
+    assert plan_db.plan_exists("seed query", "builtin-template") is True
+    assert plan_db.plan_exists("seed query", "catalog") is True
+    assert plan_db.plan_exists("seed query", "author") is True
+
+
+def test_plan_exists_false_on_query_mismatch(plan_db: T2Database) -> None:
+    """plan_exists() returns False when the query does not match."""
+    plan_db.save_plan(
+        query="exists",
+        plan_json='{}',
+        tags="builtin-template",
+    )
+    assert plan_db.plan_exists("different query", "builtin-template") is False
+
+
+def test_plan_exists_false_on_tag_mismatch(plan_db: T2Database) -> None:
+    """plan_exists() returns False when the tag is not among the plan's tags."""
+    plan_db.save_plan(
+        query="q",
+        plan_json='{}',
+        tags="builtin-template,catalog",
+    )
+    assert plan_db.plan_exists("q", "nonexistent-tag") is False
+
+
+def test_plan_exists_uses_comma_boundary_match(plan_db: T2Database) -> None:
+    """plan_exists() matches whole tokens, not substrings.
+
+    Regression guard for the review finding: the pre-fix substring LIKE would
+    return True for ``builtin-template`` when a plan's tags contained
+    ``builtin-template-v2`` or ``not-builtin-template``. The comma-boundary
+    pattern ``(',' || tags || ',') LIKE '%,<tag>,%'`` prevents that.
+    """
+    # Plan tagged with a SUPERSTRING of the search tag — must NOT match.
+    plan_db.save_plan(
+        query="superstring",
+        plan_json='{}',
+        tags="builtin-template-v2,other",
+    )
+    assert plan_db.plan_exists("superstring", "builtin-template") is False
+
+    # Plan tagged with a PREFIXED variant — must NOT match.
+    plan_db.save_plan(
+        query="prefixed",
+        plan_json='{}',
+        tags="not-builtin-template,other",
+    )
+    assert plan_db.plan_exists("prefixed", "builtin-template") is False
+
+    # Plan tagged with the exact token in the MIDDLE of the comma list — must match.
+    plan_db.save_plan(
+        query="middle",
+        plan_json='{}',
+        tags="other,builtin-template,more",
+    )
+    assert plan_db.plan_exists("middle", "builtin-template") is True
+
+    # Plan tagged with the exact token at the END — must match.
+    plan_db.save_plan(
+        query="end",
+        plan_json='{}',
+        tags="other,builtin-template",
+    )
+    assert plan_db.plan_exists("end", "builtin-template") is True
+
+
+def test_plan_exists_isolated_per_query(plan_db: T2Database) -> None:
+    """plan_exists() scopes the match to a single query string."""
+    plan_db.save_plan(query="query-a", plan_json='{}', tags="builtin-template")
+    plan_db.save_plan(query="query-b", plan_json='{}', tags="other")
+
+    assert plan_db.plan_exists("query-a", "builtin-template") is True
+    assert plan_db.plan_exists("query-b", "builtin-template") is False

@@ -94,10 +94,10 @@ def test_flag_stale_uses_last_accessed(db: T2Database) -> None:
     db.put(project="proj", title="old.md", content="old entry")
     # Backdate last_accessed
     old_ts = (datetime.now(UTC) - timedelta(days=45)).isoformat()
-    db.conn.execute(
+    db.memory.conn.execute(
         "UPDATE memory SET last_accessed=? WHERE title='old.md'", (old_ts,)
     )
-    db.conn.commit()
+    db.memory.conn.commit()
 
     db.put(project="proj", title="fresh.md", content="fresh entry")
     db.get(project="proj", title="fresh.md")  # sets last_accessed to now
@@ -113,11 +113,11 @@ def test_flag_stale_falls_back_to_timestamp(db: T2Database) -> None:
     db.put(project="proj", title="never-accessed.md", content="untouched")
     # Backdate the timestamp, leave last_accessed empty
     old_ts = (datetime.now(UTC) - timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.conn.execute(
+    db.memory.conn.execute(
         "UPDATE memory SET timestamp=?, last_accessed='' WHERE title='never-accessed.md'",
         (old_ts,),
     )
-    db.conn.commit()
+    db.memory.conn.commit()
 
     stale = db.flag_stale_memories("proj", idle_days=30)
     assert len(stale) >= 1
@@ -181,11 +181,11 @@ def test_mcp_memory_consolidate_flag_stale(db: T2Database, monkeypatch) -> None:
 
     db.put(project="proj", title="old.md", content="stale")
     old_ts = (datetime.now(UTC) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.conn.execute(
+    db.memory.conn.execute(
         "UPDATE memory SET timestamp=?, last_accessed='' WHERE title='old.md'",
         (old_ts,),
     )
-    db.conn.commit()
+    db.memory.conn.commit()
     monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
 
     result = memory_consolidate(action="flag-stale", project="proj", idle_days=30)
@@ -533,11 +533,11 @@ def test_mcp_memory_consolidate_with_real_t2_ctx(tmp_path, monkeypatch) -> None:
     # Backdate a.md so flag-stale has something to find
     backdate_db = T2Database(db_path)
     old_ts = (datetime.now(UTC) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    backdate_db.conn.execute(
+    backdate_db.memory.conn.execute(
         "UPDATE memory SET timestamp=?, last_accessed='' WHERE title='a.md'",
         (old_ts,),
     )
-    backdate_db.conn.commit()
+    backdate_db.memory.conn.commit()
     backdate_db.close()
 
     # flag-stale on the same re-opened DB
@@ -553,19 +553,19 @@ def test_find_overlapping_does_not_bump_access_count(db: T2Database) -> None:
            content="search engine architecture design implementation")
 
     # Snapshot access_count before the scan
-    before_a = db.conn.execute(
+    before_a = db.memory.conn.execute(
         "SELECT access_count FROM memory WHERE title='a.md'"
     ).fetchone()[0]
-    before_b = db.conn.execute(
+    before_b = db.memory.conn.execute(
         "SELECT access_count FROM memory WHERE title='b.md'"
     ).fetchone()[0]
 
     db.find_overlapping_memories("proj")
 
-    after_a = db.conn.execute(
+    after_a = db.memory.conn.execute(
         "SELECT access_count FROM memory WHERE title='a.md'"
     ).fetchone()[0]
-    after_b = db.conn.execute(
+    after_b = db.memory.conn.execute(
         "SELECT access_count FROM memory WHERE title='b.md'"
     ).fetchone()[0]
 

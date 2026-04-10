@@ -6,6 +6,96 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Next release ships **RDR-063 (T2 domain split)** — the Phase 1/Phase 2 refactor
+that was drafted and gate-ready in 3.7.0. T2 is now a four-store package with
+per-store `sqlite3.Connection` + `threading.Lock`; cross-domain reads no longer
+block on unrelated writes. 3457 non-integration tests passing (+1 for
+`test_t2_concurrency.py`), concurrency acceptance gates all green.
+
+### Added
+
+- **RDR-063: T2 Domain Split** — `src/nexus/db/t2.py` (1,052 LOC monolith,
+  four mixed domains) split into `src/nexus/db/t2/` package with four per-
+  domain stores behind a composing `T2Database` facade:
+  - `MemoryStore` (`db.memory`) — agent memory, FTS5 search, access tracking,
+    heat-weighted TTL, consolidation helpers
+  - `PlanLibrary` (`db.plans`) — plan templates, plan search, plan TTL
+  - `CatalogTaxonomy` (`db.taxonomy`) — topic clustering, topic assignment
+  - `Telemetry` (`db.telemetry`) — relevance log, retention-based expiry
+  Each store opens its own `sqlite3.Connection` against the shared SQLite file
+  in WAL mode with `busy_timeout=5000`. Reads in one domain are never blocked
+  by writes in another. Concurrent writes across domains still serialize at
+  SQLite's single-writer WAL lock but `busy_timeout` absorbs brief contention.
+  Per-domain migration guards prevent double-`ALTER TABLE` under concurrent
+  constructors. Phase 3 (physical file split) is explicitly deferred; requires
+  its own RDR.
+
+- **New concurrency test suite**: `tests/test_t2_concurrency.py` — 6 tests
+  covering cross-domain parallel writes, same-store serialization, single-
+  threaded baseline, memory_search under concurrent write load (acceptance
+  gate), memory_get under concurrent write load, and memory_search during
+  active `cluster_and_persist` runs. All gates stable across 10+ runs.
+
+- `_is_sqlite_busy` helper in `memory_store.py` uses `exc.sqlite_errorcode`
+  for precise SQLITE_BUSY detection (Python 3.12+). Extended codes
+  (`SQLITE_BUSY_SNAPSHOT`, `SQLITE_BUSY_RECOVERY`, `SQLITE_BUSY_TIMEOUT`) are
+  intentionally NOT swallowed — they indicate distinct failure modes.
+
+### Changed
+
+- **Best-effort access tracking** (behavior change): `memory.search(access="track")`
+  and `memory.get()` now run the `access_count`/`last_accessed` UPDATE as a
+  best-effort side-effect under a temporary `PRAGMA busy_timeout = 0`. Under
+  sustained cross-domain write load, roughly 5–10% of updates fail-fast on
+  `SQLITE_BUSY` and are logged at warning as `memory.access_tracking.skipped`.
+  The returned row content is unaffected; only the counter update may be
+  skipped. This trades counter precision for tail latency stability — the
+  pre-refactor behavior would block the caller for up to 5 seconds on the
+  busy_timeout. RDR-057 heat-weighted TTL remains approximate under load
+  (see [Storage Tiers § Heat-Weighted Expiry](docs/storage-tiers.md#t2----memory-bank)).
+
+- `T2Database` facade is now pure composition. `T2Database.conn` and
+  `T2Database._lock` were removed. Callers that reached into the facade's
+  raw connection must route through a specific domain store
+  (`db.memory.conn`, `db.plans.conn`, etc.). All in-repo call sites migrated;
+  no external callers should have depended on these (they were implementation
+  details, not advertised API).
+
+### Fixed
+
+- README agent/skill/tool counts: 32 → 33 skills, 24 → 25 MCP tools (main
+  README), 32 → 33 skills (nx plugin README), 17 → 16 agents and 32 → 33
+  skills (getting-started.md), 17 → 16 agents (historical.md).
+- `docs/architecture.md` Telemetry row mislabeled "access tracking" — moved
+  to Memory row where it belongs; Telemetry reworded as "Relevance log …
+  retention-based expiry".
+- `nx/README.md` Hooks table rewritten to match `hooks.json` — removed
+  non-existent `bd prime` entries, added missing `PostCompact`,
+  `StopFailure`, `Stop`, `PreToolUse` (bd-close gate), and
+  `PermissionRequest` (auto-approve MCP) hooks.
+- `docs/storage-tiers.md` stale "Upcoming (RDR-063 draft)" blurb replaced
+  with the shipped architecture description.
+- `docs/rdr/README.md` RDR-063 status row updated from Accepted → Closed.
+- `catalog_taxonomy.py::get_topic_docs` — added Phase 3 fragility note
+  explaining that the cross-table JOIN depends on single-file architecture
+  and will require redesign if Phase 3 proceeds.
+
+### Docs
+
+- **New**: `docs/rdr/post-mortem/063-t2-domain-split.md` — full post-mortem
+  covering the 3 drifts (module LOC targets, access-tracking behavior change,
+  now-addressed carry-forwards), 3 carry-forward items, and 4 process
+  takeaways.
+- `docs/architecture.md` — new § T2 Domain Stores section with the domain
+  store table and Phase 1 → Phase 2 concurrency model comparison.
+- `docs/contributing.md` — new § Adding a T2 Domain Feature with recipes for
+  extending an existing store and adding a new domain store.
+- `docs/storage-tiers.md` — RDR-063 interaction note under Heat-Weighted
+  Expiry explaining best-effort access tracking.
+- `docs/memory-and-tasks.md` — access tracking paragraph clarified to reflect
+  best-effort semantics under load.
+- `CLAUDE.md` — source layout updated from `db/t2.py` to `db/t2/` package.
+
 ## [3.7.0] - 2026-04-10
 
 Three accepted RDRs ship together in a single release: RDR-057 (progressive

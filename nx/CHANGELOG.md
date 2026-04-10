@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Plugin version aligned with Nexus CLI next release (RDR-063: T2 Domain Split).
+No plugin-level functional changes — the T2 refactor is internal to the core
+CLI and MCP servers. Documentation and README precision fixes only.
+
+### Fixed
+
+- `nx/README.md` header: 32 → 33 skills.
+- `nx/README.md` "What You Get" bullets: 32 → 33 skills; 10 → 11 standalone
+  skills (adds the missing `catalog` skill, which was orphaned from the
+  listings).
+- `nx/README.md` Directory Structure: added `catalog/` to the skills tree
+  and refreshed the `hooks/scripts/` listing to enumerate all 10 scripts
+  (session_start, rdr, post_compact, stop_failure, stop_verification,
+  pre_close_verification, subagent-start, auto-approve-nx-mcp, plus the
+  two shared helpers). The previous listing showed only 4 of 10.
+- `nx/README.md` Standalone Skills (10) → (11), with a `catalog` row added.
+- `nx/README.md` Hooks table rewritten to match `hooks.json` — removed
+  `bd prime` entries that don't exist in the hook wiring; added missing
+  `PostCompact` (`post_compact_hook.sh`), `Stop` (`stop_verification_hook.sh`),
+  `StopFailure` (`stop_failure_hook.py`), `PreToolUse` (Bash, bd-close gate),
+  and `PermissionRequest` (auto-approve MCP) entries.
+- `nx/README.md` agent directory note: "14 specialized + 2 internal" reworded
+  to "14 command-invoked + 2 query-dispatched" — the two dispatched agents
+  (`analytical-operator`, `query-planner`) are not "internal"; they're
+  invoked via the `query` skill's planner/operator pipeline.
+
 ## [3.7.0] - 2026-04-10
 
 ### Added
