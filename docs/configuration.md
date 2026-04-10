@@ -138,6 +138,28 @@ tuning:
 
 These values are exposed as a `TuningConfig` dataclass in `nexus.config`. The search command, indexer, and scoring modules all read from this config — changes take effect on the next invocation without restarting anything.
 
+## Heat-Weighted T2 Expiry
+
+T2 memory entries use a heat-weighted effective TTL (RDR-057 Phase 2a):
+
+```
+effective_ttl = base_ttl * (1 + log(access_count + 1))
+```
+
+Highly-accessed entries survive longer than their nominal TTL. Unaccessed entries (`access_count=0`) expire at the base rate (`log(1) = 0`, so multiplier = 1). Every `memory_get` or `memory_search` hit increments `access_count` and updates `last_accessed`.
+
+| access_count | Multiplier | Effective TTL (base 30 days) |
+|--------------|------------|------------------------------|
+| 0 | 1.00 | 30 days |
+| 1 | 1.69 | ~51 days |
+| 5 | 2.79 | ~84 days |
+| 10 | 3.40 | ~102 days |
+| 50 | 4.93 | ~148 days |
+
+**Note**: This differs from the paper (Memory in the LLM Era) which uses division for relevance-decay. Nexus uses multiplication for heat-based survival — entries agents keep touching stick around longer. If you need strict time-bounded expiry regardless of access, use `ttl=None` (permanent) and explicit `memory_delete` instead.
+
+Periodic purge runs via `T2Database.expire(relevance_log_days=90)`, which also purges the `relevance_log` telemetry table (RDR-061 E2) of entries older than 90 days.
+
 ## Verification
 
 Opt-in mechanical enforcement hooks that catch common agent failure modes: premature session closure and premature bead closure.

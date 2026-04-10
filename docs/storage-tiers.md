@@ -23,6 +23,8 @@ Falls back to a local `EphemeralClient` (with a warning) when no server record i
 
 Everything is wiped at session end: the `SessionEnd` hook stops the ChromaDB server and deletes the backing tmpdir. Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
 
+**Access tracking (RDR-057)**: Every `T1.get()` and `T1.search()` hit increments `access_count` and updates `last_accessed` on the returned entries (stored as ChromaDB metadata — schemaless, no migration). The counts feed the progressive formalization tier model but do not drive expiry at T1 (T1 is wiped at session end regardless).
+
 **Use for**: working hypotheses, temporary notes, in-flight analysis shared across spawned agents.
 
 ## T2 -- Memory Bank
@@ -39,6 +41,14 @@ T2 is the persistent local layer that bridges sessions. Notes, project state, an
 - **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
 
 Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, or permanent. Default is `30d` for developer notes.
+
+**Heat-weighted expiry (RDR-057 Phase 2a)**: T2 `access_count` and `last_accessed` columns track usage. Effective TTL becomes `base_ttl * (1 + log(access_count + 1))` — frequently-accessed entries survive longer. See [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
+
+**Consolidation (RDR-061 E6)**: `memory_consolidate` MCP tool provides `find-overlaps`, `merge` (with `dry_run` and `confirm_destructive` safety gates), and `flag-stale` operations. See [Memory and Tasks — Consolidation](memory-and-tasks.md#consolidation-rdr-061-e6).
+
+**Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry — not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
+
+**Upcoming (RDR-063 draft)**: T2 is being considered for a domain split into `memory_store`, `plan_library`, `catalog_taxonomy`, and `telemetry` modules. See `docs/rdr/rdr-063-t2-domain-split.md`. Current implementation uses a single shared SQLite file.
 
 ## T3 -- Permanent Knowledge
 

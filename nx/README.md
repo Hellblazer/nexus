@@ -41,7 +41,7 @@ Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Three bundled MCP servers** — nexus (core storage), nexus-catalog (catalog tools), and sequential-thinking via `.mcp.json`
+- **Two bundled MCP servers** — `nexus` (15 core tools: storage, memory, scratch, plans, consolidation) and `nexus-catalog` (10 catalog tools: search, show, link, resolve, stats) — plus `sequential-thinking` fetched via npx
 
 ### Pick your entry point
 

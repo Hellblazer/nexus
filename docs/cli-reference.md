@@ -283,6 +283,31 @@ Standard catalog management. Run `nx catalog COMMAND --help` for details.
 
 ---
 
+## nx taxonomy
+
+Persistent topic taxonomy (RDR-061 E5) — hierarchical clustering of T2 memory
+entries into topics for navigation and consolidation. **CLI only** (no MCP tool
+by design — taxonomy operations are human-driven, not agent-driven).
+
+```
+nx taxonomy list                       # list root topics
+nx taxonomy list --parent-id 5         # list children of topic 5
+nx taxonomy rebuild --project myrepo   # cluster all entries in project
+nx taxonomy show 5                     # show topic details and assigned docs
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List topics (root by default; use `--parent-id` for children) |
+| `rebuild` | Re-cluster a project's memory entries into topics |
+| `show TOPIC_ID` | Show topic label, children, and assigned doc titles |
+
+**Rebuild semantics**: `nx taxonomy rebuild --project X` runs Ward hierarchical
+clustering over T2 memory entries in project X. Vocab is capped at 2000 words
+with stopword filtering. Each entry is assigned to exactly one topic.
+
+---
+
 ## nx store
 
 Manage T3 knowledge entries.

@@ -11,7 +11,7 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 
 Core tools are prefixed `mcp__plugin_nx_nexus__`; catalog tools are prefixed `mcp__plugin_nx_nexus-catalog__`.
 
-There are 14 core tools: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`.
+There are 15 core tools: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`.
 There are 10 catalog tools (nexus-catalog server): `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`.
 
 ### search
@@ -175,6 +175,33 @@ mcp__plugin_nx_nexus__memory_search(query="query"
 mcp__plugin_nx_nexus__memory_search(query="query", project="{repo}"
 ```
 
+### memory_consolidate
+
+T2 memory hygiene (RDR-061 E6): find overlapping entries, merge duplicates, flag stale entries. Merge is destructive and gated by `dry_run` and `confirm_destructive`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `action` | str | required | `"find-overlaps"`, `"merge"`, `"flag-stale"` |
+| `project` | str | required | T2 project namespace |
+| `min_similarity` | float | `0.7` | Jaccard threshold for `find-overlaps` |
+| `idle_days` | int | `30` | Staleness threshold for `flag-stale` |
+| `keep_id` | int | `0` | Entry ID to keep when merging (must be > 0) |
+| `delete_ids` | str | `""` | Comma-separated IDs to delete during merge |
+| `merged_content` | str | `""` | Replacement content for kept entry |
+| `dry_run` | bool | `False` | Preview merge without modifying T2 |
+| `confirm_destructive` | bool | `False` | Required when merging > 1 entry |
+
+```
+mcp__plugin_nx_nexus__memory_consolidate(action="find-overlaps", project="{repo}"
+mcp__plugin_nx_nexus__memory_consolidate(action="flag-stale", project="{repo}", idle_days=30
+mcp__plugin_nx_nexus__memory_consolidate(action="merge", project="{repo}",
+    keep_id=42, delete_ids="43", merged_content="...", dry_run=True
+mcp__plugin_nx_nexus__memory_consolidate(action="merge", project="{repo}",
+    keep_id=42, delete_ids="43,44,45", merged_content="...", confirm_destructive=True
+```
+
+Merge safety: aborts with `KeyError` if `keep_id` does not exist (prevents data loss when `expire()` races with merge). `delete_ids` are preserved in that case.
+
 ### scratch
 
 T1 session scratch pad — ephemeral within-session storage.
@@ -211,6 +238,10 @@ Manage scratch entries: flag for persistence or promote to T2.
 mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>"
 mcp__plugin_nx_nexus__scratch_manage(action="promote", entry_id="<id>", project="{repo}", title="findings.md"
 ```
+
+**Promote return value** (RDR-057 Phase 1c): The promote action returns a `PromotionReport` rendered in the response string:
+- `(action=new)` — clean write, no overlap detected
+- `(action=overlap_detected)` — FTS5 found a similar existing T2 entry. The new entry is still written as a separate row; the agent must decide whether to also call `memory_consolidate(action="merge")` to dedupe.
 
 **Usage pattern**: Use T1 scratch for in-flight working notes. Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via store_put.
 

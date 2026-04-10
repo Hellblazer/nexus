@@ -52,7 +52,7 @@ nx catalog link "Paper A" "Paper B" --type cites
 nx catalog link 1.1.5 1.2.3 --type implements
 ```
 
-Both arguments accept titles or tumblers. Link types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`.
+Both arguments accept titles or tumblers. Link types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`, `formalizes`.
 
 Duplicate links are merged — the second creator is recorded in `co_discovered_by`. Linking to a deleted or non-existent document is rejected by default.
 
@@ -106,7 +106,7 @@ query(question="related work", follow_links="cites")         # citation-enriched
 
 For simple scoped queries, `query()` with catalog params is a single MCP call — no agent dispatch needed. For complex analytical queries (compare, extract, generate), the `/nx:query` skill orchestrates multi-step plans via three-path dispatch: Path 1 (single `query()` call) → Path 2 (template match) → Path 3 (planner agent).
 
-Individual catalog MCP tools (`catalog_search`, `catalog_links`, `catalog_resolve`) are still available for direct metadata inspection and graph traversal.
+Individual catalog MCP tools (`search`, `links`, `resolve` on the `nexus-catalog` server — short names, no `catalog_` prefix since RDR-062) are still available for direct metadata inspection and graph traversal. Full tool names: `mcp__plugin_nx_nexus-catalog__search`, `mcp__plugin_nx_nexus-catalog__links`, etc.
 
 Agents also create links during their work — the debugger creates `relates` links between findings, the developer creates `implements` links to RDRs, the knowledge-tidier creates `supersedes` links when consolidating documents.
 
@@ -121,8 +121,9 @@ Agents also create links during their work — the debugger creates `relates` li
 | `relates` | Related findings | Cross-cutting concerns, similar topics | Debugger, deep-analyst, manual |
 | `quotes` | Direct quotation with spans | Citing a specific passage as evidence | Manual |
 | `comments` | Commentary or annotation | Metadata notes about a document | Manual |
+| `formalizes` | Progressive formalization | A higher-level representation (e.g., extracted entities, RDF triples) formalizes a raw L0 text chunk | RDR-057 progressive formalization, agents |
 
-**Choosing the right type:** Use `cites` for bibliographic references. Use `implements` when code directly realizes a design (not just mentions it — that's `relates`). Use `supersedes` when one document fully replaces another. Use `quotes` when you need to pin a specific passage with a span reference.
+**Choosing the right type:** Use `cites` for bibliographic references. Use `implements` when code directly realizes a design (not just mentions it — that's `relates`). Use `supersedes` when one document fully replaces another. Use `quotes` when you need to pin a specific passage with a span reference. Use `formalizes` when creating a higher-abstraction representation that points back to its raw source (multi-representation equivalence per RDR-057).
 
 Every link carries `created_by` provenance — you can always tell who asserted a relationship and filter by it:
 
@@ -144,7 +145,7 @@ Spans identify specific passages within documents. The three formats have differ
 
 **What happens when spans go stale:** If you re-index a document, positional spans (`42-57`, `3:100-250`) may point to the wrong text. Content-hash spans (`chash:`) continue to resolve correctly as long as the chunk text hasn't changed.
 
-**Detecting stale spans:** Run `nx catalog link-audit` (or use the `catalog_link_audit` MCP tool). The audit reports:
+**Detecting stale spans:** Run `nx catalog link-audit` (the `catalog_link_audit` operation is CLI-only since RDR-062 — demoted from the MCP surface). The audit reports:
 - `stale_spans` — positional spans on documents that were re-indexed after the link was created
 - `stale_chash` — content-hash spans that no longer resolve to any chunk in T3 (chunk was deleted or text changed)
 
