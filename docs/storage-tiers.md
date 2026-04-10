@@ -48,7 +48,7 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 **Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry — not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
 
-**Upcoming (RDR-063 draft)**: T2 is being considered for a domain split into `memory_store`, `plan_library`, `catalog_taxonomy`, and `telemetry` modules. See `docs/rdr/rdr-063-t2-domain-split.md`. Current implementation uses a single shared SQLite file.
+**Domain split (RDR-063)**: T2 is implemented as four domain stores under `src/nexus/db/t2/` — `MemoryStore` (memory table), `PlanLibrary` (plans table), `CatalogTaxonomy` (topics + topic_assignments), and `Telemetry` (relevance_log). Each store opens its own `sqlite3.Connection` against the shared SQLite file in WAL mode with `busy_timeout=5000`, so reads in one domain are never blocked by writes in another. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls continue to work via method delegation, and new code can reach the domain stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
 
 ## T3 -- Permanent Knowledge
 
