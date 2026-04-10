@@ -31,53 +31,28 @@ from nexus.db.t2.memory_store import (
     MemoryStore,
     _sanitize_fts5,  # re-exported for nexus.catalog.catalog_db
 )
+from nexus.db.t2.plan_library import PlanLibrary
 
 _log = structlog.get_logger()
 
 # Re-export for backward compatibility — ``catalog/catalog_db.py`` and
 # ``tests/test_t2.py`` still ``from nexus.db.t2 import _sanitize_fts5``.
-__all__ = ["AccessPolicy", "MemoryStore", "SharedConnection", "T2Database", "_sanitize_fts5"]
+__all__ = [
+    "AccessPolicy",
+    "MemoryStore",
+    "PlanLibrary",
+    "SharedConnection",
+    "T2Database",
+    "_sanitize_fts5",
+]
 
 
-# ── Residual schema (plans, topics, topic_assignments) ───────────────────────
+# ── Residual schema (topics, topic_assignments) ──────────────────────────────
 # Memory schema lives in memory_store._MEMORY_SCHEMA_SQL.
-# Plan/taxonomy schema will migrate out in the next beads.
+# Plans schema lives in plan_library._PLANS_SCHEMA_SQL.
+# Taxonomy schema (topics + topic_assignments) will migrate out in nexus-u29l.
 _RESIDUAL_SCHEMA_SQL = """\
 PRAGMA journal_mode=WAL;
-
-CREATE TABLE IF NOT EXISTS plans (
-    id         INTEGER PRIMARY KEY,
-    project    TEXT NOT NULL DEFAULT '',
-    query      TEXT NOT NULL,
-    plan_json  TEXT NOT NULL,
-    outcome    TEXT DEFAULT 'success',
-    tags       TEXT DEFAULT '',
-    created_at TEXT NOT NULL,
-    ttl        INTEGER
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
-    query,
-    tags,
-    project,
-    content=plans,
-    content_rowid='id'
-);
-
-CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
-    INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-END;
-
-CREATE TRIGGER IF NOT EXISTS plans_ad AFTER DELETE ON plans BEGIN
-    INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-        VALUES ('delete', old.id, old.query, old.tags, old.project);
-END;
-
-CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
-    INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-        VALUES ('delete', old.id, old.query, old.tags, old.project);
-    INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-END;
 
 CREATE TABLE IF NOT EXISTS topics (
     id            INTEGER PRIMARY KEY,
@@ -95,8 +70,6 @@ CREATE TABLE IF NOT EXISTS topic_assignments (
     PRIMARY KEY (doc_id, topic_id)
 );
 """
-
-_PLAN_COLUMNS = ("id", "project", "query", "plan_json", "outcome", "tags", "created_at", "ttl")
 
 
 # ── Per-process migration guard ──────────────────────────────────────────────
@@ -132,6 +105,7 @@ class T2Database:
         # fields point at the same objects — Phase 2 will split them.
         self._shared = SharedConnection(conn=self.conn, lock=self._lock)
         self.memory: MemoryStore = MemoryStore(self._shared)
+        self.plans: PlanLibrary = PlanLibrary(self._shared)
         # Canonicalize path for the migration guard key: /foo/./bar and
         # /foo/bar must hash to the same entry or the guard is bypassed.
         try:
@@ -144,9 +118,10 @@ class T2Database:
         with self._lock:
             # Note: executescript() implicitly COMMITs any open transaction.
             # Safe here because _init_schema runs only during __init__ with
-            # no prior transaction. Memory DDL runs first (lock-naive helper
-            # on MemoryStore), then the residual plans/topics DDL.
+            # no prior transaction. Memory and plans DDL run first (lock-naive
+            # helpers on the domain stores), then the residual topics DDL.
             self.memory.init_schema_unlocked()
+            self.plans.init_schema_unlocked()
             self.conn.executescript(_RESIDUAL_SCHEMA_SQL)
             self.conn.commit()
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
@@ -160,64 +135,12 @@ class T2Database:
                 if path_key in _migrated_paths:
                     return
                 self.memory._migrate_fts_if_needed()
-                self._migrate_plans_if_needed()
-                self._migrate_plans_ttl_if_needed()
+                self.plans._migrate_plans_if_needed()
+                self.plans._migrate_plans_ttl_if_needed()
                 self.memory._migrate_access_tracking_if_needed()
                 self._migrate_topics_if_needed()
                 self._migrate_relevance_log_if_needed()
                 _migrated_paths.add(path_key)
-
-    def _migrate_plans_if_needed(self) -> None:
-        """Add 'project' column to plans table if missing (v2.8.0 schema change).
-
-        Safe to call multiple times — no-op when 'project' is already present
-        or when the plans table doesn't exist yet.
-        """
-        row = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='plans'"
-        ).fetchone()
-        if row is None or "project" in row[0]:
-            return
-
-        _log.info("Migrating plans table to add project column")
-        self.conn.execute("ALTER TABLE plans ADD COLUMN project TEXT NOT NULL DEFAULT ''")
-        # Recreate FTS + triggers with project column
-        self.conn.executescript("""\
-            DROP TRIGGER IF EXISTS plans_ai;
-            DROP TRIGGER IF EXISTS plans_ad;
-            DROP TRIGGER IF EXISTS plans_au;
-            DROP TABLE  IF EXISTS plans_fts;
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
-                query, tags, project, content=plans, content_rowid='id'
-            );
-
-            CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
-                INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-            END;
-            CREATE TRIGGER IF NOT EXISTS plans_ad AFTER DELETE ON plans BEGIN
-                INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-                    VALUES ('delete', old.id, old.query, old.tags, old.project);
-            END;
-            CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
-                INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-                    VALUES ('delete', old.id, old.query, old.tags, old.project);
-                INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-            END;
-        """)
-        self.conn.execute("INSERT INTO plans_fts(plans_fts) VALUES('rebuild')")
-        self.conn.commit()
-        _log.info("plans migration complete (added project column)")
-
-    def _migrate_plans_ttl_if_needed(self) -> None:
-        """Add 'ttl' column to plans table if missing."""
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(plans)").fetchall()}
-        if not cols or "ttl" in cols:
-            return
-        _log.info("Migrating plans table to add ttl column")
-        self.conn.execute("ALTER TABLE plans ADD COLUMN ttl INTEGER")
-        self.conn.commit()
-        _log.info("plans ttl migration complete")
 
     def _migrate_topics_if_needed(self) -> None:
         """Add topics and topic_assignments tables if missing."""
@@ -382,7 +305,7 @@ class T2Database:
     ) -> list[dict[str, Any]]:
         return self.memory.flag_stale_memories(project, idle_days=idle_days)
 
-    # ── Plan Library ──────────────────────────────────────────────────────────
+    # ── Plan Library delegation (RDR-063 Phase 1 step 3) ──────────────────────
 
     def save_plan(
         self,
@@ -393,79 +316,35 @@ class T2Database:
         project: str = "",
         ttl: int | None = None,
     ) -> int:
-        """Insert a plan record. Returns the new row ID.
-
-        Args:
-            ttl: Time-to-live in days. None means permanent (no expiry).
-        """
-        created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._lock:
-            cursor = self.conn.execute(
-                """
-                INSERT INTO plans (project, query, plan_json, outcome, tags, created_at, ttl)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (project, query, plan_json, outcome, tags, created_at, ttl),
-            )
-            self.conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
-
-    def search_plans(self, query: str, limit: int = 5, project: str = "") -> list[dict[str, Any]]:
-        """FTS5 search over plans (query + tags). Returns plans ordered by rank.
-
-        Expired plans (ttl set and created_at + ttl days < now) are excluded.
-        """
-        safe = _sanitize_fts5(query)
-        ttl_filter = (
-            "AND (p.ttl IS NULL OR julianday('now') - julianday(p.created_at) <= p.ttl)"
+        return self.plans.save_plan(
+            query=query,
+            plan_json=plan_json,
+            outcome=outcome,
+            tags=tags,
+            project=project,
+            ttl=ttl,
         )
-        if project:
-            sql = f"""
-                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
-                FROM plans p
-                JOIN plans_fts ON plans_fts.rowid = p.id
-                WHERE plans_fts MATCH ? AND p.project = ?
-                {ttl_filter}
-                ORDER BY rank
-                LIMIT ?
-            """
-            params: tuple = (safe, project, limit)
-        else:
-            sql = f"""
-                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
-                FROM plans p
-                JOIN plans_fts ON plans_fts.rowid = p.id
-                WHERE plans_fts MATCH ?
-                {ttl_filter}
-                ORDER BY rank
-                LIMIT ?
-            """
-            params = (safe, limit)
-        with self._lock:
-            try:
-                rows = self.conn.execute(sql, params).fetchall()
-            except sqlite3.OperationalError as exc:
-                raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-        return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
+
+    def search_plans(
+        self,
+        query: str,
+        limit: int = 5,
+        project: str = "",
+    ) -> list[dict[str, Any]]:
+        return self.plans.search_plans(query, limit=limit, project=project)
 
     def list_plans(self, limit: int = 20, project: str = "") -> list[dict[str, Any]]:
-        """Return most recent non-expired plans ordered by created_at DESC."""
-        ttl_filter = "(ttl IS NULL OR julianday('now') - julianday(created_at) <= ttl)"
-        if project:
-            sql = f"""
-                SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
-                FROM plans WHERE project = ? AND {ttl_filter} ORDER BY created_at DESC LIMIT ?
-            """
-            params_l: tuple = (project, limit)
-        else:
-            sql = f"""
-                SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
-                FROM plans WHERE {ttl_filter} ORDER BY created_at DESC LIMIT ?
-            """
-            params_l = (limit,)
-        with self._lock:
-            rows = self.conn.execute(sql, params_l).fetchall()
-        return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
+        return self.plans.list_plans(limit=limit, project=project)
+
+    def plan_exists(self, query: str, tag: str) -> bool:
+        """Return True if any plan with *query* has *tag* among its tags.
+
+        Audit finding F2 / Landmine 1: facade delegate so
+        ``commands/catalog.py:_seed_plan_templates`` can replace
+        ``db.conn.execute(...)`` with ``db.plan_exists(...)`` and
+        survive Phase 2's per-store connection split.
+        """
+        return self.plans.plan_exists(query, tag)
 
     # ── Relevance log (RDR-061 E2) ────────────────────────────────────────────
 

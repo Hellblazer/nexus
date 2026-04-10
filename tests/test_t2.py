@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from nexus.db.t2 import T2Database, _sanitize_fts5
+from nexus.db.t2.plan_library import PlanLibrary
 
 _OLD_FTS_SCHEMA = """PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS memory (
@@ -612,13 +613,17 @@ def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) ->
         t2_module._migrated_paths.discard(str(path.resolve()))
 
     call_count = {"n": 0}
-    original = T2Database._migrate_plans_if_needed
+    # RDR-063 Phase 1 step 3: _migrate_plans_if_needed lives on PlanLibrary
+    # now, not on T2Database. The guard semantics this test verifies are
+    # unchanged — the facade's _init_schema still calls into PlanLibrary
+    # under the same single _migrated_lock.
+    original = PlanLibrary._migrate_plans_if_needed
 
     def counting(self):
         call_count["n"] += 1
         return original(self)
 
-    monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
+    monkeypatch.setattr(PlanLibrary, "_migrate_plans_if_needed", counting)
 
     db1 = T2Database(path)
     assert call_count["n"] == 1
@@ -663,13 +668,15 @@ def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None
         t2_module._migrated_paths.discard(str(canonical.resolve()))
 
     call_count = {"n": 0}
-    original = T2Database._migrate_plans_if_needed
+    # See test_migration_guard_sequential_construction for the rationale —
+    # _migrate_plans_if_needed is on PlanLibrary after RDR-063 Phase 1 step 3.
+    original = PlanLibrary._migrate_plans_if_needed
 
     def counting(self):
         call_count["n"] += 1
         return original(self)
 
-    monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
+    monkeypatch.setattr(PlanLibrary, "_migrate_plans_if_needed", counting)
 
     # First construction via canonical path
     T2Database(canonical)
@@ -701,14 +708,16 @@ def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None
 
     call_count = {"n": 0}
     count_lock = threading.Lock()
-    original = T2Database._migrate_plans_if_needed
+    # See test_migration_guard_sequential_construction for the rationale —
+    # _migrate_plans_if_needed is on PlanLibrary after RDR-063 Phase 1 step 3.
+    original = PlanLibrary._migrate_plans_if_needed
 
     def counting(self):
         with count_lock:
             call_count["n"] += 1
         return original(self)
 
-    monkeypatch.setattr(T2Database, "_migrate_plans_if_needed", counting)
+    monkeypatch.setattr(PlanLibrary, "_migrate_plans_if_needed", counting)
 
     barrier = threading.Barrier(10, timeout=10)
     errors: list[Exception] = []
