@@ -273,7 +273,7 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
     cat = Catalog.init(catalog_dir)
     cat.register_owner("knowledge", "curator")
     _reset_singletons()
-    with patch("nexus.mcp_server._get_t3") as mock_t3:
+    with patch("nexus.mcp.core._get_t3") as mock_t3:
         mock_db = MagicMock()
         mock_db.put.return_value = "doc-abc123"
         mock_t3.return_value = mock_db
