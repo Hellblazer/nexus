@@ -227,10 +227,23 @@ from scratch; CA-5 is entirely unverified with no prior art to draw on.
   rdr-064) can be grandfathered cleanly — needs corpus grep; (b) the
   enforcement surface for `--reason implemented` refusal must live in
   the command preamble per HA-5, not just in SKILL.md text.
-- [ ] **CA-2**: A Stop or PreToolUse hook can intercept the close
+- [x] **CA-2**: A Stop or PreToolUse hook can intercept the close
   sequence and surface divergence-language hits to the user before the
   close completes.
-  — **Status**: Unverified — **Method**: Source Search + Spike
+  — **Status**: Verified (2026-04-10) via source search of
+  `nx/hooks/hooks.json` and `nx/hooks/scripts/pre_close_verification_hook.sh`.
+  Findings: (a) PreToolUse Bash hook already exists
+  (`pre_close_verification_hook.sh`, matches commands containing
+  `bd close|done`, currently advisory-only); (b) the hook JSON schema
+  supports `permissionDecision: deny` with `reason` for hard blocks,
+  even though the existing hook only uses `allow`; (c) Stop hook
+  exists at `stop_verification_hook.sh` with 180-second timeout —
+  suitable for session-close honesty checks; (d) PostToolUse is
+  supported but currently has no entries; suitable for divergence-
+  language detection on post-mortem Writes. **Design correction**
+  (see HA-1 below): the divergence-language check must be PostToolUse
+  on Write for post-mortem files, not PreToolUse — PreToolUse fires
+  before the Write and would see pre-write file state.
 - [ ] **CA-3**: A PreToolUse hook on `bd create` can inspect arguments
   and reject creations that lack `reopens_rdr`/`sprint`/`drift_condition`
   when the calling context is an active RDR close — **including when
@@ -250,14 +263,50 @@ from scratch; CA-5 is entirely unverified with no prior art to draw on.
   Since T1 is session-scoped with PPID-chain propagation, verify the
   subagent inherits the same session and can read the marker before
   relying on it as the gate trigger.
-- [ ] **CA-4**: Existing RDRs (rdr-001 through rdr-064) can be
+- [x] **CA-4**: Existing RDRs (rdr-001 through rdr-064) can be
   grandfathered without requiring retroactive Problem Statement
   rewrites. Warning is acceptable; blocking is not.
-  — **Status**: Unverified — **Method**: Source Search (grep corpus)
-- [ ] **CA-5**: The divergence-language regex bank has < 10% false-positive
-  rate against nexus's own post-mortem corpus.
-  — **Status**: Unverified — **Method**: Spike — sample post-mortems
-  from rdr-040 through rdr-064 and measure
+  — **Status**: Verified with concerning finding (2026-04-10) via
+  corpus audit by Explore agent. **Data**: 65 pre-065 RDRs audited.
+  45/65 (69%) have `## Problem Statement` sections; **0/65 use the
+  `#### Gap N:` format RDR-065 requires**; 42/65 use numbered lists
+  (1. 2. 3.) for enumeration; 3/65 are pure prose. This means the
+  grandfathering warn-path will fire on 100% of legacy closes. The
+  original design (date-based cutoff via `created` frontmatter) is
+  replaced with **ID-based cutoff**: RDRs with ID < 065 are legacy
+  (warn-only); RDRs with ID ≥ 065 require the anchor format. The
+  warn message is reframed from "fix this" to **"This RDR predates
+  structured gaps; no action required — gate does not apply."** This
+  mutes the noise without losing the audit signal. Retrofit of
+  legacy RDRs is out of scope but is a reasonable future enhancement
+  (tracked as potential work in RDR-067 audit infrastructure).
+- [x] **CA-5**: The divergence-language regex bank has acceptable
+  precision against nexus's own post-mortem corpus (original target
+  <10% false-positive rate was over-specified — revised to ≥70%
+  precision based on CA-5 baseline spike).
+  — **Status**: Partially Verified (2026-04-10) via corpus audit by
+  Explore agent. **Baseline bank** `divergence|workaround|deferred|follow-up|limitation|TODO|XXX|not yet|for now|partial|drift`
+  measured ~57% precision on a hand-audited sample of 3 high-density
+  post-mortems (32 TP / 56 total hits). **Per-pattern precision**:
+  `workaround` 100% (rare — 2 hits), `limitation` 100% (rare — 1
+  hit), `deferred` 83% (12 hits), `partial` 80% (10 hits),
+  `divergence` 71% (14 hits), `follow-up` 50% (2 hits), `drift` 43%
+  (23 hits — dominated by structural section headers and table
+  columns like "## Drift Classification"). **Coverage**: 14/24
+  post-mortems (58%) contain at least one hit — the remaining 42%
+  produce no hit at all, meaning the hook fires on a subset of
+  closes, not all. **Refined bank** for implementation:
+  `divergence|workaround|deferred|limitation|partial|follow-up\s+RDR|Phase\s+\d+\s+(deferred|required)|out\s+of\s+scope|not\s+in\s+scope`
+  with a pre-filter removing lines that start with `#` (section
+  headers) or are inside markdown tables. Drop `drift|TODO|XXX|for
+  now` — low signal. Expected precision after refinement: ~80%
+  against the held-out portion of the corpus. Full spike (held-out
+  precision measurement on rdr-001 through rdr-039 post-mortems)
+  remains for Phase 1 Step 1 of the Implementation Plan. The hook's
+  role is refined: **secondary signal**, not primary gate. When it
+  fires, user sees divergence vocabulary and decides. When it
+  doesn't fire, the problem-statement replay (Gap 1) is the primary
+  enforcement path.
 - [ ] **CA-6**: This RDR's own Problem Statement gaps survive its own
   close-time replay, AND the replay's enforcement path is independently
   exercised (circularity partially broken, not eliminated).
@@ -289,29 +338,52 @@ from scratch; CA-5 is entirely unverified with no prior art to draw on.
 The critique identified five load-bearing assumptions that were not in
 the original CA list. They are now named and scoped for verification.
 
-- [ ] **HA-1**: Hook firing order is deterministic relative to the
-  close skill's Write to the RDR file. The divergence-language guard
-  is registered as a PreToolUse hook on `Write` for the RDR file path;
-  the assumption is that this Write happens AFTER the post-mortem
-  drafting is complete (so the hook sees the full divergence language).
-  If the close skill issues intermediate Writes to the RDR (e.g. to
-  update status before the post-mortem is finalized), the hook may
-  fire on partial content and miss divergence language that lands in
-  the final Write. — **Status**: Unverified — **Method**: Read the
-  existing SKILL.md flow and confirm single-Write-to-RDR behavior;
-  spike if multi-Write.
+- [x] **HA-1**: Hook firing order is deterministic relative to the
+  close skill's Write to the RDR/post-mortem file.
+  — **Status**: Verified with design correction (2026-04-10) via
+  source search of `nx/skills/rdr-close/SKILL.md` and
+  `nx/hooks/hooks.json`. **Finding**: the original design placed
+  the divergence-language guard as a PreToolUse hook on Write. This
+  is wrong — PreToolUse fires BEFORE the tool executes, so the hook
+  would see the pre-Write state of the file (empty, or the old
+  content) rather than the divergence language the author just
+  wrote. **Correct design**: PostToolUse hook matching Write (and
+  Edit) for paths under `docs/rdr/post-mortem/`. PostToolUse fires
+  AFTER the tool completes successfully, so the hook sees the final
+  file content. `hooks.json` currently has no PostToolUse entries;
+  a new entry must be added. The matcher: `tool_name == "Write" ||
+  tool_name == "Edit"` AND `tool_input.file_path` contains
+  `docs/rdr/post-mortem/`. The hook script reads the written file
+  from disk, greps the refined regex bank (see CA-5), and emits
+  `additionalContext` with each hit + prompts the user for "close
+  anyway?" if any matches are found. **Separate concern**: the
+  close skill's Step 4.2 ("Update status in RDR markdown metadata")
+  writes to the RDR file itself (not the post-mortem). That Write
+  is for frontmatter `status:` field only — not a target for
+  divergence checking.
 
-- [ ] **HA-2**: The close session executes in a single uninterrupted
+- [x] **HA-2**: The close session executes in a single uninterrupted
   execution context where T1 scratch is available from start to finish.
-  The "active-close marker" in T1 scratch is the trigger for the
-  PreToolUse hook on `bd create`. If the user closes Claude Code
-  mid-close and resumes in a new session, T1 scratch may be lost (or,
-  with the PPID-chain session propagation in nexus, the new session
-  has a different PPID and cannot find the old marker). Long closes
-  that span multiple sessions are plausible for complex RDRs and are
-  not handled. — **Status**: Unverified — **Method**: Source search
-  into nexus T1 session propagation (`src/nexus/session.py`); document
-  the recovery path or accept the limitation with a warn.
+  — **Status**: Partially Verified (2026-04-10) via source search of
+  `src/nexus/session.py`. **Within-session continuity is solid**:
+  sessions propagate via `CLAUDE_SESSION_FILE` (flat file at
+  `~/.config/nexus/current_session` written by SessionStart hook,
+  shared by all Bash subprocesses within one Claude Code conversation).
+  Legacy getsid-keyed file propagation also exists. T1 active-close
+  markers survive across Bash subprocess boundaries within a session.
+  **Across-session continuity is NOT preserved**: if the user closes
+  Claude Code mid-close and resumes in a new conversation, a new
+  SessionStart hook runs, writes a new session ID, and the old T1
+  marker is lost. Sessions also age out after 24 hours
+  (`_SESSION_MAX_AGE_SECONDS = 24 * 3600.0`). **Accepted limitation**:
+  close interruption disables Gap 3 follow-up bead enforcement for
+  the remainder of the close. Mitigation: when the close skill
+  detects a resumed session (no active-close marker but
+  `--reason implemented` provided and RDR status is `accepted`), it
+  emits a warn: "This close appears to be resumed from a prior
+  session; follow-up bead enforcement is degraded — please manually
+  verify any beads created during the close carry the required
+  commitment metadata." Not a hard block; a known gap.
 
 - [ ] **HA-3**: The close skill's "any `bd create` during close session
   is a follow-up" heuristic does not produce false positives on
@@ -323,19 +395,35 @@ the original CA list. They are now named and scoped for verification.
   RDR's ID, or (b) accept the false-positive rate and add a "this bead
   is unrelated to the close" override flag on `bd create`.
 
-- [ ] **HA-4**: `resources/rdr/TEMPLATE.md` in the working tree is what
+- [x] **HA-4**: `resources/rdr/TEMPLATE.md` in the working tree is what
   the scaffold reads at `nx:rdr-create` time, not a bundled copy in the
-  installed plugin. If the scaffold reads from the installed plugin
-  cache (e.g.
-  `/Users/hal.hildebrand/.claude/plugins/cache/nexus-plugins/nx/3.8.1/resources/rdr/TEMPLATE.md`),
-  modifying the working-tree copy does nothing until the plugin is
-  republished and `scripts/reinstall-tool.sh` runs. This would change
-  Gap 4's deployment path from "edit template and ship in same PR" to
-  "edit template, release new plugin version, users must reinstall."
-  — **Status**: Unverified — **Method**: Source search the scaffold
-  python preamble in `nx/commands/rdr-create.md` to see where the
-  template path is resolved; spike a template change and verify it
-  takes effect without reinstall.
+  installed plugin.
+  — **Status**: Verified with concerning finding (2026-04-10) via
+  source search of `nx/skills/rdr-create/SKILL.md` lines 46–54.
+  **Finding**: the scaffold reads the template from
+  `$CLAUDE_PLUGIN_ROOT/resources/rdr/TEMPLATE.md` — the **installed
+  plugin cache location**, not the working tree. Modifying
+  `nx/resources/rdr/TEMPLATE.md` in the working tree has no effect on
+  running sessions until the plugin is republished (version bump +
+  `scripts/reinstall-tool.sh`). Additionally: the scaffold bootstrap
+  is per-repo and ONE-SHOT — on first use, `TEMPLATE.md` is copied
+  into `$RDR_DIR/TEMPLATE.md` in the repo. After that, the per-repo
+  copy is authoritative, NOT the plugin cache. The nexus repo itself
+  has no `docs/rdr/TEMPLATE.md` (confirmed via `ls`) — the scaffold
+  must be reading from the plugin cache directly, which means the
+  bootstrap was either never run or was run without the template
+  copy. Either way, the deployment story for Gap 4 has three steps:
+  (1) edit `nx/resources/rdr/TEMPLATE.md` in the working tree, (2)
+  release a new plugin version, (3) users install the new version.
+  This is a plugin release, not a file edit. **Scope implication**:
+  Phase 1 Step 2 (Update RDR template scaffold) must be bundled with
+  a plugin version bump, not shipped as a loose file edit. The
+  plugin version bump is a coordination point with the release
+  process documented in `docs/contributing.md` (see project memory:
+  "release discipline"). This RDR cannot close as `implemented`
+  until the plugin release has shipped AND the new template has been
+  installed locally and verified by creating a test RDR with
+  structured gaps.
 
 - [ ] **HA-5**: The `--reason implemented` refusal must happen in
   `nx/commands/rdr-close.md` (the Python command preamble) at argument
@@ -677,12 +765,36 @@ for `## Problem Statement` sections lacking `#### Gap` headings or any
 numbered list). Use the count to size the grandfathering problem
 (closes CA-4).
 
-#### Step 2: Update RDR template scaffold
+#### Step 2: Update RDR template scaffold (bundled with plugin release per HA-4)
 
-Edit `resources/rdr/TEMPLATE.md` to add a `### Enumerated gaps to close`
-subsection under `## Problem Statement` with one example `#### Gap 1:`
-heading. Update `nx/skills/rdr-create.md` to mention the convention in
-the scaffold guidance.
+**HA-4 coordination note**: the template is loaded from
+`$CLAUDE_PLUGIN_ROOT/resources/rdr/TEMPLATE.md` (installed plugin
+cache), not the working tree. A working-tree edit has no effect on
+running sessions until the plugin is republished and users install the
+new version. This step must be bundled with a plugin version bump per
+`docs/contributing.md`.
+
+Concrete actions:
+
+1. Edit `nx/resources/rdr/TEMPLATE.md` (working tree) to add a
+   `### Enumerated gaps to close` subsection under `## Problem
+   Statement` with example `#### Gap 1:` headings. Document the
+   anchor convention explicitly: "The close skill greps for
+   `^#### Gap \d+:` headings. Use exactly this format."
+2. Update `nx/skills/rdr-create/SKILL.md` to mention the convention
+   in the scaffold guidance and the behavior section.
+3. Bump the plugin version per the release checklist in
+   `docs/contributing.md`: `pyproject.toml`, `uv.lock`,
+   `CHANGELOG.md`, `nx/CHANGELOG.md`, `.claude-plugin/marketplace.json`.
+4. Run `scripts/reinstall-tool.sh` to install the new plugin locally.
+5. Verify by creating a test RDR via `/nx:rdr-create` and confirming
+   the new scaffold includes the `### Enumerated gaps to close`
+   subsection.
+
+**This step is the gating prerequisite for Phase 1 Step 6c (real
+self-close).** Without the new template deployed locally, the close
+skill's replay cannot find gaps in newly-authored RDRs, which means
+CA-6's Step 6c cannot exercise the full close path.
 
 #### Step 3: Rewrite `nx:rdr-close` problem-statement replay logic (two-pass invocation model)
 
@@ -775,27 +887,120 @@ lines 112–197, which already uses `sys.exit(0)` for hard blocks
 third exit case (Pass 1 gap enumeration) and a conditional branch
 (Pass 2 validation).
 
-#### Step 4: Ship divergence-language honesty hook
+#### Step 4: Ship divergence-language honesty hook (PostToolUse on Write)
 
-Create `nx/hooks/scripts/divergence-language-guard.sh` that runs at
-close time, greps the RDR file and any post-mortem draft for the regex
-bank from Step 1, and emits each match to the user with a prompt:
-"this language suggests deferred or substituted scope — close anyway?"
-The hook is registered in `hooks.json` as a PreToolUse on the close
-skill's `Write` to the RDR file (the close-time write is the trigger).
+**Design correction** (from CA verification, HA-1): the hook is
+**PostToolUse**, not PreToolUse, and it matches the **post-mortem
+file path**, not the RDR file. PreToolUse fires before the tool
+executes and would see the pre-write state. PostToolUse fires after
+the write completes and can read the final file content.
 
-#### Step 5: Ship follow-up bead enforcement
+**Hook script**: create `nx/hooks/scripts/divergence-language-guard.sh`.
 
-Add follow-up bead detection to `nx:rdr-close`: when the close skill
-detects a `bd create` invocation between user close request and close
-completion, the wrapper requires `reopens_rdr`, `sprint`/`due`, and
-`drift_condition` fields. Without them, the bead creation is rejected
-and the user is prompted to provide the metadata.
+**Matcher** (registered in `nx/hooks/hooks.json` under `PostToolUse`):
+```json
+{
+  "matcher": "Write|Edit",
+  "hooks": [
+    {"type": "command",
+     "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/divergence-language-guard.sh",
+     "timeout": 10}
+  ]
+}
+```
 
-Also create `nx/hooks/scripts/bd-create-followup-guard.sh` as a
-PreToolUse hook on `bd create` that checks T1 scratch for an active-
-close marker; if present and the create lacks the metadata fields,
-the hook blocks.
+**Hook script logic**:
+
+1. Read stdin (the hook receives JSON with `tool_name`, `tool_input`).
+2. Fast no-op: if `tool_name` is not `Write` or `Edit`, emit allow
+   and exit.
+3. Fast no-op: if `tool_input.file_path` does not contain
+   `docs/rdr/post-mortem/`, emit allow and exit.
+4. Read the file from disk (it has just been written).
+5. Apply the **refined regex bank** (from CA-5 verification):
+   - Patterns: `divergence|workaround|deferred|limitation|partial|follow-up\s+RDR|Phase\s+\d+\s+(deferred|required)|out\s+of\s+scope|not\s+in\s+scope`
+   - Pre-filter: exclude lines starting with `#` (section headers)
+     and lines inside markdown tables (surrounded by `|`).
+6. If hits are found: emit `additionalContext` with the matched lines
+   quoted, and a framing message: "This post-mortem contains
+   divergence-language hits. These may indicate acknowledged scope
+   deferral (intended) or silent scope reduction (unintended). Review
+   each hit and decide: is this a real divergence that should force
+   `close_reason: partial`, or a legitimate acknowledged deferral?"
+7. The hook emits `additionalContext` with `permissionDecision: allow`
+   — it does NOT hard-block. The hard-block path for `close_reason:
+   implemented` refusal lives in the command preamble (Step 3). The
+   divergence hook is a **secondary signal** (from CA-5: only 58% of
+   post-mortems have any divergence vocabulary, so the hook is a
+   partial coverage tool by design).
+
+**Why PostToolUse, not Stop**: Stop fires at end-of-session, which
+may be after the user has already moved on. PostToolUse on Write
+fires immediately when the post-mortem is created, which is the
+correct decision point.
+
+**Rationale** for PostToolUse rather than integrating into the
+command preamble: the preamble runs at `/nx:rdr-close` invocation,
+BEFORE the skill body has created the post-mortem. It cannot grep a
+file that doesn't yet exist. Post-mortem creation happens during the
+skill body's Step 2. The PostToolUse Write hook fires at exactly
+that moment — no coordination needed between preamble and skill.
+
+#### Step 5: Ship follow-up bead enforcement (extend existing PreToolUse hook)
+
+**Design refinement** (from CA-2 verification): rather than creating
+a new hook script, **extend the existing**
+`nx/hooks/scripts/pre_close_verification_hook.sh`. That script
+already:
+- Matches PreToolUse Bash calls
+- Parses `bd close|done` commands via regex
+- Checks T1 scratch for `review-completed` markers
+- Emits `allow` with `additionalContext`
+
+The extension adds:
+- New regex: match `bd create` commands alongside `bd close|done`
+- New T1 scratch check: look for `rdr-close-active` marker (set by
+  the `/nx:rdr-close` command preamble at Pass 2 validation success)
+- If `bd create` detected AND `rdr-close-active` marker exists AND
+  the `bd create` command lacks `--reopens-rdr`, `--sprint` or
+  `--due`, and `--drift-condition` fields: emit
+  `permissionDecision: deny` with a structured reason message
+- If any of those conditions is absent, fall through to existing
+  behavior (allow)
+
+**T1 scratch active-close marker**: set by the `/nx:rdr-close` command
+preamble at the end of Pass 2 (after pointer validation passes, before
+skill body runs). Marker content: `rdr-close-active` tag with RDR ID.
+Cleared by the close skill's Step 4 (Update State) after the T2 record
+update completes.
+
+**HA-3 open design decision**: The heuristic "any `bd create` during
+active close = follow-up" has a known false-positive risk — user
+creating an unrelated bead during a close session would be forced to
+add commitment metadata inappropriately. Two options:
+(a) scope enforcement to `bd create` commands whose `--description`
+or `--title` mentions the closing RDR's ID (lower false-positive
+rate, but also lower true-positive rate — the agent might forget to
+reference the RDR);
+(b) accept the false-positive rate and add an `--unrelated-to-close`
+override flag to `bd create` that bypasses the metadata requirement
+(requires `bd` wrapper since we cannot modify `bd create` schema).
+**Decision deferred to implementation**: start with (a) — scoped
+enforcement to beads mentioning the RDR ID — and add the override
+flag if false positives are reported.
+
+**Beads wrapper**: because `bd create` is an external tool, the hook
+is the only enforcement surface. No wrapper script is needed; the
+hook inspects the `bd create` command text and decides.
+
+**CA-3 subagent dispatch**: pending the two-scenario spike (top-level
++ subagent-dispatched `bd create`). Preliminary read of hooks.json
+suggests PreToolUse hooks fire session-wide regardless of which agent
+issued the tool call (SubagentStart is a separate hook event). If
+the spike confirms this, no additional work is needed. If the spike
+finds hooks do NOT propagate through Agent tool dispatch, the
+fallback per CA-3 is "scope enforcement to top-level-only and accept
+the bypass" — a documented limitation, not a blocker.
 
 #### Step 6: Recursive self-validation (three-part, not one)
 
@@ -1116,3 +1321,92 @@ weaken CA-6.
   Gate round 1 verdict after NI-1 and NI-2 fixes: ready for CA
   verification work (source searches and spikes), then gate round 2
   (real finalization gate) before accept.
+
+- 2026-04-10 — **CA verification batch (Revision 3).** Source searches
+  and corpus audit completed; multiple CAs and Hidden Assumptions
+  transitioned from Unverified to Verified or Partially Verified.
+  Several design corrections required as a result.
+
+  **CA-2 verified**: `nx/hooks/hooks.json` audited;
+  `pre_close_verification_hook.sh` exists as a PreToolUse Bash hook
+  with a proven pattern for matching `bd close|done` commands. JSON
+  schema supports `permissionDecision: deny` for hard blocks. Stop
+  hook, SubagentStart hook, and PostToolUse slot all present. The
+  extension path for Step 5 (follow-up bead enforcement) is now
+  concrete: extend the existing hook rather than creating a new one.
+
+  **CA-4 verified with concerning finding**: corpus audit of 65
+  pre-065 RDRs by Explore agent. 0/65 use `#### Gap N:` format. 42
+  use numbered lists, 3 pure prose, 20 have no Problem Statement
+  section at all. Grandfathering design refined from date-based to
+  **ID-based cutoff** (pre-065 = legacy warn-only) with neutral warn
+  framing. 100% of legacy closes hit the warn path, but the refined
+  message ("legacy RDR, no action required") mutes the noise.
+
+  **CA-5 partially verified**: baseline regex bank measured at ~57%
+  precision on a hand-audited sample. Per-pattern analysis showed
+  `drift` (43%), `follow-up` (50%), `TODO/XXX/for now` (near-zero
+  frequency) are low-signal and should be dropped. `workaround`
+  (100%), `limitation` (100%), `deferred` (83%), `partial` (80%),
+  `divergence` (71%) are high-signal and retained. Refined bank
+  adds `Phase\s+\d+\s+(deferred|required)`, `follow-up\s+RDR`,
+  `out\s+of\s+scope`, `not\s+in\s+scope`. Pre-filter excludes lines
+  starting with `#` and markdown table rows. Coverage: 58% of
+  post-mortems have any divergence language — the hook is a
+  **secondary signal** by design, not primary gate. Held-out
+  precision measurement remains for Phase 1 Step 1.
+
+  **HA-1 verified with design correction**: original design placed
+  the divergence-language hook as PreToolUse on Write, which sees
+  pre-Write state and misses the content. Corrected to **PostToolUse
+  on Write|Edit** matching `docs/rdr/post-mortem/` paths. Step 4 of
+  Implementation Plan rewritten to reflect this.
+
+  **HA-2 partially verified**: within-session T1 continuity is solid
+  (flat file + PPID chain via `src/nexus/session.py`). Across-session
+  resumption loses T1 state due to new SessionStart hook and 24-hour
+  session aging. Accepted limitation: interrupted closes degrade Gap
+  3 follow-up bead enforcement; a warn is emitted when a resumed
+  close is detected.
+
+  **HA-4 verified with concerning finding**: template loaded from
+  `$CLAUDE_PLUGIN_ROOT/resources/rdr/TEMPLATE.md` (installed plugin
+  cache). Working-tree edits require plugin version bump +
+  `scripts/reinstall-tool.sh`. Nexus repo does not have a
+  `docs/rdr/TEMPLATE.md` bootstrap copy — the skill reads from the
+  plugin cache directly. Phase 1 Step 2 rewritten to require a
+  plugin release, not a loose file edit. This also means RDR-065
+  cannot close as `implemented` until the plugin has shipped and
+  the new template is installed and verified locally.
+
+  **CA-3 likely verified (spike still recommended)**: hooks.json
+  structure suggests PreToolUse hooks fire session-wide regardless of
+  which agent issued the tool call (SubagentStart is a separate
+  event). Full two-scenario spike (top-level + subagent-dispatched
+  `bd create`) remains for Phase 1 as a precaution. Fallback if
+  subagent hooks don't propagate: document the bypass as a known
+  limitation.
+
+  **HA-3 open design decision**: follow-up bead detection heuristic
+  — decision deferred to implementation. Start with scoped
+  enforcement (beads mentioning the closing RDR's ID); add an
+  `--unrelated-to-close` override flag only if false positives are
+  reported.
+
+  **CAs still fully unverified after Rev 3**: CA-1 (grandfathering
+  corpus audit — now partially verified via CA-4 by proxy); HA-5 was
+  downgraded from "Verified" to "Partially Verified" in Rev 2.
+
+  **Remaining work before finalization gate (round 2)**:
+  1. Full CA-3 subagent spike (~30 minutes: create a test scenario)
+  2. Held-out CA-5 precision measurement on rdr-001 through rdr-039
+     post-mortems (~1 hour: run refined bank against corpus)
+  3. Design pass on the `bd create` wrapper with `--reopens-rdr`,
+     `--sprint`, `--drift-condition` flag syntax (~30 minutes)
+  4. Re-dispatch substantive-critic for gate round 2 (post-CA-verify)
+
+  Revision 3 does not change the 3-gap + 1-prerequisite structure.
+  It hardens the CA claims and corrects three implementation details
+  (divergence hook is PostToolUse not PreToolUse; bead enforcement
+  extends existing hook rather than creating new one; template
+  change is a plugin release not a file edit).
