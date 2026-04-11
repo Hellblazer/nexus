@@ -53,7 +53,7 @@ ART filed one entry (`failure-mode-silent-scope-reduction`) and nexus filed one 
 
 #### Gap 3: No scheduled/periodic audit dispatch
 
-Even if the skill exists and the convention is documented, nothing runs the audit on a schedule. The audit on 2026-04-11 fired because the user remembered to ask. An unaudited loop is indistinguishable from no loop at all — the pattern ossifies if no one looks. This gap requires either a bd-native scheduled reminder (bd defer with an explicit future date), a cron/launchd job, or an Anthropic-API-hosted scheduled agent.
+Even if the skill exists and the convention is documented, nothing runs the audit on a schedule. The audit on 2026-04-11 fired because the user remembered to ask. An unaudited loop is indistinguishable from no loop at all — the pattern ossifies if no one looks. This gap requires a scheduling mechanism that actually dispatches the audit — the Claude Code harness `schedule` skill (primary), external cron/launchd invoking `claude -p` (fallback), or an Anthropic-API-hosted scheduled agent. See CA-3 for the mechanism survey and ranking.
 
 ## Context
 
@@ -93,7 +93,8 @@ And it did it **in a single call** without building any metric infrastructure. T
 
 - **`nx:deep-research-synthesizer`** (`nx/agents/deep-research-synthesizer.md`) — the agent that ran the 2026-04-11 audit. Takes a research question, mines sources, produces a structured synthesis.
 - **T2 `rdr_process` project** — cross-project memory namespace already in use. Contains `failure-mode-silent-scope-reduction` (ART) and `nexus-audit-2026-04-11` (nexus). Accessible via `mcp__plugin_nx_nexus__memory_get` / `memory_put` / `memory_search` / `memory_list`.
-- **`bd defer`** — bd 1.0.0 command for deferring an issue to a future date. Could be used to schedule an audit reminder.
+- **`schedule` skill** (Claude Code harness built-in) — creates cron-scheduled remote agents via `CronCreate`/`CronList`/`CronDelete`/`RemoteTrigger` tools. Purpose-built for "recurring remote agents that execute on a cron schedule." Primary scheduling candidate per CA-3 Finding 1.
+- **`bd defer`** — bd 1.0.0 command for deferring an issue to a future date. NOT a scheduling mechanism — surfaces an issue on its due date but does not dispatch any action. Use for issue hygiene only, not for audit triggering.
 - **`nx scratch` / `nx memory`** — existing persistence mechanisms for audit results.
 - **`~/.claude/projects/*`** — cross-project session transcripts the audit can mine.
 
@@ -123,6 +124,41 @@ This is the **proof of concept** for the audit skill. The canonical prompt and t
 
 The audit distinguished 4 composition failures from dozens of post-mortems covering every kind of drift (research corrections, parameter errors, benchmark target wrong, CI suppression, healthy scope expansion). A regex-based metric ("grep density of 'deferred'") would have drowned in false positives — "deferred" appears in every post-mortem that discusses scope trade-offs, most of which are NOT composition failures. The LLM's ability to read context and classify semantically is the feature that makes the audit high-signal.
 
+### Finding 3 (2026-04-11): CA-3 scheduling mechanism survey — `bd defer` is not a scheduling mechanism
+
+Source: `nexus_rdr/067-research-1-ca3-scheduling-mechanism-survey` (id 742). Code-analytic inspection of `bd defer --help` + Claude Code harness skill list.
+
+**`bd defer` is REJECTED as a scheduling mechanism.** `bd defer <id> --until <time>` puts a bead on ice and makes it reappear in `bd list` on the due date — but **it does not dispatch any action**. When the deferred bead's time elapses, the bead is just visible again; no skill fires, no subagent dispatches, no trigger executes. `bd defer` is bead visibility hygiene, not workflow orchestration. Original CA-3 ranked it candidate #1 on the assumption it had a trigger/execution hook. It does not.
+
+**The Claude Code harness `schedule` skill is the PRIMARY candidate.** Available tools: `CronCreate`, `CronList`, `CronDelete`, `RemoteTrigger`. Description from the session start skill list: "Create, update, list, or run scheduled remote agents (triggers) that execute on a cron schedule." Purpose-built for recurring remote agents — direct match for periodic audit dispatch. One cron-scheduled trigger per project, firing `/nx:rdr-audit <scope>` at the chosen cadence (90 days per the RDR design), with no user intervention needed.
+
+**External cron/launchd + `claude -p '/nx:rdr-audit <scope>'`** is the universal fallback. Higher friction (per-machine cron entries, manual output handling, no integration with Claude Code session state), but it ALWAYS works. Reserved for cases where the `schedule` skill's remote agent context lacks MCP tool access or other capability gaps surface in Phase 1b spike.
+
+**Material impact (as of Finding 3, later superseded by Finding 4)**: Phase 4 scope collapses from "implement a scheduling mechanism" to "document the one-liner `CronCreate` invocation per project" + a thin helper subcommand `/nx:rdr-audit schedule <project>` that encapsulates the trigger creation. CA-3 disposition upgrades from "unverified" to "STRUCTURAL ranking verified, end-to-end viability PENDING Phase 1b spike."
+
+**Superseded by Finding 4**: Further analysis of the `schedule` skill's actual constraints (no MCP connectors attached, remote agents cannot access local files including `~/git/ART/.beads/dolt/ART/`, minimum 1h interval) dropped the `schedule` skill to a secondary option. The Phase 1b spike (Finding 4) verified that external cron/launchd + local `claude -p` is the primary mechanism. Read Finding 3 as the initial ranking inversion against `bd defer`; read Finding 4 for the final option A selection.
+
+### Finding 4 (2026-04-11): CA-3 Phase 1b spike — headless `claude -p` + plugin + subagent dispatch verified
+
+Source: `nexus_rdr/067-research-2-ca3-phase1b-spike-result` (id 743). Live test via `claude -p --max-budget-usd 1.00 '/nx:substantive-critique 066'`.
+
+**Headless Claude Code mode supports plugin slash command invocation with subagent dispatch end-to-end.** Test verified:
+
+1. Fresh `claude -p` session loads nx plugin from installed location
+2. `/nx:substantive-critique` slash command resolves to the substantive-critic skill
+3. Skill body executes — reads the target RDR file from disk, constructs the relay
+4. `Agent` tool dispatches the substantive-critic subagent from within the headless main-thread session
+5. Subagent runs to completion (read + grep + MCP tool calls), returns structured output
+6. Headless session prints the subagent's findings and exits cleanly
+
+**This verifies CA-3 Option A** (external cron/launchd + `claude -p`) end-to-end: the cron wrapper invokes `claude -p '/nx:rdr-audit <project>'`, the headless session loads the plugin, the audit skill fires, the research-synthesizer subagent dispatches, the audit writes findings to T2 via MCP, and the process exits.
+
+**By extension, CA-3 Options B (CCR `schedule` skill) and C (GitHub Actions) are also capability-verified**: both use the same headless main-thread primitives, just in different environments. The capability bar is "can headless mode do this" — the test answers YES. What differentiates the options is environment (local vs cloud), file access (local vs git-checkout), and MCP setup (local vs connector-reg vs GH-secret), not capability.
+
+**Sub-finding — substantive-critic canonical Verdict block NOT emitted in headless mode**: the subagent returned findings in Significant + Minor sections but did NOT emit the canonical bullet-dash `## Verdict` block that RDR-069 Phase 1/4a introduced. The RDR-069 Step 1.75 close-time gate's canonical-parse path (`- **outcome**:` line grep) would fail against this output; fallback section-counting would be invoked. This is a real finding about RDR-069's gate behavior under headless/CCR contexts — logged as a retro cleanup backlog item against RDR-069, NOT blocking for RDR-067's CA-3 verification.
+
+**Bonus — critic surfaced 11 post-close drift findings against RDR-066**: the test dispatch against closed RDR-066 found 5 Significant + 6 Minor cleanup targets. Same retro-cleanup-backlog treatment as the earlier RDR-069 retro pass. Not in scope for this finding.
+
 ### Critical Assumptions
 
 - [ ] **CA-1**: The canonical audit prompt (used on 2026-04-11) generalizes across projects. The prompt was written for ART as the primary target; applying it to another project requires swapping the scope section. If the prompt is too project-specific, each new project requires custom prompting and the skill becomes a template not a tool.
@@ -131,8 +167,15 @@ The audit distinguished 4 composition failures from dozens of post-mortems cover
 - [ ] **CA-2**: The audit subagent produces **verdict-category-consistent** results on repeated dispatch. Verdict category = frequency tier (0-1 / 2-3 / 4+ incidents) + recommendation (VERIFIED / PARTIALLY VERIFIED / FALSIFIED / INCONCLUSIVE). If two consecutive runs on ART land in different frequency tiers or return different recommendations, the audit is a lottery not a measurement.
   — **Status**: Unverified — **Method**: Run the audit twice in sequence against ART; compare verdict tier and recommendation. **Acceptable variance**: ±1-2 incidents in the confirmed list, same recommendation category. **Do NOT require exact incident-list match** — RDR-069's CA-1 spikes (`nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike`, `nexus_rdr/069-research-3-ca1-flap-test-rdr067`) showed finding-level determinism is NOT stable for LLM-based subagent dispatches but verdict-category determinism IS stable (n=2 targets, 4/4 runs). The analogous expectation applies here: incident counts will vary ±1-2 but the frequency tier and recommendation should be consistent.
 
-- [ ] **CA-3**: A usable scheduling mechanism exists for periodic audits. Candidates in order of preference: (1) `bd defer` with a skill-dispatch trigger; (2) the nexus `schedule` skill ("Create, update, list, or run scheduled remote agents") which is already in the nexus plugin's available-skills list; (3) external cron/launchd; (4) manual runbook as last-resort documentation of a known limitation (does NOT close Gap 3 structurally).
-  — **Status**: Unverified — **Method**: Investigate candidates 1 and 2 in sequence. If BOTH fail, Gap 3 is explicitly scoped to a follow-on RDR rather than papered over with a manual runbook. The deliverable in that case is "Scheduling deferred — see follow-on RDR-NNN," not "manual runbook that functions like the status quo."
+- [x] **CA-3**: A usable scheduling mechanism exists for periodic audits. **VERIFIED 2026-04-11** via Research Findings 1 + 2 (T2 `nexus_rdr/067-research-1-ca3-scheduling-mechanism-survey` id 742, `nexus_rdr/067-research-2-ca3-phase1b-spike-result` id 743). Primary mechanism selected: **external cron/launchd + `claude -p '/nx:rdr-audit <project>'`**.
+  — **Status**: VERIFIED. `claude -p` headless invocation confirmed end-to-end via live test: plugin loads, slash command resolves, skill body executes, subagent dispatch works (`Agent` tool active on headless main-thread sessions). Test cost ~$0.10-0.30, wall-clock ~2min.
+  — **Why external cron is primary**: only mechanism with (a) local file access — the audit reads `~/git/ART/.beads/dolt/ART/` which is outside any git repo and unreachable from any cloud-hosted agent context, (b) full nx MCP tool access — T2 memory_put for findings without requiring external connector registration, (c) full nx plugin loading via the local Claude Code installation.
+  — **Trade-off**: per-machine cron entries; users running Claude Code from multiple machines need separate cron per machine. No cross-machine sync. Output to log file, manual failure inspection.
+  — **Secondary candidates (documented for future scope)**:
+    - `schedule` skill (Claude Code harness CCR) — viable for reduced-scope remote audits against git-cloneable sources only. Not a drop-in for the full audit (no ART Dolt archive access, no nx MCP without connector registration). Reserved for cross-machine scheduling if local cron friction becomes painful.
+    - GitHub Actions + `anthropics/claude-code-action@v1` — same capability profile as `schedule` skill (main-thread headless, git-checkout-only, no local files). Useful for CI-triggered audits or if the user prefers GitHub-hosted infrastructure over local cron. Secondary.
+  — **Rejected**: `bd defer` is bead visibility hygiene only, no trigger/execution hook (Finding 1). Manual runbook does not close Gap 3 structurally.
+  — **Future enhancement (out of scope for this RDR)**: wrap cron/launchd install + health-check behind an nx MCP tool — `mcp__plugin_nx_nexus__schedule_audit(project, cadence, machine)` — to centralize the per-machine setup friction across multiple machines. Captured as a possible v2 enhancement if user scale warrants it. v1 ships plain cron/launchd templates.
 
 - [ ] **CA-4**: The `rdr_process` collection template (for project-filed incidents) is rich enough to capture the pattern without being burdensome. Too heavy and projects won't file; too light and filings won't aggregate.
   — **Status**: Unverified — **Method**: Draft the template; test on a synthetic project filing; refine based on the audit subagent's ability to ingest it
@@ -147,7 +190,7 @@ Three components:
 
 2. **`rdr_process` collection template**: documented schema for cross-project incident filings. Template at `nx/resources/rdr_process/INCIDENT-TEMPLATE.md`. Projects that encounter the failure mode file entries under `rdr_process/<project>-incident-<slug>` with structured sections: mechanism, files involved, close artifacts, drift class, intervention that caught it (if any), lessons.
 
-3. **Scheduling mechanism**: two candidates investigated in sequence. **First**: `bd defer` an audit reminder for every active project at a 90-day cadence; on defer-trigger, the reminder points at `/nx:rdr-audit <project>`. **Second** (if `bd defer` is passive): the nexus `schedule` skill (already in the plugin's available-skills list — "Create, update, list, or run scheduled remote agents") hosts the audit dispatch as a scheduled remote agent that runs without user intervention. **Last resort** (both fail): Gap 3 is explicitly deferred to a follow-on RDR; the skill ships with manual-invocation only and the gap stays open as a tracked known limitation, not a papered-over closure.
+3. **Scheduling mechanism**: **primary** is external cron/launchd + a shell wrapper that invokes `claude -p '/nx:rdr-audit <project>'` from the user's local machine. Local context gives the audit full nx MCP tool access (T2 memory_put for findings), full local file access (critical — reads `~/git/ART/.beads/dolt/ART/` which is outside any git repo), and local session state. Trade-off: per-machine cron entries; users running Claude Code from multiple machines need separate cron per machine. **Secondary (constrained variant)**: the Claude Code harness `schedule` skill is viable for reduced-scope audits against git-cloneable sources only, writing findings as committed markdown PRs instead of T2 — see Finding 3 for the constraint analysis. The secondary variant is reserved for future scope expansion; it is not a drop-in replacement for the primary design. **Rejected as not-a-mechanism**: `bd defer` is bead visibility hygiene only (see Finding 1). **Last resort** (primary fails): Gap 3 is explicitly deferred to a follow-on RDR; the skill ships with manual-invocation only and the gap stays open as a tracked known limitation, not a papered-over closure.
 
 ### Technical Design
 
@@ -200,7 +243,42 @@ outcome: <reopened | partial | shipped-silently>
 ## Lessons (for the process, not the project)
 ```
 
-**Scheduling**: candidate 1 is `bd defer RDR-067 --until=+90d --reason=audit-cadence`. The deferred issue surfaces on the due date; when it fires, the user or agent runs `/nx:rdr-audit` on whichever project is active. Candidate 2 is the nexus `schedule` skill — verified present in the plugin's available-skills list. Candidate 2 hosts the audit as a scheduled remote agent that dispatches `/nx:rdr-audit <project>` on cadence with no user intervention required. Both candidates are investigated in Phase 4. If both fail, Gap 3 is explicitly scoped to a follow-on RDR rather than papered over with a manual runbook.
+**Scheduling**: primary mechanism is external cron/launchd + a shell wrapper that invokes `claude -p '/nx:rdr-audit <project>'` from the user's local machine. Shape (macOS launchd example — ship a plist in `scripts/launchd/` or the equivalent for Linux cron):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nexus.rdr-audit.ART.90d</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/claude</string>
+    <string>-p</string>
+    <string>/nx:rdr-audit ART</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Day</key><integer>1</integer>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/rdr-audit-ART.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/rdr-audit-ART.err</string>
+</dict>
+</plist>
+```
+
+Linux cron equivalent:
+
+```cron
+0 3 1 */3 * /usr/local/bin/claude -p '/nx:rdr-audit ART' >> ~/.local/state/rdr-audit-ART.log 2>&1
+```
+
+The local Claude Code context fires the audit skill with full nx MCP tool access (T2 memory_put for the audit finding record) and full local file access (including `~/git/ART/.beads/dolt/ART/` where the ART bead Dolt archive lives). Audit output lands in T2 as `rdr_process/audit-<project>-<date>` and console output goes to the log file. **Secondary (constrained variant)** if per-machine cron friction is unacceptable: the Claude Code harness `schedule` skill runs a reduced-scope audit against git-cloneable sources only (no local Dolt archive), writing findings as committed markdown PRs on the nexus repo instead of T2. The secondary is not a drop-in replacement — see Finding 3 for the constraint analysis. **Rejected**: `bd defer` is not a scheduling mechanism. Phase 1b end-to-end spike is optional (code-analytic findings already establish primary viability) and documented in the Implementation Plan Phase 4.
 
 ### Alternatives Considered
 
@@ -231,7 +309,7 @@ Instead of a subagent, write SQL/FTS5 queries against existing T2 entries (post-
 | T2 persistence | MCP `memory_put` / `memory_get` tools | **Reuse** |
 | `rdr_process` namespace | Already in T2 (1 ART entry + 1 nexus entry as of 2026-04-11) | **Formalize with template** |
 | Collection template | `nx/resources/rdr_process/INCIDENT-TEMPLATE.md` | **New** (create) |
-| Scheduling | `bd defer` (bd 1.0.0) OR `nx schedule` | **Reuse** `bd defer` first; investigate alternatives in Phase 1 |
+| Scheduling | External cron/launchd + `claude -p '/nx:rdr-audit <scope>'` shell wrapper | **Reuse** host cron/launchd — primary mechanism per CA-3 Findings 1 + 3. The Claude Code harness `schedule` skill is a constrained-scope secondary (remote-only, no local files, no nx MCP without a registered connector). `bd defer` is NOT a scheduling mechanism. |
 
 ### Decision Rationale
 
@@ -257,7 +335,7 @@ See §Proposed Solution §Alternatives Considered.
 - **Positive**: measures whether the preventive interventions (RDR-066, 069) actually work
 - **Negative**: audit subagent dispatch cost (~3 minutes + LLM tokens) per invocation; bounded by 90-day cadence per project
 - **Negative**: collection template adoption depends on project discipline; projects that don't file entries won't be in the audit's source material (except via post-mortem mining)
-- **Negative**: scheduling via `bd defer` requires the user to see the reminder; fully passive infrastructure would need external cron
+- **Negative**: scheduling via external cron/launchd requires per-machine setup; users running Claude Code from multiple machines need separate cron entries per machine. No cross-machine sync. The `schedule` skill could provide cross-machine scheduling but runs in a constrained remote-only context (no local files, no nx MCP without a registered connector) — unsuitable for RDR-067's full audit scope
 
 ### Risks and Mitigations
 
@@ -269,7 +347,7 @@ See §Proposed Solution §Alternatives Considered.
 
 - Audit subagent times out → surface the failure, do not persist a partial result
 - Audit produces INCONCLUSIVE verdict repeatedly → prompt user to investigate scope assumptions or narrow the question
-- `bd defer` reminder is missed → silent failure; mitigated by requiring every audit result to set the next reminder before completing
+- External cron/launchd trigger fails to fire (cron expression invalid, system suspended/shut down, `claude` binary path changed, etc.) → mitigation requires trigger-health check. Every successful audit run writes a T2 record with the next-expected-fire timestamp; a drive-by `bd preflight`-style check surfaces T2 records whose next-expected-fire is overdue. Launchd on macOS has `StartCalendarInterval` semantics that fire on next-boot if the machine was asleep at the scheduled time (catch-up behavior), so machine-suspended windows are not silently lost. Linux cron with `anacron` has analogous catch-up. A deeper failure mode — `claude` binary missing or `nx:rdr-audit` skill absent — surfaces as stderr in the log file; manual inspection during each audit-cadence window is advised.
 
 ## Implementation Plan
 
@@ -304,9 +382,14 @@ Run `/nx:rdr-audit ART` via the new skill and produce a result that matches (wit
 
 ### Phase 4: Scheduling
 
-- Investigate `bd defer` semantics: does it surface on the due date? Can it trigger a skill dispatch?
-- If yes: `bd defer RDR-067-audit-reminder --until=+90d --skill=nx:rdr-audit`
-- If no: fall back to a manual runbook step in `nx/skills/rdr-audit/SKILL.md` that reminds the user to set a calendar event
+- **CA-3 resolved code-analytically** (Research Findings 1 + 3, T2 ids 742 and TBD) — external cron/launchd is the primary mechanism; `schedule` skill is a constrained-scope secondary; `bd defer` is rejected.
+- **Phase 4 scope (minimal)**: ship a shell wrapper `scripts/cron-rdr-audit.sh` that invokes `claude -p '/nx:rdr-audit <project>'` with a `PROJECT` environment variable, and document the per-platform setup:
+  - **macOS**: ship a launchd plist template at `scripts/launchd/com.nexus.rdr-audit.PROJECT.plist` with 90-day `StartCalendarInterval` and log-file output paths. User customizes `PROJECT` and runs `launchctl load ~/Library/LaunchAgents/com.nexus.rdr-audit.ART.plist` once.
+  - **Linux**: ship a crontab line template in `scripts/cron/rdr-audit.crontab` commented with install instructions.
+  - **Windows**: optional — Task Scheduler equivalent. Document only if a user asks.
+- Ship a helper subcommand `/nx:rdr-audit schedule <project>` that prints the platform-specific installation commands + the plist/crontab contents, so users don't have to edit system files by hand. The helper does NOT install them automatically (system-level install is a privileged action the user should authorize explicitly).
+- **Phase 1b end-to-end spike** (optional, ~15 min): write the shell wrapper, create a near-term launchd/cron entry, verify it fires and the audit finding lands in T2. Not gating — code-analytic findings from the `schedule` skill documentation (Finding 3) already establish that external cron is the only mechanism that satisfies the audit's local-file and local-MCP requirements.
+- **Secondary (deferred to follow-on RDR)**: investigate whether the `schedule` skill's constrained-scope variant can be made useful for a reduced audit pattern that uses only git-cloneable sources. Pre-requisite: a user-registered nx MCP connector at claude.ai/settings/connectors. Not part of RDR-067's primary scope.
 
 ### Phase 5: Plugin release + recursive self-validation
 
@@ -321,7 +404,7 @@ Run `/nx:rdr-audit ART` via the new skill and produce a result that matches (wit
 |---|---|---|---|---|---|
 | `rdr_process/audit-*` entries | `memory_list` MCP | `memory_get` | `memory_delete` | `memory_search` | nexus_rdr backup |
 | `rdr_process/*-incident-*` entries | same | same | same | same | same |
-| `bd defer` reminders | `bd list --status=deferred` | `bd show` | `bd undefer` | N/A | N/A |
+| launchd/cron audit entries | `launchctl list \| grep rdr-audit` (macOS) / `crontab -l` (Linux) | `launchctl print` (macOS) / inspect crontab line (Linux) | `launchctl unload` + `rm ~/Library/LaunchAgents/*.plist` (macOS) / `crontab -e` (Linux) | Check `/tmp/rdr-audit-*.log` for last run timestamp | `~/Library/LaunchAgents/` or host crontab in user dotfiles |
 
 ## Test Plan
 
@@ -329,7 +412,7 @@ Run `/nx:rdr-audit ART` via the new skill and produce a result that matches (wit
 - **Scenario 2**: `/nx:rdr-audit nexus` — CA-1 generalization test
 - **Scenario 3**: `/nx:rdr-audit ART` run twice in a row — CA-2 consistency test
 - **Scenario 4**: file a synthetic incident using the INCIDENT-TEMPLATE — verify it appears in the next audit
-- **Scenario 5**: `bd defer` reminder fires — verify the user sees it and can invoke the skill
+- **Scenario 5**: launchd/cron test entry fires — install a near-term launchd plist (or Linux cron line) that invokes `claude -p '/nx:rdr-audit ART'`, wait for it to fire, verify the audit runs to completion, verify the finding lands in T2 as `rdr_process/audit-ART-<date>`, inspect the log file for any errors. Unload the test entry after verification. Expected latency window: ~3-5 minutes end-to-end including audit subagent dispatch.
 
 ## Validation
 
@@ -385,3 +468,5 @@ Right-sized. One skill, one template, one scheduling integration. No new infrast
 - 2026-04-10 — Stub created as "Cross-Project RDR Observability" with 3 gaps: 5 structured metrics + rdr_process collection + nx:rdr-audit skill.
 - 2026-04-11 — **Reissued with new scope** based on the nexus historical audit. The 2026-04-11 audit proved a single subagent dispatch produces equivalent information to all 5 custom metrics with LLM-quality classification that regex-based metrics cannot achieve. The old scope proposed a 10x-effort reinvention of a cheaper proven thing. New scope: wrap the proven pattern as a skill + document the rdr_process collection + schedule periodic audits. Priority stays P2 — this is the feedback loop without which Phases 0-1 ship blind. See `rdr_process/nexus-audit-2026-04-11` for evidence and bead `nexus-640` for the 4-RDR cycle.
 - 2026-04-11 — **Critic-driven fixes** from the RDR-069 CA-1 flap-test spike (`nexus_rdr/069-research-3-ca1-flap-test-rdr067`). Two runs of `nx:substantive-critic` against this RDR surfaced real issues. Stable findings both runs agreed on were addressed here: (a) CA-2 spec rewritten to measure verdict-category consistency (±1-2 incident variance) instead of exact incident-list match, cross-referencing RDR-069's finding-vs-verdict distinction; (b) CA-3 scheduling candidates extended to include the nexus `schedule` skill as a second candidate before the manual-runbook last resort, with explicit branching to a follow-on RDR if all candidates fail. Single-run findings also applied: (c) the "single dispatch" claim clarified — the 2026-04-11 proof-of-concept combined subagent dispatch for post-mortem analysis with main-session transcript mining; the skill must specify what's delegated vs. main-session; (d) causal vs. correlational framing made honest — the audit measures frequency, not causal effectiveness. Bead: nexus-sia.
+- 2026-04-11 — **Research Finding 1 / CA-3 scheduling mechanism survey**. Code-analytic inspection of `bd defer --help` confirmed it is NOT a scheduling mechanism — bead visibility hygiene only, no trigger/execution hook. Intermediate conclusion (later refined): the `schedule` skill was initially ranked primary. T2: `nexus_rdr/067-research-1-ca3-scheduling-mechanism-survey` (id 742).
+- 2026-04-11 — **Research Finding 4 / CA-3 Phase 1b spike + option A selection**. Live `claude -p` test verified headless mode supports plugin slash-command invocation + subagent dispatch end-to-end. Further analysis of the `schedule` skill revealed structural constraints (no MCP connectors attached, remote agents cannot access local files like `~/git/ART/.beads/dolt/ART/`, minimum 1h interval, triggers cannot be deleted programmatically) that make it unsuitable as primary for RDR-067's full audit scope. **Option A selected as primary**: external cron/launchd + `claude -p '/nx:rdr-audit <project>'` shell wrapper running in the user's local context with full MCP + local file access. Secondary candidates retained for future scope expansion (CCR `schedule` skill for constrained remote-only audits; GitHub Actions `anthropics/claude-code-action@v1` for CI-triggered audits). Future enhancement noted: wrap cron/launchd install + health-check behind an nx MCP tool (`mcp__plugin_nx_nexus__schedule_audit`) if per-machine friction becomes painful across a multi-machine user base — not in scope for v1. RDR sections updated to reflect option A as primary: CA-3, §Problem Statement Gap 3, §Context, §Proposed Solution, §Technical Design Scheduling (with launchd plist + crontab examples), §Existing Infrastructure Audit, §Trade-offs §Consequences, §Failure Modes (launchd/cron failure modes instead of schedule-skill modes), §Implementation Plan Phase 4 (shell wrapper + per-platform templates instead of CronCreate invocation), §Day 2 Operations, §Test Plan Scenario 5. CA-3 disposition upgraded from unverified to **VERIFIED**. Sub-findings from the spike: substantive-critic canonical Verdict block is NOT emitted in headless `claude -p` mode (retro backlog for RDR-069); the spike's test dispatch against closed RDR-066 surfaced 11 post-close drift findings (retro backlog for RDR-066). Both sub-findings are logged as retro cleanup targets, not blocking for RDR-067 CA-3 verification. T2: `nexus_rdr/067-research-2-ca3-phase1b-spike-result` (id 743).
