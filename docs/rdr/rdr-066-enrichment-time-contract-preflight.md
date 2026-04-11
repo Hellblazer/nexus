@@ -126,11 +126,45 @@ explicitly and not by drift.
 
 ## Research Findings
 
-[Pending — do not start research until RDR-065 has shipped.]
-
 ### Investigation
 
-[Pending.]
+#### Finding 1 (2026-04-11): bd 1.0.0 has native first-class custom metadata
+
+**Source Search** against `bd create --help` and live JSON roundtrip
+verification on bd 1.0.0 (Homebrew). T2: `nexus_rdr/066-research-1-ca3-verified`.
+
+The stub assumed "we cannot modify beads internals" and scoped Gap 2
+around a tag/naming convention. That assumption is wrong in a good way:
+
+- **`--metadata string`** — bd accepts arbitrary JSON (`--metadata
+  '{"coordinator":true,...}'` or `@file.json`). Stored at top-level
+  `metadata` in `bd show --json` output, no key collisions with bd's
+  own fields. Roundtrips losslessly.
+- **`--waits-for-gate all-children`** — bd natively has a "wait until
+  all child beads complete" gate (the default). This is literally the
+  coordinator-bead semantic Gap 2 sketches.
+- **`--design`, `--context`, `--acceptance`, `--notes`, `--spec-id`,
+  `--external-ref`** — structured fields that can host per-bead
+  contracts without abusing `--description`.
+
+**Design implications** for when Phase 1 of this RDR begins:
+
+- **Gap 2** (coordinator bead concept) — no hack needed. Set
+  `metadata.coordinator=true` on coordinator beads; keep
+  `--waits-for-gate all-children` (default); probe trigger is
+  `bd list --json | jq '.[] | select(.metadata.coordinator == true)'`.
+- **Gap 1** (dimensional contracts) — contracts can live in
+  `--design` / `--context` / `metadata.contracts` rather than jammed
+  into free-form `--description`. This preserves description as
+  narrative and contracts as structured data.
+- **Gap 3** (`nx:composition-probe` skill) — still build from scratch,
+  but its trigger mechanism is now trivial (single `bd list --json`
+  query against the metadata key).
+
+**Risk noted**: bd's `metadata` is freeform JSON with no schema
+enforcement. A downstream tool relying on `metadata.coordinator`
+has no guarantee the key exists or is a bool. Same risk applies to
+contracts stored in metadata. Address in Phase 1 design review.
 
 ### Critical Assumptions
 
@@ -143,10 +177,14 @@ explicitly and not by drift.
   resolution. If contracts must be verified by Serena/JetBrains lookup
   at enrichment time, the cost may be prohibitive.
   — **Status**: Unverified — **Method**: Spike
-- [ ] **CA-3**: A "coordinator bead" concept can be expressed as a tag
+- [x] **CA-3**: A "coordinator bead" concept can be expressed as a tag
   or naming convention without modifying the `bd` schema. (We cannot
   modify beads internals.)
-  — **Status**: Unverified — **Method**: Source Search
+  — **Status**: **VERIFIED (2026-04-11)** — stronger than assumed: bd 1.0.0
+  has first-class `--metadata` JSON support plus native `--waits-for-gate
+  all-children` coordinator semantic. No tag/convention hack needed.
+  — **Method**: Source Search (bd CLI help + live JSON roundtrip) —
+  see Finding 1 above. T2: `nexus_rdr/066-research-1-ca3-verified`
 
 ## Proposed Solution
 
