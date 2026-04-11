@@ -13,9 +13,17 @@ related_issues: ["RDR-065"]
 
 # RDR-066: Enrichment-Time Contract Pre-Flight
 
-> Stub. Do not start until RDR-065 has shipped and produced at least one
-> close-time funnel measurement. This RDR has explicit dependencies on
-> RDR-065's findings about which failures actually slip through.
+> **Draft, awaiting trigger event.** RDR-065 shipped 2026-04-11. This RDR
+> is now gated on CA-1's **trigger** rather than a time-based wait: it
+> moves from `draft` to `in-progress` on the first observed composition
+> failure where close-time gates caught the problem but at ≥2 beads of
+> sunk-cost penalty. See CA-1 below for the exact condition.
+>
+> **CA-3** (can "coordinator bead" be expressed without modifying bd
+> schema) and **CA-2** (can plan-enricher produce dimensional contracts
+> without runtime symbol resolution) are already verified — see
+> Research Findings. Phase 1 design work can start immediately once
+> the CA-1 trigger fires.
 
 ## Problem Statement
 
@@ -90,37 +98,63 @@ documented failure mode. The three siblings split by lifecycle stage:
   workaround gating, beginning as a research RDR mining ART incidents
   for a regex bank. Stub.
 
-### Why deferred
+### Why deferred (revised 2026-04-11)
 
-Two reasons. First, RDR-065 must ship and produce a baseline measurement
-of which failures actually pass through the close-time funnel. Without
-that measurement, RDR-066's interventions are speculative — we don't
-know whether enrichment-time fixes will catch failures the close-time
-funnel already caught for free. Second, the "coordinator bead" concept
-is a structural change to how plans relate to beads, and that change
-deserves its own design pass once we understand what RDR-065 has and
-hasn't fixed.
+**Original rationale** (from stub): wait for RDR-065 baseline data
+before building enrichment-time interventions. This framing was broken
+in two ways:
 
-### Drift condition
+1. **The baseline doesn't exist.** Nothing in RDR-065 accumulates "N
+   close-time catches that would have been cheaper at enrichment time"
+   metrics. That instrumentation is RDR-067's job — which is also a
+   stub. Waiting for baseline data was waiting for a signal no code
+   generates.
+2. **Detection ≠ prevention.** Even if RDR-065's close-time gates
+   catch composition failures 100% of the time, they catch them
+   AFTER ≥2 beads of wasted work. Enrichment-time gates catch the
+   same failures BEFORE any work is done. These are sequential
+   filters, not substitutes. A close-time catch doesn't make an
+   enrichment-time catch redundant — it just means the failure was
+   expensive to detect.
 
-**If RDR-066 has not moved from `draft` to a state where Phase 1
-investigation has started within 120 days of RDR-065 closing as
-`implemented`, reopen RDR-065 and re-evaluate whether the enrichment-
-time scope should be folded back into RDR-065 or explicitly
-abandoned.** 120 days gives RDR-065 time to produce meaningful
-baseline data. If the data shows the close-time funnel is catching
-the failure mode effectively, RDR-066 may become lower priority or
-be abandoned — which is fine, as long as the decision is made
-explicitly and not by drift.
+**Revised rationale**: this RDR's value is gated on encountering the
+failure mode in real work with meaningful sunk-cost penalty. See CA-1
+below for the exact trigger. If no qualifying event occurs within
+120 days, the RDR is explicitly ABANDONED or reclassified as
+research-only — not left drifting as an open draft.
+
+### Drift condition (revised 2026-04-11)
+
+**Trigger-based, not time-based.** This RDR moves from `draft` to
+`in-progress` on the first CA-1 trigger event (see Critical
+Assumptions). If 120 days from RDR-065 closing (i.e., by 2026-08-09)
+pass without a CA-1 trigger, take one of these explicit actions —
+don't let the RDR sit:
+
+1. **Abandon**: close as `reverted` with reason "failure mode did not
+   manifest with expected frequency".
+2. **Reclassify**: convert `type: process` → `type: research`; leave
+   open as a permanent document about the enrichment-time failure
+   mode without building the interventions.
+3. **Fold**: merge surviving scope (e.g., the contracts template
+   from CA-2's spike) into a broader RDR and close this one as
+   `superseded`.
+
+The decision must be made explicitly with a one-paragraph rationale
+in the Revision History. Passive drift is disallowed.
 
 ### Technical Environment
 
 - **`nx:enrich-plan`** (`nx/skills/enrich-plan/SKILL.md`): the skill
   that produces enriched plans from sketches
 - **plan-enricher agent**: the agent the skill dispatches
-- **bead metadata**: managed by external `bd` tool; we cannot add fields
-  directly. May need a wrapper convention or a "coordinator" tag in the
-  description text that the probe skill greps for
+- **bead metadata**: bd 1.0.0 has first-class `--metadata` JSON
+  (verified via CA-3 — see Research Finding 1). We can set
+  `metadata.coordinator=true` and query via `bd show --json` or
+  `bd list --json | jq '.[] | select(.metadata.coordinator == true)'`.
+  **No wrapper convention needed.** bd also natively has
+  `--waits-for-gate all-children` (default) which is literally the
+  coordinator "wait until all children complete" semantic.
 - **No existing composition-probe machinery**: would need to design from
   scratch, drawing on RDR-068's regex bank for failure detection
 
@@ -214,10 +248,21 @@ contracts stored in metadata. Address in Phase 1 design review.
 
 ### Critical Assumptions
 
-- [ ] **CA-1**: RDR-065's close-time funnel does NOT catch the
-  enrichment-stage failures that ART RC-1 and RC-2 describe. If it does,
-  this RDR may be unnecessary.
-  — **Status**: Unverified — **Method**: Wait for RDR-065 baseline data
+- [ ] **CA-1** (reframed 2026-04-11): At least one composition failure
+  matching ART RC-1 or RC-2 pattern is observed during real nexus
+  development **where close-time gates caught it but at ≥2 beads of
+  sunk-cost penalty**. Such an observation confirms the prevention vs.
+  detection gap that justifies enrichment-time interventions.
+  — **Status**: Unverified — no qualifying event observed yet
+  — **Method**: **Trigger-based.** The RDR moves from `draft` to
+  `in-progress` on the first qualifying observation. If no trigger
+  fires within 120 days (by 2026-08-09), apply the drift condition —
+  abandon, reclassify as research, or fold into another RDR.
+  — **Why the old framing was wrong**: the original CA-1 said "wait
+  for RDR-065 baseline data." No code generates such a baseline (that
+  would be RDR-067's job, also a stub). And even a 100% close-time
+  catch rate doesn't make this RDR unnecessary — it just makes the
+  failures expensive to detect. Detection ≠ prevention.
 - [x] **CA-2**: The plan-enricher agent can produce dimensional contracts
   given a structured template prompt without requiring runtime symbol
   resolution. If contracts must be verified by Serena/JetBrains lookup
@@ -286,3 +331,19 @@ contracts stored in metadata. Address in Phase 1 design review.
 ## Revision History
 
 - 2026-04-10 — Stub created as deferred sibling to RDR-065.
+- 2026-04-11 — CA-3 verified (bd 1.0.0 first-class `--metadata`).
+  T2: `nexus_rdr/066-research-1-ca3-verified`.
+- 2026-04-11 — CA-2 spike verified for the easy case (plan-enricher
+  can produce grounded contracts from `Read` alone for self-contained
+  functions with plain types). Phase 1 must retry on a hard case.
+  T2: `nexus_rdr/066-research-2-ca2-spike-verified`.
+- 2026-04-11 — **CA-1 reframed from wait-based to trigger-based.**
+  The old "wait for RDR-065 baseline data" condition was broken: no
+  code in RDR-065 or elsewhere accumulates the baseline it waited
+  for, and the detection-vs-prevention logic was a category error
+  (RDR-065 catches failures AFTER ≥2 beads of sunk work; RDR-066
+  would prevent them BEFORE any work — these are sequential filters,
+  not substitutes). New CA-1 trips on the first observed composition
+  failure with ≥2 beads of sunk-cost penalty. Drift condition
+  rewritten: 120-day window → explicit abandon/reclassify/fold
+  decision. Passive drift disallowed.
