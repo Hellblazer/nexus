@@ -73,7 +73,15 @@ Also clear the T1 scratch `rdr-close-active` marker after Step 4 (Update State) 
 
 ### Step 1.75: Automatic Critique
 
-Dispatch `/nx:substantive-critique <rdr-id>` via the Agent tool and parse the `## Verdict` block from the response. Extract the `- **outcome**:` line. This is the authoritative gate signal (CA-1 verified n=4 for outcome-category determinism; finding-level variance is expected).
+Dispatch `/nx:substantive-critique <rdr-id>` via the Agent tool and parse the `## Verdict` block from the response. This is the authoritative gate signal (CA-1 verified n=4 for outcome-category determinism; finding-level variance is expected).
+
+**Verdict extraction** — try in order, take the first hit:
+
+1. **Canonical path** (preferred): find the literal line `- **outcome**:` (bullet-dash, bold "outcome", colon, space, value). The value is one of `justified`, `partial`, `not-justified`.
+2. **Code-block path**: if the agent emitted the Verdict block inside a code fence, look for a line matching `outcome:\s*(\S+)` within a `## Verdict` section. Normalize the captured value case-insensitively: `FAILED`/`FAIL`/`BLOCKED`/`NOT-JUSTIFIED` → `not-justified`; `PARTIAL`/`PARTIALLY` → `partial`; `PASS`/`PASSED`/`APPROVED`/`JUSTIFIED` → `justified`.
+3. **Fallback path**: if neither canonical nor code-block form is present, count `### Issue:` headers under `## Critical Issues` and `## Significant Issues`. Derive outcome mechanically: Critical > 0 → `not-justified`; Critical == 0 AND Significant > 0 → `partial`; all clear → `justified`. Surface the fallback path to the user explicitly: "The critic did not emit a canonical Verdict block. Falling back to section counting: <counts>."
+
+All three paths map to the same 3-valued enum (`justified` / `partial` / `not-justified`) which is the gate signal branched on below.
 
 **Short-circuit**: if the preamble surfaced a `Force Implemented (audit)` line, skip the dispatch entirely — the user has taken explicit responsibility. Write a T2 override audit entry with `critic_verdict: skipped` (see branch E below) and continue to Step 2.
 
@@ -107,7 +115,7 @@ Branch on `Verdict.outcome`:
 
 **C. `not-justified`** → surface ALL Critical findings verbatim. Block `close_reason: implemented` AND `close_reason: reverted`. User must either: (1) address findings and re-run the close, or (2) pass `--force-implemented "<reason>"` with a substantive reason. A one-word reason (e.g., `--force-implemented "wontfix"`) is insufficient — prompt the user to expand it before accepting.
 
-**D. Verdict block absent or malformed** → apply the documented fallback parse rule. Count `### Issue:` headers under `## Critical Issues` and `## Significant Issues` in the critic's response. Derive outcome mechanically: Critical > 0 → treat as `not-justified`; Critical == 0 AND Significant > 0 → treat as `partial`; all clear → treat as `justified`. Surface the fallback path to the user explicitly: "The critic did not emit a canonical Verdict block. Falling back to section counting: <counts>." Then branch on the derived outcome.
+**D. Verdict extraction failure** → this case should be rare now that the verdict extractor above tries canonical bullet form, code-block key-value form, AND section-counting fallback. Only reach this branch if all three extraction paths fail (e.g. critic response is completely empty or wholly unparseable). Surface explicitly to the user: "Critic response could not be parsed at all. Proceed without critique? (y/N)". Do not silently block; do not silently proceed.
 
 **E. Override audit entry** (runs for every `--force-implemented` invocation, regardless of critic outcome):
 
