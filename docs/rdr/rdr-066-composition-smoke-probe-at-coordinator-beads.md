@@ -2,16 +2,19 @@
 id: RDR-066
 title: "Composition Smoke Probe at Coordinator Beads"
 type: process
-status: accepted
+status: closed
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-10
 reissued: 2026-04-11
 accepted_date: 2026-04-11
+closed_date: 2026-04-11
+close_reason: implemented
 gate_iteration: 5
 revision_iteration: 6
 phase_5b_runs: 3
+close_critic_runs: 1
 related_issues: ["RDR-065", "RDR-067", "RDR-068", "RDR-069"]
 supersedes_scope: "Enrichment-Time Contract Pre-Flight (original 2026-04-10 scope bundled contracts + probe + coordinator concept)"
 ---
@@ -23,15 +26,21 @@ supersedes_scope: "Enrichment-Time Contract Pre-Flight (original 2026-04-10 scop
 > in the wrong priority order: dimensional contracts + composition probe
 > + coordinator-bead concept. The nexus audit (`rdr_process/nexus-audit-2026-04-11`)
 > found that of 4 confirmed ART silent-scope-reduction incidents,
-> **4/4 would be caught by the composition probe** while only **1/4 would
-> be caught cleanly by text-level dimensional contracts** (3 of the 4 are
-> "unwiring" failures — building blocks correctly implemented but not
-> wired to production — which the probe catches at runtime but static
-> contracts cannot). The probe is the high-leverage preventive
-> intervention. Dimensional contracts are secondary belt-and-suspenders
-> and have moved to RDR-068. The coordinator-bead concept is resolved
-> for free via `bd metadata.coordinator=true` (CA-3 from the prior
-> iteration, still verified).
+> **3/4 would be caught by the composition probe** (the inter-bead
+> composition failures: RDR-073, RDR-075, RDR-031). The 4th (RDR-036
+> FactualTeacher.query HashMap short-circuit) is an intra-class failure
+> mode outside the probe framework's scope and re-attributes to RDR-068
+> dimensional contracts — see §Research Findings §Finding 3 and CA-5b
+> for the Phase 1b retrospective that established this revised framing.
+> Text-level dimensional contracts catch **1/4 definitively** (the
+> RDR-073 dim mismatch) with a potential **2/4** extension contingent on
+> CA-068-5 (intra-class semantic contracts). The probe is the
+> high-leverage preventive intervention for the inter-bead failure class.
+> Dimensional contracts are secondary belt-and-suspenders on RDR-073 and
+> the primary intervention for the RDR-036 class; they have moved to
+> RDR-068. The coordinator-bead concept is resolved for free via
+> `bd metadata.coordinator=true` (CA-3 from the prior iteration, still
+> verified).
 
 ## Problem Statement
 
@@ -81,8 +90,8 @@ The original RDR-066 (2026-04-10) bundled three gaps:
 
 And ranked them effectively equally (all three as Phase 1). The audit inverts this:
 
-- **INT-2 composition probe catches 4/4 incidents *conditional on correct coordinator tagging*** — all of RDR-073, 075, 036, 031 would surface under a runtime composition smoke test IF the coordinator bead in each had `metadata.coordinator=true` set at enrichment time. The 4/4 figure is a ceiling, not a guarantee. Actual catch rate = 4/4 × (coordinator tag precision) × (probe step not skipped). See CA-4, CA-5, and §Gap 3 for the tagging and trigger mechanism risks.
-- **INT-1 dimensional contracts catches 1/4 incidents cleanly** — only RDR-073's dim mismatch. The "unwiring" incidents (RDR-036, RDR-075, RDR-031) have **correct** static contracts; the classes exist, their signatures match, the declared types are right. What's missing is that the production code path doesn't actually INVOKE them. Text-level contracts cannot detect "method declared but not called."
+- **INT-2 composition probe catches 3/4 incidents *conditional on correct coordinator tagging*** — RDR-073, 075, 031 are inter-bead composition failures that would surface under a runtime composition smoke test IF the coordinator bead in each had `metadata.coordinator=true` set at enrichment time. **RDR-036 is out of the probe framework's scope entirely** — it is an intra-class HashMap short-circuit inside `FactualTeacher.query`, not a composition of ≥2 prior beads. See §Research Findings §Finding 3 and CA-5b for the Phase 1b retrospective that established this framing. The 3/4 figure is a ceiling, not a guarantee. Actual catch rate = 3/4 × (coordinator tag precision) × (probe step not skipped). See CA-4, CA-5, and §Gap 3 for the tagging and trigger mechanism risks.
+- **INT-1 dimensional contracts catches 1/4 incidents definitively** — RDR-073's dim mismatch. The "unwiring" incidents (RDR-075, RDR-031) have **correct** static contracts; the classes exist, their signatures match, the declared types are right. What's missing is that the production code path doesn't actually INVOKE them. Text-level contracts cannot detect "method declared but not called." RDR-036 (HashMap short-circuit) re-attributes to contracts as a **candidate** for extended coverage contingent on CA-068-5 (intra-class semantic contracts) — potentially raising contracts to 2/4 definitive if CA-068-5 passes in RDR-068's Phase 1.
 
 The probe is the primary intervention. Contracts are an additive layer. They belong in separate RDRs with separate priority, not bundled.
 
@@ -389,7 +398,7 @@ Phase 1 has two parallel sub-tasks. Both feed Phase 2/3 implementation decisions
 
 **Deferred**: the full CA-5 cross-bead method-ownership lookup heuristic is out of scope for Phase 2. Tracked as a follow-on bead under the RDR-066 implementation epic. The fallback heuristic ships first; the richer detection is an optional upgrade after shipping.
 
-**Acknowledged false-positive risk**: the edge-count heuristic over-tags fan-in beads that depend on many siblings without actually composing their outputs in failure-prone ways. Over-tagging causes wasted probes, not missed failures — the 4/4 catch claim is unchanged. Correction channel: RDR-067 audit loop catches coordinator-tagged beads whose probes never catch real failures.
+**Acknowledged false-positive risk**: the edge-count heuristic over-tags fan-in beads that depend on many siblings without actually composing their outputs in failure-prone ways. Over-tagging causes wasted probes, not missed in-scope failures — the 3/4 catch claim (inter-bead composition failures) is unchanged. Correction channel: RDR-067 audit loop catches coordinator-tagged beads whose probes never catch real failures.
 
 ### Phase 3: `nx:composition-probe` skill
 
