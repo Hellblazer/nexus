@@ -112,8 +112,16 @@ if not rdr_path.exists():
 reason_match = re.search(r'--reason\s+(\S+)', args)
 close_reason = reason_match.group(1) if reason_match else None
 force = bool(re.search(r'--force', args))
+# --pointers may be single-quoted, double-quoted, or a single unquoted token
+pointers_match = (re.search(r"--pointers\s+'([^']+)'", args)
+                  or re.search(r'--pointers\s+"([^"]+)"', args)
+                  or re.search(r'--pointers\s+(\S+)', args))
+pointers_arg = pointers_match.group(1) if pointers_match else None
 args_clean = re.sub(r'--reason\s+\S+', '', args)
-args_clean = re.sub(r'--force', '', args_clean).strip()
+args_clean = re.sub(r'--force', '', args_clean)
+args_clean = re.sub(r"--pointers\s+'[^']+'", '', args_clean)
+args_clean = re.sub(r'--pointers\s+"[^"]+"', '', args_clean)
+args_clean = re.sub(r'--pointers\s+\S+', '', args_clean).strip()
 
 id_match = re.search(r'\d+', args_clean)
 
@@ -159,6 +167,113 @@ if current_status.lower() not in ('accepted', 'final'):
         print(f"> Run `/nx:rdr-gate` to validate, or use `--force` to override.")
         print()
         sys.exit(0)
+
+# === Gap 1: Two-pass Problem Statement Replay (RDR-065) ===
+# HARD ENFORCEMENT SURFACE per HA-5: this preamble — not SKILL.md text — is the
+# only place an agent cannot reason past. Pass 1 enumerates gaps; Pass 2 validates
+# per-gap file:line pointers. Grandfathering is ID-based (rdr_id_int < 65), never
+# date-based — see CA-4 in docs/rdr/rdr-065-close-time-funnel-hardening.md.
+if (close_reason or '').lower() == 'implemented':
+    def _extract_section(doc, heading):
+        idx = doc.find(heading)
+        if idx == -1:
+            return ''
+        rest = doc[idx + len(heading):]
+        nxt = re.search(r'\n## ', rest)
+        return rest[:nxt.start()] if nxt else rest
+
+    def _parse_pointers(s):
+        out = {}
+        for tok in s.split(','):
+            tok = tok.strip()
+            if '=' in tok:
+                k, _, v = tok.partition('=')
+                out[k.strip()] = v.strip()
+        return out
+
+    try:
+        rdr_id_int = int(t2_key)
+    except ValueError:
+        rdr_id_int = -1
+    rdr_id_label = t2_key
+    problem_stmt = _extract_section(text, '## Problem Statement')
+    # Regex permits parenthetical context between number and colon
+    # (e.g., `#### Gap 4 (prerequisite for Gap 1): <title>`) — author convenience.
+    gap_matches = re.findall(r'^#### Gap (\d+)([^\n:]*):\s*(.*)$', problem_stmt, re.MULTILINE)
+    gap_count = len(gap_matches)
+
+    if rdr_id_int < 65 and gap_count == 0:
+        # GRANDFATHERING: legacy RDR with no structured gaps — warn and proceed.
+        print("> **WARN**: This RDR predates structured gaps; no action required — gate does not apply.")
+        print()
+    elif rdr_id_int >= 65 and gap_count == 0:
+        # MALFORMED-NEW: post-policy RDR is missing the required gap headings — block.
+        print(f"> **ERROR**: RDR-{rdr_id_label} has no `#### Gap N: <title>` headings in `## Problem Statement`.")
+        print(r"> Expected format: `#### Gap 1: <gap title>` (regex: `^#### Gap \d+:`)")
+        print()
+        sys.exit(0)
+    elif gap_count > 0 and not pointers_arg:
+        # PASS 1: enumerate gaps and instruct re-invoke with --pointers.
+        print("### Problem Statement Gaps")
+        print()
+        for num, qual, title in gap_matches:
+            qual_str = qual.strip()
+            qual_disp = f" {qual_str}" if qual_str else ""
+            print(f"- Gap{num}{qual_disp}: {title.strip()}")
+        print()
+        print("**Re-invoke with per-gap closure pointers:**")
+        print()
+        example = ",".join(f"Gap{num}=path/to/file.py:LINE" for num, _q, _t in gap_matches)
+        print(f"```\n/nx:rdr-close {rdr_id_label} --reason implemented --pointers '{example}'\n```")
+        print()
+        sys.exit(0)
+    else:
+        # PASS 2: validate that every gap has a pointer and the file exists.
+        # Shape enforcement (RDR-065 6b review fix): the pointer MUST be in
+        # `file:line` shape — a colon followed by at least one digit. A bare
+        # filename like `Gap1=README.md` would otherwise game the gate.
+        pointers = _parse_pointers(pointers_arg)
+        failures = []
+        for num, _qual, _title in gap_matches:
+            gap_key = f"Gap{num}"
+            if gap_key not in pointers:
+                failures.append(f"{gap_key}: no pointer supplied")
+                continue
+            ptr = pointers[gap_key]
+            file_part, sep, line_part = ptr.partition(':')
+            if not sep:
+                failures.append(f"{gap_key}: pointer '{ptr}' missing ':LINE' — expected file:line shape")
+                continue
+            if not re.match(r'^\d+', line_part):
+                failures.append(f"{gap_key}: pointer '{ptr}' has no line number after ':' — expected file:line shape")
+                continue
+            if not (Path(repo_root) / file_part).exists():
+                failures.append(f"{gap_key}: file '{file_part}' does not exist in repo")
+        if failures:
+            print("> **ERROR**: Problem Statement pointer validation failed:")
+            for f in failures:
+                print(f">   - {f}")
+            print(">")
+            print("> The gate verifies you have committed to a specific file:line pointer per gap.")
+            print("> It does not verify the pointer is semantically correct.")
+            print()
+            sys.exit(0)
+        # Validation passed — emit framing and set T1 active-close marker.
+        print("### PROBLEM STATEMENT REPLAY: validation passed")
+        print()
+        for gap_key, ptr in sorted(pointers.items()):
+            print(f"- {gap_key} → {ptr}")
+        print()
+        print("> The gate verifies you have committed to a specific file:line pointer per gap.")
+        print("> It does not verify the pointer is semantically correct. Correctness is your responsibility.")
+        print()
+        try:
+            subprocess.run(
+                ['nx', 'scratch', 'put', rdr_id_label,
+                 '--tags', f'rdr-close-active,rdr-{rdr_id_label}'],
+                capture_output=True, timeout=5)
+        except Exception:
+            pass
 
 # T2 metadata (current status)
 print("### T2 Metadata (current status)")

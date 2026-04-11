@@ -21,6 +21,18 @@ related_issues: []
 [What is the specific challenge or requirement?
 Refine as research deepens understanding.]
 
+### Enumerated gaps to close
+
+*The close skill greps for `^#### Gap \d+:` headings in this section. Use exactly this format — one heading per gap.*
+
+#### Gap 1: <gap title>
+
+Describe the specific problem or missing behavior this gap addresses. Be concrete: what breaks today, and what does the fix deliver?
+
+#### Gap 2: <gap title>
+
+(Add additional gaps as needed. Remove placeholder headings for gaps you do not use.)
+
 ## Context
 
 ### Background

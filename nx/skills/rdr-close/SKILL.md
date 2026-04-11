@@ -39,6 +39,38 @@ Ask: "Did implementation diverge from the plan? If so, describe the divergences.
 
 If diverged:
 
+### Step 1.5: Problem Statement Replay
+
+Branch on what the preamble emitted:
+
+**A. If the preamble emitted `PROBLEM STATEMENT REPLAY: validation passed` (Pass 2 success)**:
+- Surface this to the user in the conversation
+- Show the per-gap → file:line summary the preamble printed
+- Continue to Step 2
+
+**B. If the preamble emitted a Pass 1 gap enumeration** (no `--pointers` was supplied):
+- Show the gap list to the user
+- Conversationally collect closure pointers from the user, one gap at a time
+- Format as: `Gap1=file.py:123,Gap2=other.py:45`
+- Re-invoke: `/nx:rdr-close NNN --reason implemented --pointers 'Gap1=...,Gap2=...'`
+- The re-invocation will run Pass 2 of the preamble
+- On Pass 2 success, surface the validation-passed message and jump to branch A
+
+**C. If the preamble emitted a legacy WARN** (`This RDR predates structured gaps; no action required`):
+- Surface the warn to the user explicitly
+- Note that grandfathering applied because RDR ID < 065
+- Continue to Step 2
+
+**D. If the preamble blocked** (`sys.exit(0)` with error — malformed new RDR or pointer failure):
+- The skill body will not have run; the user sees the preamble error directly
+- This case requires no SKILL.md guidance — the preamble error message is self-explanatory
+- Resolve the error (fix gaps or fix pointers) then re-invoke
+
+**Mandatory user-facing framing** (say this verbatim before continuing to Step 2):
+> "The replay gate verifies you have committed to a specific file:line pointer per gap. It does NOT verify the pointer is semantically correct. Correctness is your responsibility — review each pointer manually before allowing the close to proceed."
+
+Also clear the T1 scratch `rdr-close-active` marker after Step 4 (Update State) completes — add a note at Step 4 to run: `nx scratch delete <entry-id>` where the entry was set by the preamble.
+
 ### Step 2: Create Post-Mortem
 
 Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. Populate:
