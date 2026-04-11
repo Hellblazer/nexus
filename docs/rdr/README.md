@@ -87,10 +87,10 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-063](rdr-063-t2-domain-split.md) | T2 Domain Split — Separating Memory, Plans, Catalog, and Telemetry | Architecture | Closed | 2026-04-10 |
 | [RDR-064](rdr-064-nx-console-embedded-web-ui.md) | nx console — Process Monitor for Agentic Nexus | Feature | Draft | 2026-04-10 |
 | [RDR-065](rdr-065-close-time-funnel-hardening.md) | Close-Time Funnel Hardening Against Silent Scope Reduction | Process | Implemented | 2026-04-11 |
-| [RDR-066](rdr-066-enrichment-time-contract-preflight.md) | Enrichment-Time Contract Pre-Flight | Process | Draft (stub) | 2026-04-10 |
-| [RDR-067](rdr-067-cross-project-rdr-observability.md) | Cross-Project RDR Observability | Process | Draft (stub) | 2026-04-10 |
-| [RDR-068](rdr-068-composition-failure-detection.md) | Composition Failure Detection (Research) | Research | Draft (stub) | 2026-04-10 |
-| [RDR-069](rdr-069-evidence-chain-gate-beads.md) | Evidence-Chain Gate Beads | Process | Draft (stub) | 2026-04-10 |
+| [RDR-066](rdr-066-composition-smoke-probe-at-coordinator-beads.md) | Composition Smoke Probe at Coordinator Beads | Process | Draft | 2026-04-11 |
+| [RDR-067](rdr-067-cross-project-rdr-audit-loop.md) | Cross-Project RDR Audit Loop | Process | Draft | 2026-04-11 |
+| [RDR-068](rdr-068-dimensional-contracts-at-enrichment.md) | Dimensional Contracts at Enrichment | Process | Draft | 2026-04-11 |
+| [RDR-069](rdr-069-automatic-substantive-critic-at-close.md) | Automatic Substantive-Critic at Close | Process | Draft | 2026-04-11 |
 
 ---
 
