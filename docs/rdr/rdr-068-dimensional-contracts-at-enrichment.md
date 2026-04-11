@@ -47,7 +47,13 @@ The silent-scope-reduction failure mode (canonical: `~/git/ART/docs/rdr/meta/RDR
 
 **Today's problem**: plan-enricher produces structural enrichment (files, classes, methods, acceptance criteria) without dimensional contracts. Every enriched bead describes WHAT classes and methods exist without describing WHAT SHAPE data flows through them. The dimensional question is exactly the question that would catch this class of failure in 5 minutes, before a single line of code is written, and it isn't asked because the template doesn't force it.
 
-This RDR is **belt-and-suspenders** on top of RDR-066's composition smoke probe. The probe catches 4/4 audit incidents including dim mismatches. Dimensional contracts catch 1/4 cleanly (the dim mismatch sub-class) and provide a cheap additional layer that surfaces the error earlier — at plan time, not at coordinator-bead probe time.
+This RDR is **belt-and-suspenders** on top of RDR-066's composition smoke probe, with a revised priority rationale as of 2026-04-11 (RDR-066 Phase 1b finding):
+
+- **RDR-066 probe** catches **3/4** audit incidents (RDR-073, RDR-075, RDR-031 — the inter-bead composition failures). The 4th (RDR-036 FactualTeacher.query HashMap short-circuit) is out of the probe framework's scope — it's an **intra-class** failure mode where the method signature is satisfied but the implementation silently delegates to a HashMap lookup instead of the composed resonance path. Source: `nexus_rdr/066-research-4-ca5b-retrospective` (id 734).
+- **Dimensional contracts** catch **at least 1/4 cleanly** (RDR-073 dim mismatch) and **possibly 2/4** if RDR-036's intra-class short-circuit can be expressed as a declared-return-type contract mismatch (e.g., declared "resonance-cascade output" vs actual "raw HashMap value"). The 2/4 extension is contingent on contract expressiveness for return-shape-vs-return-value semantics — see CA-068-5 (pending verification) for the hard case.
+- Net effect: **the probe addresses the inter-bead failure class (3 incidents), contracts address the intra-class failure class (1 incident, possibly 2)**. The two layers are complementary, not duplicative. Priority remains P3 because the probe is the larger payoff on absolute catch count, but contracts now have a non-trivial standalone value justification (catch a class the probe cannot) beyond the "belt-and-suspenders on the 1/4 overlap" framing.
+
+Dimensional contracts provide a cheap additional layer that surfaces errors earlier — at plan time, not at coordinator-bead probe time — and target the intra-class failure class that the probe structurally cannot address.
 
 ### Enumerated gaps to close
 
@@ -125,14 +131,20 @@ Template refinements surfaced by that spike (applied here):
 
 Source: `rdr_process/nexus-audit-2026-04-11`.
 
-Of the 4 confirmed ART incidents:
+Of the 4 confirmed ART incidents (coverage updated 2026-04-11 per RDR-066 Phase 1b re-attribution):
 
-- **RDR-073** (312D/65D dim mismatch): A dimensional contract on `SemanticGroundingLayer.process` (input_shape: `(batch, DEFAULT_SEM_DIM=65)`) and on `PhonemicWordPipeline.lastProcessedWordVector()` (output_shape: `(312,)`) would have surfaced the mismatch at enrichment time. ✓ Caught cleanly.
-- **RDR-075** (InstarLearning structurally dead): The classes and method signatures were correct. The contract would say `InstarLearning.apply(state) -> void` and be satisfied — it IS applied, just in the wrong factory. ✗ Not caught by text contracts.
-- **RDR-036** (HashMap short-circuit): The `FactualTeacher.query` method signature is `String -> String`. The contract is satisfied — it returns a string. The failure is that a HashMap lookup short-circuits the neural path; contracts don't express "these components should all be reached." ✗ Not caught by text contracts.
-- **RDR-031** (building blocks only, pipeline not swapped): Same pattern — the contracts on individual methods are correct; the integration point (the place where the pipeline should have swapped) is below the contract level. ✗ Not caught by text contracts.
+- **RDR-073** (312D/65D dim mismatch): A dimensional contract on `SemanticGroundingLayer.process` (input_shape: `(batch, DEFAULT_SEM_DIM=65)`) and on `PhonemicWordPipeline.lastProcessedWordVector()` (output_shape: `(312,)`) would have surfaced the mismatch at enrichment time. ✓ **Caught cleanly** by contracts AND by the probe. Overlap case.
+- **RDR-075** (InstarLearning structurally dead): The classes and method signatures were correct. The contract would say `InstarLearning.apply(state) -> void` and be satisfied — it IS applied, just in the wrong factory. ✗ **Not caught by text contracts** (signature OK). Caught by the probe (inter-bead composition failure — the production factory doesn't invoke InstarLearning).
+- **RDR-036** (HashMap short-circuit): The `FactualTeacher.query` method signature is `String -> String`. The basic contract is satisfied — it returns a string. **Per RDR-066 Phase 1b (T2 `066-research-4-ca5b-retrospective` id 734), this is an intra-class failure that the probe framework CANNOT catch** (FactualTeacher's bead description names methods within FactualTeacher itself, not from other beads; no inter-bead composition to probe). It re-attributes to this RDR as a **candidate for extended-contract coverage**: if contracts express "declared return semantics" (e.g., "returns a resonance-cascade output") beyond "declared return type" (e.g., "returns String"), the HashMap short-circuit becomes a contract violation. Whether this is feasible is tracked as **CA-068-5** (intra-class semantic contracts). ✓/✗ **Contingent on CA-068-5** — feasibility pending verification.
+- **RDR-031** (building blocks only, pipeline not swapped): Same pattern as RDR-075 — the contracts on individual methods are correct; the integration point (the place where the pipeline should have swapped) is below the contract level. ✗ **Not caught by text contracts**. Caught by the probe (inter-bead composition — the pipeline wiring is what a probe exercises).
 
-**Contracts catch 1/4 cleanly, probe catches 4/4.** Contracts are a belt-and-suspenders layer, not a primary intervention. Priority is therefore P3.
+**Revised coverage counts** (post RDR-066 Phase 1b):
+
+- **Probe** (RDR-066) catches **3/4** inter-bead composition failures (RDR-073, RDR-075, RDR-031). RDR-036 is out-of-scope for the probe framework entirely.
+- **Contracts** (this RDR) catch **1/4 definitively** (RDR-073 — the dim mismatch) with potential coverage of **2/4 contingent on CA-068-5** (if RDR-036's intra-class short-circuit can be expressed as a declared-semantics contract).
+- **Complementary, not overlapping**: the probe and contracts address **disjoint failure classes** (inter-bead composition vs. intra-class semantic contracts). The overlap is only the RDR-073 dim mismatch.
+
+Contracts remain a **belt-and-suspenders layer** on the RDR-073-class overlap AND a **primary intervention** on the RDR-036-class intra-class failure mode (contingent on CA-068-5). Priority remains P3 because the absolute catch count is smaller than RDR-066's, but the unique coverage of the RDR-036 class gives contracts standalone value beyond the overlap.
 
 ### Critical Assumptions
 
@@ -156,6 +168,14 @@ Of the 4 confirmed ART incidents:
 
 - [ ] **CA-068-4**: The contracts template has explicit cross-bead provenance fields — `**Provided by**: <bead-id>` on each input and `**Consumed by**: <bead-id>` on each output — that make mechanical mismatch detection possible without requiring plan-enricher to infer which beads compose which outputs. Without these fields, mismatch detection requires LLM inference and re-introduces the cross-bead-lookup problem from RDR-066's CA-5.
   — **Status**: Unverified — **Method**: add the fields to the contracts template in Phase 1; test mismatch detection on the RDR-073 retrospective with and without the fields; measure detection accuracy.
+
+**Added CA-068-5 (intra-class semantic contracts — from RDR-066 Phase 1b re-attribution)**:
+
+- [ ] **CA-068-5**: Dimensional contracts can express "declared return semantics" (what the function should *do*) beyond "declared return type" (what the function should *return*), so that intra-class short-circuit failures like RDR-036's HashMap lookup bypass become contract violations. The current 11-field contract template captures `Signature`, `Inputs`, `Outputs` with dimensional shape but NOT semantic-level contracts like "this method should reach the resonance path" or "this method should not short-circuit to a lookup table."
+  — **Source**: RDR-066 Phase 1b (T2 `066-research-4-ca5b-retrospective` id 734) surfaced RDR-036 as an intra-class failure mode outside the composition probe's framework scope. RDR-066 §Finding 3 notes: "RDR-036 re-attributes to RDR-068 dimensional contracts as the appropriate intervention" if contracts can be extended to express declared semantics, not just declared types. This CA tests that claim.
+  — **Status**: Unverified — **Method**: Phase 1 spike against the RDR-036 retrospective. Construct a semantic-contract form for `FactualTeacher.query` that distinguishes "returns a resonance-cascade output string" from "returns any string via any code path." Test whether a plan-auditor agent (or human reader) can mechanically detect that a HashMap-shortcircuit implementation violates the semantic contract even when the signature contract is satisfied. Easy case: test on `FactualTeacher.query` directly. Hard case: test on a realistic intra-class short-circuit constructed synthetically to avoid retrospective bias.
+  — **Implication**: if CA-068-5 passes, RDR-068's catch rate rises from **1/4 definitive + 3/4 not caught** to **2/4 definitive + 2/4 not caught** on the historical target set — the RDR-036 class becomes a unique coverage target for contracts, giving this RDR standalone value beyond the RDR-073 dim-mismatch overlap with the probe. If CA-068-5 fails, contracts remain at 1/4 and the "belt-and-suspenders on the RDR-073 overlap" framing remains, with no standalone catch beyond the probe's coverage.
+  — **Fallback**: if CA-068-5 cannot be made robust (semantic contracts are too vague to be mechanically checkable), the RDR-036 re-attribution is rejected and the incident remains "caught by neither" — a known gap in the 4-RDR remediation cycle that a future RDR can address via a different intervention (e.g., mutation testing or runtime path assertions).
 
 ## Proposed Solution
 
