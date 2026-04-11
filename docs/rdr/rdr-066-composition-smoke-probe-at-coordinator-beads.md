@@ -2,15 +2,13 @@
 id: RDR-066
 title: "Composition Smoke Probe at Coordinator Beads"
 type: process
-status: closed
+status: accepted
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-10
 reissued: 2026-04-11
 accepted_date: 2026-04-11
-closed_date: 2026-04-11
-close_reason: implemented
 gate_iteration: 5
 revision_iteration: 6
 phase_5b_runs: 3
