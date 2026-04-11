@@ -13,6 +13,18 @@ effort: medium
 - **Standalone**: User runs `/nx:enrich-plan` to enrich beads with codebase-derived context — file paths, symbols, test commands, constraints. No preceding audit required.
 - **Post-Audit**: When T1 scratch contains audit findings, incorporates gap mitigations and severity classifications alongside the standard context enrichment
 
+## Coordinator Convention (RDR-066 Phase 2)
+
+Beads whose implementation composes outputs from ≥2 prior beads are **coordinators**. The enricher detects them via a simple fallback heuristic: `blocking-dependency count ≥ 2 → coordinator candidate`. Detected coordinators are:
+
+1. Tagged with `metadata.coordinator = true` via `bd update --metadata` at enrichment time (Step 4b)
+2. Verified post-write via `bd show --json` to catch silent-omission failures (Step 4c)
+3. Annotated with a `/nx:composition-probe <id>` instruction in the enriched bead description (Step 3)
+
+The tag is the substrate for the future `/nx:composition-probe` skill (RDR-066 Phase 3), which dispatches a composition smoke test against coordinator beads before downstream beads begin. The goal is to catch silent scope reduction at M+1 (the responsible coordinator) instead of N (the integration bead where N-1 beads are already merged).
+
+This is a **fallback heuristic** — the structural `≥2 deps` rule over-tags fan-in beads (false positives cause wasted probes, not missed failures) and may under-tag composition coordinators whose plan authors didn't declare all composition edges via `bd dep add`. The full CA-5 method-ownership lookup is deferred; the fallback is sufficient for 3/3 historical inter-bead composition coordinators per the Phase 1b retrospective (T2 `nexus_rdr/066-research-4-ca5b-retrospective`, id 734). See RDR-066 §Critical Assumptions CA-4, CA-5 fallback, and CA-5b for the full feasibility and coverage analysis.
+
 ---
 
 
@@ -96,8 +108,9 @@ Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for design decision
 ### Step 2: Read Current State
 
 For each child bead:
-1. Run `/beads:show <id>` to read current description
+1. Run `/beads:show <id> --json` to read current description and the full bead shape
 2. Note existing context, dependencies, and gaps
+3. **Coordinator detection (RDR-066 Phase 2)** — inspect `.dependencies` from the JSON output. Count entries where `type == "blocks"` (the `parent-child` edges are organizational, not composition). If the blocking-dependency count is **≥ 2**, treat this bead as a **coordinator candidate**: record a local flag `coordinator = true` keyed to `<id>` for use in Steps 3 and 4. A coordinator candidate is a bead whose implementation composes outputs from ≥2 prior beads and should run an `/nx:composition-probe` before downstream beads begin.
 
 ### Step 3: Enrich Each Bead
 
@@ -125,15 +138,47 @@ For each child bead, update its description with:
   - Add mitigation instructions inline
   - Adjust dependency sequencing per auditor recommendations
 
+- **Coordinator probe-run step (RDR-066 Phase 2)** — if the bead was flagged `coordinator = true` in Step 2, append a final implementation instruction to the enriched bead description:
+
+  > **Before beginning the next bead, run `/nx:composition-probe <this-bead-id>` and verify PASS.** This bead has ≥2 blocking dependencies and is tagged as a coordinator candidate. The composition probe runs a 30-50 line smoke test against the coordinator's entry point to catch silent scope reduction at the composition boundary. If the probe fails, reopen the failing dependency bead before proceeding.
+
+  This text is a load-bearing instruction to future agents/users executing the plan. Do not elide it, paraphrase it, or move it out of the enriched description — downstream Gap 3 closure depends on it being present verbatim.
+
 ### Step 4: Update Beads
 
-For each enriched bead, two actions in sequence:
+For each enriched bead, two-or-three actions in sequence (the third runs only for coordinator candidates):
 
 **Step 4a** — Write enriched content to a temp file using the **Write tool** (file_path: `/tmp/bead-<id>.md`, content: the enriched markdown). Do NOT use echo, cat, or heredoc — use the Write tool.
 
-**Step 4b** — Update the bead from the file: `/beads:update <id> --body-file /tmp/bead-<id>.md`
+**Step 4b** — Update the bead from the file. For non-coordinator beads:
+
+```
+/beads:update <id> --body-file /tmp/bead-<id>.md
+```
+
+For beads flagged `coordinator = true` in Step 2, **extend the update call to include the coordinator metadata tag** (RDR-066 Phase 2, CA-4 `FEASIBLE-WITH-DIFF`):
+
+```
+/beads:update <id> --body-file /tmp/bead-<id>.md --metadata '{"coordinator": true}'
+```
+
+The `--metadata` flag is a `bd` 1.0.0+ feature (verified in retained CA, T2 `nexus_rdr/066-research-1-ca3-verified`, id 714). Writing it here makes the coordinator convention mechanically queryable via `bd list --json | jq '.[] | select(.metadata.coordinator == true)'` and lets the `/nx:composition-probe` skill fire on the right beads.
 
 **IMPORTANT**: Do NOT use `--description "..."` for multi-line or markdown content — shell escaping silently corrupts backticks, `$variables`, and nested quotes without raising an error. Always use `--body-file`.
+
+**Step 4c — Coordinator post-write verification (CA-4 silent-omission mitigation, RDR-066 SIG-2 fix)** — runs ONLY for beads flagged `coordinator = true` in Step 2:
+
+After the `/beads:update` call with `--metadata`, immediately verify the metadata actually persisted:
+
+```
+/beads:show <id> --json
+```
+
+Parse `.metadata.coordinator` from the JSON output. Assert the value equals `true`. If the assertion fails (metadata was silently dropped, e.g., because the `bd` CLI version doesn't support the `--metadata` flag, or the update call stripped it, or a middleware layer rewrote it), **surface the failure to the user explicitly**:
+
+> **WARNING — coordinator metadata not persisted for bead `<id>`.** The `/beads:update` call succeeded but `bd show --json` shows `.metadata.coordinator` is absent or not true. The `/nx:composition-probe` skill will not fire on this bead because the coordinator tag was silently dropped. Verify the `bd` CLI version supports `--metadata` (requires 1.0.0+) and manually re-apply with `bd update <id> --metadata '{"coordinator": true}'`.
+
+Do NOT silently proceed on a verification failure — the mitigation is load-bearing. This is the exact failure mode RDR-066 exists to prevent (building blocks correctly implemented but silently unwired), applied to the RDR's own coordinator-tagging mechanism. Without Step 4c, the `--metadata` flag could be a no-op and nobody would notice until the composition probe failed to catch a real failure months later.
 
 ## T2 Persistence
 
