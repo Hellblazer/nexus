@@ -13,9 +13,17 @@ related_issues: ["RDR-065"]
 
 # RDR-066: Enrichment-Time Contract Pre-Flight
 
-> Stub. Do not start until RDR-065 has shipped and produced at least one
-> close-time funnel measurement. This RDR has explicit dependencies on
-> RDR-065's findings about which failures actually slip through.
+> **Draft, awaiting trigger event.** RDR-065 shipped 2026-04-11. This RDR
+> is now gated on CA-1's **trigger** rather than a time-based wait: it
+> moves from `draft` to `in-progress` on the first observed composition
+> failure where close-time gates caught the problem but at ≥2 beads of
+> sunk-cost penalty. See CA-1 below for the exact condition.
+>
+> **CA-3** (can "coordinator bead" be expressed without modifying bd
+> schema) and **CA-2** (can plan-enricher produce dimensional contracts
+> without runtime symbol resolution) are already verified — see
+> Research Findings. Phase 1 design work can start immediately once
+> the CA-1 trigger fires.
 
 ## Problem Statement
 
@@ -90,63 +98,189 @@ documented failure mode. The three siblings split by lifecycle stage:
   workaround gating, beginning as a research RDR mining ART incidents
   for a regex bank. Stub.
 
-### Why deferred
+### Why deferred (revised 2026-04-11)
 
-Two reasons. First, RDR-065 must ship and produce a baseline measurement
-of which failures actually pass through the close-time funnel. Without
-that measurement, RDR-066's interventions are speculative — we don't
-know whether enrichment-time fixes will catch failures the close-time
-funnel already caught for free. Second, the "coordinator bead" concept
-is a structural change to how plans relate to beads, and that change
-deserves its own design pass once we understand what RDR-065 has and
-hasn't fixed.
+**Original rationale** (from stub): wait for RDR-065 baseline data
+before building enrichment-time interventions. This framing was broken
+in two ways:
 
-### Drift condition
+1. **The baseline doesn't exist.** Nothing in RDR-065 accumulates "N
+   close-time catches that would have been cheaper at enrichment time"
+   metrics. That instrumentation is RDR-067's job — which is also a
+   stub. Waiting for baseline data was waiting for a signal no code
+   generates.
+2. **Detection ≠ prevention.** Even if RDR-065's close-time gates
+   catch composition failures 100% of the time, they catch them
+   AFTER ≥2 beads of wasted work. Enrichment-time gates catch the
+   same failures BEFORE any work is done. These are sequential
+   filters, not substitutes. A close-time catch doesn't make an
+   enrichment-time catch redundant — it just means the failure was
+   expensive to detect.
 
-**If RDR-066 has not moved from `draft` to a state where Phase 1
-investigation has started within 120 days of RDR-065 closing as
-`implemented`, reopen RDR-065 and re-evaluate whether the enrichment-
-time scope should be folded back into RDR-065 or explicitly
-abandoned.** 120 days gives RDR-065 time to produce meaningful
-baseline data. If the data shows the close-time funnel is catching
-the failure mode effectively, RDR-066 may become lower priority or
-be abandoned — which is fine, as long as the decision is made
-explicitly and not by drift.
+**Revised rationale**: this RDR's value is gated on encountering the
+failure mode in real work with meaningful sunk-cost penalty. See CA-1
+below for the exact trigger. If no qualifying event occurs within
+120 days, the RDR is explicitly ABANDONED or reclassified as
+research-only — not left drifting as an open draft.
+
+### Drift condition (revised 2026-04-11)
+
+**Trigger-based, not time-based.** This RDR moves from `draft` to
+`in-progress` on the first CA-1 trigger event (see Critical
+Assumptions). If 120 days from RDR-065 closing (i.e., by 2026-08-09)
+pass without a CA-1 trigger, take one of these explicit actions —
+don't let the RDR sit:
+
+1. **Abandon**: close as `reverted` with reason "failure mode did not
+   manifest with expected frequency".
+2. **Reclassify**: convert `type: process` → `type: research`; leave
+   open as a permanent document about the enrichment-time failure
+   mode without building the interventions.
+3. **Fold**: merge surviving scope (e.g., the contracts template
+   from CA-2's spike) into a broader RDR and close this one as
+   `superseded`.
+
+The decision must be made explicitly with a one-paragraph rationale
+in the Revision History. Passive drift is disallowed.
 
 ### Technical Environment
 
 - **`nx:enrich-plan`** (`nx/skills/enrich-plan/SKILL.md`): the skill
   that produces enriched plans from sketches
 - **plan-enricher agent**: the agent the skill dispatches
-- **bead metadata**: managed by external `bd` tool; we cannot add fields
-  directly. May need a wrapper convention or a "coordinator" tag in the
-  description text that the probe skill greps for
+- **bead metadata**: bd 1.0.0 has first-class `--metadata` JSON
+  (verified via CA-3 — see Research Finding 1). We can set
+  `metadata.coordinator=true` and query via `bd show --json` or
+  `bd list --json | jq '.[] | select(.metadata.coordinator == true)'`.
+  **No wrapper convention needed.** bd also natively has
+  `--waits-for-gate all-children` (default) which is literally the
+  coordinator "wait until all children complete" semantic.
 - **No existing composition-probe machinery**: would need to design from
   scratch, drawing on RDR-068's regex bank for failure detection
 
 ## Research Findings
 
-[Pending — do not start research until RDR-065 has shipped.]
-
 ### Investigation
 
-[Pending.]
+#### Finding 2 (2026-04-11): plan-enricher can produce grounded contracts from Read alone (easy case)
+
+**Spike** against a Sonnet-class subagent simulating plan-enricher.
+T2: `nexus_rdr/066-research-2-ca2-spike-verified`.
+
+Target: `src/nexus/frecency.py:compute_frecency` (132-line self-
+contained module). Contracts template: 11 fields including signature,
+inputs, output, preconditions, postconditions, side effects, error
+modes, calls-out-to, tools-used-to-ground, hallucination-self-check.
+
+**Result**: the agent produced a fully grounded contract in ONE
+`Read()` call on the full file. Every field carried `file:line`
+citations. No Serena / JetBrains symbol lookup was needed — the LLM
+parsed the Python signature and docstring directly. HIGH self-
+confidence on all fields except "propagating exceptions" (inferred
+from absence-of-handler, correctly self-flagged).
+
+**Hardest field**: distinguishing caught from propagating exceptions.
+Inference-from-absence is weaker than assertion-from-handler.
+
+**Template refinements surfaced by the spike**:
+
+1. Split "Error modes" into sub-bullets **caught** / **propagates**.
+2. Add a "Default values resolved" line to inline constants rather
+   than leaving them symbolic (`_DEFAULT_DECAY_RATE` → `0.01`).
+3. Keep the "Tools used" + "Hallucination self-check" fields — they
+   made the result auditable.
+
+**Scope of the verification (honest)**:
+
+- **Verified**: single self-contained function, plain types, same-
+  file helpers only, no generics, no third-party types.
+- **NOT verified** (Phase 1 concerns):
+  - Functions with cross-file symbol chains (Read alone may need many
+    reads)
+  - Generic / Protocol / TypeVar types where the declaration lives
+    elsewhere
+  - Third-party library types (may need docs lookup)
+  - Coherence scaling: can the agent hold state for ~20 contracts in
+    one enrichment pass?
+
+**Phase 1 design note**: retry the spike on a **hard case** (cross-
+file generic or protocol consumer) before committing to "no Serena
+ever". The Read-to-Serena boundary is the real question, and this
+spike only proves Read suffices on the easy side of it.
+
+#### Finding 1 (2026-04-11): bd 1.0.0 has native first-class custom metadata
+
+**Source Search** against `bd create --help` and live JSON roundtrip
+verification on bd 1.0.0 (Homebrew). T2: `nexus_rdr/066-research-1-ca3-verified`.
+
+The stub assumed "we cannot modify beads internals" and scoped Gap 2
+around a tag/naming convention. That assumption is wrong in a good way:
+
+- **`--metadata string`** — bd accepts arbitrary JSON (`--metadata
+  '{"coordinator":true,...}'` or `@file.json`). Stored at top-level
+  `metadata` in `bd show --json` output, no key collisions with bd's
+  own fields. Roundtrips losslessly.
+- **`--waits-for-gate all-children`** — bd natively has a "wait until
+  all child beads complete" gate (the default). This is literally the
+  coordinator-bead semantic Gap 2 sketches.
+- **`--design`, `--context`, `--acceptance`, `--notes`, `--spec-id`,
+  `--external-ref`** — structured fields that can host per-bead
+  contracts without abusing `--description`.
+
+**Design implications** for when Phase 1 of this RDR begins:
+
+- **Gap 2** (coordinator bead concept) — no hack needed. Set
+  `metadata.coordinator=true` on coordinator beads; keep
+  `--waits-for-gate all-children` (default); probe trigger is
+  `bd list --json | jq '.[] | select(.metadata.coordinator == true)'`.
+- **Gap 1** (dimensional contracts) — contracts can live in
+  `--design` / `--context` / `metadata.contracts` rather than jammed
+  into free-form `--description`. This preserves description as
+  narrative and contracts as structured data.
+- **Gap 3** (`nx:composition-probe` skill) — still build from scratch,
+  but its trigger mechanism is now trivial (single `bd list --json`
+  query against the metadata key).
+
+**Risk noted**: bd's `metadata` is freeform JSON with no schema
+enforcement. A downstream tool relying on `metadata.coordinator`
+has no guarantee the key exists or is a bool. Same risk applies to
+contracts stored in metadata. Address in Phase 1 design review.
 
 ### Critical Assumptions
 
-- [ ] **CA-1**: RDR-065's close-time funnel does NOT catch the
-  enrichment-stage failures that ART RC-1 and RC-2 describe. If it does,
-  this RDR may be unnecessary.
-  — **Status**: Unverified — **Method**: Wait for RDR-065 baseline data
-- [ ] **CA-2**: The plan-enricher agent can produce dimensional contracts
+- [ ] **CA-1** (reframed 2026-04-11): At least one composition failure
+  matching ART RC-1 or RC-2 pattern is observed during real nexus
+  development **where close-time gates caught it but at ≥2 beads of
+  sunk-cost penalty**. Such an observation confirms the prevention vs.
+  detection gap that justifies enrichment-time interventions.
+  — **Status**: Unverified — no qualifying event observed yet
+  — **Method**: **Trigger-based.** The RDR moves from `draft` to
+  `in-progress` on the first qualifying observation. If no trigger
+  fires within 120 days (by 2026-08-09), apply the drift condition —
+  abandon, reclassify as research, or fold into another RDR.
+  — **Why the old framing was wrong**: the original CA-1 said "wait
+  for RDR-065 baseline data." No code generates such a baseline (that
+  would be RDR-067's job, also a stub). And even a 100% close-time
+  catch rate doesn't make this RDR unnecessary — it just makes the
+  failures expensive to detect. Detection ≠ prevention.
+- [x] **CA-2**: The plan-enricher agent can produce dimensional contracts
   given a structured template prompt without requiring runtime symbol
   resolution. If contracts must be verified by Serena/JetBrains lookup
   at enrichment time, the cost may be prohibitive.
-  — **Status**: Unverified — **Method**: Spike
-- [ ] **CA-3**: A "coordinator bead" concept can be expressed as a tag
+  — **Status**: **VERIFIED for the easy case (2026-04-11)** — Sonnet-
+  class subagent produced a fully line-grounded contract for
+  `compute_frecency` from a single `Read()` call with no Serena lookup.
+  Phase 1 must retry on a hard case (cross-file generic or protocol
+  consumer) to find the Read-to-Serena boundary.
+  — **Method**: Spike — see Finding 2. T2: `nexus_rdr/066-research-2-ca2-spike-verified`
+- [x] **CA-3**: A "coordinator bead" concept can be expressed as a tag
   or naming convention without modifying the `bd` schema. (We cannot
   modify beads internals.)
-  — **Status**: Unverified — **Method**: Source Search
+  — **Status**: **VERIFIED (2026-04-11)** — stronger than assumed: bd 1.0.0
+  has first-class `--metadata` JSON support plus native `--waits-for-gate
+  all-children` coordinator semantic. No tag/convention hack needed.
+  — **Method**: Source Search (bd CLI help + live JSON roundtrip) —
+  see Finding 1 above. T2: `nexus_rdr/066-research-1-ca3-verified`
 
 ## Proposed Solution
 
@@ -197,3 +331,19 @@ explicitly and not by drift.
 ## Revision History
 
 - 2026-04-10 — Stub created as deferred sibling to RDR-065.
+- 2026-04-11 — CA-3 verified (bd 1.0.0 first-class `--metadata`).
+  T2: `nexus_rdr/066-research-1-ca3-verified`.
+- 2026-04-11 — CA-2 spike verified for the easy case (plan-enricher
+  can produce grounded contracts from `Read` alone for self-contained
+  functions with plain types). Phase 1 must retry on a hard case.
+  T2: `nexus_rdr/066-research-2-ca2-spike-verified`.
+- 2026-04-11 — **CA-1 reframed from wait-based to trigger-based.**
+  The old "wait for RDR-065 baseline data" condition was broken: no
+  code in RDR-065 or elsewhere accumulates the baseline it waited
+  for, and the detection-vs-prevention logic was a category error
+  (RDR-065 catches failures AFTER ≥2 beads of sunk work; RDR-066
+  would prevent them BEFORE any work — these are sequential filters,
+  not substitutes). New CA-1 trips on the first observed composition
+  failure with ≥2 beads of sunk-cost penalty. Drift condition
+  rewritten: 120-day window → explicit abandon/reclassify/fold
+  decision. Passive drift disallowed.
