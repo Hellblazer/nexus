@@ -71,6 +71,60 @@ Branch on what the preamble emitted:
 
 Also clear the T1 scratch `rdr-close-active` marker after Step 4 (Update State) completes — add a note at Step 4 to run: `nx scratch delete <entry-id>` where the entry was set by the preamble.
 
+### Step 1.75: Automatic Critique
+
+Dispatch `/nx:substantive-critique <rdr-id>` via the Agent tool and parse the `## Verdict` block from the response. Extract the `- **outcome**:` line. This is the authoritative gate signal (CA-1 verified n=4 for outcome-category determinism; finding-level variance is expected).
+
+**Short-circuit**: if the preamble surfaced a `Force Implemented (audit)` line, skip the dispatch entirely — the user has taken explicit responsibility. Write a T2 override audit entry with `critic_verdict: skipped` (see branch E below) and continue to Step 2.
+
+**Relay framing** (load-bearing, do not vary): the dispatch relay MUST be fixed-shape and minimal. Pass only `{rdr_id}` and the standard input artifacts (T2 RDR record, catalog entry, RDR markdown file). NEVER pass session-generated summaries of what was built, what diverged, or what the user intends. Rationalization bias is the exact failure mode RDR-069 addresses — see RDR-069 §Risks "Dispatch isolation risk".
+
+```markdown
+## Relay: substantive-critic
+
+**Task**: Critique RDR {rdr_id} against its Problem Statement for silent scope reduction, retcon, or unjustified-implemented closure.
+**Bead**: none
+
+### Input Artifacts
+- nx memory: {repo}_rdr/{rdr_id} (status, research records, planning chain)
+- Files: docs/rdr/rdr-{rdr_id}-*.md
+- Catalog: mcp__plugin_nx_nexus-catalog__search query "RDR-{rdr_id}"
+
+### Deliverable
+Critique report with canonical `## Verdict` block (outcome, confidence, critical_count, significant_count, summary).
+
+### Quality Criteria
+- [ ] Verdict block uses 5-field canonical format
+- [ ] Findings grounded in RDR text (file:line references)
+- [ ] No session context consumed beyond the listed input artifacts
+```
+
+Branch on `Verdict.outcome`:
+
+**A. `justified`** → surface the one-line summary to the user and continue to Step 2. No constraint on `close_reason`.
+
+**B. `partial`** → surface all Critical and Significant findings to the user verbatim. Block `close_reason: implemented` unless `--force-implemented "<reason>"` was supplied. If no override, prompt the user: "The critic found significant issues. Address them and re-run, or pass `--force-implemented '<reason>'` to override with audit trail." Do not proceed until the user either resolves findings (recursive loop) or passes the override.
+
+**C. `not-justified`** → surface ALL Critical findings verbatim. Block `close_reason: implemented` AND `close_reason: reverted`. User must either: (1) address findings and re-run the close, or (2) pass `--force-implemented "<reason>"` with a substantive reason. A one-word reason (e.g., `--force-implemented "wontfix"`) is insufficient — prompt the user to expand it before accepting.
+
+**D. Verdict block absent or malformed** → apply the documented fallback parse rule. Count `### Issue:` headers under `## Critical Issues` and `## Significant Issues` in the critic's response. Derive outcome mechanically: Critical > 0 → treat as `not-justified`; Critical == 0 AND Significant > 0 → treat as `partial`; all clear → treat as `justified`. Surface the fallback path to the user explicitly: "The critic did not emit a canonical Verdict block. Falling back to section counting: <counts>." Then branch on the derived outcome.
+
+**E. Override audit entry** (runs for every `--force-implemented` invocation, regardless of critic outcome):
+
+```
+mcp__plugin_nx_nexus__memory_put(
+    project="{repo}_rdr",
+    title="{rdr_id}-close-override-{YYYY-MM-DD}",
+    content="critic_verdict: {outcome|skipped}\nuser_reason: {force_implemented_reason}\nfinal_close_reason: {close_reason}\ntimestamp: {ISO8601}\nrdr_id: {rdr_id}",
+    ttl="permanent",
+    tags="rdr,close-override,rdr-{rdr_id}"
+)
+```
+
+The audit entries are the measurement surface for CA-4: if `nexus_rdr/*-close-override-*` exceeds 20% of closes in any 30-day window, Phase 2 dispatch degrades to advisory mode (see RDR-069 Day 2 Operations).
+
+**Scenario 4 — timeout or transport failure**: if the Agent tool dispatch fails, times out (>5 minutes without response), or returns an unparseable response (not just a missing Verdict block, but genuinely malformed output), surface the failure to the user explicitly and ask: "Critic dispatch failed. Proceed without critique? (y/N)". Do not silently block and do not silently proceed — the user must choose.
+
 ### Step 2: Create Post-Mortem
 
 Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. Populate:
