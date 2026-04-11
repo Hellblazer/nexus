@@ -6,6 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.4] - 2026-04-11
+
+Plugin release: surgical close-time reindex for the rdr-close skill,
+paired with a CLI extension to `nx index rdr` that enables
+single-file scoping. Both fixes ship together because the skill
+change depends on the CLI change.
+
+### Added
+
+- **`nx index rdr <file.md>`** — single-file scoping. The command now
+  accepts either a repo directory or a single `.md` file. File-mode
+  resolves the repo root via `git rev-parse --show-toplevel` and
+  writes to the same `rdr__{basename}-{hash8}` collection as the
+  directory-mode invocation. This is the form used at rdr-close time
+  when only one RDR changed.
+
+### Fixed
+
+- **`skills/rdr-close/SKILL.md` reindex step** — previously ran
+  `nx index rdr` (no argument, whole-corpus walk) unconditionally in
+  all three close flows (Implemented Step 4.4, Reverted/Abandoned
+  Step 5, Superseded Step 3). Now:
+  - Skip entirely for frontmatter-only edits (status / closed_date /
+    close_reason flip). A concrete `git diff | grep` recipe is
+    included so the user can check whether the diff is wholly inside
+    the frontmatter block before deciding.
+  - When a reindex IS warranted (divergence notes added to the body,
+    cross-link notes inserted, etc.), use the single-file form
+    `nx index rdr docs/rdr/rdr-NNN-<slug>.md`. The whole-corpus form
+    is explicitly called out as NOT appropriate at close time.
+  - Superseded flow uses two single-file invocations (one for the
+    old RDR, one for the new RDR) since both documents get cross-link
+    notes added to their bodies.
+
 ## [3.8.3] - 2026-04-11
 
 Plugin release: RDR-069 automatic substantive-critic dispatch at RDR

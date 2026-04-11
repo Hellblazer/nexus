@@ -6,6 +6,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.4] - 2026-04-11
+
+Patch release: surgical close-time reindex. The `/nx:rdr-close` skill
+was unconditionally walking the entire RDR corpus via `nx index rdr`
+on every close, even when the diff was wholly inside the frontmatter
+(status / closed_date / close_reason flip). This shipped two fixes
+that should have landed together with RDR-069 in 3.8.3.
+
+### Added
+
+- **`nx index rdr <file.md>`** — single-file scoping for the RDR
+  indexer. The command now accepts either a repo directory (existing
+  behaviour — glob all `docs/rdr/*.md`) or a single `.md` file (new
+  behaviour — index just that one file). File-mode resolves the repo
+  root from the file path via `git rev-parse --show-toplevel`, falling
+  back to the conventional `docs/rdr/<file>.md` layout when git is not
+  available. Collection naming is computed from the resolved repo
+  root, so file-mode and directory-mode write to the same
+  `rdr__{basename}-{hash8}` collection. Rejects non-markdown files
+  with a clean error; rejects unresolvable files with guidance to pass
+  a directory instead.
+
+### Fixed (nx plugin)
+
+- **`rdr-close` skill unconditional corpus reindex** — Step 4.4 of
+  the Implemented flow, Step 5 of the Reverted/Abandoned flow, and
+  Step 3 of the Superseded flow all previously ran `nx index rdr`
+  (no argument, whole-corpus walk) on every close. For
+  frontmatter-only edits this is pure waste: chunk text is unchanged
+  so embeddings would not shift. For body-level edits affecting only
+  one RDR, it is still wasteful to walk every RDR file in the corpus.
+  The skill now specifies: (a) skip the reindex entirely when the
+  diff is wholly inside the frontmatter block, with a concrete
+  `git diff | grep` recipe the user can run to check; (b) when a
+  reindex IS warranted, use the single-file form
+  `nx index rdr docs/rdr/rdr-NNN-<slug>.md` so the corpus walk is
+  avoided. The whole-corpus form is explicitly called out as NOT
+  appropriate at close time.
+
 ## [3.8.3] - 2026-04-11
 
 Patch release: ships RDR-069 automatic substantive-critic dispatch at
