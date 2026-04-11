@@ -109,7 +109,8 @@ example `#### Gap 1:` heading. The structure is conventional, not
 syntactically enforced — but the close skill greps for `#### Gap N:`
 patterns and warns when an RDR has zero matches. Existing RDRs are
 grandfathered (the close skill warns but does not block on missing
-gaps for RDRs created before this RDR's accept date).
+gaps for RDRs with numeric ID < 65; see CA-4 for the ID-based cutoff
+rationale).
 
 ## Context
 
@@ -570,8 +571,8 @@ Interventions deferred to sibling RDRs:
   (Gap 4) must document this exact regex so authors know the required
   format. The grep should distinguish "no gaps found (legacy RDR, pre-
   RDR-065)" from "no gaps matched the anchor (possibly malformed new
-  RDR)" by checking the RDR's `created` date against RDR-065's
-  `accepted_date`. Legacy case → WARN. Malformed new case → BLOCK with
+  RDR)" by comparing the RDR's numeric ID against 65 (< 65 is
+  legacy; see CA-4 for rationale). Legacy case → WARN. Malformed new case → BLOCK with
   a clear error naming the expected anchor.
 - **The replay is a structural gate, not a semantic one.** The skill
   verifies that the agent has provided a `file:line` pointer per gap
@@ -908,13 +909,14 @@ SKILL.md body proceeds with the rest of the close flow.
 2. After `close_reason` is parsed, if it is `implemented`, parse the
    RDR file's `## Problem Statement` section.
 3. Grep for `^#### Gap \d+:` anchors. Count matches.
-4. Apply grandfathering: if the RDR's `created` date is before
-   RDR-065's `accepted_date` AND match count is zero, emit WARN and
-   proceed to skill body (legacy RDR).
-5. Apply malformed-new rejection: if the RDR's `created` date is on
-   or after RDR-065's `accepted_date` AND match count is zero,
-   `sys.exit(0)` with error naming the expected anchor format
-   `#### Gap N: <title>`.
+4. Apply grandfathering: if the RDR's numeric ID is **< 65** AND
+   match count is zero, emit WARN and proceed to skill body (legacy
+   RDR; see CA-4 for rationale — date-based cutoff was replaced
+   with ID-based cutoff after the corpus audit showed 0/65 pre-065
+   RDRs use the target format).
+5. Apply malformed-new rejection: if the RDR's numeric ID is **≥ 65**
+   AND match count is zero, `sys.exit(0)` with error naming the
+   expected anchor format `#### Gap N: <title>`.
 6. If gaps were found and `--pointers` is NOT supplied: this is Pass
    1. Emit the gap list and a formatted instruction for the agent to
    collect pointers and re-invoke with `--pointers`. Then `sys.exit(0)`
