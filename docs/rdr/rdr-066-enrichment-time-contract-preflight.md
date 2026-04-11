@@ -128,6 +128,52 @@ explicitly and not by drift.
 
 ### Investigation
 
+#### Finding 2 (2026-04-11): plan-enricher can produce grounded contracts from Read alone (easy case)
+
+**Spike** against a Sonnet-class subagent simulating plan-enricher.
+T2: `nexus_rdr/066-research-2-ca2-spike-verified`.
+
+Target: `src/nexus/frecency.py:compute_frecency` (132-line self-
+contained module). Contracts template: 11 fields including signature,
+inputs, output, preconditions, postconditions, side effects, error
+modes, calls-out-to, tools-used-to-ground, hallucination-self-check.
+
+**Result**: the agent produced a fully grounded contract in ONE
+`Read()` call on the full file. Every field carried `file:line`
+citations. No Serena / JetBrains symbol lookup was needed — the LLM
+parsed the Python signature and docstring directly. HIGH self-
+confidence on all fields except "propagating exceptions" (inferred
+from absence-of-handler, correctly self-flagged).
+
+**Hardest field**: distinguishing caught from propagating exceptions.
+Inference-from-absence is weaker than assertion-from-handler.
+
+**Template refinements surfaced by the spike**:
+
+1. Split "Error modes" into sub-bullets **caught** / **propagates**.
+2. Add a "Default values resolved" line to inline constants rather
+   than leaving them symbolic (`_DEFAULT_DECAY_RATE` → `0.01`).
+3. Keep the "Tools used" + "Hallucination self-check" fields — they
+   made the result auditable.
+
+**Scope of the verification (honest)**:
+
+- **Verified**: single self-contained function, plain types, same-
+  file helpers only, no generics, no third-party types.
+- **NOT verified** (Phase 1 concerns):
+  - Functions with cross-file symbol chains (Read alone may need many
+    reads)
+  - Generic / Protocol / TypeVar types where the declaration lives
+    elsewhere
+  - Third-party library types (may need docs lookup)
+  - Coherence scaling: can the agent hold state for ~20 contracts in
+    one enrichment pass?
+
+**Phase 1 design note**: retry the spike on a **hard case** (cross-
+file generic or protocol consumer) before committing to "no Serena
+ever". The Read-to-Serena boundary is the real question, and this
+spike only proves Read suffices on the easy side of it.
+
 #### Finding 1 (2026-04-11): bd 1.0.0 has native first-class custom metadata
 
 **Source Search** against `bd create --help` and live JSON roundtrip
@@ -172,11 +218,16 @@ contracts stored in metadata. Address in Phase 1 design review.
   enrichment-stage failures that ART RC-1 and RC-2 describe. If it does,
   this RDR may be unnecessary.
   — **Status**: Unverified — **Method**: Wait for RDR-065 baseline data
-- [ ] **CA-2**: The plan-enricher agent can produce dimensional contracts
+- [x] **CA-2**: The plan-enricher agent can produce dimensional contracts
   given a structured template prompt without requiring runtime symbol
   resolution. If contracts must be verified by Serena/JetBrains lookup
   at enrichment time, the cost may be prohibitive.
-  — **Status**: Unverified — **Method**: Spike
+  — **Status**: **VERIFIED for the easy case (2026-04-11)** — Sonnet-
+  class subagent produced a fully line-grounded contract for
+  `compute_frecency` from a single `Read()` call with no Serena lookup.
+  Phase 1 must retry on a hard case (cross-file generic or protocol
+  consumer) to find the Read-to-Serena boundary.
+  — **Method**: Spike — see Finding 2. T2: `nexus_rdr/066-research-2-ca2-spike-verified`
 - [x] **CA-3**: A "coordinator bead" concept can be expressed as a tag
   or naming convention without modifying the `bd` schema. (We cannot
   modify beads internals.)
