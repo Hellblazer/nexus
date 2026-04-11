@@ -2,13 +2,15 @@
 id: RDR-069
 title: "Automatic Substantive-Critic Dispatch at Close"
 type: process
-status: accepted
+status: closed
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-10
 reissued: 2026-04-11
 accepted_date: 2026-04-11
+closed_date: 2026-04-11
+close_reason: implemented
 related_issues: ["RDR-065", "RDR-066", "RDR-067", "RDR-068"]
 supersedes_scope: "Evidence-Chain Gate Beads (original 2026-04-10 scope)"
 ---
@@ -427,6 +429,10 @@ Run the new automatic-dispatch close flow against a test RDR with a known retcon
 | Resource | List | Info | Delete | Verify | Backup |
 |---|---|---|---|---|---|
 | T2 `nexus_rdr/*-close-override-*` entries | `nx memory list` via MCP | `memory_get` | `memory_delete` | `memory_search "close-override"` | Part of nexus_rdr project backup |
+
+**CA-4 override-rate threshold** (binding post-ship):
+
+> If override rate exceeds **20% of closes in any 30-day window**, Phase 2 dispatch is treated as failing; the gate degrades to advisory mode (critic runs and surfaces findings but does not block close) and the critic prompt is tuned. Measurement: count `nexus_rdr/*-close-override-*` T2 entries over total closes in the window. Unverifiable at ship time — this threshold is monitored, not tested.
 
 ## Test Plan
 

@@ -111,14 +111,34 @@ if not rdr_path.exists():
 # Strip flags from args before extracting ID
 reason_match = re.search(r'--reason\s+(\S+)', args)
 close_reason = reason_match.group(1) if reason_match else None
-force = bool(re.search(r'--force', args))
+# --force MUST use negative lookahead (not \b) so `--force-implemented` does not match.
+# `\b` fires between `e` and `-` (word/non-word boundary) and incorrectly matches the
+# audit-override flag. Verified: re.search(r'--force\b', '--force-implemented') is True.
+# See RDR-069 plan-auditor SIG-1 / nexus-ctq.2 acceptance criteria.
+force = bool(re.search(r'--force(?!-)', args))
 # --pointers may be single-quoted, double-quoted, or a single unquoted token
 pointers_match = (re.search(r"--pointers\s+'([^']+)'", args)
                   or re.search(r'--pointers\s+"([^"]+)"', args)
                   or re.search(r'--pointers\s+(\S+)', args))
 pointers_arg = pointers_match.group(1) if pointers_match else None
+# --force-implemented "<reason>" — audit-trail override for critic blocks (RDR-069).
+# Reason must be non-empty; an empty string is rejected at the preamble gate.
+force_implemented_match = (re.search(r"--force-implemented\s+'([^']*)'", args)
+                            or re.search(r'--force-implemented\s+"([^"]*)"', args)
+                            or re.search(r'--force-implemented\s+(\S+)', args))
+force_implemented_reason = force_implemented_match.group(1) if force_implemented_match else None
+if force_implemented_match is not None and not (force_implemented_reason or '').strip():
+    print("> **ERROR**: `--force-implemented` requires a non-empty reason string.")
+    print("> Example: `/nx:rdr-close 069 --reason implemented --force-implemented 'critic false positive — gap addressed at src/foo.py:42'`")
+    sys.exit(0)
 args_clean = re.sub(r'--reason\s+\S+', '', args)
-args_clean = re.sub(r'--force', '', args_clean)
+# Strip --force-implemented BEFORE --force so the negative-lookahead strip below
+# has no `--force-implemented` to (correctly) skip and no residual tail to confuse
+# the ID extractor.
+args_clean = re.sub(r"--force-implemented\s+'[^']*'", '', args_clean)
+args_clean = re.sub(r'--force-implemented\s+"[^"]*"', '', args_clean)
+args_clean = re.sub(r'--force-implemented\s+\S+', '', args_clean)
+args_clean = re.sub(r'--force(?!-)', '', args_clean)
 args_clean = re.sub(r"--pointers\s+'[^']+'", '', args_clean)
 args_clean = re.sub(r'--pointers\s+"[^"]+"', '', args_clean)
 args_clean = re.sub(r'--pointers\s+\S+', '', args_clean).strip()
@@ -155,6 +175,8 @@ print(f"### RDR: {rdr_file.name}")
 print(f"**Title:** {title}  **Current Status:** {current_status}")
 if close_reason:
     print(f"**Close Reason:** {close_reason}")
+if force_implemented_reason:
+    print(f"**Force Implemented (audit):** {force_implemented_reason}")
 print()
 
 # Hard-block: refuse to close unless status is accepted or final (P1 from RDR-001)

@@ -221,6 +221,40 @@ Example: If nx store write fails but nx memory succeeds, note in response: "Crit
 ## Verification Performed
 [What you cross-referenced, what evidence you gathered]
 
+## Verdict
+
+**You MUST emit this block literally, at the end of your critique, outside any code fence, using bullet-dash markdown.** The RDR-069 close-flow parser greps for the exact line `- **outcome**:` — alternative phrasings (`outcome: FAILED`, plain-text key-value pairs, code-block emission) force the parser onto the fallback path and degrade CA-2.
+
+The outcome field MUST be one of exactly three literal strings — `justified`, `partial`, or `not-justified`. Do not substitute `PASS`, `FAIL`, `FAILED`, `BLOCKED`, `APPROVED`, or any other alternative vocabulary. The parser maps only the three canonical values.
+
+Example of a correctly emitted Verdict block for a clean RDR (copy this shape exactly, vary only the values):
+
+```
+## Verdict
+
+- **outcome**: justified
+- **confidence**: high
+- **critical_count**: 0
+- **significant_count**: 0
+- **summary**: Problem Statement gaps are addressed with file:line pointers; no scope reduction detected.
+```
+
+Example for an RDR with a silent-scope-reduction retcon:
+
+```
+## Verdict
+
+- **outcome**: not-justified
+- **confidence**: high
+- **critical_count**: 1
+- **significant_count**: 2
+- **summary**: Gap 2 is enumerated in the Problem Statement but silently reframed as out of scope in the Proposed Solution with no ### Gap 2: addressed heading.
+```
+
+Mapping rule: `critical_count > 0` → `not-justified`. `critical_count == 0` AND `significant_count > 0` → `partial`. Both counts zero → `justified`. Confidence is your own assessment (`high` / `medium` / `low`) based on evidence strength. Summary is ONE sentence — no line breaks, no bullet points inside the summary.
+
+> Fallback parse rule: if this Verdict block is absent or the `- **outcome**:` line cannot be located verbatim, downstream parsers count `### Issue:` headers under `## Critical Issues` and `## Significant Issues` and derive outcome mechanically. The fallback works but the canonical path is preferred — emit the block exactly as shown above.
+
 ## Operating Principles
 
 - **No fluff**: Every sentence adds value. Skip praise unless genuinely warranted.

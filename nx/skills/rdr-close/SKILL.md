@@ -71,6 +71,68 @@ Branch on what the preamble emitted:
 
 Also clear the T1 scratch `rdr-close-active` marker after Step 4 (Update State) completes — add a note at Step 4 to run: `nx scratch delete <entry-id>` where the entry was set by the preamble.
 
+### Step 1.75: Automatic Critique
+
+Dispatch `/nx:substantive-critique <rdr-id>` via the Agent tool and parse the `## Verdict` block from the response. This is the authoritative gate signal (CA-1 verified n=4 for outcome-category determinism; finding-level variance is expected).
+
+**Verdict extraction** — try in order, take the first hit:
+
+1. **Canonical path** (preferred): find the literal line `- **outcome**:` (bullet-dash, bold "outcome", colon, space, value). The value is one of `justified`, `partial`, `not-justified`.
+2. **Code-block path**: if the agent emitted the Verdict block inside a code fence, look for a line matching `outcome:\s*(\S+)` within a `## Verdict` section. Normalize the captured value case-insensitively: `FAILED`/`FAIL`/`BLOCKED`/`NOT-JUSTIFIED` → `not-justified`; `PARTIAL`/`PARTIALLY` → `partial`; `PASS`/`PASSED`/`APPROVED`/`JUSTIFIED` → `justified`.
+3. **Fallback path**: if neither canonical nor code-block form is present, count `### Issue:` headers under `## Critical Issues` and `## Significant Issues`. Derive outcome mechanically: Critical > 0 → `not-justified`; Critical == 0 AND Significant > 0 → `partial`; all clear → `justified`. Surface the fallback path to the user explicitly: "The critic did not emit a canonical Verdict block. Falling back to section counting: <counts>."
+
+All three paths map to the same 3-valued enum (`justified` / `partial` / `not-justified`) which is the gate signal branched on below.
+
+**Short-circuit**: if the preamble surfaced a `Force Implemented (audit)` line, skip the dispatch entirely — the user has taken explicit responsibility. Write a T2 override audit entry with `critic_verdict: skipped` (see branch E below) and continue to Step 2.
+
+**Relay framing** (load-bearing, do not vary): the dispatch relay MUST be fixed-shape and minimal. Pass only `{rdr_id}` and the standard input artifacts (T2 RDR record, catalog entry, RDR markdown file). NEVER pass session-generated summaries of what was built, what diverged, or what the user intends. Rationalization bias is the exact failure mode RDR-069 addresses — see RDR-069 §Risks "Dispatch isolation risk".
+
+```markdown
+## Relay: substantive-critic
+
+**Task**: Critique RDR {rdr_id} against its Problem Statement for silent scope reduction, retcon, or unjustified-implemented closure.
+**Bead**: none
+
+### Input Artifacts
+- nx memory: {repo}_rdr/{rdr_id} (status, research records, planning chain)
+- Files: docs/rdr/rdr-{rdr_id}-*.md
+- Catalog: mcp__plugin_nx_nexus-catalog__search query "RDR-{rdr_id}"
+
+### Deliverable
+Critique report with canonical `## Verdict` block (outcome, confidence, critical_count, significant_count, summary).
+
+### Quality Criteria
+- [ ] Verdict block uses 5-field canonical format
+- [ ] Findings grounded in RDR text (file:line references)
+- [ ] No session context consumed beyond the listed input artifacts
+```
+
+Branch on `Verdict.outcome`:
+
+**A. `justified`** → surface the one-line summary to the user and continue to Step 2. No constraint on `close_reason`.
+
+**B. `partial`** → surface all Critical and Significant findings to the user verbatim. Block `close_reason: implemented` unless `--force-implemented "<reason>"` was supplied. If no override, prompt the user: "The critic found significant issues. Address them and re-run, or pass `--force-implemented '<reason>'` to override with audit trail." Do not proceed until the user either resolves findings (recursive loop) or passes the override.
+
+**C. `not-justified`** → surface ALL Critical findings verbatim. Block `close_reason: implemented` unless `--force-implemented "<reason>"` was supplied. Per RDR-069 §Proposed Solution (line 282) and §Technical Design (line 307), `close_reason: reverted` and `close_reason: partial` are legitimate non-override paths on `not-justified` — a user who genuinely wants to acknowledge failure with `reverted` should be able to do so without the override flag. User's options: (1) address findings and re-run with `--reason implemented` (recursive refinement loop), (2) re-run with `--reason reverted` or `--reason partial` (honest failure-acknowledgment, no override needed), or (3) pass `--force-implemented "<reason>"` with a substantive reason to force `implemented` despite the Critical findings. A one-word reason (e.g., `--force-implemented "wontfix"`) is insufficient — prompt the user to expand it before accepting. Only `close_reason: implemented` requires the override.
+
+**D. Verdict extraction failure** → this case should be rare now that the verdict extractor above tries canonical bullet form, code-block key-value form, AND section-counting fallback. Only reach this branch if all three extraction paths fail (e.g. critic response is completely empty or wholly unparseable). Surface explicitly to the user: "Critic response could not be parsed at all. Proceed without critique? (y/N)". Do not silently block; do not silently proceed.
+
+**E. Override audit entry** (runs for every `--force-implemented` invocation, regardless of critic outcome):
+
+```
+mcp__plugin_nx_nexus__memory_put(
+    project="{repo}_rdr",
+    title="{rdr_id}-close-override-{YYYY-MM-DD}",
+    content="critic_verdict: {outcome|skipped}\nuser_reason: {force_implemented_reason}\nfinal_close_reason: {close_reason}\ntimestamp: {ISO8601}\nrdr_id: {rdr_id}",
+    ttl="permanent",
+    tags="rdr,close-override,rdr-{rdr_id}"
+)
+```
+
+The audit entries are the measurement surface for CA-4: if `nexus_rdr/*-close-override-*` exceeds 20% of closes in any 30-day window, Phase 2 dispatch degrades to advisory mode (see RDR-069 Day 2 Operations).
+
+**Scenario 4 — timeout or transport failure**: if the Agent tool dispatch fails, times out (>5 minutes without response), or returns an unparseable response (not just a missing Verdict block, but genuinely malformed output), surface the failure to the user explicitly and ask: "Critic dispatch failed. Proceed without critique? (y/N)". Do not silently block and do not silently proceed — the user must choose.
+
 ### Step 2: Create Post-Mortem
 
 Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. Populate:
@@ -116,11 +178,26 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 2. Update status in RDR markdown metadata
 3. Regenerate `docs/rdr/README.md` index
-4. Run `nx index rdr` to update T3 semantic index
+4. **Scoped conditional reindex** — if the RDR body changed during close (e.g. divergence notes added, post-mortem link inserted, or any text outside the frontmatter block modified), run `nx index rdr` **scoped to the single RDR file**, NOT the whole corpus:
+
+   ```bash
+   nx index rdr docs/rdr/rdr-NNN-<slug>.md
+   ```
+
+   A frontmatter-only edit (status/closed_date/close_reason flipping) does NOT need a reindex at all — the chunk text is unchanged, so embeddings would not shift. Check with:
+
+   ```bash
+   # If the diff is wholly inside the frontmatter block, skip the reindex.
+   git diff HEAD -- docs/rdr/rdr-NNN-*.md | grep -v '^[+-]---' | grep -v '^[+-][a-z_]*: ' | grep -E '^[+-]' | head -1
+   # Prints nothing → frontmatter-only → skip.
+   # Prints lines → body changed → run the single-file `nx index rdr <path>`.
+   ```
+
+   **Do NOT run the directory form `nx index rdr` (no argument)** at close time — that walks the whole corpus and hash-dedups every file, which is wasteful for a one-file edit. The file form takes only the target RDR.
 
 ### Step 5: Catalog Links (if catalog initialized)
 
-After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to capture implementation provenance:
+The RDR already has a catalog entry from the original accept-time indexing. Create links to capture implementation provenance (if catalog is initialized):
 
 1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically. Review with `nx catalog links <rdr-tumbler> --type implements-heuristic` — promote high-confidence ones to `implements` via `mcp__plugin_nx_nexus-catalog__link` for link-boost scoring benefit (heuristic links have zero search boost weight).
 
@@ -138,7 +215,7 @@ Skip all catalog steps silently if catalog is not initialized. The T2 record and
 
 ### Step 6: T3 Archive (post-mortem only)
 
-The main RDR is already semantically indexed by Step 4's `nx index rdr` (CCE embeddings, section-level chunks). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
+The main RDR was already semantically indexed at accept time (and refreshed in Step 4 only if the body changed during close). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
 
 If a post-mortem exists, archive it to a separate collection (using the exact file path from Step 2, not a glob): mcp__plugin_nx_nexus__store_put(content=(contents of $RDR_DIR/post-mortem/NNN-kebab-title.md), collection="knowledge__rdr_postmortem__{repo}", title="PREFIX-NNN Title (post-mortem)", tags="rdr,post-mortem,{drift-categories}"
 
@@ -155,9 +232,9 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 2. Offer post-mortem (useful for capturing what was learned, even from abandoned work)
 3. Update T2 record with close reason
 4. Update markdown metadata
-5. Run `nx index rdr` to update T3 semantic index (research findings are valuable even for failed RDRs)
+5. **Scoped conditional reindex** — if the RDR body changed, run `nx index rdr docs/rdr/rdr-NNN-<slug>.md` (single-file form). A frontmatter-only `status: reverted` flip does not warrant a reindex. Apply the same diff check from Step 4 of the Implemented flow.
 6. Archive post-mortem to `knowledge__rdr_postmortem__{repo}` (if created)
-7. Regenerate index
+7. Regenerate README index
 
 ## Flow: Superseded
 
@@ -165,7 +242,7 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 2. Cross-link both RDRs (bidirectional):
    - **Old RDR**: In T2, set `superseded_by: "NNN"`. In markdown, add "Superseded by RDR-NNN" note
    - **New RDR**: In T2, set `supersedes: "MMM"`. In markdown, add "Supersedes RDR-MMM" note
-3. Run `nx index rdr` to update T3 semantic index
+3. **Scoped reindex** — this flow typically DOES warrant a reindex because the markdown notes added in step 2 live in the RDR body. Run the single-file form: `nx index rdr docs/rdr/rdr-NNN-<slug>.md` on the OLD RDR, and separately on the NEW RDR. Two files → two single-file invocations. Do NOT run the whole-corpus form.
 4. **Catalog link** (if catalog initialized): Create `supersedes` link in the catalog so the graph reflects the relationship:
    ```
    # Find both RDRs by title in catalog
@@ -219,7 +296,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 - [ ] Open beads displayed and user asked for explicit confirmation before proceeding
 - [ ] Beads NOT auto-closed — human decides
 - [ ] T2 record updated with close reason, date, epic bead ID, and archived flag
-- [ ] T3 semantic index updated via `nx index rdr`
+- [ ] T3 semantic index refreshed via `nx index rdr` **only if the RDR body changed during close** (divergence notes added, cross-link notes inserted, etc.) — skipped for frontmatter-only closes
 - [ ] Post-mortem archived to `knowledge__rdr_postmortem__{repo}` (if exists)
 - [ ] README index regenerated
 - [ ] Idempotent: re-running skips completed steps
@@ -230,7 +307,7 @@ Outputs produced by this skill directly:
 
 - **Console output**: Bead status gate table (if epic_bead in T2)
 - **T2 memory**: Close metadata via memory_put tool: project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
-- **T3 semantic index**: Updated via `nx index rdr` (CCE embeddings, section-level chunks)
+- **T3 semantic index**: Conditionally refreshed via `nx index rdr` (CCE embeddings, section-level chunks) — only when the RDR body changed during close; frontmatter-only edits are skipped
 - **Filesystem**: Post-mortem at `$RDR_DIR/post-mortem/NNN-kebab-title.md`, updated README
 
 Outputs generated by the knowledge-tidier agent (post-mortem archival only):
