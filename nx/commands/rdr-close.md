@@ -259,7 +259,8 @@ if (close_reason or '').lower() == 'implemented':
         print()
         try:
             subprocess.run(
-                ['nx', 'scratch', 'put', rdr_id_label, '--tags', 'rdr-close-active'],
+                ['nx', 'scratch', 'put', rdr_id_label,
+                 '--tags', f'rdr-close-active,rdr-{rdr_id_label}'],
                 capture_output=True, timeout=5)
         except Exception:
             pass
