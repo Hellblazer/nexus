@@ -53,6 +53,8 @@ If `$RDR_DIR` does not exist:
 
 If `$CLAUDE_PLUGIN_ROOT` is not available, use the templates inline (they are embedded below in the Templates section).
 
+> **Gap convention**: the Problem Statement section must use `#### Gap N: <title>` headings (regex: `^#### Gap \d+:`). The close skill uses this format to enumerate gaps and require per-gap closure pointers when `--reason implemented` is passed. Authors must fill in concrete gap headings before the RDR is accepted.
+
 ### Step 2: Assign ID
 
 Scan `$RDR_DIR/` for files matching `[0-9][0-9][0-9]-*.md`. Find the highest number. Next ID = max + 1, zero-padded to 3 digits. If no files exist, start at `001`.
