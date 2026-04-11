@@ -2,12 +2,15 @@
 id: RDR-065
 title: "Close-Time Funnel Hardening Against Silent Scope Reduction"
 type: process
-status: accepted
+status: implemented
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-10
 accepted_date: 2026-04-10
+closed: 2026-04-11
+close_reason: Implemented
+post_mortem: docs/rdr/post-mortem/065-close-time-funnel-hardening.md
 related_issues: ["RDR-066", "RDR-067", "RDR-068", "RDR-069"]
 ---
 
