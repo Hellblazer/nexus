@@ -2,13 +2,13 @@
 id: RDR-067
 title: "Cross-Project RDR Audit Loop"
 type: process
-status: draft
+status: accepted
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-10
 reissued: 2026-04-11
-accepted_date:
+accepted_date: 2026-04-11
 related_issues: ["RDR-065", "RDR-066", "RDR-068", "RDR-069"]
 supersedes_scope: "Cross-Project RDR Observability (original 2026-04-10 scope proposed 5 custom structured metrics + collection + skill)"
 ---
