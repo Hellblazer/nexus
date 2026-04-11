@@ -2,13 +2,14 @@
 id: RDR-066
 title: "Composition Smoke Probe at Coordinator Beads"
 type: process
-status: draft
+status: accepted
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-10
 reissued: 2026-04-11
-accepted_date:
+accepted_date: 2026-04-11
+gate_iteration: 5
 related_issues: ["RDR-065", "RDR-067", "RDR-068", "RDR-069"]
 supersedes_scope: "Enrichment-Time Contract Pre-Flight (original 2026-04-10 scope bundled contracts + probe + coordinator concept)"
 ---
@@ -116,7 +117,38 @@ In each of the 4 confirmed ART incidents, the failure would surface under a runt
 - **RDR-036**: probe against `FactualTeacher.query("what is a dog")` for a phrase not in the HashMap → "I don't know" regardless of neural path state. Surfaces the HashMap short-circuit.
 - **RDR-031**: probe against a Grossberg pipeline end-to-end with a real input → isolates whether the mechanism is running or a deprecated pre-swap path is still live.
 
-Each of these probes is ≤50 lines of test code *for dim-mismatch-class failures*. Unwiring failures (RDR-036, RDR-075, RDR-031) may require heavier setup (e.g., RDR-075's InstarLearning probe needs a full training loop to observe weight changes — more than 50 lines). The 30-50 line budget applies to the dim-mismatch sub-class; unwiring probes are sized to whatever realistic composition exercise is required. **Additionally, the 4/4 catch claim is conditional on correct coordinator tagging** (see CA-4 and CA-5) — the probe only runs if `metadata.coordinator=true` is set on the bead at enrichment time.
+Each of these probes is ≤50 lines of test code *for dim-mismatch-class failures*. Unwiring failures (RDR-036, RDR-075, RDR-031) may require heavier setup (e.g., RDR-075's InstarLearning probe needs a full training loop to observe weight changes — more than 50 lines). The 30-50 line budget applies to the dim-mismatch sub-class; unwiring probes are sized to whatever realistic composition exercise is required.
+
+**The 4/4 catch claim is conditional on four distinct factors**, not one. Actual catch rate = 4/4 × (coordinator tag precision) × (probe step not skipped) × (fallback heuristic reaches the historical coordinators):
+
+1. **Coordinator tag precision** (CA-4): plan-enricher actually writes `metadata.coordinator=true` when it should
+2. **Probe step adherence**: the agent/user running the plan actually executes `/nx:composition-probe <id>` at the enriched bead's probe step (CA-4 mitigation via post-write verification; Gap 3 is convention-based, not structural)
+3. **Fallback heuristic coverage** (CA-5b, new): the ≥2-declared-dependencies fallback heuristic must tag each of the four historical coordinator beads. If a historical coordinator had only 1 declared `bd` dependency but composed two outputs (e.g., composed two sibling beads without explicit `bd dep add`), the fallback would miss it and the full method-ownership lookup would not — the fallback can structurally undercount
+4. **Probe run integrity** (CA-1/CA-2/CA-3): the generated probe actually surfaces the failure rather than false-passing
+
+The RDR asserts 4/4 as a ceiling. Real catch rate is bounded below by the multiplicative product of all four factors. CA-5b is the new gating assumption added at gate time to test factor 3 retrospectively against the ART plan graphs.
+
+### Finding 4 (2026-04-11): plan-enricher CA-4/CA-5 feasibility — Phase 2 is near-zero-cost
+
+Source: `nexus_rdr/066-research-3-ca4-ca5-enricher-feasibility` (id 730). Dispatched `nx:codebase-deep-analyzer` against `nx/agents/plan-enricher.md` and `nx/skills/enrich-plan/SKILL.md` with a fixed-shape minimal relay. Purely code-analytic — no runtime spike required.
+
+**The enricher walks beads one at a time with zero cross-bead state.** The per-child loop at `plan-enricher.md:98-100` processes beads serially with no accumulator, no map, no session memory of prior walks. Tool budget: Write, `/beads:show`, `/beads:update --body-file`, scratch, memory_get/put, sequential-thinking. No Serena, no catalog, no symbol-resolution tools.
+
+**CA-4 disposition**: `FEASIBLE-WITH-DIFF`. The enricher's only mutation call at `plan-enricher.md:134` is `/beads:update <id> --body-file ...` — it never passes `--metadata`. Verified against `bd show nexus-ctq.1 --json`: `"metadata": {}` despite being well-enriched. The `bd` CLI supports `--metadata` roundtrips (retained CA, id 714). The diff is prompt-only: extend the update call to include `--metadata '{"coordinator": true}'` when the detection heuristic fires. **Silent-omission failure mode**: the enricher can successfully write the body and silently omit the metadata flag with no error. Mitigation: add a post-write verification step asserting `.metadata.coordinator == true` persisted.
+
+**CA-5 full disposition**: `REQUIRES-REWORK`. Full method-to-bead ownership lookup needs (a) an explicit accumulator phase before the per-bead loop, and (b) Serena added to the tool budget. Not a bounded prompt diff. **Deferred to a follow-on bead tracked under the RDR-066 implementation epic.** Not required for shipping Phase 2.
+
+**CA-5 fallback disposition**: `ZERO-COST`. `bd show <id> --json` already returns a `dependencies` array. The enricher already calls `/beads:show <id>` for each bead at line 99 — the dependency count is available in the existing read path with **no additional tool calls**. The check `len(dependencies) >= 2 → coordinator candidate` is a single prompt sentence. No cross-bead state, no tool budget change, no architectural rework.
+
+**Trade-off of the fallback — asymmetric failure modes**:
+
+- **Over-tagging** (false positives): fan-in beads (e.g., "final integration test" beads that depend on many siblings but don't actually compose outputs in failure-prone ways) get tagged as coordinators and run probes they don't need. Wasted probe runtime, no missed failures. Correction channel: RDR-067 audit loop flags coordinator-tagged beads whose probes never catch real failures at 90-day cadence.
+
+- **Under-tagging** (false negatives, structural gap): a bead that composes outputs from ≥2 prior beads but has only 1 declared `bd` dependency (because the plan author or enricher didn't add explicit `bd dep add` edges between the composing bead and all its semantic dependencies). The full CA-5 method-ownership lookup would tag this bead as coordinator via code-level evidence; the fallback heuristic would not. **This is the structural gap in the 4/4 equivalence claim**: the fallback matches the full lookup's coordinator set only when each coordinator has declared `bd` dependencies matching its actual composition graph. The RDR does not verify this equivalence against the four historical ART coordinators. CA-5b (added in the 2026-04-11 gate finding) is the retrospective verification: count declared `bd` dependencies on each of IMPL-04 (RDR-073), DevelopmentalCurriculumIntegration (RDR-075), FactualTeacher.query (RDR-036), and Step 5 pipeline (RDR-031), and confirm each has ≥2.
+
+**The 4/4 catch claim under the fallback is therefore contingent**, not absolute. If CA-5b passes (all four coordinators have ≥2 declared deps), the fallback achieves 4/4. If CA-5b fails (any coordinator has <2 declared deps), the fallback achieves 3/4 or less and the CA-5 full deferral carries an associated catch-rate cost. CA-5b is unverified at gate time; Phase 1 resolves it via ART plan graph retrospective lookup (cheap — no runtime spike, just `bd list --json` + grep on ART's plan graph, or a read of the ART bead histories).
+
+**Material implication**: Phase 2 of the Implementation Plan (coordinator convention + plan-enricher update) is now a near-zero-cost prompt diff, not a moderate rewrite. The risk profile of RDR-066 shifts: Phase 1 hard-case spike (CA-1/CA-2/CA-3) remains the gating expensive work; Phase 2 is trivially cheap.
 
 ### Retained findings from prior iteration (verified CAs)
 
@@ -138,13 +170,16 @@ Two findings from the 2026-04-11 first iteration of this RDR are carried forward
 - [ ] **CA-3**: The probe can run in a bounded amount of time (~30-120 seconds) without requiring full test-suite setup, database seeds, or other heavy infrastructure. A probe that takes 10 minutes is unusable.
   — **Status**: Unverified — **Method**: Spike; measure generation + execution latency on a real target
 
-- [ ] **CA-4**: The coordinator-bead identification convention (`metadata.coordinator=true`) is reliably applied by plan-enricher or by users. If it's missed, the probe doesn't fire and the 4/4 catch claim degrades proportionally to the miss rate.
-  — **Status**: Unverified — **Method**: update plan-enricher prompt; test on a sample 10-20 bead plan; measure the miss rate against a manually-labeled ground truth
-  — **Mitigation, not backstop**: the 90-day RDR-067 audit loop catches missed tags eventually but not before a specific close ships without a probe. A stronger mitigation is CA-5 below.
+- [x] **CA-4**: The coordinator-bead identification convention (`metadata.coordinator=true`) can be reliably applied by plan-enricher. **Status**: `FEASIBLE-WITH-DIFF` — verified by code analysis (see Finding 4). The `bd update --metadata` path is available and unused today; Phase 2 adds a single prompt sentence to invoke it when the coordinator heuristic fires. **Silent-omission mitigation**: Phase 2 also adds a post-write verification step asserting `.metadata.coordinator == true` was persisted, so the enricher cannot silently drop the tag without surfacing to the user. **Method**: Code analysis + post-write verification pattern. **T2**: `nexus_rdr/066-research-3-ca4-ca5-enricher-feasibility` (id 730).
 
-- [ ] **CA-5** (added 2026-04-11 from substantive-critic finding): Plan-enricher can reliably detect that a bead composes outputs from ≥2 prior beads **via cross-bead method-ownership lookup**. The detection rule is "if this bead's description names methods defined in ≥2 prior beads in the plan, tag as coordinator" — this requires the enricher to hold method-to-bead ownership mappings across the full walk, not just inspect the current bead in isolation.
-  — **Status**: Unverified — **Method**: test plan-enricher on a 10-20 bead plan with a mix of coordinator and non-coordinator beads; measure the miss rate and false-positive rate
-  — **Fallback**: a simpler heuristic that does NOT depend on cross-bead lookup — any bead with ≥2 `--waits-for` dependencies is a coordinator candidate regardless of method content. May over-tag (false positives) but under-misses.
+- [x] **CA-5 (fallback — shipping path)**: Plan-enricher can detect coordinator candidates via the cheap heuristic "any bead with ≥2 `bd` dependencies is a coordinator candidate." **Status**: `ZERO-COST` — verified by code analysis (see Finding 4). `bd show <id> --json` already returns `.dependencies`; the enricher already calls `/beads:show <id>` in its existing read path at `plan-enricher.md:99`. The check is a single prompt sentence consuming data already in the read path. **False-positive risk**: over-tags fan-in beads that don't actually compose outputs. Over-tagging wastes probes, does not miss failures. Correction channel: RDR-067 audit loop flags coordinator-tagged beads whose probes never catch real failures. **T2**: `nexus_rdr/066-research-3-ca4-ca5-enricher-feasibility` (id 730).
+
+- [~] **CA-5 (full — deferred)**: The richer heuristic "detect coordinators via cross-bead method-ownership lookup in the enricher's walk" **requires architectural rework** (accumulator phase + Serena addition to tool budget), confirmed by code analysis (Finding 4). The current enricher at `plan-enricher.md:98-100` walks beads one at a time with zero cross-bead state; full method-ownership detection is not a bounded prompt diff. **Status**: `DEFERRED` — out of scope for Phase 2 shipping. Tracked as a follow-on bead under the RDR-066 implementation epic, to be created at plan time. The fallback heuristic above ships first; the richer detection is an optional upgrade after shipping. **No longer gating** the RDR's acceptance, but see CA-5b below — the catch-rate equivalence claim between fallback and full is itself an unverified assumption that needs retrospective verification.
+
+- [ ] **CA-5b** (added 2026-04-11 from gate Layer 3 critic finding SIG-1): The fallback heuristic (≥2 declared `bd` dependencies → coordinator candidate) tags each of the four historical ART incident coordinator beads. This is the equivalence claim between the fallback and the full method-ownership lookup, applied to the specific 4/4 catch evidence base.
+  — **Status**: Unverified — **Method**: Retrospective lookup against ART's plan graph / bead history for each of IMPL-04 (RDR-073), DevelopmentalCurriculumIntegration (RDR-075), FactualTeacher.query (RDR-036), and Step 5 pipeline wiring (RDR-031). Count declared `bd` dependencies at the time of the incident. Cheap — no runtime spike, just `bd list --json` + grep on the ART plan graph snapshot, or a read of the ART post-mortem + bead archive. Can be done in Phase 1 alongside the CA-1/CA-2/CA-3 hard-case spike.
+  — **Disposition rule**: If **all four** coordinators have ≥2 declared `bd` dependencies, CA-5b passes and the 4/4 claim under the fallback is fully supported. If **1-2** coordinators have <2 declared deps, the fallback achieves 3/4 or 2/4 under the same plan structure (CA-5 full would be required to reach 4/4 on those targets). Adjust the RDR's catch-rate claim and the §Trade-offs §Consequences language accordingly, and consider whether CA-5 full should be un-deferred into the shipping scope.
+  — **Gate-time observation**: this CA was not surfaced until the Layer 3 critic dispatch noted the structural gap in the "fallback reaches the same coordinator set" claim. It is added at gate time rather than during initial drafting because the equivalence between the two detection rules is not intuitive — the fallback's graph-structural check and the full method-ownership check produce different coordinator sets in principle, and the RDR had silently conflated them.
 
 ## Proposed Solution
 
@@ -249,18 +284,21 @@ The build effort is bounded: one new skill (composition-probe), one prompt updat
 
 ### Consequences
 
-- **Positive**: catches 4/4 audit incidents at bounded reopen cost
+- **Positive**: catches **up to 4/4 audit incidents** at bounded reopen cost — actual catch rate is bounded below by the product of (coordinator tag precision) × (probe step adherence) × (fallback-to-full equivalence on historical coordinators, CA-5b) × (probe run integrity). The 4/4 is the ceiling the full-spec design achieves; the shipping design using the fallback heuristic reaches 4/4 only if CA-5b passes for all four historical coordinators. See §Research Findings §Finding 3 for the full conditional
 - **Positive**: surfaces the identity of the failing dependency bead, enabling targeted reopen rather than coordinator rewrite
 - **Positive**: composable with RDR-065 (close-time replay), RDR-068 (contracts), RDR-069 (critic) — none overlap, all layer
 - **Negative**: adds ~30-120 seconds per coordinator bead (not per bead; only coordinators)
 - **Negative**: requires plan-enricher prompt discipline (CA-4 mitigation); missed coordinator tags mean missed probes
 - **Negative**: probe subagent may generate flaky or low-quality tests on hard cases until CA-1/CA-2 are verified and the prompt is tuned
+- **Negative** (fallback-heuristic specific): the `≥2 declared dependencies` fallback may under-tag coordinators whose plan did not declare all composition edges via `bd dep add`. CA-5b quantifies this structurally against the historical 4/4 target set
 
 ### Risks and Mitigations
 
 - **Risk**: Probe false-positive rate is high on noisy targets (e.g., flaky integration points). **Mitigation**: the probe runs the subagent-generated test up to 3 times; only consistent failures block.
 - **Risk**: Probe takes too long on hard cases. **Mitigation**: CA-3 spike; if latency unacceptable, narrow probe scope to dimensional assertions only (skip runtime execution).
 - **Risk**: Plan-enricher misses coordinator tagging (CA-4). **Mitigation**: RDR-067 audit loop detects plans with undetected coordinators by cross-referencing bead dependency graphs.
+- **Risk** (OBS-3 from gate Layer 3): **RDR-067 is the correction channel for fallback over-tagging, but RDR-067 is itself draft with unverified CAs.** If RDR-067 is deferred or de-scoped, there is no correction channel for coordinator over-tagging by the `≥2 deps` fallback heuristic — the false-positive rate is unbounded in that case, and the wasted probe runtime accumulates indefinitely. **Mitigation**: the CA-5b retrospective in Phase 1 narrows the expected false-positive rate by confirming the historical baseline. If CA-5b passes, the fallback is precise-enough that the RDR-067 dependency is soft. If CA-5b fails or partially passes, RDR-067 becomes a harder dependency and the user should consider whether to ship RDR-066 at all before RDR-067 has gated.
+- **Risk** (SIG-1 from gate Layer 3): **The fallback heuristic may not reach the full lookup's coordinator set on the historical 4/4 target.** The RDR silently conflated structural dependency-count and semantic method-ownership as if they produced the same coordinator tagging in all cases. CA-5b is the test. **Mitigation**: the Phase 1 retrospective ART plan graph lookup is the verification path; the disposition rule in CA-5b spells out what to do if the fallback achieves 3/4 or 2/4 (consider un-deferring CA-5 full or narrowing the catch claim).
 
 ### Failure Modes
 
@@ -275,26 +313,50 @@ The build effort is bounded: one new skill (composition-probe), one prompt updat
 
 ### Prerequisites
 
-- [ ] RDR-069 (Phase 0) shipped — the critic is the safety net if this probe misses; build the net first
-- [ ] CA-1 through CA-5 verified via a hard-case spike (CA-5 is the cross-bead method-ownership detection heuristic for plan-enricher)
-- [ ] **Bead-level ordering enforcement**: when implementation beads are created for this RDR, use `bd dep add <066-impl-epic> <069-impl-epic>` so the 066 implementation is mechanically blocked until 069 ships. Prose prerequisite alone is not sufficient — see the substantive-critic finding in `nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike` (run 1 Significant issue) and the underlying concern that parallel acceptance of 066 and 069 would allow 066 implementation to start without the safety net
+- [x] RDR-069 (Phase 0) shipped — the critic is the safety net if this probe misses; build the net first. **Satisfied 2026-04-11** (PR #147 merged to main).
+- [ ] CA-1, CA-2, CA-3 verified via Phase 1 hard-case spike (runtime probe generation + failure message interpretability + latency bound)
+- [ ] CA-5b verified via Phase 1 retrospective ART plan graph lookup (cheap — no runtime, just `bd list --json` + grep or post-mortem read)
+- [x] CA-4 `FEASIBLE-WITH-DIFF` verified by code analysis (Finding 4, id 730). Verified outcome feeds into Phase 2 as the prompt-diff specification. Phase 2 implementation still must demonstrate end-to-end runtime correctness including the silent-omission negative test.
+- [x] CA-5 fallback `ZERO-COST` verified by code analysis (Finding 4, id 730). Feeds Phase 2.
+- [ ] **Bead-level ordering enforcement**: when implementation beads are created for this RDR, use `bd dep add <066-impl-epic> <069-impl-epic>` so the 066 implementation is mechanically blocked until 069 ships. Prose prerequisite alone is not sufficient — see the substantive-critic finding in `nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike` (run 1 Significant issue) and the underlying concern that parallel acceptance of 066 and 069 would allow 066 implementation to start without the safety net. **Note**: RDR-069 is now closed/implemented on main, so this ordering constraint is trivially satisfied at plan time. It remains documented for the pattern-level discipline it expresses
 
 ### Minimum Viable Validation
 
 Run the probe against a synthetic coordinator bead constructed from ART's RDR-073 IMPL-04 retrospectively. The probe should generate a test against `GroundedLanguageSystem.dialog().process("ball")` with the trained pipeline, run it, and surface `IllegalArgumentException: input length 312 != state size 65`. This is a known-failure target with a known-correct answer.
 
-### Phase 1: Hard-case spike
+### Phase 1: Hard-case spike + CA-5b retrospective
+
+Phase 1 has two parallel sub-tasks. Both feed Phase 2/3 implementation decisions.
+
+**Phase 1a — Runtime hard-case spike (CA-1, CA-2, CA-3)**
 
 - Pick a cross-file generic composition from the nexus or ART codebase (e.g., a coordinator that composes `Pipeline<T>` and `Projection<U>`)
 - Dispatch the proposed probe-generation subagent with a fixed prompt
 - Measure: did the subagent need Serena / symbol lookup? How long did generation take? Was the generated test accurate? Was the failure message interpretable?
-- Outcome: decide Read-only vs. Read+Serena architecture; document in CA-1/CA-2 dispositions
+- Outcome: decide Read-only vs. Read+Serena architecture; document in CA-1/CA-2/CA-3 dispositions
+
+**Phase 1b — CA-5b retrospective (fallback-to-full equivalence on the historical 4/4 target)**
+
+- For each of the four historical ART coordinator beads (IMPL-04 from RDR-073, DevelopmentalCurriculumIntegration from RDR-075, FactualTeacher.query from RDR-036, Step 5 pipeline from RDR-031), determine how many declared `bd` dependencies the coordinator bead had at the time of the incident
+- Sources (in order of preference): (a) `~/git/ART/.beads/` archive + `bd show <id> --json` if the bead IDs can be recovered from the post-mortems, (b) grep the ART post-mortems for `--waits-for` declarations around the coordinator bead, (c) read the original plan document if preserved in `~/git/ART/docs/plans/` or equivalent
+- Outcome: record counts per coordinator in a CA-5b disposition entry in T2 (`nexus_rdr/066-research-4-ca5b-retrospective`). Apply the disposition rule from the CA-5b definition — if all four have ≥2 declared deps, CA-5b passes and the 4/4 claim holds under the fallback. If 1-2 have <2, adjust the catch rate claim in §Trade-offs §Consequences and reconsider whether CA-5 full should be un-deferred
+- Latency: this is a cheap task — no runtime spike, no subagent dispatch, just CLI + grep. Estimate ≤30 minutes total.
 
 ### Phase 2: Coordinator convention + plan-enricher update
 
-- Document the `metadata.coordinator=true` convention in `nx/agents/plan-enricher.md`
-- Update plan-enricher prompt: detection rule, tagging rule, probe-step emission rule
-- Test: run plan-enricher on a small test plan with a known coordinator; verify tag and probe step are emitted
+**Scope shift (per Finding 4)**: Phase 2 is a near-zero-cost prompt diff, not a moderate rewrite. The enricher already reads `.dependencies` from `bd show --json` in its existing per-bead walk; the detection heuristic is a single prompt sentence consuming data already in the read path.
+
+- Add the detection rule to `nx/agents/plan-enricher.md` near line 100: "After reading the bead via `/beads:show <id> --json`, inspect `.dependencies`. If the count is ≥2, treat this bead as a coordinator candidate." (The `--waits-for` edge-count fallback heuristic — ships the 80% value at zero marginal cost.)
+- Extend the `/beads:update` call near line 134 to append `--metadata '{"coordinator": true}'` when the coordinator candidate heuristic fires.
+- Add a post-write verification step: after `/beads:update`, call `/beads:show <id> --json` and assert `.metadata.coordinator == true` was persisted. On failure, surface to the user. (CA-4 silent-omission mitigation — the enricher can successfully write the body update and silently omit the metadata flag with no error.)
+- Emit the probe-run step in the enriched bead description: "Before beginning the next bead, run `/nx:composition-probe <this-bead-id>` and verify PASS."
+- Document the `metadata.coordinator=true` convention in the enricher prompt header so future readers understand the semantic.
+- **Happy-path test**: run plan-enricher on a small test plan with a known coordinator (≥2 deps); verify tag, post-write verification, and probe step are all emitted.
+- **Negative test (SIG-2 mitigation)**: run plan-enricher in a failure-injection harness where the `--metadata` flag is deliberately stripped from the generated `bd update` call (simulate the silent-omission failure mode by mocking the update command, patching it out at the shell layer, or overriding the prompt with a variant that omits the flag). **Expected outcome**: the post-write verification step catches the missing tag via `bd show --json | .metadata.coordinator` and surfaces failure to the user explicitly. **Gate**: this test must fail loudly if the mitigation step is stripped from the prompt — it is the load-bearing negative test for CA-4. Without this test, the post-write verification could ship as dead code (present in the prompt text but never exercised), which is exactly the "building blocks correctly implemented but not wired" failure mode RDR-066 is designed to prevent.
+
+**Deferred**: the full CA-5 cross-bead method-ownership lookup heuristic is out of scope for Phase 2. Tracked as a follow-on bead under the RDR-066 implementation epic. The fallback heuristic ships first; the richer detection is an optional upgrade after shipping.
+
+**Acknowledged false-positive risk**: the edge-count heuristic over-tags fan-in beads that depend on many siblings without actually composing their outputs in failure-prone ways. Over-tagging causes wasted probes, not missed failures — the 4/4 catch claim is unchanged. Correction channel: RDR-067 audit loop catches coordinator-tagged beads whose probes never catch real failures.
 
 ### Phase 3: `nx:composition-probe` skill
 
@@ -323,11 +385,13 @@ Run the probe against a synthetic coordinator bead constructed from ART's RDR-07
 
 ## Test Plan
 
-- **Scenario 1** (Phase 1 spike): cross-file generic composition; does the subagent need Serena; is the probe accurate; is latency bounded
+- **Scenario 1** (Phase 1a spike): cross-file generic composition; does the subagent need Serena; is the probe accurate; is latency bounded
 - **Scenario 2** (RDR-073 retrospective): known-failure target; verify probe catches the 312D/65D mismatch
 - **Scenario 3** (clean coordinator): a coordinator bead whose composition actually works; verify probe returns PASS without false positive
 - **Scenario 4** (RDR-036 retrospective): verify probe would have caught the HashMap short-circuit
-- **Scenario 5** (CA-4 — missed tag): run plan-enricher on a plan with a coordinator that plan-enricher doesn't recognize; measure the miss rate
+- **Scenario 5** (CA-4 — missed tag happy path): run plan-enricher on a plan with a coordinator that plan-enricher doesn't recognize; measure the miss rate
+- **Scenario 5b** (CA-4 silent-omission negative test — SIG-2 from gate Layer 3): run plan-enricher in a failure-injection harness where the `--metadata` flag is deliberately stripped from the generated `bd update` call. **Expected**: the post-write verification step catches the missing `metadata.coordinator` field via `bd show --json` and surfaces failure loudly to the user. **Gate**: if the mitigation step is dead code (present in prompt text, never exercised), this test must fail. This is the load-bearing negative test for the CA-4 silent-omission mitigation — without it, the mitigation could ship broken.
+- **Scenario 5c** (CA-5b retrospective — SIG-1 from gate Layer 3): for each of the four historical ART coordinator beads (RDR-073 IMPL-04, RDR-075 DevelopmentalCurriculumIntegration, RDR-036 FactualTeacher.query, RDR-031 Step 5 pipeline), count declared `bd` dependencies at the time of the incident. **Expected**: each coordinator has ≥2 declared deps (confirming fallback-to-full equivalence on the historical target set) OR record the failing coordinators and apply the CA-5b disposition rule (narrow the 4/4 claim or un-defer CA-5 full). Cheap — no runtime spike, just `bd list --json` + grep or ART post-mortem read.
 - **Scenario 6** (recursive 5a): synthetic retcon in a test coordinator → probe catches → this RDR's close passes
 
 ## Validation
@@ -348,7 +412,10 @@ No contradiction with RDR-065, 067, 068, 069 — the probe is a specific prevent
 
 ### Assumption Verification
 
-CA-1, CA-2, CA-3, CA-4 must be verified in Phase 1 spike before the gate passes.
+- **Phase 1a** (runtime hard-case spike): CA-1, CA-2, CA-3 must be verified before Phase 3 implementation begins
+- **Phase 1b** (retrospective ART plan graph lookup): CA-5b must be verified before Phase 2 implementation; its outcome feeds the catch-rate claim language
+- **Phase 2** (implementation): CA-4 is verified end-to-end by Scenario 5 (happy path) AND Scenario 5b (silent-omission negative test). CA-5 fallback is verified end-to-end by Scenario 5.
+- **Gate**: CA-1, CA-2, CA-3, CA-4 (analysis), CA-5 fallback (analysis), CA-5b (retrospective) must all be verified before the RDR-066 close flow accepts `close_reason: implemented`. CA-5 full remains deferred throughout; CA-5b failure triggers un-deferral on 1-2 targets rather than a full-scope expansion.
 
 ### Scope Verification
 
@@ -387,4 +454,6 @@ Right-sized. One new skill, one prompt update, one workflow integration. No new 
 - 2026-04-10 — Stub created as "Enrichment-Time Contract Pre-Flight" with 3 bundled gaps (contracts + probe + coordinator concept).
 - 2026-04-11 (first iteration) — CA-2 and CA-3 verified; scope narrowed to "contracts + probe"; merged into PR #143.
 - 2026-04-11 (second iteration) — **Reissued with new scope** based on nexus historical audit. Evidence shows the composition probe catches 4/4 audit incidents while dimensional contracts catch 1/4 cleanly. Probe is the primary intervention; contracts moved to RDR-068 as belt-and-suspenders. Coordinator-bead concept resolved via `bd metadata.coordinator=true` (free). New scope: Composition Smoke Probe at Coordinator Beads. Priority stays P2. Phase 1 of the 4-RDR remediation (depends on RDR-069 Phase 0). See `rdr_process/nexus-audit-2026-04-11` for evidence and bead `nexus-640` for the cycle.
-- 2026-04-11 (third iteration — **this one**) — **Critic-driven fixes** from the RDR-069 CA-1 determinism spike (`nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike`). Two runs of `nx:substantive-critic` against this RDR surfaced issues the second iteration missed. Fixes applied: (a) retained-CA section added to track the prior-iteration findings (bd metadata, easy-case contracts) that were verified but not numbered; (b) CA-5 added for the coordinator detection heuristic's cross-bead method-ownership lookup requirement; (c) §Technical Design marked as conditional on CA-1 outcome (Read-only vs Read+Serena branches); (d) CA-2 fallback design added for the unattributed-failure case; (e) §Failure Modes extended with probe-step-skipped and unintelligible-failure cases; (f) §Gap 3 acknowledges convention-not-hook closure explicitly; (g) Implementation Plan Prerequisites adds bead-level ordering enforcement via `bd dep add`; (h) Phase 5 step labels renamed 6a/6b/6c → 5a/5b/5c; (i) 4/4 claim qualified as "conditional on correct tagging"; (j) duplicate §Alternatives Considered renamed to §Briefly Rejected Alternatives. Bead: nexus-57j.
+- 2026-04-11 (third iteration) — **Critic-driven fixes** from the RDR-069 CA-1 determinism spike (`nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike`). Two runs of `nx:substantive-critic` against this RDR surfaced issues the second iteration missed. Fixes applied: (a) retained-CA section added to track the prior-iteration findings (bd metadata, easy-case contracts) that were verified but not numbered; (b) CA-5 added for the coordinator detection heuristic's cross-bead method-ownership lookup requirement; (c) §Technical Design marked as conditional on CA-1 outcome (Read-only vs Read+Serena branches); (d) CA-2 fallback design added for the unattributed-failure case; (e) §Failure Modes extended with probe-step-skipped and unintelligible-failure cases; (f) §Gap 3 acknowledges convention-not-hook closure explicitly; (g) Implementation Plan Prerequisites adds bead-level ordering enforcement via `bd dep add`; (h) Phase 5 step labels renamed 6a/6b/6c → 5a/5b/5c; (i) 4/4 claim qualified as "conditional on correct tagging"; (j) duplicate §Alternatives Considered renamed to §Briefly Rejected Alternatives. Bead: nexus-57j.
+- 2026-04-11 (fourth iteration — Finding 4) — **CA-4/CA-5 feasibility analysis** via `nx:codebase-deep-analyzer` against current `plan-enricher.md` and `enrich-plan/SKILL.md`. Outcome: CA-4 `FEASIBLE-WITH-DIFF` (prompt-only, silent-omission mitigation needed); CA-5 full `REQUIRES-REWORK` (deferred to follow-on bead); CA-5 fallback `ZERO-COST` (data already in enricher's read path). Phase 2 scope shifts from "moderate rewrite" to "near-zero-cost prompt diff". T2: `nexus_rdr/066-research-3-ca4-ca5-enricher-feasibility` (id 730).
+- 2026-04-11 (fifth iteration — **this one**, gate Layer 3 fixes) — **Finalization gate run** (`/nx:rdr-gate 066`) returned PASSED (0 Critical) but surfaced 2 Significant findings and 4 Observations via Layer 3 critic dispatch. Fixes applied: (a) §Research Findings §Finding 3 4/4 qualification tightened to four conditional factors including the new CA-5b; (b) §Finding 4 "fallback reaches same coordinator set" claim acknowledged as structurally unvalidated — added explicit under-tagging failure mode analysis; (c) CA-5b added to gating CA set ("the four historical ART coordinator beads each have ≥2 declared `bd` dependencies"); (d) §Trade-offs §Consequences "catches 4/4" unconditionally → "catches up to 4/4" with full conditional chain; (e) §Risks extended with RDR-067-deferred-no-correction-channel risk (OBS-3) + fallback-heuristic coordinator-set under-tagging risk (SIG-1); (f) Phase 1 split into 1a (runtime hard-case spike for CA-1/CA-2/CA-3) and 1b (retrospective ART plan graph lookup for CA-5b); (g) Phase 2 happy-path test + SIG-2 negative test for CA-4 silent-omission mitigation made explicit; (h) Test Plan gains Scenario 5b (silent-omission negative test) and Scenario 5c (CA-5b retrospective lookup); (i) §Finalization Gate §Assumption Verification fixes CA-4 phase misattribution (was "Phase 1 spike", now "Phase 2 implementation + Scenario 5b"); (j) Prerequisites now reflects RDR-069 shipped (satisfied) and CA-4 + CA-5 fallback verified by analysis, with remaining unchecked CAs explicit. Gate T2 record: `nexus_rdr/066-gate-latest`.
