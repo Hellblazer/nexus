@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx index — code repository indexing commands."""
+import subprocess
 import sys
 from pathlib import Path
 
@@ -418,39 +419,63 @@ _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
 
 
 @index.command("rdr")
-@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path), default=".")
+@click.argument("path", type=click.Path(exists=True, file_okay=True, dir_okay=True, path_type=Path), default=".")
 @click.option(
     "--force",
     is_flag=True,
     default=False,
-    help="Force re-indexing all RDR documents, bypassing staleness check.",
+    help="Force re-indexing, bypassing staleness check.",
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print per-file progress lines. Auto-enabled when stdout is not a TTY.")
 def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
-    """Discover and index RDR documents in docs/rdr/ into T3 rdr__REPO-HASH8."""
+    """Index RDR documents into T3 rdr__REPO-HASH8.
+
+    PATH is either a repo root (glob all docs/rdr/*.md, excluding README/TEMPLATE)
+    or a single `.md` file (index just that file — the preferred form when only
+    one RDR changed, e.g. at rdr-close time).
+    """
     from nexus.doc_indexer import batch_index_markdowns
     from nexus.registry import _repo_identity, _rdr_collection_name
 
     path = path.resolve()
-    rdr_dir = path / "docs" / "rdr"
 
-    if not rdr_dir.is_dir():
-        click.echo("No docs/rdr/ directory found")
-        return
+    if path.is_file():
+        # Single-file scoping: infer repo root from git so collection naming
+        # stays consistent with directory-mode invocations.
+        if path.suffix.lower() != ".md":
+            click.echo(f"Not a markdown file: {path.name}")
+            return
+        try:
+            repo_root = Path(subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=path.parent, text=True, stderr=subprocess.DEVNULL,
+            ).strip()).resolve()
+        except Exception:
+            # Fallback: assume conventional docs/rdr/<file>.md layout.
+            if path.parent.name == "rdr" and path.parent.parent.name == "docs":
+                repo_root = path.parent.parent.parent
+            else:
+                click.echo(f"Cannot resolve repo root from {path} — pass a repo directory instead.")
+                return
+        rdr_files = [path]
+    else:
+        repo_root = path
+        rdr_dir = repo_root / "docs" / "rdr"
+        if not rdr_dir.is_dir():
+            click.echo("No docs/rdr/ directory found")
+            return
+        # Glob only top-level .md files, excluding README.md and TEMPLATE.md
+        rdr_files = sorted(
+            p for p in rdr_dir.glob("*.md")
+            if p.is_file() and p.name not in _RDR_EXCLUDES
+        )
+        if not rdr_files:
+            click.echo("0 RDR documents found.")
+            return
 
-    # Glob only top-level .md files, excluding README.md and TEMPLATE.md
-    rdr_files = sorted(
-        p for p in rdr_dir.glob("*.md")
-        if p.is_file() and p.name not in _RDR_EXCLUDES
-    )
-
-    if not rdr_files:
-        click.echo("0 RDR documents found.")
-        return
-
-    basename, _ = _repo_identity(path)
-    collection = _rdr_collection_name(path)
+    basename, _ = _repo_identity(repo_root)
+    collection = _rdr_collection_name(repo_root)
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {len(rdr_files)} RDR document(s) into {collection}…")
 
@@ -472,7 +497,7 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
 
     results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
                                     content_type="rdr", force=force, on_file=on_file,
-                                    base_path=path)
+                                    base_path=repo_root)
     bar.close()
     indexed = sum(1 for s in results.values() if s == "indexed")
     result_label = "Force re-indexed" if force else "Indexed"

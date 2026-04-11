@@ -178,16 +178,22 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 2. Update status in RDR markdown metadata
 3. Regenerate `docs/rdr/README.md` index
-4. **Conditional reindex** — run `nx index rdr` only if the RDR body actually changed during close (e.g. divergence notes added, post-mortem link inserted into the RDR doc, or any text outside the frontmatter block modified). A frontmatter-only edit (status/closed_date/close_reason flipping) does NOT need a T3 reindex — the chunk text is unchanged, so embeddings would not shift. Check with:
+4. **Scoped conditional reindex** — if the RDR body changed during close (e.g. divergence notes added, post-mortem link inserted, or any text outside the frontmatter block modified), run `nx index rdr` **scoped to the single RDR file**, NOT the whole corpus:
+
+   ```bash
+   nx index rdr docs/rdr/rdr-NNN-<slug>.md
+   ```
+
+   A frontmatter-only edit (status/closed_date/close_reason flipping) does NOT need a reindex at all — the chunk text is unchanged, so embeddings would not shift. Check with:
 
    ```bash
    # If the diff is wholly inside the frontmatter block, skip the reindex.
    git diff HEAD -- docs/rdr/rdr-NNN-*.md | grep -v '^[+-]---' | grep -v '^[+-][a-z_]*: ' | grep -E '^[+-]' | head -1
-   # If the command prints nothing, body was not modified — skip Step 4.4.
-   # If it prints lines, body changed — run `nx index rdr` to refresh.
+   # Prints nothing → frontmatter-only → skip.
+   # Prints lines → body changed → run the single-file `nx index rdr <path>`.
    ```
 
-   The rdr indexer is hash-dedup aware, so a no-op reindex is cheap but not free — it still walks every RDR file. Skip when not warranted.
+   **Do NOT run the directory form `nx index rdr` (no argument)** at close time — that walks the whole corpus and hash-dedups every file, which is wasteful for a one-file edit. The file form takes only the target RDR.
 
 ### Step 5: Catalog Links (if catalog initialized)
 
@@ -226,7 +232,7 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 2. Offer post-mortem (useful for capturing what was learned, even from abandoned work)
 3. Update T2 record with close reason
 4. Update markdown metadata
-5. **Conditional reindex** — run `nx index rdr` only if the RDR body actually changed (apply the same frontmatter-vs-body diff check from Step 4 of the Implemented flow). A frontmatter-only `status: reverted` flip does not warrant a reindex.
+5. **Scoped conditional reindex** — if the RDR body changed, run `nx index rdr docs/rdr/rdr-NNN-<slug>.md` (single-file form). A frontmatter-only `status: reverted` flip does not warrant a reindex. Apply the same diff check from Step 4 of the Implemented flow.
 6. Archive post-mortem to `knowledge__rdr_postmortem__{repo}` (if created)
 7. Regenerate README index
 
@@ -236,7 +242,7 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 2. Cross-link both RDRs (bidirectional):
    - **Old RDR**: In T2, set `superseded_by: "NNN"`. In markdown, add "Superseded by RDR-NNN" note
    - **New RDR**: In T2, set `supersedes: "MMM"`. In markdown, add "Supersedes RDR-MMM" note
-3. **Conditional reindex** — this flow typically DOES warrant a reindex because the markdown notes added in step 2 live in the RDR body (not the frontmatter), so chunk text shifts. Run `nx index rdr`. If a given cross-link note was only added to the frontmatter (unusual), apply the diff check from Implemented flow Step 4 instead.
+3. **Scoped reindex** — this flow typically DOES warrant a reindex because the markdown notes added in step 2 live in the RDR body. Run the single-file form: `nx index rdr docs/rdr/rdr-NNN-<slug>.md` on the OLD RDR, and separately on the NEW RDR. Two files → two single-file invocations. Do NOT run the whole-corpus form.
 4. **Catalog link** (if catalog initialized): Create `supersedes` link in the catalog so the graph reflects the relationship:
    ```
    # Find both RDRs by title in catalog

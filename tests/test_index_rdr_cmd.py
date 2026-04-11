@@ -128,3 +128,65 @@ def test_index_rdr_monitor_flag_and_on_file(
     mock_batch.assert_called_once()
     _, kwargs = mock_batch.call_args
     assert callable(kwargs.get("on_file")), "on_file must be passed when --monitor is set"
+
+
+def test_index_rdr_single_file_scope(
+    runner: CliRunner, repo_with_rdrs: Path
+) -> None:
+    """Passing a single RDR file indexes only that file, not the whole corpus."""
+    # Initialize git repo so _repo_identity and repo-root resolution work.
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=repo_with_rdrs, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "--allow-empty", "-q", "-m", "init"],
+                   cwd=repo_with_rdrs, check=True)
+
+    target = repo_with_rdrs / "docs" / "rdr" / "001-use-sqlite.md"
+
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        result = runner.invoke(main, ["index", "rdr", str(target)])
+
+    assert result.exit_code == 0, result.output
+    mock_batch.assert_called_once()
+    paths_arg = mock_batch.call_args[0][0]
+    assert len(paths_arg) == 1, f"Expected 1 file, got {len(paths_arg)}: {paths_arg}"
+    assert paths_arg[0].name == "001-use-sqlite.md"
+    # Collection still uses the repo-root identity, not the file's parent
+    _, kwargs = mock_batch.call_args
+    from nexus.registry import _rdr_collection_name
+    assert kwargs["collection_name"] == _rdr_collection_name(repo_with_rdrs.resolve())
+
+
+def test_index_rdr_single_file_rejects_non_markdown(
+    runner: CliRunner, repo_with_rdrs: Path
+) -> None:
+    """Passing a non-markdown file exits cleanly with an error message."""
+    target = repo_with_rdrs / "docs" / "rdr" / "notes.txt"
+    target.write_text("not markdown")
+
+    with patch("nexus.doc_indexer.batch_index_markdowns") as mock_batch:
+        result = runner.invoke(main, ["index", "rdr", str(target)])
+
+    assert result.exit_code == 0, result.output
+    mock_batch.assert_not_called()
+    assert "Not a markdown file" in result.output
+
+
+def test_index_rdr_single_file_fallback_layout(
+    runner: CliRunner, repo_with_rdrs: Path
+) -> None:
+    """Without git, single-file mode falls back to the conventional docs/rdr/ layout."""
+    target = repo_with_rdrs / "docs" / "rdr" / "002-adopt-click.md"
+
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        with patch(
+            "nexus.commands.index.subprocess.check_output",
+            side_effect=FileNotFoundError("git not available"),
+        ):
+            result = runner.invoke(main, ["index", "rdr", str(target)])
+
+    assert result.exit_code == 0, result.output
+    mock_batch.assert_called_once()
+    paths_arg = mock_batch.call_args[0][0]
+    assert len(paths_arg) == 1
+    assert paths_arg[0].name == "002-adopt-click.md"
