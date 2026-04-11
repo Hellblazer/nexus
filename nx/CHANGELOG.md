@@ -6,6 +6,51 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.3] - 2026-04-11
+
+Plugin release: RDR-069 automatic substantive-critic dispatch at RDR
+close time. Adds the only silent-scope-reduction intervention with
+empirical catch evidence (2/2 on the ART RDRs that motivated the
+remediation cycle).
+
+### Added
+
+- **`skills/rdr-close/SKILL.md` Step 1.75 Automatic Critique** —
+  dispatches `/nx:substantive-critique <rdr-id>` via a fixed-shape
+  minimal relay and parses the canonical `## Verdict` block from the
+  response. Branches on outcome: `justified` passes through; `partial`
+  blocks `implemented` without `--force-implemented`; `not-justified`
+  blocks both `implemented` and `reverted` without override. Fallback
+  parse rule (counting `### Issue:` headers) handles a missing Verdict
+  block. Scenario 4 explicitly surfaces dispatch timeouts and
+  transport failures to the user.
+- **`agents/substantive-critic.md` canonical Verdict block** — 5-field
+  block (outcome / confidence / critical_count / significant_count /
+  summary) added to the Output Format between Verification Performed
+  and Operating Principles. Downstream parsers grep
+  `- **outcome**:` for the verdict category.
+- **`commands/rdr-close.md` `--force-implemented "<reason>"` flag** —
+  audit-trail override for critic blocks. Parsed in the preamble
+  alongside `--pointers`; non-empty reason is required. Surfaced to
+  the SKILL.md body via a `Force Implemented (audit)` line. The skill
+  body writes a T2 audit entry for every invocation
+  (`nexus_rdr/<id>-close-override-<YYYY-MM-DD>`).
+- **T2 override audit pattern** in Step 1.75 branch E — captures
+  `critic_verdict` (or "skipped" when the user short-circuits the
+  dispatch), `user_reason`, `final_close_reason`, `timestamp`, and
+  `rdr_id`. Measurement surface for CA-4 (20% override-rate threshold
+  over 30 days).
+
+### Fixed
+
+- **`commands/rdr-close.md` `--force` regex** — migrated both
+  occurrences (detection at `force = bool(...)` and the `re.sub` in
+  the `args_clean` stripping chain) from bare `r'--force'` to
+  `r'--force(?!-)'` negative lookahead. Prevents `--force-implemented`
+  from silently activating the status-override path. `\b` is
+  explicitly rejected in a code comment — word-boundary fires between
+  `e` and `-`. Plan-auditor SIG-1 / SIG-2 closed.
+
 ## [3.8.2] - 2026-04-11
 
 Plugin release: RDR-065 close-time funnel hardening. New gates defend the

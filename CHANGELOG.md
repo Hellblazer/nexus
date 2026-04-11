@@ -6,6 +6,71 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.3] - 2026-04-11
+
+Patch release: ships RDR-069 automatic substantive-critic dispatch at
+`/nx:rdr-close`. New Step 1.75 (Automatic Critique) runs the
+`substantive-critic` agent on every close and gates `close_reason` on
+the critic's verdict category. Addresses ART's documented
+silent-scope-reduction failure mode with the only intervention that has
+empirical catch evidence (2/2 on ART RDR-073 + RDR-075).
+
+### Added (nx plugin)
+
+- **Step 1.75 Automatic Critique** in `nx/skills/rdr-close/SKILL.md` —
+  dispatches `/nx:substantive-critique <rdr-id>` via a fixed-shape
+  minimal relay (rdr_id + standard input artifacts only — never
+  session-generated summaries, which is the exact rationalization-bias
+  failure mode RDR-069 addresses). Parses the canonical `## Verdict`
+  block and branches on outcome: `justified` passes through; `partial`
+  blocks `close_reason: implemented` without override; `not-justified`
+  blocks `implemented` and `reverted` without override; a fallback path
+  counts `### Issue:` headers under `## Critical Issues` /
+  `## Significant Issues` when the Verdict block is absent. Scenario 4
+  surfaces dispatch timeouts and transport failures to the user —
+  neither silently blocks nor silently proceeds.
+- **Canonical Verdict block** in `nx/agents/substantive-critic.md`
+  Output Format — 5 fields (`outcome`, `confidence`, `critical_count`,
+  `significant_count`, `summary`) at the `- **outcome**:` line the
+  close-flow parser greps. Fallback parse rule documented inline.
+- **`--force-implemented "<reason>"`** flag in `nx/commands/rdr-close.md`
+  preamble — escape hatch for false-positive critic blocks. Requires a
+  non-empty reason (empty reason → `sys.exit(0)` with usage hint).
+  Handles single-quoted, double-quoted, and bare-token reason forms.
+  Writes a T2 audit entry at `nexus_rdr/<id>-close-override-<YYYY-MM-DD>`
+  capturing `critic_verdict` (or "skipped"), `user_reason`,
+  `final_close_reason`, `timestamp`, and `rdr_id`.
+- **CA-4 override-rate threshold** documented in RDR-069 Day 2
+  Operations — `>20%` override rate in any 30-day window degrades
+  Phase 2 dispatch to advisory mode (critic runs, findings surface,
+  close is not blocked). Measurement surface: the T2 override audit
+  entries above.
+
+### Fixed (nx plugin)
+
+- **`--force` regex collision** in `rdr-close` preamble (plan-auditor
+  SIG-1/SIG-2). Both occurrences — the `force = bool(...)` detection
+  and the `args_clean` `re.sub(...)` stripping step — now use
+  `r'--force(?!-)'` negative lookahead instead of `r'--force'`. A
+  `\b`-based fix is explicitly rejected: word-boundary fires between
+  `e` and `-` and still matches `--force-implemented`. Verified in
+  Python REPL; concrete AC test from the Phase 2 bead passes.
+
+### Performance
+
+- **Critic dispatch latency** (CA-3): median ~111s, range 95-217s
+  (n=9 runs on real RDRs during the Phase 0 research arc). Clean RDRs
+  take longer than broken ones — the critic cannot short-circuit on
+  "no Critical" and must exhaustively confirm. Budget 3-4 minutes for
+  a clean close; use `--force-implemented "<reason>"` for
+  high-confidence closes where the latency is not warranted.
+
+### RDR
+
+- RDR-069 Automatic Substantive-Critic Dispatch at Close — Phase 0 of
+  the 4-RDR silent-scope-reduction remediation cycle (shipped first;
+  RDR-066/067/068 are the later layers).
+
 ## [3.8.2] - 2026-04-11
 
 Patch release: ships RDR-065 close-time funnel hardening for the nx plugin.
