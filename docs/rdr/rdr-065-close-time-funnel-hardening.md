@@ -761,10 +761,10 @@ Only procedure changes behavior.
 - **Risk**: The wedge ships and the failure mode persists because the
   problem is upstream (enrichment) and the close-time funnel only
   catches it at the boundary, not at the source.
-  **Mitigation**: Sibling RDR-B addresses enrichment-time contracts.
+  **Mitigation**: Sibling RDR-066 addresses enrichment-time contracts.
   This RDR is explicitly the cheapest signal — if it ships and the
   next 3 RDRs still exhibit the failure mode, that is itself the
-  evidence to invest in RDR-B and RDR-D.
+  evidence to invest in RDR-066 and RDR-068.
 
 ### Failure Modes
 
@@ -780,18 +780,27 @@ Only procedure changes behavior.
   positive and the user dismisses it; later, a real divergence is
   missed because the user is desensitized to the prompt. Diagnosis:
   audit the dismissed-prompts log periodically (this RDR does not
-  build the audit; sibling RDR-C does).
+  build the audit; sibling RDR-067 does).
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified (CA-1 through CA-6)
-- [ ] Nexus RDR corpus audit completed (grep `docs/rdr/*.md` for
-      divergence language; count Problem Statements without enumerated
-      gaps)
-- [ ] Sibling RDR landscape created (this RDR plus stubs for RDR-B,
-      RDR-C, and RDR-D so the deferred work has anchors)
+- [x] Critical Assumptions CA-1 through CA-5 and HA-1 through HA-5
+      verified or resolved (2026-04-10 Rev 3 + Rev 4 CA verification
+      batch). CA-6 remains unverified by design — it is a bootstrap
+      recursive self-validation that requires implementation and runs
+      via the three-part structure defined in the Minimum Viable
+      Validation section.
+- [x] Nexus RDR corpus audit completed (2026-04-10 Rev 3 via Explore
+      agent; 65 pre-065 RDRs audited; 0/65 use `#### Gap N:` format;
+      grandfathering redesigned to ID-based cutoff).
+- [x] Sibling RDR landscape created: RDR-066 (Enrichment-Time
+      Contract Pre-Flight), RDR-067 (Cross-Project RDR Observability),
+      RDR-068 (Composition Failure Detection — research),
+      RDR-069 (Evidence-Chain Gate Beads — INT-6, created in
+      response to substantive-critique Critical Finding 3). All
+      stubs have explicit drift conditions.
 
 ### Minimum Viable Validation
 
@@ -808,19 +817,25 @@ incorrect and must be revised before any other RDR uses it.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: Audit nexus RDR corpus
+#### Step 1: Hold-out spot-check on refined regex bank (most of this work is already done)
 
-Grep `docs/rdr/*.md` for divergence vocabulary (`workaround`,
-`deferred`, `follow-up`, `divergence`, `limitation`, `TODO`, `XXX`,
-`partial`, `not yet`, `for now`). Count hits per RDR. Sample the top
-5 hits and read them to confirm whether they represent the failure
-mode or legitimate scoped deferrals. Use the result to refine the
-divergence-language regex bank (closes CA-5).
+**Most of this step landed during Rev 3 and Rev 4 of the draft** (see
+CA-4 and CA-5 in the Critical Assumptions section). The nexus RDR
+corpus audit identified 0/65 pre-065 RDRs with `#### Gap N:` format
+(closes CA-4, grandfathering redesigned). The two-pass precision
+measurement on post-mortems (baseline 3-PM sample + held-out 5-PM
+sample) produced the 8-pattern refined bank. `partial` was dropped
+after 0% held-out precision.
 
-Also count Problem Statements without enumerated gap structure (greps
-for `## Problem Statement` sections lacking `#### Gap` headings or any
-numbered list). Use the count to size the grandfathering problem
-(closes CA-4).
+**Remaining work for Step 1**: a lightweight spot-check of the final
+refined bank against 3 additional post-mortems not yet audited
+(pick from rdr-001 through rdr-039). Goal: confirm the projected
+~83% precision holds on a fresh sample before the hook ships. If
+any new false-positive pattern emerges, drop or refine it.
+
+**Do not re-run the full calibration** — the refined bank was
+authored from two rounds of measurement with per-pattern audit; a
+third full run is bureaucracy, not validation. Spot-check only.
 
 #### Step 2: Update RDR template scaffold (bundled with plugin release per HA-4)
 
@@ -1216,19 +1231,60 @@ appropriate for a process gate.
 
 ## Finalization Gate
 
-> Complete each item with a written response before marking this RDR
-> as **Accepted**. This RDR is currently `draft` — the gate has not
-> been run.
+> Gate run 2026-04-10. Outcome: **PASSED** (0 Critical, 0 Significant,
+> 5 Observations). Layer 1 structural check PASS; Layer 2 assumption
+> audit PASS (10 of 11 CAs/HAs verified or resolved; CA-6 is bootstrap
+> by design); Layer 3 substantive-critic PASSED with 5 non-blocking
+> observations (4 addressed inline, 1 is future implementer guidance
+> about CA-6 synthetic-gap hygiene).
+>
+> Prior critique rounds: round 0 (3 Critical, 4 Significant, 5 Hidden
+> Assumptions, 2 Minor — all addressed in Rev 1), round 1 (2 new
+> issues — addressed in Rev 2), gate round 2 (1 drift finding —
+> addressed in Rev 4+), gate Layer 3 (5 observations — 4 addressed
+> now, 1 future-guidance).
 
 ### Contradiction Check
 
-[Pending — to be filled during gate run.]
+No contradictions found between research findings, design principles,
+and proposed solution. The two-pass invocation model resolves the
+Rev 1 bidirectional handoff impossibility. The regex bank is
+internally consistent across Technical Design, CA-5, and
+Implementation Plan Step 4 (8 patterns, no `partial`). The three
+enforcement surfaces (command preamble for Gap 1, PostToolUse Write
+for Gap 2, existing `pre_close_verification_hook.sh` extension for
+Gap 3) are compatible and non-overlapping. HA-4 establishes the
+plugin-release coordination for Gap 4 without contradicting the
+close-time funnel design.
 
 ### Assumption Verification
 
-[Pending — CA-1 through CA-6 must be verified before accept. CA-6 is
-recursive: it requires the implemented close skill to validate this
-RDR.]
+**10 of 11 CAs/HAs verified or resolved** via Rev 3 + Rev 4 CA
+verification batch. See `nexus_rdr/065-research-ca-verification-batch`
+in T2 for the structured research log.
+
+- CA-1 Partially Verified (source search)
+- CA-2 Verified (hooks architecture audit)
+- CA-3 Verified (behavioral spike confirming subagent hook propagation
+  plus `agent_id` field availability)
+- CA-4 Verified with concerning finding (65-RDR corpus audit;
+  mitigated by ID-cutoff grandfathering)
+- CA-5 Verified with refinement (two-pass precision measurement;
+  final 8-pattern bank projected ~83%)
+- **CA-6 Unverified by design** — recursive self-validation requires
+  implementation. The three-part Minimum Viable Validation structure
+  (synthetic failure injection + independent code review + real
+  self-close) partially breaks the bootstrap circularity and is the
+  honest limit of what pre-implementation validation can achieve.
+- HA-1 Verified with design correction (PostToolUse Write, not
+  PreToolUse)
+- HA-2 Partially Verified (within-session fine; across-session
+  resume is accepted limitation with warn)
+- HA-3 Resolved (scoped detection via RDR ID mention)
+- HA-4 Verified with concerning finding (plugin release coordination
+  required for Gap 4; RDR stays `accepted` until release)
+- HA-5 Partially Verified (enforcement surface confirmed at
+  `nx/commands/rdr-close.md` line 113; implementation pending)
 
 #### API Verification
 
@@ -1272,9 +1328,10 @@ weaken CA-6.
 - RDR-001 (rdr-process-validation) — original process self-test
 - RDR-024 (rdr-process-guardrails) — predecessor process guardrail RDR
 - RDR-045 (post-implementation-verification) — closest sibling in nexus history
-- Sibling RDRs (to be created): RDR-B Enrichment-Time Contract Pre-Flight,
-  RDR-C Cross-Project RDR Observability, RDR-D Composition Failure
-  Detection
+- Sibling RDRs (created 2026-04-10): RDR-066 Enrichment-Time Contract
+  Pre-Flight, RDR-067 Cross-Project RDR Observability, RDR-068
+  Composition Failure Detection (research), RDR-069 Evidence-Chain
+  Gate Beads (INT-6)
 - Nexus skills: `nx/skills/rdr-create.md`, `nx/skills/rdr-close.md`,
   `nx/skills/rdr-accept.md`, `nx/skills/rdr-gate.md`,
   `nx/skills/enrich-plan.md`
