@@ -90,7 +90,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-066](rdr-066-composition-smoke-probe-at-coordinator-beads.md) | Composition Smoke Probe at Coordinator Beads | Process | Draft | 2026-04-11 |
 | [RDR-067](rdr-067-cross-project-rdr-audit-loop.md) | Cross-Project RDR Audit Loop | Process | Draft | 2026-04-11 |
 | [RDR-068](rdr-068-dimensional-contracts-at-enrichment.md) | Dimensional Contracts at Enrichment | Process | Draft | 2026-04-11 |
-| [RDR-069](rdr-069-automatic-substantive-critic-at-close.md) | Automatic Substantive-Critic at Close | Process | Accepted | 2026-04-11 |
+| [RDR-069](rdr-069-automatic-substantive-critic-at-close.md) | Automatic Substantive-Critic at Close | Process | Implemented | 2026-04-11 |
 
 ---
 

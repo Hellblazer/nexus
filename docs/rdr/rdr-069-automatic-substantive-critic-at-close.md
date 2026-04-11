@@ -2,13 +2,15 @@
 id: RDR-069
 title: "Automatic Substantive-Critic Dispatch at Close"
 type: process
-status: accepted
+status: closed
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-10
 reissued: 2026-04-11
 accepted_date: 2026-04-11
+closed_date: 2026-04-11
+close_reason: implemented
 related_issues: ["RDR-065", "RDR-066", "RDR-067", "RDR-068"]
 supersedes_scope: "Evidence-Chain Gate Beads (original 2026-04-10 scope)"
 ---
