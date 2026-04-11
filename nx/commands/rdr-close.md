@@ -229,6 +229,9 @@ if (close_reason or '').lower() == 'implemented':
         sys.exit(0)
     else:
         # PASS 2: validate that every gap has a pointer and the file exists.
+        # Shape enforcement (RDR-065 6b review fix): the pointer MUST be in
+        # `file:line` shape — a colon followed by at least one digit. A bare
+        # filename like `Gap1=README.md` would otherwise game the gate.
         pointers = _parse_pointers(pointers_arg)
         failures = []
         for num, _qual, _title in gap_matches:
@@ -236,7 +239,14 @@ if (close_reason or '').lower() == 'implemented':
             if gap_key not in pointers:
                 failures.append(f"{gap_key}: no pointer supplied")
                 continue
-            file_part = pointers[gap_key].partition(':')[0]
+            ptr = pointers[gap_key]
+            file_part, sep, line_part = ptr.partition(':')
+            if not sep:
+                failures.append(f"{gap_key}: pointer '{ptr}' missing ':LINE' — expected file:line shape")
+                continue
+            if not re.match(r'^\d+', line_part):
+                failures.append(f"{gap_key}: pointer '{ptr}' has no line number after ':' — expected file:line shape")
+                continue
             if not (Path(repo_root) / file_part).exists():
                 failures.append(f"{gap_key}: file '{file_part}' does not exist in repo")
         if failures:
