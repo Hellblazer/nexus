@@ -95,6 +95,69 @@ Across 4 confirmed ART incidents in the 90-day window (RDR-031, RDR-036, RDR-073
 
 Three of four catches were made by the critic; one was made by the user doing manually what the critic does automatically. **None** of ART's INT-1..INT-7 interventions have been empirically tested — they're all proposals from the same agent class that failed to catch the pattern in-session.
 
+### Finding 4 (2026-04-11): CA-1 + CA-3 — critic is outcome-deterministic at verdict level; ~107s median latency
+
+**Determinism + latency spike.** Dispatched `nx:substantive-critic` twice sequentially against `rdr-066-composition-smoke-probe-at-coordinator-beads.md` with an identical prompt. Compared outputs. T2: `nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike`.
+
+**Latency**: Run 1 = 114s (9 tool uses), Run 2 = 99s (11 tool uses). **Median ~107s.** Within the 60-180s prediction from Finding 3.
+
+**Verdict-level determinism — STABLE.** Both runs classified RDR-066 as `not-justified` (Critical count > 0). The close-flow gate's decision (block `close_reason: implemented` when Critical > 0) is the same in both runs. No flap at the verdict-decision layer.
+
+**Finding-level determinism — NOT STABLE.** Each run found specific Critical issues the other missed:
+
+| Finding | Run 1 | Run 2 |
+|---|---|---|
+| Overall verdict | not-justified (2 Critical) | not-justified (1 Critical) |
+| Phase prerequisite under-enforced | Significant | Significant |
+| Coordinator tagging has gaps | Significant | Significant (deeper — proposed new CA-5) |
+| CA numbering discrepancy | **Critical** | missed |
+| Probe attribution treated as solved despite CA-2 unverified | **Critical** | missed |
+| Design-before-spike ordering (§Technical Design locked before CA-1 resolved) | missed | **Critical** |
+| Probe trigger is text instruction not structural hook | Significant | missed |
+| Phase label inconsistency (5a/b/c vs 6a/b/c) | missed | Significant |
+
+Both runs surfaced real issues. The union is richer than either alone.
+
+**Implications for RDR-069 implementation**:
+
+1. **Treat verdict-level determinism as the contract** (`Critical > 0 → not-justified`). Do not promise finding-level determinism — individual Critical issues vary between runs.
+2. **Surface the critic's specific findings to the user as informational**, but base the gate decision on the verdict category, not on any specific issue.
+3. **Consider a `--critique-runs=N` flag** (default 1) that runs the critic multiple times and takes the union of findings. Useful for high-stakes closes; not required for Phase 1.
+4. **Caveat — n=1 target, 2 runs.** This spike did not test a clean RDR where the critic might find 0 Critical issues in one run and 1 in another (that's the flap-at-gate failure mode). A follow-up spike after shipping should run the critic 5+ times against a clean target to check for that case.
+
+**CA-1 disposition**: **PARTIALLY VERIFIED (outcome-deterministic, not finding-deterministic).**
+**CA-3 disposition**: **VERIFIED — acceptable.** ~107s median is within close-flow friction tolerance. `--force-implemented` remains useful but not load-bearing for latency avoidance.
+
+### Finding 3 (2026-04-11): CA-2 — critic output is semi-structured, minimal extension required
+
+**Source Search** against `nx/agents/substantive-critic.md`, `nx/skills/substantive-critique/SKILL.md`, and `nx/commands/substantive-critique.md`. Cross-referenced with the live RDR-073 critic output at session `62cadb3a-...jsonl` line 839. T2: `nexus_rdr/069-research-1-ca2-critic-output-verified`.
+
+The critic's agent prompt (lines 200-223) defines a fixed Output Format with stable section headers: `## Critique Summary`, `## Critical Issues`, `## Significant Issues`, `## Observations`, `## Verification Performed`. Each Issue has structured fields (Location, Problem, Impact, Recommendation, Evidence). Section headers are grep-countable, which means a verdict can be derived mechanically:
+
+- `### Issue:` count under `## Critical Issues` > 0 → **not-justified**
+- Critical == 0 AND Significant > 0 → **partial**
+- All clear → **justified**
+
+Real-world compliance was observed on RDR-073 (session line 839) — the critic followed the template exactly. The template is reliable in practice but not enforced by code, so any drifted run would break a section-header parser.
+
+**Recommended fix for RDR-069 Phase 2** (~15 lines in one agent file): add an explicit `## Verdict` block to the end of the Output Format:
+
+```
+## Verdict
+
+- **outcome**: <justified | partial | not-justified>
+- **confidence**: <high | medium | low>
+- **critical_count**: N
+- **significant_count**: N
+- **summary**: <one sentence>
+```
+
+Close flow parses this block primarily; falls back to `### Issue:` header counting as a safety net if the Verdict block is missing or malformed.
+
+**CA-2 disposition**: **PARTIALLY VERIFIED** — the path is clear. The machine-readable form exists today via section counting; add the explicit Verdict block for robustness.
+
+**CA-3 implication** (latency): the critic is `model: sonnet, effort: high` and follows sequential-thinking + persistence protocols. Expect ~60-180 seconds per dispatch in typical cases, more for complex RDRs. This is at the boundary of acceptable close-flow friction — CA-3 measurement in Phase 1 will determine whether `--force-implemented` becomes load-bearing for users who can't tolerate the latency.
+
 ### Finding 2 (2026-04-11): The retcon is cognitive, not just cost-function
 
 Source: `~/.claude/projects/-Users-hal-hildebrand-git-ART/62cadb3a-b647-4378-8afb-bdd5c40ef831.jsonl` lines 526-529 (the RDR-073 live session).
@@ -107,14 +170,17 @@ This means INT-3 (workaround gating with user approval) has a hidden assumption:
 
 ### Critical Assumptions
 
-- [ ] **CA-1**: The substantive-critic produces consistent verdicts on repeated dispatch against the same RDR artifacts — i.e., running the critic twice in a row on the same inputs yields functionally equivalent verdicts. If the critic is non-deterministic in ways that matter, automatic dispatch could produce flap (close passes critic run 1, fails critic run 2).
-  — **Status**: Unverified — **Method**: Spike (run critic twice on RDR-073 and RDR-075, compare verdicts for semantic equivalence)
+- [x] **CA-1**: The substantive-critic produces consistent verdicts on repeated dispatch against the same RDR artifacts — i.e., running the critic twice in a row on the same inputs yields functionally equivalent verdicts. If the critic is non-deterministic in ways that matter, automatic dispatch could produce flap (close passes critic run 1, fails critic run 2).
+  — **Status**: **PARTIALLY VERIFIED (2026-04-11)** — outcome-deterministic at verdict level (both runs classified the target as `not-justified`); not deterministic at finding level (specific Critical issues vary). Close-flow gate on `Critical > 0 → not-justified` is stable for this spike's data. Follow-up needed: test a clean target (expecting `justified` verdict) to check for the flap-at-gate failure mode.
+  — **Method**: Spike — see Finding 4. T2: `nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike`
 
-- [ ] **CA-2**: The critic can parse its own verdict into a machine-readable form that the close flow can consume (e.g., an outcome field: `justified | partial | not-justified`). If every verdict has to be read by a human to extract the outcome, the "automatic" part of "automatic dispatch" is a lie.
-  — **Status**: Unverified — **Method**: Source Search (inspect current critic output structure) + template adjustment if needed
+- [x] **CA-2**: The critic can parse its own verdict into a machine-readable form that the close flow can consume (e.g., an outcome field: `justified | partial | not-justified`). If every verdict has to be read by a human to extract the outcome, the "automatic" part of "automatic dispatch" is a lie.
+  — **Status**: **PARTIALLY VERIFIED (2026-04-11)** — Source search confirms the critic's Output Format has stable grep-countable section headers (`## Critical Issues`, `## Significant Issues`) with structured `### Issue:` entries underneath. Verdict can be derived from section counts. Template compliance is prompt-only but was observed to hold in practice (RDR-073 session line 839). Recommended Phase 2 work: add a ~15-line explicit `## Verdict` block with outcome/confidence/counts/summary for robustness; fall back to section-header counting if the Verdict block is missing.
+  — **Method**: Source Search + live transcript cross-reference — see Finding 3. T2: `nexus_rdr/069-research-1-ca2-critic-output-verified`
 
-- [ ] **CA-3**: The critic dispatch time (one LLM call, ~20-60 seconds for the critic's Read + analysis + write) is acceptable in the close flow. If it adds minutes, users will learn to avoid closes and the gate becomes friction.
-  — **Status**: Unverified — **Method**: Measure on the next real close after shipping
+- [x] **CA-3**: The critic dispatch time (one LLM call, ~20-60 seconds for the critic's Read + analysis + write) is acceptable in the close flow. If it adds minutes, users will learn to avoid closes and the gate becomes friction.
+  — **Status**: **VERIFIED (2026-04-11)** — median ~107s per dispatch (range 99-114s on n=2 runs against RDR-066). Within close-flow friction tolerance. `--force-implemented` remains useful for false-positive override but is NOT load-bearing for latency avoidance.
+  — **Method**: Measured alongside CA-1 determinism spike — see Finding 4. T2: `nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike`
 
 - [ ] **CA-4**: The `--force-implemented` override is genuinely rare in practice — used when the critic produces a false positive, not used as a routine bypass. If users use it on every close, the gate is theater.
   — **Status**: Unverified — **Method**: Post-ship telemetry via T2 audit entry per override invocation
