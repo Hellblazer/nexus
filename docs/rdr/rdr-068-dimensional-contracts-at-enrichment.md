@@ -108,7 +108,9 @@ The research target (a regex bank for detecting composition failures in test out
 
 ## Research Findings
 
-### Finding 1 (2026-04-11): CA-2 easy case still holds — retained from prior iteration
+### Finding 1 (2026-04-11): Easy-case contract generation verified — retained from prior iteration
+
+> **Label disambiguation (critic-driven fix 2026-04-11)**: the source T2 entry for this finding is titled `nexus_rdr/066-research-2-ca2-spike-verified` (id 715) — that spike was authored against RDR-066's CA numbering, where CA-2 was the easy-case contract generation question. **In RDR-068's CA numbering, the same evidence satisfies CA-068-1** (the easy case of hard-case contract generation — see renumbered CAs below). The spike content is valid; the label was re-purposed without re-numbering when this RDR was reissued. See Critical Issue 1 / CA namespace collision in the 2026-04-11 critic findings (`nexus_rdr/069-research-5-ca1-rdr068-n4`).
 
 Source: `nexus_rdr/066-research-2-ca2-spike-verified` (written during the prior iteration; retained because the finding is still valid under the new scope).
 
@@ -134,14 +136,26 @@ Of the 4 confirmed ART incidents:
 
 ### Critical Assumptions
 
-- [ ] **CA-1** (hard case): LLM can produce grounded dimensional contracts for cross-file generics, protocols, and third-party library types without requiring runtime symbol resolution. The easy case is verified (Finding 1); the hard case is not.
+**Namespace note (critic-driven fix 2026-04-11)**: CAs are prefixed with the RDR number to avoid collision with RDR-066's and RDR-069's CA labels. The same spike evidence (T2 id 715) verifies a different CA in each RDR because the RDRs ask different questions. When referencing "CA-1 verified" across RDRs, always include the RDR prefix.
+
+- [x] **CA-068-0 — Easy-case contract generation** (retained from prior iteration): LLM can produce grounded dimensional contracts for self-contained plain-type functions from a single `Read()` call. **Status**: VERIFIED (2026-04-11) via T2 id 715. **Scope**: plain types, self-contained functions, same-file helpers only. Hard case tracked as CA-068-1 below.
+
+- [ ] **CA-068-1** (hard case): LLM can produce grounded dimensional contracts for cross-file generics, protocols, and third-party library types without requiring runtime symbol resolution. The easy case (CA-068-0) is verified; the hard case is not.
   — **Status**: Unverified — **Method**: Spike on a real hard-case target (e.g., a nexus class composing `llama_index_core.schema.TextNode` with `chromadb.Collection` and a generic return type)
+  — **Implication for §Technical Design**: if CA-068-1 fails, the subagent architecture shifts from Read-only to Read+Serena. See the "Design branches on CA-068-1 outcome" note in §Technical Design.
 
-- [ ] **CA-2**: The contracts surfacing the dim-mismatch pattern are discoverable in a cross-bead comparison — i.e., a tool (or plan-auditor agent, or human reader) can look at bead 4's contract and bead 5's contract and see the mismatch without being told where to look. If contracts are only comprehensible in isolation, they don't help.
-  — **Status**: Unverified — **Method**: retrospective test against RDR-073 — would a reader of IMPL-04 enrichment + IMPL-05 enrichment with contracts have noticed the 312D/65D mismatch?
+- [ ] **CA-068-2**: The contracts surfacing the dim-mismatch pattern are discoverable in a cross-bead comparison — i.e., a tool (or plan-auditor agent, or human reader) can look at bead 4's contract and bead 5's contract and see the mismatch without being told where to look. If contracts are only comprehensible in isolation, they don't help — and contracts become the ceremonial boilerplate failure mode the §Trade-offs section warns against.
+  — **Status**: Unverified — **Method**: retrospective test against RDR-073 — would a reader of IMPL-04 enrichment + IMPL-05 enrichment with contracts have noticed the 312D/65D mismatch? Test both a human-readability form (can a reader spot it) and a machine-detection form (can plan-enricher walk the contracts and emit a `CONTRACT MISMATCH` warning).
+  — **Implication for §Technical Design**: this is the load-bearing assumption for RDR-068's entire value proposition. If CA-068-2 fails, the template ships as boilerplate and the 1/4 catch rate collapses to 0/4. The Technical Design has a design branch on this assumption — see "Design branches on CA-068-2 outcome" below.
+  — **Phase sequencing consequence**: **Phase 2 (template + skill update) must NOT ship before CA-068-2 is verified.** This is enforced via `bd dep add <068-phase-2-bead> <068-phase-1-bead>` in the Implementation Plan — prose prerequisite alone is not sufficient.
 
-- [ ] **CA-3**: Contracts add an acceptable amount of enrichment time. The CA-2 easy-case spike took ~50 seconds for a 132-line function with a single Read call. Hard case is probably 2-5x. For a 20-bead plan with 5-10 contracts per bead, enrichment latency could climb significantly.
-  — **Status**: Unverified — **Method**: Phase 1 hard-case spike; measure latency
+- [ ] **CA-068-3**: Contracts add an acceptable amount of enrichment time. The easy-case spike (id 715) took **~50 seconds for a 132-line function** with a single Read call. **Realistic extrapolation**: for a 20-bead plan with 5-10 methods per bead (100-200 contract generations), easy-case alone is **83-167 minutes** (1.4-2.8 hours). At the 2-5x hard-case multiplier, the upper bound is **5-14 hours**. The RDR previously stated "~5 minutes for 20 beads" as a cap — this is unrealistic by a factor of 17-40x.
+  — **Status**: Unverified at realistic scale — **Method**: Phase 1 spike measures latency on a representative 5-10-bead plan, not a single-function synthetic. If the realistic-scale latency is prohibitive, Phase 2 narrows scope (e.g., contracts only on methods that cross bead boundaries, skipping intra-bead private methods) or caches contract generations across reruns.
+
+**Added CA-068-4 (cross-bead provenance fields — from critic-driven finding 2026-04-11)**:
+
+- [ ] **CA-068-4**: The contracts template has explicit cross-bead provenance fields — `**Provided by**: <bead-id>` on each input and `**Consumed by**: <bead-id>` on each output — that make mechanical mismatch detection possible without requiring plan-enricher to infer which beads compose which outputs. Without these fields, mismatch detection requires LLM inference and re-introduces the cross-bead-lookup problem from RDR-066's CA-5.
+  — **Status**: Unverified — **Method**: add the fields to the contracts template in Phase 1; test mismatch detection on the RDR-073 retrospective with and without the fields; measure detection accuracy.
 
 ## Proposed Solution
 
@@ -190,9 +204,13 @@ Extend `nx/skills/enrich-plan/SKILL.md` to require a `## Contracts` section per 
 **Hallucination self-check**: <which fields, if any, less than 100% confident>
 ```
 
-**Plan-enricher prompt update**: for each bead in the plan, after populating file paths and method names, walk each method and produce the contracts block using the template. If the method's contracts conflict with an earlier bead's contracts (e.g., bead 5 expects shape X but bead 3's contract says it produces shape Y), emit a `CONTRACT MISMATCH` warning in the enrichment output. The warning blocks enrichment completion until resolved.
+**Plan-enricher prompt update**: for each bead in the plan, after populating file paths and method names, walk each method and produce the contracts block using the template. If a method's contracts conflict with an earlier bead's contracts (e.g., bead 5 expects shape X but bead 3's contract says it produces shape Y), emit a `CONTRACT MISMATCH` **advisory warning** in the enrichment output. Mismatch warnings do NOT block enrichment completion by default — they are surfaced to the user for review, and the user decides whether to resolve before proceeding. Hard-blocking behavior may be added later once CA-068-2 is verified and false-positive rate is measured.
 
-**Mismatch detection (CA-2)**: during enrichment, after all beads have contracts, plan-enricher walks the contracts and produces a cross-bead summary: "Bead 3 produces `list[ChunkResult]`; Bead 7 expects `dict[str, ChunkResult]`; mismatch." This is the payoff — the contracts become useful when a comparison surfaces the mismatch.
+> **Design branches on CA-068-1 outcome.** The skill shape below describes the "CA-068-1 passes" branch (Read-only subagent, no Serena). If the Phase 1 hard-case spike shows cross-file generics / protocols / third-party types require symbol resolution, the architecture shifts: the subagent prompt gains `jet_brains_find_symbol` instructions, the tool budget increases. The design below is conditional.
+>
+> **Design branches on CA-068-2 outcome.** The mismatch detection mechanism below assumes contracts are cross-comparable. If CA-068-2 fails — contracts are interpretable individually but not cross-comparable — **Phase 3 mismatch detection is demoted to advisory human review only**, and §Trade-offs' "contracts become ceremonial" failure mode becomes the default. In that case, the RDR's value proposition reduces to "structured contracts as documentation aid" — which may not justify the enrichment-time cost (CA-068-3). If both CA-068-2 and CA-068-3 fail, the RDR should be closed as `partial` and its value scoped down to "contracts template exists, no automated detection."
+
+**Mismatch detection (CA-068-2)**: during enrichment, after all beads have contracts, plan-enricher walks the contracts and produces a cross-bead summary: "Bead 3 produces `list[ChunkResult]`; Bead 7 expects `dict[str, ChunkResult]`; mismatch." **The walk requires cross-bead provenance fields on the contracts template** (see CA-068-4): each input has a `**Provided by**: <bead-id>` annotation and each output has a `**Consumed by**: <bead-id>` annotation. Without these explicit links, the walk requires LLM inference about which beads compose which outputs, which re-introduces the cross-bead-lookup problem from RDR-066's CA-5. Phase 1 adds these fields to the template before Phase 2 ships.
 
 ### Alternatives Considered
 
@@ -263,7 +281,9 @@ See §Proposed Solution §Alternatives Considered.
 
 ### Prerequisites
 
-- [ ] RDR-066 (Phase 1) shipped — probe is the primary layer; contracts are belt-and-suspenders on top
+- [ ] RDR-066 (Phase 1 of the 4-RDR remediation) shipped — the probe is the primary layer; contracts are belt-and-suspenders on top
+- [ ] **CA-068-2 verified via Phase 1 retrospective test on RDR-073 BEFORE Phase 2 (template + skill update) begins.** Enforced via `bd dep add <068-phase-2-bead> <068-phase-1-bead>` at plan time. Prose prerequisite alone is not sufficient — without bead-level enforcement, an implementer could ship Phase 2's template without the mismatch detection that justifies contracts existing at all, producing exactly the ceremonial failure mode §Trade-offs warns against.
+- [ ] **CA-068-3 latency extrapolation** completed at realistic plan size (5-10 beads minimum) BEFORE Phase 2 ships, since the prior "~50s per function" easy-case number extrapolates to hours at realistic plan scale and may make the whole intervention cost-prohibitive.
 - [ ] CA-1 (hard case) verified OR explicitly scoped as easy-case-only
 
 ### Minimum Viable Validation
@@ -292,9 +312,9 @@ Retrospective test against RDR-073: populate contracts for IMPL-04 (GroundedLang
 ### Phase 4: Plugin release + recursive self-validation
 
 - Bump version, reinstall, smoke test
-- **6a**: synthetic dim mismatch injected into a test plan; verify plan-enricher catches via mismatch detection
-- **6b**: substantive-critic on RDR-068
-- **6c**: real self-close of RDR-068 via RDR-069 close flow
+- **4a**: synthetic dim mismatch injected into a test plan; verify plan-enricher catches via mismatch detection
+- **4b**: substantive-critic on RDR-068
+- **4c**: real self-close of RDR-068 via RDR-069 close flow
 
 ### Day 2 Operations
 
@@ -309,7 +329,7 @@ Retrospective test against RDR-073: populate contracts for IMPL-04 (GroundedLang
 - **Scenario 2** (clean plan): enrich a plan with no dimensional mismatches; verify no false positives
 - **Scenario 3** (CA-1 hard case): cross-file generic / protocol / third-party target; measure grounding quality + latency
 - **Scenario 4** (mismatch detection): inject a synthetic mismatch into a plan; verify detection
-- **Scenario 5** (recursive 6a): inject a mismatch into a test plan; verify the new plan-enricher catches it
+- **Scenario 5** (recursive 4a): inject a mismatch into a test plan; verify the new plan-enricher catches it
 
 ## Validation
 
@@ -319,7 +339,7 @@ The RDR-073 retrospective MVV is the load-bearing test. Phase 1 spike determines
 
 ### Performance Expectations
 
-Easy-case contract generation: ~20-50 seconds per method (from CA-2 spike in prior iteration). Hard case: unknown, measured in Phase 1. If enrichment latency exceeds ~5 minutes for a 20-bead plan, narrow scope or cache contracts between beads.
+Easy-case contract generation: ~50 seconds per method (from T2 id 715 spike in prior iteration). Hard case: unknown, measured in Phase 1. **Realistic extrapolation** for a 20-bead plan with 5-10 methods per bead = 100-200 contract generations × 50s = **83-167 minutes** easy-case; 250-830 minutes (4-14 hours) at 2-5x hard-case multiplier. The prior "~5 minutes for 20 beads" cap was unrealistic by 17-40x. If the realistic-scale latency is prohibitive, Phase 2 must narrow scope (e.g., contracts only on methods that cross bead boundaries, skipping intra-bead private methods) OR cache contract generations across reruns OR scope the entire RDR to small plans (≤5 beads) only.
 
 ## Finalization Gate
 
@@ -329,7 +349,7 @@ No contradictions. Contracts are a plan-time layer beneath the probe (RDR-066) a
 
 ### Assumption Verification
 
-CA-1, CA-2, CA-3 verified in Phase 1 spike.
+CA-068-1, CA-068-2, CA-068-3, CA-068-4 verified in Phase 1 spike. CA-068-0 retained from prior iteration as already verified. Cross-reference must use the RDR-068-prefixed CA labels to avoid collision with RDR-066's and RDR-069's CA numbering.
 
 ### Scope Verification
 
@@ -364,3 +384,4 @@ Right-sized for a P3 belt-and-suspenders layer.
 
 - 2026-04-10 — Stub created as "Composition Failure Detection (Research)" targeting INT-3 (workaround gating) with a regex-bank research goal.
 - 2026-04-11 — **Reissued with new scope**. The regex-bank research is obsoleted by the 2026-04-11 nexus audit (LLM classification beats regex for this task) and INT-3 is deferred indefinitely (retcon mechanism makes real-time detection harder than ART assumed). The RDR-068 number is repurposed for ART's INT-1 (dimensional contracts at enrichment) — the cheapest belt-and-suspenders layer on top of RDR-066's composition probe. Priority P3 (lowest of the four) because the probe catches 4/4 while contracts catch 1/4 cleanly. See `rdr_process/nexus-audit-2026-04-11` for evidence and bead `nexus-640` for the 4-RDR cycle.
+- 2026-04-11 (second iteration) — **Critic-driven fixes** from RDR-069's CA-1 spike on this target (`nexus_rdr/069-research-5-ca1-rdr068-n4`, T2 id 722). Two runs of `nx:substantive-critic` against RDR-068 found 3 stable issues across runs and 4 additional correct single-run findings. Fixes applied: (a) CA namespace isolation — CAs renumbered to `CA-068-0` through `CA-068-4` to prevent collision with RDR-066's and RDR-069's CA labels; (b) new CA-068-4 added for the cross-bead provenance fields (`Provided by` / `Consumed by`) required for mechanical mismatch detection; (c) §Technical Design given explicit design branches on CA-068-1 (Read vs Read+Serena) and CA-068-2 (automated mismatch detection vs advisory human review); (d) §Finding 1 label disambiguated — the T2 spike at id 715 was authored under RDR-066's CA numbering but verifies RDR-068's CA-068-0; (e) `CONTRACT MISMATCH` behavior softened from "blocks enrichment" to "advisory warning" to match §Trade-offs; (f) Phase 4 sub-step labels renamed `6a/6b/6c` → `4a/4b/4c`; (g) §Prerequisites strengthened with `bd dep add` enforcement of CA-068-2 verification before Phase 2 ships (prevents shipping ceremonial template); (h) CA-068-3 latency extrapolation made realistic — "~5 minutes for 20 beads" replaced with "83-167 minutes easy case, 4-14 hours at hard-case multiplier" forcing Phase 2 to narrow scope or cache; (i) §Performance Expectations updated with the realistic extrapolation. Bead: nexus-sia.

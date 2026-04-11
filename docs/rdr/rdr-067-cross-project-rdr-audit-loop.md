@@ -59,7 +59,9 @@ Even if the skill exists and the convention is documented, nothing runs the audi
 
 ### Background
 
-This RDR is **Phase 2** of the four-RDR silent-scope-reduction remediation. Phase 0 (RDR-069, critic at close) and Phase 1 (RDR-066, composition probe) are preventive — they catch the failure before or at close time. This RDR is the **feedback loop**: after those interventions ship, run audits periodically to measure whether the failure mode is still occurring. Without the feedback loop, we ship preventive interventions and have no way to know if they work. That's exactly how we got here.
+This RDR is **Phase 2** of the four-RDR silent-scope-reduction remediation. Phase 0 (RDR-069, critic at close) and Phase 1 (RDR-066, composition probe) are preventive — they catch the failure before or at close time. This RDR is the **feedback loop**: after those interventions ship, run audits periodically to track whether the failure mode is still occurring in the historical record.
+
+**Honest framing** (from substantive-critic review 2026-04-11): the audit measures incident **frequency**, not causal **effectiveness** of the interventions. A 90-day audit reads historical post-mortems and classifies the incidents found there. If the rate drops after interventions ship, that is *correlational* evidence — not proof that the interventions caused the drop. Statistical significance on a 1-2/month baseline over a 90-day window is weak; longer windows or more data are needed for causal claims. The audit is valuable as a frequency monitor and a trend indicator; it should not be oversold as a causal effectiveness measurement.
 
 ### Why this supersedes the original scope
 
@@ -72,7 +74,9 @@ The original RDR-067 (2026-04-10) proposed 5 custom structured metrics:
 
 Plus a collection convention + `nx:rdr-audit` skill. The metrics would each require infrastructure: T2 queries, aggregations, time-windowing, per-project projection, visualization.
 
-**The audit on 2026-04-11 proved all 5 metrics are unnecessary.** A single dispatch of a deep-research-synthesizer subagent with a fixed prompt produced:
+**The audit on 2026-04-11 proved all 5 metrics are unnecessary.** A dispatch of a deep-research-synthesizer subagent with a fixed prompt produced equivalent information about incident frequency and pattern classification. Note (from substantive-critic review 2026-04-11): the 2026-04-11 audit combined a subagent dispatch for post-mortem pattern analysis with main-session work for session-transcript mining. The most analytically novel finding — the RDR-073 cognitive retcon mechanism at session lines 526-529 — came from main-session transcript mining, not from the delegated subagent. The `nx:rdr-audit` skill must specify what's delegated to the subagent vs. what's done in the main session before dispatch (transcript mining cannot currently be delegated because the subagent doesn't have efficient access to `~/.claude/projects/*`). For projects without existing post-mortems (where transcripts are the primary evidence source), the skill may need to surface raw transcript excerpts to the main session for manual inspection. This is an open design question for Phase 2.
+
+The subagent dispatch alone produced:
 - 4 confirmed incidents in the 90-day window (covers metrics 1, 4, 5)
 - Classification by drift category (covers metric 3)
 - Near-miss identification (RDR-021 research-phase catch)
@@ -124,11 +128,11 @@ The audit distinguished 4 composition failures from dozens of post-mortems cover
 - [ ] **CA-1**: The canonical audit prompt (used on 2026-04-11) generalizes across projects. The prompt was written for ART as the primary target; applying it to another project requires swapping the scope section. If the prompt is too project-specific, each new project requires custom prompting and the skill becomes a template not a tool.
   — **Status**: Unverified — **Method**: Re-run the audit against a second project (e.g., nexus itself, which has ~24 post-mortems; or a different user project) and measure if the output quality matches
 
-- [ ] **CA-2**: The audit subagent produces consistent verdicts on repeated dispatch. If two consecutive runs on ART return radically different incident counts, the audit is a lottery not a measurement.
-  — **Status**: Unverified — **Method**: Run the audit twice in sequence against ART; compare incident counts and confidence levels
+- [ ] **CA-2**: The audit subagent produces **verdict-category-consistent** results on repeated dispatch. Verdict category = frequency tier (0-1 / 2-3 / 4+ incidents) + recommendation (VERIFIED / PARTIALLY VERIFIED / FALSIFIED / INCONCLUSIVE). If two consecutive runs on ART land in different frequency tiers or return different recommendations, the audit is a lottery not a measurement.
+  — **Status**: Unverified — **Method**: Run the audit twice in sequence against ART; compare verdict tier and recommendation. **Acceptable variance**: ±1-2 incidents in the confirmed list, same recommendation category. **Do NOT require exact incident-list match** — RDR-069's CA-1 spikes (`nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike`, `nexus_rdr/069-research-3-ca1-flap-test-rdr067`) showed finding-level determinism is NOT stable for LLM-based subagent dispatches but verdict-category determinism IS stable (n=2 targets, 4/4 runs). The analogous expectation applies here: incident counts will vary ±1-2 but the frequency tier and recommendation should be consistent.
 
-- [ ] **CA-3**: `bd defer` or equivalent provides a usable scheduling mechanism for periodic audits. If no nexus/bd-native scheduling exists, we need an external cron job or scheduled Claude Code agent.
-  — **Status**: Unverified — **Method**: Investigate `bd defer` semantics and bd calendar integration; fall back to scheduled-agents pattern if needed
+- [ ] **CA-3**: A usable scheduling mechanism exists for periodic audits. Candidates in order of preference: (1) `bd defer` with a skill-dispatch trigger; (2) the nexus `schedule` skill ("Create, update, list, or run scheduled remote agents") which is already in the nexus plugin's available-skills list; (3) external cron/launchd; (4) manual runbook as last-resort documentation of a known limitation (does NOT close Gap 3 structurally).
+  — **Status**: Unverified — **Method**: Investigate candidates 1 and 2 in sequence. If BOTH fail, Gap 3 is explicitly scoped to a follow-on RDR rather than papered over with a manual runbook. The deliverable in that case is "Scheduling deferred — see follow-on RDR-NNN," not "manual runbook that functions like the status quo."
 
 - [ ] **CA-4**: The `rdr_process` collection template (for project-filed incidents) is rich enough to capture the pattern without being burdensome. Too heavy and projects won't file; too light and filings won't aggregate.
   — **Status**: Unverified — **Method**: Draft the template; test on a synthetic project filing; refine based on the audit subagent's ability to ingest it
@@ -143,7 +147,7 @@ Three components:
 
 2. **`rdr_process` collection template**: documented schema for cross-project incident filings. Template at `nx/resources/rdr_process/INCIDENT-TEMPLATE.md`. Projects that encounter the failure mode file entries under `rdr_process/<project>-incident-<slug>` with structured sections: mechanism, files involved, close artifacts, drift class, intervention that caught it (if any), lessons.
 
-3. **Scheduling mechanism**: `bd defer` an audit reminder for every active project at a 90-day cadence. On defer-trigger, the reminder points at `/nx:rdr-audit <project>`. If `bd defer` is insufficient (too passive, too easy to snooze), fall back to a scheduled Claude Code agent via `claude cron` or similar.
+3. **Scheduling mechanism**: two candidates investigated in sequence. **First**: `bd defer` an audit reminder for every active project at a 90-day cadence; on defer-trigger, the reminder points at `/nx:rdr-audit <project>`. **Second** (if `bd defer` is passive): the nexus `schedule` skill (already in the plugin's available-skills list — "Create, update, list, or run scheduled remote agents") hosts the audit dispatch as a scheduled remote agent that runs without user intervention. **Last resort** (both fail): Gap 3 is explicitly deferred to a follow-on RDR; the skill ships with manual-invocation only and the gap stays open as a tracked known limitation, not a papered-over closure.
 
 ### Technical Design
 
@@ -196,7 +200,7 @@ outcome: <reopened | partial | shipped-silently>
 ## Lessons (for the process, not the project)
 ```
 
-**Scheduling**: `bd defer RDR-067 --until=+90d --reason=audit-cadence`. The deferred issue surfaces on the due date; when it fires, the user or agent runs `/nx:rdr-audit` on whichever project is active. Alternative if `bd defer` isn't the right vehicle: `nx schedule` or `claude schedule` — investigated in Phase 1.
+**Scheduling**: candidate 1 is `bd defer RDR-067 --until=+90d --reason=audit-cadence`. The deferred issue surfaces on the due date; when it fires, the user or agent runs `/nx:rdr-audit` on whichever project is active. Candidate 2 is the nexus `schedule` skill — verified present in the plugin's available-skills list. Candidate 2 hosts the audit as a scheduled remote agent that dispatches `/nx:rdr-audit <project>` on cadence with no user intervention required. Both candidates are investigated in Phase 4. If both fail, Gap 3 is explicitly scoped to a follow-on RDR rather than papered over with a manual runbook.
 
 ### Alternatives Considered
 
@@ -380,3 +384,4 @@ Right-sized. One skill, one template, one scheduling integration. No new infrast
 
 - 2026-04-10 — Stub created as "Cross-Project RDR Observability" with 3 gaps: 5 structured metrics + rdr_process collection + nx:rdr-audit skill.
 - 2026-04-11 — **Reissued with new scope** based on the nexus historical audit. The 2026-04-11 audit proved a single subagent dispatch produces equivalent information to all 5 custom metrics with LLM-quality classification that regex-based metrics cannot achieve. The old scope proposed a 10x-effort reinvention of a cheaper proven thing. New scope: wrap the proven pattern as a skill + document the rdr_process collection + schedule periodic audits. Priority stays P2 — this is the feedback loop without which Phases 0-1 ship blind. See `rdr_process/nexus-audit-2026-04-11` for evidence and bead `nexus-640` for the 4-RDR cycle.
+- 2026-04-11 — **Critic-driven fixes** from the RDR-069 CA-1 flap-test spike (`nexus_rdr/069-research-3-ca1-flap-test-rdr067`). Two runs of `nx:substantive-critic` against this RDR surfaced real issues. Stable findings both runs agreed on were addressed here: (a) CA-2 spec rewritten to measure verdict-category consistency (±1-2 incident variance) instead of exact incident-list match, cross-referencing RDR-069's finding-vs-verdict distinction; (b) CA-3 scheduling candidates extended to include the nexus `schedule` skill as a second candidate before the manual-runbook last resort, with explicit branching to a follow-on RDR if all candidates fail. Single-run findings also applied: (c) the "single dispatch" claim clarified — the 2026-04-11 proof-of-concept combined subagent dispatch for post-mortem analysis with main-session transcript mining; the skill must specify what's delegated vs. main-session; (d) causal vs. correlational framing made honest — the audit measures frequency, not causal effectiveness. Bead: nexus-sia.
