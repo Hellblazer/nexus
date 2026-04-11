@@ -221,6 +221,16 @@ Example: If nx store write fails but nx memory succeeds, note in response: "Crit
 ## Verification Performed
 [What you cross-referenced, what evidence you gathered]
 
+## Verdict
+
+- **outcome**: <justified | partial | not-justified>
+- **confidence**: <high | medium | low>
+- **critical_count**: <N>
+- **significant_count**: <N>
+- **summary**: <one sentence>
+
+> Fallback parse rule: if this Verdict block is absent or malformed, downstream parsers count `### Issue:` headers under `## Critical Issues` and `## Significant Issues` and derive outcome mechanically — Critical > 0 → `not-justified`; Critical == 0 AND Significant > 0 → `partial`; all clear → `justified`.
+
 ## Operating Principles
 
 - **No fluff**: Every sentence adds value. Skip praise unless genuinely warranted.

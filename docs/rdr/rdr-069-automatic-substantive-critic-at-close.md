@@ -428,6 +428,10 @@ Run the new automatic-dispatch close flow against a test RDR with a known retcon
 |---|---|---|---|---|---|
 | T2 `nexus_rdr/*-close-override-*` entries | `nx memory list` via MCP | `memory_get` | `memory_delete` | `memory_search "close-override"` | Part of nexus_rdr project backup |
 
+**CA-4 override-rate threshold** (binding post-ship):
+
+> If override rate exceeds **20% of closes in any 30-day window**, Phase 2 dispatch is treated as failing; the gate degrades to advisory mode (critic runs and surfaces findings but does not block close) and the critic prompt is tuned. Measurement: count `nexus_rdr/*-close-override-*` T2 entries over total closes in the window. Unverifiable at ship time — this threshold is monitored, not tested.
+
 ## Test Plan
 
 - **Scenario 1**: close an RDR with clean §Problem Statement closure. **Verify**: critic returns `justified`, close proceeds as `implemented` without override.
