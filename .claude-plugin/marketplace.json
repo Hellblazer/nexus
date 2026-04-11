@@ -9,13 +9,13 @@
       "name": "nx",
       "source": "./nx",
       "description": "Self-hosted three-tier knowledge management with 16 specialized agents, analytical query pipelines, semantic search, and RDR decision tracking for Claude Code.",
-      "version": "3.8.4"
+      "version": "3.8.5"
     },
     {
       "name": "sn",
       "source": "./sn",
       "description": "Injects Serena and Context7 MCP tool usage guidance into subagents via SubagentStart hook.",
-      "version": "3.8.4"
+      "version": "3.8.5"
     }
   ]
 }

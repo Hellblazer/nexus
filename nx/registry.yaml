@@ -508,6 +508,16 @@ standalone_skills:
       - "finished feature work"
     tools: [Bash, Read]
 
+  composition-probe:
+    description: "Runtime composition smoke test for coordinator beads — dispatches a general-purpose subagent to generate a 30-50 line end-to-end test against the coordinator's entry point, runs it via project-native test runner (py/java/ts auto-detected), reports PASS or FAIL with dependency attribution. Fires on beads tagged metadata.coordinator=true (set by plan-enricher ≥2 deps heuristic). Read-only tool budget per RDR-066 Phase 1a CA-1 finding."
+    triggers:
+      - "run composition probe on bead X"
+      - "verify coordinator bead composition"
+      - "check composition before next bead"
+      - "/nx:composition-probe <bead-id>"
+    tools: [Bash, Read, Grep, Glob]
+    dispatches_to: [general-purpose]
+
 # =============================================================================
 # PIPELINES
 # =============================================================================

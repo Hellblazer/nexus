@@ -6,6 +6,65 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.5] - 2026-04-11
+
+Patch release: ships RDR-066 (Composition Smoke Probe at Coordinator
+Beads) Phase 1 of the 4-RDR silent-scope-reduction remediation. Adds
+plan-enricher coordinator detection and the `nx:composition-probe`
+skill. Catches 3/4 historical ART audit incidents at the coordinator
+boundary (inter-bead composition failures); the 4th (RDR-036 intra-class
+HashMap short-circuit) is out of scope and re-attributed to RDR-068
+dimensional contracts.
+
+### Added (nx plugin)
+
+- **Plan-enricher coordinator detection** (`nx/agents/plan-enricher.md`)
+  — the enricher now inspects `bd show <id> --json .dependencies` in
+  its per-bead walk. When the blocking-dependency count is ≥ 2, the
+  bead is tagged `metadata.coordinator=true` via `bd update --metadata`,
+  and a `/nx:composition-probe <id>` instruction is appended to the
+  enriched bead description. Post-write verification asserts the tag
+  actually persisted (CA-4 silent-omission mitigation) — on failure the
+  enricher surfaces an explicit WARNING to the user rather than
+  silently proceeding.
+- **`nx:composition-probe` skill** (`nx/skills/composition-probe/SKILL.md`)
+  — new skill fired on coordinator beads (or manually via
+  `/nx:composition-probe <id>`). Reads the coordinator bead and its
+  dependencies, dispatches a general-purpose subagent with a verbatim
+  prompt to generate a 30-50 line composition smoke test, runs it via
+  the project-native test runner (py/java/ts auto-detected), and
+  reports PASS or FAIL with attribution to the specific failing
+  dependency bead. Read-only subagent tool budget (Read + Grep + Glob),
+  locked on Phase 1a spike that verified `search_cross_corpus` as a
+  hard-case target without Serena symbol resolution needed.
+
+### Fixed (nx plugin)
+
+- **Coordinator convention documentation** in plan-enricher agent
+  prompt header — clarifies what a coordinator is, how detection works
+  (fallback heuristic, not full method-ownership lookup), and the
+  over-tagging / under-tagging trade-offs. Inline references to the
+  Phase 1b CA-5b retrospective (3/3 on in-scope historical targets).
+
+### Performance
+
+- Composition probe execution latency (Phase 1a empirical): **1.93s**
+  for a 5-test probe against `search_engine.search_cross_corpus`
+  (real `EphemeralClient` + ONNX MiniLM, no mocks, no API keys).
+  Well under the documented 30-120s budget. Generation latency
+  ~8 minutes wall-clock for reading source files and authoring the
+  probe on a hard case.
+
+### RDR
+
+- RDR-066 Composition Smoke Probe at Coordinator Beads — Phase 1 of
+  the 4-RDR silent-scope-reduction remediation cycle (Phase 0 was
+  RDR-069, shipped 3.8.3). Catch ceiling revised from 4/4 to 3/4
+  after Phase 1b retrospective found RDR-036 FactualTeacher.query
+  HashMap short-circuit was an intra-class failure mode outside
+  the probe framework's scope (re-attributes to RDR-068 dimensional
+  contracts).
+
 ## [3.8.4] - 2026-04-11
 
 Patch release: surgical close-time reindex. The `/nx:rdr-close` skill

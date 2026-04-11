@@ -6,6 +6,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.5] - 2026-04-11
+
+Plugin release: RDR-066 (Composition Smoke Probe at Coordinator Beads)
+Phase 1 of the 4-RDR silent-scope-reduction remediation. Ships the
+plan-enricher coordinator detection + the new composition-probe skill.
+
+### Added
+
+- **`agents/plan-enricher.md` coordinator detection**: per-bead walk
+  now reads `bd show <id> --json` (was `bd show <id>`) and counts
+  blocking dependencies. When `≥ 2`, the bead is tagged
+  `metadata.coordinator=true` via `bd update --metadata`, a
+  `/nx:composition-probe <id>` instruction is appended to the enriched
+  bead description, and a post-write verification step asserts the
+  tag persisted. Verification failure surfaces a WARNING to the user
+  explicitly — no silent drops.
+- **`skills/composition-probe/SKILL.md`** new skill: reads coordinator
+  bead + dependencies, dispatches general-purpose subagent with a
+  pinned prompt to generate a 30-50 line composition smoke test,
+  runs it via project-native test runner, reports PASS or FAIL with
+  bead-level attribution. Read-only tool budget (Read + Grep + Glob
+  only) per Phase 1a CA-1 verification — Nexus and ART coordinator
+  targets use `Any` at injection boundaries with runtime dict-key
+  contracts, so Serena symbol resolution is not required.
+- **Coordinator Convention** section added to the plan-enricher
+  agent prompt header — documents what a coordinator is, how the
+  fallback detection heuristic works, what the tag enables downstream
+  (probe dispatch), and why full CA-5 method-ownership lookup is
+  deferred (cost + scope: Phase 1b verified CA-5 full would not
+  improve catch rate on the historical target set).
+
+### RDR
+
+- RDR-066 Phase 1 shipped. Phase 0 (RDR-069) shipped in 3.8.3. Catch
+  ceiling is 3/4 historical ART incidents (RDR-073, RDR-075, RDR-031
+  are in-scope inter-bead composition failures; RDR-036 is an
+  intra-class failure mode that re-attributes to RDR-068 dimensional
+  contracts).
+
 ## [3.8.4] - 2026-04-11
 
 Plugin release: surgical close-time reindex for the rdr-close skill,
