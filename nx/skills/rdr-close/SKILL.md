@@ -178,11 +178,20 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 2. Update status in RDR markdown metadata
 3. Regenerate `docs/rdr/README.md` index
-4. Run `nx index rdr` to update T3 semantic index
+4. **Conditional reindex** — run `nx index rdr` only if the RDR body actually changed during close (e.g. divergence notes added, post-mortem link inserted into the RDR doc, or any text outside the frontmatter block modified). A frontmatter-only edit (status/closed_date/close_reason flipping) does NOT need a T3 reindex — the chunk text is unchanged, so embeddings would not shift. Check with:
+
+   ```bash
+   # If the diff is wholly inside the frontmatter block, skip the reindex.
+   git diff HEAD -- docs/rdr/rdr-NNN-*.md | grep -v '^[+-]---' | grep -v '^[+-][a-z_]*: ' | grep -E '^[+-]' | head -1
+   # If the command prints nothing, body was not modified — skip Step 4.4.
+   # If it prints lines, body changed — run `nx index rdr` to refresh.
+   ```
+
+   The rdr indexer is hash-dedup aware, so a no-op reindex is cheap but not free — it still walks every RDR file. Skip when not warranted.
 
 ### Step 5: Catalog Links (if catalog initialized)
 
-After `nx index rdr` in Step 4, the RDR has a catalog entry. Create links to capture implementation provenance:
+The RDR already has a catalog entry from the original accept-time indexing. Create links to capture implementation provenance (if catalog is initialized):
 
 1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically. Review with `nx catalog links <rdr-tumbler> --type implements-heuristic` — promote high-confidence ones to `implements` via `mcp__plugin_nx_nexus-catalog__link` for link-boost scoring benefit (heuristic links have zero search boost weight).
 
@@ -200,7 +209,7 @@ Skip all catalog steps silently if catalog is not initialized. The T2 record and
 
 ### Step 6: T3 Archive (post-mortem only)
 
-The main RDR is already semantically indexed by Step 4's `nx index rdr` (CCE embeddings, section-level chunks). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
+The main RDR was already semantically indexed at accept time (and refreshed in Step 4 only if the body changed during close). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
 
 If a post-mortem exists, archive it to a separate collection (using the exact file path from Step 2, not a glob): mcp__plugin_nx_nexus__store_put(content=(contents of $RDR_DIR/post-mortem/NNN-kebab-title.md), collection="knowledge__rdr_postmortem__{repo}", title="PREFIX-NNN Title (post-mortem)", tags="rdr,post-mortem,{drift-categories}"
 
@@ -217,9 +226,9 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 2. Offer post-mortem (useful for capturing what was learned, even from abandoned work)
 3. Update T2 record with close reason
 4. Update markdown metadata
-5. Run `nx index rdr` to update T3 semantic index (research findings are valuable even for failed RDRs)
+5. **Conditional reindex** — run `nx index rdr` only if the RDR body actually changed (apply the same frontmatter-vs-body diff check from Step 4 of the Implemented flow). A frontmatter-only `status: reverted` flip does not warrant a reindex.
 6. Archive post-mortem to `knowledge__rdr_postmortem__{repo}` (if created)
-7. Regenerate index
+7. Regenerate README index
 
 ## Flow: Superseded
 
@@ -227,7 +236,7 @@ Dispatch `knowledge-tidier` agent for post-mortem archival if the post-mortem co
 2. Cross-link both RDRs (bidirectional):
    - **Old RDR**: In T2, set `superseded_by: "NNN"`. In markdown, add "Superseded by RDR-NNN" note
    - **New RDR**: In T2, set `supersedes: "MMM"`. In markdown, add "Supersedes RDR-MMM" note
-3. Run `nx index rdr` to update T3 semantic index
+3. **Conditional reindex** — this flow typically DOES warrant a reindex because the markdown notes added in step 2 live in the RDR body (not the frontmatter), so chunk text shifts. Run `nx index rdr`. If a given cross-link note was only added to the frontmatter (unusual), apply the diff check from Implemented flow Step 4 instead.
 4. **Catalog link** (if catalog initialized): Create `supersedes` link in the catalog so the graph reflects the relationship:
    ```
    # Find both RDRs by title in catalog
@@ -281,7 +290,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 - [ ] Open beads displayed and user asked for explicit confirmation before proceeding
 - [ ] Beads NOT auto-closed — human decides
 - [ ] T2 record updated with close reason, date, epic bead ID, and archived flag
-- [ ] T3 semantic index updated via `nx index rdr`
+- [ ] T3 semantic index refreshed via `nx index rdr` **only if the RDR body changed during close** (divergence notes added, cross-link notes inserted, etc.) — skipped for frontmatter-only closes
 - [ ] Post-mortem archived to `knowledge__rdr_postmortem__{repo}` (if exists)
 - [ ] README index regenerated
 - [ ] Idempotent: re-running skips completed steps
@@ -292,7 +301,7 @@ Outputs produced by this skill directly:
 
 - **Console output**: Bead status gate table (if epic_bead in T2)
 - **T2 memory**: Close metadata via memory_put tool: project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
-- **T3 semantic index**: Updated via `nx index rdr` (CCE embeddings, section-level chunks)
+- **T3 semantic index**: Conditionally refreshed via `nx index rdr` (CCE embeddings, section-level chunks) — only when the RDR body changed during close; frontmatter-only edits are skipped
 - **Filesystem**: Post-mortem at `$RDR_DIR/post-mortem/NNN-kebab-title.md`, updated README
 
 Outputs generated by the knowledge-tidier agent (post-mortem archival only):
