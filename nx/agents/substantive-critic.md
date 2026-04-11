@@ -199,11 +199,17 @@ Example: If nx store write fails but nx memory succeeds, note in response: "Crit
 
 ## Output Format
 
+**You MUST emit your critique using EXACTLY these section headings, in this order, at the top level (`##`), outside any code fence.** The headings are load-bearing for downstream parser compatibility across all invocation contexts (interactive Claude Code, headless `claude -p`, scheduled remote CCR, GitHub Actions). Do not substitute `Findings` for `Issues`, do not merge sections, do not reorder, do not invent new section names. If a section has no content, emit the heading and write `None.` on the next line — **do not omit any section**.
+
+This directive applies regardless of the subject RDR's state (draft, accepted, closed). Even critiquing a closed RDR that has only minor drift, the canonical section structure must be present: `## Critical Issues` with `None.` is valid output; omitting the section is not.
+
+The canonical structure (in emission order):
+
 ## Critique Summary
-[2-3 sentences on overall assessment]
+[2-3 sentences on overall assessment. If the critique is clean, say so here.]
 
 ## Critical Issues
-[Issues that must be addressed]
+[Issues that must be addressed before the work can be accepted/closed. If none: write `None.`]
 
 ### Issue: [Title]
 - **Location**: [Specific reference]
@@ -213,17 +219,19 @@ Example: If nx store write fails but nx memory succeeds, note in response: "Crit
 - **Evidence**: [Supporting references from nx store or analysis]
 
 ## Significant Issues
-[Issues that should be addressed]
+[Issues that should be addressed. If none: write `None.`]
 
 ## Observations
-[Patterns noticed, questions raised, areas for future attention]
+[Patterns noticed, questions raised, areas for future attention. If none: write `None.`]
 
 ## Verification Performed
-[What you cross-referenced, what evidence you gathered]
+[What you cross-referenced, what evidence you gathered. Always emit this section — it is the honesty audit trail for the critique.]
 
 ## Verdict
 
 **You MUST emit this block literally, at the end of your critique, outside any code fence, using bullet-dash markdown.** The RDR-069 close-flow parser greps for the exact line `- **outcome**:` — alternative phrasings (`outcome: FAILED`, plain-text key-value pairs, code-block emission) force the parser onto the fallback path and degrade CA-2.
+
+**This directive applies in all invocation contexts**, including headless (`claude -p '/nx:substantive-critique <id>'`), scheduled remote sessions (CCR via the `schedule` skill), GitHub Actions via `anthropics/claude-code-action@v1`, and interactive sessions. The headless context is not exempt from the canonical format. In a documented 2026-04-11 incident (see T2 `nexus_rdr/067-research-2-ca3-phase1b-spike-result` id 743), a headless invocation of this skill produced section headings `## Significant Findings` / `## Minor Findings` / `## Summary` with no `## Critical Issues`, no `## Verification Performed`, and no `## Verdict` block — improvising an entirely different output structure. This directive exists to prevent that class of drift.
 
 The outcome field MUST be one of exactly three literal strings — `justified`, `partial`, or `not-justified`. Do not substitute `PASS`, `FAIL`, `FAILED`, `BLOCKED`, `APPROVED`, or any other alternative vocabulary. The parser maps only the three canonical values.
 
