@@ -2,14 +2,18 @@
 id: RDR-066
 title: "Composition Smoke Probe at Coordinator Beads"
 type: process
-status: accepted
+status: closed
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-10
 reissued: 2026-04-11
 accepted_date: 2026-04-11
+closed_date: 2026-04-11
+close_reason: implemented
 gate_iteration: 5
+revision_iteration: 6
+phase_5b_runs: 3
 related_issues: ["RDR-065", "RDR-067", "RDR-068", "RDR-069"]
 supersedes_scope: "Enrichment-Time Contract Pre-Flight (original 2026-04-10 scope bundled contracts + probe + coordinator concept)"
 ---
@@ -248,14 +252,19 @@ description: Use to run a composition smoke test against a coordinator bead befo
 - On FAIL: structured report citing the failing dependency bead with suggested reopen
 ```
 
-**Subagent prompt** (used by the skill):
+**Subagent prompt** (used by the skill — pinned verbatim in `nx/skills/composition-probe/SKILL.md`):
 
 > Generate a minimal (30-50 line) end-to-end smoke test against `<entry_point>` that exercises the composition of dependencies {list of dep bead IDs + their declared outputs}. The test should:
 > - Use realistic input data (not mocks, not stubs, not defaults)
 > - Assert on output shape AND intermediate value dimensionality
 > - Fail fast on any exception
 > - Print which dependency's contract was violated if the composition fails
+>
 > Write the test to /tmp/probe-{bead_id}.{ext} and run it. Report pass/fail + which dependency (if any) violated its declared output shape.
+>
+> If you cannot attribute the failure to a specific dependency bead, say so explicitly rather than guessing.
+
+The final sentence is the CA-2 attribution-fallback instruction (see §Critical Assumptions CA-2 and §Failure Modes). It is part of the prompt spec, not an addendum — when the SKILL.md pins the prompt verbatim it includes this line.
 
 **Integration with plan-enricher**: prompt update. Add a rule to the enrichment walk: "If this bead's description names methods defined in ≥2 prior beads in the plan, set `metadata.coordinator=true` via `bd update --metadata` AND add a final implementation step 'Run `/nx:composition-probe <this-id>` and verify PASS before beginning the next bead.'"
 
@@ -292,7 +301,9 @@ Run the existing test suite against main after each coordinator bead lands.
 
 ### Decision Rationale
 
-The audit shows 4/4 incidents are coordinator-bead failures. A probe at the coordinator boundary catches all 4 at the lowest sunk-cost point. No other intervention has this breadth (INT-1 catches 1/4, INT-3 is speculative, INT-6 is superseded). This is the highest-leverage preventive intervention available.
+The audit shows **3/4 incidents are inter-bead composition failures** the probe framework addresses — RDR-073 (GroundedLanguageSystem coordinator), RDR-075 (DevelopmentalCurriculum runPhase2 + CogEMEmotionalModulator), and RDR-031 (Full pipeline wiring SSMF → GM → DriveRep → Heterarchy). The 4th historical incident (RDR-036 FactualTeacher.query HashMap short-circuit) is an intra-class failure mode outside the probe framework's scope and re-attributes to RDR-068 dimensional contracts. See §Research Findings §Finding 3 for the Phase 1b retrospective that established this framing and CA-5b for the per-coordinator dependency-count verification.
+
+A probe at the coordinator boundary addresses the 3 in-scope incidents at the lowest sunk-cost point. No other intervention has this breadth for inter-bead composition failures (INT-1 catches 1/4 cleanly on dim mismatches, possibly 2/4 if RDR-036 is re-attributed to contracts; INT-3 is speculative; INT-6 is superseded). This is the highest-leverage preventive intervention available for the inter-bead failure class.
 
 The build effort is bounded: one new skill (composition-probe), one prompt update (plan-enricher), one workflow integration (probe-run step in generated plans). No new infrastructure, no new bead types, no new T2 schemas.
 
