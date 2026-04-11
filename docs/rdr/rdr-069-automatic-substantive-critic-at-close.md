@@ -95,6 +95,23 @@ Across 4 confirmed ART incidents in the 90-day window (RDR-031, RDR-036, RDR-073
 
 **The honest empirical base is 2/2** (RDR-073 and RDR-075 via the skill). RDR-036 and RDR-031 are retrospective attributions — the critic would probably have caught them based on the pattern, but we have no direct evidence because the skill was not dispatched on those closes. The 2/2 empirical rate plus 2 retrospective matches is still the strongest evidence in ART's INT-1..INT-7 list (every other intervention is 0/0 — never tested), but the numbers should not be overstated. **None** of ART's INT-1..INT-7 interventions have been empirically tested — they're all proposals from the same agent class that failed to catch the pattern in-session.
 
+### Finding 7 (2026-04-11): CA-1 n=4 — RDR-068 target, and substantive RDR-068 fixes surfaced
+
+**Fourth target.** Dispatched the critic twice against RDR-068. Both runs returned `not-justified` (Run 1: 1 Critical; Run 2: 2 Critical). Latency 96s and 108s. T2: `nexus_rdr/069-research-5-ca1-rdr068-n4` (id 722).
+
+**CA-1 running total**: n=4 targets, 8 runs, 4/4 verdict-category stability. Latency median shifts to ~111s (was 122s at n=3). Still no flap observed.
+
+**Substantive RDR-068 findings surfaced by this spike** (applied in the same commit as this finding):
+
+- Stable Critical: CA numbering collision between RDR-068 and RDR-066 creates a false-confirmation risk. A gate check searching T2 for "CA-2 verified" could surface RDR-066's spike and mistakenly satisfy RDR-068's unrelated CA-2.
+- Stable Critical: RDR-068's CA-2 (cross-bead mismatch detection) is treated as implemented in §Technical Design despite being Unverified — no design branch analog to RDR-066's "Design branches on CA-1 outcome."
+- Stable Significant: Phase label `6a/b/c` not renamed to `4a/b/c` (same fix RDR-066 had; not propagated).
+- Stable Significant: Phase 2 (template + skill update) can ship before CA-068-2 (mismatch detection) is verified, enabling the ceremonial failure mode the §Trade-offs section names.
+- Run 1 only: enrichment latency extrapolation was unrealistic. At 50s per contract × 100-200 contracts for a 20-bead plan = 83 minutes to 14 hours. The RDR's "~5 minutes" cap was off by 17-40x.
+- Run 2 only: `CONTRACT MISMATCH` was described as "blocks enrichment" in §Technical Design but "advisory warning" in §Trade-offs — internal contradiction.
+
+**All stable + correct single-run findings applied** to RDR-068 in this commit: CA renumbered with `CA-068-*` prefix; CA-068-4 added for cross-bead provenance fields; §Technical Design given explicit design branches on CA-068-1 and CA-068-2; §Finding 1 label disambiguated; mismatch behavior softened to advisory; phase labels renamed 4a/b/c; §Prerequisites strengthened with `bd dep` enforcement; latency extrapolation made honest.
+
 ### Finding 6 (2026-04-11): CA-1 meta-test — n=3 targets, critic's recursive critique of RDR-069 itself
 
 **Meta-test.** Dispatched the critic twice against RDR-069 itself — the RDR about automatic critic dispatch, critic'd. T2: `nexus_rdr/069-research-4-ca1-meta-test-rdr069` (id 721).
@@ -240,16 +257,16 @@ This means INT-3 (workaround gating with user approval) has a hidden assumption:
 ### Critical Assumptions
 
 - [x] **CA-1**: The substantive-critic produces consistent verdicts on repeated dispatch against the same RDR artifacts — i.e., running the critic twice in a row on the same inputs yields functionally equivalent verdicts. If the critic is non-deterministic in ways that matter, automatic dispatch could produce flap (close passes critic run 1, fails critic run 2).
-  — **Status**: **VERIFIED at verdict-category level (2026-04-11)** — n=2 targets, 4 total runs, 2/2 stability on gate-decision outcome. RDR-066 both runs `not-justified`; RDR-067 both runs `justified`. Flap-at-gate failure mode NOT observed. Caveat: still not finding-deterministic (specific Critical/Significant issues vary between runs). n=2 is better than n=1 but not exhaustive; a truly borderline target (exactly 1 marginal Critical issue) could still flap.
-  — **Method**: Spikes — see Finding 4 (RDR-066) and Finding 5 (RDR-067). T2: `nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike` (id 719), `nexus_rdr/069-research-3-ca1-flap-test-rdr067` (id 720)
+  — **Status**: **VERIFIED at verdict-category level (2026-04-11, n=4)** — 4 targets, 8 total runs, 4/4 stability on gate-decision outcome. RDR-066 both runs `not-justified`; RDR-067 both runs `justified`; RDR-069 both runs `not-justified`; RDR-068 both runs `not-justified`. Flap-at-gate failure mode NOT observed. Caveat: still not finding-deterministic (specific Critical/Significant issues vary between runs). A truly borderline target (exactly 1 marginal Critical issue at the Critical/Significant boundary) could theoretically still flap — but 4/4 streak on diverse targets is strong enough to ship.
+  — **Method**: Spikes — see Finding 4 (RDR-066), Finding 5 (RDR-067), Finding 6 (RDR-069 meta-test), Finding 7 (RDR-068). T2: `nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike` (id 719), `nexus_rdr/069-research-3-ca1-flap-test-rdr067` (id 720), `nexus_rdr/069-research-4-ca1-meta-test-rdr069` (id 721), `nexus_rdr/069-research-5-ca1-rdr068-n4` (id 722)
 
 - [x] **CA-2**: The critic can parse its own verdict into a machine-readable form that the close flow can consume (e.g., an outcome field: `justified | partial | not-justified`). If every verdict has to be read by a human to extract the outcome, the "automatic" part of "automatic dispatch" is a lie.
   — **Status**: **PARTIALLY VERIFIED (2026-04-11)** — Source search confirms the critic's Output Format has stable grep-countable section headers (`## Critical Issues`, `## Significant Issues`) with structured `### Issue:` entries underneath. Verdict can be derived from section counts. Template compliance is prompt-only but was observed to hold in practice (RDR-073 session line 839). Recommended Phase 2 work: add a ~15-line explicit `## Verdict` block with outcome/confidence/counts/summary for robustness; fall back to section-header counting if the Verdict block is missing.
   — **Method**: Source Search + live transcript cross-reference — see Finding 3. T2: `nexus_rdr/069-research-1-ca2-critic-output-verified`
 
 - [x] **CA-3**: The critic dispatch time (one LLM call, ~20-60 seconds for the critic's Read + analysis + write) is acceptable in the close flow. If it adds minutes, users will learn to avoid closes and the gate becomes friction.
-  — **Status**: **VERIFIED with wider tolerance (2026-04-11)** — median ~104.5s per dispatch, range **95-217s** (n=4 runs across 2 targets). Clean RDRs take longer to critic than broken ones (2-4 minutes vs ~100s); confirming "clean" requires exhaustive searching, confirming "broken" can short-circuit on the first Critical issue. Within close-flow friction tolerance but closer to the boundary than Finding 4 first suggested. `--force-implemented` useful as both false-positive override AND as a "skip the critic I know this is clean" escape hatch for impatient users.
-  — **Method**: Measured alongside CA-1 determinism + flap spikes — see Finding 4 (RDR-066) and Finding 5 (RDR-067). T2: `nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike` (id 719), `nexus_rdr/069-research-3-ca1-flap-test-rdr067` (id 720)
+  — **Status**: **VERIFIED with wider tolerance (2026-04-11, n=8)** — median ~111s per dispatch, range **95-217s** (n=8 runs across 4 targets). Clean RDRs take longer to critic than broken ones (2-4 minutes vs ~100s); confirming "clean" requires exhaustive searching, confirming "broken" can short-circuit on the first Critical issue. Within close-flow friction tolerance. `--force-implemented` useful as both false-positive override AND as a "skip the critic I know this is clean" escape hatch for impatient users.
+  — **Method**: Measured alongside CA-1 spikes — see Findings 4, 5, 6, 7. T2: `nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike` (id 719), `nexus_rdr/069-research-3-ca1-flap-test-rdr067` (id 720), `nexus_rdr/069-research-4-ca1-meta-test-rdr069` (id 721), `nexus_rdr/069-research-5-ca1-rdr068-n4` (id 722)
 
 - [ ] **CA-4**: The `--force-implemented` override is genuinely rare in practice — used when the critic produces a false positive, not used as a routine bypass. If users use it on every close, the gate is theater.
   — **Status**: Unverified — **Method**: Post-ship telemetry via T2 audit entry per override invocation
