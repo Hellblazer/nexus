@@ -974,8 +974,9 @@ the write completes and can read the final file content.
 3. Fast no-op: if `tool_input.file_path` does not contain
    `docs/rdr/post-mortem/`, emit allow and exit.
 4. Read the file from disk (it has just been written).
-5. Apply the **refined regex bank** (from CA-5 verification):
-   - Patterns: `divergence|workaround|deferred|limitation|partial|follow-up\s+RDR|Phase\s+\d+\s+(deferred|required)|out\s+of\s+scope|not\s+in\s+scope`
+5. Apply the **refined regex bank** (from CA-5 verification, 8
+   patterns after Rev 4 dropped `partial`):
+   - Patterns: `divergence|workaround|limitation|deferred|follow-up\s+RDR|Phase\s+\d+\s+(deferred|required)|out\s+of\s+scope|not\s+in\s+scope`
    - Pre-filter: exclude lines starting with `#` (section headers)
      and lines inside markdown tables (surrounded by `|`).
 6. If hits are found: emit `additionalContext` with the matched lines
