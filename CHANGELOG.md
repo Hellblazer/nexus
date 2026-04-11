@@ -6,6 +6,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.2] - 2026-04-11
+
+Patch release: ships RDR-065 close-time funnel hardening for the nx plugin.
+No core CLI changes — all surface area lives in the `nx` Claude Code plugin
+(commands, hooks, skill text, RDR template scaffold). The new gates defend
+the RDR close ritual against silent scope reduction.
+
+### Added (nx plugin)
+
+- **RDR template scaffold (Gap 4)** — `### Enumerated gaps to close`
+  subsection with `#### Gap N: <title>` placeholders. Authors of new RDRs
+  scaffold the structure required by the close gate out of the box.
+- **Two-pass Problem Statement Replay preamble (Gap 1)** — added to
+  `nx/commands/rdr-close.md`. Pass 1 enumerates `#### Gap N:` headings from
+  the RDR's Problem Statement and exits cleanly when `--pointers` omitted.
+  Pass 2 validates per-gap pointers (key coverage + file existence) and sets
+  a T1 scratch `rdr-close-active,rdr-NNN` marker on success. Grandfathering
+  is ID-based (`rdr_id_int < 65`), never date-based. Hard blocks all use
+  `sys.exit(0)`.
+- **`### Step 1.5: Problem Statement Replay`** — new section in
+  `nx/skills/rdr-close/SKILL.md` documenting the four preamble outcomes
+  (validation passed / Pass 1 enumeration / legacy WARN / hard block) and
+  the verbatim user-facing framing prompt.
+- **Divergence-language guard PostToolUse hook (Gap 2)** — new
+  `nx/hooks/scripts/divergence-language-guard.sh` registered for `Write|Edit`
+  matching `docs/rdr/post-mortem/`. Bakes in the LOCKED Rev 4 8-pattern
+  regex bank with markdown header / table-row pre-filtering. Advisory
+  only — never hard-blocks.
+- **`bd create` commitment-metadata enforcement (Gap 3)** — extends
+  `nx/hooks/scripts/pre_close_verification_hook.sh`. When an RDR close is
+  active and a follow-up `bd create` mentions the active RDR, the hook
+  requires `reopens_rdr`, `sprint`/`due`, and `drift_condition` markers in
+  title+description. Missing markers → hard deny with reason. Audit log at
+  `/tmp/nexus-rdr065-bd-create-audit.log`.
+
+### RDR
+
+- RDR-065 Close-Time Funnel Hardening Against Silent Scope Reduction —
+  6 of 10 epic beads closed with this release.
+
 ## [3.8.1] - 2026-04-10
 
 Patch release: four bug fixes from a live shakeout of v3.8.0. Every

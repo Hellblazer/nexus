@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.2] - 2026-04-11
+
+Plugin release: RDR-065 close-time funnel hardening. New gates defend the
+RDR close ritual against silent scope reduction.
+
+### Added
+
+- **RDR template scaffold (RDR-065 Gap 4)** — TEMPLATE.md grew an
+  `### Enumerated gaps to close` subsection with `#### Gap N:` placeholders
+  and a documented heading regex (`^#### Gap \d+:`). The close skill
+  enumerates these.
+- **Two-pass Problem Statement Replay preamble** in `commands/rdr-close.md`
+  (RDR-065 Gap 1). Pass 1 lists gaps and exits cleanly; Pass 2 validates
+  per-gap `--pointers` (key coverage + file existence) and sets a T1
+  scratch active-close marker. ID-based grandfathering for pre-065 RDRs.
+- **`### Step 1.5: Problem Statement Replay`** in `skills/rdr-close/SKILL.md`
+  — user-facing wrapper around the preamble's four outcomes plus the
+  verbatim "structural-not-semantic" framing prompt.
+- **`hooks/scripts/divergence-language-guard.sh`** — new PostToolUse hook
+  on `Write|Edit` for post-mortem files. Locked Rev 4 8-pattern regex bank;
+  markdown header / table-row pre-filter; advisory only (never blocks).
+- **`bd create` enforcement branch** in
+  `hooks/scripts/pre_close_verification_hook.sh`. During an active RDR
+  close, follow-up beads that mention the RDR must include `reopens_rdr`,
+  `sprint`/`due`, and `drift_condition` metadata. Missing markers → deny.
+
 ## [3.8.1] - 2026-04-10
 
 Plugin version aligned with Nexus CLI 3.8.1. Patch release — bug
