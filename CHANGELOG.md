@@ -122,7 +122,10 @@ empirical catch evidence (2/2 on ART RDR-073 + RDR-075).
   failure mode RDR-069 addresses). Parses the canonical `## Verdict`
   block and branches on outcome: `justified` passes through; `partial`
   blocks `close_reason: implemented` without override; `not-justified`
-  blocks `implemented` and `reverted` without override; a fallback path
+  blocks `close_reason: implemented` without override (while
+  `close_reason: reverted` and `close_reason: partial` remain available
+  without override as honest-failure-acknowledgment paths — only
+  `implemented` requires `--force-implemented`); a fallback path
   counts `### Issue:` headers under `## Critical Issues` /
   `## Significant Issues` when the Verdict block is absent. Scenario 4
   surfaces dispatch timeouts and transport failures to the user —

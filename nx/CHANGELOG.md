@@ -93,10 +93,12 @@ remediation cycle).
   minimal relay and parses the canonical `## Verdict` block from the
   response. Branches on outcome: `justified` passes through; `partial`
   blocks `implemented` without `--force-implemented`; `not-justified`
-  blocks both `implemented` and `reverted` without override. Fallback
-  parse rule (counting `### Issue:` headers) handles a missing Verdict
-  block. Scenario 4 explicitly surfaces dispatch timeouts and
-  transport failures to the user.
+  blocks `implemented` without `--force-implemented` (while `reverted`
+  and `partial` remain available without override — only `implemented`
+  requires the audit override). Fallback parse rule (counting
+  `### Issue:` headers) handles a missing Verdict block. Scenario 4
+  explicitly surfaces dispatch timeouts and transport failures to the
+  user.
 - **`agents/substantive-critic.md` canonical Verdict block** — 5-field
   block (outcome / confidence / critical_count / significant_count /
   summary) added to the Output Format between Verification Performed
