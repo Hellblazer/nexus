@@ -130,7 +130,7 @@ Do not bump these without testing the full chunking pipeline.
 
 - Branch naming: `feature/<bead-id>-<short-description>`
 - Never push directly to `main` — all changes via PR (exception: version-bump release commits, see Release Process below)
-- Use `bd` (beads) for task tracking
+- Use `bd` (beads, **≥ 1.0.0** — `brew install beads` or `brew upgrade beads`) for task tracking. Earlier 0.x versions reject the comma-separated `--status` flag the close-skill preamble uses; the bead advisory will silently report no open beads on stale installs.
 - **Code review**: Plans include review tasks after implementation phases. Use `/nx:review-code` or dispatch `code-review-expert` at the designated plan steps
 
 The `main` branch requires CI to pass before merging. Configure branch protection at
