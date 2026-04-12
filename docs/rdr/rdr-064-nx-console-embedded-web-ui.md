@@ -95,7 +95,7 @@ The console is a **window into agentic work**, not a participant in it. Every v0
 
 ### Stack
 
-- **Server**: FastAPI (already in tree via MinerU), uvicorn runner
+- **Server**: FastAPI + uvicorn (added to core deps — see RF-064-5 correction and Decision #21)
 - **Templating**: Jinja2 (FastAPI native integration)
 - **Interactivity**: HTMX for HTML-over-the-wire partial swaps; Alpine.js for local state (modals, inline toggles)
 - **Streaming**: Server-Sent Events via `sse-starlette`, consumed by HTMX's `hx-sse` extension
@@ -241,7 +241,7 @@ Phase 0 is bundled into RDR-064 rather than split into its own RDR because the r
 - Status cards: T1 Sessions | T2 SQLite | T3 Cloud | MinerU | Catalog | Activity Rate | Dolt Server | Audit Status
 - **Audit Status card** (RF-064-20): scheduled? (launchd/cron probe) | last run date + verdict | next fire | outstanding findings. Data: T2 `rdr_process/audit-*` + `launchctl list | grep rdr-audit` / `crontab -l | grep rdr-audit`. Green = scheduled + last run CLEAN; yellow = scheduled + PARTIAL findings; red = not scheduled or overdue.
 - Each card: green / yellow / red status, one-line summary, click to expand for details
-- Active sessions table: session_id | host:port | PID | uptime | scratch entry count (if probable)
+- Active sessions table: session_id | host:port | PID | uptime | liveness indicator (TCP probe, green/yellow/red per RF-064-18). Scratch entry count deferred to detail view (click row) — TCP liveness probe only on synchronous first paint.
 - 30 s SSE refresh is additive — cards update in place without reloading
 
 **Destructive actions**: none. Read-only. Verify / reindex / delete are deferred to later panels after v0.1 validation.
@@ -270,7 +270,7 @@ Phase 0 is bundled into RDR-064 rather than split into its own RDR because the r
 - Filters: time window, `link_type`, `content_type`
 - Scope toggle respected at all levels
 
-**Backend complexity**: low. One-pass groupby over `links.jsonl` with in-memory aggregation. 16 K links is milliseconds. Caching layer optional.
+**Backend complexity**: low. One-pass groupby over `links.jsonl` with in-memory aggregation. 16 K links is milliseconds. v0.1: re-scan per request; add LRU cache keyed on `links.jsonl` mtime when page load exceeds 500 ms (expected at ~100 K+ entries).
 
 ## Decision Points (Resolved in This RDR)
 
@@ -296,6 +296,7 @@ Phase 0 is bundled into RDR-064 rather than split into its own RDR because the r
 | 18 | Activity Stream filtering | Server-side before SSE push | Client-side (unacceptable bandwidth at peak event rates of 9 K docs/day) |
 | 19 | Multi-project support | Per-project pid file (`console.<project>.pid`), scope selector toggles cross-project views | Single global console instance (breaks multi-project workflow) |
 | 20 | Activity Stream data source | JSONL tail polling at 1 s | Catalog SQLite polling; inotify/FSEvents watcher; catalog-write-path integration (all add backend coupling for v0.1) |
+| 21 | Console dependency strategy | Add `fastapi>=0.115` + `uvicorn[standard]` to core deps | Optional `[console]` extra (broken `nx console` for standard installs — unacceptable for P1) |
 
 ## Research Findings
 
@@ -322,11 +323,15 @@ What remains true: stderr is the only sink for most modules (catalog, auto-linke
 
 Two internal HTTP servers exist in the tree: the T1 session ChromaDB HTTP server (started by the `SessionStart` hook, PPID-keyed, agent IPC) and the MinerU FastAPI extractor (`src/nexus/commands/mineru.py`). Both are internal plumbing, not user-facing. RDR-018 (2026-03) removed the original `nx serve` static file server. No REST endpoints, no WebSocket code, no templates, no frontend assets exist anywhere. All UI work is net-new. Notably, shell history shows 4 attempts at `nx serve` after removal — a signal that the operator has been reaching for a web surface.
 
-### RF-064-5: FastAPI is already a Nexus dependency via MinerU
+### RF-064-5: FastAPI is a MinerU optional-extra dependency, not core (CORRECTED 2026-04-11)
 
-**Source**: `src/nexus/commands/mineru.py` + `pyproject.toml`.
+**Source**: `pyproject.toml` lines 56-61, `uv.lock` marker analysis, gate Layer 3 critique.
 
-MinerU's extraction server is built on FastAPI + uvicorn. Both packages are already locked in `uv.lock`. Choosing FastAPI for `nx console` adds zero new server-framework dependencies. The MinerU pid-file pattern (`~/.config/nexus/mineru.pid` with JSON `{pid, port, started_at}`) also establishes the convention for `~/.config/nexus/console.<project>.pid` — direct architectural reuse with precedent. MinerU uses dynamic ephemeral ports, so console's fixed default (8765) does not collide.
+**Correction**: The prior version of this RF stated FastAPI and uvicorn were "already in tree" at zero dependency cost. This is wrong. FastAPI and uvicorn are locked in `uv.lock` but gated behind `[project.optional-dependencies] mineru`. `uv run python -c "import fastapi"` fails with `ModuleNotFoundError` in the standard install; only `uv run --extra mineru` succeeds. `sse-starlette` IS in core (via `mcp>=1.0`), and `jinja2` IS in core (via docling/chromadb). The server framework is NOT.
+
+**Decision (see Decision #21)**: add `fastapi>=0.115` and `uvicorn[standard]` to core `[dependencies]` in `pyproject.toml`. For a P1 feature, gating behind an optional extra creates a broken `nx console` subcommand for standard installs. Phase 0 gains a task: "add console dependencies to pyproject.toml and update uv.lock."
+
+The MinerU pid-file pattern (`~/.config/nexus/mineru.pid` with JSON `{pid, port, started_at}`) still establishes the convention for `~/.config/nexus/console.<project>.pid` — direct architectural reuse with precedent. MinerU uses dynamic ephemeral ports, so console's fixed default (8765) does not collide.
 
 ### RF-064-6: Complete data-access layer exists as importable Python modules
 
