@@ -258,6 +258,9 @@ def search_cross_corpus(
         all_results = apply_link_boost(all_results, catalog)
 
     # Topic boost (RDR-070, nexus-aym)
+    # NOTE: topic_links not yet wired — linked-topic boost path is inert.
+    # Same-topic boost (+0.1) is active; linked-topic boost (+0.05) requires
+    # computing topic pair links at query time (future work).
     if all_results and taxonomy is not None:
         try:
             from nexus.scoring import apply_topic_boost
@@ -265,7 +268,7 @@ def search_cross_corpus(
             result_ids = [r.id for r in all_results]
             assignments = taxonomy.get_assignments_for_docs(result_ids)
             if assignments:
-                apply_topic_boost(all_results, assignments)
+                all_results = apply_topic_boost(all_results, assignments)
         except Exception:
             pass  # Non-fatal: topic boost is a ranking refinement
 
