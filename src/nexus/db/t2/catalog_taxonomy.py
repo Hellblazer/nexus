@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS topics (
     terms         TEXT
 );
 
+CREATE TABLE IF NOT EXISTS taxonomy_meta (
+    collection              TEXT PRIMARY KEY,
+    last_discover_doc_count INTEGER NOT NULL DEFAULT 0,
+    last_discover_at        TEXT
+);
+
 CREATE TABLE IF NOT EXISTS topic_assignments (
     doc_id      TEXT NOT NULL,
     topic_id    INTEGER NOT NULL REFERENCES topics(id),
@@ -617,6 +623,91 @@ class CatalogTaxonomy:
 
         return child_count
 
+    # ── Rebalance trigger (RDR-070, nexus-1im) ──────────────────────────
+
+    def needs_rebalance(self, collection: str, current_count: int) -> bool:
+        """Return True if the corpus has grown >= 2x since last discovery."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT last_discover_doc_count FROM taxonomy_meta WHERE collection = ?",
+                (collection,),
+            ).fetchone()
+        if row is None:
+            return True  # No prior discovery
+        return current_count >= 2 * row[0]
+
+    def record_discover_count(self, collection: str, doc_count: int) -> None:
+        """Record the doc count at discovery time."""
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO taxonomy_meta (collection, last_discover_doc_count, last_discover_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(collection) DO UPDATE SET "
+                "last_discover_doc_count = excluded.last_discover_doc_count, "
+                "last_discover_at = excluded.last_discover_at",
+                (collection, doc_count, now),
+            )
+            self.conn.commit()
+
+    # ── Merge strategy (RDR-070, nexus-1im) ───────────────────────────
+
+    @staticmethod
+    def _merge_labels(
+        old_centroids: np.ndarray,
+        old_labels: list[str],
+        old_review_statuses: list[str],
+        new_centroids: np.ndarray,
+        *,
+        threshold: float = 0.8,
+    ) -> list[dict[str, Any]]:
+        """Match new centroids to old centroids, transfer operator labels.
+
+        Returns a list of dicts (one per new centroid) with:
+        - ``label``: transferred label or None (caller uses c-TF-IDF)
+        - ``review_status``: 'accepted' if matched, 'pending' if new
+
+        N:1 dedup: each old centroid claimed at most once. If two new
+        centroids match the same old centroid above threshold, the
+        higher-similarity claimant wins.
+        """
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        n_new = new_centroids.shape[0]
+        result: list[dict[str, Any]] = [
+            {"label": None, "review_status": "pending"} for _ in range(n_new)
+        ]
+
+        if old_centroids.shape[0] == 0:
+            return result
+
+        # Cosine similarity matrix: (n_new, n_old)
+        sims = cosine_similarity(new_centroids, old_centroids)
+
+        # Greedy assignment: highest similarity first, each old used once
+        claimed_old: set[int] = set()
+        # Build (sim, new_idx, old_idx) sorted descending by sim
+        candidates = []
+        for new_idx in range(n_new):
+            for old_idx in range(old_centroids.shape[0]):
+                candidates.append((sims[new_idx, old_idx], new_idx, old_idx))
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        claimed_new: set[int] = set()
+        for sim, new_idx, old_idx in candidates:
+            if sim < threshold:
+                break  # No more above threshold
+            if old_idx in claimed_old or new_idx in claimed_new:
+                continue
+            result[new_idx] = {
+                "label": old_labels[old_idx],
+                "review_status": old_review_statuses[old_idx],
+            }
+            claimed_old.add(old_idx)
+            claimed_new.add(new_idx)
+
+        return result
+
     # ── HDBSCAN topic discovery (RDR-070, nexus-9k5) ────────────────────
 
     @staticmethod
@@ -732,6 +823,9 @@ class CatalogTaxonomy:
         if c_ids:
             centroid_coll.upsert(ids=c_ids, embeddings=c_embs, metadatas=c_metas)
 
+        # Record doc count for rebalance tracking
+        self.record_discover_count(collection_name, n)
+
         return count
 
     def assign_single(
@@ -833,12 +927,66 @@ class CatalogTaxonomy:
         texts: list[str],
         chroma_client: Any,
     ) -> int:
-        """Full rebuild: delete existing topics for collection, re-discover.
+        """Full rebuild with merge strategy for label preservation.
 
-        DELETE topic_assignments and topics for the collection in one
-        transaction (single lock acquisition + commit), then call
-        :meth:`discover_topics` AFTER the lock is released.
+        1. Read old centroids + labels + manual assignments
+        2. Clear old data
+        3. Run HDBSCAN on new embeddings
+        4. Match new centroids to old via ``_merge_labels``
+        5. Transfer operator labels and manual assignments
+        6. Record doc count for rebalance tracking
         """
+        # ── Step 1: read old state ────────────────────────────────────
+        old_centroids = np.empty((0, 0), dtype=np.float32)
+        old_labels: list[str] = []
+        old_review_statuses: list[str] = []
+
+        centroid_coll = self._create_centroid_collection(chroma_client)
+
+        # Read old T2 topics (id -> label, review_status) — authoritative
+        # for operator renames. ChromaDB metadata may still have the
+        # original c-TF-IDF label.
+        with self._lock:
+            old_topic_rows = self.conn.execute(
+                "SELECT id, label, review_status FROM topics WHERE collection = ?",
+                (collection_name,),
+            ).fetchall()
+        old_topic_map: dict[int, tuple[str, str]] = {
+            r[0]: (r[1], r[2]) for r in old_topic_rows
+        }
+
+        # Read old centroids from ChromaDB, resolve labels from T2
+        old_centroid_topic_ids: list[int] = []  # old topic_id per centroid index
+        try:
+            old_data = centroid_coll.get(
+                where={"collection": collection_name},
+                include=["embeddings", "metadatas"],
+            )
+            if old_data["embeddings"] is not None and len(old_data["embeddings"]) > 0:
+                old_centroids = np.array(old_data["embeddings"], dtype=np.float32)
+                for m in old_data["metadatas"]:
+                    tid = m.get("topic_id", -1)
+                    old_centroid_topic_ids.append(tid)
+                    if tid in old_topic_map:
+                        old_labels.append(old_topic_map[tid][0])
+                        old_review_statuses.append(old_topic_map[tid][1])
+                    else:
+                        old_labels.append(m.get("label", ""))
+                        old_review_statuses.append("pending")
+        except Exception:
+            pass
+
+        # Read manual assignments (doc_id -> old_topic_id)
+        with self._lock:
+            manual_rows = self.conn.execute(
+                "SELECT ta.doc_id, ta.topic_id FROM topic_assignments ta "
+                "JOIN topics t ON t.id = ta.topic_id "
+                "WHERE ta.assigned_by = 'manual' AND t.collection = ?",
+                (collection_name,),
+            ).fetchall()
+        manual_assignments: dict[str, int] = {r[0]: r[1] for r in manual_rows}
+
+        # ── Step 2: clear old data ────────────────────────────────────
         with self._lock:
             self.conn.execute(
                 "DELETE FROM topic_assignments WHERE topic_id IN "
@@ -849,6 +997,155 @@ class CatalogTaxonomy:
                 "DELETE FROM topics WHERE collection = ?", (collection_name,),
             )
             self.conn.commit()
-        return self.discover_topics(
-            collection_name, doc_ids, embeddings, texts, chroma_client,
+
+        # Clear old centroids from ChromaDB
+        old_centroid_ids = centroid_coll.get(
+            where={"collection": collection_name},
+        ).get("ids", [])
+        if old_centroid_ids:
+            centroid_coll.delete(ids=old_centroid_ids)
+
+        # ── Step 3: HDBSCAN ──────────────────────────────────────────
+        n = len(doc_ids)
+        if n < 5:
+            return 0
+
+        min_cluster_size = max(5, n // 15)
+        clusterer = SklearnHDBSCAN(
+            min_cluster_size=min_cluster_size,
+            store_centers="centroid",
+            copy=True,
         )
+        labels = clusterer.fit_predict(embeddings)
+
+        real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
+        if not real_labels:
+            return 0
+
+        # c-TF-IDF
+        vectorizer = CountVectorizer(stop_words="english")
+        tfidf_matrix = TfidfTransformer().fit_transform(
+            vectorizer.fit_transform(texts),
+        )
+        feature_names = vectorizer.get_feature_names_out()
+
+        # ── Step 4: merge labels ──────────────────────────────────────
+        new_centroids_arr = np.array(
+            [clusterer.centroids_[cid] for cid in real_labels], dtype=np.float32,
+        )
+        merged = self._merge_labels(
+            old_centroids, old_labels, old_review_statuses, new_centroids_arr,
+        )
+
+        # ── Step 5: persist ───────────────────────────────────────────
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        count = 0
+        c_ids: list[str] = []
+        c_embs: list[list[float]] = []
+        c_metas: list[dict[str, Any]] = []
+
+        # Map new cluster index -> topic_id for manual assignment transfer
+        new_topic_ids: list[int] = []
+
+        with self._lock:
+            for idx, cid in enumerate(real_labels):
+                mask = labels == cid
+
+                cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
+                top_idx = cluster_tfidf.argsort()[-10:][::-1]
+                top_terms = [str(feature_names[i]) for i in top_idx]
+                tfidf_label = " ".join(top_terms[:3])
+                terms_json = json.dumps(top_terms)
+
+                # Use merged label if available, else c-TF-IDF
+                merged_info = merged[idx]
+                label = merged_info["label"] or tfidf_label
+                review_status = merged_info["review_status"]
+
+                doc_count = int(mask.sum())
+                self.conn.execute(
+                    "INSERT INTO topics "
+                    "(label, collection, doc_count, created_at, terms, review_status) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (label, collection_name, doc_count, now, terms_json, review_status),
+                )
+                topic_id = self.conn.execute(
+                    "SELECT last_insert_rowid()"
+                ).fetchone()[0]
+                new_topic_ids.append(topic_id)
+
+                for i in range(n):
+                    if mask[i]:
+                        self.conn.execute(
+                            "INSERT OR IGNORE INTO topic_assignments "
+                            "(doc_id, topic_id, assigned_by) VALUES (?, ?, ?)",
+                            (
+                                doc_ids[i],
+                                topic_id,
+                                "auto-matched" if merged_info["label"] else "hdbscan",
+                            ),
+                        )
+
+                c_ids.append(f"{collection_name}:{topic_id}")
+                c_embs.append(clusterer.centroids_[cid].tolist())
+                c_metas.append({
+                    "topic_id": topic_id,
+                    "label": label,
+                    "collection": collection_name,
+                    "doc_count": doc_count,
+                })
+                count += 1
+
+            # Transfer manual assignments.
+            # Build old_topic_id -> new_topic_id map via merge strategy
+            # (old centroid idx → matched new centroid idx → new topic_id)
+            old_to_new_topic: dict[int, int] = {}
+            if old_centroid_topic_ids and new_topic_ids:
+                for new_idx, merge_info in enumerate(merged):
+                    if merge_info["label"] is not None:
+                        # This new topic was matched to an old one.
+                        # Find which old centroid idx was claimed by this new_idx.
+                        from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+                        if old_centroids.shape[0] > 0:
+                            sims = _cos_sim(
+                                new_centroids_arr[new_idx:new_idx+1], old_centroids,
+                            )[0]
+                            best_old_idx = int(sims.argmax())
+                            old_tid = old_centroid_topic_ids[best_old_idx]
+                            old_to_new_topic[old_tid] = new_topic_ids[new_idx]
+
+            if manual_assignments:
+                for manual_doc, old_topic_id in manual_assignments.items():
+                    # Route 1: old topic was matched to a new topic
+                    if old_topic_id in old_to_new_topic:
+                        target = old_to_new_topic[old_topic_id]
+                        self.conn.execute(
+                            "INSERT OR REPLACE INTO topic_assignments "
+                            "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'manual')",
+                            (manual_doc, target),
+                        )
+                        continue
+
+                    # Route 2: doc is in the current corpus — use embedding
+                    if manual_doc in doc_ids:
+                        doc_idx = doc_ids.index(manual_doc)
+                        doc_emb = embeddings[doc_idx : doc_idx + 1]
+                        sims = _cos_sim(doc_emb, new_centroids_arr)[0]
+                        best_idx = int(sims.argmax())
+                        if float(sims[best_idx]) > 0.5:
+                            self.conn.execute(
+                                "INSERT OR REPLACE INTO topic_assignments "
+                                "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'manual')",
+                                (manual_doc, new_topic_ids[best_idx]),
+                            )
+
+            self.conn.commit()
+
+        # Upsert new centroids
+        if c_ids:
+            centroid_coll.upsert(ids=c_ids, embeddings=c_embs, metadatas=c_metas)
+
+        # Record doc count for rebalance tracking
+        self.record_discover_count(collection_name, n)
+
+        return count

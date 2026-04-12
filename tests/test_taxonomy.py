@@ -1703,3 +1703,212 @@ class TestManualOpsCLI:
 
         assert result.exit_code == 0, result.output
         assert "2" in result.output
+
+
+# ── Rebalance trigger + merge strategy (RDR-070, nexus-1im) ───────────────
+
+
+class TestRebalanceTrigger:
+    """needs_rebalance detects 2x corpus growth."""
+
+    def test_no_prior_discover_needs_rebalance(self, db: T2Database) -> None:
+        """First discover always proceeds (no prior count)."""
+        assert db.taxonomy.needs_rebalance("test__coll", current_count=100) is True
+
+    def test_below_threshold_no_rebalance(self, db: T2Database) -> None:
+        """Under 2x growth does not trigger rebalance."""
+        db.taxonomy.record_discover_count("test__coll", 100)
+        assert db.taxonomy.needs_rebalance("test__coll", current_count=150) is False
+
+    def test_at_2x_triggers_rebalance(self, db: T2Database) -> None:
+        """At 2x growth triggers rebalance."""
+        db.taxonomy.record_discover_count("test__coll", 100)
+        assert db.taxonomy.needs_rebalance("test__coll", current_count=200) is True
+
+    def test_above_2x_triggers_rebalance(self, db: T2Database) -> None:
+        """Above 2x growth triggers rebalance."""
+        db.taxonomy.record_discover_count("test__coll", 100)
+        assert db.taxonomy.needs_rebalance("test__coll", current_count=300) is True
+
+    def test_record_updates_count(self, db: T2Database) -> None:
+        """record_discover_count updates the stored count."""
+        db.taxonomy.record_discover_count("test__coll", 50)
+        assert db.taxonomy.needs_rebalance("test__coll", current_count=80) is False
+        db.taxonomy.record_discover_count("test__coll", 80)
+        assert db.taxonomy.needs_rebalance("test__coll", current_count=160) is True
+
+
+class TestMergeStrategy:
+    """_merge_labels transfers operator labels by centroid similarity."""
+
+    def test_high_similarity_transfers_label(self, db: T2Database) -> None:
+        """Old label transferred when cosine similarity > 0.8."""
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+        # Near-identical centroids (high cosine similarity)
+        old_centroids = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+        old_labels = ["operator-approved-label"]
+        old_review_statuses = ["accepted"]
+        new_centroids = np.array([[0.99, 0.1, 0.0]], dtype=np.float32)
+
+        merged = CatalogTaxonomy._merge_labels(
+            old_centroids, old_labels, old_review_statuses, new_centroids,
+        )
+        assert len(merged) == 1
+        assert merged[0]["label"] == "operator-approved-label"
+        assert merged[0]["review_status"] == "accepted"
+
+    def test_low_similarity_uses_new_label(self, db: T2Database) -> None:
+        """New c-TF-IDF label used when cosine similarity <= 0.8."""
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+        old_centroids = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+        old_labels = ["old-label"]
+        old_review_statuses = ["accepted"]
+        # Orthogonal -> cosine similarity ~0
+        new_centroids = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
+
+        merged = CatalogTaxonomy._merge_labels(
+            old_centroids, old_labels, old_review_statuses, new_centroids,
+        )
+        assert len(merged) == 1
+        assert merged[0]["label"] is None  # caller uses c-TF-IDF
+        assert merged[0]["review_status"] == "pending"
+
+    def test_n1_dedup_highest_wins(self, db: T2Database) -> None:
+        """When two new centroids match the same old centroid, highest similarity wins."""
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+        old_centroids = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+        old_labels = ["shared-label"]
+        old_review_statuses = ["accepted"]
+        # Two new centroids, both close to old but one closer
+        new_centroids = np.array([
+            [0.95, 0.3, 0.0],  # similarity ~0.95
+            [0.85, 0.5, 0.0],  # similarity ~0.86
+        ], dtype=np.float32)
+
+        merged = CatalogTaxonomy._merge_labels(
+            old_centroids, old_labels, old_review_statuses, new_centroids,
+        )
+        assert len(merged) == 2
+        # Only the higher-similarity centroid gets the label
+        labels = [m["label"] for m in merged]
+        assert labels.count("shared-label") == 1
+        assert labels.count(None) == 1
+
+    def test_no_old_centroids(self, db: T2Database) -> None:
+        """With no old centroids, all new centroids get None labels."""
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+        new_centroids = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+        merged = CatalogTaxonomy._merge_labels(
+            np.empty((0, 2), dtype=np.float32), [], [], new_centroids,
+        )
+        assert len(merged) == 2
+        assert all(m["label"] is None for m in merged)
+
+
+class TestManualPreservation:
+    """Manual assignments preserved across re-discovery."""
+
+    @pytest.fixture()
+    def chroma(self) -> chromadb.ClientAPI:
+        return chromadb.EphemeralClient()
+
+    def test_manual_assignments_survive_rebuild(
+        self, db: T2Database, chroma: chromadb.ClientAPI,
+    ) -> None:
+        """Rebuild with merge strategy preserves manual assignments."""
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        # Initial discovery
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        texts_a = [f"machine learning gradient descent {i}" for i in range(30)]
+        texts_b = [f"database query sql index {i}" for i in range(30)]
+        texts = texts_a + texts_b
+        doc_ids = [f"doc-{i}" for i in range(60)]
+        embeddings = np.array(ef(texts), dtype=np.float32)
+
+        count = db.taxonomy.discover_topics(
+            "test__preserve", doc_ids, embeddings, texts, chroma,
+        )
+        assert count >= 2
+
+        # Manually assign a doc and rename a topic
+        topics = db.taxonomy.get_topics()
+        topic = topics[0]
+        db.taxonomy.assign_topic("manual-doc", topic["id"], assigned_by="manual")
+        db.taxonomy.rename_topic(topic["id"], "operator-approved")
+
+        # Rebuild (with merge strategy)
+        new_count = db.taxonomy.rebuild_taxonomy(
+            "test__preserve", doc_ids, embeddings, texts, chroma,
+        )
+        assert new_count >= 2
+
+        # Check that operator label survived via merge strategy
+        new_topics = db.taxonomy.get_topics()
+        new_labels = [t["label"] for t in new_topics]
+        # The operator-approved label should be transferred to the
+        # nearest matching centroid (same data -> high similarity)
+        assert "operator-approved" in new_labels
+
+        # Manual assignment should be preserved
+        rows = db.taxonomy.conn.execute(
+            "SELECT assigned_by FROM topic_assignments WHERE doc_id = 'manual-doc'"
+        ).fetchall()
+        assert len(rows) >= 1
+        assert any(r[0] == "manual" for r in rows)
+
+
+class TestRediscoveryCentroidLifecycle:
+    """Centroid lifecycle: clear before re-upsert on --force."""
+
+    @pytest.fixture()
+    def chroma(self) -> chromadb.ClientAPI:
+        return chromadb.EphemeralClient()
+
+    def test_force_clears_old_centroids(
+        self, db: T2Database, chroma: chromadb.ClientAPI,
+    ) -> None:
+        """rebuild_taxonomy clears old centroids before upserting new."""
+        rng = np.random.default_rng(42)
+        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings[:30, 0] += 3.0
+        embeddings[30:, 1] += 3.0
+        doc_ids = [f"doc-{i}" for i in range(60)]
+        texts = (
+            [f"machine learning neural {i}" for i in range(30)]
+            + [f"database query sql {i}" for i in range(30)]
+        )
+
+        # First discovery
+        db.taxonomy.discover_topics(
+            "test__lifecycle", doc_ids, embeddings, texts, chroma,
+        )
+        centroid_coll = chroma.get_collection(
+            "taxonomy__centroids", embedding_function=None,
+        )
+        first_ids = set(centroid_coll.get()["ids"])
+        assert len(first_ids) >= 2
+
+        # Rebuild (clears old, creates new)
+        db.taxonomy.rebuild_taxonomy(
+            "test__lifecycle", doc_ids, embeddings, texts, chroma,
+        )
+        second_ids = set(centroid_coll.get()["ids"])
+        assert len(second_ids) >= 2
+
+        # Old centroid IDs should be replaced (not accumulated)
+        # The IDs use format "collection:topic_id" — topic_ids change on rebuild
+        # so old IDs should not persist
+        all_ids = centroid_coll.get(
+            where={"collection": "test__lifecycle"},
+        )["ids"]
+        # Count should match number of current topics, not 2x
+        current_topics = [
+            t for t in db.taxonomy.get_topics()
+            if t.get("collection") == "test__lifecycle"
+        ]
+        assert len(all_ids) == len(current_topics)
