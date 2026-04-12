@@ -389,6 +389,17 @@ rdr_skills:
       - "finish RDR"
     dispatches_to: [knowledge-tidier]
 
+  rdr-audit:
+    slash_command: /rdr-audit
+    command_file: commands/rdr-audit.md
+    description: "Audit a project's RDR lifecycle for silent-scope-reduction base rate, or inspect/manage scheduled periodic audits"
+    triggers:
+      - "audit this project"
+      - "run the silent scope reduction audit"
+      - "check base rate on"
+      - "periodic audit"
+    dispatches_to: [deep-research-synthesizer]
+
   rdr-list:
     slash_command: /rdr-list
     command_file: commands/rdr-list.md

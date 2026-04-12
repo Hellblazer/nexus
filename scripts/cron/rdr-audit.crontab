@@ -1,0 +1,22 @@
+# rdr-audit crontab template
+#
+# Before installing:
+#   1. Replace /ABSOLUTE/PATH/TO/nexus with the absolute path to this nexus repo
+#   2. Replace ART with your project name (e.g. ART, nexus)
+#   3. Run: crontab -e
+#   4. Paste the line below (without the leading `#`) and save
+#   5. Verify: crontab -l | grep rdr-audit
+#
+# Schedule: `0 3 1 */3 *` fires at 03:00 on the 1st day of every 3rd month
+# (approximately 90-day cadence — the 1st of January/April/July/October).
+#
+# The shell wrapper (scripts/cron-rdr-audit.sh) rotates logs at 10MB,
+# writes to ~/.local/state/rdr-audit/<PROJECT>.log, and requires PROJECT
+# set in the environment or inline on the crontab line.
+#
+# Anacron note: if the machine is off when the cron fires, the run is
+# skipped for that interval. For laptops or intermittently-online hosts,
+# consider anacron, systemd timers with Persistent=true, or a similar
+# catch-up mechanism.
+
+0 3 1 */3 * PROJECT=ART /ABSOLUTE/PATH/TO/nexus/scripts/cron-rdr-audit.sh

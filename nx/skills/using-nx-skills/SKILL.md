@@ -108,6 +108,7 @@ Plan reuse is opportunistic — the skill functions normally when the plan libra
 
 **RDR lifecycle:** `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-gate` → `/nx:rdr-accept` → `/nx:rdr-close`
 - List: `/nx:rdr-list` | Show: `/nx:rdr-show NNN`
+- Audit the base rate of silent-scope-reduction on a project: `/nx:rdr-audit [project]`
 
 **Git workflow:**
 - Need workspace isolation? → `/nx:git-worktrees`
@@ -168,6 +169,7 @@ Use this table to match tasks to skills. When in doubt, check the skill.
 | rdr-gate | `/nx:rdr-gate` | RDR appears complete; needs structural + assumption + AI critique check |
 | rdr-accept | `/nx:rdr-accept` | Gate returned PASSED; ready to officially accept the RDR |
 | rdr-close | `/nx:rdr-close` | RDR implemented; close with optional post-mortem and bead status advisory |
+| rdr-audit | `/nx:rdr-audit` | Auditing a project's RDR lifecycle for silent-scope-reduction base rate, or inspecting/managing scheduled periodic audits |
 
 ### Git Workflow
 

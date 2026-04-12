@@ -88,7 +88,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-064](rdr-064-nx-console-embedded-web-ui.md) | nx console — Process Monitor for Agentic Nexus | Feature | Draft | 2026-04-10 |
 | [RDR-065](rdr-065-close-time-funnel-hardening.md) | Close-Time Funnel Hardening Against Silent Scope Reduction | Process | Implemented | 2026-04-11 |
 | [RDR-066](rdr-066-composition-smoke-probe-at-coordinator-beads.md) | Composition Smoke Probe at Coordinator Beads | Process | Implemented | 2026-04-11 |
-| [RDR-067](rdr-067-cross-project-rdr-audit-loop.md) | Cross-Project RDR Audit Loop | Process | Draft | 2026-04-11 |
+| [RDR-067](rdr-067-cross-project-rdr-audit-loop.md) | Cross-Project RDR Audit Loop | Process | Implemented | 2026-04-11 |
 | [RDR-068](rdr-068-dimensional-contracts-at-enrichment.md) | Dimensional Contracts at Enrichment | Process | Draft | 2026-04-11 |
 | [RDR-069](rdr-069-automatic-substantive-critic-at-close.md) | Automatic Substantive-Critic at Close | Process | Implemented | 2026-04-11 |
 

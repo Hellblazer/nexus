@@ -192,9 +192,9 @@ Each bead must contain sufficient context for autonomous execution:
 
 
 
-## T3 Persistence (MANDATORY before returning)
+## Persistence (before returning)
 
-You MUST store key architectural decisions to T3 knowledge BEFORE returning. Plans go to T2 memory (per Completion Protocol), but validated decisions belong in T3 so the auto-linker can create catalog links.
+You MUST persist key architectural decisions BEFORE returning — **unless the dispatching relay specifies an alternative storage target** in its Input Artifacts, Deliverable, or Operational Notes section. Plans go to T2 memory by default (per Completion Protocol), and validated decisions go to T3 so the auto-linker can create catalog links. When the relay names an explicit target, honor it instead of these defaults.
 
 ```
 mcp__plugin_nx_nexus__store_put(

@@ -2,13 +2,15 @@
 id: RDR-067
 title: "Cross-Project RDR Audit Loop"
 type: process
-status: draft
+status: closed
 priority: P2
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-10
 reissued: 2026-04-11
-accepted_date:
+accepted_date: 2026-04-11
+closed_date: 2026-04-11
+close_reason: implemented
 related_issues: ["RDR-065", "RDR-066", "RDR-068", "RDR-069"]
 supersedes_scope: "Cross-Project RDR Observability (original 2026-04-10 scope proposed 5 custom structured metrics + collection + skill)"
 ---
@@ -153,16 +155,18 @@ Source: `nexus_rdr/067-research-2-ca3-phase1b-spike-result` (id 743). Live test 
 
 **This verifies CA-3 Option A** (external cron/launchd + `claude -p`) end-to-end: the cron wrapper invokes `claude -p '/nx:rdr-audit <project>'`, the headless session loads the plugin, the audit skill fires, the research-synthesizer subagent dispatches, the audit writes findings to T2 via MCP, and the process exits.
 
-**By extension, CA-3 Options B (CCR `schedule` skill) and C (GitHub Actions) are also capability-verified**: both use the same headless main-thread primitives, just in different environments. The capability bar is "can headless mode do this" — the test answers YES. What differentiates the options is environment (local vs cloud), file access (local vs git-checkout), and MCP setup (local vs connector-reg vs GH-secret), not capability.
+**Headless main-thread capability floor is sufficient for all three options; environmental constraints differentiate them, not raw capability.** The live test established the capability floor: a headless main-thread session can load a plugin, resolve a slash command, execute skill body, and dispatch a subagent via the `Agent` tool. CCR `schedule` skill (Option B) and GitHub Actions `claude-code-action@v1` (Option C) rest on the same primitives, so the capability floor extends there — but **neither environment was actually exercised by the test**. The differentiators are environmental, not capability: (a) **MCP tool availability** — local Claude Code has nx MCP registered by default; CCR needs a user-registered connector at claude.ai/settings/connectors; GH Actions needs a secret-provisioned equivalent. (b) **Local-file access** — the audit reads `~/git/ART/.beads/dolt/ART/`, reachable only from local context; neither B nor C can touch that path. These environmental differentiators — not capability gaps — are why Option A is selected. Options B and C are **structurally ruled out for the full audit scope**, not capability-verified for it. If and when a reduced-scope variant targets git-cloneable-only evidence, the capability floor applies there too, and B or C could be reopened.
 
-**Sub-finding — substantive-critic canonical Verdict block NOT emitted in headless mode**: the subagent returned findings in Significant + Minor sections but did NOT emit the canonical bullet-dash `## Verdict` block that RDR-069 Phase 1/4a introduced. The RDR-069 Step 1.75 close-time gate's canonical-parse path (`- **outcome**:` line grep) would fail against this output; fallback section-counting would be invoked. This is a real finding about RDR-069's gate behavior under headless/CCR contexts — logged as a retro cleanup backlog item against RDR-069, NOT blocking for RDR-067's CA-3 verification.
+**Sub-finding — substantive-critic canonical Verdict block NOT emitted in headless mode (RESOLVED in PR #149, commit c103ece)**: the subagent returned findings in Significant + Minor sections but did NOT emit the canonical bullet-dash `## Verdict` block that RDR-069 Phase 1/4a introduced. The RDR-069 Step 1.75 close-time gate's canonical-parse path (`- **outcome**:` line grep) would have failed against this output; fallback section-counting would have been invoked. **Resolution**: PR #149 strengthened the Output Format directive in `nx/agents/substantive-critic.md` to cover the entire section structure (not just the Verdict block) and explicitly named headless `claude -p`, scheduled remote CCR, and GitHub Actions as invocation contexts the directive applies to. The T2 incident (id 743) is cited in the agent file as a documented precedent to prevent recurrence.
 
 **Bonus — critic surfaced 11 post-close drift findings against RDR-066**: the test dispatch against closed RDR-066 found 5 Significant + 6 Minor cleanup targets. Same retro-cleanup-backlog treatment as the earlier RDR-069 retro pass. Not in scope for this finding.
 
 ### Critical Assumptions
 
 - [ ] **CA-1**: The canonical audit prompt (used on 2026-04-11) generalizes across projects. The prompt was written for ART as the primary target; applying it to another project requires swapping the scope section. If the prompt is too project-specific, each new project requires custom prompting and the skill becomes a template not a tool.
-  — **Status**: Unverified — **Method**: Re-run the audit against a second project (e.g., nexus itself, which has ~24 post-mortems; or a different user project) and measure if the output quality matches
+  — **Status**: Unverified — **Method**: Re-run the audit against a second project (e.g., nexus itself, which has ~24 post-mortems; or a different user project).
+  — **Acceptance criteria** (structurally parallel to CA-2): output MUST contain (a) at least one confirmed incident OR an explicit INCONCLUSIVE verdict with honest sampling caveats, (b) explicit enumeration of what was and wasn't covered, (c) frequency estimate with a confidence level (HIGH / MEDIUM / LOW), (d) drift-category classification for each confirmed incident (unwiring / dim-mismatch / deferred-integration / other). Structural absence of any of (a)–(d) means the prompt is too ART-specific and needs generalization before the skill is production-ready; generalization work is CA-1 remediation, not a skill-level decision.
+  — **Do NOT** require incident-count similarity across projects — projects differ in both base rate and post-mortem inventory; the criterion is structural completeness of the output, not incident-count overlap.
 
 - [ ] **CA-2**: The audit subagent produces **verdict-category-consistent** results on repeated dispatch. Verdict category = frequency tier (0-1 / 2-3 / 4+ incidents) + recommendation (VERIFIED / PARTIALLY VERIFIED / FALSIFIED / INCONCLUSIVE). If two consecutive runs on ART land in different frequency tiers or return different recommendations, the audit is a lottery not a measurement.
   — **Status**: Unverified — **Method**: Run the audit twice in sequence against ART; compare verdict tier and recommendation. **Acceptable variance**: ±1-2 incidents in the confirmed list, same recommendation category. **Do NOT require exact incident-list match** — RDR-069's CA-1 spikes (`nexus_rdr/069-research-2-ca1-ca3-critic-determinism-spike`, `nexus_rdr/069-research-3-ca1-flap-test-rdr067`) showed finding-level determinism is NOT stable for LLM-based subagent dispatches but verdict-category determinism IS stable (n=2 targets, 4/4 runs). The analogous expectation applies here: incident counts will vary ±1-2 but the frequency tier and recommendation should be consistent.
@@ -177,8 +181,8 @@ Source: `nexus_rdr/067-research-2-ca3-phase1b-spike-result` (id 743). Live test 
   — **Rejected**: `bd defer` is bead visibility hygiene only, no trigger/execution hook (Finding 1). Manual runbook does not close Gap 3 structurally.
   — **Future enhancement (out of scope for this RDR)**: wrap cron/launchd install + health-check behind an nx MCP tool — `mcp__plugin_nx_nexus__schedule_audit(project, cadence, machine)` — to centralize the per-machine setup friction across multiple machines. Captured as a possible v2 enhancement if user scale warrants it. v1 ships plain cron/launchd templates.
 
-- [ ] **CA-4**: The `rdr_process` collection template (for project-filed incidents) is rich enough to capture the pattern without being burdensome. Too heavy and projects won't file; too light and filings won't aggregate.
-  — **Status**: Unverified — **Method**: Draft the template; test on a synthetic project filing; refine based on the audit subagent's ability to ingest it
+- [x] **CA-4**: The `rdr_process` collection template (for project-filed incidents) is rich enough to capture the pattern without being burdensome. Too heavy and projects won't file; too light and filings won't aggregate.
+  — **Status**: **VERIFIED 2026-04-11** via Phase 3 (nexus-dqp.6). Template shipped at `nx/resources/rdr_process/INCIDENT-TEMPLATE.md` with 6 frontmatter fields (`project`, `rdr`, `incident_date`, `drift_class`, `caught_by`, `outcome`) + 8 required narrative sections. `drift_class` enum matches the canonical prompt taxonomy exactly so sibling project filings aggregate without translation. Synthetic filing test at `rdr_process/demo-incident-ca4-unwiring` (id 756) verified that filings are parseable via `memory_search` with frontmatter block intact in retrieval preview. Full CA-4 disposition at T2 `nexus_rdr/067-ca4-synthetic-filing` (ttl=0 permanent). Full live-dispatch validation inherited from Phase 1b spike runs (T2 ids 751, 752, 753) which demonstrated `deep-research-synthesizer` correctly parses and classifies rdr_process entries using the same schema the template formalizes.
 
 ## Proposed Solution
 
@@ -186,7 +190,13 @@ Source: `nexus_rdr/067-research-2-ca3-phase1b-spike-result` (id 743). Live test 
 
 Three components:
 
-1. **`nx:rdr-audit` skill**: new skill at `nx/skills/rdr-audit/SKILL.md` that wraps the proven pattern. Takes a project target (defaults to ART; accepts any project name as argument). Dispatches `nx:deep-research-synthesizer` with the canonical prompt (pinned in the skill). Persists result to `rdr_process/audit-<project>-<YYYY-MM-DD>`. Surfaces summary to user.
+1. **`nx:rdr-audit` skill**: new skill at `nx/skills/rdr-audit/SKILL.md` that wraps the proven pattern. **Core audit dispatch** takes a project target (defaults to ART; accepts any project name as argument), dispatches `nx:deep-research-synthesizer` with the canonical prompt (pinned in the skill), persists result to `rdr_process/audit-<project>-<YYYY-MM-DD>`, surfaces summary to user. The skill also exposes **bare-bones management subcommands** so users and agents can inspect and manage scheduling from inside Claude Code without shelling out to OS primitives by hand:
+    - `/nx:rdr-audit list` — list all scheduled audits across projects by parsing `launchctl list | grep rdr-audit` (macOS) or `crontab -l` (Linux). **Read-only.**
+    - `/nx:rdr-audit status <project>` — show next-fire timestamp (from launchd/cron inspection) and last-run outcome (from the most recent `rdr_process/audit-<project>-*` T2 entry). **Read-only.**
+    - `/nx:rdr-audit history <project>` — list the last N audit findings for a project from T2 via `memory_list` + `memory_get`. **Read-only.**
+    - `/nx:rdr-audit schedule <project>` — **print** the platform-specific plist/crontab install commands for the user to review and run manually. Does NOT auto-execute the install (system-level installs are privileged).
+    - `/nx:rdr-audit unschedule <project>` — **print** the uninstall commands for the user to review and run manually. Does NOT auto-execute.
+   The split between **read-only** (list/status/history) and **print-only** (schedule/unschedule) keeps the skill safe to invoke from any session without risk of unauthorized privileged OS changes. The management surface makes the feedback loop inspectable from inside Claude Code — any session (interactive or `claude -p`) can answer "is anything scheduled, and did it fire?" without leaving the agent context.
 
 2. **`rdr_process` collection template**: documented schema for cross-project incident filings. Template at `nx/resources/rdr_process/INCIDENT-TEMPLATE.md`. Projects that encounter the failure mode file entries under `rdr_process/<project>-incident-<slug>` with structured sections: mechanism, files involved, close artifacts, drift class, intervention that caught it (if any), lessons.
 
@@ -199,25 +209,43 @@ Three components:
 ```
 ---
 name: rdr-audit
-description: Audit a project's RDR lifecycle for silent-scope-reduction pattern
+description: Use when auditing a project's RDR lifecycle for silent-scope-reduction frequency, or when inspecting/managing scheduled periodic audits
 ---
 
 ## When to use
-- User invokes `/nx:rdr-audit <project>` (default: current project)
-- Periodic audit reminder fires
+- User invokes `/nx:rdr-audit <project>` (default: current project) — runs the audit
+- Periodic audit reminder fires (launchd/cron invokes `claude -p '/nx:rdr-audit <project>'`)
+- User invokes a management subcommand: `list`, `status`, `history`, `schedule`, `unschedule`
 
 ## Inputs
-- Project name (default: current working directory's project)
-- Optional: time window (default: last 90 days)
-- Optional: pinpoint incident (e.g. a specific RDR ID to audit)
+- First positional argument is either the subcommand OR a project name:
+  - No argument → run audit on current project
+  - `<project>` → run audit on named project
+  - `list` → list scheduled audits (read-only)
+  - `status <project>` → show next-fire + last-run (read-only)
+  - `history <project>` → last N audit findings (read-only)
+  - `schedule <project>` → print install commands (does not execute)
+  - `unschedule <project>` → print uninstall commands (does not execute)
+- Optional (audit mode): time window (default: last 90 days)
+- Optional (audit mode): pinpoint incident (e.g. a specific RDR ID to audit)
 
-## Behavior
-1. Dispatch `nx:deep-research-synthesizer` with the canonical prompt
-2. Wait for result
-3. Parse the incident count and recommendation
-4. Persist full result to `rdr_process/audit-<project>-<date>` via memory_put
-5. Surface summary to user
-6. If INCONCLUSIVE or if a recommendation contradicts a prior audit, flag for user review
+## Behavior — audit dispatch (default mode)
+1. Main-session pre-step: read `~/.claude/projects/*` transcripts relevant to the target project. Transcript mining is not delegatable — subagents cannot access that path efficiently — so the main session gathers excerpts before dispatch.
+2. Dispatch `nx:deep-research-synthesizer` with the canonical prompt + the pre-gathered transcript excerpts
+3. Wait for result
+4. Parse the incident count and recommendation
+5. Persist full result to `rdr_process/audit-<project>-<date>` via memory_put, including a `next_expected_fire` timestamp for health-check use
+6. Surface summary to user
+7. If INCONCLUSIVE or if a recommendation contradicts a prior audit, flag for user review
+
+## Behavior — management subcommands (bare bones)
+- `list`: shell out to `launchctl list | grep rdr-audit` (macOS) and `crontab -l 2>/dev/null | grep rdr-audit` (Linux); format the combined output as a table (`project | platform | schedule | next-fire`). Read-only.
+- `status <project>`: parse `launchctl print` (macOS) or the matching crontab line (Linux) to extract next-fire; read the most recent `rdr_process/audit-<project>-*` entry via memory_get to extract last-run outcome; display both side-by-side. Read-only.
+- `history <project>`: enumerate `rdr_process/audit-<project>-*` via `memory_list`; fetch the most recent N (default 5) via `memory_get`; display title, date, and outcome summary for each. Read-only.
+- `schedule <project>`: render the platform-specific plist (macOS) or crontab line (Linux) with `<project>` substituted, and print to the user together with the `launchctl load` / `crontab -e` install instructions. Does NOT execute the install. The user reviews and runs the commands manually.
+- `unschedule <project>`: print the uninstall commands (`launchctl unload ~/Library/LaunchAgents/com.nexus.rdr-audit.<project>.plist` + `rm ...`, or Linux `crontab -e` instructions). Does NOT execute.
+
+The read-only subcommands are safe to invoke from any session (interactive, `claude -p`, CCR). The print-only subcommands never touch privileged system state directly — system-level installs are privileged actions the user must authorize.
 ```
 
 **Collection template shape** (`nx/resources/rdr_process/INCIDENT-TEMPLATE.md`):
@@ -278,7 +306,7 @@ Linux cron equivalent:
 0 3 1 */3 * /usr/local/bin/claude -p '/nx:rdr-audit ART' >> ~/.local/state/rdr-audit-ART.log 2>&1
 ```
 
-The local Claude Code context fires the audit skill with full nx MCP tool access (T2 memory_put for the audit finding record) and full local file access (including `~/git/ART/.beads/dolt/ART/` where the ART bead Dolt archive lives). Audit output lands in T2 as `rdr_process/audit-<project>-<date>` and console output goes to the log file. **Secondary (constrained variant)** if per-machine cron friction is unacceptable: the Claude Code harness `schedule` skill runs a reduced-scope audit against git-cloneable sources only (no local Dolt archive), writing findings as committed markdown PRs on the nexus repo instead of T2. The secondary is not a drop-in replacement — see Finding 3 for the constraint analysis. **Rejected**: `bd defer` is not a scheduling mechanism. Phase 1b end-to-end spike is optional (code-analytic findings already establish primary viability) and documented in the Implementation Plan Phase 4.
+The local Claude Code context fires the audit skill with full nx MCP tool access (T2 memory_put for the audit finding record) and full local file access (including `~/git/ART/.beads/dolt/ART/` where the ART bead Dolt archive lives). Audit output lands in T2 as `rdr_process/audit-<project>-<date>` and console output goes to the log file. **Secondary (constrained variant)** if per-machine cron friction is unacceptable: the Claude Code harness `schedule` skill runs a reduced-scope audit against git-cloneable sources only (no local Dolt archive), writing findings as committed markdown PRs on the nexus repo instead of T2. The secondary is not a drop-in replacement — see Findings 3 + 4 for the constraint analysis. **Rejected**: `bd defer` is not a scheduling mechanism. **Phase 1b end-to-end spike DONE 2026-04-11** — Finding 4 executed the spike live; CA-3 VERIFIED (T2 id 743).
 
 ### Alternatives Considered
 
@@ -369,10 +397,17 @@ Run `/nx:rdr-audit ART` via the new skill and produce a result that matches (wit
 
 ### Phase 2: `nx:rdr-audit` skill
 
-- Create `nx/skills/rdr-audit/SKILL.md` with the pinned canonical prompt
-- Dispatch mechanism: skill body dispatches `nx:deep-research-synthesizer` and handles the result
-- Persistence: write full audit to `rdr_process/audit-<project>-<date>`; summary to user
-- Test: run `/nx:rdr-audit ART` and compare to the 2026-04-11 manual audit
+- Create `nx/skills/rdr-audit/SKILL.md` with the pinned canonical prompt and subcommand dispatch
+- **Core audit dispatch**: main-session pre-step reads `~/.claude/projects/*` transcripts for the target project (transcript mining is not delegatable — subagents cannot access that path efficiently); then skill body dispatches `nx:deep-research-synthesizer` with the canonical prompt + gathered excerpts and handles the result
+- **Persistence**: write full audit to `rdr_process/audit-<project>-<date>` with `next_expected_fire` timestamp; summary to user
+- **Management subcommands (bare bones)**: implement subcommand dispatch for `list` / `status` / `history` / `schedule` / `unschedule`. Read-only subcommands shell out to `launchctl list` / `crontab -l` + T2 `memory_list` / `memory_get`. Print-only subcommands (`schedule` / `unschedule`) render platform-specific install/uninstall commands for the user to review and run. **No auto-execution of privileged OS changes** — system-level installs are always the user's explicit step.
+- **Tests**:
+  - Run `/nx:rdr-audit ART` and compare to the 2026-04-11 manual audit (MVV)
+  - Run `/nx:rdr-audit list` with at least one audit scheduled → output table includes that entry
+  - Run `/nx:rdr-audit status ART` → shows next-fire + last-run
+  - Run `/nx:rdr-audit history ART` → shows the 2026-04-11 audit
+  - Run `/nx:rdr-audit schedule ART` → prints plist/crontab with correct project substitution
+  - Run `/nx:rdr-audit unschedule ART` → prints uninstall commands (verify nothing is actually unloaded)
 
 ### Phase 3: Collection template
 
@@ -382,21 +417,21 @@ Run `/nx:rdr-audit ART` via the new skill and produce a result that matches (wit
 
 ### Phase 4: Scheduling
 
-- **CA-3 resolved code-analytically** (Research Findings 1 + 3, T2 ids 742 and TBD) — external cron/launchd is the primary mechanism; `schedule` skill is a constrained-scope secondary; `bd defer` is rejected.
+- **CA-3 VERIFIED** (Research Findings 3 + 4, T2 ids 742 + 743) — Finding 4 executed the Phase 1b end-to-end spike live. External cron/launchd is the primary mechanism; the `schedule` skill is a constrained-scope secondary; `bd defer` is rejected as not-a-mechanism.
 - **Phase 4 scope (minimal)**: ship a shell wrapper `scripts/cron-rdr-audit.sh` that invokes `claude -p '/nx:rdr-audit <project>'` with a `PROJECT` environment variable, and document the per-platform setup:
   - **macOS**: ship a launchd plist template at `scripts/launchd/com.nexus.rdr-audit.PROJECT.plist` with 90-day `StartCalendarInterval` and log-file output paths. User customizes `PROJECT` and runs `launchctl load ~/Library/LaunchAgents/com.nexus.rdr-audit.ART.plist` once.
   - **Linux**: ship a crontab line template in `scripts/cron/rdr-audit.crontab` commented with install instructions.
   - **Windows**: optional — Task Scheduler equivalent. Document only if a user asks.
-- Ship a helper subcommand `/nx:rdr-audit schedule <project>` that prints the platform-specific installation commands + the plist/crontab contents, so users don't have to edit system files by hand. The helper does NOT install them automatically (system-level install is a privileged action the user should authorize explicitly).
-- **Phase 1b end-to-end spike** (optional, ~15 min): write the shell wrapper, create a near-term launchd/cron entry, verify it fires and the audit finding lands in T2. Not gating — code-analytic findings from the `schedule` skill documentation (Finding 3) already establish that external cron is the only mechanism that satisfies the audit's local-file and local-MCP requirements.
+- The `/nx:rdr-audit schedule <project>` **management subcommand** (defined in Phase 2's skill scope) handles the print-the-install-commands step — users run the commands manually. System-level installs are never auto-executed.
+- **Phase 1b end-to-end spike DONE 2026-04-11** (Finding 4, T2 id 743): headless `claude -p` invocation verified plugin loading, slash command resolution, skill body execution, and `Agent`-tool subagent dispatch end-to-end. CA-3 VERIFIED. No further spike work needed before Phase 2 starts.
 - **Secondary (deferred to follow-on RDR)**: investigate whether the `schedule` skill's constrained-scope variant can be made useful for a reduced audit pattern that uses only git-cloneable sources. Pre-requisite: a user-registered nx MCP connector at claude.ai/settings/connectors. Not part of RDR-067's primary scope.
 
 ### Phase 5: Plugin release + recursive self-validation
 
 - Version bump + reinstall
-- **6a**: run the audit skill on ART; verify output matches manual baseline
-- **6b**: substantive-critic on this RDR
-- **6c**: real self-close of RDR-067 via new close flow
+- **5a**: run the audit skill on ART; verify output matches manual baseline (MVV)
+- **5b**: substantive-critic on this RDR (via `/nx:rdr-close` Step 1.75 close-time gate)
+- **5c**: real self-close of RDR-067 via the close flow
 
 ### Day 2 Operations
 
@@ -408,11 +443,18 @@ Run `/nx:rdr-audit ART` via the new skill and produce a result that matches (wit
 
 ## Test Plan
 
-- **Scenario 1**: `/nx:rdr-audit ART` — matches manual baseline (±1 incident) with same VERIFIED recommendation
-- **Scenario 2**: `/nx:rdr-audit nexus` — CA-1 generalization test
-- **Scenario 3**: `/nx:rdr-audit ART` run twice in a row — CA-2 consistency test
-- **Scenario 4**: file a synthetic incident using the INCIDENT-TEMPLATE — verify it appears in the next audit
+- **Scenario 1**: `/nx:rdr-audit ART` — matches manual baseline (±1 incident) with same VERIFIED recommendation (CA-1 seeding run)
+- **Scenario 2**: `/nx:rdr-audit nexus` — CA-1 generalization test; verdict must satisfy acceptance criteria (a)–(d) from CA-1
+- **Scenario 3**: `/nx:rdr-audit ART` run twice in a row — CA-2 consistency test (±1-2 incident variance, same recommendation tier)
+- **Scenario 4**: file a synthetic incident using the INCIDENT-TEMPLATE — verify it appears in the next audit (CA-4)
 - **Scenario 5**: launchd/cron test entry fires — install a near-term launchd plist (or Linux cron line) that invokes `claude -p '/nx:rdr-audit ART'`, wait for it to fire, verify the audit runs to completion, verify the finding lands in T2 as `rdr_process/audit-ART-<date>`, inspect the log file for any errors. Unload the test entry after verification. Expected latency window: ~3-5 minutes end-to-end including audit subagent dispatch.
+- **Scenario 6** (management subcommands): with at least one schedule active, run in sequence:
+  - `/nx:rdr-audit list` → output table includes the active entry
+  - `/nx:rdr-audit status ART` → shows next-fire timestamp + last-run outcome
+  - `/nx:rdr-audit history ART` → shows recent audit findings including the 2026-04-11 baseline
+  - `/nx:rdr-audit schedule ART` → prints plist/crontab with correct project substitution (verify no OS-level install side-effect)
+  - `/nx:rdr-audit unschedule ART` → prints uninstall commands (verify nothing is actually unloaded)
+  - Read-only subcommands (`list`/`status`/`history`) must not alter OS or T2 state; print-only subcommands (`schedule`/`unschedule`) must not execute privileged installs.
 
 ## Validation
 
@@ -432,7 +474,7 @@ No contradictions with RDRs 065, 066, 068, 069. The audit loop is the feedback l
 
 ### Assumption Verification
 
-CA-1 through CA-4 verified in Phase 1 spike and Phase 4 investigation.
+CA-3 verified **pre-gate** via Finding 4 (T2 id 743) — the Phase 1b end-to-end spike was executed 2026-04-11. CA-1 and CA-2 are to be verified in **Phase 1 spike** (canonical prompt extraction + ART/nexus cross-project runs, with CA-1's structural acceptance criteria (a)–(d) and CA-2's ±1-2 incident variance rule). CA-4 is to be verified in **Phase 3** (draft template + test on synthetic filing).
 
 ### Scope Verification
 
@@ -469,4 +511,18 @@ Right-sized. One skill, one template, one scheduling integration. No new infrast
 - 2026-04-11 — **Reissued with new scope** based on the nexus historical audit. The 2026-04-11 audit proved a single subagent dispatch produces equivalent information to all 5 custom metrics with LLM-quality classification that regex-based metrics cannot achieve. The old scope proposed a 10x-effort reinvention of a cheaper proven thing. New scope: wrap the proven pattern as a skill + document the rdr_process collection + schedule periodic audits. Priority stays P2 — this is the feedback loop without which Phases 0-1 ship blind. See `rdr_process/nexus-audit-2026-04-11` for evidence and bead `nexus-640` for the 4-RDR cycle.
 - 2026-04-11 — **Critic-driven fixes** from the RDR-069 CA-1 flap-test spike (`nexus_rdr/069-research-3-ca1-flap-test-rdr067`). Two runs of `nx:substantive-critic` against this RDR surfaced real issues. Stable findings both runs agreed on were addressed here: (a) CA-2 spec rewritten to measure verdict-category consistency (±1-2 incident variance) instead of exact incident-list match, cross-referencing RDR-069's finding-vs-verdict distinction; (b) CA-3 scheduling candidates extended to include the nexus `schedule` skill as a second candidate before the manual-runbook last resort, with explicit branching to a follow-on RDR if all candidates fail. Single-run findings also applied: (c) the "single dispatch" claim clarified — the 2026-04-11 proof-of-concept combined subagent dispatch for post-mortem analysis with main-session transcript mining; the skill must specify what's delegated vs. main-session; (d) causal vs. correlational framing made honest — the audit measures frequency, not causal effectiveness. Bead: nexus-sia.
 - 2026-04-11 — **Research Finding 1 / CA-3 scheduling mechanism survey**. Code-analytic inspection of `bd defer --help` confirmed it is NOT a scheduling mechanism — bead visibility hygiene only, no trigger/execution hook. Intermediate conclusion (later refined): the `schedule` skill was initially ranked primary. T2: `nexus_rdr/067-research-1-ca3-scheduling-mechanism-survey` (id 742).
+- 2026-04-11 — **Research Finding 4 / CA-3 Phase 1b end-to-end spike — VERIFIED**. Live `claude -p --max-budget-usd 1.00 '/nx:substantive-critique 066'` test in a fresh headless main-thread session confirmed: plugin loads, slash command resolves, skill body executes, `Agent`-tool subagent dispatch works end-to-end. External cron/launchd + local `claude -p` selected as primary mechanism (Option A); `schedule` skill and GitHub Actions reclassified as structurally ruled out for the full audit scope (no local-file access to ART Dolt archive; no nx MCP without connector registration). CA-3 marked VERIFIED. Sub-finding: substantive-critic did NOT emit the canonical Verdict block in headless mode — retro-cleanup item filed. T2: `nexus_rdr/067-research-2-ca3-phase1b-spike-result` (id 743). See `research/rdr-067-ca3-spike` branch / PR #150.
+- 2026-04-11 — **Gate PASSED + drift cleanup + management surface added**. `/nx:rdr-gate 067` result: Layer 1 PASS, Layer 2 PASS, Layer 3 partial (0 Critical, 2 Significant, 5 Observations) — T2 `nexus_rdr/067-gate-latest` (id 744). This pass addresses:
+  - **SIG-1**: Finding 4 "by extension verifies Options B and C" reframed as "headless main-thread capability floor sufficient for all three options; environmental constraints (MCP access, local-file access) differentiate them, not raw capability." Options B and C clearly labeled as structurally ruled out for the full audit, not capability-verified for it.
+  - **SIG-2**: CA-1 sharpened with structural acceptance criteria (a)–(d) parallel to CA-2 (at-least-one-confirmed-incident-or-INCONCLUSIVE, sampling caveats enumeration, frequency-estimate-with-confidence, drift-category per incident). Explicit note that incident-count similarity across projects is NOT required.
+  - **OBS-1**: Phase 4 citation "T2 ids 742 and TBD / Research Findings 1 + 3" corrected to "T2 ids 742 + 743 / Research Findings 3 + 4."
+  - **OBS-2**: Phase 5 subsection labels 6a / 6b / 6c corrected to 5a / 5b / 5c.
+  - **OBS-3**: "Phase 1b end-to-end spike is optional" language in §Technical Design + §Implementation Plan Phase 4 converted to past-tense "DONE 2026-04-11 (Finding 4, T2 id 743)."
+  - **OBS-4**: §Finalization Gate §Assumption Verification reframed to distinguish CA-3 pre-gate verified from CA-1 / CA-2 (Phase 1 spike) and CA-4 (Phase 3).
+  - **OBS-5**: Finding 4 sub-finding "retro cleanup backlog item" updated to "RESOLVED in PR #149 commit c103ece" — the Output Format directive was strengthened and explicitly names headless / CCR / GH Actions contexts.
+  - **NEW scope (folded into Phase 2)**: bare-bones management surface for the audit skill — `list` / `status` / `history` (read-only) + `schedule` / `unschedule` (print-only). Wraps host OS primitives (`launchctl list`, `crontab -l`) and T2 `memory_list` / `memory_get` so users and agents can inspect scheduling state from inside Claude Code without shelling out by hand. Closes the "is anything scheduled, and did it fire?" observability gap that Phase 4's OS-level install templates otherwise left open. Bead: `nexus-gate-067-cleanup`.
 - 2026-04-11 — **Research Finding 4 / CA-3 Phase 1b spike + option A selection**. Live `claude -p` test verified headless mode supports plugin slash-command invocation + subagent dispatch end-to-end. Further analysis of the `schedule` skill revealed structural constraints (no MCP connectors attached, remote agents cannot access local files like `~/git/ART/.beads/dolt/ART/`, minimum 1h interval, triggers cannot be deleted programmatically) that make it unsuitable as primary for RDR-067's full audit scope. **Option A selected as primary**: external cron/launchd + `claude -p '/nx:rdr-audit <project>'` shell wrapper running in the user's local context with full MCP + local file access. Secondary candidates retained for future scope expansion (CCR `schedule` skill for constrained remote-only audits; GitHub Actions `anthropics/claude-code-action@v1` for CI-triggered audits). Future enhancement noted: wrap cron/launchd install + health-check behind an nx MCP tool (`mcp__plugin_nx_nexus__schedule_audit`) if per-machine friction becomes painful across a multi-machine user base — not in scope for v1. RDR sections updated to reflect option A as primary: CA-3, §Problem Statement Gap 3, §Context, §Proposed Solution, §Technical Design Scheduling (with launchd plist + crontab examples), §Existing Infrastructure Audit, §Trade-offs §Consequences, §Failure Modes (launchd/cron failure modes instead of schedule-skill modes), §Implementation Plan Phase 4 (shell wrapper + per-platform templates instead of CronCreate invocation), §Day 2 Operations, §Test Plan Scenario 5. CA-3 disposition upgraded from unverified to **VERIFIED**. Sub-findings from the spike: substantive-critic canonical Verdict block is NOT emitted in headless `claude -p` mode (retro backlog for RDR-069); the spike's test dispatch against closed RDR-066 surfaced 11 post-close drift findings (retro backlog for RDR-066). Both sub-findings are logged as retro cleanup targets, not blocking for RDR-067 CA-3 verification. T2: `nexus_rdr/067-research-2-ca3-phase1b-spike-result` (id 743).
+
+- 2026-04-11 — **Phase 5a MVV + portability rewrite (post-gate scope addition)**. The Phase 5a MVV first dispatch mis-resolved `ART` → `arcaneum` because the canonical prompt's original `~/git/{project}/docs/rdr/post-mortem/*.md` template was interpreted as a relative path in the subagent context, dropping the `~/git/` prefix and resolving against the main session's CWD. The retry with explicit absolute paths succeeded cleanly: VERIFIED / HIGH / 3 incidents / unwiring-dominant against the 4-incident baseline (Δ=1, within CA-2 ±1-2 bound; {073,075,036} overlap with baseline {073,075,036,031}; drift-category reclassification on RDR-073 from `dim-mismatch` to `unwiring` consistent with RDR-069 finding-level variance precedent). **Post-gate portability rewrite applied** to prevent the path-resolution bug from recurring: the skill body now resolves an absolute `{project_path}` via a new precedence chain (explicit absolute path arg → `NEXUS_PROJECT_ROOTS` env var → default candidate roots `$HOME/git`/`$HOME/src`/`$HOME/projects`/`$HOME/code`/`$HOME/work`/`$HOME/dev`/`$HOME/Documents/git` — none authoritative, all common conventions → unresolved fallback skipping file-based layer). The canonical prompt at T2 `nexus_rdr/067-canonical-prompt-v1` was upserted to v1.1 with `{project_path}` as a new substitution parameter replacing `~/git/{project}/` throughout the §Scope section, plus an explicit `## IMPORTANT — path handling` warning and a sanity-check instruction ("if your results contain files from a project other than `{project}`, STOP"). This is a **material post-gate scope addition** documented here per the silent-scope-reduction prevention principle the RDR itself formalizes. Root-cause investigation + fix disposition at T2 `nexus_active/rdr067-persistence-root-cause-fix` (id 758). Drift bead `nexus-cwm` opened and closed in the same session once the fix was applied. **MVV comparison** at T2 `nexus_rdr/067-phase5a-mvv-comparison` (permanent, ttl=0).
+
+- 2026-04-11 — **Research-class agent persistence softening (post-gate scope addition, side-effect fix)**. Phase 1b spike disposition originally framed the "subagents do not reliably self-persist" finding as an instruction-compliance issue (0/3 deep-research-synthesizer runs called `memory_put` despite explicit relay instructions). Follow-up investigation during Phase 5a root-caused the actual cause: `nx/agents/deep-research-synthesizer.md` had a hardcoded "MUST store your research findings to T3 knowledge BEFORE returning" primary directive + a `<HARD-GATE>` enforcement block, both keyed to `store_put(collection="knowledge")`. The agent was correctly following its trained T3 pattern; the Phase 1b spike dispatches landed in T3 as `rdr067-audit-run1-*` instead of the requested T2 target. Five sibling research-class agents (`deep-analyst`, `codebase-deep-analyzer`, `architect-planner`, `debugger`, `strategic-planner`) had identical hardcoded T3 mandates. **Softening applied** to all 6 agents: primary directive and HARD-GATE blocks rewritten to "MUST persist ... unless the dispatching relay specifies an alternative storage target in its Input Artifacts, Deliverable, or Operational Notes". Default behavior (T3 via `store_put` for generic `/nx:research`-style dispatches) is preserved; dispatching skills like `nx:rdr-audit` can now redirect findings to T2 without fighting the agents' trained pattern. Phase 5a MVV dispatches confirmed the softening works — both the first (mis-scoped) and retry dispatches used `memory_put` to T2, neither called `store_put` to T3. This is a **material post-gate scope addition** documented here per the same principle as the portability rewrite above. Not in the original RDR-067 Technical Design, but a necessary side-effect fix without which the `nx:rdr-audit` skill's persistence-ownership invariant would be redundant with (not complementary to) a conflicting agent directive. Full investigation at T2 `nexus_active/rdr067-persistence-root-cause-fix` (id 758). Files changed: `nx/agents/deep-research-synthesizer.md`, `nx/agents/deep-analyst.md`, `nx/agents/codebase-deep-analyzer.md`, `nx/agents/architect-planner.md`, `nx/agents/debugger.md`, `nx/agents/strategic-planner.md`.

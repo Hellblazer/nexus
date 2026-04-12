@@ -6,6 +6,61 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.0] - 2026-04-11
+
+Plugin release: RDR-067 (Cross-Project RDR Audit Loop) Phase 2 of the
+4-RDR silent-scope-reduction remediation. Ships the `nx:rdr-audit`
+skill + management subcommands, cross-project incident template,
+scheduling asset templates, and softens six research-class agents to
+honor relay-specified storage targets.
+
+### Added
+
+- **`skills/rdr-audit/SKILL.md`** new skill: wraps the RDR-067 canonical
+  audit prompt (T2-pinned at `nexus_rdr/067-canonical-prompt-v1`) as a
+  one-command feedback loop. Dispatches `deep-research-synthesizer`
+  with the substituted prompt, parses the verdict (VERIFIED /
+  PARTIALLY VERIFIED / INCONCLUSIVE / FALSIFIED), and persists findings
+  to T2 `rdr_process/audit-<project>-<date>`. Phase 2a invariants:
+  transcript mining is non-delegatable to subagents (main session must
+  pre-gather before dispatch); skill body owns `memory_put` persistence;
+  current-project derivation via `git remote` → pwd → user-prompt
+  precedence chain.
+- **Management subcommands** on `rdr-audit`: `list` / `status` /
+  `history` / `schedule` / `unschedule` with explicit read-only vs
+  print-only safety split. Read-only commands shell out to
+  `launchctl list` / `crontab -l` / `memory_search` / `memory_get` only
+  with zero state mutation. Print-only commands render platform install
+  templates for user review — they never execute `launchctl load`,
+  `launchctl unload`, plist file writes, or crontab edits.
+- **`commands/rdr-audit.md`** slash command with project-name
+  derivation, evidence pre-scoping (worktree + transcript directory
+  detection), and subcommand safety classification.
+- **`resources/rdr_process/INCIDENT-TEMPLATE.md`** cross-project
+  incident filing template: 6 frontmatter fields + 8 narrative
+  sections. `drift_class` enum (`unwiring` / `dim-mismatch` /
+  `deferred-integration` / `other`) exactly matches the canonical
+  audit prompt's sub-pattern taxonomy so sibling project filings
+  aggregate without translation.
+- **Scheduling templates** (`scripts/cron-rdr-audit.sh` + plist + crontab
+  + READMEs) for periodic 90-day audits via local cron/launchd.
+- **Tests**: `tests/test_rdr_audit_skill.py` (46 tests),
+  `tests/test_rdr_audit_scheduling.py` (29 tests),
+  `tests/test_rdr_audit_incident_template.py` (16 tests).
+
+### Changed
+
+- **Research-class agent persistence directives softened to honor relay
+  targets.** Six agents (`deep-research-synthesizer`, `deep-analyst`,
+  `codebase-deep-analyzer`, `architect-planner`, `debugger`,
+  `strategic-planner`) previously enforced "MUST store to T3 via
+  `store_put` BEFORE returning" via primary directive + `<HARD-GATE>`
+  block. Now: "MUST persist ... unless the dispatching relay specifies
+  an alternative storage target (T2 `memory_put` or T1 `scratch`) in
+  Input Artifacts, Deliverable, or Operational Notes". Default to T3
+  when the relay is silent (preserves auto-linker + catalog graph
+  behavior for `/nx:research`, `/nx:deep-analysis`, etc.).
+
 ## [3.8.5] - 2026-04-11
 
 Plugin release: RDR-066 (Composition Smoke Probe at Coordinator Beads)
