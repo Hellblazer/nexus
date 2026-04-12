@@ -331,6 +331,16 @@ class CatalogTaxonomy:
 
         return [_build_node(r, 0) for r in roots]
 
+    def get_doc_ids_for_topic(self, label: str) -> list[str]:
+        """Return doc_ids assigned to the topic with the given label."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT ta.doc_id FROM topic_assignments ta "
+                "JOIN topics t ON t.id = ta.topic_id WHERE t.label = ?",
+                (label,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
     def get_assignments_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
         """Return {doc_id: topic_id} for docs that have topic assignments."""
         if not doc_ids:

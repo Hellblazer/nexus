@@ -360,3 +360,64 @@ class TestTopicGrouping:
         for r in results:
             assert "_cluster_label" not in r.metadata
             assert "_topic_label" not in r.metadata
+
+
+class TestTopicScopedSearch:
+    """topic= parameter pre-filters search to documents in a specific topic."""
+
+    def _make_taxonomy(self, topic_docs: dict[str, list[str]]):
+        """Create a fake taxonomy where label→[doc_ids]."""
+        tax = MagicMock()
+
+        def fake_get_doc_ids(label):
+            return topic_docs.get(label, [])
+
+        tax.get_doc_ids_for_topic = fake_get_doc_ids
+
+        def fake_get_assignments(doc_ids):
+            result = {}
+            for label, ids in topic_docs.items():
+                for did in doc_ids:
+                    if did in ids:
+                        result[did] = hash(label) % 1000
+            return result
+
+        tax.get_assignments_for_docs = fake_get_assignments
+        tax.get_topics = lambda **kw: []
+        return tax
+
+    def test_topic_prefilter_narrows_results(self) -> None:
+        """Only results matching the topic's doc_ids are returned."""
+        all_results = _low_distance_results("code__test", 10)
+        t3 = _FakeT3({"code__test": all_results})
+        # Only first 3 docs in the topic
+        tax = self._make_taxonomy({"http handlers": ["code__test-0", "code__test-1", "code__test-2"]})
+
+        results = search_cross_corpus(
+            "q", ["code__test"], 10, t3,
+            cluster_by=None, taxonomy=tax,
+            topic="http handlers",
+        )
+        assert len(results) == 3
+        assert {r.id for r in results} == {"code__test-0", "code__test-1", "code__test-2"}
+
+    def test_topic_not_found_returns_empty(self) -> None:
+        """Non-existent topic returns empty results."""
+        t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
+        tax = self._make_taxonomy({})
+
+        results = search_cross_corpus(
+            "q", ["code__test"], 10, t3,
+            cluster_by=None, taxonomy=tax,
+            topic="nonexistent",
+        )
+        assert results == []
+
+    def test_topic_none_does_not_filter(self) -> None:
+        """topic=None (default) returns all results."""
+        t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
+        results = search_cross_corpus(
+            "q", ["code__test"], 10, t3,
+            cluster_by=None, topic=None,
+        )
+        assert len(results) == 5

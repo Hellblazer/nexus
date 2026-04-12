@@ -159,6 +159,7 @@ def search_cross_corpus(
     catalog: Any | None = None,
     link_boost: bool = False,
     taxonomy: Any | None = None,
+    topic: str | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -184,6 +185,23 @@ def search_cross_corpus(
     cfg_cluster = cfg.get("search", {}).get("cluster_by")
     if cfg_cluster is not None:
         cluster_by = cfg_cluster
+
+    # Topic pre-filter (RDR-070, nexus-u2a): restrict to docs in a topic
+    topic_doc_ids: set[str] | None = None
+    if topic and taxonomy is not None:
+        try:
+            ids = taxonomy.get_doc_ids_for_topic(topic)
+            if not ids:
+                _log.info("topic_not_found", topic=topic)
+                return []
+            if len(ids) <= _MAX_PREFILTER_IDS:
+                topic_doc_ids = set(ids)
+            else:
+                # Too many — post-filter after search
+                topic_doc_ids = set(ids)
+                _log.debug("topic_prefilter_post_filter", topic=topic, n_ids=len(ids))
+        except Exception:
+            _log.debug("topic_prefilter_failed", exc_info=True)
 
     # Thresholds are calibrated for Voyage AI embeddings.
     # Skip filtering when Voyage is not in use (local mode, test injection).
@@ -229,6 +247,10 @@ def search_cross_corpus(
                 dropped=dropped,
                 threshold=threshold,
             )
+
+    # Topic post-filter: keep only results in the requested topic
+    if topic_doc_ids is not None:
+        all_results = [r for r in all_results if r.id in topic_doc_ids]
 
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:

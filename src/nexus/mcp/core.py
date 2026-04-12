@@ -52,6 +52,7 @@ def search(
     offset: int = 0,
     where: str = "",
     cluster_by: str = "",
+    topic: str = "",
 ) -> str:
     """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
 
@@ -61,7 +62,8 @@ def search(
         limit: Page size (default 10)
         offset: Skip N results for pagination (default 0)
         where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
-        cluster_by: "semantic" for Ward hierarchical clustering, empty for flat ranked list
+        cluster_by: "semantic" for topic/Ward clustering (default), empty to disable
+        topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
     """
     try:
         from nexus.search_engine import search_cross_corpus
@@ -89,11 +91,19 @@ def search(
         # Fetch enough to fill the requested page
         fetch_n = offset + limit
         clustered = bool(cluster_by)
+        # Topic-scoped search (RDR-070): pass taxonomy for pre-filtering
+        taxonomy = None
+        if topic:
+            from nexus.db.t2 import T2Database
+            from nexus.mcp_infra import default_db_path
+            taxonomy = T2Database(default_db_path()).taxonomy
         results = search_cross_corpus(
             query, target, n_results=fetch_n, t3=t3, where=where_dict,
             cluster_by=cluster_by or None,
             catalog=_get_catalog(),
             link_boost=False,
+            taxonomy=taxonomy,
+            topic=topic or None,
         )
         # Only sort by distance for flat (non-clustered) results.
         # Clustered results arrive in cluster-grouped order from search_engine.
