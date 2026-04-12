@@ -181,3 +181,127 @@ def rebuild_cmd(collection: str) -> None:
             collection, db.taxonomy, t3._client, force=True,
         )
     click.echo(f"Rebuilt {count} topics for collection {collection!r}.")
+
+
+# ── Review command (RDR-070, nexus-lbu) ─────────────────────────────────────
+
+
+def _resolve_doc_titles(doc_ids: list[str]) -> list[str]:
+    """Resolve doc_ids to human-readable titles via catalog, fallback to raw ID."""
+    try:
+        from nexus.catalog.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return doc_ids
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        titles: list[str] = []
+        for doc_id in doc_ids:
+            results = cat.search(doc_id)
+            if results:
+                titles.append(results[0].get("title", doc_id))
+            else:
+                titles.append(doc_id)
+        return titles
+    except Exception:
+        return doc_ids
+
+
+def _display_topic(
+    topic: dict[str, Any],
+    index: int,
+    total: int,
+    taxonomy: "CatalogTaxonomy",
+) -> None:
+    """Display a single topic for review."""
+    import json
+
+    click.echo(f"\n{'─' * 60}")
+    click.echo(f"  [{index}/{total}]  {topic['label']}  ({topic['doc_count']} docs)")
+
+    # c-TF-IDF terms
+    if topic.get("terms"):
+        try:
+            terms = json.loads(topic["terms"])
+            click.echo(f"  Terms: {', '.join(terms)}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Representative docs
+    doc_ids = taxonomy.get_topic_doc_ids(topic["id"], limit=3)
+    if doc_ids:
+        titles = _resolve_doc_titles(doc_ids)
+        click.echo("  Docs:")
+        for title in titles:
+            click.echo(f"    - {title}")
+
+    click.echo(f"{'─' * 60}")
+
+
+def _show_merge_targets(
+    current_id: int,
+    collection: str,
+    taxonomy: "CatalogTaxonomy",
+) -> None:
+    """Show other topics in the same collection as merge targets."""
+    topics = taxonomy.get_topics()
+    targets = [t for t in topics if t["id"] != current_id and t.get("collection") == collection]
+    if not targets:
+        click.echo("  No other topics to merge into.")
+        return
+    click.echo("  Available merge targets:")
+    for t in targets:
+        click.echo(f"    [{t['id']}] {t['label']} ({t['doc_count']} docs)")
+
+
+@taxonomy.command("review")
+@click.option("--collection", "-c", default="", help="Filter by collection")
+@click.option("--limit", "-n", default=15, type=int, help="Topics per session", show_default=True)
+def review_cmd(collection: str, limit: int) -> None:
+    """Interactive topic review — accept, rename, merge, delete, or skip."""
+    with T2Database(_default_db_path()) as db:
+        topics = db.taxonomy.get_unreviewed_topics(collection=collection, limit=limit)
+        if not topics:
+            click.echo("No unreviewed topics. All done!")
+            return
+
+        click.echo(f"Reviewing {len(topics)} topic(s)")
+        click.echo("Actions: [a]ccept  [r]ename  [m]erge  [d]elete  [S]kip")
+
+        for i, topic in enumerate(topics, 1):
+            _display_topic(topic, i, len(topics), db.taxonomy)
+
+            action = click.prompt(
+                "Action",
+                type=click.Choice(["a", "r", "m", "d", "S"], case_sensitive=True),
+                default="S",
+            )
+
+            if action == "a":
+                db.taxonomy.mark_topic_reviewed(topic["id"], "accepted")
+                click.echo(f"  Accepted: {topic['label']}")
+
+            elif action == "r":
+                new_label = click.prompt("  New label")
+                db.taxonomy.rename_topic(topic["id"], new_label)
+                click.echo(f"  Renamed: {topic['label']} -> {new_label}")
+
+            elif action == "m":
+                _show_merge_targets(topic["id"], topic["collection"], db.taxonomy)
+                target_id = click.prompt("  Merge into topic ID", type=int)
+                target = db.taxonomy.get_topic_by_id(target_id)
+                if target is None:
+                    click.echo(f"  Topic {target_id} not found, skipping.")
+                    continue
+                db.taxonomy.merge_topics(topic["id"], target_id)
+                click.echo(f"  Merged into: {target['label']}")
+
+            elif action == "d":
+                db.taxonomy.delete_topic(topic["id"])
+                click.echo(f"  Deleted: {topic['label']}")
+
+            elif action == "S":
+                click.echo("  Skipped.")
+
+    click.echo("\nReview session complete.")

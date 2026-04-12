@@ -28,6 +28,7 @@ Lock ownership convention (matches MemoryStore / PlanLibrary):
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -66,7 +67,9 @@ CREATE TABLE IF NOT EXISTS topics (
     collection    TEXT NOT NULL,
     centroid_hash TEXT,
     doc_count     INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    terms         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS topic_assignments (
@@ -85,6 +88,8 @@ _TOPIC_COLUMNS = (
     "centroid_hash",
     "doc_count",
     "created_at",
+    "review_status",
+    "terms",
 )
 
 # ── CatalogTaxonomy ───────────────────────────────────────────────────────────
@@ -132,6 +137,7 @@ class CatalogTaxonomy:
                     return
                 self._migrate_topics_if_needed()
                 self._migrate_assigned_by_if_needed()
+                self._migrate_review_columns_if_needed()
                 _migrated_paths.add(path_key)
 
     def _migrate_topics_if_needed(self) -> None:
@@ -187,6 +193,26 @@ class CatalogTaxonomy:
         )
         self.conn.commit()
 
+    def _migrate_review_columns_if_needed(self) -> None:
+        """Add ``review_status`` and ``terms`` columns if missing.
+
+        RDR-070 (nexus-lbu). Lock-naive: caller must hold both locks.
+        """
+        cols = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(topics)").fetchall()
+        }
+        if "review_status" not in cols:
+            _log.info("Migrating topics: adding review_status column")
+            self.conn.execute(
+                "ALTER TABLE topics ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'"
+            )
+        if "terms" not in cols:
+            _log.info("Migrating topics: adding terms column")
+            self.conn.execute("ALTER TABLE topics ADD COLUMN terms TEXT")
+        if "review_status" not in cols or "terms" not in cols:
+            self.conn.commit()
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def get_topics(
@@ -205,12 +231,12 @@ class CatalogTaxonomy:
         with self._lock:
             if parent_id is None:
                 rows = self.conn.execute(
-                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at, review_status, terms "
                     "FROM topics WHERE parent_id IS NULL ORDER BY doc_count DESC"
                 ).fetchall()
             else:
                 rows = self.conn.execute(
-                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at, review_status, terms "
                     "FROM topics WHERE parent_id = ? ORDER BY doc_count DESC",
                     (parent_id,),
                 ).fetchall()
@@ -304,13 +330,13 @@ class CatalogTaxonomy:
         with self._lock:
             if collection:
                 roots = self.conn.execute(
-                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at, review_status, terms "
                     "FROM topics WHERE parent_id IS NULL AND collection = ? ORDER BY doc_count DESC",
                     (collection,),
                 ).fetchall()
             else:
                 roots = self.conn.execute(
-                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at, review_status, terms "
                     "FROM topics WHERE parent_id IS NULL ORDER BY doc_count DESC"
                 ).fetchall()
 
@@ -319,7 +345,7 @@ class CatalogTaxonomy:
             if depth < max_depth:
                 with self._lock:
                     children = self.conn.execute(
-                        "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at "
+                        "SELECT id, label, parent_id, collection, centroid_hash, doc_count, created_at, review_status, terms "
                         "FROM topics WHERE parent_id = ? ORDER BY doc_count DESC",
                         (row[0],),
                     ).fetchall()
@@ -352,6 +378,113 @@ class CatalogTaxonomy:
                 doc_ids,
             ).fetchall()
         return {row[0]: row[1] for row in rows}
+
+    # ── Review workflow (RDR-070, nexus-lbu) ─────────────────────────────
+
+    def get_unreviewed_topics(
+        self,
+        collection: str = "",
+        *,
+        limit: int = 15,
+    ) -> list[dict[str, Any]]:
+        """Return topics with ``review_status='pending'``, ordered by doc_count DESC."""
+        with self._lock:
+            if collection:
+                rows = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, "
+                    "created_at, review_status, terms "
+                    "FROM topics WHERE review_status = 'pending' AND collection = ? "
+                    "ORDER BY doc_count DESC LIMIT ?",
+                    (collection, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, "
+                    "created_at, review_status, terms "
+                    "FROM topics WHERE review_status = 'pending' "
+                    "ORDER BY doc_count DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(zip(_TOPIC_COLUMNS, row)) for row in rows]
+
+    def mark_topic_reviewed(self, topic_id: int, status: str) -> None:
+        """Update ``review_status`` for a topic."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE topics SET review_status = ? WHERE id = ?",
+                (status, topic_id),
+            )
+            self.conn.commit()
+
+    def rename_topic(self, topic_id: int, new_label: str) -> None:
+        """Rename a topic's label and mark as accepted."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE topics SET label = ?, review_status = 'accepted' WHERE id = ?",
+                (new_label, topic_id),
+            )
+            self.conn.commit()
+
+    def delete_topic(self, topic_id: int) -> None:
+        """Delete a topic and all its assignments."""
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM topic_assignments WHERE topic_id = ?", (topic_id,),
+            )
+            self.conn.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
+            self.conn.commit()
+
+    def merge_topics(self, source_id: int, target_id: int) -> None:
+        """Move all assignments from source to target, delete source.
+
+        Uses INSERT OR IGNORE to handle docs assigned to both topics
+        (dedup). Updates target's doc_count to the actual assignment count.
+        """
+        with self._lock:
+            # Move assignments (ignore duplicates)
+            self.conn.execute(
+                "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id, assigned_by) "
+                "SELECT doc_id, ?, assigned_by FROM topic_assignments WHERE topic_id = ?",
+                (target_id, source_id),
+            )
+            # Remove source assignments
+            self.conn.execute(
+                "DELETE FROM topic_assignments WHERE topic_id = ?", (source_id,),
+            )
+            # Update target doc_count from actual assignments
+            new_count = self.conn.execute(
+                "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?",
+                (target_id,),
+            ).fetchone()[0]
+            self.conn.execute(
+                "UPDATE topics SET doc_count = ? WHERE id = ?",
+                (new_count, target_id),
+            )
+            # Delete source topic
+            self.conn.execute("DELETE FROM topics WHERE id = ?", (source_id,))
+            self.conn.commit()
+
+    def get_topic_by_id(self, topic_id: int) -> dict[str, Any] | None:
+        """Return a single topic dict by ID, or None."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT id, label, parent_id, collection, centroid_hash, doc_count, "
+                "created_at, review_status, terms "
+                "FROM topics WHERE id = ?",
+                (topic_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(zip(_TOPIC_COLUMNS, row))
+
+    def get_topic_doc_ids(self, topic_id: int, *, limit: int = 3) -> list[str]:
+        """Return doc_ids assigned to a topic (limited, for display)."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT doc_id FROM topic_assignments WHERE topic_id = ? LIMIT ?",
+                (topic_id, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
 
     # ── HDBSCAN topic discovery (RDR-070, nexus-9k5) ────────────────────
 
@@ -427,16 +560,18 @@ class CatalogTaxonomy:
             for cid in real_labels:
                 mask = labels == cid
 
-                # Top-3 TF-IDF terms as label
+                # Top c-TF-IDF terms: top-3 as label, top-10 stored for review
                 cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
-                top_idx = cluster_tfidf.argsort()[-3:][::-1]
-                label = " ".join(feature_names[i] for i in top_idx)
+                top_idx = cluster_tfidf.argsort()[-10:][::-1]
+                top_terms = [str(feature_names[i]) for i in top_idx]
+                label = " ".join(top_terms[:3])
+                terms_json = json.dumps(top_terms)
 
                 doc_count = int(mask.sum())
                 self.conn.execute(
-                    "INSERT INTO topics (label, collection, doc_count, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (label, collection_name, doc_count, now),
+                    "INSERT INTO topics (label, collection, doc_count, created_at, terms) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (label, collection_name, doc_count, now, terms_json),
                 )
                 topic_id = self.conn.execute(
                     "SELECT last_insert_rowid()"

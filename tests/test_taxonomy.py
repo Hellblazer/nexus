@@ -832,3 +832,559 @@ class TestSklearnHdbscanSmoke:
         cluster_a = labels[0]
         assert assigned == cluster_a
         assert sims[0, assigned] > 0.5
+
+
+# ── Review infrastructure (RDR-070, nexus-lbu) ────────────────────────────────
+
+
+class TestReviewSchema:
+    """Schema migrations for review_status and terms columns."""
+
+    def test_review_status_column_exists(self, db: T2Database) -> None:
+        """review_status column added to topics table via migration."""
+        cols = {
+            row[1]
+            for row in db.taxonomy.conn.execute("PRAGMA table_info(topics)").fetchall()
+        }
+        assert "review_status" in cols
+
+    def test_terms_column_exists(self, db: T2Database) -> None:
+        """terms column added to topics table via migration."""
+        cols = {
+            row[1]
+            for row in db.taxonomy.conn.execute("PRAGMA table_info(topics)").fetchall()
+        }
+        assert "terms" in cols
+
+    def test_review_status_default_pending(self, db: T2Database) -> None:
+        """New topics default to review_status='pending'."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("test", "proj", 1, "2026-01-01T00:00:00Z"),
+        )
+        db.taxonomy.conn.commit()
+        row = db.taxonomy.conn.execute(
+            "SELECT review_status FROM topics LIMIT 1"
+        ).fetchone()
+        assert row[0] == "pending"
+
+
+class TestReviewMethods:
+    """CatalogTaxonomy methods for review workflow."""
+
+    def test_get_unreviewed_topics(self, db: T2Database) -> None:
+        """get_unreviewed_topics returns only pending topics."""
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                ("pending-topic", "proj", 5, "2026-01-01T00:00:00Z", "pending"),
+                ("accepted-topic", "proj", 3, "2026-01-01T00:00:00Z", "accepted"),
+                ("deleted-topic", "proj", 1, "2026-01-01T00:00:00Z", "deleted"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+
+        unreviewed = db.taxonomy.get_unreviewed_topics(collection="proj")
+        assert len(unreviewed) == 1
+        assert unreviewed[0]["label"] == "pending-topic"
+
+    def test_get_unreviewed_topics_limit(self, db: T2Database) -> None:
+        """get_unreviewed_topics respects limit."""
+        for i in range(10):
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (f"topic-{i}", "proj", i + 1, "2026-01-01T00:00:00Z"),
+            )
+        db.taxonomy.conn.commit()
+
+        result = db.taxonomy.get_unreviewed_topics(collection="proj", limit=3)
+        assert len(result) == 3
+
+    def test_get_unreviewed_topics_all_collections(self, db: T2Database) -> None:
+        """get_unreviewed_topics with empty collection returns all."""
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("topic-a", "coll-a", 5, "2026-01-01T00:00:00Z"),
+                ("topic-b", "coll-b", 3, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+
+        result = db.taxonomy.get_unreviewed_topics()
+        assert len(result) == 2
+
+    def test_mark_topic_reviewed(self, db: T2Database) -> None:
+        """mark_topic_reviewed updates review_status."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("test", "proj", 5, "2026-01-01T00:00:00Z"),
+        )
+        topic_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+
+        db.taxonomy.mark_topic_reviewed(topic_id, "accepted")
+
+        row = db.taxonomy.conn.execute(
+            "SELECT review_status FROM topics WHERE id = ?", (topic_id,)
+        ).fetchone()
+        assert row[0] == "accepted"
+
+    def test_rename_topic(self, db: T2Database) -> None:
+        """rename_topic updates label and sets review_status='accepted'."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("old-label", "proj", 5, "2026-01-01T00:00:00Z"),
+        )
+        topic_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+
+        db.taxonomy.rename_topic(topic_id, "new-label")
+
+        row = db.taxonomy.conn.execute(
+            "SELECT label, review_status FROM topics WHERE id = ?", (topic_id,)
+        ).fetchone()
+        assert row[0] == "new-label"
+        assert row[1] == "accepted"
+
+    def test_delete_topic(self, db: T2Database) -> None:
+        """delete_topic removes topic and its assignments."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("doomed", "proj", 1, "2026-01-01T00:00:00Z"),
+        )
+        topic_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+        db.taxonomy.conn.execute(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            ("doc-1", topic_id),
+        )
+        db.taxonomy.conn.commit()
+
+        db.taxonomy.delete_topic(topic_id)
+
+        assert (
+            db.taxonomy.conn.execute(
+                "SELECT COUNT(*) FROM topics WHERE id = ?", (topic_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            db.taxonomy.conn.execute(
+                "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?",
+                (topic_id,),
+            ).fetchone()[0]
+            == 0
+        )
+
+    def test_merge_topics(self, db: T2Database) -> None:
+        """merge_topics moves assignments from source to target, deletes source."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("source", "proj", 2, "2026-01-01T00:00:00Z"),
+        )
+        source_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("target", "proj", 3, "2026-01-01T00:00:00Z"),
+        )
+        target_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("doc-a", source_id), ("doc-b", source_id), ("doc-c", target_id)],
+        )
+        db.taxonomy.conn.commit()
+
+        db.taxonomy.merge_topics(source_id, target_id)
+
+        # Source topic deleted
+        assert (
+            db.taxonomy.conn.execute(
+                "SELECT COUNT(*) FROM topics WHERE id = ?", (source_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        # Target doc_count = actual assignment count (3 distinct docs)
+        target_row = db.taxonomy.conn.execute(
+            "SELECT doc_count FROM topics WHERE id = ?", (target_id,)
+        ).fetchone()
+        assert target_row[0] == 3
+        # All assignments on target
+        docs = db.taxonomy.conn.execute(
+            "SELECT doc_id FROM topic_assignments WHERE topic_id = ? ORDER BY doc_id",
+            (target_id,),
+        ).fetchall()
+        assert [r[0] for r in docs] == ["doc-a", "doc-b", "doc-c"]
+
+    def test_merge_topics_dedup(self, db: T2Database) -> None:
+        """merge_topics handles docs assigned to both source and target."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("source", "proj", 1, "2026-01-01T00:00:00Z"),
+        )
+        source_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("target", "proj", 1, "2026-01-01T00:00:00Z"),
+        )
+        target_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+
+        # Same doc assigned to both topics
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("shared-doc", source_id), ("shared-doc", target_id)],
+        )
+        db.taxonomy.conn.commit()
+
+        db.taxonomy.merge_topics(source_id, target_id)
+
+        # Only one assignment for the shared doc on target
+        count = db.taxonomy.conn.execute(
+            "SELECT COUNT(*) FROM topic_assignments WHERE doc_id = 'shared-doc' AND topic_id = ?",
+            (target_id,),
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_get_topic_by_id(self, db: T2Database) -> None:
+        """get_topic_by_id returns a single topic dict or None."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("my-topic", "proj", 7, "2026-01-01T00:00:00Z"),
+        )
+        topic_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+
+        result = db.taxonomy.get_topic_by_id(topic_id)
+        assert result is not None
+        assert result["label"] == "my-topic"
+        assert result["doc_count"] == 7
+
+        assert db.taxonomy.get_topic_by_id(99999) is None
+
+    def test_get_topic_doc_ids(self, db: T2Database) -> None:
+        """get_topic_doc_ids returns limited doc_ids for a topic."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("test", "proj", 5, "2026-01-01T00:00:00Z"),
+        )
+        topic_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+        for i in range(5):
+            db.taxonomy.conn.execute(
+                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                (f"doc-{i}", topic_id),
+            )
+        db.taxonomy.conn.commit()
+
+        result = db.taxonomy.get_topic_doc_ids(topic_id, limit=3)
+        assert len(result) == 3
+        assert all(isinstance(d, str) for d in result)
+
+
+class TestDiscoverStoresTerms:
+    """discover_topics stores c-TF-IDF terms in the terms column."""
+
+    @pytest.fixture()
+    def chroma_client(self) -> chromadb.ClientAPI:
+        return chromadb.EphemeralClient()
+
+    def test_terms_stored_as_json(
+        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+    ) -> None:
+        """discover_topics persists top c-TF-IDF terms as JSON."""
+        import json
+
+        rng = np.random.default_rng(42)
+        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings[:30, 0] += 3.0
+        embeddings[30:, 1] += 3.0
+        doc_ids = [f"doc-{i}" for i in range(60)]
+        texts = (
+            [f"machine learning neural network gradient {i}" for i in range(30)]
+            + [f"database query indexing sql schema {i}" for i in range(30)]
+        )
+
+        db.taxonomy.discover_topics(
+            "test__coll", doc_ids, embeddings, texts, chroma_client,
+        )
+
+        rows = db.taxonomy.conn.execute(
+            "SELECT terms FROM topics WHERE terms IS NOT NULL"
+        ).fetchall()
+        assert len(rows) >= 2
+        for row in rows:
+            terms = json.loads(row[0])
+            assert isinstance(terms, list)
+            assert len(terms) >= 3
+
+
+class TestReviewCLI:
+    """CLI tests for nx taxonomy review."""
+
+    def _seed_topics(self, db_path: Path) -> int:
+        """Insert test topics and return the first topic_id."""
+        import json
+
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics "
+                "(label, collection, doc_count, created_at, review_status, terms) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "machine learning",
+                    "proj",
+                    5,
+                    "2026-01-01T00:00:00Z",
+                    "pending",
+                    json.dumps(["neural", "network", "gradient", "loss", "model"]),
+                ),
+            )
+            topic_id = db.taxonomy.conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+            for i in range(3):
+                db.taxonomy.conn.execute(
+                    "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                    (f"src/model_{i}.py", topic_id),
+                )
+            db.taxonomy.conn.commit()
+        return topic_id
+
+    def test_review_accept(self, tmp_path: Path) -> None:
+        """Accept action marks topic as accepted."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        self._seed_topics(db_path)
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy, ["review", "--collection", "proj"], input="a\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            status = db.taxonomy.conn.execute(
+                "SELECT review_status FROM topics LIMIT 1"
+            ).fetchone()[0]
+        assert status == "accepted"
+
+    def test_review_skip(self, tmp_path: Path) -> None:
+        """Skip action leaves topic as pending."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        self._seed_topics(db_path)
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy, ["review", "--collection", "proj"], input="S\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            status = db.taxonomy.conn.execute(
+                "SELECT review_status FROM topics LIMIT 1"
+            ).fetchone()[0]
+        assert status == "pending"
+
+    def test_review_rename(self, tmp_path: Path) -> None:
+        """Rename action updates the topic label."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        self._seed_topics(db_path)
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["review", "--collection", "proj"],
+                input="r\ndeep learning\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            row = db.taxonomy.conn.execute(
+                "SELECT label, review_status FROM topics LIMIT 1"
+            ).fetchone()
+        assert row[0] == "deep learning"
+        assert row[1] == "accepted"
+
+    def test_review_delete(self, tmp_path: Path) -> None:
+        """Delete action removes topic and assignments."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        self._seed_topics(db_path)
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy, ["review", "--collection", "proj"], input="d\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            count = db.taxonomy.conn.execute(
+                "SELECT COUNT(*) FROM topics"
+            ).fetchone()[0]
+        assert count == 0
+
+    def test_review_no_unreviewed(self, tmp_path: Path) -> None:
+        """Shows 'all done' message when no topics need review."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        # Create DB but don't add any topics
+        with T2Database(db_path):
+            pass
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy, ["review", "--collection", "proj"],
+            )
+
+        assert result.exit_code == 0
+        assert "no unreviewed topics" in result.output.lower() or "all done" in result.output.lower()
+
+    def test_review_merge(self, tmp_path: Path) -> None:
+        """Merge action moves docs to target topic."""
+        import json
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            # Source topic (pending)
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics "
+                "(label, collection, doc_count, created_at, review_status, terms) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "source topic",
+                    "proj",
+                    2,
+                    "2026-01-01T00:00:00Z",
+                    "pending",
+                    json.dumps(["a", "b", "c"]),
+                ),
+            )
+            source_id = db.taxonomy.conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+            # Target topic (already accepted)
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics "
+                "(label, collection, doc_count, created_at, review_status, terms) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "target topic",
+                    "proj",
+                    3,
+                    "2026-01-01T00:00:00Z",
+                    "accepted",
+                    json.dumps(["d", "e", "f"]),
+                ),
+            )
+            target_id = db.taxonomy.conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+            db.taxonomy.conn.executemany(
+                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                [("doc-a", source_id), ("doc-b", source_id), ("doc-c", target_id)],
+            )
+            db.taxonomy.conn.commit()
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            # m = merge, then enter target topic ID
+            result = runner.invoke(
+                taxonomy,
+                ["review", "--collection", "proj"],
+                input=f"m\n{target_id}\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            # Source deleted
+            assert (
+                db.taxonomy.conn.execute(
+                    "SELECT COUNT(*) FROM topics WHERE id = ?", (source_id,)
+                ).fetchone()[0]
+                == 0
+            )
+            # All docs on target
+            docs = db.taxonomy.conn.execute(
+                "SELECT doc_id FROM topic_assignments WHERE topic_id = ? ORDER BY doc_id",
+                (target_id,),
+            ).fetchall()
+            assert {r[0] for r in docs} == {"doc-a", "doc-b", "doc-c"}
