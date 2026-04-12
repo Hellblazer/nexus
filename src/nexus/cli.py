@@ -3,6 +3,7 @@ import click
 
 from nexus.commands.catalog import catalog
 from nexus.commands.collection import collection
+from nexus.commands.console import console
 from nexus.commands.config_cmd import config_group
 from nexus.commands.doctor import doctor_cmd
 from nexus.commands.enrich import enrich
@@ -31,6 +32,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
 main.add_command(catalog)
 main.add_command(collection)
+main.add_command(console)
 main.add_command(config_group, name="config")
 main.add_command(enrich)
 main.add_command(doctor_cmd, name="doctor")

@@ -1,0 +1,47 @@
+/* nx console — custom styles (Pico baseline) */
+
+/* Dense, data-first layout */
+:root {
+  --pico-font-size: 87.5%;
+}
+
+nav {
+  padding-block: 0.25rem;
+}
+
+nav strong {
+  font-family: monospace;
+}
+
+/* Active panel indicator */
+nav a[aria-current="page"] {
+  font-weight: bold;
+  text-decoration: underline;
+}
+
+/* Activity stream rows */
+#activity-stream table {
+  font-size: 0.85rem;
+}
+
+/* Health cards */
+.health-card {
+  border-left: 4px solid var(--pico-primary);
+  padding: 0.5rem 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.health-card.ok {
+  border-left-color: var(--pico-ins-color);
+}
+
+.health-card.warn {
+  border-left-color: var(--pico-del-color);
+}
+
+/* Scope selector in nav */
+nav select {
+  margin: 0;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.85rem;
+}
