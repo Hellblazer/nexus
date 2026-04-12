@@ -331,6 +331,18 @@ class CatalogTaxonomy:
 
         return [_build_node(r, 0) for r in roots]
 
+    def get_assignments_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
+        """Return {doc_id: topic_id} for docs that have topic assignments."""
+        if not doc_ids:
+            return {}
+        with self._lock:
+            placeholders = ",".join("?" for _ in doc_ids)
+            rows = self.conn.execute(
+                f"SELECT doc_id, topic_id FROM topic_assignments WHERE doc_id IN ({placeholders})",
+                doc_ids,
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
     # ── HDBSCAN topic discovery (RDR-070, nexus-9k5) ────────────────────
 
     @staticmethod

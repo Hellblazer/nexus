@@ -49,22 +49,24 @@ def _low_distance_results(col: str, n: int) -> list[dict]:
 
 
 class TestClusterByNone:
-    def test_default_returns_flat_list(self) -> None:
+    """Explicit cluster_by=None disables all clustering."""
+
+    def test_explicit_none_returns_flat_list(self) -> None:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
-        results = search_cross_corpus("q", ["code__test"], 10, t3)
+        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by=None)
         assert isinstance(results, list)
         assert all(isinstance(r, SearchResult) for r in results)
         assert len(results) == 5
 
     def test_no_cluster_label_on_results(self) -> None:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 3)})
-        results = search_cross_corpus("q", ["code__test"], 10, t3)
+        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by=None)
         for r in results:
             assert "_cluster_label" not in r.metadata
 
     def test_get_embeddings_not_called(self) -> None:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
-        search_cross_corpus("q", ["code__test"], 10, t3)
+        search_cross_corpus("q", ["code__test"], 10, t3, cluster_by=None)
         assert t3.get_embeddings_calls == []
 
 
@@ -273,3 +275,88 @@ class TestConfigDefault:
         from nexus.config import load_config
         cfg = load_config()
         assert cfg.get("search", {}).get("cluster_by") is None
+
+
+# ── Topic-based grouping (RDR-070, nexus-y8f) ───────────────────────────────
+
+
+class TestTopicGrouping:
+    """When >50% of results have topic assignments, group by topic label."""
+
+    def _make_taxonomy(self, assignments: dict[str, int], topics: dict[int, str]):
+        """Create a fake taxonomy with given doc_id→topic_id and topic_id→label maps."""
+        tax = MagicMock()
+        tax.conn = MagicMock()
+
+        def fake_get_assigned(doc_ids):
+            return {did: assignments[did] for did in doc_ids if did in assignments}
+
+        tax.get_assignments_for_docs = fake_get_assigned
+
+        def fake_get_topics(**kw):
+            return [{"id": tid, "label": lbl} for tid, lbl in topics.items()]
+
+        tax.get_topics = fake_get_topics
+        return tax
+
+    def test_topic_grouping_when_majority_assigned(self) -> None:
+        """Results grouped by topic label when >50% have assignments."""
+        t3 = _FakeT3({"code__test": _low_distance_results("code__test", 6)})
+        # 4 of 6 results assigned (67% > 50%)
+        assignments = {
+            "code__test-0": 1, "code__test-1": 1,
+            "code__test-2": 2, "code__test-3": 2,
+        }
+        topics = {1: "http handlers", 2: "database queries"}
+        tax = self._make_taxonomy(assignments, topics)
+
+        results = search_cross_corpus(
+            "q", ["code__test"], 10, t3,
+            cluster_by="semantic", taxonomy=tax,
+        )
+        assert len(results) == 6
+        labeled = [r for r in results if "_topic_label" in r.metadata]
+        assert len(labeled) == 4
+        labels = {r.metadata["_topic_label"] for r in labeled}
+        assert labels == {"http handlers", "database queries"}
+
+    def test_ward_fallback_when_few_assignments(self) -> None:
+        """Falls back to Ward clustering when <=50% have topic assignments."""
+        t3 = _FakeT3({"code__test": _low_distance_results("code__test", 6)})
+        # Only 2 of 6 assigned (33% < 50%)
+        assignments = {"code__test-0": 1}
+        topics = {1: "http handlers"}
+        tax = self._make_taxonomy(assignments, topics)
+
+        results = search_cross_corpus(
+            "q", ["code__test"], 10, t3,
+            cluster_by="semantic", taxonomy=tax,
+        )
+        assert len(results) == 6
+        # Ward clustering adds _cluster_label, not _topic_label
+        labeled = [r for r in results if "_cluster_label" in r.metadata]
+        assert len(labeled) >= 1
+
+    def test_ward_fallback_when_no_taxonomy(self) -> None:
+        """Falls back to Ward when taxonomy is None."""
+        t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
+        results = search_cross_corpus(
+            "q", ["code__test"], 10, t3,
+            cluster_by="semantic", taxonomy=None,
+        )
+        assert len(results) == 5
+        # Ward clustering should have run
+        labeled = [r for r in results if "_cluster_label" in r.metadata]
+        assert len(labeled) >= 1
+
+    def test_explicit_none_disables_all_clustering(self) -> None:
+        """cluster_by=None disables both topic and Ward clustering."""
+        t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
+        results = search_cross_corpus(
+            "q", ["code__test"], 10, t3,
+            cluster_by=None,
+        )
+        assert len(results) == 5
+        for r in results:
+            assert "_cluster_label" not in r.metadata
+            assert "_topic_label" not in r.metadata
