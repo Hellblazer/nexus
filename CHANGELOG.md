@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.1] - 2026-04-11
+
+### Fixed
+
+- **rdr-audit canonical prompt v1.2**: added mandatory code-verification
+  gate for PARTIAL and SCOPE-REDUCED audit verdicts. The audit read RDR
+  text (success criteria checkboxes) but not code, producing false-positive
+  SCOPE-REDUCED on RDR-056 when all 4 features had shipped. The gate
+  requires Grep spot-checks against the source before any non-CLEAN verdict.
+
+### Changed
+
+- RDR-066 composition probe catch demonstration proven via synthetic test
+  (10-dim vs 5-dim mismatch correctly attributed).
+- RDR-067 CA-1 verified (prompt generalizes beyond ART), CA-2 partially
+  verified (calibration drifts on severity grading).
+- RDRs 057, 061, 062 closed as implemented; 065 status corrected; 068
+  closed as won't-ship.
+
 ## [3.9.0] - 2026-04-11
 
 Minor release: ships RDR-067 (Cross-Project RDR Audit Loop) — Phase 2 of
