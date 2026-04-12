@@ -527,6 +527,99 @@ def test_cli_taxonomy_list(db: T2Database) -> None:
     assert result.exit_code == 0
 
 
+# ── discover_for_collection + CLI (RDR-070, nexus-2dq) ──────────────────────
+
+
+def test_discover_for_collection(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """discover_for_collection fetches texts, embeds with MiniLM, runs discover_topics."""
+    from nexus.commands.taxonomy_cmd import discover_for_collection
+    from nexus.db.local_ef import LocalEmbeddingFunction
+
+    # Seed a ChromaDB collection with documents
+    ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    texts_a = [f"machine learning neural network gradient {i}" for i in range(30)]
+    texts_b = [f"database query indexing sql schema {i}" for i in range(30)]
+    texts = texts_a + texts_b
+    doc_ids = [f"doc-{i}" for i in range(60)]
+
+    coll = chroma_client.get_or_create_collection(
+        "test__discover", embedding_function=None,
+    )
+    embeddings = ef(texts)
+    coll.add(ids=doc_ids, documents=texts, embeddings=embeddings)
+
+    count = discover_for_collection(
+        "test__discover", db.taxonomy, chroma_client, force=False,
+    )
+    assert count >= 2
+    topics = db.taxonomy.get_topics()
+    assert len(topics) >= 2
+
+
+def test_discover_for_collection_force(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """force=True clears existing topics before re-discovering."""
+    from nexus.commands.taxonomy_cmd import discover_for_collection
+    from nexus.db.local_ef import LocalEmbeddingFunction
+
+    ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    texts = (
+        [f"machine learning neural {i}" for i in range(30)]
+        + [f"database query sql {i}" for i in range(30)]
+    )
+    doc_ids = [f"doc-{i}" for i in range(60)]
+
+    coll = chroma_client.get_or_create_collection(
+        "test__force", embedding_function=None,
+    )
+    coll.add(ids=doc_ids, documents=texts, embeddings=ef(texts))
+
+    count1 = discover_for_collection(
+        "test__force", db.taxonomy, chroma_client, force=False,
+    )
+    count2 = discover_for_collection(
+        "test__force", db.taxonomy, chroma_client, force=True,
+    )
+    assert count1 >= 2
+    assert count2 >= 2
+
+
+def test_discover_cli_invocation() -> None:
+    """nx taxonomy discover --collection <name> exits 0 in local mode."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from nexus.commands.taxonomy_cmd import taxonomy
+
+    runner = CliRunner()
+    with patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=3) as mock_fn:
+        result = runner.invoke(taxonomy, ["discover", "--collection", "test__coll"])
+
+    assert result.exit_code == 0, result.output
+    assert "3 topics" in result.output
+    mock_fn.assert_called_once()
+
+
+def test_rebuild_cli_is_discover_force_alias() -> None:
+    """nx taxonomy rebuild --collection <name> delegates to discover --force."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from nexus.commands.taxonomy_cmd import taxonomy
+
+    runner = CliRunner()
+    with patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=2) as mock_fn:
+        result = runner.invoke(taxonomy, ["rebuild", "--collection", "test__coll"])
+
+    assert result.exit_code == 0, result.output
+    mock_fn.assert_called_once()
+    _, kwargs = mock_fn.call_args
+    assert kwargs.get("force") is True
+
+
 # ── sklearn HDBSCAN smoke tests (RDR-070, nexus-86v) ────────────────────────
 #
 # scikit-learn>=1.3 is a core dep. sklearn.cluster.HDBSCAN replaces BERTopic
