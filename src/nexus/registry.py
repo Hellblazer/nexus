@@ -94,6 +94,10 @@ def _rdr_collection_name(repo: Path) -> str:
 class RepoRegistry:
     """Thread-safe registry of indexed repositories stored as JSON."""
 
+    # Paths matching these prefixes are never persisted — they come from test
+    # runs, worktrees, or accidental indexing of temp directories.
+    _EPHEMERAL_PREFIXES = ("/private/tmp", "/private/var", "/tmp", "/var/folders")
+
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = threading.RLock()
@@ -107,12 +111,21 @@ class RepoRegistry:
             if not isinstance(self._data.get("repos"), dict):
                 _log.warning("Registry has invalid structure; starting empty", path=str(path))
                 self._data = {"repos": {}}
+            # Prune stale entries: temp dirs, dead worktrees, non-existent paths
+            self._prune_stale()
 
     # ── public API ────────────────────────────────────────────────────────────
 
     def add(self, repo: Path) -> None:
-        """Register *repo*, initialising collection names and head_hash."""
+        """Register *repo*, initialising collection names and head_hash.
+
+        Rejects ephemeral paths (temp dirs, worktrees) to prevent registry
+        pollution from test runs and CI.
+        """
         key = str(repo)
+        if self._is_ephemeral(key):
+            _log.debug("registry_skip_ephemeral", path=key)
+            return
         name = repo.name
         code_col = _collection_name(repo)
         docs_col = _docs_collection_name(repo)
@@ -159,6 +172,29 @@ class RepoRegistry:
                 self._save()
 
     # ── internal ──────────────────────────────────────────────────────────────
+
+    @classmethod
+    def _is_ephemeral(cls, path: str) -> bool:
+        """Return True if *path* looks like a temp dir or worktree."""
+        if any(path.startswith(p) for p in cls._EPHEMERAL_PREFIXES):
+            return True
+        if "/worktrees/" in path or "/pytest-" in path:
+            return True
+        return False
+
+    def _prune_stale(self) -> None:
+        """Remove entries whose paths no longer exist or are ephemeral."""
+        repos = self._data.get("repos", {})
+        before = len(repos)
+        clean = {
+            k: v for k, v in repos.items()
+            if not self._is_ephemeral(k) and Path(k).exists()
+        }
+        pruned = before - len(clean)
+        if pruned:
+            self._data["repos"] = clean
+            self._save()
+            _log.info("registry_pruned_stale", removed=pruned, remaining=len(clean))
 
     def _save(self) -> None:
         """Atomic write via mkstemp + os.replace(), safe against concurrent processes.

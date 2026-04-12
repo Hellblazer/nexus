@@ -2,46 +2,40 @@
 {% block title %}Activity — nx console{% endblock %}
 {% block content %}
 <div x-data="{paused: false}">
-  <hgroup>
-    <h2>Activity Stream</h2>
-    <p>
-      Scope: <code>{{ scope }}</code>
-      <button x-on:click="paused = !paused" x-text="paused ? 'Resume' : 'Pause'" class="secondary outline" style="margin-left: 1rem; padding: 0.25rem 0.75rem; font-size: 0.8rem;"></button>
-    </p>
-  </hgroup>
+  <div style="display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.5rem;">
+    <h2 style="margin:0;">Activity</h2>
+    <span class="stat-label">{{ events | length }} recent events</span>
+    <button x-on:click="paused = !paused"
+            x-text="paused ? '▶ Resume' : '⏸ Pause'"
+            class="secondary outline"
+            style="margin-left: auto; padding: 0.15rem 0.5rem; font-size: 0.75rem;"></button>
+  </div>
 
-  <details>
+  <details style="margin-bottom: 0.5rem;">
     <summary>Filters</summary>
-    <div hx-get="/activity/events?scope={{ scope }}" hx-trigger="input delay:300ms from:find input" hx-target="#event-table-body" hx-include="[name]">
+    <form hx-get="/activity/events?scope={{ scope }}" hx-trigger="input delay:300ms" hx-target="#event-rows">
       <div class="grid">
-        <label>Actor <input type="text" name="created_by" placeholder="e.g. index_hook"></label>
-        <label>Content type <input type="text" name="content_type" placeholder="e.g. code"></label>
-        <label>Link type <input type="text" name="link_type" placeholder="e.g. implements"></label>
+        <label><span class="stat-label">Actor</span>
+          <input type="text" name="created_by" placeholder="e.g. index_hook" style="margin-top:0.1rem;"></label>
+        <label><span class="stat-label">Content type</span>
+          <input type="text" name="content_type" placeholder="e.g. code" style="margin-top:0.1rem;"></label>
+        <label><span class="stat-label">Link type</span>
+          <input type="text" name="link_type" placeholder="e.g. implements" style="margin-top:0.1rem;"></label>
       </div>
-    </div>
+    </form>
   </details>
 
   <table role="grid">
     <thead>
       <tr>
-        <th>Time</th>
-        <th>Actor</th>
-        <th>Action</th>
+        <th style="width:11rem;">Time</th>
+        <th style="width:10rem;">Actor</th>
+        <th style="width:10rem;">Action</th>
         <th>Target</th>
       </tr>
     </thead>
-    <tbody id="event-table-body">
-      {% for e in events %}
-      <tr style="border-left: 3px solid {% if e.kind == 'link' %}var(--pico-primary){% else %}var(--pico-secondary){% endif %};">
-        <td><small>{{ e.timestamp[:19] }}</small></td>
-        <td><code>{{ e.actor }}</code></td>
-        <td>{{ e.action }}</td>
-        <td><small>{{ e.target }}</small></td>
-      </tr>
-      {% endfor %}
-      {% if not events %}
-      <tr><td colspan="4">No events found. Run <code>nx index repo .</code> to generate activity.</td></tr>
-      {% endif %}
+    <tbody id="event-rows">
+      {% include "activity/_stream.html" %}
     </tbody>
   </table>
 </div>
