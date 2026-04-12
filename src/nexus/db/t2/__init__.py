@@ -59,7 +59,6 @@ from typing import Any
 
 import structlog
 
-from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 from nexus.db.t2.memory_store import (
     AccessPolicy,
     MemoryStore,
@@ -74,7 +73,6 @@ _log = structlog.get_logger()
 # ``tests/test_t2.py`` still ``from nexus.db.t2 import _sanitize_fts5``.
 __all__ = [
     "AccessPolicy",
-    "CatalogTaxonomy",
     "MemoryStore",
     "PlanLibrary",
     "T2Database",
@@ -107,11 +105,6 @@ class T2Database:
         # their initial CREATE TABLE IF NOT EXISTS scripts.
         self.memory: MemoryStore = MemoryStore(path)
         self.plans: PlanLibrary = PlanLibrary(path)
-        # CatalogTaxonomy takes a MemoryStore reference because
-        # cluster_and_persist reads memory entries to build word vectors.
-        # The cross-domain dependency is intentionally explicit at the
-        # constructor signature (RDR-063 §Cross-Domain Contracts).
-        self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
         self.telemetry: Telemetry = Telemetry(path)
 
     def __enter__(self) -> "T2Database":
@@ -128,7 +121,6 @@ class T2Database:
         recently opened connection (telemetry) is released first.
         """
         self.telemetry.close()
-        self.taxonomy.close()
         self.plans.close()
         self.memory.close()
 
@@ -199,36 +191,7 @@ class T2Database:
         title: str | None = None,
         id: int | None = None,
     ) -> bool:
-        """Delete a memory entry and cascade cleanup taxonomy assignments.
-
-        v3.8.1: cross-domain cascade (memory → taxonomy). When a memory
-        row is deleted, any ``topic_assignments`` rows referencing it
-        by (project, title) are also removed and any topics left empty
-        by the deletion are dropped. See
-        ``CatalogTaxonomy.purge_assignments_for_doc`` for the
-        scoped-by-collection semantics.
-
-        The cascade is the facade's job because it crosses a domain
-        boundary — ``MemoryStore`` does not know about taxonomy tables
-        and should not. When the delete is by numeric id, we resolve
-        the row's project and title first so the cascade can scope
-        correctly.
-        """
-        # Resolve (project, title) for cascade scoping. Cheap indexed
-        # lookup via the memory connection directly to avoid the
-        # access_count side-effect of ``memory.get(id=...)`` on a row
-        # we're about to delete. Only executes when the caller used --id.
-        if id is not None and (project is None or title is None):
-            with self.memory._lock:
-                row = self.memory.conn.execute(
-                    "SELECT project, title FROM memory WHERE id = ?", (id,)
-                ).fetchone()
-            if row is not None:
-                project, title = row[0], row[1]
-        deleted = self.memory.delete(project=project, title=title, id=id)
-        if deleted and project and title:
-            self.taxonomy.purge_assignments_for_doc(project=project, title=title)
-        return deleted
+        return self.memory.delete(project=project, title=title, id=id)
 
     def find_overlapping_memories(
         self,

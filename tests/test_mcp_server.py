@@ -574,54 +574,6 @@ class TestQueryCatalogRouting:
         assert "No documents found matching catalog filters" in query(question="anything", **kwargs)
 
 
-# ── Cluster output (RDR-056) ────────────────────────────────────────────────
-
-def _make_clustered_results() -> list[SearchResult]:
-    return [
-        SearchResult(id="a1", content="HNSW tail failures in approximate search",
-                     distance=0.41, collection="knowledge__papers",
-                     metadata={"_cluster_label": "HNSW Robustness", "title": "HNSW paper"}),
-        SearchResult(id="a2", content="Graph-based index failures compound in pipelines",
-                     distance=0.52, collection="knowledge__papers",
-                     metadata={"_cluster_label": "HNSW Robustness", "title": "Pipeline paper"}),
-        SearchResult(id="b1", content="Ward hierarchical clustering groups results",
-                     distance=0.45, collection="docs__manual",
-                     metadata={"_cluster_label": "Result Clustering", "title": "Clustering doc"}),
-        SearchResult(id="b2", content="Semantic grouping improves LLM comprehension",
-                     distance=0.55, collection="docs__manual",
-                     metadata={"_cluster_label": "Result Clustering", "title": "LLM doc"}),
-    ]
-
-
-def _search_clustered(results, corpus="knowledge,docs", cluster_by="semantic"):
-    collections = [{"name": "knowledge__papers", "count": 10}]
-    if "docs" in corpus:
-        collections.append({"name": "docs__manual", "count": 5})
-    _mock_t3(collections)
-    with patch("nexus.search_engine.search_cross_corpus",
-               lambda q, c, n_results=10, t3=None, where=None, **kw: results):
-        return search("test query", corpus=corpus, cluster_by=cluster_by)
-
-
-def test_cluster_labels_in_output():
-    output = _search_clustered(_make_clustered_results())
-    assert "HNSW Robustness" in output and "Result Clustering" in output
-
-
-def test_cluster_order_preserved():
-    output = _search_clustered(_make_clustered_results())
-    positions = [output.find(s) for s in (
-        "HNSW tail failures", "Graph-based index", "Ward hierarchical", "Semantic grouping")]
-    assert positions == sorted(positions) and all(p >= 0 for p in positions)
-
-
-def test_flat_search_no_cluster_headers():
-    results = [SearchResult(id="r1", content="some result", distance=0.3,
-                            collection="knowledge__papers", metadata={"title": "Paper"})]
-    output = _search_clustered(results, corpus="knowledge", cluster_by="")
-    assert "---" not in output.split("\n--- showing")[0]
-
-
 # ── T1 session sharing ──────────────────────────────────────────────────────
 
 def test_t1_shared_session():

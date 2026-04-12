@@ -152,7 +152,7 @@ def search_cross_corpus(
     n_results: int,
     t3: Any,
     where: dict | None = None,
-    cluster_by: str | None = None,
+    cluster_by: str | None = None,  # deprecated, ignored
     catalog: Any | None = None,
     link_boost: bool = False,
 ) -> list[SearchResult]:
@@ -172,8 +172,6 @@ def search_cross_corpus(
     *where* is an optional ChromaDB metadata filter forwarded to every collection.
     """
     cfg = load_config()
-    if cluster_by is None:
-        cluster_by = cfg.get("search", {}).get("cluster_by")
 
     # Thresholds are calibrated for Voyage AI embeddings.
     # Skip filtering when Voyage is not in use (local mode, test injection).
@@ -225,12 +223,11 @@ def search_cross_corpus(
         from nexus.scoring import apply_link_boost
         all_results = apply_link_boost(all_results, catalog)
 
-    # Fetch embeddings once if either contradiction detection OR clustering
-    # needs them — avoids double fetching (F1 fix). Per-collection failures
+    # Fetch embeddings for contradiction detection. Per-collection failures
     # are isolated: failed indices are excluded from feature processing but
     # do not suppress the features for successfully-fetched collections (R3-1).
     contradiction_enabled = cfg.get("search", {}).get("contradiction_check", True)
-    needs_embeddings = (contradiction_enabled or cluster_by == "semantic") and all_results
+    needs_embeddings = contradiction_enabled and all_results
     fetched_embeddings = None
     failed_indices: set[int] = set()
     if needs_embeddings:
@@ -240,20 +237,6 @@ def search_cross_corpus(
     # search.contradiction_check=false in .nexus.yml.
     if contradiction_enabled and all_results and fetched_embeddings is not None:
         all_results = _flag_contradictions(all_results, fetched_embeddings, failed_indices)
-
-    if cluster_by == "semantic" and all_results and fetched_embeddings is not None:
-        # Clustering cannot partially-cluster — if any collection fetch
-        # failed, fall through to unclustered results rather than corrupting
-        # the cluster assignment by excluding some results.
-        if not failed_indices:
-            all_results = _apply_clustering(all_results, fetched_embeddings)
-        else:
-            _log.warning(
-                "clustering_skipped_partial_failure",
-                failed_indices=len(failed_indices),
-                total_results=len(all_results),
-                reason="cannot partially cluster — some collection fetches failed",
-            )
 
     return all_results
 
@@ -396,40 +379,3 @@ def _flag_contradictions(
     return out
 
 
-def _apply_clustering(
-    results: list[SearchResult],
-    embeddings: "np.ndarray",
-) -> list[SearchResult]:
-    """Cluster results using pre-fetched embeddings, returning flat list with labels.
-
-    Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
-    duplicate ChromaDB round-trips when contradiction detection also runs.
-    """
-    from nexus.search_clusterer import cluster_results
-
-    # Convert SearchResults to dicts for cluster_results API
-    result_dicts = [
-        {"id": r.id, "content": r.content, "distance": r.distance,
-         "collection": r.collection, "metadata": dict(r.metadata),
-         "hybrid_score": r.hybrid_score}
-        for r in results
-    ]
-
-    clusters = cluster_results(result_dicts, embeddings)
-
-    # Flatten clusters back to SearchResult list, preserving cluster labels
-    out: list[SearchResult] = []
-    for cluster in clusters:
-        for rd in cluster:
-            meta = rd.get("metadata", {})
-            if "_cluster_label" in rd:
-                meta["_cluster_label"] = rd["_cluster_label"]
-            out.append(SearchResult(
-                id=rd["id"],
-                content=rd["content"],
-                distance=rd["distance"],
-                collection=rd["collection"],
-                metadata=meta,
-                hybrid_score=rd.get("hybrid_score", 0.0),
-            ))
-    return out

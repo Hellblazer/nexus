@@ -191,7 +191,6 @@ def apply_quality_boost(
 
 _LINK_BOOST_WEIGHTS: dict[str, float] = {
     "implements": 1.0,
-    "implements-heuristic": 0.0,
     "relates": 0.5,
     "cites": 0.5,
     "supersedes": 0.0,

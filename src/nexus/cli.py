@@ -15,7 +15,6 @@ from nexus.commands.mineru import mineru_group
 from nexus.commands.scratch import scratch
 from nexus.commands.search_cmd import search_cmd
 from nexus.commands.store import store
-from nexus.commands.taxonomy_cmd import taxonomy
 
 @click.group()
 @click.version_option(package_name="conexus", prog_name="nx")
@@ -45,4 +44,3 @@ main.add_command(mineru_group, name="mineru")
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")
 main.add_command(store)
-main.add_command(taxonomy)

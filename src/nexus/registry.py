@@ -111,21 +111,13 @@ class RepoRegistry:
             if not isinstance(self._data.get("repos"), dict):
                 _log.warning("Registry has invalid structure; starting empty", path=str(path))
                 self._data = {"repos": {}}
-            # Prune stale entries: temp dirs, dead worktrees, non-existent paths
             self._prune_stale()
 
     # ── public API ────────────────────────────────────────────────────────────
 
     def add(self, repo: Path) -> None:
-        """Register *repo*, initialising collection names and head_hash.
-
-        Rejects ephemeral paths (temp dirs, worktrees) to prevent registry
-        pollution from test runs and CI.
-        """
+        """Register *repo*, initialising collection names and head_hash."""
         key = str(repo)
-        if self._is_ephemeral(key):
-            _log.debug("registry_skip_ephemeral", path=key)
-            return
         name = repo.name
         code_col = _collection_name(repo)
         docs_col = _docs_collection_name(repo)
@@ -175,21 +167,18 @@ class RepoRegistry:
 
     @classmethod
     def _is_ephemeral(cls, path: str) -> bool:
-        """Return True if *path* looks like a temp dir or worktree."""
-        if any(path.startswith(p) for p in cls._EPHEMERAL_PREFIXES):
+        """Return True if *path* looks like a pytest temp dir or orphaned worktree."""
+        if "/pytest-" in path:
             return True
-        if "/worktrees/" in path or "/pytest-" in path:
+        if "/worktrees/" in path and not Path(path).exists():
             return True
         return False
 
     def _prune_stale(self) -> None:
-        """Remove entries whose paths no longer exist or are ephemeral."""
+        """Remove entries whose paths no longer exist on disk."""
         repos = self._data.get("repos", {})
         before = len(repos)
-        clean = {
-            k: v for k, v in repos.items()
-            if not self._is_ephemeral(k) and Path(k).exists()
-        }
+        clean = {k: v for k, v in repos.items() if Path(k).exists()}
         pruned = before - len(clean)
         if pruned:
             self._data["repos"] = clean
