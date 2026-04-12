@@ -26,12 +26,11 @@ def index() -> None:
     """Index repositories, PDFs, and Markdown into T3 collections."""
 
 
-def _discover_taxonomy(collection_name, taxonomy, chroma_client, *, force=False, min_cluster_size=None):
+def _discover_taxonomy(collection_name, taxonomy, chroma_client, *, force=False):
     """Wrapper for discover_for_collection — importable for patching in tests."""
     from nexus.commands.taxonomy_cmd import discover_for_collection
     return discover_for_collection(
-        collection_name, taxonomy, chroma_client,
-        force=force, min_cluster_size=min_cluster_size,
+        collection_name, taxonomy, chroma_client, force=force,
     )
 
 

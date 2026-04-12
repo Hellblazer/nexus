@@ -13,7 +13,7 @@ def test_index_repo_triggers_taxonomy_discover(tmp_path) -> None:
     """index_repo_cmd calls _discover_taxonomy after indexing."""
     calls: list[str] = []
 
-    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False, min_cluster_size=None):
+    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False):
         calls.append(collection_name)
         return 2
 
@@ -39,7 +39,7 @@ def test_index_repo_no_taxonomy_flag(tmp_path) -> None:
     """--no-taxonomy skips taxonomy discover."""
     calls: list[str] = []
 
-    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False, min_cluster_size=None):
+    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False):
         calls.append(collection_name)
         return 0
 
@@ -60,7 +60,7 @@ def test_index_repo_frecency_only_skips_taxonomy(tmp_path) -> None:
     """--frecency-only skips taxonomy discover."""
     calls: list[str] = []
 
-    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False, min_cluster_size=None):
+    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False):
         calls.append(collection_name)
         return 0
 

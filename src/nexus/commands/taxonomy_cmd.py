@@ -26,7 +26,6 @@ def discover_for_collection(
     chroma_client: Any,
     *,
     force: bool = False,
-    min_cluster_size: int | None = None,
 ) -> int:
     """Fetch texts from a T3 collection, embed with MiniLM, run HDBSCAN discovery.
 
@@ -44,9 +43,6 @@ def discover_for_collection(
     force:
         If True, delete existing topics for this collection before
         re-discovering (calls ``rebuild_taxonomy``).
-    min_cluster_size:
-        Override adaptive ``max(5, N//15)`` formula. Passed through
-        to HDBSCAN if set (not yet wired — future ``nexus-7m8``).
 
     Returns
     -------
@@ -161,37 +157,27 @@ def show_cmd(topic_id: int, limit: int) -> None:
 @taxonomy.command("discover")
 @click.option("--collection", "-c", required=True, help="T3 collection to discover topics for")
 @click.option("--force", is_flag=True, help="Delete existing topics before re-discovering")
-@click.option("--min-cluster-size", type=int, default=None, help="Override adaptive cluster size")
-def discover_cmd(collection: str, force: bool, min_cluster_size: int | None) -> None:
+def discover_cmd(collection: str, force: bool) -> None:
     """Discover topics from a T3 collection using HDBSCAN clustering."""
     from nexus.db import make_t3
 
     with T2Database(_default_db_path()) as db:
         t3 = make_t3()
         count = discover_for_collection(
-            collection,
-            db.taxonomy,
-            t3._client,
-            force=force,
-            min_cluster_size=min_cluster_size,
+            collection, db.taxonomy, t3._client, force=force,
         )
     click.echo(f"Created {count} topics for collection {collection!r}.")
 
 
 @taxonomy.command("rebuild")
 @click.option("--collection", "-c", required=True, help="T3 collection to rebuild taxonomy for")
-@click.option("--min-cluster-size", type=int, default=None, help="Override adaptive cluster size")
-def rebuild_cmd(collection: str, min_cluster_size: int | None) -> None:
+def rebuild_cmd(collection: str) -> None:
     """Rebuild topic taxonomy from scratch (alias for discover --force)."""
     from nexus.db import make_t3
 
     with T2Database(_default_db_path()) as db:
         t3 = make_t3()
         count = discover_for_collection(
-            collection,
-            db.taxonomy,
-            t3._client,
-            force=True,
-            min_cluster_size=min_cluster_size,
+            collection, db.taxonomy, t3._client, force=True,
         )
     click.echo(f"Rebuilt {count} topics for collection {collection!r}.")

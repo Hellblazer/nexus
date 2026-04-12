@@ -216,12 +216,15 @@ class CatalogTaxonomy:
                 ).fetchall()
         return [dict(zip(_TOPIC_COLUMNS, row)) for row in rows]
 
-    def assign_topic(self, doc_id: str, topic_id: int) -> None:
+    def assign_topic(
+        self, doc_id: str, topic_id: int, *, assigned_by: str = "hdbscan",
+    ) -> None:
         """Assign a document to a topic (idempotent via INSERT OR IGNORE)."""
         with self._lock:
             self.conn.execute(
-                "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                (doc_id, topic_id),
+                "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id, assigned_by) "
+                "VALUES (?, ?, ?)",
+                (doc_id, topic_id, assigned_by),
             )
             self.conn.commit()
 

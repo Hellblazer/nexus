@@ -16,6 +16,15 @@ def chroma_client() -> chromadb.ClientAPI:
     return chromadb.EphemeralClient()
 
 
+@pytest.fixture(autouse=True)
+def _reset_hooks():
+    """Clear post_store_hooks between tests to prevent cross-test leakage."""
+    from nexus.mcp_infra import _post_store_hooks
+    _post_store_hooks.clear()
+    yield
+    _post_store_hooks.clear()
+
+
 # ── Hook mechanism ───────────────────────────────────────────────────────────
 
 

@@ -285,11 +285,7 @@ def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
 
     topic_id = taxonomy.assign_single(collection, embedding, chroma_client)
     if topic_id is not None:
-        taxonomy.conn.execute(
-            "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id, assigned_by) VALUES (?, ?, 'centroid')",
-            (doc_id, topic_id),
-        )
-        taxonomy.conn.commit()
+        taxonomy.assign_topic(doc_id, topic_id, assigned_by="centroid")
 
 
 # ── Test injection ────────────────────────────────────────────────────────────
