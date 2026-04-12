@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.1] - 2026-04-11
+
+Patch: code-verification gate for the RDR audit methodology, RDR-066
+composition probe catch demonstration, and RDR housekeeping.
+
+### Fixed
+
+- **`skills/rdr-audit/SKILL.md`**: added mandatory code-verification gate
+  for PARTIAL and SCOPE-REDUCED audit verdicts. The audit read RDR text
+  (success criteria checkboxes) but not code — producing false-positive
+  SCOPE-REDUCED on RDR-056 when all 4 features had shipped. The gate
+  requires Grep spot-checks against the source before any non-CLEAN
+  verdict. Canonical prompt bumped to v1.2 (T2
+  `nexus_rdr/067-canonical-prompt-v1`).
+
+### Changed
+
+- **RDR-066 Phase 5a proven**: synthetic composition probe catch test
+  demonstrated end-to-end FAIL→catch→attribution cycle (10-dim vs 5-dim
+  mismatch correctly attributed to specific dependency beads).
+- **RDR-067 CA-1 verified**: two independent audit runs against nexus
+  confirmed the canonical prompt generalizes beyond ART. CA-2 partially
+  verified (2/4 overlapping verdicts agree, calibration drifts on severity).
+- **RDRs closed**: 057 (implemented), 061 (implemented), 062 (implemented),
+  065 (status flip), 068 (won't-ship — reduces to formal verification).
+  README index updated for 057-069.
+
 ## [3.9.0] - 2026-04-11
 
 Plugin release: RDR-067 (Cross-Project RDR Audit Loop) Phase 2 of the
