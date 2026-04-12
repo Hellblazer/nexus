@@ -675,7 +675,8 @@ class CatalogTaxonomy:
 
         n_new = new_centroids.shape[0]
         result: list[dict[str, Any]] = [
-            {"label": None, "review_status": "pending"} for _ in range(n_new)
+            {"label": None, "review_status": "pending", "old_centroid_idx": -1}
+            for _ in range(n_new)
         ]
 
         if old_centroids.shape[0] == 0:
@@ -702,6 +703,7 @@ class CatalogTaxonomy:
             result[new_idx] = {
                 "label": old_labels[old_idx],
                 "review_status": old_review_statuses[old_idx],
+                "old_centroid_idx": old_idx,
             }
             claimed_old.add(old_idx)
             claimed_new.add(new_idx)
@@ -1008,6 +1010,7 @@ class CatalogTaxonomy:
         # ── Step 3: HDBSCAN ──────────────────────────────────────────
         n = len(doc_ids)
         if n < 5:
+            self.record_discover_count(collection_name, n)
             return 0
 
         min_cluster_size = max(5, n // 15)
@@ -1097,24 +1100,17 @@ class CatalogTaxonomy:
                 count += 1
 
             # Transfer manual assignments.
-            # Build old_topic_id -> new_topic_id map via merge strategy
-            # (old centroid idx → matched new centroid idx → new topic_id)
+            # Build old_topic_id -> new_topic_id map from _merge_labels output
             old_to_new_topic: dict[int, int] = {}
             if old_centroid_topic_ids and new_topic_ids:
                 for new_idx, merge_info in enumerate(merged):
-                    if merge_info["label"] is not None:
-                        # This new topic was matched to an old one.
-                        # Find which old centroid idx was claimed by this new_idx.
-                        from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
-                        if old_centroids.shape[0] > 0:
-                            sims = _cos_sim(
-                                new_centroids_arr[new_idx:new_idx+1], old_centroids,
-                            )[0]
-                            best_old_idx = int(sims.argmax())
-                            old_tid = old_centroid_topic_ids[best_old_idx]
-                            old_to_new_topic[old_tid] = new_topic_ids[new_idx]
+                    old_idx = merge_info.get("old_centroid_idx", -1)
+                    if merge_info["label"] is not None and 0 <= old_idx < len(old_centroid_topic_ids):
+                        old_tid = old_centroid_topic_ids[old_idx]
+                        old_to_new_topic[old_tid] = new_topic_ids[new_idx]
 
             if manual_assignments:
+                doc_id_to_idx = {did: i for i, did in enumerate(doc_ids)}
                 for manual_doc, old_topic_id in manual_assignments.items():
                     # Route 1: old topic was matched to a new topic
                     if old_topic_id in old_to_new_topic:
@@ -1127,9 +1123,9 @@ class CatalogTaxonomy:
                         continue
 
                     # Route 2: doc is in the current corpus — use embedding
-                    if manual_doc in doc_ids:
-                        doc_idx = doc_ids.index(manual_doc)
-                        doc_emb = embeddings[doc_idx : doc_idx + 1]
+                    if manual_doc in doc_id_to_idx:
+                        from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+                        doc_emb = embeddings[doc_id_to_idx[manual_doc] : doc_id_to_idx[manual_doc] + 1]
                         sims = _cos_sim(doc_emb, new_centroids_arr)[0]
                         best_idx = int(sims.argmax())
                         if float(sims[best_idx]) > 0.5:
