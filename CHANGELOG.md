@@ -6,6 +6,76 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.0] - 2026-04-11
+
+Minor release: ships RDR-067 (Cross-Project RDR Audit Loop) — Phase 2 of
+the 4-RDR silent-scope-reduction remediation. Adds the `nx:rdr-audit`
+skill which wraps the proven 2026-04-11 audit pattern as a one-command
+feedback loop, five management subcommands with a read-only / print-only
+safety split, cross-project incident template, scheduling asset
+templates for local cron/launchd, and softens six research-class agents
+to honor relay-specified storage targets (T1/T2/T3).
+
+### Added (nx plugin)
+
+- **`nx:rdr-audit` skill** (`nx/skills/rdr-audit/SKILL.md`) — wraps the
+  canonical audit prompt from RDR-067 Phase 1a (pinned in T2 at
+  `nexus_rdr/067-canonical-prompt-v1`, ttl=0 permanent) as a one-command
+  feedback loop. Dispatches the `deep-research-synthesizer` agent with
+  the substituted prompt, parses the output, and persists findings to
+  T2 `rdr_process/audit-<project>-<date>`. Enforces the Phase 1b
+  invariant that transcript mining from `~/.claude/projects/*` is
+  non-delegatable (main session must pre-gather excerpts before
+  dispatch). Current-project derivation via `git remote` → pwd basename
+  → user prompt precedence chain. Skill body owns `memory_put`
+  persistence (the subagent returns findings; the skill writes T2).
+- **Management subcommands** on `nx:rdr-audit`: `list`, `status`,
+  `history`, `schedule`, `unschedule`. Enforces a safety split:
+  read-only subcommands (`list`/`status`/`history`) must not mutate OS
+  or T2 state; print-only subcommands (`schedule`/`unschedule`) must
+  not execute `launchctl load`, `launchctl unload`, crontab edits, or
+  plist file writes. Platform install/uninstall commands are printed
+  for the user to review and run manually — the skill never performs
+  privileged OS changes automatically.
+- **`nx:rdr-audit` slash command** (`nx/commands/rdr-audit.md`) —
+  preamble derives current project, pre-scopes the evidence layer
+  (worktree detection, transcript directory detection), and classifies
+  subcommands by safety class before routing to the skill body.
+- **Cross-project incident template**
+  (`nx/resources/rdr_process/INCIDENT-TEMPLATE.md`) — 6 frontmatter
+  fields + 8 required narrative sections for cross-project
+  silent-scope-reduction incident filings. Sibling projects file into
+  T2 `rdr_process/<project>-incident-<slug>` so audit subagents can
+  aggregate across projects.
+- **Scheduling asset templates** (`scripts/`) — shell wrapper
+  (`scripts/cron-rdr-audit.sh`, chmod +x, strict bash mode, log rotation
+  at 10MB), macOS launchd plist template
+  (`scripts/launchd/com.nexus.rdr-audit.PROJECT.plist`, monthly
+  cadence), Linux crontab template (`scripts/cron/rdr-audit.crontab`,
+  `0 3 1 */3 *` true 90-day cadence), and platform READMEs with
+  explicit "do not run launchctl load automatically" safety notes.
+
+### Changed (nx plugin)
+
+- **Research-class agents honor relay-specified storage targets**. Six
+  agents (`deep-research-synthesizer`, `deep-analyst`,
+  `codebase-deep-analyzer`, `architect-planner`, `debugger`,
+  `strategic-planner`) previously had hardcoded "MUST store to T3 via
+  `store_put`" directives and `<HARD-GATE>` blocks that overrode
+  dispatching skills' T2 target requests. Softened to "MUST persist …
+  unless the dispatching relay specifies an alternative storage target
+  in its Input Artifacts, Deliverable, or Operational Notes section".
+  The T3 default is preserved for generic `/nx:research`,
+  `/nx:deep-analysis`, `/nx:analyze-code`, etc. invocations (so the
+  auto-linker and catalog graph behavior is unchanged). Dispatching
+  skills like `nx:rdr-audit` can now redirect findings to T2 without
+  fighting the agent's trained pattern.
+
+### Docs
+
+- RDR-067 (`docs/rdr/rdr-067-cross-project-rdr-audit-loop.md`) accepted
+  2026-04-11, status `accepted`.
+
 ## [3.8.5] - 2026-04-11
 
 Patch release: ships RDR-066 (Composition Smoke Probe at Coordinator

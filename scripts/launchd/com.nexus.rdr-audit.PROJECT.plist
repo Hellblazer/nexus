@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    rdr-audit launchd template
+
+    Before installing:
+      1. Replace every `PROJECT` placeholder with your project name (e.g. ART, nexus)
+      2. Replace /ABSOLUTE/PATH/TO/nexus with the absolute path to this nexus repo
+      3. Replace /Users/YOURNAME with your home directory path
+      4. Save as ~/Library/LaunchAgents/com.nexus.rdr-audit.PROJECT.plist (with PROJECT substituted)
+      5. Load: launchctl load ~/Library/LaunchAgents/com.nexus.rdr-audit.PROJECT.plist
+
+    NOTE: launchd StartCalendarInterval does not support exact 90-day intervals.
+    The configuration below fires on the 1st of each month at 03:00 local time
+    (~30-day cadence, closest practical approximation). For a true 90-day cadence
+    use the cron template under scripts/cron/rdr-audit.crontab (Linux) or accept
+    the monthly-as-close-to-90 compromise.
+  -->
+
+  <key>Label</key>
+  <string>com.nexus.rdr-audit.PROJECT</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/ABSOLUTE/PATH/TO/nexus/scripts/cron-rdr-audit.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PROJECT</key>
+    <string>PROJECT</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Day</key><integer>1</integer>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOURNAME/.local/state/rdr-audit/PROJECT.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/YOURNAME/.local/state/rdr-audit/PROJECT.err</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

@@ -170,9 +170,13 @@ Use to propose architectures using proven technologies.
 5. Store design decisions in Nexus: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="decision-architect-{topic}", tags="architecture"
 
 
-## T3 Persistence (MANDATORY before returning)
+## Persistence (before returning)
 
-You MUST store your architectural decisions to T3 knowledge BEFORE returning. The auto-linker creates catalog links at storage time — those links are lost if you skip this step.
+You MUST persist your architectural decisions BEFORE returning — **unless the dispatching relay specifies an alternative storage target** (e.g. a T2 `memory_put` destination or a T1 `scratch` target) in its Input Artifacts, Deliverable, or Operational Notes section. When the relay specifies a target, honor it and skip the T3 default.
+
+**Why the default is T3**: the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip the default dispatch path.
+
+**Default T3 store call** (use only when the relay does not specify an alternative):
 
 ```
 mcp__plugin_nx_nexus__store_put(
@@ -243,7 +247,10 @@ Provide structured plans with:
 Always include a `## Next Step: plan-auditor` block in your output upon plan completion for the caller to dispatch. Be thorough, be complete, be efficient - deliver plans that are executable machines focused on successful outcomes.
 
 <HARD-GATE>
-BEFORE generating your final response, you MUST call store_put to persist your architectural decisions to T3.
-If you have not yet called mcp__plugin_nx_nexus__store_put in this session, STOP and call it NOW.
-Do NOT return without storing. This is not optional.
+BEFORE generating your final response, you MUST persist your architectural decisions via EXACTLY ONE of:
+- `mcp__plugin_nx_nexus__store_put` (T3 knowledge — the DEFAULT when the dispatching relay does not specify a storage target)
+- `mcp__plugin_nx_nexus__memory_put` (T2 memory — use when the relay specifies a T2 project/title target)
+- `mcp__plugin_nx_nexus__scratch` with `action="put"` (T1 scratch — use when the relay specifies a T1 target)
+
+If you have not yet called one of these in this session, STOP and call the appropriate one NOW based on what the dispatching relay specified. Default to `store_put` T3 when the relay is silent on target. Do NOT return without persisting. This is not optional.
 </HARD-GATE>
