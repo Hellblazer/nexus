@@ -2,30 +2,13 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Deprecation shim — taxonomy moved to nexus.db.t2.catalog_taxonomy.
 
-RDR-063 Phase 1 step 4 (bead ``nexus-u29l``) extracted the topic
-taxonomy implementation out of this module into the new
-:mod:`nexus.db.t2.catalog_taxonomy` package, where it lives as a
-:class:`CatalogTaxonomy` class with its own dedicated
-``sqlite3.Connection`` and ``threading.Lock`` (promoted to an
-independent connection in Phase 2, bead ``nexus-3d3k``). The old
-module-level functions reached through the monolithic ``T2Database``'s
-lock and connection directly, which defeated the goal of giving the
-taxonomy domain its own connection.
+Thin compatibility shim so existing import sites (tests, CLI commands)
+continue to work without modification. Each wrapper accepts a
+:class:`T2Database` and forwards to ``db.taxonomy``.
 
-This file remains as a thin compatibility shim so existing import
-sites continue to work without modification:
-
-  * ``from nexus.taxonomy import get_topics, get_topic_tree, ...``
-    (used by ``tests/test_taxonomy.py`` and ``commands/taxonomy_cmd.py``)
-  * ``import nexus.taxonomy as tax`` followed by ``tax.cluster_and_persist(...)``
-    (used by two tests in ``tests/test_taxonomy.py``)
-
-Each wrapper accepts a :class:`T2Database` and forwards to the
-matching method on ``db.taxonomy``. The wrappers contain no logic of
-their own.
-
-**Removal**: per RDR-063 §Open Question 1 / Phase 1 Step 4, this shim
-is removed in the first PR after Phase 2 (bead ``nexus-3d3k``) merges.
+RDR-070 (nexus-9k5): ``cluster_and_persist`` removed — replaced by
+``discover_topics`` on :class:`CatalogTaxonomy`. ``rebuild_taxonomy``
+signature changed to accept embeddings + ChromaDB client.
 """
 
 from __future__ import annotations
@@ -68,23 +51,3 @@ def get_topic_tree(
 ) -> list[dict[str, Any]]:
     """Deprecated wrapper — use ``db.taxonomy.get_topic_tree(...)``."""
     return db.taxonomy.get_topic_tree(collection, max_depth=max_depth)
-
-
-def cluster_and_persist(
-    db: "T2Database",
-    project: str,
-    *,
-    k: int | None = None,
-) -> int:
-    """Deprecated wrapper — use ``db.taxonomy.cluster_and_persist(...)``."""
-    return db.taxonomy.cluster_and_persist(project, k=k)
-
-
-def rebuild_taxonomy(
-    db: "T2Database",
-    project: str,
-    *,
-    k: int | None = None,
-) -> int:
-    """Deprecated wrapper — use ``db.taxonomy.rebuild_taxonomy(...)``."""
-    return db.taxonomy.rebuild_taxonomy(project, k=k)

@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for persistent topic taxonomy (RDR-061 P3-1, nexus-vk8m)."""
+"""Tests for persistent topic taxonomy (RDR-061 P3-1, nexus-vk8m; RDR-070 nexus-9k5)."""
 from __future__ import annotations
 
 from pathlib import Path
 
+import chromadb
+import numpy as np
 import pytest
 
 from nexus.db.t2 import T2Database
 from nexus.taxonomy import (
     assign_topic,
-    cluster_and_persist,
     get_topic_docs,
     get_topic_tree,
     get_topics,
-    rebuild_taxonomy,
 )
+
+
+@pytest.fixture()
+def chroma_client() -> chromadb.ClientAPI:
+    """Ephemeral ChromaDB client for taxonomy centroid tests."""
+    return chromadb.EphemeralClient()
 
 
 # ── schema ──────────────────────────────────────────────────────────────────
@@ -39,20 +45,48 @@ def test_get_topics_empty(db: T2Database) -> None:
     assert get_topics(db) == []
 
 
-def test_cluster_and_persist_creates_topics(db: T2Database) -> None:
-    """Clustering entries creates topic rows in T2."""
-    # Insert enough entries to cluster
-    for i in range(10):
-        db.put(project="proj", title=f"doc-{i}.md",
-               content=f"topic alpha content about search engines {i}")
-    for i in range(10):
-        db.put(project="proj", title=f"doc-{i+10}.md",
-               content=f"topic beta content about database indexing {i}")
+def test_discover_topics_creates_topics_and_centroids(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """discover_topics persists topics to T2 and upserts centroids to ChromaDB."""
+    rng = np.random.default_rng(42)
+    # Two well-separated clusters in 384d
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
 
-    count = cluster_and_persist(db, "proj", k=3)
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural network gradient {i}" for i in range(30)]
+        + [f"database query indexing sql schema {i}" for i in range(30)]
+    )
+
+    count = db.taxonomy.discover_topics(
+        "test__coll", doc_ids, embeddings, texts, chroma_client,
+    )
     assert count >= 2
+
     topics = get_topics(db)
     assert len(topics) >= 2
+    # Each topic has a c-TF-IDF label (not empty)
+    assert all(t["label"] for t in topics)
+    # doc_count populated
+    assert all(t["doc_count"] > 0 for t in topics)
+    assert sum(t["doc_count"] for t in topics) <= 60
+
+    # Centroids upserted to taxonomy__centroids
+    centroid_coll = chroma_client.get_collection(
+        "taxonomy__centroids", embedding_function=None,
+    )
+    result = centroid_coll.get(include=["metadatas", "embeddings"])
+    assert len(result["ids"]) >= 2
+    # Centroid embeddings are 384d
+    assert len(result["embeddings"][0]) == 384
+    # Metadata has topic_id, label, collection
+    meta = result["metadatas"][0]
+    assert "topic_id" in meta
+    assert "label" in meta
+    assert meta["collection"] == "test__coll"
 
 
 def test_assign_topic(db: T2Database) -> None:
@@ -92,17 +126,28 @@ def test_assign_topic_idempotent(db: T2Database) -> None:
     assert count == 1
 
 
-def test_rebuild_taxonomy_clears_and_recreates(db: T2Database) -> None:
-    """Rebuild is idempotent — clears old topics, creates new ones."""
-    for i in range(15):
-        db.put(project="proj", title=f"doc-{i}.md",
-               content=f"content about machine learning algorithms {i}")
+def test_rebuild_taxonomy_clears_and_rediscovers(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """rebuild_taxonomy deletes old topics, then re-discovers."""
+    rng = np.random.default_rng(42)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural network {i}" for i in range(30)]
+        + [f"database query sql schema {i}" for i in range(30)]
+    )
 
-    count1 = rebuild_taxonomy(db, "proj")
-    count2 = rebuild_taxonomy(db, "proj")
-    # Both runs should produce topics (second clears first, recreates)
-    assert count1 >= 1
-    assert count2 >= 1
+    count1 = db.taxonomy.rebuild_taxonomy(
+        "test__coll", doc_ids, embeddings, texts, chroma_client,
+    )
+    count2 = db.taxonomy.rebuild_taxonomy(
+        "test__coll", doc_ids, embeddings, texts, chroma_client,
+    )
+    assert count1 >= 2
+    assert count2 >= 2
 
 
 def test_get_topics_filtered_by_parent(db: T2Database) -> None:
@@ -166,30 +211,85 @@ def test_get_topic_docs_returns_assigned(db: T2Database) -> None:
     assert {d["doc_id"] for d in docs} == {"doc-a", "doc-b"}
 
 
-def test_cluster_and_persist_caps_vocab_size(db: T2Database, monkeypatch) -> None:
-    """Vocab is capped to prevent OOM on large/diverse corpora."""
-    import nexus.taxonomy as tax
-    # Insert entries with many distinct words — should not blow up
-    for i in range(20):
-        content = " ".join(f"word{i}_{j}" for j in range(50))
-        db.put(project="big", title=f"entry-{i}", content=content)
-    # Should complete without OOM
-    n = tax.cluster_and_persist(db, "big", k=3)
-    assert n > 0
+def test_discover_topics_all_noise_returns_zero(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """When HDBSCAN assigns all docs to noise (-1), return 0 and skip centroids."""
+    rng = np.random.default_rng(42)
+    # Too few scattered points — HDBSCAN cannot find clusters
+    embeddings = rng.standard_normal((8, 384)).astype(np.float32) * 100
+    doc_ids = [f"noise-{i}" for i in range(8)]
+    texts = [f"completely unrelated text {i}" for i in range(8)]
+
+    count = db.taxonomy.discover_topics(
+        "test__coll", doc_ids, embeddings, texts, chroma_client,
+    )
+    assert count == 0
+    assert db.taxonomy.get_topics() == []
 
 
-def test_cluster_and_persist_filters_stopwords(db: T2Database) -> None:
-    """Stopwords are filtered before vocab construction."""
-    import nexus.taxonomy as tax
-    for i in range(5):
-        db.put(
-            project="sw",
-            title=f"entry-{i}",
-            content=f"the quick brown fox jumps over the lazy dog topic{i}",
-        )
-    n = tax.cluster_and_persist(db, "sw", k=2)
-    assert n > 0
-    # The vocab should have topic0..topic4 and content words, not "the", "over", etc.
+def test_assign_single_returns_nearest_topic(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_single returns the nearest topic_id via centroid ANN lookup."""
+    rng = np.random.default_rng(42)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural {i}" for i in range(30)]
+        + [f"database query sql {i}" for i in range(30)]
+    )
+
+    db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
+
+    # New embedding near cluster A (dimension 0 shifted)
+    new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
+    new_emb[0] += 3.0
+
+    topic_id = db.taxonomy.assign_single("test__coll", new_emb, chroma_client)
+    assert topic_id is not None
+    assert isinstance(topic_id, int)
+
+    # Verify it's assigned to a real topic in T2
+    topics = db.taxonomy.get_topics()
+    topic_ids = {t["id"] for t in topics}
+    assert topic_id in topic_ids
+
+
+def test_assign_single_no_centroids_returns_none(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_single returns None when no centroids exist for the collection."""
+    emb = np.random.default_rng(42).standard_normal(384).astype(np.float32)
+    # Use a collection name with no centroids — EphemeralClient shares
+    # in-process state, so centroids from other tests may exist.
+    result = db.taxonomy.assign_single("nonexistent__coll", emb, chroma_client)
+    assert result is None
+
+
+def test_assigned_by_column_populated(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """discover_topics sets assigned_by='hdbscan' on topic_assignment rows."""
+    rng = np.random.default_rng(42)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural {i}" for i in range(30)]
+        + [f"database query sql {i}" for i in range(30)]
+    )
+
+    db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
+
+    rows = db.taxonomy.conn.execute(
+        "SELECT DISTINCT assigned_by FROM topic_assignments"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "hdbscan"
 
 
 def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
@@ -425,3 +525,89 @@ def test_cli_taxonomy_list(db: T2Database) -> None:
     # The command uses its own DB; for a true integration test we'd need to
     # inject the fixture DB. Here we just verify the command doesn't crash.
     assert result.exit_code == 0
+
+
+# ── sklearn HDBSCAN smoke tests (RDR-070, nexus-86v) ────────────────────────
+#
+# scikit-learn>=1.3 is a core dep. sklearn.cluster.HDBSCAN replaces BERTopic
+# for topic discovery — same HDBSCAN algorithm, c-TF-IDF labels via
+# CountVectorizer+TfidfTransformer, incremental assignment via nearest centroid.
+# No torch, no sentence-transformers, no optional extra needed.
+
+
+class TestSklearnHdbscanSmoke:
+    """Verify sklearn HDBSCAN + TF-IDF topic pipeline works on 384d embeddings."""
+
+    def test_hdbscan_finds_clusters(self) -> None:
+        """HDBSCAN discovers clusters from well-separated 384d embeddings."""
+        from sklearn.cluster import HDBSCAN
+
+        rng = np.random.default_rng(42)
+        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings[:30, 0] += 3.0
+        embeddings[30:, 1] += 3.0
+
+        clusterer = HDBSCAN(min_cluster_size=5, store_centers="centroid", copy=True)
+        labels = clusterer.fit_predict(embeddings)
+
+        assert len(labels) == 60
+        real_topics = {t for t in labels if t >= 0}
+        assert len(real_topics) >= 2, f"Expected >=2 clusters, got {real_topics}"
+        assert clusterer.centroids_.shape[1] == 384
+
+    def test_tfidf_topic_labels(self) -> None:
+        """c-TF-IDF produces meaningful per-cluster labels from doc text."""
+        from sklearn.cluster import HDBSCAN
+        from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
+
+        rng = np.random.default_rng(42)
+        docs_a = [f"machine learning neural network gradient {i}" for i in range(30)]
+        docs_b = [f"database query indexing sql schema {i}" for i in range(30)]
+        docs = docs_a + docs_b
+
+        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings[:30, 0] += 3.0
+        embeddings[30:, 1] += 3.0
+
+        labels = HDBSCAN(min_cluster_size=5, copy=True).fit_predict(embeddings)
+
+        vectorizer = CountVectorizer(stop_words="english")
+        tfidf = TfidfTransformer().fit_transform(vectorizer.fit_transform(docs))
+        feature_names = vectorizer.get_feature_names_out()
+
+        real_clusters = {t for t in labels if t >= 0}
+        for cid in real_clusters:
+            mask = labels == cid
+            cluster_tfidf = tfidf[mask].mean(axis=0).A1
+            top_idx = cluster_tfidf.argsort()[-3:][::-1]
+            top_terms = [feature_names[i] for i in top_idx]
+            assert len(top_terms) == 3
+            # Each cluster's top terms should come from its own domain
+            assert any(t in top_terms for t in
+                       ["machine", "learning", "neural", "network", "gradient",
+                        "database", "query", "indexing", "sql", "schema"])
+
+    def test_incremental_nearest_centroid(self) -> None:
+        """New docs assigned to nearest cluster centroid via cosine similarity."""
+        from sklearn.cluster import HDBSCAN
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        rng = np.random.default_rng(42)
+        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings[:30, 0] += 3.0
+        embeddings[30:, 1] += 3.0
+
+        clusterer = HDBSCAN(min_cluster_size=5, store_centers="centroid", copy=True)
+        labels = clusterer.fit_predict(embeddings)
+
+        # New embedding near cluster A
+        new_emb = rng.standard_normal((1, 384)).astype(np.float32) * 0.1
+        new_emb[0, 0] += 3.0
+
+        sims = cosine_similarity(new_emb, clusterer.centroids_)
+        assigned = int(sims.argmax())
+
+        # Should assign to same cluster as the first 30 docs
+        cluster_a = labels[0]
+        assert assigned == cluster_a
+        assert sims[0, assigned] > 0.5

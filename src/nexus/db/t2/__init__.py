@@ -40,8 +40,8 @@ Concurrency model (RDR-063 Phase 2):
   so cross-domain write coordination happens in SQLite rather than
   Python.
 * Telemetry writes from MCP hooks no longer block ``memory.search``.
-* ``taxonomy.cluster_and_persist`` no longer freezes interactive
-  memory access while rebuilding clusters.
+* ``taxonomy.discover_topics`` holds only ``taxonomy._lock`` for
+  INSERTs — never acquires ``memory._lock``.
 
 Schema migrations are per-domain and idempotent: each store runs its
 own migration guard the first time it sees a given database path, so
@@ -107,10 +107,8 @@ class T2Database:
         # their initial CREATE TABLE IF NOT EXISTS scripts.
         self.memory: MemoryStore = MemoryStore(path)
         self.plans: PlanLibrary = PlanLibrary(path)
-        # CatalogTaxonomy takes a MemoryStore reference because
-        # cluster_and_persist reads memory entries to build word vectors.
-        # The cross-domain dependency is intentionally explicit at the
-        # constructor signature (RDR-063 §Cross-Domain Contracts).
+        # CatalogTaxonomy takes a MemoryStore reference for the
+        # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
         self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
         self.telemetry: Telemetry = Telemetry(path)
 

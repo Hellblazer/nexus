@@ -57,9 +57,14 @@ def show_cmd(topic_id: int, limit: int) -> None:
 @click.option("--project", "-p", required=True, help="Project to rebuild taxonomy for")
 @click.option("-k", default=None, type=int, help="Number of clusters (auto if omitted)")
 def rebuild_cmd(project: str, k: int | None) -> None:
-    """Rebuild topic taxonomy from scratch."""
-    from nexus.taxonomy import rebuild_taxonomy
+    """Rebuild topic taxonomy from scratch.
 
-    with T2Database(_default_db_path()) as db:
-        count = rebuild_taxonomy(db, project, k=k)
-    click.echo(f"Created {count} topics for project {project!r}.")
+    RDR-070: rebuild now requires embeddings from a T3 collection.
+    Use ``nx taxonomy discover`` (nexus-2dq) instead.
+    """
+    click.echo(
+        "Error: `nx taxonomy rebuild` requires the new discover pipeline (RDR-070).\n"
+        "Use `nx taxonomy discover --collection <name>` once nexus-2dq lands.",
+        err=True,
+    )
+    raise SystemExit(1)
