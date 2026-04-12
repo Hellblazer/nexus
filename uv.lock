@@ -679,6 +679,7 @@ dependencies = [
     { name = "chromadb" },
     { name = "click" },
     { name = "docling" },
+    { name = "fastapi" },
     { name = "httpx" },
     { name = "llama-index-core" },
     { name = "markdown-it-py" },
@@ -693,6 +694,7 @@ dependencies = [
     { name = "structlog" },
     { name = "tqdm" },
     { name = "tree-sitter-language-pack" },
+    { name = "uvicorn", extra = ["standard"] },
     { name = "voyageai" },
 ]
 
@@ -718,6 +720,7 @@ requires-dist = [
     { name = "chromadb", specifier = ">=0.6" },
     { name = "click", specifier = ">=8.1" },
     { name = "docling", specifier = ">=2.76.0" },
+    { name = "fastapi", specifier = ">=0.115" },
     { name = "fastembed", marker = "extra == 'local'", specifier = ">=0.7.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "llama-index-core", specifier = "==0.12.7" },
@@ -733,6 +736,7 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.0" },
     { name = "tqdm", specifier = ">=4.65" },
     { name = "tree-sitter-language-pack", specifier = "==0.7.1" },
+    { name = "uvicorn", extras = ["standard"] },
     { name = "voyageai", specifier = ">=0.2" },
 ]
 provides-extras = ["local", "mineru"]
