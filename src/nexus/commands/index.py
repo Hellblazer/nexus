@@ -26,6 +26,15 @@ def index() -> None:
     """Index repositories, PDFs, and Markdown into T3 collections."""
 
 
+def _discover_taxonomy(collection_name, taxonomy, chroma_client, *, force=False, min_cluster_size=None):
+    """Wrapper for discover_for_collection — importable for patching in tests."""
+    from nexus.commands.taxonomy_cmd import discover_for_collection
+    return discover_for_collection(
+        collection_name, taxonomy, chroma_client,
+        force=force, min_cluster_size=min_cluster_size,
+    )
+
+
 @index.command("repo")
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
@@ -55,7 +64,9 @@ def index() -> None:
     show_default=True,
     help="Behaviour when another process holds the repo lock: skip exits immediately, wait blocks.",
 )
-def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, force_stale: bool, on_locked: str) -> None:
+@click.option("--no-taxonomy", is_flag=True, default=False,
+              help="Skip automatic topic discovery after indexing.")
+def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, force_stale: bool, on_locked: str, no_taxonomy: bool) -> None:
     """Register and immediately index a code repository at PATH.
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
@@ -127,6 +138,34 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
             if rdr_failed:
                 parts.append(f"{rdr_failed} failed")
             click.echo(f"  RDR documents: {', '.join(parts)} (collection rdr__)")
+    # Auto-discover taxonomy topics (RDR-070, nexus-0bg)
+    if not frecency_only and not no_taxonomy and stats:
+        try:
+            from nexus.db import make_t3
+            from nexus.db.t2 import T2Database
+            from nexus.commands._helpers import default_db_path
+
+            t3 = make_t3()
+            info = reg.get(path) or {}
+            collections = []
+            if info.get("collection"):
+                collections.append(info["collection"])
+            if info.get("docs_collection"):
+                collections.append(info["docs_collection"])
+
+            total_topics = 0
+            with T2Database(default_db_path()) as db:
+                for col_name in collections:
+                    try:
+                        n = _discover_taxonomy(col_name, db.taxonomy, t3._client)
+                        total_topics += n
+                    except Exception:
+                        _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)
+            if total_topics:
+                click.echo(f"  Taxonomy: discovered {total_topics} topics across {len(collections)} collections.")
+        except Exception:
+            _log.debug("taxonomy_discover_failed", exc_info=True)
+
     if not frecency_only:
         try:
             from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir
