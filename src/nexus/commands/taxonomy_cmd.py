@@ -375,3 +375,124 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
         t3 = make_t3()
         child_count = db.taxonomy.split_topic(topic_id, k=k, chroma_client=t3._client)
         click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
+
+
+# ── Topic-aware links (RDR-070, nexus-40f) ──────────────────────────────────
+
+
+def _try_load_catalog() -> Any:
+    """Load the catalog if initialized, else return None."""
+    try:
+        from nexus.catalog.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if Catalog.is_initialized(cat_path):
+            return Catalog(cat_path, cat_path / ".catalog.db")
+    except Exception:
+        pass
+    return None
+
+
+def compute_topic_links(
+    taxonomy: "CatalogTaxonomy",
+    catalog: Any,
+    *,
+    collection: str = "",
+) -> list[dict[str, Any]]:
+    """Derive inter-topic relationships from catalog link graph.
+
+    Joins catalog links (tumbler→tumbler) with topic assignments
+    (doc_id→topic) via file_path matching. Returns aggregated
+    topic-pair counts with link types.
+    """
+    from collections import Counter, defaultdict
+
+    # Build doc_id → topic_label index from T2
+    topics = taxonomy.get_topics()
+    if collection:
+        topics = [t for t in topics if t.get("collection") == collection]
+
+    topic_label_map: dict[int, str] = {t["id"]: t["label"] for t in topics}
+    doc_to_topic: dict[str, str] = {}
+    for topic in topics:
+        doc_ids = taxonomy.get_all_topic_doc_ids(topic["id"])
+        for did in doc_ids:
+            doc_to_topic[did] = topic_label_map[topic["id"]]
+
+    if not doc_to_topic:
+        return []
+
+    # Build tumbler → topic_label via catalog entry resolution
+    links = catalog.link_query(limit=0)
+    if not links:
+        return []
+
+    # Resolve link endpoints and match to topics
+    tumbler_cache: dict[str, str | None] = {}
+
+    def _resolve_topic(tumbler: Any) -> str | None:
+        key = str(tumbler)
+        if key in tumbler_cache:
+            return tumbler_cache[key]
+        entry = catalog.resolve(tumbler)
+        result = None
+        if entry and entry.file_path:
+            # Exact match first
+            if entry.file_path in doc_to_topic:
+                result = doc_to_topic[entry.file_path]
+            else:
+                # Prefix match: doc_id may have chunk suffix
+                for did, label in doc_to_topic.items():
+                    if did.startswith(entry.file_path):
+                        result = label
+                        break
+        tumbler_cache[key] = result
+        return result
+
+    # Aggregate links between topics
+    pair_counts: Counter[tuple[str, str]] = Counter()
+    pair_types: dict[tuple[str, str], set[str]] = defaultdict(set)
+
+    for link in links:
+        from_label = _resolve_topic(link.from_tumbler)
+        to_label = _resolve_topic(link.to_tumbler)
+        if from_label and to_label and from_label != to_label:
+            # Canonical ordering for undirected aggregation
+            key = (from_label, to_label) if from_label < to_label else (to_label, from_label)
+            pair_counts[key] += 1
+            pair_types[key].add(link.link_type)
+
+    return [
+        {
+            "from_topic": k[0],
+            "to_topic": k[1],
+            "link_count": v,
+            "link_types": sorted(pair_types[k]),
+        }
+        for k, v in pair_counts.most_common()
+    ]
+
+
+@taxonomy.command("links")
+@click.option("--collection", "-c", default="", help="Filter by collection")
+def links_cmd(collection: str) -> None:
+    """Show inter-topic relationships derived from catalog links."""
+    with T2Database(_default_db_path()) as db:
+        catalog = _try_load_catalog()
+        if catalog is None:
+            click.echo("No catalog initialized. Run `nx catalog setup` first.")
+            return
+
+        result = compute_topic_links(db.taxonomy, catalog, collection=collection)
+        if not result:
+            click.echo("No topic links found.")
+            return
+
+        click.echo(f"Topic relationships ({len(result)} pairs):\n")
+        for pair in result:
+            types_str = ", ".join(pair["link_types"])
+            click.echo(
+                f"  {pair['from_topic']} <-> {pair['to_topic']}"
+                f"  ({pair['link_count']} links: {types_str})"
+            )

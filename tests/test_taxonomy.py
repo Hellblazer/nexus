@@ -1912,3 +1912,236 @@ class TestRediscoveryCentroidLifecycle:
             if t.get("collection") == "test__lifecycle"
         ]
         assert len(all_ids) == len(current_topics)
+
+
+# ── Topic-aware links (RDR-070, nexus-40f) ────────────────────────────────
+
+
+class TestComputeTopicLinks:
+    """compute_topic_links derives inter-topic relationships from catalog links."""
+
+    def test_basic_topic_link(self, db: T2Database) -> None:
+        """Two docs in different topics, linked in catalog, produce a topic link."""
+        from unittest.mock import MagicMock
+
+        from nexus.commands.taxonomy_cmd import compute_topic_links
+
+        # Set up two topics with docs
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("networking", "code__proj", 2, "2026-01-01T00:00:00Z"),
+                ("database", "code__proj", 2, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        t1_id = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'networking'"
+        ).fetchone()[0]
+        t2_id = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'database'"
+        ).fetchone()[0]
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [
+                ("src/net/server.py", t1_id),
+                ("src/net/client.py", t1_id),
+                ("src/db/store.py", t2_id),
+                ("src/db/query.py", t2_id),
+            ],
+        )
+        db.taxonomy.conn.commit()
+
+        # Mock catalog with one link between docs in different topics
+        mock_catalog = MagicMock()
+        mock_entry_a = MagicMock(
+            file_path="src/net/server.py",
+            physical_collection="code__proj",
+        )
+        mock_entry_a.tumbler = MagicMock()
+        mock_entry_a.tumbler.__str__ = lambda s: "1.1"
+        mock_entry_b = MagicMock(
+            file_path="src/db/store.py",
+            physical_collection="code__proj",
+        )
+        mock_entry_b.tumbler = MagicMock()
+        mock_entry_b.tumbler.__str__ = lambda s: "1.2"
+
+        mock_link = MagicMock(
+            link_type="cites",
+        )
+        mock_link.from_tumbler = mock_entry_a.tumbler
+        mock_link.to_tumbler = mock_entry_b.tumbler
+
+        mock_catalog.link_query.return_value = [mock_link]
+        mock_catalog.resolve.side_effect = lambda t: (
+            mock_entry_a if str(t) == "1.1" else mock_entry_b
+        )
+
+        result = compute_topic_links(db.taxonomy, mock_catalog)
+        assert len(result) >= 1
+        pair = result[0]
+        assert {"networking", "database"} == {pair["from_topic"], pair["to_topic"]}
+        assert pair["link_count"] == 1
+        assert "cites" in pair["link_types"]
+
+    def test_no_links_returns_empty(self, db: T2Database) -> None:
+        """No catalog links → empty result."""
+        from unittest.mock import MagicMock
+
+        from nexus.commands.taxonomy_cmd import compute_topic_links
+
+        mock_catalog = MagicMock()
+        mock_catalog.link_query.return_value = []
+
+        assert compute_topic_links(db.taxonomy, mock_catalog) == []
+
+    def test_same_topic_link_excluded(self, db: T2Database) -> None:
+        """Links between docs in the same topic are excluded."""
+        from unittest.mock import MagicMock
+
+        from nexus.commands.taxonomy_cmd import compute_topic_links
+
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("single-topic", "code__proj", 2, "2026-01-01T00:00:00Z"),
+        )
+        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("src/a.py", tid), ("src/b.py", tid)],
+        )
+        db.taxonomy.conn.commit()
+
+        mock_catalog = MagicMock()
+        entry_a = MagicMock(file_path="src/a.py", physical_collection="code__proj")
+        entry_a.tumbler.__str__ = lambda s: "1.1"
+        entry_b = MagicMock(file_path="src/b.py", physical_collection="code__proj")
+        entry_b.tumbler.__str__ = lambda s: "1.2"
+        link = MagicMock(link_type="relates")
+        link.from_tumbler = entry_a.tumbler
+        link.to_tumbler = entry_b.tumbler
+        mock_catalog.link_query.return_value = [link]
+        mock_catalog.resolve.side_effect = lambda t: (
+            entry_a if str(t) == "1.1" else entry_b
+        )
+
+        result = compute_topic_links(db.taxonomy, mock_catalog)
+        assert result == []
+
+    def test_multiple_link_types_aggregated(self, db: T2Database) -> None:
+        """Multiple links between same topic pair aggregate counts and types."""
+        from unittest.mock import MagicMock
+
+        from nexus.commands.taxonomy_cmd import compute_topic_links
+
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("api", "code__proj", 1, "2026-01-01T00:00:00Z"),
+                ("model", "code__proj", 1, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        t1 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'api'"
+        ).fetchone()[0]
+        t2 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'model'"
+        ).fetchone()[0]
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("src/api.py", t1), ("src/model.py", t2)],
+        )
+        db.taxonomy.conn.commit()
+
+        mock_catalog = MagicMock()
+        ea = MagicMock(file_path="src/api.py", physical_collection="code__proj")
+        ea.tumbler.__str__ = lambda s: "1.1"
+        eb = MagicMock(file_path="src/model.py", physical_collection="code__proj")
+        eb.tumbler.__str__ = lambda s: "1.2"
+
+        link1 = MagicMock(link_type="cites")
+        link1.from_tumbler = ea.tumbler
+        link1.to_tumbler = eb.tumbler
+        link2 = MagicMock(link_type="implements")
+        link2.from_tumbler = ea.tumbler
+        link2.to_tumbler = eb.tumbler
+
+        mock_catalog.link_query.return_value = [link1, link2]
+        mock_catalog.resolve.side_effect = lambda t: (
+            ea if str(t) == "1.1" else eb
+        )
+
+        result = compute_topic_links(db.taxonomy, mock_catalog)
+        assert len(result) == 1
+        assert result[0]["link_count"] == 2
+        assert set(result[0]["link_types"]) == {"cites", "implements"}
+
+
+class TestTopicLinksCLI:
+    """CLI tests for nx taxonomy links."""
+
+    def test_links_no_catalog(self, tmp_path: Path) -> None:
+        """Links command gracefully handles missing catalog."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path):
+            pass
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(taxonomy, ["links"])
+
+        assert result.exit_code == 0
+        assert "no topic links" in result.output.lower() or "catalog" in result.output.lower()
+
+    def test_links_with_data(self, tmp_path: Path) -> None:
+        """Links command shows topic relationships."""
+        from unittest.mock import MagicMock, patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path):
+            pass
+
+        mock_result = [
+            {
+                "from_topic": "api",
+                "to_topic": "database",
+                "link_count": 5,
+                "link_types": ["cites", "implements"],
+            },
+        ]
+
+        runner = CliRunner()
+        with (
+            patch(
+                "nexus.commands.taxonomy_cmd._default_db_path",
+                return_value=db_path,
+            ),
+            patch(
+                "nexus.commands.taxonomy_cmd.compute_topic_links",
+                return_value=mock_result,
+            ),
+            patch(
+                "nexus.commands.taxonomy_cmd._try_load_catalog",
+                return_value=MagicMock(),
+            ),
+        ):
+            result = runner.invoke(taxonomy, ["links"])
+
+        assert result.exit_code == 0
+        assert "api" in result.output
+        assert "database" in result.output
