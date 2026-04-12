@@ -2,7 +2,9 @@
 id: RDR-068
 title: "Dimensional Contracts at Enrichment"
 type: process
-status: draft
+status: closed
+closed_date: 2026-04-11
+closed_reason: won't-ship
 priority: P3
 author: Hal Hildebrand
 reviewed-by: self
@@ -146,35 +148,77 @@ Of the 4 confirmed ART incidents (coverage updated 2026-04-11 per RDR-066 Phase 
 
 Contracts remain a **belt-and-suspenders layer** on the RDR-073-class overlap AND a **primary intervention** on the RDR-036-class intra-class failure mode (contingent on CA-068-5). Priority remains P3 because the absolute catch count is smaller than RDR-066's, but the unique coverage of the RDR-036 class gives contracts standalone value beyond the overlap.
 
+### Finding 3 (2026-04-11): CA-068-1 FAILS for Read-only — hard case requires Serena
+
+Source: `nexus_rdr/068-research-3-ca1-hard-case-fails-read-only` (T2 id 763).
+
+Five hard-case targets in `src/nexus/` tested — all require symbol resolution:
+
+| Method | File:Line | Hard-case reason |
+|--------|-----------|-----------------|
+| `search_cross_corpus()` | `search_engine.py:149` | Returns cross-file `SearchResult`, opaque `t3: Any` wrapping chromadb |
+| `_fetch_embeddings_for_results()` | `search_engine.py:261` | `np.ndarray` with `(N, emb_dim)` shape, dynamic import |
+| `_build_chunk_metadata()` | `pipeline_stages.py:119` | Opaque `chunk: Any` (TextChunk from another module), 26+ key dict |
+| `extractor_loop()` | `pipeline_stages.py:53` | Cross-file `ExtractionResult` dataclass, `PipelineDB` composition |
+| `get_embeddings()` | `db/t3.py:336` | `np.ndarray` with `(N, D)` shape contract, chromadb wrapping |
+
+**Design branch taken: Read+Serena.** Plan-enricher subagent needs `jet_brains_find_symbol` for cross-file type resolution, third-party schema lookup, and implicit shape contract grounding.
+
+### Finding 4 (2026-04-11): CA-068-3 latency extrapolation confirmed — scope narrowing required
+
+Source: `nexus_rdr/068-research-4-ca3-latency-realistic-extrapolation` (T2 id 764).
+
+Codebase analysis of 697 functions: 68% easy-case, 31% hard-case. But enriched beads skew hard (integration points like `search_engine.py` are 62% hard). Scenario estimates at 60% hard-case weighting:
+
+| Plan Size | Methods | Estimated Time |
+|-----------|---------|----------------|
+| 5 beads × 5 methods | 25 | ~40 min |
+| 10 beads × 6 methods | 60 | ~95 min (1.6h) |
+| 20 beads × 8 methods | 160 | ~253 min (4.2h) |
+
+CA-068-1 failure (Read+Serena) adds unknown Serena latency on top. Phase 1 spike must measure on a real 5-10 bead plan. Scope narrowing options: cross-bead methods only (~50% reduction), easy-case only, caching, or batch/parallel generation.
+
+### Finding 5 (2026-04-11): CA-068-2/4/5 cross-bead analysis — dependency chain identified
+
+Source: `nexus_rdr/068-research-5-ca2-ca4-ca5-cross-bead-analysis` (T2 id 765).
+
+**CA-068-2 (cross-bead comparability)**: CONTINGENT on CA-068-4. Enricher architecture supports it (Step 2 reads all beads, ~20K tokens for contract registry fits in-context). Numerical dim mismatches are mechanically detectable. But without provenance fields, method-to-method mapping requires LLM inference (same problem as RDR-066 CA-5).
+
+**CA-068-4 (provenance fields)**: LIKELY PASSES. Three auto-population sources: bead dependency edges, method names from descriptions, "Calls out to" contract field. Mechanical linking path exists.
+
+**CA-068-5 (semantic contracts)**: CONTINGENT — reframed. Three nexus analogues confirm the semantic field CAN express path distinctions (`_embed_with_fallback`, `resolve_path`, `_prefilter_from_catalog`). But verification still requires reading the method body. **Reframe**: semantic contracts are verification specifications for the critic/probe, not standalone detectors. The 2/4 catch rate claim becomes "provides detection specifications" not "detects independently."
+
+**Cross-CA dependency chain**: CA-068-4 enables CA-068-2 (provenance → mechanical comparison). CA-068-5 is orthogonal (different failure class). CA-068-2 + CA-068-4 are load-bearing for the 1/4 definitive catch.
+
 ### Critical Assumptions
 
 **Namespace note (critic-driven fix 2026-04-11)**: CAs are prefixed with the RDR number to avoid collision with RDR-066's and RDR-069's CA labels. The same spike evidence (T2 id 715) verifies a different CA in each RDR because the RDRs ask different questions. When referencing "CA-1 verified" across RDRs, always include the RDR prefix.
 
 - [x] **CA-068-0 — Easy-case contract generation** (retained from prior iteration): LLM can produce grounded dimensional contracts for self-contained plain-type functions from a single `Read()` call. **Status**: VERIFIED (2026-04-11) via T2 id 715. **Scope**: plain types, self-contained functions, same-file helpers only. Hard case tracked as CA-068-1 below.
 
-- [ ] **CA-068-1** (hard case): LLM can produce grounded dimensional contracts for cross-file generics, protocols, and third-party library types without requiring runtime symbol resolution. The easy case (CA-068-0) is verified; the hard case is not.
-  — **Status**: Unverified — **Method**: Spike on a real hard-case target (e.g., a nexus class composing `llama_index_core.schema.TextNode` with `chromadb.Collection` and a generic return type)
-  — **Implication for §Technical Design**: if CA-068-1 fails, the subagent architecture shifts from Read-only to Read+Serena. See the "Design branches on CA-068-1 outcome" note in §Technical Design.
+- [x] **CA-068-1** (hard case): LLM can produce grounded dimensional contracts for cross-file generics, protocols, and third-party library types without requiring runtime symbol resolution. The easy case (CA-068-0) is verified; the hard case is not.
+  — **Status**: FAILS FOR READ-ONLY (2026-04-11) via T2 id 763. All 5 hard-case targets tested (`search_cross_corpus`, `_fetch_embeddings_for_results`, `_build_chunk_metadata`, `extractor_loop`, `get_embeddings`) require symbol resolution for cross-file types, third-party library schemas (chromadb, numpy, voyageai), and implicit shape contracts. **Design branch taken: Read+Serena.** The plan-enricher subagent prompt must gain `jet_brains_find_symbol` instructions; tool budget increases.
+  — **Implication for §Technical Design**: CA-068-1 fails → the subagent architecture shifts from Read-only to Read+Serena. See the "Design branches on CA-068-1 outcome" note in §Technical Design. The hard-case latency multiplier (CA-068-3) is now higher than the 2-5x estimate because Serena calls add unknown overhead.
 
 - [ ] **CA-068-2**: The contracts surfacing the dim-mismatch pattern are discoverable in a cross-bead comparison — i.e., a tool (or plan-auditor agent, or human reader) can look at bead 4's contract and bead 5's contract and see the mismatch without being told where to look. If contracts are only comprehensible in isolation, they don't help — and contracts become the ceremonial boilerplate failure mode the §Trade-offs section warns against.
-  — **Status**: Unverified — **Method**: retrospective test against RDR-073 — would a reader of IMPL-04 enrichment + IMPL-05 enrichment with contracts have noticed the 312D/65D mismatch? Test both a human-readability form (can a reader spot it) and a machine-detection form (can plan-enricher walk the contracts and emit a `CONTRACT MISMATCH` warning).
+  — **Status**: CONTINGENT ON CA-068-4 (2026-04-11) via T2 id 765. The enricher architecture supports cross-bead comparison: Step 2 reads ALL beads before Step 3 enriches sequentially, so a contract registry (~20K tokens for 20 beads × 5 methods) fits in-context. Numerical dim mismatches are mechanically detectable via string comparison on Shape constraint fields. **But**: without provenance fields (CA-068-4), the enricher knows "bead B depends on bead A" but NOT "bead B's method Y consumes bead A's method X's output" — same cross-bead-lookup problem as RDR-066 CA-5. False-positive risk: LOW for target failure class (shape constraint adds specificity beyond type). **Still needs retrospective test on RDR-073 to move to VERIFIED.**
   — **Implication for §Technical Design**: this is the load-bearing assumption for RDR-068's entire value proposition. If CA-068-2 fails, the template ships as boilerplate and the 1/4 catch rate collapses to 0/4. The Technical Design has a design branch on this assumption — see "Design branches on CA-068-2 outcome" below.
   — **Phase sequencing consequence**: **Phase 2 (template + skill update) must NOT ship before CA-068-2 is verified.** This is enforced via `bd dep add <068-phase-2-bead> <068-phase-1-bead>` in the Implementation Plan — prose prerequisite alone is not sufficient.
 
 - [ ] **CA-068-3**: Contracts add an acceptable amount of enrichment time. The easy-case spike (id 715) took **~50 seconds for a 132-line function** with a single Read call. **Realistic extrapolation**: for a 20-bead plan with 5-10 methods per bead (100-200 contract generations), easy-case alone is **83-167 minutes** (1.4-2.8 hours). At the 2-5x hard-case multiplier, the upper bound is **5-14 hours**. The RDR previously stated "~5 minutes for 20 beads" as a cap — this is unrealistic by a factor of 17-40x.
-  — **Status**: Unverified at realistic scale — **Method**: Phase 1 spike measures latency on a representative 5-10-bead plan, not a single-function synthetic. If the realistic-scale latency is prohibitive, Phase 2 narrows scope (e.g., contracts only on methods that cross bead boundaries, skipping intra-bead private methods) or caches contract generations across reruns.
+  — **Status**: UNVERIFIED AT REALISTIC SCALE, extrapolation confirmed (2026-04-11) via T2 id 764. Codebase analysis: 697 functions in src/nexus/, 68% easy-case, 31% hard-case — but enriched beads skew hard (search_engine.py is 62% hard). Scenario estimates at 60% hard-case: 5-bead plan ~40min, 10-bead ~95min (1.6h), 20-bead ~253min (4.2h). CA-068-1 failure (Read+Serena required) adds unknown Serena latency multiplier on top. **Phase 1 spike must measure on 5-10 bead plan.** Scope narrowing options: (a) cross-bead methods only (~50% reduction), (b) easy-case only (defer hard), (c) cache generations, (d) batch/parallel generation.
 
 **Added CA-068-4 (cross-bead provenance fields — from critic-driven finding 2026-04-11)**:
 
 - [ ] **CA-068-4**: The contracts template has explicit cross-bead provenance fields — `**Provided by**: <bead-id>` on each input and `**Consumed by**: <bead-id>` on each output — that make mechanical mismatch detection possible without requiring plan-enricher to infer which beads compose which outputs. Without these fields, mismatch detection requires LLM inference and re-introduces the cross-bead-lookup problem from RDR-066's CA-5.
-  — **Status**: Unverified — **Method**: add the fields to the contracts template in Phase 1; test mismatch detection on the RDR-073 retrospective with and without the fields; measure detection accuracy.
+  — **Status**: LIKELY PASSES (2026-04-11) via T2 id 765. Analysis shows three info sources for auto-population: (1) bead dependency edges from `bd show --json` give bead-level graph, (2) method names from bead descriptions give cross-bead method references, (3) "Calls out to" contract field gives method-to-method linking. Auto-population path: for each input in B's contracts with a method reference → search blocking-dependency beads' contracts for matching method → annotate Provided by/Consumed by. Mechanical, no LLM inference needed. Risk: depends on bead description quality naming cross-bead method deps explicitly. **Still needs Phase 1 template test to move to VERIFIED.**
 
 **Added CA-068-5 (intra-class semantic contracts — from RDR-066 Phase 1b re-attribution)**:
 
 - [ ] **CA-068-5**: Dimensional contracts can express "declared return semantics" (what the function should *do*) beyond "declared return type" (what the function should *return*), so that intra-class short-circuit failures like RDR-036's HashMap lookup bypass become contract violations. The current 11-field contract template captures `Signature`, `Inputs`, `Outputs` with dimensional shape but NOT semantic-level contracts like "this method should reach the resonance path" or "this method should not short-circuit to a lookup table."
   — **Source**: RDR-066 Phase 1b (T2 `066-research-4-ca5b-retrospective` id 734) surfaced RDR-036 as an intra-class failure mode outside the composition probe's framework scope. RDR-066 §Finding 3 notes: "RDR-036 re-attributes to RDR-068 dimensional contracts as the appropriate intervention" if contracts can be extended to express declared semantics, not just declared types. This CA tests that claim.
-  — **Status**: Unverified — **Method**: Phase 1 spike against the RDR-036 retrospective. Construct a semantic-contract form for `FactualTeacher.query` that distinguishes "returns a resonance-cascade output string" from "returns any string via any code path." Test whether a plan-auditor agent (or human reader) can mechanically detect that a HashMap-shortcircuit implementation violates the semantic contract even when the signature contract is satisfied. Easy case: test on `FactualTeacher.query` directly. Hard case: test on a realistic intra-class short-circuit constructed synthetically to avoid retrospective bias.
-  — **Implication**: if CA-068-5 passes, RDR-068's catch rate rises from **1/4 definitive + 3/4 not caught** to **2/4 definitive + 2/4 not caught** on the historical target set — the RDR-036 class becomes a unique coverage target for contracts, giving this RDR standalone value beyond the RDR-073 dim-mismatch overlap with the probe. If CA-068-5 fails, contracts remain at 1/4 and the "belt-and-suspenders on the RDR-073 overlap" framing remains, with no standalone catch beyond the probe's coverage.
+  — **Status**: CONTINGENT — REFRAMED (2026-04-11) via T2 id 765. Three nexus analogues tested: `_embed_with_fallback` (doc_indexer.py:127, Voyage API vs zero-vector), `resolve_path` (catalog.py:480, 9 paths), `_prefilter_from_catalog` (search_engine.py:104, 8 paths). The semantic field CAN express the distinction between intended and short-circuit paths. **But verification requires reading the method body** — same cost as code review. **Critical reframe**: semantic contracts reduce verification from an open-ended question ("what should this do?") to a closed comparison ("does this match its contract?"). They are **verification specifications for the critic/probe**, not standalone detectors. The 2/4 catch rate claim should read: "contracts provide detection specifications for 2/4 incidents that enable other tools to detect them" — not "contracts detect 2/4 independently."
+  — **Implication**: if CA-068-5 passes (in the reframed sense), RDR-068's catch rate rises from **1/4 definitive + 3/4 not caught** to **1/4 definitive + 1/4 specification-assisted + 2/4 not caught** on the historical target set. If CA-068-5 fails even in the reframed sense (semantic contracts too vague to constrain critic verification), contracts remain at 1/4.
   — **Fallback**: if CA-068-5 cannot be made robust (semantic contracts are too vague to be mechanically checkable), the RDR-036 re-attribution is rejected and the incident remains "caught by neither" — a known gap in the 4-RDR remediation cycle that a future RDR can address via a different intervention (e.g., mutation testing or runtime path assertions).
 
 ## Proposed Solution
@@ -400,8 +444,42 @@ Right-sized for a P3 belt-and-suspenders layer.
 - RDR-066 (Phase 1 — composition probe) — the primary layer this supplements
 - RDR-069 (Phase 0 — critic at close) — the backstop
 
+## Post-Mortem: Won't-Ship
+
+**Closed 2026-04-11.** RDR-068 is closed as `won't-ship` after CA research killed the value proposition.
+
+### Root cause: the proposal reduces to formal contract checking, which LLMs cannot do
+
+Dimensional contracts at enrichment are a dressed-up version of a well-known hard problem: verifying that composed software components satisfy interface contracts at their boundaries. This is the domain of formal verification, dependent type systems, and contract-based design (Eiffel, Design by Contract, refinement types). Decades of PL research have produced tools for this — none of them are "have an LLM write a text specification and have another LLM check it later."
+
+The RDR proposed exactly that: LLM-generated text contracts checked by LLM-mediated comparison. The enforcement chain has no mechanical ground truth at any point:
+
+1. **Generation**: an LLM writes contracts grounded by reading code — but the grounding is best-effort, not proven
+2. **Comparison**: string matching on shape fields works for the trivial numerical case (312 vs 65) but not for type compatibility, semantic equivalence, or behavioral contracts
+3. **Verification**: checking an implementation against a semantic contract requires reading the method body — the same cost as a code review, with no reduction in effort
+
+This should have been caught at proposal time. The "dimensional contracts" framing obscured the fact that the proposal was asking an LLM to do formal verification by another name. The easy case (CA-068-0, plain types) succeeded because it's trivial — a 132-line function with `float` and `int` parameters. The hard case (CA-068-1) failed for exactly the reason formal verification is hard: cross-module type resolution, third-party library schemas, and implicit shape invariants require a formal model of the program, not a text summary.
+
+### What the research showed
+
+- **CA-068-1**: All 5 hard-case targets require Serena symbol resolution. Read-only contract generation fails on real code.
+- **CA-068-3**: 1.6-4.2 hours of enrichment time per plan, plus unknown Serena overhead. Cost is prohibitive relative to the 1/4 catch rate.
+- **CA-068-5**: Semantic contracts can express path distinctions but cannot mechanically verify them. Reframed as "verification specifications" — but a specification that requires an LLM to check is not a contract, it's a comment.
+
+### What survives
+
+Nothing from this RDR ships. The probe (RDR-066) catches 3/4 incidents at runtime. The critic (RDR-069) catches what the probe misses at close time. Together they cover the space without the ceremony of LLM-generated contracts.
+
+The 1 incident contracts uniquely target (RDR-073 dim mismatch) is also caught by the probe. The 1 incident contracts might extend to (RDR-036 intra-class short-circuit) requires semantic verification that reduces to code review.
+
+### Lesson
+
+Don't propose LLM-mediated enforcement for problems that require formal guarantees. If the enforcement mechanism is "an LLM checks text written by another LLM," the intervention is advisory documentation, not a contract system. Call it what it is and evaluate the cost accordingly — in this case, hours of enrichment time for advisory comments that the critic already produces for free.
+
 ## Revision History
 
+- 2026-04-11 (closed) — **Won't-ship.** CA research confirmed the proposal reduces to formal contract checking via LLM, which is a known hard problem LLMs cannot solve. Cost (1.6-4.2h enrichment per plan) is prohibitive for a 1/4 catch rate on a failure class already covered by the probe (RDR-066) and critic (RDR-069). The easy case succeeds trivially; the hard case fails for the same reasons formal verification is hard. Post-mortem recorded.
 - 2026-04-10 — Stub created as "Composition Failure Detection (Research)" targeting INT-3 (workaround gating) with a regex-bank research goal.
 - 2026-04-11 — **Reissued with new scope**. The regex-bank research is obsoleted by the 2026-04-11 nexus audit (LLM classification beats regex for this task) and INT-3 is deferred indefinitely (retcon mechanism makes real-time detection harder than ART assumed). The RDR-068 number is repurposed for ART's INT-1 (dimensional contracts at enrichment) — the cheapest belt-and-suspenders layer on top of RDR-066's composition probe. Priority P3 (lowest of the four) because the probe catches 4/4 while contracts catch 1/4 cleanly. See `rdr_process/nexus-audit-2026-04-11` for evidence and bead `nexus-640` for the 4-RDR cycle.
+- 2026-04-11 (third iteration) — **CA research spike**. All 5 open CAs investigated against the nexus codebase. CA-068-1: FAILS for Read-only (all 5 hard-case targets require Serena symbol resolution; design branch taken: Read+Serena). CA-068-2: CONTINGENT on CA-068-4 (enricher architecture supports it but needs provenance for method-to-method mapping). CA-068-3: extrapolation confirmed at 1.6-4.2h for 10-20 bead plans; scope narrowing needed. CA-068-4: LIKELY PASSES (three auto-population sources identified). CA-068-5: CONTINGENT — reframed as verification specifications for critic/probe, not standalone detectors. T2 ids 763-765.
 - 2026-04-11 (second iteration) — **Critic-driven fixes** from RDR-069's CA-1 spike on this target (`nexus_rdr/069-research-5-ca1-rdr068-n4`, T2 id 722). Two runs of `nx:substantive-critic` against RDR-068 found 3 stable issues across runs and 4 additional correct single-run findings. Fixes applied: (a) CA namespace isolation — CAs renumbered to `CA-068-0` through `CA-068-4` to prevent collision with RDR-066's and RDR-069's CA labels; (b) new CA-068-4 added for the cross-bead provenance fields (`Provided by` / `Consumed by`) required for mechanical mismatch detection; (c) §Technical Design given explicit design branches on CA-068-1 (Read vs Read+Serena) and CA-068-2 (automated mismatch detection vs advisory human review); (d) §Finding 1 label disambiguated — the T2 spike at id 715 was authored under RDR-066's CA numbering but verifies RDR-068's CA-068-0; (e) `CONTRACT MISMATCH` behavior softened from "blocks enrichment" to "advisory warning" to match §Trade-offs; (f) Phase 4 sub-step labels renamed `6a/6b/6c` → `4a/4b/4c`; (g) §Prerequisites strengthened with `bd dep add` enforcement of CA-068-2 verification before Phase 2 ships (prevents shipping ceremonial template); (h) CA-068-3 latency extrapolation made realistic — "~5 minutes for 20 beads" replaced with "83-167 minutes easy case, 4-14 hours at hard-case multiplier" forcing Phase 2 to narrow scope or cache; (i) §Performance Expectations updated with the realistic extrapolation. Bead: nexus-sia.

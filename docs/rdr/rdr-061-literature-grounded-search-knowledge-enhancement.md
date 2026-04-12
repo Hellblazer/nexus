@@ -2,7 +2,9 @@
 title: "Literature-Grounded Search and Knowledge Enhancement Roadmap"
 id: RDR-061
 type: design
-status: accepted
+status: closed
+closed_date: 2026-04-11
+closed_reason: implemented
 accepted_date: 2026-04-09
 reviewed_by: self
 priority: P1

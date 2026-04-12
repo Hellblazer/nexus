@@ -78,19 +78,19 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-054](rdr-054-chunk-boundary-equation-splitting.md) | Chunk Boundary Equation Splitting — Information Loss at Chunk Boundaries | Bug | Closed | 2026-04-07 |
 | [RDR-055](rdr-055-section-type-metadata-quality-scoring.md) | Section-Type Metadata and Quality Scoring for Knowledge Collections | Feature | Closed | 2026-04-07 |
 | [RDR-056](rdr-056-search-robustness-result-clustering.md) | Search Robustness and Result Clustering | Feature | Closed | 2026-04-07 |
-| [RDR-057](rdr-057-progressive-formalization-memory-tiers.md) | Progressive Formalization Across Memory Tiers | Feature | Accepted | 2026-04-07 |
+| [RDR-057](rdr-057-progressive-formalization-memory-tiers.md) | Progressive Formalization Across Memory Tiers | Feature | Closed | 2026-04-07 |
 | [RDR-058](rdr-058-pipeline-orchestration-plan-reuse.md) | Pipeline Orchestration and Plan Reuse | Feature | Closed | 2026-04-07 |
 | [RDR-059](rdr-059-code-search-embedding-mismatch.md) | Code Search Embedding Model Mismatch | Bug | Closed | 2026-04-07 |
 | [RDR-060](rdr-060-catalog-path-rationalization-link-usability.md) | Catalog Path Rationalization and Link Graph Usability | Feature | Closed | 2026-04-08 |
-| [RDR-061](rdr-061-literature-grounded-search-knowledge-enhancement.md) | Literature-Grounded Search and Knowledge Enhancement Roadmap | Design | Accepted | 2026-04-09 |
-| [RDR-062](rdr-062-mcp-interface-tiering.md) | MCP Interface Tiering — Core + Catalog Server Split | Architecture | Accepted | 2026-04-09 |
+| [RDR-061](rdr-061-literature-grounded-search-knowledge-enhancement.md) | Literature-Grounded Search and Knowledge Enhancement Roadmap | Design | Closed | 2026-04-09 |
+| [RDR-062](rdr-062-mcp-interface-tiering.md) | MCP Interface Tiering — Core + Catalog Server Split | Architecture | Closed | 2026-04-09 |
 | [RDR-063](rdr-063-t2-domain-split.md) | T2 Domain Split — Separating Memory, Plans, Catalog, and Telemetry | Architecture | Closed | 2026-04-10 |
 | [RDR-064](rdr-064-nx-console-embedded-web-ui.md) | nx console — Process Monitor for Agentic Nexus | Feature | Draft | 2026-04-10 |
-| [RDR-065](rdr-065-close-time-funnel-hardening.md) | Close-Time Funnel Hardening Against Silent Scope Reduction | Process | Implemented | 2026-04-11 |
-| [RDR-066](rdr-066-composition-smoke-probe-at-coordinator-beads.md) | Composition Smoke Probe at Coordinator Beads | Process | Implemented | 2026-04-11 |
-| [RDR-067](rdr-067-cross-project-rdr-audit-loop.md) | Cross-Project RDR Audit Loop | Process | Implemented | 2026-04-11 |
-| [RDR-068](rdr-068-dimensional-contracts-at-enrichment.md) | Dimensional Contracts at Enrichment | Process | Draft | 2026-04-11 |
-| [RDR-069](rdr-069-automatic-substantive-critic-at-close.md) | Automatic Substantive-Critic at Close | Process | Implemented | 2026-04-11 |
+| [RDR-065](rdr-065-close-time-funnel-hardening.md) | Close-Time Funnel Hardening Against Silent Scope Reduction | Process | Closed | 2026-04-11 |
+| [RDR-066](rdr-066-composition-smoke-probe-at-coordinator-beads.md) | Composition Smoke Probe at Coordinator Beads | Process | Closed | 2026-04-11 |
+| [RDR-067](rdr-067-cross-project-rdr-audit-loop.md) | Cross-Project RDR Audit Loop | Process | Closed | 2026-04-11 |
+| [RDR-068](rdr-068-dimensional-contracts-at-enrichment.md) | Dimensional Contracts at Enrichment | Process | Closed | 2026-04-11 |
+| [RDR-069](rdr-069-automatic-substantive-critic-at-close.md) | Automatic Substantive-Critic at Close | Process | Closed | 2026-04-11 |
 
 ---
 

@@ -1,6 +1,8 @@
 ---
 title: "RDR-062: MCP Interface Tiering — Core + Catalog Server Split"
-status: accepted
+status: closed
+closed_date: 2026-04-11
+closed_reason: implemented
 type: architecture
 priority: P1
 created: 2026-04-09

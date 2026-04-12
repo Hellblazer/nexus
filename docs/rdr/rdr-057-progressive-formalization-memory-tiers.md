@@ -2,7 +2,9 @@
 title: "Progressive Formalization Across Memory Tiers"
 id: RDR-057
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-04-11
+closed_reason: implemented
 accepted_date: 2026-04-07
 reviewed-by: self
 priority: high
