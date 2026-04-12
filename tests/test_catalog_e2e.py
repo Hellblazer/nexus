@@ -19,7 +19,7 @@ from nexus.registry import RepoRegistry
 _NEXUS_ROOT = Path(__file__).parent.parent
 _CODE_FILES = ["src/nexus/ttl.py", "src/nexus/corpus.py", "src/nexus/types.py"]
 _PROSE = "# Test Repo\n\nA test repository for catalog E2E tests.\n\n## Features\n\n- Catalog integration\n- Tumbler addressing\n"
-_RDR = "---\ntitle: Corpus and TTL Design\nstatus: accepted\n---\n\n# RDR-001: Corpus and TTL Design\n\n## Decision\n\nWe use tumblers for addressing.\n## Implementation\n\nThe ttl module handles time-to-live logic.\nThe corpus module handles naming.\n"
+_RDR = "---\ntitle: Corpus and TTL Design\nstatus: accepted\n---\n\n# RDR-001: Corpus and TTL Design\n\n## Decision\n\nWe use tumblers for addressing.\n## Implementation\n\nThe ttl module (src/nexus/ttl.py) handles time-to-live logic.\nThe corpus module (src/nexus/corpus.py) handles naming.\n"
 
 
 def _git(repo, *args):
