@@ -264,7 +264,7 @@ Fixed: sort is now conditional (skipped when `cluster_by` is set), and formatter
 
 ## Success Criteria
 
-- [ ] verify_collection_deep() reports multi-probe hit rate
-- [x] Search results for >15 chunks show cluster groupings (fixed: cluster headers rendered in MCP output)
-- [ ] Measurable reduction in high-distance (>0.7) results in agent workflows
-- [ ] nx doctor reports per-collection robustness proxy
+- [x] verify_collection_deep() reports multi-probe hit rate (t3.py:876-945, peeks 5 docs, reports probe_hit_rate as Robustness-δ@K proxy)
+- [x] Search results for >15 chunks show cluster groupings (search_clusterer.py, cluster_by param in MCP + search_engine)
+- [x] Measurable reduction in high-distance (>0.7) results in agent workflows (search_engine.py:39 reads distance_threshold from .nexus.yml, config.py:296 defines corpus-specific thresholds)
+- [x] nx doctor reports per-collection robustness proxy (doctor.py:291 tunes hnsw:search_ef, collection.py:243 shows probe hit rate)

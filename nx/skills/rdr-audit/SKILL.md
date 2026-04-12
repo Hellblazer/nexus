@@ -361,3 +361,15 @@ This skill incorporates six signals surfaced by the Phase 1b spike (T2 `nexus_rd
 4. **≤25 tool budget ceiling** — documented in the relay Quality Criteria and inherited from the canonical prompt's own budget section.
 5. **Near-misses section is high-signal** — Run 3 surfaced 3 near-miss catches as positive evidence for the prevention infrastructure. Consider promoting this section from optional to required in a prompt v2.
 6. **Output is narrative, not scalar** — LLM classification variance on borderline incidents means the skill surfaces the full subagent output to the user, not a collapsed single-scalar verdict. The compact summary in Step 9 is a pointer to the full T2 record, not a replacement for it.
+
+## v1.2 Code-Verification Gate (2026-04-11)
+
+Two independent CA-1/CA-2 audit runs against nexus produced a false-positive SCOPE-REDUCED verdict on RDR-056 because 3/4 success-criteria checkboxes were unchecked — but the code had shipped all 4 features (`probe_hit_rate` in t3.py, `search_clusterer.py`, `distance_threshold` in config.py, `hnsw:search_ef` in doctor.py). The audit read RDR text but not code.
+
+**Fix**: the canonical prompt (v1.2) now includes a mandatory **code-verification gate** for any non-CLEAN verdict. Before classifying PARTIAL or SCOPE-REDUCED, the auditor must Grep the project source for key identifiers from the success criteria. If the code ships the feature, the unchecked checkbox is a documentation gap, not a scope gap.
+
+- Budget: ≤3 Grep calls per non-CLEAN candidate (3-9 total for a typical audit)
+- The incident block in the output format now requires a `Code-verification result` field for non-CLEAN verdicts
+- Method notes updated: "Unchecked success criteria are NOT evidence of non-implementation"
+
+See T2 `nexus_rdr/067-research-2-audit-methodology-false-positive` (id 771) for the evidence.
