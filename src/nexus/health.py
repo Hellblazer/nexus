@@ -231,18 +231,20 @@ def _check_t3_cloud() -> list[HealthResult]:
                 ],
                 fatal=True,
             ))
-        # Old layout warning
-        try:
-            chromadb.CloudClient(
-                tenant=chroma_tenant or None, database=f"{chroma_database}_code", api_key=chroma_key
-            )
-            results.append(HealthResult(
-                label=f"ChromaDB  ({chroma_database}_code)",
-                ok=False,
-                detail="old layout detected — migrate and set NX_MIGRATED=1",
-            ))
-        except Exception:
-            pass
+        # Old layout warning (skip if migrated flag is set)
+        migrated = get_credential("migrated")
+        if not migrated:
+            try:
+                chromadb.CloudClient(
+                    tenant=chroma_tenant or None, database=f"{chroma_database}_code", api_key=chroma_key
+                )
+                results.append(HealthResult(
+                    label=f"ChromaDB  ({chroma_database}_code)",
+                    ok=False,
+                    detail="old layout detected — migrate and set NX_MIGRATED=1",
+                ))
+            except Exception:
+                pass
 
     # VOYAGE_API_KEY
     voyage_key = get_credential("voyage_api_key")
