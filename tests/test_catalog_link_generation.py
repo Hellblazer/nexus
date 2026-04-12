@@ -93,72 +93,6 @@ class TestCitationLinks:
         assert count == 0
 
 
-class TestCodeRdrLinks:
-    def test_code_rdr_heuristic(self, tmp_path):
-        from nexus.catalog.link_generator import generate_code_rdr_links
-
-        cat = _make_catalog(tmp_path)
-        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
-        cat.register(
-            owner, "catalog.py", content_type="code",
-            file_path="src/nexus/catalog/catalog.py",
-        )
-        cat.register(
-            owner, "Git-Backed Catalog Design", content_type="rdr",
-            file_path="docs/rdr/rdr-049-git-backed-catalog.md",
-        )
-        count = generate_code_rdr_links(cat)
-        assert count == 1
-        # Link direction: code → implements → RDR
-        code_entry = cat.by_file_path(owner, "src/nexus/catalog/catalog.py")
-        links = cat.links_from(code_entry.tumbler, link_type="implements-heuristic")
-        assert len(links) == 1
-        assert links[0].created_by == "index_hook"
-
-    def test_short_names_not_matched(self, tmp_path):
-        from nexus.catalog.link_generator import generate_code_rdr_links
-
-        cat = _make_catalog(tmp_path)
-        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
-        cat.register(owner, "db.py", content_type="code", file_path="src/db.py")
-        cat.register(owner, "Database Design", content_type="rdr", file_path="docs/rdr/db.md")
-        count = generate_code_rdr_links(cat)
-        assert count == 0  # "db" is too short (<=3 chars)
-
-    def test_no_duplicates(self, tmp_path):
-        from nexus.catalog.link_generator import generate_code_rdr_links
-
-        cat = _make_catalog(tmp_path)
-        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
-        cat.register(owner, "catalog.py", content_type="code", file_path="src/catalog.py")
-        cat.register(owner, "Catalog Design", content_type="rdr", file_path="docs/rdr/catalog.md")
-        generate_code_rdr_links(cat)
-        count2 = generate_code_rdr_links(cat)
-        assert count2 == 0
-
-
-class TestCodeRdrLinkCap:
-    def test_cap_enforced(self, tmp_path):
-        from nexus.catalog.link_generator import generate_code_rdr_links, _MAX_RDR_MATCHES_PER_CODE
-
-        cat = _make_catalog(tmp_path)
-        owner = cat.register_owner("nexus", "repo", repo_hash="abcd1234")
-        code = cat.register(
-            owner, "indexer.py", content_type="code",
-            file_path="src/nexus/indexer.py",
-        )
-        # Create more RDRs than the cap, all matching "indexer"
-        for i in range(_MAX_RDR_MATCHES_PER_CODE + 2):
-            cat.register(
-                owner, f"Indexer Design Part {i}", content_type="rdr",
-                file_path=f"docs/rdr/rdr-{100+i}-indexer-{i}.md",
-            )
-        count = generate_code_rdr_links(cat)
-        assert count == _MAX_RDR_MATCHES_PER_CODE
-        links = cat.links_from(code, link_type="implements-heuristic")
-        assert len(links) == _MAX_RDR_MATCHES_PER_CODE
-
-
 class TestRdrFilePathLinks:
     """Test generate_rdr_filepath_links — extract file paths from RDR content."""
 
@@ -269,10 +203,7 @@ class TestRdrFilePathLinks:
 
 class TestCreatedByTracking:
     def test_all_auto_links_have_machine_created_by(self, tmp_path):
-        from nexus.catalog.link_generator import (
-            generate_citation_links,
-            generate_code_rdr_links,
-        )
+        from nexus.catalog.link_generator import generate_citation_links
 
         cat = _make_catalog(tmp_path)
         owner = cat.register_owner("test", "curator")

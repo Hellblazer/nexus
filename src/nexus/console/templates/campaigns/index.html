@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Campaigns — nx console{% endblock %}
+{% block content %}
+<h2>Campaigns &amp; Provenance</h2>
+
+{% if named_campaigns %}
+<details open>
+  <summary><strong>Named Campaigns</strong> ({{ named_campaigns | length }})</summary>
+  <table role="grid">
+    <thead>
+      <tr>
+        <th>Creator</th>
+        <th>Links</th>
+        <th>Types</th>
+        <th>First</th>
+        <th>Last</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for name, c in named_campaigns.items() %}
+      <tr style="border-left: 3px solid var(--pico-primary); cursor: pointer;"
+          hx-get="/campaigns/{{ name }}?scope={{ scope }}" hx-target="main" hx-push-url="true">
+        <td><code>{{ name }}</code></td>
+        <td>{{ c.count }}</td>
+        <td><small>{{ c.link_types | join(', ') }}</small></td>
+        <td><small>{{ c.first_seen }}</small></td>
+        <td><small>{{ c.last_seen }}</small></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% else %}
+<p>No named campaigns found.</p>
+{% endif %}
+
+<details>
+  <summary><strong>System Creators</strong> ({{ system_campaigns | length }})</summary>
+  {% if system_campaigns %}
+  <table role="grid">
+    <thead>
+      <tr>
+        <th>Creator</th>
+        <th>Links</th>
+        <th>Types</th>
+        <th>First</th>
+        <th>Last</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for name, c in system_campaigns.items() %}
+      <tr style="border-left: 3px solid var(--pico-secondary);">
+        <td><code>{{ name }}</code></td>
+        <td>{{ c.count }}</td>
+        <td><small>{{ c.link_types | join(', ') }}</small></td>
+        <td><small>{{ c.first_seen }}</small></td>
+        <td><small>{{ c.last_seen }}</small></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No system creators found.</p>
+  {% endif %}
+</details>
+{% endblock %}

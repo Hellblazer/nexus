@@ -218,6 +218,6 @@ def test_doctor_missing_chroma_key_reports_warning(
 
 def test_doctor_ripgrep_present(runner: CliRunner, fake_home: Path) -> None:
     """nx doctor checks for ripgrep on PATH."""
-    with patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"):
+    with patch("nexus.health.shutil.which", return_value="/usr/bin/rg"):
         result = runner.invoke(main, ["doctor"])
     assert "rg" in result.output or "ripgrep" in result.output.lower()

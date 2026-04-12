@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}nx console{% endblock %}</title>
+  <link rel="stylesheet" href="/static/pico.min.css">
+  <link rel="stylesheet" href="/static/console.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/alpine.min.js" defer></script>
+</head>
+<body>
+  <nav class="container-fluid">
+    <ul>
+      <li><strong>nx&nbsp;console</strong></li>
+    </ul>
+    <ul>
+      <li><a href="/activity?scope={{ scope }}"
+             {% if active_panel == 'activity' %}aria-current="page"{% endif %}>Activity</a></li>
+      <li><a href="/health?scope={{ scope }}"
+             {% if active_panel == 'health' %}aria-current="page"{% endif %}>Health</a></li>
+      <li><a href="/campaigns?scope={{ scope }}"
+             {% if active_panel == 'campaigns' %}aria-current="page"{% endif %}>Campaigns</a></li>
+      <li>
+        <select x-data x-on:change="window.location.search = '?scope=' + $event.target.value"
+                aria-label="Scope">
+          <option value="project" {% if scope != 'all' %}selected{% endif %}>project</option>
+          <option value="all" {% if scope == 'all' %}selected{% endif %}>all</option>
+        </select>
+      </li>
+    </ul>
+  </nav>
+  <main class="container-fluid">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

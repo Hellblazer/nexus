@@ -1,0 +1,228 @@
+/* nx console — dense process-monitor aesthetic (htop/pgHero/Prometheus) */
+
+:root {
+  --pico-font-size: 82%;
+  --console-ok: #4caf50;
+  --console-warn: #ff9800;
+  --console-err: #f44336;
+  --console-muted: #888;
+  --console-border: rgba(255,255,255,0.08);
+}
+
+body {
+  padding: 0;
+}
+
+/* Nav — compact, fixed feel */
+nav {
+  padding-block: 0.15rem;
+  border-bottom: 1px solid var(--console-border);
+  margin-bottom: 0;
+}
+
+nav strong {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+}
+
+nav a {
+  font-size: 0.85rem;
+  padding: 0.2rem 0.6rem;
+}
+
+nav a[aria-current="page"] {
+  font-weight: bold;
+  text-decoration: none;
+  background: rgba(255,255,255,0.06);
+  border-radius: 4px;
+}
+
+nav select {
+  margin: 0;
+  padding: 0.15rem 0.4rem;
+  font-size: 0.8rem;
+  border-radius: 4px;
+}
+
+/* Main content — tight */
+main {
+  padding-top: 0.5rem;
+}
+
+main h2 {
+  font-size: 1.1rem;
+  margin-bottom: 0.25rem;
+}
+
+main h3 {
+  font-size: 0.95rem;
+  margin-bottom: 0.25rem;
+  margin-top: 1rem;
+}
+
+main hgroup p {
+  font-size: 0.8rem;
+  margin-bottom: 0.25rem;
+}
+
+/* Tables — dense, monospaced data */
+table {
+  font-size: 0.78rem;
+  margin-bottom: 0.5rem;
+}
+
+table th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--console-muted);
+  padding: 0.2rem 0.5rem;
+  border-bottom: 1px solid var(--console-border);
+}
+
+table td {
+  padding: 0.15rem 0.5rem;
+  border-bottom: 1px solid var(--console-border);
+  vertical-align: top;
+}
+
+table tr:hover {
+  background: rgba(255,255,255,0.03);
+}
+
+table code {
+  font-size: 0.78rem;
+  padding: 0;
+  background: none;
+}
+
+/* Health cards — status-bar style */
+.health-card {
+  border-left: 3px solid var(--console-muted);
+  padding: 0.4rem 0.75rem;
+  margin-bottom: 0.4rem;
+  background: rgba(255,255,255,0.02);
+  border-radius: 0 4px 4px 0;
+}
+
+.health-card header {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--console-muted);
+  padding: 0;
+  margin-bottom: 0.15rem;
+  border: none;
+  background: none;
+}
+
+.health-card p {
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.health-card.ok {
+  border-left-color: var(--console-ok);
+}
+
+.health-card.warn {
+  border-left-color: var(--console-err);
+}
+
+.health-card details {
+  margin-top: 0.3rem;
+}
+
+.health-card summary {
+  font-size: 0.75rem;
+  color: var(--console-muted);
+}
+
+/* Activity stream — left border per event type */
+.event-row {
+  border-left: 3px solid var(--pico-primary);
+  transition: background 0.1s;
+}
+
+.event-row.doc {
+  border-left-color: var(--console-ok);
+}
+
+.event-row.link {
+  border-left-color: var(--pico-primary);
+}
+
+/* Filter bar */
+details > summary {
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+details .grid {
+  gap: 0.5rem;
+}
+
+details .grid label {
+  font-size: 0.75rem;
+  margin-bottom: 0;
+}
+
+details .grid input {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.4rem;
+}
+
+/* Campaign rows — clickable */
+tr[hx-get] {
+  cursor: pointer;
+}
+
+tr[hx-get]:hover {
+  background: rgba(255,255,255,0.06) !important;
+}
+
+/* Stat counters */
+.stat-value {
+  font-size: 1.4rem;
+  font-weight: bold;
+  font-family: "SF Mono", monospace;
+  line-height: 1;
+}
+
+.stat-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--console-muted);
+}
+
+/* Grid cards tight */
+.grid > article {
+  margin-bottom: 0.3rem;
+  padding: 0.4rem 0.75rem;
+}
+
+/* Badge counts */
+.badge {
+  display: inline-block;
+  background: rgba(255,255,255,0.1);
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-family: "SF Mono", monospace;
+}
+
+/* Scrollable pre blocks */
+pre {
+  font-size: 0.75rem;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* Timestamp styling */
+.ts {
+  color: var(--console-muted);
+  font-family: "SF Mono", monospace;
+  font-size: 0.72rem;
+}

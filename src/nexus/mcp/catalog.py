@@ -574,6 +574,9 @@ def catalog_link_bulk(
 
 def main():
     """Run the catalog MCP server on stdio transport."""
+    from nexus.logging_setup import configure_logging
+
+    configure_logging("mcp")
     mcp.run(transport="stdio")
 
 

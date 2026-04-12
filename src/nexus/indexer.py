@@ -315,12 +315,11 @@ def _catalog_hook(
         if new_tumblers:
             _progress(f"  Catalog: linking {len(new_tumblers)} new entries…\r")
         try:
-            from nexus.catalog.link_generator import generate_code_rdr_links, generate_rdr_filepath_links
-            link_count = generate_code_rdr_links(cat, new_tumblers=new_tumblers)
+            from nexus.catalog.link_generator import generate_rdr_filepath_links
             fp_count = generate_rdr_filepath_links(cat, new_tumblers=new_tumblers)
-            links_created = link_count + fp_count
+            links_created = fp_count
             if links_created:
-                _log.info("catalog_links_generated", heuristic=link_count, filepath=fp_count, repo=repo_name)
+                _log.info("catalog_links_generated", filepath=fp_count, repo=repo_name)
         except Exception:
             _log.debug("catalog_link_generation_failed", exc_info=True)
 

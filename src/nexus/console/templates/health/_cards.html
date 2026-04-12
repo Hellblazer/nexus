@@ -1,0 +1,99 @@
+<div class="grid">
+
+  <article class="health-card {% if active_sessions > 0 %}ok{% else %}warn{% endif %}">
+    <header>T1 Sessions</header>
+    <div class="stat-value">{{ active_sessions }}</div>
+    <div class="stat-label">active</div>
+    {% if sessions %}
+    <details>
+      <summary>{{ sessions | length }} session file(s)</summary>
+      <table role="grid">
+        <thead><tr><th>Session</th><th>Endpoint</th><th>PID</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for s in sessions %}
+          <tr>
+            <td><code>{{ s.session_id[:12] }}</code></td>
+            <td><code>{{ s.host }}:{{ s.port }}</code></td>
+            <td>{{ s.pid }}</td>
+            <td>{% if s.tcp_reachable %}<span style="color:var(--console-ok);">reachable</span>{% elif s.pid_alive %}<span style="color:var(--console-warn);">pid only</span>{% else %}<span style="color:var(--console-err);">dead</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
+  </article>
+
+  <article class="health-card {% if mineru.running %}ok{% else %}warn{% endif %}">
+    <header>MinerU</header>
+    {% if mineru.running %}
+    <div class="stat-value" style="color:var(--console-ok);">UP</div>
+    <div class="stat-label">PID {{ mineru.pid }} &middot; port {{ mineru.port }}</div>
+    {% else %}
+    <div class="stat-value" style="color:var(--console-muted);">OFF</div>
+    <div class="stat-label">{% if mineru.get('stale_pid') %}stale pid file{% else %}not running{% endif %}</div>
+    {% endif %}
+  </article>
+
+  <article class="health-card {% if catalog.exists %}ok{% else %}warn{% endif %}">
+    <header>Catalog</header>
+    {% if catalog.exists %}
+    <div class="stat-value" style="color:var(--console-ok);">OK</div>
+    <div class="stat-label">last write {{ age_str(catalog.age_seconds) }}</div>
+    {% else %}
+    <div class="stat-value" style="color:var(--console-muted);">&mdash;</div>
+    <div class="stat-label">not initialized</div>
+    {% endif %}
+  </article>
+
+</div>
+
+<div class="grid">
+
+  <article class="health-card {% if index_log.exists %}ok{% else %}warn{% endif %}">
+    <header>Index Log</header>
+    {% if index_log.exists %}
+    <div class="stat-value">{{ index_log.size_mb }}</div>
+    <div class="stat-label">MB &middot; last write {{ age_str(index_log.age_seconds) }}</div>
+    {% else %}
+    <div class="stat-value" style="color:var(--console-muted);">&mdash;</div>
+    <div class="stat-label">not created</div>
+    {% endif %}
+  </article>
+
+  <article class="health-card {% if dolt_server.exists %}ok{% else %}warn{% endif %}">
+    <header>Dolt</header>
+    {% if dolt_server.exists %}
+    <div class="stat-value" style="color:var(--console-ok);">OK</div>
+    <div class="stat-label">log active {{ age_str(dolt_server.age_seconds) }}</div>
+    {% else %}
+    <div class="stat-value" style="color:var(--console-muted);">&mdash;</div>
+    <div class="stat-label">no log</div>
+    {% endif %}
+  </article>
+
+  <article class="health-card {% if health_ok %}ok{% else %}warn{% endif %}">
+    <header>System</header>
+    {% if health_ok %}
+    <div class="stat-value" style="color:var(--console-ok);">PASS</div>
+    {% else %}
+    <div class="stat-value" style="color:var(--console-err);">FAIL</div>
+    {% endif %}
+    <div class="stat-label">{{ health_checks | length }} checks</div>
+    <details>
+      <summary>full report</summary>
+      <table role="grid">
+        <tbody>
+          {% for c in health_checks %}
+          <tr>
+            <td style="width:1.5rem;">{% if c.ok %}<span style="color:var(--console-ok);">&#x2713;</span>{% else %}<span style="color:var(--console-err);">&#x2717;</span>{% endif %}</td>
+            <td>{{ c.label }}</td>
+            <td><small style="color:var(--console-muted);">{{ c.detail }}</small></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+  </article>
+
+</div>
