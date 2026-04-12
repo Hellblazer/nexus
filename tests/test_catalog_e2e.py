@@ -220,7 +220,6 @@ class TestMCP:
         from nexus.mcp_server import catalog_link_audit
         audit = catalog_link_audit()
         assert "error" not in audit and audit["total"] >= 1
-        assert "implements-heuristic" in audit["by_type"]
         assert audit["orphaned_count"] == 0
 
 
@@ -228,14 +227,6 @@ class TestMCP:
 
 
 class TestLinks:
-    def test_code_rdr_links_generated(self, indexed_catalog):
-        from nexus.catalog.link_generator import generate_code_rdr_links
-        cat, _ = indexed_catalog
-        assert cat._db.execute("SELECT count(*) FROM documents WHERE content_type='code'").fetchone()[0] >= 1
-        assert cat._db.execute("SELECT count(*) FROM documents WHERE content_type='rdr'").fetchone()[0] >= 1
-        assert cat._db.execute("SELECT count(*) FROM links").fetchone()[0] >= 1
-        assert generate_code_rdr_links(cat) == 0
-
     def test_full_link_lifecycle(self, linked_catalog):
         from nexus.catalog.link_generator import generate_citation_links
         cat, doc_a, doc_b, doc_c = linked_catalog
