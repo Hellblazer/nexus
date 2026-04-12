@@ -1,0 +1,11 @@
+{% for e in events %}
+<tr style="border-left: 3px solid {% if e.kind == 'link' %}var(--pico-primary){% else %}var(--pico-secondary){% endif %};">
+  <td><small>{{ e.timestamp[:19] }}</small></td>
+  <td><code>{{ e.actor }}</code></td>
+  <td>{{ e.action }}</td>
+  <td><small>{{ e.target }}</small></td>
+</tr>
+{% endfor %}
+{% if not events %}
+<tr><td colspan="4">No matching events.</td></tr>
+{% endif %}

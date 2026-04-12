@@ -1,0 +1,10 @@
+{% if event %}
+<article>
+  <header>Event: {{ event_id }}</header>
+  <pre><code>{{ event | tojson(indent=2) }}</code></pre>
+</article>
+{% else %}
+<article>
+  <p>Select an event to view details.</p>
+</article>
+{% endif %}
