@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.2] - 2026-04-11
+
+Dynamic model selection: all 16 agents lowered to cheapest viable
+default (haiku or sonnet). Skills include Model Selection tables
+guiding when to escalate via Agent tool `model` parameter. No opus
+defaults remain — opus is an explicit escalation for complex tasks.
+
+### Changed
+
+- 8 agents default haiku (was sonnet): substantive-critic, code-review-expert,
+  plan-auditor, test-validator, codebase-deep-analyzer, plan-enricher,
+  query-planner, deep-research-synthesizer
+- 4 agents default sonnet (was opus): debugger, deep-analyst,
+  architect-planner, strategic-planner
+- 7 skills gain Model Selection tables: substantive-critique, debugging,
+  deep-analysis, research-synthesis, code-review, architecture,
+  strategic-planning
+
 ## [3.9.1] - 2026-04-11
 
 Patch: code-verification gate for the RDR audit methodology, RDR-066

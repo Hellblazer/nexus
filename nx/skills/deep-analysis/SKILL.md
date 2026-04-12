@@ -6,7 +6,16 @@ effort: high
 
 # Deep Analysis Skill
 
-Delegates to the **deep-analyst** agent (model: opus).
+Delegates to the **deep-analyst** agent.
+
+## Model Selection
+
+Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
+
+| Task Shape | Model | When |
+|-----------|-------|------|
+| Single-module or focused question | sonnet (default) | Most analysis tasks |
+| >3 modules, system-level, or novel architecture | opus | Cross-cutting investigations |
 
 ## When This Skill Activates
 

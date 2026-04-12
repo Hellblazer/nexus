@@ -6,7 +6,16 @@ effort: high
 
 # Architecture Skill
 
-Delegates to the **architect-planner** agent (model: opus).
+Delegates to the **architect-planner** agent.
+
+## Model Selection
+
+Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
+
+| Task Shape | Model | When |
+|-----------|-------|------|
+| Single-module design, extension of existing pattern | sonnet (default) | Most architecture work |
+| Multi-phase, novel architecture, or system-wide redesign | opus | Greenfield, cross-cutting concerns |
 
 ## Code Navigation
 

@@ -2,9 +2,9 @@
 name: deep-research-synthesizer
 version: "2.0"
 description: Conducts comprehensive research across nx knowledge store, memory, web resources, and code repositories. Use when needing multi-source research synthesis or building comprehensive understanding of new technologies.
-model: sonnet
+model: haiku
 color: teal
-effort: medium
+effort: low
 ---
 
 ## Usage Examples

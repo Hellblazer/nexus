@@ -2,9 +2,9 @@
 name: query-planner
 version: "2.0"
 description: Decomposes analytical questions into step-by-step execution plans with operator references. Use when complex research questions need multi-step retrieval and analysis.
-model: sonnet
+model: haiku
 color: blue
-effort: medium
+effort: low
 ---
 
 ## Scope

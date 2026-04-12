@@ -22,6 +22,18 @@ Delegates to the **substantive-critic** agent. See [registry.yaml](../../registr
 
 If the critique targets an RDR or architectural artifact, seed link-context so critique findings stored to T3 auto-link. See `/nx:catalog` for details.
 
+## Model Selection
+
+The substantive-critic agent defaults to **haiku** (fast, cheap). Escalate at dispatch time via the Agent tool's `model` parameter:
+
+| Task Shape | Model | When |
+|-----------|-------|------|
+| Single file, focused critique | haiku (default) | README review, small doc, single function |
+| Multi-file or cross-RDR | sonnet | >3 files, plan critique, implementation vs spec |
+| Cycle-level or architectural | opus | Multi-RDR assessment, system-wide design review |
+
+Pass `model: "sonnet"` or `model: "opus"` on the Agent tool call to override.
+
 ## Agent Invocation
 
 Use the Agent tool to invoke **substantive-critic**:

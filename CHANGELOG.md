@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.2] - 2026-04-11
+
+### Changed
+
+- **Dynamic model selection for all agents**: agent defaults lowered to
+  cheapest model that handles the common case (8 agents → haiku, 4 → sonnet
+  from opus). Skills include Model Selection tables with escalation triggers.
+  The Agent tool's `model` parameter overrides frontmatter at dispatch time
+  (documented priority 2 in Claude Code resolution chain). Opus is now an
+  explicit escalation, not a default.
+
+  | Before | After (default) | Escalation |
+  |--------|-----------------|------------|
+  | 4 opus agents | 0 opus defaults | opus via `model` param when needed |
+  | 8 sonnet agents | 4 sonnet defaults | sonnet via `model` param when needed |
+  | 2 haiku agents | 12 haiku/sonnet defaults | — |
+
 ## [3.9.1] - 2026-04-11
 
 ### Fixed

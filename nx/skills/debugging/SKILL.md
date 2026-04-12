@@ -6,7 +6,16 @@ effort: medium
 
 # Debugging Skill
 
-Delegates to the **debugger** agent (model: opus).
+Delegates to the **debugger** agent.
+
+## Model Selection
+
+Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
+
+| Task Shape | Model | When |
+|-----------|-------|------|
+| Single test failure, clear stack trace | sonnet (default) | Most debugging |
+| Multi-component, non-deterministic, or cross-module | opus | Flaky tests, race conditions, system-level |
 
 ## Code Navigation
 

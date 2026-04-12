@@ -6,7 +6,16 @@ effort: high
 
 # Strategic Planning Skill
 
-Delegates to the **strategic-planner** agent. See [registry.yaml](../../registry.yaml) for details.
+Delegates to the **strategic-planner** agent.
+
+## Model Selection
+
+Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
+
+| Task Shape | Model | When |
+|-----------|-------|------|
+| ≤10 beads, single-phase, clear scope | sonnet (default) | Most planning work |
+| >15 beads, multi-RDR, or ambiguous requirements | opus | Complex decomposition |
 
 ## When This Skill Activates
 

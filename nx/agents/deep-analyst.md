@@ -2,9 +2,9 @@
 name: deep-analyst
 version: "2.0"
 description: Provides thorough analysis of complex problems and intricate system relationships. Use when investigating performance mysteries, debugging multi-component interactions, or understanding system behavior.
-model: opus
+model: sonnet
 color: blue
-effort: high
+effort: medium
 ---
 
 ## Usage Examples

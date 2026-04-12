@@ -6,7 +6,16 @@ effort: medium
 
 # Research Synthesis Skill
 
-Delegates to the **deep-research-synthesizer** agent. See [registry.yaml](../../registry.yaml) for details.
+Delegates to the **deep-research-synthesizer** agent.
+
+## Model Selection
+
+Default: **haiku**. Escalate via `model` parameter on the Agent tool:
+
+| Task Shape | Model | When |
+|-----------|-------|------|
+| Single-topic lookup, ≤3 sources | haiku (default) | Quick research |
+| Multi-source synthesis, >5 sources, or cross-project | sonnet | Comprehensive research |
 
 ## When This Skill Activates
 

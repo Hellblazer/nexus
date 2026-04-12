@@ -2,9 +2,9 @@
 name: architect-planner
 version: "2.0"
 description: Designs comprehensive software architecture and creates phased execution plans for complex projects. Use when starting new features requiring architectural design or planning multi-phase implementations.
-model: opus
+model: sonnet
 color: green
-effort: high
+effort: medium
 ---
 
 ## Usage Examples
