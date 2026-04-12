@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""JSONL tail watchers and SSE broadcasters for the nx console."""
+"""JSONL tail watchers, session scanners, and SSE broadcasters for the nx console."""
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import socket
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -70,6 +73,72 @@ class JSONLTailWatcher:
                 self._callback(record)
             except json.JSONDecodeError:
                 _log.debug("jsonl_parse_error", path=str(self._path), line=line[:80])
+
+
+# ── Session scanner ───────────────────────────────────────────────────────────
+
+
+@dataclass
+class SessionInfo:
+    """Info about one T1 session."""
+
+    session_id: str
+    host: str
+    port: int
+    pid: int
+    pid_alive: bool
+    tcp_reachable: bool
+    created_at: str
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _tcp_probe(host: str, port: int, timeout: float = 0.5) -> bool:
+    if port == 0:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, ConnectionRefusedError):
+        return False
+
+
+def scan_sessions_sync(sessions_dir: Path) -> list[SessionInfo]:
+    """Scan *.session files and probe each for liveness (synchronous)."""
+    if not sessions_dir.exists():
+        return []
+
+    results: list[SessionInfo] = []
+    for sf in sessions_dir.glob("*.session"):
+        try:
+            record = json.loads(sf.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        pid = record.get("server_pid", 0)
+        host = record.get("server_host", "127.0.0.1")
+        port = record.get("server_port", 0)
+
+        pid_alive = _is_pid_alive(pid) if pid else False
+        tcp_ok = _tcp_probe(host, port) if pid_alive else False
+
+        results.append(SessionInfo(
+            session_id=record.get("session_id", sf.stem),
+            host=host,
+            port=port,
+            pid=pid,
+            pid_alive=pid_alive,
+            tcp_reachable=tcp_ok,
+            created_at=str(record.get("created_at", "")),
+        ))
+
+    return results
 
 
 class SSEBroadcaster:

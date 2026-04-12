@@ -1,9 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Health — nx console{% endblock %}
 {% block content %}
-<h2>Sessions &amp; Health</h2>
-<p>System health checks and active session monitoring.</p>
-<div id="health-dashboard">
-  <p>Loading health status&hellip;</p>
+<hgroup>
+  <h2>Sessions &amp; Health</h2>
+  <p>
+    <button hx-get="/health/refresh?scope={{ scope }}" hx-target="#health-cards" class="secondary outline" style="padding: 0.25rem 0.75rem; font-size: 0.8rem;">Refresh</button>
+  </p>
+</hgroup>
+
+<div id="health-cards">
+  {% include "health/_cards.html" %}
 </div>
 {% endblock %}
