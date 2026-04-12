@@ -55,13 +55,13 @@ Key principle: **the system discovers, the operator decides.** Every topic propo
 
 ### Phase 1: Incremental Topic Assignment (the automatic part)
 
-**Assign-on-ingest**: when a new document enters the catalog (via `store_put`, `index repo`, or `index pdf`), compute its similarity to existing topic centroids stored in T2. If the best match exceeds a similarity threshold (default 0.6), assign the document to that topic and update the centroid incrementally. If no match, buffer the document as "unassigned."
+**Assign-on-ingest**: when a new document enters the catalog via `store_put`, re-embed its content with the local MiniLM model (RF-070-4: ~1ms, no API call) and compute cosine distance to existing topic centroids in T2. If the best match is within threshold (≤0.35 prose / ≤0.25 code, per RF-070-5), assign the document and update the centroid via running mean. If no match, buffer the document.
 
-**Trigger**: extend `auto_linker.py` to also call `taxonomy.assign_or_buffer(doc_embedding, doc_id, collection)` on every `store_put`. The auto-linker already fires at the right boundary — adding topic assignment is a natural extension.
+**Trigger**: add a `post_store_hook` callback in `mcp_infra.py` (RF-070-6). Do NOT extend `auto_linker.py` — it is single-responsibility for links. The hook receives the document ID, collection, and content. Batch indexing via `nx index repo` is unaffected — topic assignment for batch runs as a separate `nx taxonomy cluster` operation.
 
-**Centroid storage**: T2 `topics` table already has a `centroid_hash` column. Extend to store the actual centroid vector (as msgpack blob) so assignment is a single cosine similarity computation, not a full re-cluster.
+**Centroid storage**: T2 `topics` table already has `centroid_hash`. Add a `centroid BLOB` column for the actual 384d MiniLM vector (msgpack-encoded). Assignment is one cosine distance computation per topic — O(k) where k is the number of topics in that collection.
 
-**Topic spawning**: when the unassigned buffer reaches a threshold (default 10 documents), run a mini-cluster over just the buffered documents. If the clustering produces a coherent group (intra-cluster similarity > 0.5), spawn a new topic. Otherwise, leave them buffered for the next periodic rebalance.
+**Topic spawning**: when the unassigned buffer reaches 10 documents (RF-070-5), run Ward mini-clustering via the existing `cluster_results()` in `search_clusterer.py`. If a cluster has mean pairwise distance ≤ 0.40 (prose) / 0.30 (code), spawn a new topic. Otherwise, leave buffered for the next periodic rebalance.
 
 ### Phase 2: Periodic Rebalance (the expensive part)
 
@@ -164,12 +164,12 @@ P1 and P3 can run in parallel after the centroid storage is in place.
 4. An agent running `search(topic="schema-evolution", query="mapping composition")` gets results scoped to that topic
 5. The operator can answer "what topics does nexus know about?" in under 5 seconds via the CLI
 
-## Open Questions
+## Open Questions (Resolved)
 
-1. **Embedding source for topic assignment**: use the existing T3 embeddings (voyage-code-3 / voyage-context-3) or compute lightweight local embeddings (MiniLM) for topic math? T3 embeddings are better quality but require API calls; local embeddings are free but lower quality.
-2. **Cross-collection topics**: should a topic span collections (e.g., "schema-evolution" includes both `code__nexus` chunks and `docs__chase-papers` chunks)? The current taxonomy is per-collection. Cross-collection topics are more useful but require a shared embedding space.
-3. **Topic hierarchy depth**: flat (1 level) vs. hierarchical (2-3 levels)? The existing schema supports hierarchy (`parent_id`). Flat is simpler to start; hierarchy can emerge in rebalance if a topic grows large enough to split meaningfully.
-4. **Buffer threshold**: how many unassigned documents before attempting a mini-cluster? Too low (3) creates noise topics. Too high (50) delays topic discovery. Default 10 is a guess.
+1. **Embedding source for topic assignment**: **RESOLVED → Local MiniLM (RF-070-4).** Cross-model Voyage cosine similarity is ~0.05 (documented noise). Use bundled `LocalEmbeddingFunction` (MiniLM 384d) as a dedicated topic-assignment embedding space. ~1ms per document, no API calls, unifies local and cloud mode.
+2. **Cross-collection topics**: **RESOLVED → Two-tier approach.** Per-collection topics use Voyage embeddings from T3 (same model, meaningful cosine). Cross-collection topic "families" use MiniLM re-embedding to find thematic overlap between code and prose topics. This gives both precision (per-collection) and discovery (cross-collection).
+3. **Topic hierarchy depth**: **Decision → Start flat, split on variance.** Begin with 1-level topics. When intra-cluster mean pairwise distance exceeds the split threshold (0.40 prose / 0.30 code), the rebalance proposes a split to the operator. Hierarchy emerges from operator decisions, not from the algorithm.
+4. **Buffer threshold**: **RESOLVED → 10 documents (RF-070-5).** Constrained by Ward clustering minimum (k=2 at `ceil(10/5)`). Validated against data distribution: only 9 collections exceed 100 docs, so mini-clustering 10 buffered docs is proportional.
 
 ## Research Findings
 
@@ -182,8 +182,29 @@ P1 and P3 can run in parallel after the centroid storage is in place.
 ### RF-070-2: Existing Infrastructure
 - `search_clusterer.py`: 91 LOC, Ward + k-means, clean API, tested. Needs no changes for Phase 3.
 - `catalog_taxonomy.py`: 520 LOC, full T2 domain store with schema, locking, tree queries. Needs centroid storage + incremental assign for Phase 1.
-- `auto_linker.py`: 106 LOC, fires on every `store_put`. Natural extension point for Phase 1 assignment.
+- `auto_linker.py`: 106 LOC, single-responsibility for link creation. **Do NOT extend for topic assignment** (see RF-070-6). Add a separate `post_store_hook` in `mcp_infra.py` instead.
 - `scoring.py`: already has `_LINK_BOOST_WEIGHTS` dict. Adding topic boost is mechanical.
 
 ### RF-070-3: Word-Frequency vs. Embedding Clustering
-The existing `cluster_and_persist` uses word-frequency vectors (TF-IDF-like). This works for memory entries (short text, English) but not for code chunks (identifiers, mixed languages). Phase 1 should use the document's actual embedding vector (already stored in T3) for topic assignment, falling back to word-frequency when embeddings are unavailable.
+The existing `cluster_and_persist` uses word-frequency vectors (TF-IDF-like). This works for memory entries (short text, English) but not for code chunks (identifiers, mixed languages). Phase 1 should use the document's actual embedding vector for topic assignment. Per RF-070-4, use local MiniLM as the topic embedding space to avoid cross-model incompatibility.
+
+### RF-070-4: Cross-Model Embedding Incompatibility (HIGH confidence)
+Cross-model cosine similarity between `voyage-code-3` and `voyage-context-3` is ~0.05 — documented noise. The codebase has `EmbeddingModelMismatch` error class and explicit guard rails against mixing. **Recommendation**: use bundled `LocalEmbeddingFunction` (MiniLM 384d, `src/nexus/db/local_ef.py`) as a dedicated topic-assignment embedding space. Cost: ~1ms per document on CPU, no API calls, deterministic. Naturally unifies local and cloud mode. Topic centroids stored as 384d vectors in T2 `topics.centroid` BLOB column.
+
+### RF-070-5: Incremental Assignment Thresholds (MEDIUM confidence)
+Calibrated from existing noise-floor thresholds in `config.py:296` (RDR-056 empirical data):
+
+| Parameter | Prose (knowledge/docs/rdr) | Code | Rationale |
+|---|---|---|---|
+| Same-topic assignment | cosine distance ≤ 0.35 | ≤ 0.25 | Midpoint of useful range (0 to noise floor) |
+| Buffer before mini-cluster | 10 docs | 10 docs | Ward minimum viable k=2 |
+| Split (too broad) | mean pairwise > 0.40 | > 0.30 | ~60% of noise floor |
+
+ChromaDB uses cosine distance (1 - cosine_similarity). Only 9 of 763 collections exceed 100 docs. Schema is ready: `centroid_hash` column exists, `topic_assignments` supports `INSERT OR IGNORE`. **Thresholds should be logged and adjusted** after first real deployment — medium confidence because they're derived from search calibration, not topic-specific validation.
+
+### RF-070-6: Hook Point for Incremental Assignment (HIGH confidence)
+**Do NOT extend `auto_linker.py`** — it is single-responsibility for catalog link creation with zero embedding awareness. Instead:
+1. Add a `post_store_hook` callback list in `mcp_infra.py`, called from `store_put` after the existing auto_link call.
+2. Modify `t3.put()` to **return the embedding vector** instead of discarding it — CCE collections already compute it in `_cce_embed()` then throw it away after upsert.
+3. For code collections (server-side embedding), use `t3.get_embeddings(collection, [doc_id])` — one HTTP call, acceptable latency.
+4. **Batch indexing is unaffected** — `index_repository()` calls `t3.upsert_chunks_with_embeddings()` directly, never touching `store_put`. Topic assignment for batch-indexed repos stays as a separate `nx taxonomy cluster` operation.
