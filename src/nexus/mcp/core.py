@@ -18,6 +18,7 @@ from nexus.db.t3 import verify_collection_deep
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
+    fire_post_store_hooks as _fire_post_store_hooks,
     get_catalog as _get_catalog,
     get_collection_names as _get_collection_names,
     get_recent_search_traces as _get_recent_search_traces,
@@ -435,6 +436,8 @@ def store_put(
                 structlog.get_logger().debug("store_put_auto_linked", doc_id=doc_id, link_count=n)
         except Exception:
             pass  # auto-linking is non-fatal
+        # RDR-070: post-store hooks (taxonomy assignment, etc.)
+        _fire_post_store_hooks(doc_id, col_name, content)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.

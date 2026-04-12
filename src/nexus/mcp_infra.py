@@ -220,6 +220,78 @@ def resolve_tumbler_mcp(cat, value):
     return resolve_tumbler(cat, value)
 
 
+# ── Post-store hooks (RDR-070, nexus-7h2) ────────────────────────────────────
+# Synchronous hooks that fire after every store_put. Exceptions are caught per-
+# hook and logged, never propagated — same non-fatal pattern as auto_linker.
+
+_post_store_hooks: list = []
+
+
+def register_post_store_hook(fn) -> None:
+    """Register a callable(doc_id, collection, content) to fire after store_put."""
+    _post_store_hooks.append(fn)
+
+
+def fire_post_store_hooks(doc_id: str, collection: str, content: str) -> None:
+    """Invoke all registered post-store hooks. Exceptions logged, never raised."""
+    import structlog
+    _hook_log = structlog.get_logger()
+    for hook in _post_store_hooks:
+        try:
+            hook(doc_id, collection, content)
+        except Exception:
+            _hook_log.debug("post_store_hook_failed", hook=getattr(hook, "__name__", "?"), exc_info=True)
+
+
+def taxonomy_assign_hook(
+    doc_id: str,
+    collection: str,
+    content: str,
+    *,
+    taxonomy=None,
+    chroma_client=None,
+) -> None:
+    """Assign a newly stored document to its nearest topic via centroid ANN.
+
+    Re-embeds ``content`` with local MiniLM 384d, queries
+    ``taxonomy__centroids`` for the nearest cluster, and writes a
+    ``topic_assignments`` row with ``assigned_by='centroid'``.
+
+    No-op when centroids don't exist (no discover run yet).
+    Keyword args ``taxonomy`` and ``chroma_client`` are injection points
+    for testing; production path resolves them from singletons.
+    """
+    from nexus.db.local_ef import LocalEmbeddingFunction
+
+    if taxonomy is None:
+        with t2_ctx() as db:
+            taxonomy = db.taxonomy
+            _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client)
+            return
+
+    _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client)
+
+
+def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
+    """Inner logic for taxonomy_assign_hook (avoids double context-manager)."""
+    import numpy as np
+    from nexus.db.local_ef import LocalEmbeddingFunction
+
+    if chroma_client is None:
+        chroma_client = get_t3()._client
+
+    ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    embedding = np.array(ef([content])[0], dtype=np.float32)
+
+    topic_id = taxonomy.assign_single(collection, embedding, chroma_client)
+    if topic_id is not None:
+        taxonomy.conn.execute(
+            "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id, assigned_by) VALUES (?, ?, 'centroid')",
+            (doc_id, topic_id),
+        )
+        taxonomy.conn.commit()
+
+
 # ── Test injection ────────────────────────────────────────────────────────────
 
 
@@ -232,6 +304,7 @@ def reset_singletons():
     _collections_cache = ([], 0.0)
     _catalog_instance = None
     _catalog_mtime = 0.0
+    _post_store_hooks.clear()
     clear_search_traces()
 
 
