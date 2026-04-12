@@ -65,3 +65,19 @@ def test_noisy_loggers_suppressed():
     configure_logging("cli")
     for name in ("httpx", "httpcore", "chromadb.telemetry", "opentelemetry"):
         assert logging.getLogger(name).level >= logging.WARNING
+
+
+def test_repeated_call_does_not_accumulate_handlers(tmp_path, monkeypatch):
+    """Calling configure_logging twice for the same mode replaces the handler."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    configure_logging("console")
+    configure_logging("console")
+    root = logging.getLogger()
+    file_handlers = [
+        h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)
+    ]
+    assert len(file_handlers) == 1
+    assert file_handlers[0].baseFilename.endswith("console.log")
+    # Cleanup
+    root.removeHandler(file_handlers[0])
+    file_handlers[0].close()

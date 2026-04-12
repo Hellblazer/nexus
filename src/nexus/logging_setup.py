@@ -44,11 +44,20 @@ def configure_logging(
     # Non-CLI modes get a rotating file handler
     logs_dir = _config_dir() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / f"{mode}.log"
+
+    # Remove stale handler for the same file if re-called (e.g. server restart)
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        if isinstance(h, logging.handlers.RotatingFileHandler) and h.baseFilename == str(log_path):
+            root.removeHandler(h)
+            h.close()
+
     handler = logging.handlers.RotatingFileHandler(
-        logs_dir / f"{mode}.log",
+        log_path,
         maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=5,
     )
     handler.setLevel(level)
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
-    logging.getLogger().addHandler(handler)
+    root.addHandler(handler)
