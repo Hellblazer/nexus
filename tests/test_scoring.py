@@ -311,3 +311,115 @@ class TestLinkBoost:
         apply_link_boost([r], cat, boost_weight=0.2, type_weights={"implements": 0.5})
         # 0.2 * 0.5 = 0.1
         assert r.hybrid_score == pytest.approx(0.6, abs=0.01)
+
+
+# ── Topic boost (RDR-070, nexus-aym) ─────────────────────────────────────
+
+
+class TestTopicBoost:
+    """apply_topic_boost() scoring tests."""
+
+    def _make_result(
+        self, doc_id="doc-1", score=0.5, collection="code__test",
+    ) -> SearchResult:
+        return SearchResult(
+            id=doc_id, content="text", distance=0.3, collection=collection,
+            metadata={}, hybrid_score=score,
+        )
+
+    def test_same_topic_boost(self) -> None:
+        """Results in the same topic as another result get +0.1 boost."""
+        from nexus.scoring import apply_topic_boost
+
+        r1 = self._make_result(doc_id="doc-a", score=0.5)
+        r2 = self._make_result(doc_id="doc-b", score=0.4)
+        r3 = self._make_result(doc_id="doc-c", score=0.3)
+
+        # doc-a and doc-b in same topic, doc-c in a different one
+        assignments = {"doc-a": 1, "doc-b": 1, "doc-c": 2}
+
+        apply_topic_boost([r1, r2, r3], assignments)
+
+        # doc-a and doc-b should be boosted (same topic pair)
+        assert r1.hybrid_score > 0.5
+        assert r2.hybrid_score > 0.4
+        # doc-c is alone in its topic — no same-topic partner in results
+        assert r3.hybrid_score == 0.3
+
+    def test_linked_topic_boost(self) -> None:
+        """Results in linked topics get +0.05 boost."""
+        from nexus.scoring import apply_topic_boost
+
+        r1 = self._make_result(doc_id="doc-a", score=0.5)
+        r2 = self._make_result(doc_id="doc-b", score=0.4)
+
+        assignments = {"doc-a": 1, "doc-b": 2}
+        topic_links = {(1, 2): 3}  # topics 1 and 2 are linked
+
+        apply_topic_boost([r1, r2], assignments, topic_links=topic_links)
+
+        assert r1.hybrid_score > 0.5
+        assert r2.hybrid_score > 0.4
+
+    def test_no_assignments_unchanged(self) -> None:
+        """No topic assignments → scores unchanged."""
+        from nexus.scoring import apply_topic_boost
+
+        r1 = self._make_result(doc_id="doc-a", score=0.5)
+
+        apply_topic_boost([r1], {})
+        assert r1.hybrid_score == 0.5
+
+    def test_single_result_no_boost(self) -> None:
+        """A single result has no partner → no boost."""
+        from nexus.scoring import apply_topic_boost
+
+        r1 = self._make_result(doc_id="doc-a", score=0.5)
+        assignments = {"doc-a": 1}
+
+        apply_topic_boost([r1], assignments)
+        assert r1.hybrid_score == 0.5
+
+    def test_boost_values(self) -> None:
+        """Verify exact boost amounts."""
+        from nexus.scoring import (
+            _TOPIC_LINKED_BOOST,
+            _TOPIC_SAME_BOOST,
+            apply_topic_boost,
+        )
+
+        r1 = self._make_result(doc_id="doc-a", score=0.5)
+        r2 = self._make_result(doc_id="doc-b", score=0.5)
+
+        assignments = {"doc-a": 1, "doc-b": 1}
+        apply_topic_boost([r1, r2], assignments)
+
+        assert r1.hybrid_score == pytest.approx(0.5 + _TOPIC_SAME_BOOST, abs=0.001)
+        assert r2.hybrid_score == pytest.approx(0.5 + _TOPIC_SAME_BOOST, abs=0.001)
+
+    def test_combined_same_and_linked_boost(self) -> None:
+        """Results get both same-topic and linked-topic boost."""
+        from nexus.scoring import (
+            _TOPIC_LINKED_BOOST,
+            _TOPIC_SAME_BOOST,
+            apply_topic_boost,
+        )
+
+        r1 = self._make_result(doc_id="doc-a", score=0.5)
+        r2 = self._make_result(doc_id="doc-b", score=0.5)
+        r3 = self._make_result(doc_id="doc-c", score=0.5)
+
+        # doc-a and doc-b in topic 1, doc-c in topic 2
+        assignments = {"doc-a": 1, "doc-b": 1, "doc-c": 2}
+        topic_links = {(1, 2): 1}
+
+        apply_topic_boost([r1, r2, r3], assignments, topic_links=topic_links)
+
+        # r1 gets same-topic (with r2) + linked-topic (with r3)
+        assert r1.hybrid_score == pytest.approx(
+            0.5 + _TOPIC_SAME_BOOST + _TOPIC_LINKED_BOOST, abs=0.001,
+        )
+        # r3 gets linked-topic (with r1 and r2)
+        assert r3.hybrid_score == pytest.approx(
+            0.5 + _TOPIC_LINKED_BOOST, abs=0.001,
+        )

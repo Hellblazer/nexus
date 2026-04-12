@@ -257,6 +257,18 @@ def search_cross_corpus(
         from nexus.scoring import apply_link_boost
         all_results = apply_link_boost(all_results, catalog)
 
+    # Topic boost (RDR-070, nexus-aym)
+    if all_results and taxonomy is not None:
+        try:
+            from nexus.scoring import apply_topic_boost
+
+            result_ids = [r.id for r in all_results]
+            assignments = taxonomy.get_assignments_for_docs(result_ids)
+            if assignments:
+                apply_topic_boost(all_results, assignments)
+        except Exception:
+            pass  # Non-fatal: topic boost is a ranking refinement
+
     # Fetch embeddings once if either contradiction detection OR clustering
     # needs them — avoids double fetching (F1 fix). Per-collection failures
     # are isolated: failed indices are excluded from feature processing but

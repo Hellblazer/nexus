@@ -265,6 +265,70 @@ def apply_link_boost(
     return results
 
 
+# ── Topic boost (RDR-070, nexus-aym) ─────────────────────────────────────
+
+_TOPIC_SAME_BOOST: float = 0.1
+_TOPIC_LINKED_BOOST: float = 0.05
+
+
+def apply_topic_boost(
+    results: list[SearchResult],
+    topic_assignments: dict[str, int],
+    *,
+    topic_links: dict[tuple[int, int], int] | None = None,
+) -> list[SearchResult]:
+    """Boost hybrid_score for results that share or are linked by topic.
+
+    For each result with a topic assignment:
+    - If another result in the set shares the SAME topic: +_TOPIC_SAME_BOOST
+    - If another result is in a LINKED topic: +_TOPIC_LINKED_BOOST
+
+    Boost is applied once per relationship type (not per partner).
+    """
+    if not topic_assignments or len(results) < 2:
+        return results
+
+    links = topic_links or {}
+
+    # Build topic_id → set of result indices
+    topic_to_indices: dict[int, list[int]] = {}
+    result_topics: dict[int, int] = {}  # result index → topic_id
+    for i, r in enumerate(results):
+        tid = topic_assignments.get(r.id)
+        if tid is not None:
+            result_topics[i] = tid
+            topic_to_indices.setdefault(tid, []).append(i)
+
+    # Build set of linked topic pairs (both directions)
+    linked_pairs: set[tuple[int, int]] = set()
+    for (a, b) in links:
+        linked_pairs.add((a, b))
+        linked_pairs.add((b, a))
+
+    for i, r in enumerate(results):
+        tid = result_topics.get(i)
+        if tid is None:
+            continue
+
+        # Same-topic boost: at least one other result in the same topic
+        same_topic_peers = topic_to_indices.get(tid, [])
+        if len(same_topic_peers) > 1:
+            r.hybrid_score += _TOPIC_SAME_BOOST
+
+        # Linked-topic boost: at least one result in a linked topic
+        has_linked = False
+        for other_tid, indices in topic_to_indices.items():
+            if other_tid == tid:
+                continue
+            if (tid, other_tid) in linked_pairs:
+                has_linked = True
+                break
+        if has_linked:
+            r.hybrid_score += _TOPIC_LINKED_BOOST
+
+    return results
+
+
 _voyage_instance: object | None = None
 _voyage_lock = threading.Lock()
 
