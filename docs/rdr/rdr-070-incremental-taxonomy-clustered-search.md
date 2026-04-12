@@ -53,23 +53,25 @@ Key principle: **the system discovers, the operator decides.** Every topic propo
 
 ## Proposed Approach
 
-### Phase 1: Incremental Topic Assignment (the automatic part)
+### Phase 1: Batch Topic Discovery + Incremental Assignment
 
-**Assign-on-ingest**: when a new document enters the catalog via `store_put`, re-embed its content with the local MiniLM model (RF-070-4: ~1ms, no API call) and compute cosine distance to existing topic centroids in T2. If the best match is within threshold (≤0.35 prose / ≤0.25 code, per RF-070-5), assign the document and update the centroid via running mean. If no match, buffer the document.
+**Architecture change (RF-070-9)**: use **BERTopic** for batch topic discovery and **HDBSCAN `approximate_predict`** for incremental single-document assignment. This replaces hand-rolled Ward clustering with a production-quality library that solves the exact problem. ~300 LOC integration, ~15MB dependency (bertopic + hdbscan + umap-learn + scikit-learn, no PyTorch).
 
-**Trigger**: add a `post_store_hook` callback in `mcp_infra.py` (RF-070-6). Do NOT extend `auto_linker.py` — it is single-responsibility for links. The hook receives the document ID, collection, and content. Batch indexing via `nx index repo` is unaffected — topic assignment for batch runs as a separate `nx taxonomy cluster` operation.
+**Initial discovery**: `nx taxonomy discover [--collection CODE]` runs BERTopic `fit_transform(docs, embeddings)` over all documents in a collection. Accepts our MiniLM 384d vectors directly — no re-embedding needed. BERTopic's c-TF-IDF produces topic labels automatically from document text. Expect 30-60 topics globally, 5-15 per major collection (RF-070-8).
 
-**Centroid storage**: T2 `topics` table already has `centroid_hash`. Add a `centroid BLOB` column for the actual 384d MiniLM vector (msgpack-encoded). Assignment is one cosine distance computation per topic — O(k) where k is the number of topics in that collection.
+**Incremental assignment**: on `store_put`, re-embed the document content with local MiniLM (~1ms, no API call per RF-070-4), then use `HDBSCAN.approximate_predict(clusterer, [new_embedding])` to assign to an existing topic. No refit, no threshold tuning — HDBSCAN handles density-based assignment natively, including labeling outliers as noise (-1) instead of forcing assignment.
 
-**Topic spawning**: when the unassigned buffer reaches 10 documents (RF-070-5), run Ward mini-clustering via the existing `cluster_results()` in `search_clusterer.py`. If a cluster has mean pairwise distance ≤ 0.40 (prose) / 0.30 (code), spawn a new topic. Otherwise, leave buffered for the next periodic rebalance.
+**Trigger**: add a `post_store_hook` callback in `mcp_infra.py` (RF-070-6). Do NOT extend `auto_linker.py`. Batch indexing via `nx index repo` is unaffected — topic assignment for batch runs as a separate `nx taxonomy discover` operation.
+
+**Threshold correction (RF-070-7)**: the original thresholds (≤0.25 code / ≤0.35 prose) were empirically invalid — they would catch <5% of same-collection pairs. Real intra-collection mean pairwise distances: code 0.56, prose 0.52, knowledge 0.71. **HDBSCAN eliminates the need for manual thresholds entirely** — it discovers density-based clusters from the data's natural structure.
+
+**Persistence**: BERTopic model serialized to disk (`.safetensors` format). HDBSCAN clusterer object pickled for `approximate_predict`. Topic labels and assignments stored in existing T2 `topics` / `topic_assignments` schema. Add `model_version` column to track which BERTopic model produced the clustering.
 
 ### Phase 2: Periodic Rebalance (the expensive part)
 
-**Full re-cluster**: on `nx catalog setup`, `nx taxonomy rebuild`, or on a configurable schedule (e.g., weekly via the audit loop), run Ward hierarchical clustering over all documents in a collection. This:
-- Merges topics that drifted together (centroid similarity > 0.8)
-- Splits topics that grew too broad (intra-cluster variance above threshold)
-- Reassigns documents that were buffered or misassigned
-- Updates all centroid vectors
+**Full re-discovery**: on `nx taxonomy discover --force`, or when the corpus has grown 2x since the last discovery (RF-070-8), re-run BERTopic over the full collection. BERTopic's `merge_models()` merges a new batch model into the existing master model, preserving operator decisions. Alternatively, a full `fit_transform` with `hierarchical_topics()` produces a topic tree mapping to our `topics.parent_id` column.
+
+**Hierarchy**: start flat (depth 1) per RF-070-8 — hierarchy only helps above ~2K docs per topic. Only `code__ART` (4,168 docs) is likely to need sub-topics. BERTopic's built-in `hierarchical_topics()` handles this when needed.
 
 **User review**: after a rebalance, `nx taxonomy review` presents each new/changed topic as a question:
 
@@ -164,12 +166,13 @@ P1 and P3 can run in parallel after the centroid storage is in place.
 4. An agent running `search(topic="schema-evolution", query="mapping composition")` gets results scoped to that topic
 5. The operator can answer "what topics does nexus know about?" in under 5 seconds via the CLI
 
-## Open Questions (Resolved)
+## Open Questions (All Resolved)
 
-1. **Embedding source for topic assignment**: **RESOLVED → Local MiniLM (RF-070-4).** Cross-model Voyage cosine similarity is ~0.05 (documented noise). Use bundled `LocalEmbeddingFunction` (MiniLM 384d) as a dedicated topic-assignment embedding space. ~1ms per document, no API calls, unifies local and cloud mode.
-2. **Cross-collection topics**: **RESOLVED → Two-tier approach.** Per-collection topics use Voyage embeddings from T3 (same model, meaningful cosine). Cross-collection topic "families" use MiniLM re-embedding to find thematic overlap between code and prose topics. This gives both precision (per-collection) and discovery (cross-collection).
-3. **Topic hierarchy depth**: **Decision → Start flat, split on variance.** Begin with 1-level topics. When intra-cluster mean pairwise distance exceeds the split threshold (0.40 prose / 0.30 code), the rebalance proposes a split to the operator. Hierarchy emerges from operator decisions, not from the algorithm.
-4. **Buffer threshold**: **RESOLVED → 10 documents (RF-070-5).** Constrained by Ward clustering minimum (k=2 at `ceil(10/5)`). Validated against data distribution: only 9 collections exceed 100 docs, so mini-clustering 10 buffered docs is proportional.
+1. **Embedding source**: **RESOLVED → Local MiniLM 384d (RF-070-4).** Cross-model Voyage cosine similarity is ~0.05 (documented noise). MiniLM serves as the unified topic-assignment space. ~1ms per doc, no API calls, unifies local and cloud mode. MiniLM ceiling: ~50 reliable topics (RF-070-8); upgrade to bge-base 768d if >60 topics needed.
+2. **Cross-collection topics**: **RESOLVED → MiniLM unified space.** Per-collection Voyage embeddings are incompatible (RF-070-7: cross-model mean distance 1.005 ≈ random). All topic math uses MiniLM re-embedding. Same-project cross-content-type delta is +0.228 in MiniLM space — detectable but wide.
+3. **Topic hierarchy depth**: **RESOLVED → Flat, split on demand (RF-070-8).** At 10K docs / 30-60 topics, average topic size is 170-330 — well below the ~2K threshold where hierarchy helps. Only `code__ART` (4,168 docs) may need sub-topics. BERTopic `hierarchical_topics()` available when needed.
+4. **Threshold approach**: **RESOLVED → HDBSCAN replaces manual thresholds (RF-070-7, RF-070-9).** The original thresholds (≤0.25 code / ≤0.35 prose) were empirically invalid — real intra-collection means are 0.56 (code) and 0.52 (prose). HDBSCAN discovers density-based clusters from natural data structure without distance cutoffs. BERTopic wraps HDBSCAN with topic labeling.
+5. **Tool choice**: **RESOLVED → BERTopic + HDBSCAN `approximate_predict` (RF-070-9).** ~300 LOC integration, ~15MB deps, accepts pre-computed embeddings, incremental assignment without refit, automatic topic labels via c-TF-IDF, built-in hierarchy support.
 
 ## Research Findings
 
@@ -207,4 +210,29 @@ ChromaDB uses cosine distance (1 - cosine_similarity). Only 9 of 763 collections
 1. Add a `post_store_hook` callback list in `mcp_infra.py`, called from `store_put` after the existing auto_link call.
 2. Modify `t3.put()` to **return the embedding vector** instead of discarding it — CCE collections already compute it in `_cce_embed()` then throw it away after upsert.
 3. For code collections (server-side embedding), use `t3.get_embeddings(collection, [doc_id])` — one HTTP call, acceptable latency.
-4. **Batch indexing is unaffected** — `index_repository()` calls `t3.upsert_chunks_with_embeddings()` directly, never touching `store_put`. Topic assignment for batch-indexed repos stays as a separate `nx taxonomy cluster` operation.
+4. **Batch indexing is unaffected** — `index_repository()` calls `t3.upsert_chunks_with_embeddings()` directly, never touching `store_put`. Topic assignment for batch-indexed repos stays as a separate `nx taxonomy discover` operation.
+
+### RF-070-7: Empirical Distance Distributions (HIGH confidence — 7,350 pairwise measurements)
+**The original thresholds were empirically invalid.** Measured intra-collection mean pairwise cosine distances across 6 production collections (132,691 total docs):
+
+| Content type | P10 | Median | Mean | P90 | Std |
+|---|---|---|---|---|---|
+| Code (3 collections) | 0.40-0.43 | 0.53-0.62 | 0.53-0.60 | 0.65-0.72 | 0.10-0.12 |
+| Prose (2 collections) | 0.12-0.24 | 0.54-0.55 | 0.51-0.53 | 0.72-0.86 | 0.17-0.30 |
+| Knowledge | 0.52 | 0.74 | 0.71 | 0.85 | — |
+
+A code threshold of 0.25 captures <5% of same-collection pairs. Cross-model distance (voyage-code-3 vs voyage-context-3) averages **1.005** — random. MiniLM re-embedding shows same-project cross-type delta of +0.228. **Conclusion**: manual thresholds are fragile; HDBSCAN's density-based approach is the right abstraction.
+
+### RF-070-8: Topic Modeling Literature (MEDIUM-HIGH confidence)
+At ~10K mixed code/prose documents:
+- **Expected topics**: 30-60 globally, 5-15 per major collection
+- **Hierarchy**: flat sufficient at 10K; hierarchy helps above ~2K docs per topic level
+- **MiniLM ceiling**: ~50 reliable topics; above that, conflation exceeds 20%
+- **Incremental quality**: 85-90% agreement with batch between rebalances; rebalance every 2x corpus growth
+- **Operator review bandwidth**: 10-15 topics per session, merge fastest (2-3s), split slowest (15-30s)
+- **Code topics**: syntactically driven in MiniLM; label from file paths/AST, not identifiers
+
+### RF-070-9: Taxonomy Tool Survey (HIGH confidence)
+**Winner: BERTopic + HDBSCAN `approximate_predict`.** Evaluated against: Top2Vec (no pre-computed embedding API), Gensim LDA (bag-of-words only), Owlready2/SKOS (ontology, not discovery), Lilac (dead), Nomic Atlas (cloud-only), Argilla (overkill).
+
+BERTopic: accepts numpy embeddings via `fit_transform(docs, embeddings)`, automatic c-TF-IDF topic labels, built-in `hierarchical_topics()`, `merge_models()` for production incremental updates. ~15MB wheel, 8.5K GitHub stars, active development. HDBSCAN (in scikit-learn 1.3+): `approximate_predict(clusterer, new_points)` assigns new documents to existing clusters without refitting — the exact primitive for incremental assignment.
