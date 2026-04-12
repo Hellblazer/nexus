@@ -1,9 +1,10 @@
 ---
 title: "RDR-064: nx console — Process Monitor for Agentic Nexus"
-status: draft
+status: accepted
 type: feature
 priority: P1
 created: 2026-04-10
+accepted_date: 2026-04-11
 reviewed-by: self
 ---
 
