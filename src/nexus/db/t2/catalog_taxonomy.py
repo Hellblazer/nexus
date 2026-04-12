@@ -486,6 +486,137 @@ class CatalogTaxonomy:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def get_all_topic_doc_ids(self, topic_id: int) -> list[str]:
+        """Return all doc_ids assigned to a topic (no limit)."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT doc_id FROM topic_assignments WHERE topic_id = ?",
+                (topic_id,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def resolve_label(
+        self, label: str, *, collection: str = "",
+    ) -> int | None:
+        """Resolve a topic label to its ID. Returns None if not found."""
+        with self._lock:
+            if collection:
+                row = self.conn.execute(
+                    "SELECT id FROM topics WHERE label = ? AND collection = ? LIMIT 1",
+                    (label, collection),
+                ).fetchone()
+            else:
+                row = self.conn.execute(
+                    "SELECT id FROM topics WHERE label = ? LIMIT 1",
+                    (label,),
+                ).fetchone()
+        return row[0] if row else None
+
+    def split_topic(
+        self,
+        topic_id: int,
+        k: int,
+        chroma_client: Any,
+    ) -> int:
+        """Split a topic into k children via KMeans sub-clustering.
+
+        Fetches doc texts from the T3 collection, re-embeds with local
+        MiniLM, runs KMeans(n_clusters=k), creates child topics with
+        c-TF-IDF labels, and reassigns docs. Returns number of children
+        created, or 0 if too few docs.
+        """
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        topic = self.get_topic_by_id(topic_id)
+        if topic is None:
+            return 0
+
+        doc_ids = self.get_all_topic_doc_ids(topic_id)
+        if len(doc_ids) < k:
+            return 0
+
+        # Fetch texts from T3 collection
+        collection_name = topic["collection"]
+        try:
+            coll = chroma_client.get_collection(
+                collection_name, embedding_function=None,
+            )
+        except Exception:
+            _log.warning("split_collection_not_found", collection=collection_name)
+            return 0
+
+        result = coll.get(ids=doc_ids, include=["documents"])
+        texts = result.get("documents") or []
+        fetched_ids = result.get("ids") or []
+        if len(texts) < k:
+            return 0
+
+        # Re-embed with MiniLM
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        embeddings = np.array(ef(texts), dtype=np.float32)
+
+        # KMeans sub-clustering
+        from sklearn.cluster import KMeans
+
+        km = KMeans(n_clusters=k, n_init=10, random_state=42)
+        labels = km.fit_predict(embeddings)
+
+        # c-TF-IDF labels for children
+        vectorizer = CountVectorizer(stop_words="english")
+        tfidf_matrix = TfidfTransformer().fit_transform(
+            vectorizer.fit_transform(texts),
+        )
+        feature_names = vectorizer.get_feature_names_out()
+
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        child_count = 0
+
+        with self._lock:
+            # Remove parent assignments (docs move to children)
+            self.conn.execute(
+                "DELETE FROM topic_assignments WHERE topic_id = ?",
+                (topic_id,),
+            )
+
+            for cid in range(k):
+                mask = labels == cid
+                if not mask.any():
+                    continue
+
+                cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
+                top_idx = cluster_tfidf.argsort()[-10:][::-1]
+                top_terms = [str(feature_names[i]) for i in top_idx]
+                label = " ".join(top_terms[:3])
+                terms_json = json.dumps(top_terms)
+                doc_count = int(mask.sum())
+
+                self.conn.execute(
+                    "INSERT INTO topics "
+                    "(label, parent_id, collection, doc_count, created_at, terms) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (label, topic_id, collection_name, doc_count, now, terms_json),
+                )
+                child_id = self.conn.execute(
+                    "SELECT last_insert_rowid()"
+                ).fetchone()[0]
+
+                for i in range(len(fetched_ids)):
+                    if mask[i]:
+                        self.conn.execute(
+                            "INSERT OR IGNORE INTO topic_assignments "
+                            "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'split')",
+                            (fetched_ids[i], child_id),
+                        )
+                child_count += 1
+
+            # Update parent doc_count to 0 (all docs moved to children)
+            self.conn.execute(
+                "UPDATE topics SET doc_count = 0 WHERE id = ?", (topic_id,),
+            )
+            self.conn.commit()
+
+        return child_count
+
     # ── HDBSCAN topic discovery (RDR-070, nexus-9k5) ────────────────────
 
     @staticmethod

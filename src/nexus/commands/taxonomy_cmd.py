@@ -305,3 +305,73 @@ def review_cmd(collection: str, limit: int) -> None:
                 click.echo("  Skipped.")
 
     click.echo("\nReview session complete.")
+
+
+# ── Manual operations (RDR-070, nexus-c3w) ──────────────────────────────────
+
+
+@taxonomy.command("assign")
+@click.argument("doc_id")
+@click.argument("topic_label")
+@click.option("--collection", "-c", default="", help="Collection scope for label lookup")
+def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
+    """Assign a document to a topic by label."""
+    with T2Database(_default_db_path()) as db:
+        topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
+        if topic_id is None:
+            click.echo(f"Topic '{topic_label}' not found.")
+            return
+        db.taxonomy.assign_topic(doc_id, topic_id, assigned_by="manual")
+        click.echo(f"Assigned '{doc_id}' to topic '{topic_label}' (id={topic_id}).")
+
+
+@taxonomy.command("rename")
+@click.argument("topic_label")
+@click.argument("new_label")
+@click.option("--collection", "-c", default="", help="Collection scope for label lookup")
+def rename_cmd(topic_label: str, new_label: str, collection: str) -> None:
+    """Rename a topic."""
+    with T2Database(_default_db_path()) as db:
+        topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
+        if topic_id is None:
+            click.echo(f"Topic '{topic_label}' not found.")
+            return
+        db.taxonomy.rename_topic(topic_id, new_label)
+        click.echo(f"Renamed '{topic_label}' -> '{new_label}'.")
+
+
+@taxonomy.command("merge")
+@click.argument("source_label")
+@click.argument("target_label")
+@click.option("--collection", "-c", default="", help="Collection scope for label lookup")
+def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
+    """Merge source topic into target topic."""
+    with T2Database(_default_db_path()) as db:
+        source_id = db.taxonomy.resolve_label(source_label, collection=collection)
+        if source_id is None:
+            click.echo(f"Source topic '{source_label}' not found.")
+            return
+        target_id = db.taxonomy.resolve_label(target_label, collection=collection)
+        if target_id is None:
+            click.echo(f"Target topic '{target_label}' not found.")
+            return
+        db.taxonomy.merge_topics(source_id, target_id)
+        click.echo(f"Merged '{source_label}' into '{target_label}'.")
+
+
+@taxonomy.command("split")
+@click.argument("topic_label")
+@click.option("--k", "-k", default=2, type=int, help="Number of sub-topics", show_default=True)
+@click.option("--collection", "-c", default="", help="Collection scope for label lookup")
+def split_cmd(topic_label: str, k: int, collection: str) -> None:
+    """Split a topic into k sub-topics via KMeans clustering."""
+    from nexus.db import make_t3
+
+    with T2Database(_default_db_path()) as db:
+        topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
+        if topic_id is None:
+            click.echo(f"Topic '{topic_label}' not found.")
+            return
+        t3 = make_t3()
+        child_count = db.taxonomy.split_topic(topic_id, k=k, chroma_client=t3._client)
+        click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")

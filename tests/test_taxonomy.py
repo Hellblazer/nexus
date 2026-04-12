@@ -1388,3 +1388,318 @@ class TestReviewCLI:
                 (target_id,),
             ).fetchall()
             assert {r[0] for r in docs} == {"doc-a", "doc-b", "doc-c"}
+
+
+# ── Manual taxonomy operations CLI (RDR-070, nexus-c3w) ───────────────────
+
+
+class TestResolveLabel:
+    """resolve_label looks up topic_id by label."""
+
+    def test_resolve_existing(self, db: T2Database) -> None:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("my-topic", "proj", 5, "2026-01-01T00:00:00Z"),
+        )
+        db.taxonomy.conn.commit()
+        result = db.taxonomy.resolve_label("my-topic", collection="proj")
+        assert result is not None
+        assert isinstance(result, int)
+
+    def test_resolve_missing(self, db: T2Database) -> None:
+        assert db.taxonomy.resolve_label("nonexistent") is None
+
+    def test_resolve_scoped_by_collection(self, db: T2Database) -> None:
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("shared-label", "coll-a", 3, "2026-01-01T00:00:00Z"),
+                ("shared-label", "coll-b", 2, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+        result = db.taxonomy.resolve_label("shared-label", collection="coll-b")
+        assert result is not None
+        topic = db.taxonomy.get_topic_by_id(result)
+        assert topic["collection"] == "coll-b"
+
+
+class TestSplitTopic:
+    """split_topic creates child topics via KMeans sub-clustering."""
+
+    @pytest.fixture()
+    def chroma(self) -> chromadb.ClientAPI:
+        return chromadb.EphemeralClient()
+
+    def test_split_creates_children(
+        self, db: T2Database, chroma: chromadb.ClientAPI,
+    ) -> None:
+        """Split a parent topic into k children via KMeans."""
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        # Create parent topic with mixed docs
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("mixed-topic", "test__split", 30, "2026-01-01T00:00:00Z"),
+        )
+        parent_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+
+        # Two domains — split should separate them
+        texts_a = [f"machine learning gradient descent {i}" for i in range(15)]
+        texts_b = [f"database query sql index {i}" for i in range(15)]
+        texts = texts_a + texts_b
+        doc_ids = [f"doc-{i}" for i in range(30)]
+
+        for did in doc_ids:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                (did, parent_id),
+            )
+        db.taxonomy.conn.commit()
+
+        # Seed the T3 collection with docs
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        coll = chroma.get_or_create_collection(
+            "test__split", embedding_function=None,
+        )
+        coll.add(ids=doc_ids, documents=texts, embeddings=ef(texts))
+
+        child_count = db.taxonomy.split_topic(
+            parent_id, k=2, chroma_client=chroma,
+        )
+        assert child_count == 2
+
+        # Children exist with parent_id set
+        children = db.taxonomy.get_topics(parent_id=parent_id)
+        assert len(children) == 2
+        assert all(c["doc_count"] > 0 for c in children)
+
+        # Parent has no direct assignments (all moved to children)
+        parent_docs = db.taxonomy.get_topic_doc_ids(parent_id)
+        assert len(parent_docs) == 0
+
+    def test_split_too_few_docs(self, db: T2Database) -> None:
+        """Split with fewer docs than k returns 0."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("tiny", "proj", 2, "2026-01-01T00:00:00Z"),
+        )
+        parent_id = db.taxonomy.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("doc-0", parent_id), ("doc-1", parent_id)],
+        )
+        db.taxonomy.conn.commit()
+
+        result = db.taxonomy.split_topic(
+            parent_id, k=3, chroma_client=chromadb.EphemeralClient(),
+        )
+        assert result == 0
+
+
+class TestManualOpsCLI:
+    """CLI tests for nx taxonomy assign/merge/split/rename commands."""
+
+    def test_assign_cli(self, tmp_path: Path) -> None:
+        """nx taxonomy assign sets assigned_by='manual'."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("target-topic", "proj", 5, "2026-01-01T00:00:00Z"),
+            )
+            db.taxonomy.conn.commit()
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["assign", "my-doc-id", "target-topic", "--collection", "proj"],
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            row = db.taxonomy.conn.execute(
+                "SELECT assigned_by FROM topic_assignments WHERE doc_id = 'my-doc-id'"
+            ).fetchone()
+        assert row is not None
+        assert row[0] == "manual"
+
+    def test_assign_cli_unknown_label(self, tmp_path: Path) -> None:
+        """nx taxonomy assign with unknown label prints error."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path):
+            pass
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy, ["assign", "doc-x", "nonexistent"],
+            )
+
+        assert result.exit_code == 0
+        assert "not found" in result.output.lower()
+
+    def test_rename_cli(self, tmp_path: Path) -> None:
+        """nx taxonomy rename updates the label."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("old-name", "proj", 5, "2026-01-01T00:00:00Z"),
+            )
+            db.taxonomy.conn.commit()
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["rename", "old-name", "new-name", "--collection", "proj"],
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            row = db.taxonomy.conn.execute(
+                "SELECT label FROM topics LIMIT 1"
+            ).fetchone()
+        assert row[0] == "new-name"
+
+    def test_merge_cli(self, tmp_path: Path) -> None:
+        """nx taxonomy merge moves docs and deletes source."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("source", "proj", 2, "2026-01-01T00:00:00Z"),
+            )
+            source_id = db.taxonomy.conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("target", "proj", 1, "2026-01-01T00:00:00Z"),
+            )
+            db.taxonomy.conn.executemany(
+                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                [("doc-a", source_id), ("doc-b", source_id)],
+            )
+            db.taxonomy.conn.commit()
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["merge", "source", "target", "--collection", "proj"],
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            # Source deleted
+            assert (
+                db.taxonomy.conn.execute(
+                    "SELECT COUNT(*) FROM topics WHERE label = 'source'"
+                ).fetchone()[0]
+                == 0
+            )
+            # Target has the docs
+            target_id = db.taxonomy.conn.execute(
+                "SELECT id FROM topics WHERE label = 'target'"
+            ).fetchone()[0]
+            docs = db.taxonomy.conn.execute(
+                "SELECT doc_id FROM topic_assignments WHERE topic_id = ?",
+                (target_id,),
+            ).fetchall()
+            assert {r[0] for r in docs} == {"doc-a", "doc-b"}
+
+    def test_split_cli(self, tmp_path: Path) -> None:
+        """nx taxonomy split creates child topics."""
+        from unittest.mock import MagicMock, patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("big-topic", "test__split_cli", 30, "2026-01-01T00:00:00Z"),
+            )
+            parent_id = db.taxonomy.conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+            for i in range(30):
+                db.taxonomy.conn.execute(
+                    "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                    (f"doc-{i}", parent_id),
+                )
+            db.taxonomy.conn.commit()
+
+        mock_t3 = MagicMock()
+        runner = CliRunner()
+        with (
+            patch(
+                "nexus.commands.taxonomy_cmd._default_db_path",
+                return_value=db_path,
+            ),
+            patch(
+                "nexus.db.make_t3",
+                return_value=mock_t3,
+            ),
+            patch(
+                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.split_topic",
+                return_value=2,
+            ),
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["split", "big-topic", "--k", "2", "--collection", "test__split_cli"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "2" in result.output
