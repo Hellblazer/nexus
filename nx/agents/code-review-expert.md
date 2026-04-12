@@ -2,9 +2,9 @@
 name: code-review-expert
 version: "2.0"
 description: Reviews code for quality, security, and best practices. Use proactively after completing features or immediately after writing significant code changes.
-model: haiku
+model: sonnet
 color: purple
-effort: low
+effort: high
 ---
 
 ## Usage Examples

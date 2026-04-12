@@ -6,6 +6,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.3] - 2026-04-11
+
+### Fixed
+
+- **Agent model defaults restored to original values**: 3.9.2 downgraded
+  agents aggressively; clean eval against ART RDR-073 (no T2 injection)
+  proved haiku fails on complex architectural critique and sonnet uses
+  more tool calls than opus. All defaults restored to v3.9.1 originals
+  (4 opus, 10 sonnet, 2 haiku). The Model Selection tables added in 3.9.2
+  are retained — they allow dispatchers to downgrade per-task when the
+  task is simple enough, while keeping strong defaults.
+
+  Lesson: initial haiku eval was contaminated by SubagentStart T2
+  injection priming agents with the answer. T2 context ≠ cold capability.
+
+## [3.9.3] - 2026-04-11
+
+### Fixed
+
+- **Agent model defaults recalibrated after clean evaluation**:
+
+### Fixed
+
+- **Agent model defaults recalibrated after clean evaluation**: 3.9.2
+  set 8 agents to haiku default. Clean testing (no T2 context injection)
+  against ART RDR-073 showed haiku fails on complex architectural
+  critique — answers the wrong question, can't hold a dimensional thread
+  through a 903-line RDR. Six analytical agents restored to sonnet
+  default; three mechanical agents remain haiku.
+
+  Agents restored to sonnet: substantive-critic, plan-auditor,
+  deep-research-synthesizer, code-review-expert, codebase-deep-analyzer,
+  query-planner.
+
+  Agents remaining haiku: plan-enricher, test-validator, knowledge-tidier,
+  analytical-operator, pdf-chromadb-processor.
+
+  Finding: initial haiku evaluation was contaminated — SubagentStart hook
+  injected T2 context about the exact failure mode being tested, making
+  haiku appear capable of analysis it couldn't do cold.
+
 ## [3.9.2] - 2026-04-11
 
 ### Changed

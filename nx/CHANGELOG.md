@@ -6,6 +6,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.3] - 2026-04-11
+
+Agent model defaults restored to v3.9.1 originals after clean eval
+showed haiku fails cold on complex tasks. Model Selection tables from
+3.9.2 retained for per-task downgrade when appropriate.
+
+### Fixed
+
+- 4 agents restored to opus: debugger, deep-analyst, architect-planner,
+  strategic-planner
+- 8 agents restored to sonnet: substantive-critic, code-review-expert,
+  plan-auditor, plan-enricher, test-validator, codebase-deep-analyzer,
+  deep-research-synthesizer, query-planner
+- 2 agents unchanged at haiku: knowledge-tidier, pdf-chromadb-processor
+- Model Selection tables retained in 7 skills for per-task downgrade
+
+## [3.9.3] - 2026-04-11
+
+Agent model defaults recalibrated. Clean eval (no T2 injection) against
+ART RDR-073 showed haiku fails on complex architectural critique. Six
+agents restored to sonnet; three mechanical agents stay haiku. Escalation
+tables in skills unchanged — opus remains an explicit escalation.
+
+### Fixed
+
+- substantive-critic: haiku → sonnet (can't hold dimensional thread cold)
+- plan-auditor: haiku → sonnet (same reasoning class)
+- deep-research-synthesizer: haiku → sonnet (multi-source synthesis)
+- code-review-expert: haiku → sonnet (needs to understand intent)
+- codebase-deep-analyzer: haiku → sonnet (architecture patterns)
+- query-planner: haiku → sonnet (plan decomposition)
+
 ## [3.9.2] - 2026-04-11
 
 Dynamic model selection: all 16 agents lowered to cheapest viable

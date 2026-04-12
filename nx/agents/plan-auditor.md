@@ -2,9 +2,9 @@
 name: plan-auditor
 version: "2.0"
 description: Reviews and validates technical plans for accuracy, completeness, and codebase alignment. Use before implementing any plan — catches gaps and technical errors before they become bugs.
-model: haiku
+model: sonnet
 color: orange
-effort: low
+effort: high
 ---
 
 ## Usage Examples
