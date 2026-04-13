@@ -209,7 +209,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                 # Refresh L1 context cache
                 try:
                     from nexus.context import generate_context_l1
-                    generate_context_l1(db.taxonomy)
+                    generate_context_l1(db.taxonomy, repo_path=path)
                 except Exception:
                     pass  # Non-fatal
         except Exception:

@@ -151,6 +151,34 @@ class TestGenerateContextL1:
         assert "old content" not in content
 
 
+    def test_repo_scoped(self, db: T2Database, tmp_path: Path) -> None:
+        """Only includes collections registered to the specified repo."""
+        from unittest.mock import patch
+
+        from nexus.context import generate_context_l1
+
+        # Topics from two different repos
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                ("My Repo Topic", "code__myrepo-abc123", 100, "2026-01-01T00:00:00Z", "accepted"),
+                ("Other Repo Topic", "code__other-def456", 50, "2026-01-01T00:00:00Z", "accepted"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+
+        # Mock registry to return myrepo collections only
+        mock_entry = {"collection": "code__myrepo-abc123", "docs_collection": "docs__myrepo-abc123"}
+        with patch("nexus.context._repo_collections", return_value={"code__myrepo-abc123", "docs__myrepo-abc123", "rdr__myrepo-abc123"}):
+            out = tmp_path / "context_l1.txt"
+            generate_context_l1(db.taxonomy, output_path=out, repo_path=Path("/fake/myrepo"))
+            content = out.read_text()
+
+        assert "My Repo Topic" in content
+        assert "Other Repo Topic" not in content
+
+
 class TestRefreshContextL1:
     """Convenience wrapper that opens T2 and delegates."""
 

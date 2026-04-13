@@ -11,11 +11,15 @@ def context() -> None:
 
 
 @context.command("refresh")
-def refresh_cmd() -> None:
+@click.option("--global", "global_", is_flag=True, help="Include all collections, not just current repo")
+def refresh_cmd(global_: bool) -> None:
     """Regenerate the L1 context cache from taxonomy topics."""
+    from pathlib import Path
+
     from nexus.context import refresh_context_l1
 
-    result = refresh_context_l1()
+    repo_path = None if global_ else Path.cwd()
+    result = refresh_context_l1(repo_path=repo_path)
     if result:
         content = result.read_text()
         tokens = len(content) // 4

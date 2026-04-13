@@ -357,8 +357,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         # Refresh L1 context cache after discovery
         if total_topics:
             try:
+                from pathlib import Path as _Path
                 from nexus.context import generate_context_l1
-                generate_context_l1(db.taxonomy)
+                generate_context_l1(db.taxonomy, repo_path=_Path.cwd())
             except Exception:
                 pass  # Non-fatal
 

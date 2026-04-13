@@ -22,10 +22,40 @@ CONTEXT_L1_PATH = Path.home() / ".config" / "nexus" / "context_l1.txt"
 _TOPICS_PER_PREFIX = 5
 
 
+def _repo_collections(repo_path: Path | None) -> set[str] | None:
+    """Return collection names registered to a repo, or None for all."""
+    if repo_path is None:
+        return None
+    try:
+        from nexus.registry import RepoRegistry
+
+        reg_path = Path.home() / ".config" / "nexus" / "repos.json"
+        if not reg_path.exists():
+            return None
+        reg = RepoRegistry(reg_path)
+        entry = reg.get(repo_path)
+        if not entry:
+            return None
+        colls = set()
+        for key in ("collection", "docs_collection"):
+            if entry.get(key):
+                colls.add(entry[key])
+        # Also include rdr__ and knowledge__ for this repo
+        # (they use the same hash suffix)
+        for coll_name in colls.copy():
+            suffix = coll_name.split("__", 1)[1] if "__" in coll_name else ""
+            if suffix:
+                colls.add(f"rdr__{suffix}")
+        return colls if colls else None
+    except Exception:
+        return None
+
+
 def generate_context_l1(
     taxonomy: "CatalogTaxonomy",
     *,
     output_path: Path | None = None,
+    repo_path: Path | None = None,
 ) -> Path | None:
     """Generate L1 context cache from taxonomy topic labels.
 
@@ -33,9 +63,13 @@ def generate_context_l1(
     prefix (code/docs/knowledge/rdr), takes top 5 per prefix by
     doc_count. Writes atomically via temp file + os.replace.
 
+    When ``repo_path`` is provided, only topics from collections
+    registered to that repo are included. Otherwise all collections.
+
     Returns the output path, or None if no topics exist.
     """
     output_path = output_path or CONTEXT_L1_PATH
+    allowed = _repo_collections(repo_path)
 
     # Query root topics only (excludes children from split)
     with taxonomy._lock:
@@ -48,14 +82,19 @@ def generate_context_l1(
     if not rows:
         return None
 
-    # Group by collection prefix
+    # Group by collection prefix, filtered by repo if specified
     prefixes: dict[str, list[tuple[str, int]]] = {}
     for collection, label, doc_count in rows:
+        if allowed is not None and collection not in allowed:
+            continue
         prefix = collection.split("__")[0] if "__" in collection else collection
         if prefix not in prefixes:
             prefixes[prefix] = []
         if len(prefixes[prefix]) < _TOPICS_PER_PREFIX:
             prefixes[prefix].append((label, doc_count))
+
+    if not prefixes:
+        return None
 
     # Build text
     lines = ["## Knowledge Map", ""]
@@ -91,6 +130,7 @@ def refresh_context_l1(
     *,
     db_path: Path | None = None,
     output_path: Path | None = None,
+    repo_path: Path | None = None,
 ) -> Path | None:
     """Open T2, generate L1 context cache, close. Convenience wrapper."""
     from nexus.commands._helpers import default_db_path
@@ -98,4 +138,6 @@ def refresh_context_l1(
 
     path = db_path or default_db_path()
     with T2Database(path) as db:
-        return generate_context_l1(db.taxonomy, output_path=output_path)
+        return generate_context_l1(
+            db.taxonomy, output_path=output_path, repo_path=repo_path,
+        )
