@@ -141,6 +141,65 @@ def taxonomy() -> None:
     """Topic taxonomy — browsable knowledge hierarchy."""
 
 
+@taxonomy.command("status")
+def status_cmd() -> None:
+    """Show taxonomy health: collections, coverage, review state."""
+    with T2Database(_default_db_path()) as db:
+        # Get all topics grouped by collection
+        all_topics = db.taxonomy.conn.execute(
+            "SELECT collection, COUNT(*), SUM(doc_count), "
+            "SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN review_status = 'accepted' THEN 1 ELSE 0 END) "
+            "FROM topics GROUP BY collection ORDER BY SUM(doc_count) DESC"
+        ).fetchall()
+
+        if not all_topics:
+            click.echo("No taxonomy data. Run `nx index repo` or `nx taxonomy discover`.")
+            return
+
+        total_topics = 0
+        total_assigned = 0
+        total_pending = 0
+
+        click.echo("Taxonomy Status\n")
+        for coll, n_topics, n_docs, n_pending, n_accepted in all_topics:
+            total_topics += n_topics
+            total_assigned += n_docs
+            total_pending += n_pending
+
+            # Check rebalance
+            meta = db.taxonomy.conn.execute(
+                "SELECT last_discover_doc_count, last_discover_at "
+                "FROM taxonomy_meta WHERE collection = ?",
+                (coll,),
+            ).fetchone()
+
+            rebal = ""
+            if meta:
+                last_count, last_at = meta
+                if last_at:
+                    rebal = f"  discovered {last_at[:10]}"
+
+            status_parts = []
+            if n_accepted:
+                status_parts.append(f"{n_accepted} accepted")
+            if n_pending:
+                status_parts.append(f"{n_pending} pending")
+            status_str = ", ".join(status_parts) if status_parts else "all pending"
+
+            click.echo(f"  {coll}")
+            click.echo(f"    {n_topics} topics, {n_docs} docs assigned ({status_str}){rebal}")
+
+        # Topic links
+        link_count = db.taxonomy.conn.execute(
+            "SELECT COUNT(*) FROM topic_links"
+        ).fetchone()[0]
+
+        click.echo(f"\nTotal: {total_topics} topics, {total_assigned} docs assigned, {link_count} topic links")
+        if total_pending:
+            click.echo(f"Action: {total_pending} topics need review. Run `nx taxonomy review`.")
+
+
 @taxonomy.command("list")
 @click.option("--collection", "-c", default="", help="Filter by collection/project")
 @click.option("--depth", "-d", default=2, type=int, help="Tree depth", show_default=True)
@@ -598,3 +657,116 @@ def links_cmd(collection: str) -> None:
                 f"  {pair['from_topic']} <-> {pair['to_topic']}"
                 f"  ({pair['link_count']} links: {types_str})"
             )
+
+
+# ── LLM-powered labeling (RDR-070) ──────────────────────────────────────────
+
+
+def _claude_available() -> bool:
+    """Check if claude CLI is on PATH."""
+    import shutil
+
+    return shutil.which("claude") is not None
+
+
+def _generate_label_llm(terms: list[str], sample_doc_ids: list[str]) -> str | None:
+    """Generate a human-readable topic label via claude -p --model haiku.
+
+    Returns None on failure (claude not available, timeout, etc.).
+    """
+    import subprocess
+
+    doc_names = []
+    for did in sample_doc_ids[:5]:
+        base = did.split(":")[0]
+        name = base.split("/")[-1]
+        doc_names.append(name)
+
+    prompt = (
+        f"Name this topic in 3-5 words. "
+        f"Terms: {', '.join(terms[:7])}. "
+        f"Sample docs: {', '.join(doc_names)}. "
+        f"Reply with ONLY the label, nothing else."
+    )
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--model", "haiku"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            label = result.stdout.strip().strip('"').strip("'")
+            # Sanity: reject if too long or contains prompt leakage
+            if 3 <= len(label) <= 60 and "terms:" not in label.lower():
+                return label
+    except Exception:
+        pass
+    return None
+
+
+def relabel_topics(
+    taxonomy: "CatalogTaxonomy",
+    *,
+    collection: str = "",
+    only_pending: bool = True,
+) -> int:
+    """Batch-relabel topics using claude -p --model haiku.
+
+    Returns number of topics relabeled.
+    """
+    import json
+
+    if only_pending:
+        topics = taxonomy.get_unreviewed_topics(collection=collection, limit=100)
+    else:
+        topics = taxonomy.get_topics_for_collection(collection) if collection else taxonomy.get_topics()
+
+    if not topics:
+        return 0
+
+    count = 0
+    for topic in topics:
+        terms = json.loads(topic["terms"]) if topic.get("terms") else []
+        if not terms:
+            continue
+
+        doc_ids = taxonomy.get_topic_doc_ids(topic["id"], limit=5)
+        label = _generate_label_llm(terms, doc_ids)
+        if label:
+            taxonomy.rename_topic(topic["id"], label)
+            count += 1
+
+    return count
+
+
+@taxonomy.command("label")
+@click.option("--collection", "-c", default="", help="Filter by collection")
+@click.option("--all", "relabel_all", is_flag=True, help="Relabel all topics, not just pending")
+def label_cmd(collection: str, relabel_all: bool) -> None:
+    """Generate human-readable topic labels using Claude."""
+    if not _claude_available():
+        click.echo("claude CLI not found. Install Claude Code to use LLM labeling.")
+        return
+
+    with T2Database(_default_db_path()) as db:
+        topics = (
+            db.taxonomy.get_topics_for_collection(collection) if collection
+            else db.taxonomy.get_topics()
+        )
+        pending = [t for t in topics if t.get("review_status") == "pending"]
+        target = topics if relabel_all else pending
+
+        if not target:
+            click.echo("No topics to label.")
+            return
+
+        click.echo(f"Labeling {len(target)} topics via Claude haiku...")
+        count = relabel_topics(
+            db.taxonomy,
+            collection=collection,
+            only_pending=not relabel_all,
+        )
+        click.echo(f"Relabeled {count}/{len(target)} topics.")

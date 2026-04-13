@@ -169,7 +169,42 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                     except Exception:
                         _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)
             if total_topics:
-                click.echo(f"  Taxonomy: discovered {total_topics} topics across {len(collections)} collections.")
+                click.echo(
+                    f"  Taxonomy: {total_topics} topics across {len(collections)} collections."
+                )
+                # Auto-label with Claude if available and enabled
+                try:
+                    from nexus.commands.taxonomy_cmd import _claude_available, relabel_topics
+                    auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
+                    if auto_label and _claude_available():
+                        labeled = 0
+                        for col_name in collections:
+                            labeled += relabel_topics(
+                                db.taxonomy, collection=col_name, only_pending=True,
+                            )
+                        if labeled:
+                            click.echo(f"  Labels:   {labeled} topics labeled by Claude haiku.")
+                except Exception:
+                    _log.debug("taxonomy_label_failed", exc_info=True)
+
+                # Count remaining unreviewed
+                unreviewed = len(db.taxonomy.get_unreviewed_topics())
+                if unreviewed:
+                    click.echo(
+                        f"  Review:   {unreviewed} topics pending. "
+                        f"Run `nx taxonomy review` to curate."
+                    )
+                # Auto-populate topic links if catalog available
+                try:
+                    from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links
+                    cat = _try_load_catalog()
+                    if cat:
+                        for col_name in collections:
+                            compute_topic_links(
+                                db.taxonomy, cat, collection=col_name, persist=True,
+                            )
+                except Exception:
+                    pass  # Non-fatal
         except Exception:
             _log.debug("taxonomy_discover_failed", exc_info=True)
 
