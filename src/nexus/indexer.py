@@ -708,20 +708,31 @@ def _index_pdf_file(
         prefix = "## " + "  ".join(prefix_parts)
         embed_texts_pdf.append(f"{prefix}\n\n{doc}")
 
-    # Augment metadata with repo-indexer fields
+    # Augment metadata with repo-indexer fields.
+    # Filter empty/zero values from _pdf_chunks to stay under ChromaDB's
+    # 32-key metadata limit. PDF chunks produce ~31 raw keys; augmentation
+    # adds ~12 more. Without filtering, the _write_batch trimmer silently
+    # drops keys by insertion order, losing git metadata.
+    _EMPTY_VALUES = ("", 0, False, None)
+    # Keys where empty/zero IS meaningful (TTL guard, required fields)
+    _KEEP_ALWAYS = {"expires_at", "ttl_days", "chunk_index", "page_number"}
     metadatas: list[dict] = []
     for m in metadatas_raw:
+        # Drop empty raw metadata values
+        cleaned = {
+            k: v for k, v in m.items()
+            if v not in _EMPTY_VALUES or k in _KEEP_ALWAYS
+        }
         augmented = {
-            **m,
+            **cleaned,
             "title": f"{file.relative_to(repo)}:page-{m.get('page_number', 0)}",
             "tags": "pdf",
             "category": "prose",
-            "session_id": "",
             "source_agent": "nexus-indexer",
             "expires_at": "",
             "ttl_days": 0,
             "frecency_score": float(score),
-            **git_meta,
+            **{k: v for k, v in git_meta.items() if v},
         }
         metadatas.append(augmented)
 

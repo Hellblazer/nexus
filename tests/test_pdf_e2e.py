@@ -133,12 +133,8 @@ class TestIndexPdfFileE2E:
 
         results = local_t3.search("hello world test document", [collection_name])
         assert results, "Expected search results after indexing"
-        # git_project_name may be trimmed when total metadata keys exceed
-        # ChromaDB's 32-key limit (PDF chunks carry ~25 keys from extraction
-        # + 8 from augmentation + 4 from git = 37, triggering the trim).
-        # Verify the core indexing worked by checking a key that survives.
         assert results[0].get("source_agent") == "nexus-indexer"
         assert results[0].get("tags") == "pdf"
-        # If git_project_name survived the trim, verify its value
-        if "git_project_name" in results[0]:
-            assert results[0]["git_project_name"] == pdf_git_repo_e2e.name
+        # git_project_name survives now that empty metadata values are
+        # filtered before augmentation (staying under 32-key limit)
+        assert results[0].get("git_project_name") == pdf_git_repo_e2e.name
