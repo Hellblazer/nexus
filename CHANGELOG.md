@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-04-13
+
+### Changed
+
+- Batch topic labeling: 20 topics per claude -p call (amortizes startup overhead), 4 parallel workers. 654 topics labeled in ~3 minutes vs ~70 minutes sequential.
+
+
 ## [4.0.2] - 2026-04-13
 
 ### Changed
