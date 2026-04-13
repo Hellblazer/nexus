@@ -1,9 +1,11 @@
 ---
 title: "RDR-071: Query Sanitizer"
-status: draft
+status: accepted
 type: feature
 priority: P1
 created: 2026-04-13
+accepted_date: 2026-04-13
+reviewed-by: self
 ---
 
 # RDR-071: Query Sanitizer
