@@ -680,9 +680,17 @@ class CatalogTaxonomy:
             _log.warning("split_collection_not_found", collection=collection_name)
             return 0
 
-        result = coll.get(ids=doc_ids, include=["documents"])
-        texts = result.get("documents") or []
-        fetched_ids = result.get("ids") or []
+        # Paginate get() to respect cloud quota (limit 300)
+        _PAGE = 250
+        fetched_ids: list[str] = []
+        texts: list[str] = []
+        for i in range(0, len(doc_ids), _PAGE):
+            batch = doc_ids[i : i + _PAGE]
+            result = coll.get(ids=batch, include=["documents"])
+            for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
+                if fdoc:
+                    fetched_ids.append(fid)
+                    texts.append(fdoc)
         if len(texts) < k:
             return 0
 

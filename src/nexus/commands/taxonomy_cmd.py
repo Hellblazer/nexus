@@ -68,7 +68,7 @@ def discover_for_collection(
     all_ids: list[str] = []
     all_texts: list[str] = []
     offset = 0
-    page_size = 5000
+    page_size = 250  # Cloud quota: Get limit 300
     while offset < n:
         page = coll.get(
             include=["documents"],
