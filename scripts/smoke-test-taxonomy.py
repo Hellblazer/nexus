@@ -106,10 +106,14 @@ def smoke_test_repo(repo_path: Path, db_path: Path, chroma_path: Path) -> None:
 
     # ── 1. Index code files ───────────────────────────────────────────
     print(f"\n  [{INFO}] Indexing {repo_path.name}...")
-    files = sorted(repo_path.rglob("*.py"))[:100]
+    _SKIP_DIRS = {".venv", "venv", "__pycache__", ".git", "node_modules", ".tox", ".eggs"}
+    all_py = sorted(
+        f for f in repo_path.rglob("*.py")
+        if not any(skip in f.parts for skip in _SKIP_DIRS)
+    )[:200]
     texts: list[str] = []
     ids: list[str] = []
-    for f in files:
+    for f in all_py:
         try:
             t = f.read_text(errors="replace")[:2000]
             if len(t) > 50:  # skip tiny files
