@@ -282,15 +282,34 @@ def taxonomy_assign_hook(
 
 
 def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
-    """Inner logic for taxonomy_assign_hook (avoids double context-manager)."""
+    """Inner logic for taxonomy_assign_hook (avoids double context-manager).
+
+    Fetches the doc's existing T3 embedding (Voyage on cloud, MiniLM on
+    local) rather than re-embedding with MiniLM. Falls back to MiniLM
+    if the T3 embedding isn't available (e.g., race condition).
+    """
     import numpy as np
-    from nexus.db.local_ef import LocalEmbeddingFunction
 
     if chroma_client is None:
         chroma_client = get_t3()._client
 
-    ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    embedding = np.array(ef([content])[0], dtype=np.float32)
+    # Try to fetch the doc's existing T3 embedding (already stored by store_put)
+    embedding = None
+    try:
+        coll = chroma_client.get_collection(collection, embedding_function=None)
+        result = coll.get(ids=[doc_id], include=["embeddings"])
+        if result["embeddings"] is not None and len(result["embeddings"]) > 0:
+            emb = result["embeddings"][0]
+            if emb is not None and len(emb) > 0:
+                embedding = np.array(emb, dtype=np.float32)
+    except Exception:
+        pass  # Fall through to MiniLM
+
+    if embedding is None:
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        embedding = np.array(ef([content])[0], dtype=np.float32)
 
     topic_id = taxonomy.assign_single(collection, embedding, chroma_client)
     if topic_id is not None:

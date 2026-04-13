@@ -27,7 +27,13 @@ def discover_for_collection(
     *,
     force: bool = False,
 ) -> int:
-    """Fetch texts from a T3 collection, embed with MiniLM, run HDBSCAN discovery.
+    """Fetch texts + embeddings from a T3 collection, run HDBSCAN discovery.
+
+    Uses the existing T3 embeddings (Voyage on cloud, MiniLM on local)
+    rather than re-embedding. This preserves the quality of the original
+    embedding model — Voyage-code-3 for code, Voyage-context-3 for docs.
+    Falls back to local MiniLM re-embedding when T3 embeddings are not
+    available (e.g., collection stored without embeddings).
 
     Shared entry point for the CLI ``nx taxonomy discover`` and
     programmatic callers (``index_repo_cmd``, ``post_store_hook``).
@@ -49,8 +55,6 @@ def discover_for_collection(
     int
         Number of topics created.
     """
-    from nexus.db.local_ef import LocalEmbeddingFunction
-
     try:
         coll = chroma_client.get_collection(
             collection_name, embedding_function=None,
@@ -64,32 +68,61 @@ def discover_for_collection(
         _log.info("too_few_docs", collection=collection_name, n=n)
         return 0
 
-    # Fetch all doc_ids + documents in pages (ChromaDB default limit is 10k)
+    # Fetch doc_ids, documents, and existing embeddings in pages.
+    # Uses T3 embeddings (Voyage on cloud) when available.
     all_ids: list[str] = []
     all_texts: list[str] = []
+    all_embs: list[list[float]] = []
+    has_t3_embeddings = True
     offset = 0
     page_size = 250  # Cloud quota: Get limit 300
     while offset < n:
         page = coll.get(
-            include=["documents"],
+            include=["documents", "embeddings"],
             limit=page_size,
             offset=offset,
         )
         page_ids = page["ids"]
-        page_docs = page["documents"] or []
-        # Filter out entries with None text (stored without content)
-        for pid, pdoc in zip(page_ids, page_docs):
-            if pdoc is not None:
+        page_docs = page.get("documents") or []
+        page_embs = page.get("embeddings")
+        if page_embs is None:
+            page_embs = [None] * len(page_ids)
+            has_t3_embeddings = False
+
+        for i, pid in enumerate(page_ids):
+            doc = page_docs[i] if i < len(page_docs) else None
+            emb = page_embs[i] if i < len(page_embs) else None
+            if doc is not None:
                 all_ids.append(pid)
-                all_texts.append(pdoc)
+                all_texts.append(doc)
+                if emb is not None and len(emb) > 0:
+                    all_embs.append(list(emb))
+                else:
+                    has_t3_embeddings = False
+
         offset += len(page_ids)
         if len(page_ids) < page_size:
             break
 
-    # Re-embed with local MiniLM 384d — T3 may use Voyage (1024d)
-    ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    _log.info("embedding_docs", collection=collection_name, n=len(all_texts))
-    embeddings = np.array(ef(all_texts), dtype=np.float32)
+    # Use T3 embeddings if all docs have them; else fall back to MiniLM
+    if has_t3_embeddings and len(all_embs) == len(all_ids):
+        embeddings = np.array(all_embs, dtype=np.float32)
+        _log.info(
+            "using_t3_embeddings",
+            collection=collection_name,
+            n=len(all_ids),
+            dim=embeddings.shape[1],
+        )
+    else:
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        _log.info(
+            "reembedding_with_minilm",
+            collection=collection_name,
+            n=len(all_texts),
+        )
+        embeddings = np.array(ef(all_texts), dtype=np.float32)
 
     if force:
         return taxonomy.rebuild_taxonomy(
