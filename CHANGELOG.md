@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-04-13
+
+### Fixed
+
+- `nx taxonomy` command group was not registered in `cli.py` (included in 4.0.0 squash merge but registration line was missing)
+- Added `test_cli_registration.py` to prevent this class of bug: verifies all command modules, taxonomy subcommands, MCP tools, and post-store hooks are properly wired
+
 ## [4.0.0] - 2026-04-13
 
 ### Added
