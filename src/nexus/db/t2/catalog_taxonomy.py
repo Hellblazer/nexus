@@ -896,6 +896,50 @@ class CatalogTaxonomy:
             metadata={"hnsw:space": "cosine"},
         )
 
+    # Threshold for switching from HDBSCAN to MiniBatchKMeans.
+    # HDBSCAN is O(n^2) on high-dimensional data; at 5K+ x 1024d it
+    # takes minutes. MiniBatchKMeans is O(n) and produces good clusters.
+    _LARGE_COLLECTION_THRESHOLD = 5000
+
+    def _cluster(
+        self,
+        embeddings: np.ndarray,
+        n: int,
+        collection_name: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Cluster embeddings. Returns (labels, centroids).
+
+        Uses HDBSCAN for small collections (density-based, automatic k).
+        Switches to MiniBatchKMeans for large collections (O(n) speed).
+        """
+        if n <= self._LARGE_COLLECTION_THRESHOLD:
+            _log.info("clustering_hdbscan", n=n, collection=collection_name)
+            clusterer = SklearnHDBSCAN(
+                min_cluster_size=5,
+                store_centers="centroid",
+                copy=True,
+            )
+            labels = clusterer.fit_predict(embeddings)
+            # HDBSCAN centroids indexed by cluster label
+            centroids = getattr(clusterer, "centroids_", np.empty((0, embeddings.shape[1])))
+            return labels, centroids
+
+        from sklearn.cluster import MiniBatchKMeans
+
+        k = max(10, int(n ** 0.5 / 3))
+        _log.info(
+            "clustering_minibatch_kmeans",
+            n=n, k=k, collection=collection_name,
+        )
+        km = MiniBatchKMeans(
+            n_clusters=k,
+            batch_size=min(1000, n),
+            n_init=3,
+            random_state=42,
+        )
+        labels = km.fit_predict(embeddings)
+        return labels, km.cluster_centers_
+
     def discover_topics(
         self,
         collection_name: str,
@@ -904,23 +948,25 @@ class CatalogTaxonomy:
         texts: list[str],
         chroma_client: Any,
     ) -> int:
-        """Discover topics from pre-computed embeddings via sklearn HDBSCAN.
+        """Discover topics from pre-computed embeddings.
 
-        Clusters ``embeddings`` (N × D float32), generates c-TF-IDF labels
-        from ``texts``, persists topic rows + assignments to T2, and
-        upserts cluster centroids to the ``taxonomy__centroids`` ChromaDB
-        collection for incremental assignment via :meth:`assign_single`.
+        Uses HDBSCAN for collections under 5K docs (density-based, finds
+        natural cluster count). Switches to MiniBatchKMeans for larger
+        collections (O(n) vs O(n^2), 100-300x faster at scale).
 
-        Returns number of topics created. Returns 0 if HDBSCAN assigns
-        all documents to noise (-1), or if topics already exist for this
-        collection (use ``rebuild_taxonomy`` to re-discover).
+        Generates c-TF-IDF labels from ``texts``, persists topic rows +
+        assignments to T2, and upserts cluster centroids to the
+        ``taxonomy__centroids`` ChromaDB collection for incremental
+        assignment via :meth:`assign_single`.
+
+        Returns number of topics created, or 0 if topics already exist
+        for this collection (use ``rebuild_taxonomy`` to re-discover).
         """
         n = len(doc_ids)
         if n < 5:
             return 0
 
         # Guard: skip if topics already exist for this collection.
-        # Use rebuild_taxonomy (--force) for re-discovery.
         with self._lock:
             existing = self.conn.execute(
                 "SELECT COUNT(*) FROM topics WHERE collection = ?",
@@ -934,18 +980,12 @@ class CatalogTaxonomy:
             )
             return 0
 
-        min_cluster_size = 5
-        clusterer = SklearnHDBSCAN(
-            min_cluster_size=min_cluster_size,
-            store_centers="centroid",
-            copy=True,
-        )
-        labels = clusterer.fit_predict(embeddings)
+        labels, centroids = self._cluster(embeddings, n, collection_name)
 
         real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
         if not real_labels:
             _log.warning(
-                "hdbscan_all_noise",
+                "cluster_all_noise",
                 n_docs=n,
                 collection=collection_name,
             )
@@ -962,7 +1002,7 @@ class CatalogTaxonomy:
 
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         count = 0
-        c_ids: list[str] = []
+        c_ids_out: list[str] = []
         c_embs: list[list[float]] = []
         c_metas: list[dict[str, Any]] = []
 
@@ -995,8 +1035,8 @@ class CatalogTaxonomy:
                             (doc_ids[i], topic_id),
                         )
 
-                c_ids.append(f"{collection_name}:{topic_id}")
-                c_embs.append(clusterer.centroids_[cid].tolist())
+                c_ids_out.append(f"{collection_name}:{topic_id}")
+                c_embs.append(centroids[cid].tolist())
                 c_metas.append({
                     "topic_id": topic_id,
                     "label": label,
@@ -1008,8 +1048,8 @@ class CatalogTaxonomy:
             self.conn.commit()
 
         # Upsert centroids outside the lock
-        if c_ids:
-            centroid_coll.upsert(ids=c_ids, embeddings=c_embs, metadatas=c_metas)
+        if c_ids_out:
+            centroid_coll.upsert(ids=c_ids_out, embeddings=c_embs, metadatas=c_metas)
 
         # Record doc count for rebalance tracking
         self.record_discover_count(collection_name, n)
@@ -1209,13 +1249,7 @@ class CatalogTaxonomy:
             self.record_discover_count(collection_name, n)
             return 0
 
-        min_cluster_size = 5
-        clusterer = SklearnHDBSCAN(
-            min_cluster_size=min_cluster_size,
-            store_centers="centroid",
-            copy=True,
-        )
-        labels = clusterer.fit_predict(embeddings)
+        labels, centroids_arr = self._cluster(embeddings, n, collection_name)
 
         real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
         if not real_labels:
@@ -1236,7 +1270,7 @@ class CatalogTaxonomy:
 
         # ── Step 4: merge labels ──────────────────────────────────────
         new_centroids_arr = np.array(
-            [clusterer.centroids_[cid] for cid in real_labels], dtype=np.float32,
+            [centroids_arr[cid] for cid in real_labels], dtype=np.float32,
         )
         merged = self._merge_labels(
             old_centroids, old_labels, old_review_statuses, new_centroids_arr,
@@ -1292,7 +1326,7 @@ class CatalogTaxonomy:
                         )
 
                 c_ids.append(f"{collection_name}:{topic_id}")
-                c_embs.append(clusterer.centroids_[cid].tolist())
+                c_embs.append(centroids_arr[cid].tolist())
                 c_metas.append({
                     "topic_id": topic_id,
                     "label": label,
