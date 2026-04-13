@@ -320,7 +320,15 @@ def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
 
 
 def reset_singletons():
-    """Reset lazy singletons (for tests only)."""
+    """Reset lazy singletons (for tests only).
+
+    NOTE: _post_store_hooks is intentionally NOT cleared here.  Hooks are
+    registered at module-import time (e.g. ``register_post_store_hook`` in
+    ``nexus.mcp.core``).  Because Python only executes module-level code
+    once, clearing the list here would permanently lose those registrations
+    for the remainder of the test session.  Tests that need an empty hook
+    list should clear ``_post_store_hooks`` explicitly in their own fixture.
+    """
     global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
     _t1_instance = None
     _t1_isolated = False
@@ -328,7 +336,6 @@ def reset_singletons():
     _collections_cache = ([], 0.0)
     _catalog_instance = None
     _catalog_mtime = 0.0
-    _post_store_hooks.clear()
     clear_search_traces()
 
 
