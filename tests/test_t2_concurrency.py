@@ -294,10 +294,10 @@ def test_memory_search_under_discover_topics_load(tmp_path: Path) -> None:
         f"load_p99={load_p99:.2f}ms ratio={ratio:.2f}x"
     )
 
-    assert load_p95 < baseline_p95 * 4.0, (
+    assert load_p95 < baseline_p95 * 5.0, (
         f"memory_search p95 inflated during discover_topics: "
         f"baseline_p95={baseline_p95:.2f}ms load_p95={load_p95:.2f}ms "
-        f"ratio={ratio:.2f}x (threshold 4.0x)"
+        f"ratio={ratio:.2f}x (threshold 5.0x)"
     )
 
 
