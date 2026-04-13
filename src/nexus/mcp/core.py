@@ -71,7 +71,14 @@ def search(
         topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
     """
     try:
+        from nexus.config import load_config
+        from nexus.filters import sanitize_query
         from nexus.search_engine import search_cross_corpus
+
+        cfg = load_config()
+        if cfg.get("search", {}).get("query_sanitizer", True):
+            query = sanitize_query(query)
+
         t3 = _get_t3()
 
         if corpus == "all":
@@ -216,7 +223,14 @@ def query(
         subtree: Tumbler prefix to scope search to a subtree
     """
     try:
+        from nexus.config import load_config
+        from nexus.filters import sanitize_query
         from nexus.search_engine import search_cross_corpus
+
+        cfg = load_config()
+        if cfg.get("search", {}).get("query_sanitizer", True):
+            question = sanitize_query(question)
+
         t3 = _get_t3()
 
         # Catalog-aware routing: derive target collections from catalog metadata

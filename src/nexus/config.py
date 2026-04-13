@@ -312,6 +312,7 @@ _DEFAULTS: dict[str, Any] = {
         },
         "cluster_by": None,
         "contradiction_check": True,
+        "query_sanitizer": True,
     },
     "voyageai": {
         "read_timeout_seconds": 120,
