@@ -96,7 +96,7 @@ def discover_for_collection(
     _next_milestone = _milestone_step
     while offset < n:
         if offset >= _next_milestone and _next_milestone < n:
-            _progress(f"    fetched {offset:,}/{n:,} ({100 * offset // n}%)")
+            _progress(f"    fetching {offset:,}/{n:,} chunks ({100 * offset // n}%)")
             _next_milestone += _milestone_step
         page = coll.get(
             include=["documents", "embeddings"],
@@ -127,7 +127,7 @@ def discover_for_collection(
 
     import time
 
-    _progress(f"    fetched {len(all_ids):,} docs")
+    _progress(f"    fetched {len(all_ids):,} chunks")
 
     # Use T3 embeddings if all docs have them; else fall back to MiniLM
     if has_t3_embeddings and len(all_embs) == len(all_ids):
