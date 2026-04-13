@@ -8,7 +8,9 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Only cancel in-progress runs on PRs (stale pushes). Never cancel main —
+  # tag pushes were cancelling version-bump CI, leaving the badge red.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
