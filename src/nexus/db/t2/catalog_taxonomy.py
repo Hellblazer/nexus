@@ -926,7 +926,7 @@ class CatalogTaxonomy:
             )
             return 0
 
-        min_cluster_size = max(5, n // 15)
+        min_cluster_size = 5
         clusterer = SklearnHDBSCAN(
             min_cluster_size=min_cluster_size,
             store_centers="centroid",
@@ -1201,7 +1201,7 @@ class CatalogTaxonomy:
             self.record_discover_count(collection_name, n)
             return 0
 
-        min_cluster_size = max(5, n // 15)
+        min_cluster_size = 5
         clusterer = SklearnHDBSCAN(
             min_cluster_size=min_cluster_size,
             store_centers="centroid",
