@@ -22,6 +22,17 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
+def _progress(msg: str) -> None:
+    """Print a progress message and flush immediately (works in pipes/redirects)."""
+    import sys
+
+    click.echo(msg)
+    try:
+        sys.stdout.buffer.flush()
+    except Exception:
+        pass
+
+
 # ── Shared function (M5 — callable from CLI and index_repo_cmd) ──────────────
 
 
@@ -75,22 +86,18 @@ def discover_for_collection(
 
     # Fetch doc_ids, documents, and existing embeddings in pages.
     # Uses T3 embeddings (Voyage on cloud) when available.
-    import sys
-
     all_ids: list[str] = []
     all_texts: list[str] = []
     all_embs: list[list[float]] = []
     has_t3_embeddings = True
     offset = 0
     page_size = 250  # Cloud quota: Get limit 300
-    total_pages = (n + page_size - 1) // page_size
-    page_num = 0
+    _milestone_step = max(n // 4, 1)
+    _next_milestone = _milestone_step
     while offset < n:
-        page_num += 1
-        sys.stderr.write(
-            f"\r  {collection_name}: fetching {offset}/{n} ({page_num}/{total_pages})"
-        )
-        sys.stderr.flush()
+        if offset >= _next_milestone and _next_milestone < n:
+            _progress(f"    fetched {offset:,}/{n:,} ({100 * offset // n}%)")
+            _next_milestone += _milestone_step
         page = coll.get(
             include=["documents", "embeddings"],
             limit=page_size,
@@ -118,10 +125,7 @@ def discover_for_collection(
         if len(page_ids) < page_size:
             break
 
-    sys.stderr.write(
-        f"\r  {collection_name}: clustering {len(all_ids)} docs...          \n"
-    )
-    sys.stderr.flush()
+    _progress(f"    fetched {len(all_ids):,} docs, clustering...")
 
     # Use T3 embeddings if all docs have them; else fall back to MiniLM
     if has_t3_embeddings and len(all_embs) == len(all_ids):
