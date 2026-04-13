@@ -259,30 +259,76 @@ def show_cmd(topic_id: int, limit: int) -> None:
 
 
 @taxonomy.command("discover")
-@click.option("--collection", "-c", required=True, help="T3 collection to discover topics for")
+@click.option("--collection", "-c", default="", help="T3 collection (omit for --all)")
+@click.option("--all", "discover_all", is_flag=True, help="Discover all eligible T3 collections")
 @click.option("--force", is_flag=True, help="Delete existing topics before re-discovering")
-def discover_cmd(collection: str, force: bool) -> None:
-    """Discover topics from a T3 collection using HDBSCAN clustering."""
+def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
+    """Discover topics from T3 collections using HDBSCAN clustering.
+
+    Use --collection for a single collection, or --all to discover
+    topics for every T3 collection (respects local_exclude_collections).
+    """
     from fnmatch import fnmatch
 
     from nexus.config import is_local_mode, load_config
     from nexus.db import make_t3
 
-    if is_local_mode():
-        cfg = load_config()
-        exclude = cfg.get("taxonomy", {}).get("local_exclude_collections", [])
-        if any(fnmatch(collection, pat) for pat in exclude):
+    if not collection and not discover_all:
+        click.echo("Specify --collection <name> or --all.")
+        return
+
+    cfg = load_config()
+    exclude = (
+        cfg.get("taxonomy", {}).get("local_exclude_collections", [])
+        if is_local_mode() else []
+    )
+    t3 = make_t3()
+
+    if discover_all:
+        colls = t3._client.list_collections()
+        targets = [
+            c.name for c in colls
+            if c.count() >= 5
+            and not any(fnmatch(c.name, pat) for pat in exclude)
+            and not c.name.startswith("taxonomy__")
+        ]
+        if not targets:
+            click.echo("No eligible collections found.")
+            return
+        click.echo(f"Discovering topics for {len(targets)} collections...")
+    else:
+        if is_local_mode() and any(fnmatch(collection, pat) for pat in exclude):
             click.echo(
                 f"Warning: {collection!r} matches taxonomy.local_exclude_collections "
                 f"({exclude}). Local MiniLM clusters poorly on code. Proceeding anyway."
             )
+        targets = [collection]
 
+    total_topics = 0
     with T2Database(_default_db_path()) as db:
-        t3 = make_t3()
-        count = discover_for_collection(
-            collection, db.taxonomy, t3._client, force=force,
-        )
-    click.echo(f"Created {count} topics for collection {collection!r}.")
+        for col_name in targets:
+            count = discover_for_collection(
+                col_name, db.taxonomy, t3._client, force=force,
+            )
+            if count:
+                click.echo(f"  {col_name}: {count} topics")
+                total_topics += count
+            else:
+                click.echo(f"  {col_name}: no clusters found")
+
+        # Auto-label if configured and available
+        auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
+        if auto_label and total_topics and _claude_available():
+            click.echo("Labeling topics with Claude haiku...")
+            labeled = 0
+            for col_name in targets:
+                labeled += relabel_topics(
+                    db.taxonomy, collection=col_name, only_pending=True,
+                )
+            if labeled:
+                click.echo(f"  Labeled {labeled} topics.")
+
+    click.echo(f"\nTotal: {total_topics} topics.")
 
 
 @taxonomy.command("rebuild")
