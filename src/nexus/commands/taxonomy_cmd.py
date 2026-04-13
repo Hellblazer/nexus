@@ -75,13 +75,22 @@ def discover_for_collection(
 
     # Fetch doc_ids, documents, and existing embeddings in pages.
     # Uses T3 embeddings (Voyage on cloud) when available.
+    import sys
+
     all_ids: list[str] = []
     all_texts: list[str] = []
     all_embs: list[list[float]] = []
     has_t3_embeddings = True
     offset = 0
     page_size = 250  # Cloud quota: Get limit 300
+    total_pages = (n + page_size - 1) // page_size
+    page_num = 0
     while offset < n:
+        page_num += 1
+        sys.stderr.write(
+            f"\r  {collection_name}: fetching {offset}/{n} ({page_num}/{total_pages})"
+        )
+        sys.stderr.flush()
         page = coll.get(
             include=["documents", "embeddings"],
             limit=page_size,
@@ -108,6 +117,11 @@ def discover_for_collection(
         offset += len(page_ids)
         if len(page_ids) < page_size:
             break
+
+    sys.stderr.write(
+        f"\r  {collection_name}: clustering {len(all_ids)} docs...          \n"
+    )
+    sys.stderr.flush()
 
     # Use T3 embeddings if all docs have them; else fall back to MiniLM
     if has_t3_embeddings and len(all_embs) == len(all_ids):
@@ -311,7 +325,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
 
     total_topics = 0
     with _T2Database(_default_db_path()) as db:
-        for col_name in targets:
+        for i, col_name in enumerate(targets, 1):
+            if len(targets) > 1:
+                click.echo(f"[{i}/{len(targets)}] {col_name}")
             count = discover_for_collection(
                 col_name, db.taxonomy, t3._client, force=force,
             )
@@ -319,7 +335,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                 click.echo(f"  {col_name}: {count} topics")
                 total_topics += count
             else:
-                click.echo(f"  {col_name}: no clusters found")
+                click.echo(f"  {col_name}: skipped")
 
         # Auto-label if configured and available
         auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
