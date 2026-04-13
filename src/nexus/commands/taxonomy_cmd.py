@@ -256,9 +256,8 @@ def _show_merge_targets(
     collection: str,
     taxonomy: "CatalogTaxonomy",
 ) -> None:
-    """Show other topics in the same collection as merge targets."""
-    topics = taxonomy.get_topics()
-    targets = [t for t in topics if t["id"] != current_id and t.get("collection") == collection]
+    """Show all other topics in the same collection as merge targets."""
+    targets = taxonomy.get_topics_for_collection(collection, exclude_id=current_id)
     if not targets:
         click.echo("  No other topics to merge into.")
         return
@@ -415,71 +414,96 @@ def compute_topic_links(
     catalog: Any,
     *,
     collection: str = "",
+    persist: bool = False,
 ) -> list[dict[str, Any]]:
     """Derive inter-topic relationships from catalog link graph.
 
     Joins catalog links (tumbler→tumbler) with topic assignments
     (doc_id→topic) via file_path matching. Returns aggregated
     topic-pair counts with link types.
+
+    When ``persist=True``, also writes to the ``topic_links`` T2 table
+    for use by ``apply_topic_boost`` at search time.
     """
     from collections import Counter, defaultdict
 
-    # Build doc_id → topic_label index from T2
+    # Build doc_id → (topic_label, topic_id) index from T2
     topics = taxonomy.get_topics()
     if collection:
         topics = [t for t in topics if t.get("collection") == collection]
 
     topic_label_map: dict[int, str] = {t["id"]: t["label"] for t in topics}
-    doc_to_topic: dict[str, str] = {}
+    doc_to_topic_label: dict[str, str] = {}
+    doc_to_topic_id: dict[str, int] = {}
     for topic in topics:
         doc_ids = taxonomy.get_all_topic_doc_ids(topic["id"])
         for did in doc_ids:
-            doc_to_topic[did] = topic_label_map[topic["id"]]
+            doc_to_topic_label[did] = topic_label_map[topic["id"]]
+            doc_to_topic_id[did] = topic["id"]
 
-    if not doc_to_topic:
+    if not doc_to_topic_label:
         return []
 
-    # Build tumbler → topic_label via catalog entry resolution
+    # Build prefix index: file_path → first matching doc_id (O(N) build, O(1) lookup)
+    # Sorted doc_ids enable prefix matching via bisect
+    from bisect import bisect_left
+
+    sorted_doc_ids = sorted(doc_to_topic_label.keys())
+
+    def _find_by_prefix(prefix: str) -> str | None:
+        """Find first doc_id that starts with prefix via binary search."""
+        idx = bisect_left(sorted_doc_ids, prefix)
+        if idx < len(sorted_doc_ids) and sorted_doc_ids[idx].startswith(prefix):
+            return sorted_doc_ids[idx]
+        return None
+
+    # Build tumbler → topic via catalog entry resolution
     links = catalog.link_query(limit=0)
     if not links:
         return []
 
-    # Resolve link endpoints and match to topics
-    tumbler_cache: dict[str, str | None] = {}
+    tumbler_cache: dict[str, tuple[str, int] | None] = {}
 
-    def _resolve_topic(tumbler: Any) -> str | None:
+    def _resolve_topic(tumbler: Any) -> tuple[str, int] | None:
         key = str(tumbler)
         if key in tumbler_cache:
             return tumbler_cache[key]
         entry = catalog.resolve(tumbler)
         result = None
         if entry and entry.file_path:
-            # Exact match first
-            if entry.file_path in doc_to_topic:
-                result = doc_to_topic[entry.file_path]
+            fp = entry.file_path
+            if fp in doc_to_topic_label:
+                result = (doc_to_topic_label[fp], doc_to_topic_id[fp])
             else:
-                # Prefix match: doc_id may have chunk suffix
-                for did, label in doc_to_topic.items():
-                    if did.startswith(entry.file_path):
-                        result = label
-                        break
+                match = _find_by_prefix(fp)
+                if match:
+                    result = (doc_to_topic_label[match], doc_to_topic_id[match])
         tumbler_cache[key] = result
         return result
 
     # Aggregate links between topics
     pair_counts: Counter[tuple[str, str]] = Counter()
     pair_types: dict[tuple[str, str], set[str]] = defaultdict(set)
+    # Also track by topic_id for persistence
+    id_pair_counts: Counter[tuple[int, int]] = Counter()
+    id_pair_types: dict[tuple[int, int], set[str]] = defaultdict(set)
 
     for link in links:
-        from_label = _resolve_topic(link.from_tumbler)
-        to_label = _resolve_topic(link.to_tumbler)
-        if from_label and to_label and from_label != to_label:
-            # Canonical ordering for undirected aggregation
-            key = (from_label, to_label) if from_label < to_label else (to_label, from_label)
-            pair_counts[key] += 1
-            pair_types[key].add(link.link_type)
+        from_info = _resolve_topic(link.from_tumbler)
+        to_info = _resolve_topic(link.to_tumbler)
+        if from_info and to_info and from_info[1] != to_info[1]:
+            from_label, from_id = from_info
+            to_label, to_id = to_info
+            # Canonical ordering
+            label_key = (from_label, to_label) if from_label < to_label else (to_label, from_label)
+            pair_counts[label_key] += 1
+            pair_types[label_key].add(link.link_type)
 
-    return [
+            id_key = (from_id, to_id) if from_id < to_id else (to_id, from_id)
+            id_pair_counts[id_key] += 1
+            id_pair_types[id_key].add(link.link_type)
+
+    result = [
         {
             "from_topic": k[0],
             "to_topic": k[1],
@@ -488,6 +512,21 @@ def compute_topic_links(
         }
         for k, v in pair_counts.most_common()
     ]
+
+    # Persist to T2 for search-time topic boost
+    if persist and id_pair_counts:
+        persist_data = [
+            {
+                "from_topic_id": k[0],
+                "to_topic_id": k[1],
+                "link_count": v,
+                "link_types": sorted(id_pair_types[k]),
+            }
+            for k, v in id_pair_counts.most_common()
+        ]
+        taxonomy.upsert_topic_links(persist_data)
+
+    return result
 
 
 @taxonomy.command("links")
@@ -500,7 +539,9 @@ def links_cmd(collection: str) -> None:
             click.echo("No catalog initialized. Run `nx catalog setup` first.")
             return
 
-        result = compute_topic_links(db.taxonomy, catalog, collection=collection)
+        result = compute_topic_links(
+            db.taxonomy, catalog, collection=collection, persist=True,
+        )
         if not result:
             click.echo("No topic links found.")
             return

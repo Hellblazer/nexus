@@ -316,12 +316,19 @@ def search_cross_corpus(
 
     # Topic boost (RDR-070, nexus-aym) — applied AFTER grouping so
     # distance-based group ordering is not contaminated by the boost.
-    # NOTE: topic_links not yet wired — linked-topic boost path is inert.
     if _topic_assignments and all_results:
         try:
             from nexus.scoring import apply_topic_boost
 
-            all_results = apply_topic_boost(all_results, _topic_assignments)
+            # Read cached topic links for linked-topic boost
+            topic_links: dict[tuple[int, int], int] | None = None
+            if taxonomy is not None:
+                relevant_ids = list(set(_topic_assignments.values()))
+                topic_links = taxonomy.get_topic_link_pairs(relevant_ids) or None
+
+            all_results = apply_topic_boost(
+                all_results, _topic_assignments, topic_links=topic_links,
+            )
         except Exception:
             _log.debug("topic_boost_failed", exc_info=True)
 

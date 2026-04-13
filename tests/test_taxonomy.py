@@ -2511,3 +2511,135 @@ class TestEdgeCases:
         assert result.exit_code == 0, result.output
         assert "doc-a" in result.output
         assert "doc-b" in result.output
+
+
+class TestTopicLinksTable:
+    """topic_links T2 table for search-time linked-topic boost."""
+
+    def test_topic_links_table_created(self, db: T2Database) -> None:
+        """topic_links table exists after init."""
+        tables = {
+            r[0]
+            for r in db.taxonomy.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "topic_links" in tables
+
+    def test_upsert_and_read_topic_links(self, db: T2Database) -> None:
+        """upsert_topic_links persists, get_topic_link_pairs reads."""
+        # Create topics
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("api", "proj", 5, "2026-01-01T00:00:00Z"),
+                ("db", "proj", 3, "2026-01-01T00:00:00Z"),
+                ("test", "proj", 2, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+        ids = [
+            r[0] for r in db.taxonomy.conn.execute(
+                "SELECT id FROM topics ORDER BY id"
+            ).fetchall()
+        ]
+
+        links = [
+            {
+                "from_topic_id": ids[0],
+                "to_topic_id": ids[1],
+                "link_count": 5,
+                "link_types": ["cites", "implements"],
+            },
+            {
+                "from_topic_id": ids[1],
+                "to_topic_id": ids[2],
+                "link_count": 2,
+                "link_types": ["relates"],
+            },
+        ]
+        count = db.taxonomy.upsert_topic_links(links)
+        assert count == 2
+
+        result = db.taxonomy.get_topic_link_pairs(ids)
+        assert (ids[0], ids[1]) in result
+        assert result[(ids[0], ids[1])] == 5
+        assert (ids[1], ids[2]) in result
+
+    def test_get_topic_link_pairs_empty(self, db: T2Database) -> None:
+        """Empty topic_links returns empty dict."""
+        assert db.taxonomy.get_topic_link_pairs([1, 2, 3]) == {}
+
+    def test_get_topic_link_pairs_scoped(self, db: T2Database) -> None:
+        """Only returns links where both endpoints are in the requested set."""
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("a", "proj", 1, "2026-01-01T00:00:00Z"),
+                ("b", "proj", 1, "2026-01-01T00:00:00Z"),
+                ("c", "proj", 1, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+        ids = [
+            r[0] for r in db.taxonomy.conn.execute(
+                "SELECT id FROM topics ORDER BY id"
+            ).fetchall()
+        ]
+
+        db.taxonomy.upsert_topic_links([
+            {"from_topic_id": ids[0], "to_topic_id": ids[1], "link_count": 3, "link_types": ["cites"]},
+            {"from_topic_id": ids[1], "to_topic_id": ids[2], "link_count": 1, "link_types": ["relates"]},
+        ])
+
+        # Only request ids[0] and ids[1] — should not include the (1,2) link
+        result = db.taxonomy.get_topic_link_pairs([ids[0], ids[1]])
+        assert (ids[0], ids[1]) in result
+        assert (ids[1], ids[2]) not in result
+
+
+class TestGetTopicsForCollection:
+    """get_topics_for_collection returns all topics (root + children)."""
+
+    def test_includes_children(self, db: T2Database) -> None:
+        """Returns both root and child topics for a collection."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("parent", "proj", 10, "2026-01-01T00:00:00Z"),
+        )
+        parent_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, parent_id, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("child", parent_id, "proj", 5, "2026-01-01T00:00:00Z"),
+        )
+        db.taxonomy.conn.commit()
+
+        result = db.taxonomy.get_topics_for_collection("proj")
+        assert len(result) == 2
+        labels = {t["label"] for t in result}
+        assert labels == {"parent", "child"}
+
+    def test_exclude_id(self, db: T2Database) -> None:
+        """exclude_id filters out the specified topic."""
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("keep-a", "proj", 3, "2026-01-01T00:00:00Z"),
+                ("keep-b", "proj", 2, "2026-01-01T00:00:00Z"),
+                ("exclude-me", "proj", 1, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+        exclude = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'exclude-me'"
+        ).fetchone()[0]
+
+        result = db.taxonomy.get_topics_for_collection("proj", exclude_id=exclude)
+        labels = {t["label"] for t in result}
+        assert "exclude-me" not in labels
+        assert len(result) == 2

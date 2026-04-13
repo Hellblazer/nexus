@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS topic_assignments (
     assigned_by TEXT NOT NULL DEFAULT 'hdbscan',
     PRIMARY KEY (doc_id, topic_id)
 );
+
+CREATE TABLE IF NOT EXISTS topic_links (
+    from_topic_id INTEGER NOT NULL REFERENCES topics(id),
+    to_topic_id   INTEGER NOT NULL REFERENCES topics(id),
+    link_count    INTEGER NOT NULL DEFAULT 0,
+    link_types    TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (from_topic_id, to_topic_id)
+);
 """
 
 _TOPIC_COLUMNS = (
@@ -545,6 +553,79 @@ class CatalogTaxonomy:
                 topic_ids,
             ).fetchall()
         return {r[0]: r[1] for r in rows}
+
+    def get_topics_for_collection(
+        self,
+        collection: str,
+        *,
+        exclude_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return all topics (root + children) for a collection."""
+        with self._lock:
+            if exclude_id is not None:
+                rows = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, "
+                    "created_at, review_status, terms "
+                    "FROM topics WHERE collection = ? AND id != ? ORDER BY doc_count DESC",
+                    (collection, exclude_id),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, doc_count, "
+                    "created_at, review_status, terms "
+                    "FROM topics WHERE collection = ? ORDER BY doc_count DESC",
+                    (collection,),
+                ).fetchall()
+        return [dict(zip(_TOPIC_COLUMNS, row)) for row in rows]
+
+    def get_topic_link_pairs(
+        self, topic_ids: list[int],
+    ) -> dict[tuple[int, int], int]:
+        """Return {(from_id, to_id): link_count} for the given topic IDs.
+
+        Used by ``apply_topic_boost`` at search time. Scoped to the
+        provided topic IDs — returns only links where both endpoints
+        are in the set.
+        """
+        if not topic_ids:
+            return {}
+        with self._lock:
+            placeholders = ",".join("?" for _ in topic_ids)
+            rows = self.conn.execute(
+                f"SELECT from_topic_id, to_topic_id, link_count FROM topic_links "
+                f"WHERE from_topic_id IN ({placeholders}) "
+                f"AND to_topic_id IN ({placeholders})",
+                topic_ids + topic_ids,
+            ).fetchall()
+        return {(r[0], r[1]): r[2] for r in rows}
+
+    def upsert_topic_links(
+        self, links: list[dict[str, Any]],
+    ) -> int:
+        """Persist inter-topic link pairs from ``compute_topic_links``.
+
+        Each dict has from_topic_id, to_topic_id, link_count, link_types.
+        Returns number of rows upserted.
+        """
+        if not links:
+            return 0
+        with self._lock:
+            # Clear existing links
+            self.conn.execute("DELETE FROM topic_links")
+            for link in links:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO topic_links "
+                    "(from_topic_id, to_topic_id, link_count, link_types) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        link["from_topic_id"],
+                        link["to_topic_id"],
+                        link["link_count"],
+                        json.dumps(link["link_types"]),
+                    ),
+                )
+            self.conn.commit()
+        return len(links)
 
     def resolve_label(
         self, label: str, *, collection: str = "",
