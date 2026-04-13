@@ -94,16 +94,100 @@ def parse_where_str(where_str: str) -> dict | None:
 
 
 # ── Query sanitizer (RDR-071) ────────────────────────────────────────────────
-# Stub constants and function. Implementation in nexus-xyh.2.
+#
+# 4-step cascade to extract search intent from agent queries that may
+# have system prompts, chain-of-thought, or tool preambles prepended.
+# Ported from mempalace/query_sanitizer.py, adapted to return str.
 
-MAX_QUERY_LENGTH = 500
-SAFE_QUERY_LENGTH = 200
-MIN_QUERY_LENGTH = 10
+import structlog
+
+_sanitizer_log = structlog.get_logger("nexus.query_sanitizer")
+
+MAX_QUERY_LENGTH = 500  # Above this, system prompt almost certainly dominates
+SAFE_QUERY_LENGTH = 200  # Below this, query is almost certainly clean
+MIN_QUERY_LENGTH = 10  # Extracted result shorter than this = extraction failed
+
+# Sentence splitter: split on . ! ? (including fullwidth) and newlines
+_SENTENCE_SPLIT = re.compile(r"[.!?。！？\n]+")
+
+# Question detector: ends with ? or fullwidth ？
+_QUESTION_MARK = re.compile(r'[?？]\s*["\']?\s*$')
 
 
 def sanitize_query(raw_query: str) -> str:
     """Extract search intent from a potentially contaminated query.
 
-    Stub — returns input unchanged. Implementation in nexus-xyh.2.
+    AI agents sometimes prepend system prompts (2000+ chars) to search
+    queries. The embedding model represents the concatenated string as a
+    single vector where the prompt overwhelms the question, causing
+    near-total retrieval failure on MiniLM (5x distance inflation).
+
+    4-step cascade:
+    1. Passthrough (<= 200 chars): no action needed
+    2. Question extraction: find last sentence ending with ?
+    3. Tail sentence: last meaningful sentence
+    4. Tail truncation: last 500 chars (fallback)
+
+    Returns the sanitized query string.
     """
-    raise NotImplementedError("sanitize_query not yet implemented (nexus-xyh.2)")
+    if not raw_query or not raw_query.strip():
+        return ""
+
+    raw_query = raw_query.strip()
+    original_length = len(raw_query)
+
+    # Step 1: Short query passthrough
+    if original_length <= SAFE_QUERY_LENGTH:
+        return raw_query
+
+    # Step 2: Question extraction
+    all_segments = [s.strip() for s in raw_query.split("\n") if s.strip()]
+
+    question_sentences: list[str] = []
+    for seg in reversed(all_segments):
+        if _QUESTION_MARK.search(seg):
+            question_sentences.append(seg)
+
+    if not question_sentences:
+        sentences = [s.strip() for s in _SENTENCE_SPLIT.split(raw_query) if s.strip()]
+        for sent in reversed(sentences):
+            if "?" in sent or "？" in sent:
+                question_sentences.append(sent)
+
+    if question_sentences:
+        candidate = question_sentences[0].strip()
+        if len(candidate) >= MIN_QUERY_LENGTH:
+            if len(candidate) > MAX_QUERY_LENGTH:
+                candidate = candidate[-MAX_QUERY_LENGTH:]
+            _sanitizer_log.debug(
+                "query_sanitized",
+                method="question_extraction",
+                original_length=original_length,
+                clean_length=len(candidate),
+            )
+            return candidate
+
+    # Step 3: Tail sentence extraction
+    for seg in reversed(all_segments):
+        seg = seg.strip()
+        if len(seg) >= MIN_QUERY_LENGTH:
+            candidate = seg
+            if len(candidate) > MAX_QUERY_LENGTH:
+                candidate = candidate[-MAX_QUERY_LENGTH:]
+            _sanitizer_log.debug(
+                "query_sanitized",
+                method="tail_sentence",
+                original_length=original_length,
+                clean_length=len(candidate),
+            )
+            return candidate
+
+    # Step 4: Tail truncation (fallback)
+    candidate = raw_query[-MAX_QUERY_LENGTH:].strip()
+    _sanitizer_log.debug(
+        "query_sanitized",
+        method="tail_truncation",
+        original_length=original_length,
+        clean_length=len(candidate),
+    )
+    return candidate
