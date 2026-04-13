@@ -2,6 +2,7 @@
 """Tests for auto-taxonomy discover after nx index repo (RDR-070, nexus-0bg)."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -17,16 +18,15 @@ def test_index_repo_triggers_taxonomy_discover(tmp_path) -> None:
         calls.append(collection_name)
         return 2
 
-    fake_stats = {"code_indexed": 5}
-
-    with (
-        patch("nexus.commands.index._discover_taxonomy", side_effect=fake_discover),
-        patch("nexus.indexer.index_repository", return_value=fake_stats),
-        patch("nexus.commands.index._registry") as mock_reg,
-        patch("nexus.commands.index.tqdm", side_effect=lambda **kw: None),
-        patch("nexus.db.make_t3"),
-        patch("nexus.db.t2.T2Database"),
-    ):
+    with ExitStack() as stack:
+        stack.enter_context(patch("nexus.commands.index._discover_taxonomy", side_effect=fake_discover))
+        stack.enter_context(patch("nexus.indexer.index_repository", return_value={"code_indexed": 5}))
+        stack.enter_context(patch("nexus.commands.index.tqdm", side_effect=lambda **kw: None))
+        stack.enter_context(patch("nexus.db.make_t3"))
+        stack.enter_context(patch("nexus.db.t2.T2Database"))
+        # Disable auto-label to prevent taxonomy_cmd import from poisoning T2Database
+        stack.enter_context(patch("nexus.config.load_config", return_value={"taxonomy": {"auto_label": False, "local_exclude_collections": []}}))
+        mock_reg = stack.enter_context(patch("nexus.commands.index._registry"))
         mock_reg.return_value.get.return_value = {"collection": "code__test", "docs_collection": "docs__test"}
         runner = CliRunner()
         result = runner.invoke(index, ["repo", str(tmp_path)])
@@ -82,14 +82,14 @@ def test_index_repo_taxonomy_failure_nonfatal(tmp_path) -> None:
     def bad_discover(*a, **kw):
         raise RuntimeError("taxonomy broke")
 
-    with (
-        patch("nexus.commands.index._discover_taxonomy", side_effect=bad_discover),
-        patch("nexus.indexer.index_repository", return_value={"code_indexed": 1}),
-        patch("nexus.commands.index._registry") as mock_reg,
-        patch("nexus.commands.index.tqdm", side_effect=lambda **kw: None),
-        patch("nexus.db.make_t3"),
-        patch("nexus.db.t2.T2Database"),
-    ):
+    with ExitStack() as stack:
+        stack.enter_context(patch("nexus.commands.index._discover_taxonomy", side_effect=bad_discover))
+        stack.enter_context(patch("nexus.indexer.index_repository", return_value={"code_indexed": 1}))
+        stack.enter_context(patch("nexus.commands.index.tqdm", side_effect=lambda **kw: None))
+        stack.enter_context(patch("nexus.db.make_t3"))
+        stack.enter_context(patch("nexus.db.t2.T2Database"))
+        stack.enter_context(patch("nexus.config.load_config", return_value={"taxonomy": {"auto_label": False, "local_exclude_collections": []}}))
+        mock_reg = stack.enter_context(patch("nexus.commands.index._registry"))
         mock_reg.return_value.get.return_value = {"collection": "code__test"}
         runner = CliRunner()
         result = runner.invoke(index, ["repo", str(tmp_path)])

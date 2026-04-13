@@ -173,19 +173,20 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                     f"  Taxonomy: {total_topics} topics across {len(collections)} collections."
                 )
                 # Auto-label with Claude if available and enabled
-                try:
-                    from nexus.commands.taxonomy_cmd import _claude_available, relabel_topics
-                    auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
-                    if auto_label and _claude_available():
-                        labeled = 0
-                        for col_name in collections:
-                            labeled += relabel_topics(
-                                db.taxonomy, collection=col_name, only_pending=True,
-                            )
-                        if labeled:
-                            click.echo(f"  Labels:   {labeled} topics labeled by Claude haiku.")
-                except Exception:
-                    _log.debug("taxonomy_label_failed", exc_info=True)
+                auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
+                if auto_label:
+                    try:
+                        from nexus.commands.taxonomy_cmd import _claude_available, relabel_topics
+                        if _claude_available():
+                            labeled = 0
+                            for col_name in collections:
+                                labeled += relabel_topics(
+                                    db.taxonomy, collection=col_name, only_pending=True,
+                                )
+                            if labeled:
+                                click.echo(f"  Labels:   {labeled} topics labeled by Claude haiku.")
+                    except Exception:
+                        _log.debug("taxonomy_label_failed", exc_info=True)
 
                 # Count remaining unreviewed
                 unreviewed = len(db.taxonomy.get_unreviewed_topics())

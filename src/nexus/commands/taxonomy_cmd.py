@@ -9,7 +9,12 @@ import numpy as np
 import structlog
 
 from nexus.commands._helpers import default_db_path as _default_db_path
-from nexus.db.t2 import T2Database
+
+
+def _T2Database(path):
+    """Lazy T2Database constructor (avoids module-level import poisoning by test mocks)."""
+    from nexus.db.t2 import T2Database
+    return T2Database(path)
 
 if TYPE_CHECKING:
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
@@ -144,7 +149,7 @@ def taxonomy() -> None:
 @taxonomy.command("status")
 def status_cmd() -> None:
     """Show taxonomy health: collections, coverage, review state."""
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         # Get all topics grouped by collection
         all_topics = db.taxonomy.conn.execute(
             "SELECT collection, COUNT(*), SUM(doc_count), "
@@ -208,7 +213,7 @@ def list_cmd(collection: str, depth: int) -> None:
     from nexus.taxonomy import get_topic_tree
 
     depth = min(depth, 4)
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         tree = get_topic_tree(db, collection, max_depth=depth)
         # Count docs with no topic assignment (noise / uncategorized)
         total_assigned = db.taxonomy.conn.execute(
@@ -247,7 +252,7 @@ def show_cmd(topic_id: int, limit: int) -> None:
     """Show documents assigned to a topic."""
     from nexus.taxonomy import get_topic_docs
 
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         docs = get_topic_docs(db, topic_id, limit=limit)
     if not docs:
         click.echo(f"No documents in topic {topic_id}.")
@@ -305,7 +310,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         targets = [collection]
 
     total_topics = 0
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         for col_name in targets:
             count = discover_for_collection(
                 col_name, db.taxonomy, t3._client, force=force,
@@ -337,7 +342,7 @@ def rebuild_cmd(collection: str) -> None:
     """Rebuild topic taxonomy from scratch (alias for discover --force)."""
     from nexus.db import make_t3
 
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         t3 = make_t3()
         count = discover_for_collection(
             collection, db.taxonomy, t3._client, force=True,
@@ -421,7 +426,7 @@ def _show_merge_targets(
 @click.option("--limit", "-n", default=15, type=int, help="Topics per session", show_default=True)
 def review_cmd(collection: str, limit: int) -> None:
     """Interactive topic review — accept, rename, merge, delete, or skip."""
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         topics = db.taxonomy.get_unreviewed_topics(collection=collection, limit=limit)
         if not topics:
             click.echo("No unreviewed topics. All done!")
@@ -481,7 +486,7 @@ def review_cmd(collection: str, limit: int) -> None:
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
     """Assign a document to a topic by label."""
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -496,7 +501,7 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def rename_cmd(topic_label: str, new_label: str, collection: str) -> None:
     """Rename a topic."""
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -511,7 +516,7 @@ def rename_cmd(topic_label: str, new_label: str, collection: str) -> None:
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
     """Merge source topic into target topic."""
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         source_id = db.taxonomy.resolve_label(source_label, collection=collection)
         if source_id is None:
             click.echo(f"Source topic '{source_label}' not found.")
@@ -532,7 +537,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     """Split a topic into k sub-topics via KMeans clustering."""
     from nexus.db import make_t3
 
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -683,7 +688,7 @@ def compute_topic_links(
 @click.option("--collection", "-c", default="", help="Filter by collection")
 def links_cmd(collection: str) -> None:
     """Show inter-topic relationships derived from catalog links."""
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         catalog = _try_load_catalog()
         if catalog is None:
             click.echo("No catalog initialized. Run `nx catalog setup` first.")
@@ -797,7 +802,7 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
         click.echo("claude CLI not found. Install Claude Code to use LLM labeling.")
         return
 
-    with T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path()) as db:
         topics = (
             db.taxonomy.get_topics_for_collection(collection) if collection
             else db.taxonomy.get_topics()
