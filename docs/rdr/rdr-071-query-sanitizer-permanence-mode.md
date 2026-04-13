@@ -1,10 +1,12 @@
 ---
 title: "RDR-071: Query Sanitizer"
-status: accepted
+status: closed
 type: feature
 priority: P1
 created: 2026-04-13
 accepted_date: 2026-04-13
+closed_date: 2026-04-13
+close_reason: implemented
 reviewed-by: self
 ---
 
