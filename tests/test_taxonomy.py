@@ -851,9 +851,9 @@ class TestMiniLMTopicQuality:
 
 # ── sklearn HDBSCAN smoke tests (RDR-070, nexus-86v) ────────────────────────
 #
-# scikit-learn>=1.3 is a core dep. sklearn.cluster.HDBSCAN replaces BERTopic
-# for topic discovery — same HDBSCAN algorithm, c-TF-IDF labels via
-# CountVectorizer+TfidfTransformer, incremental assignment via nearest centroid.
+# scikit-learn>=1.3 is a core dep. sklearn.cluster.HDBSCAN for topic
+# discovery, c-TF-IDF labels via CountVectorizer+TfidfTransformer,
+# incremental assignment via nearest centroid in ChromaDB.
 # No torch, no sentence-transformers, no optional extra needed.
 
 

@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from nexus.db.t2.memory_store import MemoryStore
 
 # RDR-070 (nexus-9k5): scikit-learn>=1.3 is a core dep. sklearn.cluster.HDBSCAN
-# replaces BERTopic for topic discovery — same algorithm, no 500MB torch chain.
+# HDBSCAN for topic discovery with c-TF-IDF labels via CountVectorizer.
 from sklearn.cluster import HDBSCAN as SklearnHDBSCAN
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 
@@ -115,7 +115,7 @@ class CatalogTaxonomy:
     RDR-070 (nexus-9k5): topic discovery uses sklearn HDBSCAN on
     pre-computed embeddings. Centroids stored in ChromaDB
     ``taxonomy__centroids`` collection. c-TF-IDF labels via
-    CountVectorizer + TfidfTransformer. No BERTopic, no PyTorch.
+    CountVectorizer + TfidfTransformer for c-TF-IDF labels.
 
     Constructor takes a :class:`MemoryStore` reference for
     :meth:`get_topic_docs` JOIN resolution (RDR-063 §Cross-Domain

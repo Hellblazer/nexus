@@ -93,9 +93,9 @@ Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of st
 
 ## Taxonomy
 
-The taxonomy feature (RDR-070) builds a browsable topic hierarchy over T3 collections
-without re-embedding. Topics are discovered using the embeddings already stored in ChromaDB
-(Voyage AI on cloud, MiniLM on local).
+Taxonomy (RDR-070) builds a topic hierarchy over T3 collections using existing embeddings, without re-embedding. HDBSCAN clusters the vectors already stored in ChromaDB, labels them with c-TF-IDF, and persists topic assignments to T2 SQLite. Every subsequent `store_put` call assigns the new document to the nearest centroid via ANN lookup. Search then uses these assignments to boost same-topic results and group output.
+
+In local mode, `code__*` collections are excluded by default because MiniLM clusters code poorly. Cloud mode uses `voyage-code-3` and is unaffected. `nx index repo` triggers discovery automatically after indexing.
 
 ### Data Flow
 
@@ -125,11 +125,6 @@ search_cross_corpus()              # search_engine.py
   │  otherwise fall back to Ward hierarchical clustering
 ```
 
-`nx index repo` auto-triggers `discover_for_collection` after indexing and optionally
-runs Claude haiku auto-labeling (`taxonomy.auto_label` config, default on). In local
-mode, `code__*` collections are excluded by default (`taxonomy.local_exclude_collections`)
-because MiniLM clusters code poorly; cloud mode uses voyage-code-3 and is unaffected.
-
 ### Storage
 
 **T2 SQLite tables** (owned by `CatalogTaxonomy`):
@@ -141,32 +136,24 @@ because MiniLM clusters code poorly; cloud mode uses voyage-code-3 and is unaffe
 | `taxonomy_meta` | Per-collection discover stats (last_discover_at, last_discover_doc_count) |
 | `topic_links` | Aggregated inter-topic link counts derived from catalog link graph |
 
-**T3 ChromaDB collection** — `taxonomy__centroids`:
-- Created with `embedding_function=None` (pre-computed vectors) and `hnsw:space=cosine`
-- One entry per topic: centroid vector, collection, topic_id, label metadata
-- Used exclusively by `assign_single()` for ANN nearest-neighbor lookup
-- Never touches `t3.get_or_create_collection()` — that would inject the wrong EF + L2
+**T3 ChromaDB collection** (`taxonomy__centroids`): created with `embedding_function=None` and `hnsw:space=cosine`. One entry per topic holds the centroid vector, collection, topic_id, and label. Used exclusively by `assign_single()` for ANN lookup. Never goes through `t3.get_or_create_collection()` (that path would inject the wrong embedding function and L2 space).
 
 ### Centroid Lifecycle
 
-- **Discover**: creates centroids for all topics in a collection
-- **Rebuild** (`nx taxonomy rebuild` / `--force`): reads old centroids + labels, runs
-  HDBSCAN on updated embeddings, matches new centroids to old via cosine similarity
-  (`_merge_labels`), transfers operator labels and `accepted` review statuses — manual
-  labels survive re-clustering
-- **Split** (`nx taxonomy split`): replaces the parent centroid with two child centroids
-- **Delete/Merge**: removes orphaned centroid entries
+| Operation | What happens |
+|-----------|-------------|
+| `discover` | Creates centroids for all topics in a collection |
+| `rebuild` (`--force`) | Runs HDBSCAN on updated embeddings, matches new centroids to old via cosine similarity (`_merge_labels`), transfers operator labels and `accepted` status |
+| `split` | Replaces the parent centroid with two child centroids |
+| `delete` / `merge` | Removes orphaned centroid entries |
+
+Manual labels survive rebuild via `_merge_labels`.
 
 ### Connection to the Catalog Link Graph
 
-`nx taxonomy links --collection <col>` calls `compute_topic_links()`, which reads the
-catalog link graph and aggregates which topics are connected via document-level links.
-Results are stored in `topic_links`. The search engine reads `topic_links` via
-`get_topic_link_map()` to apply the linked-topic distance boost (-0.05).
+`nx taxonomy links --collection <col>` reads the catalog link graph and aggregates which topics are connected via document-level links. Results are stored in `topic_links` and read by the search engine via `get_topic_link_map()` to apply the linked-topic distance boost (-0.05).
 
-### CLI — `nx taxonomy`
-
-12 subcommands:
+### CLI (`nx taxonomy`)
 
 | Command | Purpose |
 |---------|---------|
@@ -183,7 +170,7 @@ Results are stored in `topic_links`. The search engine reads `topic_links` via
 | `split` | Split a topic on a keyword pivot |
 | `links` | Compute and persist inter-topic links from catalog |
 
-### Config Keys (`taxonomy` section in `.nexus.yml`)
+### Config (`taxonomy` section in `.nexus.yml`)
 
 | Key | Default | Effect |
 |-----|---------|--------|
@@ -247,7 +234,7 @@ Phase 2 consequences:
   writes run on the telemetry connection, so `memory_search` is not
   blocked by access-tracking hooks.
 - **Cluster rebuilds don't freeze memory**: `taxonomy.cluster_and_persist`
-  runs on the taxonomy connection; the long numpy clustering phase holds
+  runs on the taxonomy connection. The long numpy clustering phase holds
   no T2 locks, so interactive memory operations continue during the
   bulk of the rebuild. (The initial `memory.get_all()` snapshot read
   still briefly acquires `memory`'s lock, as any read does.)
