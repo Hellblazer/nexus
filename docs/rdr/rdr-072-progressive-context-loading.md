@@ -1,9 +1,11 @@
 ---
 title: "RDR-072: Progressive Context Loading"
-status: draft
+status: accepted
 type: feature
 priority: P2
 created: 2026-04-13
+accepted_date: 2026-04-13
+reviewed-by: self
 ---
 
 # RDR-072: Progressive Context Loading
