@@ -1,6 +1,6 @@
 ---
 title: "RDR-074: Permanence Mode"
-status: draft
+status: deferred
 type: feature
 priority: P3
 created: 2026-04-13

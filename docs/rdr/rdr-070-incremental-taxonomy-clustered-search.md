@@ -1,10 +1,12 @@
 ---
 title: "RDR-070: Incremental Taxonomy & Clustered Search — Making the Catalog Navigable"
-status: accepted
+status: closed
 type: feature
 priority: P1
 created: 2026-04-12
 accepted_date: 2026-04-12
+closed_date: 2026-04-13
+close_reason: implemented
 reviewed-by: self
 ---
 

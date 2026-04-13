@@ -33,6 +33,7 @@ def test_all_command_modules_registered():
     # (some modules use different names via add_command(..., name="X"))
     _MODULE_TO_CLI = {
         "config_cmd": "config",
+        "context_cmd": "context",
         "doctor": "doctor",
         "hook": "hook",
         "mineru": "mineru",

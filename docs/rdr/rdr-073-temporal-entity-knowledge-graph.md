@@ -1,6 +1,6 @@
 ---
 title: "RDR-073: Temporal Entity Knowledge Graph"
-status: draft
+status: deferred
 type: feature
 priority: P2
 created: 2026-04-13

@@ -354,6 +354,15 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
             else:
                 click.echo(f"  {col_name}: skipped")
 
+        # Refresh L1 context cache after discovery
+        if total_topics:
+            try:
+                from pathlib import Path as _Path
+                from nexus.context import generate_context_l1
+                generate_context_l1(db.taxonomy, repo_path=_Path.cwd())
+            except Exception:
+                pass  # Non-fatal
+
     click.echo(f"\nTotal: {total_topics} topics, {total_labeled} labeled.")
 
 
