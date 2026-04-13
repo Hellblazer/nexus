@@ -1,6 +1,8 @@
 ---
 title: "RDR-072: Progressive Context Loading"
-status: accepted
+status: closed
+close_reason: implemented
+close_date: 2026-04-13
 type: feature
 priority: P2
 created: 2026-04-13
