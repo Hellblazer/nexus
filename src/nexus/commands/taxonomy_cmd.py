@@ -809,7 +809,7 @@ def relabel_topics(
     import json
 
     if only_pending:
-        topics = taxonomy.get_unreviewed_topics(collection=collection, limit=100)
+        topics = taxonomy.get_unreviewed_topics(collection=collection, limit=1000)
     else:
         topics = taxonomy.get_topics_for_collection(collection) if collection else taxonomy.get_topics()
 
@@ -817,12 +817,13 @@ def relabel_topics(
         return 0
 
     count = 0
-    for topic in topics:
+    for i, topic in enumerate(topics, 1):
         terms = json.loads(topic["terms"]) if topic.get("terms") else []
         if not terms:
             continue
 
         doc_ids = taxonomy.get_topic_doc_ids(topic["id"], limit=5)
+        _progress(f"    labeling [{i}/{len(topics)}] {topic['label'][:40]}")
         label = _generate_label_llm(terms, doc_ids)
         if label:
             taxonomy.rename_topic(topic["id"], label)
