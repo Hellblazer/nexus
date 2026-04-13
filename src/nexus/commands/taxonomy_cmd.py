@@ -328,7 +328,11 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
             )
         targets = [collection]
 
+    auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
+    can_label = auto_label and _claude_available()
+
     total_topics = 0
+    total_labeled = 0
     with _T2Database(_default_db_path()) as db:
         for i, col_name in enumerate(targets, 1):
             if len(targets) > 1:
@@ -339,22 +343,18 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
             if count:
                 click.echo(f"  {col_name}: {count} topics")
                 total_topics += count
+                # Label immediately after each collection (incremental, crash-safe)
+                if can_label:
+                    labeled = relabel_topics(
+                        db.taxonomy, collection=col_name, only_pending=True,
+                    )
+                    if labeled:
+                        click.echo(f"  {col_name}: labeled {labeled} topics")
+                        total_labeled += labeled
             else:
                 click.echo(f"  {col_name}: skipped")
 
-        # Auto-label if configured and available
-        auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
-        if auto_label and total_topics and _claude_available():
-            click.echo("Labeling topics with Claude haiku...")
-            labeled = 0
-            for col_name in targets:
-                labeled += relabel_topics(
-                    db.taxonomy, collection=col_name, only_pending=True,
-                )
-            if labeled:
-                click.echo(f"  Labeled {labeled} topics.")
-
-    click.echo(f"\nTotal: {total_topics} topics.")
+    click.echo(f"\nTotal: {total_topics} topics, {total_labeled} labeled.")
 
 
 @taxonomy.command("rebuild")
