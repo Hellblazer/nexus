@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.2] - 2026-04-13
+
+### Changed
+
+- **Hybrid clustering**: MiniBatchKMeans for collections over 5K chunks (O(n) vs HDBSCAN's O(n^2)). Reduces clustering time from 12+ minutes to 2.9 seconds on 63K-chunk collections.
+- **Parallel labeling**: 4 concurrent `claude -p` workers for topic labeling. Labels incrementally per collection (crash-safe) instead of batch at end.
+- **Progress tracking**: per-phase reporting for `nx taxonomy discover` (fetch milestones at 25/50/75%, embedding source, clustering time, labeling progress with worker count)
+
+### Fixed
+
+- Labeling limit raised from 100 to 1000 per collection (was silently truncating collections with 100+ topics)
+- Progress output uses `stdout.buffer.flush()` for immediate display in pipes and redirects
+
 ## [4.0.1] - 2026-04-13
 
 ### Fixed
