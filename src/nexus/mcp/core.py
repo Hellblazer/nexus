@@ -312,11 +312,13 @@ def query(
 
         # Over-fetch chunks to ensure good document coverage
         fetch_n = limit * 10
-        results = search_cross_corpus(
-            question, target, n_results=fetch_n, t3=t3, where=where_dict,
-            catalog=_get_catalog(),
-            link_boost=True,
-        )
+        with _t2_ctx() as _t2_db:
+            results = search_cross_corpus(
+                question, target, n_results=fetch_n, t3=t3, where=where_dict,
+                catalog=_get_catalog(),
+                link_boost=True,
+                taxonomy=_t2_db.taxonomy,
+            )
         results.sort(key=lambda r: r.distance)
         if not results:
             return "No documents found."

@@ -74,6 +74,9 @@ Present results directly. No planner, no T1 scratch, no plan save prompt.
 - "Show me all code in the nexus repo" → `query(question="code patterns", subtree="1.1")`
 - "What papers cite this RDR?" → `query(question="related work", follow_links="cites")`
 - "Find knowledge about distributed consensus" → `query(question="distributed consensus", content_type="paper")`
+- "Search within the PDF extraction topic" → `search(query="extraction pipeline", topic="Math-aware batch PDF extraction")`
+
+**Topic-scoped search**: When the user's question targets a known topic cluster (from `nx taxonomy list`), use the `topic` parameter on the `search` tool to pre-filter results. This narrows the search space and ensures all results come from the same knowledge domain. Use `nx taxonomy status` to see available topics.
 
 
 ### Path 2: Template Match (structured patterns)
