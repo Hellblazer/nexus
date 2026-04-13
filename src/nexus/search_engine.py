@@ -511,10 +511,9 @@ def _apply_topic_grouping(
     Results with assignments get a ``_topic_label`` metadata key.
     Unassigned results are appended at the end.
     """
-    # Build topic_id → label map
+    # Build topic_id → label map (scoped query, not full table scan)
     topic_ids = set(assignments.values())
-    topics = taxonomy.get_topics()
-    id_to_label = {t["id"]: t["label"] for t in topics if t["id"] in topic_ids}
+    id_to_label = taxonomy.get_labels_for_ids(list(topic_ids))
 
     # Partition: assigned (grouped by topic) vs unassigned
     grouped: dict[int, list[SearchResult]] = {}

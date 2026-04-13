@@ -501,6 +501,18 @@ class CatalogTaxonomy:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def get_labels_for_ids(self, topic_ids: list[int]) -> dict[int, str]:
+        """Return {topic_id: label} for the given IDs (scoped query)."""
+        if not topic_ids:
+            return {}
+        with self._lock:
+            placeholders = ",".join("?" for _ in topic_ids)
+            rows = self.conn.execute(
+                f"SELECT id, label FROM topics WHERE id IN ({placeholders})",
+                topic_ids,
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
     def resolve_label(
         self, label: str, *, collection: str = "",
     ) -> int | None:
@@ -576,6 +588,9 @@ class CatalogTaxonomy:
 
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         child_count = 0
+        c_ids: list[str] = []
+        c_embs: list[list[float]] = []
+        c_metas: list[dict[str, Any]] = []
 
         with self._lock:
             # Remove parent assignments (docs move to children)
@@ -613,6 +628,17 @@ class CatalogTaxonomy:
                             "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'split')",
                             (fetched_ids[i], child_id),
                         )
+
+                # Centroid for the child topic
+                child_centroid = embeddings[mask].mean(axis=0)
+                c_ids.append(f"{collection_name}:{child_id}")
+                c_embs.append(child_centroid.tolist())
+                c_metas.append({
+                    "topic_id": child_id,
+                    "label": label,
+                    "collection": collection_name,
+                    "doc_count": doc_count,
+                })
                 child_count += 1
 
             # Update parent doc_count to 0 (all docs moved to children)
@@ -620,6 +646,16 @@ class CatalogTaxonomy:
                 "UPDATE topics SET doc_count = 0 WHERE id = ?", (topic_id,),
             )
             self.conn.commit()
+
+        # Update centroids: remove parent, add children
+        centroid_coll = self._create_centroid_collection(chroma_client)
+        parent_centroid_id = f"{collection_name}:{topic_id}"
+        try:
+            centroid_coll.delete(ids=[parent_centroid_id])
+        except Exception:
+            pass  # Parent centroid may not exist
+        if c_ids:
+            centroid_coll.upsert(ids=c_ids, embeddings=c_embs, metadatas=c_metas)
 
         return child_count
 
@@ -952,6 +988,13 @@ class CatalogTaxonomy:
         3. Run HDBSCAN on new embeddings
         4. Match new centroids to old via ``_merge_labels``
         5. Transfer operator labels and manual assignments
+
+        RACE WINDOW: Between Step 2 (T2 DELETE committed) and the final
+        centroid upsert, concurrent ``assign_single`` calls may see stale
+        or empty centroids. Centroid operations run outside ``self._lock``
+        to avoid blocking T2 readers during ChromaDB I/O. This is an
+        accepted trade-off — taxonomy rebuild is an infrequent operator
+        action, not a hot path.
         6. Record doc count for rebalance tracking
         """
         # ── Step 1: read old state ────────────────────────────────────

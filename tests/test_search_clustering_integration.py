@@ -297,6 +297,11 @@ class TestTopicGrouping:
             return [{"id": tid, "label": lbl} for tid, lbl in topics.items()]
 
         tax.get_topics = fake_get_topics
+
+        def fake_get_labels_for_ids(ids):
+            return {tid: topics[tid] for tid in ids if tid in topics}
+
+        tax.get_labels_for_ids = fake_get_labels_for_ids
         return tax
 
     def test_topic_grouping_when_majority_assigned(self) -> None:

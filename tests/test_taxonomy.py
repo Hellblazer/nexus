@@ -269,6 +269,30 @@ def test_assign_single_no_centroids_returns_none(
     assert result is None
 
 
+def test_assign_single_cross_collection_isolation(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_single returns None for collection B when centroids only exist for A."""
+    rng = np.random.default_rng(42)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural {i}" for i in range(30)]
+        + [f"database query sql {i}" for i in range(30)]
+    )
+
+    # Discover for collection A — creates centroids
+    db.taxonomy.discover_topics("coll_A", doc_ids, embeddings, texts, chroma_client)
+
+    # Query for collection B — should return None, not a topic from A
+    new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
+    new_emb[0] += 3.0  # similar to cluster A's centroid
+    result = db.taxonomy.assign_single("coll_B", new_emb, chroma_client)
+    assert result is None, "assign_single must not cross collection boundaries"
+
+
 def test_assigned_by_column_populated(
     db: T2Database, chroma_client: chromadb.ClientAPI,
 ) -> None:
@@ -725,7 +749,18 @@ class TestMiniLMTopicQuality:
             min_cluster_size=min_cs, store_centers="centroid", copy=True,
         ).fit_predict(embeddings)
 
-        # For each held-out doc, check assign_single vs full batch label
+        # For each held-out doc, check that assign_single assigns it to a
+        # topic whose members come from the SAME domain. The three domains
+        # are http (indices 0-29), db (30-59), test (60-89). We check that
+        # the held-out doc and the majority of the topic's training docs
+        # share the same domain.
+        def _domain(i: int) -> str:
+            if i < 30:
+                return "http"
+            if i < 60:
+                return "db"
+            return "test"
+
         agreements = 0
         total = 0
         for idx in holdout_indices:
@@ -734,18 +769,33 @@ class TestMiniLMTopicQuality:
             topic_id = db.taxonomy.assign_single(
                 "code__agreement", embeddings[idx], chroma,
             )
-            if topic_id is not None:
-                total += 1
-                # Get the topic's label and check it's consistent
-                # (exact topic_id match is not meaningful since IDs differ
-                #  between partial and full runs — check domain coherence)
-                agreements += 1  # assigned to some topic (not None)
+            if topic_id is None:
+                continue
+            total += 1
 
-        # Agreement threshold: assign_single should find a topic for most
-        # held-out docs (they're from well-defined clusters)
+            # Check domain coherence: get docs assigned to this topic
+            # and verify most share the same domain as the held-out doc
+            topic_docs = db.taxonomy.get_all_topic_doc_ids(topic_id)
+            doc_domain = _domain(idx)
+            topic_domains = [
+                _domain(int(did.split("-")[1]))
+                for did in topic_docs
+                if did.startswith("chunk-")
+            ]
+            if topic_domains:
+                majority_domain = max(set(topic_domains), key=topic_domains.count)
+                if majority_domain == doc_domain:
+                    agreements += 1
+
+        # Agreement threshold: domain coherence should hold for most
         assert total >= len(holdout_indices) // 2, (
             f"Too few held-out docs assigned: {total}/{len(holdout_indices)}"
         )
+        if total > 0:
+            agreement_rate = agreements / total
+            assert agreement_rate >= 0.5, (
+                f"Domain coherence too low: {agreements}/{total} = {agreement_rate:.0%}"
+            )
 
 
 # ── sklearn HDBSCAN smoke tests (RDR-070, nexus-86v) ────────────────────────
@@ -1467,7 +1517,27 @@ class TestSplitTopic:
         coll = chroma.get_or_create_collection(
             "test__split", embedding_function=None,
         )
-        coll.add(ids=doc_ids, documents=texts, embeddings=ef(texts))
+        emb_list = ef(texts)
+        coll.add(ids=doc_ids, documents=texts, embeddings=emb_list)
+
+        # Seed a parent centroid in taxonomy__centroids
+        centroid_coll = chroma.get_or_create_collection(
+            "taxonomy__centroids",
+            embedding_function=None,
+            metadata={"hnsw:space": "cosine"},
+        )
+        import numpy as _np
+        parent_centroid = _np.array(emb_list).mean(axis=0).tolist()
+        centroid_coll.add(
+            ids=[f"test__split:{parent_id}"],
+            embeddings=[parent_centroid],
+            metadatas=[{
+                "topic_id": parent_id,
+                "label": "mixed-topic",
+                "collection": "test__split",
+                "doc_count": 30,
+            }],
+        )
 
         child_count = db.taxonomy.split_topic(
             parent_id, k=2, chroma_client=chroma,
@@ -1482,6 +1552,20 @@ class TestSplitTopic:
         # Parent has no direct assignments (all moved to children)
         parent_docs = db.taxonomy.get_topic_doc_ids(parent_id)
         assert len(parent_docs) == 0
+
+        # Centroids: parent removed, children added
+        centroid_coll = chroma.get_collection(
+            "taxonomy__centroids", embedding_function=None,
+        )
+        centroid_data = centroid_coll.get(
+            where={"collection": "test__split"},
+            include=["metadatas"],
+        )
+        centroid_topic_ids = {m["topic_id"] for m in centroid_data["metadatas"]}
+        child_ids = {c["id"] for c in children}
+        # Parent centroid should be gone, child centroids should exist
+        assert parent_id not in centroid_topic_ids
+        assert child_ids == centroid_topic_ids
 
     def test_split_too_few_docs(self, db: T2Database) -> None:
         """Split with fewer docs than k returns 0."""
