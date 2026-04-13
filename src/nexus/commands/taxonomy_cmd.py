@@ -801,12 +801,16 @@ def relabel_topics(
     *,
     collection: str = "",
     only_pending: bool = True,
+    workers: int = 8,
 ) -> int:
-    """Batch-relabel topics using claude -p --model haiku.
+    """Relabel topics using claude -p --model haiku, parallelized.
 
-    Returns number of topics relabeled.
+    Dispatches up to ``workers`` concurrent subprocess calls. Each
+    call is independent (read-only on topic data, write is a single
+    rename_topic per result). Returns number of topics relabeled.
     """
     import json
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     if only_pending:
         topics = taxonomy.get_unreviewed_topics(collection=collection, limit=1000)
@@ -816,18 +820,37 @@ def relabel_topics(
     if not topics:
         return 0
 
-    count = 0
-    for i, topic in enumerate(topics, 1):
+    # Prepare work items: (topic_id, terms, doc_ids)
+    work = []
+    for topic in topics:
         terms = json.loads(topic["terms"]) if topic.get("terms") else []
         if not terms:
             continue
-
         doc_ids = taxonomy.get_topic_doc_ids(topic["id"], limit=5)
-        _progress(f"    labeling [{i}/{len(topics)}] {topic['label'][:40]}")
-        label = _generate_label_llm(terms, doc_ids)
-        if label:
-            taxonomy.rename_topic(topic["id"], label)
-            count += 1
+        work.append((topic["id"], topic["label"], terms, doc_ids))
+
+    if not work:
+        return 0
+
+    _progress(f"    labeling {len(work)} topics ({workers} workers)...")
+
+    count = 0
+    done = 0
+
+    def _label_one(item: tuple) -> tuple[int, str | None]:
+        tid, _, terms, doc_ids = item
+        return tid, _generate_label_llm(terms, doc_ids)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_label_one, w): w for w in work}
+        for future in as_completed(futures):
+            done += 1
+            tid, label = future.result()
+            if label:
+                taxonomy.rename_topic(tid, label)
+                count += 1
+            if done % 25 == 0 or done == len(work):
+                _progress(f"    labeled {done}/{len(work)} ({count} renamed)")
 
     return count
 
