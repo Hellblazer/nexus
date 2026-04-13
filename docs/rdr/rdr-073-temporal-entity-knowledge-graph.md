@@ -8,104 +8,112 @@ created: 2026-04-13
 
 # RDR-073: Temporal Entity Knowledge Graph
 
-Add entity-first knowledge representation with temporal validity to nexus. Inspired by MemPalace's temporal KG but adapted for operational knowledge (systems, decisions, dependencies) rather than personal memory (people, events, emotions).
+Entity-first knowledge with temporal validity. Agents and operators record structured facts about systems, decisions, and dependencies. As-of queries answer "what was true about X at time Y?"
 
 ## Problem
 
-Nexus knows about documents but not entities. The catalog tracks *what* is indexed and *how documents relate*. The taxonomy tracks *what topics exist*. Neither answers:
+Nexus tracks documents (catalog), topics (taxonomy), and notes (memory). None answers:
 
-- "What components does the auth system depend on?" (entity relationships)
-- "When did we switch from Redis to Memcached?" (temporal facts)
-- "What was the deployment architecture before the migration?" (as-of queries)
-- "Who owns the indexing pipeline?" (entity attribution)
+- "What components does the auth system depend on?"
+- "When did we switch from Redis to Memcached?"
+- "Who owns the indexing pipeline?"
 
-These questions require an entity-relationship model with temporal validity, not document search.
+These require an entity-relationship model with temporal validity.
 
 ## Research
 
-### RF-073-1: MemPalace temporal KG
+### RF-073-1: MemPalace knowledge graph
 
 Source: `mempalace/knowledge_graph.py`
 
-SQLite schema: `entities` (id, name, entity_type, created_at) + `triples` (subject_id, predicate, object_id, valid_from, valid_to, source_drawer_id, created_at).
+SQLite schema: `entities` + `triples` with `valid_from`/`valid_to`. Simple temporal algebra: `valid_from <= as_of AND (valid_to IS NULL OR valid_to >= as_of)`. ~400 lines total.
 
-Key operations:
-- `add_triple("Max", "child_of", "Alice", valid_from="2015-04-01")`
-- `query_entity("Max", as_of="2026-01-15")` — returns all triples valid at that date
-- `invalidate("Max", "has_issue", "injury", ended="2026-02-15")` — closes the validity window
+Population: manually seeded from hardcoded `ENTITY_FACTS` dict + MCP `add_triple` tool. No automatic extraction from stored documents.
 
-The temporal algebra is simple: `valid_from <= as_of AND (valid_to IS NULL OR valid_to >= as_of)`.
+### RF-073-2: MemPalace palace_graph (DO NOT PORT)
 
-Strengths: simple, effective, SQLite-native. Weaknesses: entity extraction is manual (user or LLM creates triples explicitly), no automatic extraction from stored documents.
+`palace_graph.py` does a full ChromaDB collection scan (`col.get(limit=1000)` in a loop) on every call to build a navigable room/wing graph. O(N) per invocation, no caching. At scale this is prohibitively expensive and architecturally unsound. Do not port.
 
-### RF-073-2: Entity types for operational knowledge
-
-MemPalace's entity types are personal (person, project, tool, concept, place, event). Nexus would need operational types:
+### RF-073-3: Entity types for operational knowledge
 
 | Entity type | Examples |
 |-------------|----------|
 | system | auth-service, indexing-pipeline, chromadb-cluster |
-| component | rate-limiter, token-validator, pdf-extractor |
-| person | developer, reviewer, architect (role-based, not personal) |
-| decision | "use HDBSCAN over BERTopic", "switch to Voyage AI" |
+| component | rate-limiter, pdf-extractor |
+| decision | "use HDBSCAN over BERTopic" |
 | dependency | redis, postgresql, voyage-ai-api |
-| concept | eventual-consistency, centroid-ANN, c-TF-IDF |
+| concept | eventual-consistency, centroid-ANN |
 
-### RF-073-3: Entity extraction approaches
+### RF-073-4: Extraction approach
 
-Three options for populating the graph:
+Three options:
+1. **Manual only**: MCP tool `entity_add`. Agents/humans create triples explicitly. Simple. MemPalace does this.
+2. **LLM extraction on store_put**: adds latency and cost to every write. Premature.
+3. **Batch extraction**: periodic CLI command. Deferred.
 
-1. **Manual only** (MemPalace approach): MCP tool `entity_add(subject, predicate, object, valid_from)`. Agents or humans create triples explicitly. Simple but requires discipline.
+**Decision: manual only for v1.** Skip extraction until the manual graph proves its value.
 
-2. **LLM extraction**: on every `store_put`, run a lightweight extraction prompt to identify entities and relationships. Adds latency and cost to the store path.
+## Design
 
-3. **Batch extraction**: periodic `nx entity extract --collection X` that scans stored documents and proposes triples for review. Similar to how `nx taxonomy discover` works.
+### T2 EntityStore (5th domain store)
 
-Proposed: start with manual + batch extraction (options 1 + 3). Skip LLM-on-store (option 2) until the value is proven.
+~200 lines. Three tables:
 
-### RF-073-4: Integration with existing nexus features
+```sql
+CREATE TABLE IF NOT EXISTS entities (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    entity_type TEXT DEFAULT 'unknown',
+    created_at TEXT NOT NULL
+);
 
-- **Catalog links**: document-level relationships (cites, implements). Entity triples are finer-grained (component-level).
-- **Taxonomy topics**: group documents by theme. Entity graph connects concepts across topics.
-- **T2 memory**: free-text notes. Entity triples are structured facts extracted from notes.
+CREATE TABLE IF NOT EXISTS entity_triples (
+    id INTEGER PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES entities(id),
+    predicate TEXT NOT NULL,
+    object_id TEXT NOT NULL REFERENCES entities(id),
+    valid_from TEXT,
+    valid_to TEXT,
+    source_doc_id TEXT,
+    created_by TEXT DEFAULT 'manual',
+    created_at TEXT NOT NULL
+);
 
-The entity graph complements all three. It does not replace any of them.
+CREATE TABLE IF NOT EXISTS entity_aliases (
+    entity_id TEXT NOT NULL REFERENCES entities(id),
+    alias TEXT NOT NULL,
+    PRIMARY KEY (entity_id, alias)
+);
+```
 
-## Design (sketch, needs research)
+### MCP tools (3)
 
-### New T2 domain store: EntityStore
+- `entity_add(subject, predicate, object, valid_from?)` — auto-creates entities, adds triple
+- `entity_query(subject, predicate?, as_of?)` — returns all matching triples
+- `entity_invalidate(subject, predicate, object, ended)` — sets valid_to
 
-Fifth domain store alongside MemoryStore, PlanLibrary, CatalogTaxonomy, Telemetry.
-
-Tables:
-- `entities` (id, name, entity_type, collection, created_at)
-- `entity_triples` (id, subject_id, predicate, object_id, valid_from, valid_to, source_doc_id, created_at, created_by)
-- `entity_aliases` (entity_id, alias) — for matching variations ("ChromaDB" = "chromadb" = "Chroma")
-
-### MCP tools
-
-- `entity_query(subject, predicate?, as_of?)` — query the graph
-- `entity_add(subject, predicate, object, valid_from?)` — add a triple
-- `entity_invalidate(subject, predicate, object, ended)` — close a validity window
-
-### CLI
+### CLI (3 commands)
 
 - `nx entity list [--type TYPE]` — browse entities
-- `nx entity show NAME` — all triples for an entity
-- `nx entity extract --collection X` — batch extraction with review
-- `nx entity graph [--format dot]` — export for visualization
+- `nx entity show NAME` — all triples for an entity, current by default
+- `nx entity show NAME --as-of 2026-01` — historical state
+
+### What is NOT in scope (v1)
+
+- Automatic entity extraction from documents (deferred)
+- Palace-style graph traversal (rejected, O(N) per call)
+- Graph visualization (deferred)
+- Entity-scoped search (deferred, build on taxonomy pattern if needed)
 
 ## Success Criteria
 
-- SC-1: `entity_query("auth-service")` returns all current relationships
-- SC-2: `entity_query("auth-service", as_of="2026-01")` returns historical state
-- SC-3: Batch extraction proposes triples from existing documents
-- SC-4: Entity graph integrates with search (entity-scoped search, like topic-scoped)
+- SC-1: `entity_add("auth-service", "depends_on", "redis")` creates entities + triple
+- SC-2: `entity_query("auth-service")` returns all current relationships
+- SC-3: `entity_query("auth-service", as_of="2026-01")` returns historical state
+- SC-4: `entity_invalidate("auth-service", "depends_on", "redis", ended="2026-03")` closes validity
 
 ## Open Questions
 
-1. Should entity extraction run on `store_put` (real-time) or batch-only? (Proposed: batch for v1)
-2. How to handle entity resolution (dedup "ChromaDB" vs "chromadb" vs "Chroma")? (Proposed: alias table + case-insensitive matching)
-3. Should entities be scoped per-collection or global? (Proposed: global with collection provenance on triples)
-4. What predicate vocabulary? (Proposed: open vocabulary, not a fixed set. Common predicates emerge from usage.)
-5. How to bootstrap from existing catalog links? (Proposed: `entity extract --from-catalog` converts document links to entity triples)
+1. Should entity_add auto-create entities? (Proposed: yes, like git tracks files implicitly)
+2. Case-insensitive matching via alias table or COLLATE NOCASE? (Proposed: COLLATE NOCASE on name, aliases for abbreviations)
+3. Should the entity store share the T2 SQLite file or have its own? (Proposed: share, like the other 4 domain stores)
