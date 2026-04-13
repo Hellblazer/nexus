@@ -258,17 +258,19 @@ def taxonomy_assign_hook(
     ``topic_assignments`` row with ``assigned_by='centroid'``.
 
     No-op when centroids don't exist (no discover run yet), or when
-    the collection matches ``taxonomy.exclude_collections`` in config.
+    the collection matches ``taxonomy.local_exclude_collections`` and
+    running in local mode (MiniLM clusters poorly on code).
     Keyword args ``taxonomy`` and ``chroma_client`` are injection points
     for testing; production path resolves them from singletons.
     """
     from fnmatch import fnmatch
 
-    from nexus.config import load_config
+    from nexus.config import is_local_mode, load_config
 
-    exclude = load_config().get("taxonomy", {}).get("exclude_collections", [])
-    if any(fnmatch(collection, pat) for pat in exclude):
-        return
+    if is_local_mode():
+        exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
+        if any(fnmatch(collection, pat) for pat in exclude):
+            return
 
     if taxonomy is None:
         with t2_ctx() as db:

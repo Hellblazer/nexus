@@ -142,7 +142,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         try:
             from fnmatch import fnmatch
 
-            from nexus.config import load_config as _load_cfg
+            from nexus.config import is_local_mode, load_config as _load_cfg
             from nexus.db import make_t3
             from nexus.db.t2 import T2Database
             from nexus.commands._helpers import default_db_path
@@ -150,7 +150,10 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
             t3 = make_t3()
             info = reg.get(path) or {}
             cfg = _load_cfg()
-            exclude_patterns = cfg.get("taxonomy", {}).get("exclude_collections", [])
+            exclude_patterns = (
+                cfg.get("taxonomy", {}).get("local_exclude_collections", [])
+                if is_local_mode() else []
+            )
             collections = []
             for key in ("collection", "docs_collection"):
                 col = info.get(key)

@@ -287,10 +287,11 @@ _DEFAULTS: dict[str, Any] = {
         "mineru_page_batch": 1,
     },
     "taxonomy": {
-        # Glob patterns for collections to exclude from auto-discover.
-        # Code collections use MiniLM which clusters poorly on source code.
-        # Set to [] to enable taxonomy for all collections.
-        "exclude_collections": ["code__*"],
+        # Glob patterns for collections to exclude from auto-discover
+        # in LOCAL MODE ONLY. Local mode uses MiniLM which clusters
+        # poorly on source code. Cloud mode uses voyage-code-3 and
+        # is unaffected. Set to [] to enable taxonomy for all collections.
+        "local_exclude_collections": ["code__*"],
     },
     "search": {
         "hybrid_default": False,
