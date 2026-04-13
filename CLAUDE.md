@@ -114,10 +114,10 @@ src/nexus/           # Core package
   pipeline_buffer.py # SQLite WAL buffer for streaming PDF pipeline (RDR-048)
   pipeline_stages.py # Concurrent extractor/chunker/uploader stages + orchestrator
   checkpoint.py      # Batch-path crash recovery (RDR-047)
-  search_engine.py   # Cross-corpus search with over-fetch, thresholds, and catalog pre-filtering
-  search_clusterer.py # Ward hierarchical clustering for search results (opt-in)
+  search_engine.py   # Cross-corpus search with over-fetch, thresholds, topic grouping + boost, catalog pre-filtering
+  search_clusterer.py # Ward hierarchical clustering for search results (fallback when topic coverage <50%)
   frecency.py        # Git frecency scoring
-  scoring.py         # Reranking + quality_score (RDR-055 E2)
+  scoring.py         # Reranking + quality_score (RDR-055 E2) + topic boost (RDR-070)
   filters.py         # Shared where-filter parsing (MCP + CLI)
   ripgrep_cache.py   # ripgrep integration for hybrid search
   session.py         # Session lifecycle (T1 server start/connect)

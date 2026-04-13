@@ -105,6 +105,21 @@ Or set via CLI: `nx config set pdf.extractor=mineru` (writes to global config). 
 
 Merge behavior: nested dict keys are **additive** (both global and per-repo keys are retained). Scalar values and lists are **replacement** (the per-repo value wins entirely between config levels). However, `code_extensions` is additive to the **built-in** extension set — it extends the defaults, it does not replace them. `prose_extensions` wins over everything: if an extension appears in both lists, it is classified as prose. See [Repo Indexing](repo-indexing.md) for the full extension list and override semantics.
 
+## Taxonomy
+
+Topic taxonomy settings. Topics are auto-discovered after `nx index repo`.
+
+```yaml
+taxonomy:
+  auto_label: true                       # Generate labels via claude -p --model haiku (default)
+  local_exclude_collections: ["code__*"] # Skip code collections in local mode (MiniLM is poor for code)
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `auto_label` | `true` | Auto-label topics with Claude haiku after discover. Requires `claude` CLI on PATH. Set `false` to keep c-TF-IDF labels. |
+| `local_exclude_collections` | `["code__*"]` | Glob patterns for collections to skip in local mode. Cloud mode (Voyage embeddings) ignores this — set to `[]` to enable all collections locally. |
+
 ## Tuning Parameters
 
 The `[tuning]` section in `~/.config/nexus/config.yml` controls search scoring, chunking, and timeout behavior. All values have sensible defaults — only override what you need.

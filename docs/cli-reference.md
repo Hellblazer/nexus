@@ -285,26 +285,54 @@ Standard catalog management. Run `nx catalog COMMAND --help` for details.
 
 ## nx taxonomy
 
-Persistent topic taxonomy (RDR-061 E5) — hierarchical clustering of T2 memory
-entries into topics for navigation and consolidation. **CLI only** (no MCP tool
-by design — taxonomy operations are human-driven, not agent-driven).
+Topic taxonomy (RDR-070) — HDBSCAN clustering of T3 collection embeddings
+into topics for navigation, search grouping, and relevance boosting.
+
+Topics are auto-discovered after `nx index repo` and auto-labeled with
+Claude haiku when available. Search results are grouped by topic and
+boosted when results share a topic cluster.
 
 ```
-nx taxonomy list                       # list root topics
-nx taxonomy list --parent-id 5         # list children of topic 5
-nx taxonomy rebuild --project myrepo   # cluster all entries in project
-nx taxonomy show 5                     # show topic details and assigned docs
+nx taxonomy status                              # health: collections, coverage, review state
+nx taxonomy discover --all                      # discover topics for all T3 collections
+nx taxonomy discover -c docs__nexus             # discover for a single collection
+nx taxonomy discover -c docs__nexus --force     # re-discover (preserves operator labels)
+nx taxonomy list                                # topic tree
+nx taxonomy show 5                              # docs assigned to topic 5
+nx taxonomy review                              # interactive: accept/rename/merge/delete/skip
+nx taxonomy label                               # batch-relabel with Claude haiku
+nx taxonomy assign doc-id "topic label"         # manually assign a doc
+nx taxonomy rename "old label" "new label"      # rename a topic
+nx taxonomy merge "source" "target"             # merge topics
+nx taxonomy split "label" --k 3                 # split into sub-topics
+nx taxonomy links                               # show inter-topic relationships
+nx taxonomy rebuild -c docs__nexus              # full rebuild with merge strategy
 ```
 
 | Subcommand | Description |
 |------------|-------------|
-| `list` | List topics (root by default; use `--parent-id` for children) |
-| `rebuild` | Re-cluster a project's memory entries into topics |
-| `show TOPIC_ID` | Show topic label, children, and assigned doc titles |
+| `status` | Collections, topic count, coverage, review state, rebalance status |
+| `discover` | Discover topics via HDBSCAN. `--all` for all collections, `--force` to re-cluster |
+| `list` | Topic tree with doc counts |
+| `show ID` | Documents assigned to a topic |
+| `review` | Interactive review: accept, rename, merge, delete, skip |
+| `label` | Batch-relabel topics with Claude haiku (`--all` for accepted too) |
+| `assign DOC LABEL` | Manually assign a doc to a topic by label |
+| `rename OLD NEW` | Rename a topic (marks as accepted) |
+| `merge SOURCE TARGET` | Merge source into target |
+| `split LABEL --k N` | Split into N sub-topics via KMeans |
+| `links` | Inter-topic link counts from catalog graph |
+| `rebuild` | Full re-cluster with merge strategy (preserves operator labels) |
 
-**Rebuild semantics**: `nx taxonomy rebuild --project X` runs Ward hierarchical
-clustering over T2 memory entries in project X. Vocab is capped at 2000 words
-with stopword filtering. Each entry is assigned to exactly one topic.
+**Configuration** (in `.nexus.yml`):
+
+```yaml
+taxonomy:
+  auto_label: true                    # label with Claude haiku after discover (default: true)
+  local_exclude_collections: []       # default: ["code__*"] — MiniLM clusters poorly on code
+```
+
+**Upgrade path**: Run `nx taxonomy discover --all` once after upgrading to populate topics for existing collections.
 
 ---
 

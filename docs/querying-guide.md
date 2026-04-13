@@ -44,8 +44,11 @@ search(query="caching", corpus="knowledge,docs")
 # With metadata filter
 search(query="schema design", where="bib_year>=2024")
 
-# With semantic clustering
+# With semantic clustering (groups by topic when available)
 search(query="error handling patterns", cluster_by="semantic")
+
+# Topic-scoped search (pre-filter to a topic cluster)
+search(query="extraction pipeline", topic="Math-aware PDF Extraction")
 ```
 
 | Parameter | Type | Default | Description |
@@ -55,7 +58,10 @@ search(query="error handling patterns", cluster_by="semantic")
 | `limit` | int | `10` | Page size |
 | `offset` | int | `0` | Skip this many results (pagination) |
 | `where` | string | `""` | Metadata filter (`KEY=VALUE` format, comma-separated) |
-| `cluster_by` | string | `""` | Set to `semantic` to group results by Ward clustering |
+| `cluster_by` | string | `""` | Set to `semantic` to group results by topic (with Ward fallback) |
+| `topic` | string | `""` | Pre-filter to documents in this topic label (from `nx taxonomy list`) |
+
+**Topic-aware search**: When topics have been discovered (`nx taxonomy discover --all`), search results are automatically boosted when they share a topic cluster. Results in the same topic get a distance reduction of 0.1; results in linked topics get 0.05. With `cluster_by="semantic"`, results are grouped by topic label when >50% have assignments.
 
 ---
 

@@ -43,8 +43,9 @@ Everything below works immediately — no accounts, no network.
 
 ```bash
 cd your-project
-nx index repo .              # index with local ONNX embeddings
-nx search "retry logic"      # semantic search, fully local
+nx index repo .              # index with local ONNX embeddings + auto-discover topics
+nx search "retry logic"      # semantic search with topic grouping, fully local
+nx taxonomy status           # see discovered topics and coverage
 ```
 
 ### Scratch — ephemeral inter-agent context (T1)

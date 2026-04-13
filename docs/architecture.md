@@ -98,7 +98,7 @@ brief contention without raising `OperationalError`.
 |------------|-------------------|-----------------|----------------------------------------------------------------------------|
 | Memory     | `MemoryStore`     | `db.memory`     | Persistent notes, project context, FTS5 search, access tracking, TTL       |
 | Plans      | `PlanLibrary`     | `db.plans`      | Plan templates, plan search, plan TTL                                      |
-| Taxonomy   | `CatalogTaxonomy` | `db.taxonomy`   | Topic clustering, topic assignment                                         |
+| Taxonomy   | `CatalogTaxonomy` | `db.taxonomy`   | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow (RDR-070) |
 | Telemetry  | `Telemetry`       | `db.telemetry`  | Relevance log (query/chunk/action triples), retention-based expiry         |
 
 `T2Database` is a composing facade: it constructs the four stores in

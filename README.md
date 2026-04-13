@@ -46,8 +46,9 @@ Requires Python 3.12–3.13 and [uv](https://docs.astral.sh/uv/).
 ```bash
 uv tool install conexus          # install the nx CLI
 nx doctor                        # verify installation
-nx index repo .                  # index your repo (no API keys needed)
-nx search "what does X do"       # semantic search, fully local
+nx index repo .                  # index your repo + discover topics (no API keys needed)
+nx search "what does X do"       # semantic search with topic grouping, fully local
+nx taxonomy status               # see discovered topics
 ```
 
 Update: `uv tool update conexus`
