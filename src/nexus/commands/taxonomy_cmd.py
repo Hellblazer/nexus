@@ -337,10 +337,27 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
 
 
 @taxonomy.command("rebuild")
-@click.option("--collection", "-c", required=True, help="T3 collection to rebuild taxonomy for")
-def rebuild_cmd(collection: str) -> None:
+@click.option("--collection", "-c", default="", help="T3 collection to rebuild taxonomy for")
+@click.option("--project", "-p", default="", hidden=True, help="Deprecated: use --collection instead")
+@click.option("-k", default=None, type=int, hidden=True, help="Deprecated: cluster count is automatic")
+def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
     """Rebuild topic taxonomy from scratch (alias for discover --force)."""
     from nexus.db import make_t3
+
+    # Backward compat: old --project flag maps to --collection
+    if project and not collection:
+        click.echo(
+            f"Note: --project is deprecated. Use --collection instead.\n"
+            f"  Hint: nx taxonomy rebuild --collection {project}\n"
+        )
+        collection = project
+
+    if not collection:
+        click.echo("Specify --collection <name>. Use `nx taxonomy discover --all` for all collections.")
+        return
+
+    if k is not None:
+        click.echo("Note: -k is deprecated. Cluster count is now automatic (HDBSCAN).")
 
     with _T2Database(_default_db_path()) as db:
         t3 = make_t3()
