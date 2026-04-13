@@ -91,3 +91,19 @@ def parse_where_str(where_str: str) -> dict | None:
     if not where_str.strip():
         return None
     return parse_where(where_str.split(","))
+
+
+# ── Query sanitizer (RDR-071) ────────────────────────────────────────────────
+# Stub constants and function. Implementation in nexus-xyh.2.
+
+MAX_QUERY_LENGTH = 500
+SAFE_QUERY_LENGTH = 200
+MIN_QUERY_LENGTH = 10
+
+
+def sanitize_query(raw_query: str) -> str:
+    """Extract search intent from a potentially contaminated query.
+
+    Stub — returns input unchanged. Implementation in nexus-xyh.2.
+    """
+    raise NotImplementedError("sanitize_query not yet implemented (nexus-xyh.2)")
