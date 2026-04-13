@@ -6,11 +6,12 @@ Nexus has three query interfaces, each suited to different needs.
 
 | Interface | Use for | Returns | Latency |
 |-----------|---------|---------|---------|
-| `nx search` | Semantic chunk search from the CLI | Text chunks with source location | < 1s |
+| `nx search` | Semantic chunk search from the CLI | Text chunks with topic grouping | < 1s |
+| `search()` MCP tool | Chunk search from agents, with topic scoping | Chunks grouped by topic + boosted | < 1s |
 | `query()` MCP tool | Document-level retrieval with catalog routing | Best snippet per document + metadata | < 2s |
 | `/nx:query` skill | Complex multi-step analytical queries | Synthesized answer | 5-15s |
 
-**Rule of thumb**: Start with `nx search` for quick lookups. Use `query()` when you need to scope by author, content type, or follow citation links. Use `/nx:query` for questions that require extracting, comparing, or generating across multiple sources.
+**Rule of thumb**: Start with `nx search` for quick lookups. Use `search()` MCP with `topic=` to narrow results to a specific knowledge domain. Use `query()` when you need to scope by author, content type, or follow citation links. Use `/nx:query` for questions that require extracting, comparing, or generating across multiple sources.
 
 ---
 
@@ -130,7 +131,7 @@ The `query()` tool automatically boosts results from documents that have outgoin
 | `implements-heuristic` | 0.0 | Too noisy (87% of links, substring-matched) |
 | `supersedes` | 0.0 | Historical, not relevance signal |
 
-The `search()` tool does **not** apply link boost — it returns raw distance-ranked results. Use `query()` when you want the link graph to influence ranking.
+The `search()` tool does **not** apply link boost but does apply topic boost. Use `query()` when you want both the link graph and topic taxonomy to influence ranking.
 
 ---
 
@@ -182,19 +183,21 @@ Custom plans that succeed are cached for 30 days and matched on subsequent simil
 User or Agent
      │
      ├─ nx search ──────────────────► T3 semantic search (chunks)
-     │
-     ├─ query() MCP ──► catalog ──► T3 scoped search (documents)
+     │                                    │
+     ├─ search() MCP ──► topic filter ──► T3 semantic search + topic boost + grouping
+     │                                    │
+     ├─ query() MCP ──► catalog ──────► T3 scoped search (documents) + topic boost
      │                    │
      │                    └─ link graph traversal (follow_links)
      │
      └─ /nx:query skill
               │
-              ├─ Path 1: single query() call
+              ├─ Path 1: single query() call (with topic scoping)
               ├─ Path 2: template match (cached plan)
               └─ Path 3: planner agent (novel decomposition)
 ```
 
-All three paths ultimately query the same T3 collections — the difference is how they scope, route, and compose the search.
+All paths query T3 and benefit from taxonomy when topics are available. The `search()` and `query()` MCP tools additionally use the T2 taxonomy for topic-based result grouping, distance boosting, and optional pre-filtering via the `topic` parameter.
 
 ---
 
@@ -224,9 +227,21 @@ nx search "caching strategy" --where section_type!=references
 
 Knowledge, docs, and RDR collections fetch 4x the requested result count before filtering (vs 2x for code). This compensates for the higher noise ratio in prose collections, ensuring enough quality results survive threshold filtering.
 
-### Semantic clustering (opt-in)
+### Topic taxonomy (RDR-070)
 
-When `cluster_by="semantic"` is passed to the MCP `search()` tool, results are grouped by Ward hierarchical clustering. Each result gets a `_cluster_label` metadata key identifying its thematic group. Disabled by default — enable globally via `search.cluster_by: semantic` in `.nexus.yml`.
+When topics have been discovered (`nx taxonomy discover --all` or auto-triggered by `nx index repo`), search quality improves in three ways:
+
+**1. Topic boost**: Results that share a topic cluster with other results in the same query get a distance reduction. Same-topic results get -0.1 distance; results in linked topics (via catalog link graph) get -0.05. This promotes coherent result sets — if your query hits a topic cluster, more results from that cluster rise to the top.
+
+**2. Topic grouping**: With `cluster_by="semantic"` (MCP search tool), results are grouped by topic label when >50% of results have topic assignments. Each group is headed by its topic label (e.g., `── ChromaDB Transient Retry Logic ──`). When topic coverage is below 50%, falls back to Ward hierarchical clustering.
+
+**3. Topic-scoped search**: The `topic` parameter on the `search()` MCP tool pre-filters results to documents in a specific topic cluster. Use `nx taxonomy list` to see available topics, then `search(query="...", topic="Byzantine Fault Tolerant Consensus")` to narrow the search space to that domain.
+
+**How topics are created**: `nx index repo` auto-discovers topics via HDBSCAN clustering on the T3 collection's own embeddings (Voyage on cloud, MiniLM on local). Topics are auto-labeled with Claude haiku when the `claude` CLI is available. New documents stored via `store_put` are automatically assigned to the nearest topic via centroid ANN lookup.
+
+**Curating topics**: Run `nx taxonomy review` for interactive accept/rename/merge/delete. Run `nx taxonomy status` to see coverage and pending reviews. Operator-curated labels survive `nx taxonomy rebuild` via a centroid-matching merge strategy (cosine similarity >0.8 threshold).
+
+See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set.
 
 ### Catalog pre-filtering
 
