@@ -125,35 +125,36 @@ def discover_for_collection(
         if len(page_ids) < page_size:
             break
 
-    _progress(f"    fetched {len(all_ids):,} docs, clustering...")
+    import time
+
+    _progress(f"    fetched {len(all_ids):,} docs")
 
     # Use T3 embeddings if all docs have them; else fall back to MiniLM
     if has_t3_embeddings and len(all_embs) == len(all_ids):
+        _progress(f"    embedding: using T3 native ({len(all_embs[0])}d)")
         embeddings = np.array(all_embs, dtype=np.float32)
-        _log.info(
-            "using_t3_embeddings",
-            collection=collection_name,
-            n=len(all_ids),
-            dim=embeddings.shape[1],
-        )
     else:
         from nexus.db.local_ef import LocalEmbeddingFunction
 
+        _progress(f"    embedding: re-encoding with MiniLM (384d)")
         ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        _log.info(
-            "reembedding_with_minilm",
-            collection=collection_name,
-            n=len(all_texts),
-        )
         embeddings = np.array(ef(all_texts), dtype=np.float32)
 
+    _progress(f"    clustering {len(all_ids):,} x {embeddings.shape[1]}d...")
+    t0 = time.monotonic()
+
     if force:
-        return taxonomy.rebuild_taxonomy(
+        result = taxonomy.rebuild_taxonomy(
             collection_name, all_ids, embeddings, all_texts, chroma_client,
         )
-    return taxonomy.discover_topics(
-        collection_name, all_ids, embeddings, all_texts, chroma_client,
-    )
+    else:
+        result = taxonomy.discover_topics(
+            collection_name, all_ids, embeddings, all_texts, chroma_client,
+        )
+
+    elapsed = time.monotonic() - t0
+    _progress(f"    clustered in {elapsed:.1f}s")
+    return result
 
 
 # ── CLI commands ─────────────────────────────────────────────────────────────
