@@ -91,7 +91,26 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 **Domain split (RDR-063)**: T2 is implemented as four domain stores under `src/nexus/db/t2/` — `MemoryStore` (memory table), `PlanLibrary` (plans table), `CatalogTaxonomy` (topics + topic_assignments + taxonomy_meta + topic_links), and `Telemetry` (relevance_log). Each store opens its own `sqlite3.Connection` against the shared SQLite file in WAL mode with `busy_timeout=5000`, so reads in one domain are never blocked by writes in another. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls continue to work via method delegation, and new code can reach the domain stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
 
-**Topic taxonomy (RDR-070)**: `CatalogTaxonomy` provides HDBSCAN-based topic discovery from T3 collection embeddings. Topics are auto-discovered after `nx index repo`, auto-labeled with Claude haiku, and used for search grouping and relevance boosting. Centroid ANN (stored in a `taxonomy__centroids` ChromaDB collection with cosine space) enables incremental assignment of new documents. A merge strategy preserves operator-curated labels across re-discovery. See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set.
+**Topic taxonomy (RDR-070)**: `CatalogTaxonomy` provides HDBSCAN-based topic discovery from T3 collection embeddings. Topics are auto-discovered after `nx index repo`, auto-labeled with Claude haiku, and used for search grouping and relevance boosting. A merge strategy preserves operator-curated labels across re-discovery. See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set.
+
+The taxonomy spans two storage tiers:
+
+*T2 schema* — four tables in the shared `memory.db`:
+
+| Table | Key columns | Purpose |
+|-------|-------------|---------|
+| `topics` | `id`, `label`, `parent_id`, `collection`, `centroid_hash`, `doc_count`, `created_at`, `review_status`, `terms` | One row per discovered or manually-created topic; `review_status` tracks human curation state; `terms` holds the top c-TF-IDF keywords |
+| `topic_assignments` | `doc_id`, `topic_id`, `assigned_by` | Maps documents to topics; `assigned_by` records the assignment method: `hdbscan`, `manual`, `centroid`, `auto-matched`, or `split` |
+| `taxonomy_meta` | `collection`, `last_discover_doc_count`, `last_discover_at` | Per-collection watermark used to decide whether re-discovery is needed |
+| `topic_links` | `from_topic_id`, `to_topic_id`, `link_count`, `link_types` | Aggregated link counts between topics, derived from the catalog link graph |
+
+*T3 centroid collection* — `taxonomy__centroids` is a ChromaDB collection (cosine space, `hnsw:space=cosine`) that holds one entry per live topic. The vector is the cluster centroid computed during `discover_topics`; the metadata carries `{topic_id, label, collection, doc_count}`. The centroid collection is:
+
+- **Created** by `discover_topics` after each HDBSCAN run
+- **Cleared and rebuilt** wholesale by `rebuild_taxonomy`
+- **Updated incrementally** by `split_topic` (old centroid removed, two new ones inserted)
+
+*Tier interaction*: Discovery reads embeddings from T3 collections, clusters with HDBSCAN in memory, then writes topics to T2 and centroids to `taxonomy__centroids`. Incremental assignment reads the new document's T3 embedding, queries centroids via ANN, and writes a `topic_assignments` row to T2. The hot path touches T3 (read + ANN) and T2 (write) without re-running the full clustering algorithm.
 
 ## T3 -- Permanent Knowledge
 

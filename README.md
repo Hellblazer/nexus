@@ -37,6 +37,14 @@ nx search "consensus protocols" --where bib_year>=2024 --where chunk_type=table_
 nx enrich knowledge__papers --delay 0.5
 ```
 
+**Topic taxonomy.** After indexing, Nexus automatically discovers topics across your corpus using HDBSCAN clustering, then labels each cluster with a human-readable name via Claude Haiku. Search results are grouped by topic and boosted for relevance. Works with both local and cloud embeddings — no configuration needed.
+
+```bash
+nx index repo .                  # indexing triggers topic discovery automatically
+nx taxonomy status               # see discovered topics
+nx taxonomy review               # accept, rename, merge, or split topics interactively
+```
+
 **Decision tracking.** RDR documents record the reasoning behind technical choices and are searchable alongside code, so prior decisions surface automatically during new design work.
 
 ## Quick Start
@@ -130,6 +138,7 @@ The `nx` command provides direct access to all storage tiers, indexing, and sear
 | `nx doctor` | Health check — verifies dependencies, credentials, connectivity |
 | `nx hooks` | Install git hooks for automatic re-indexing on commit |
 | `nx catalog` | Document registry — search, link, audit the catalog metadata layer |
+| `nx taxonomy` | Topic taxonomy — review, rename, merge, and split auto-discovered topic clusters |
 | `nx mineru` | MinerU server lifecycle (start/stop/status) for PDF extraction |
 
 Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md).

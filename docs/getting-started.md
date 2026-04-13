@@ -43,10 +43,13 @@ Everything below works immediately — no accounts, no network.
 
 ```bash
 cd your-project
-nx index repo .              # index with local ONNX embeddings + auto-discover topics
-nx search "retry logic"      # semantic search with topic grouping, fully local
-nx taxonomy status           # see discovered topics and coverage
+nx index repo .              # index with local ONNX embeddings
+nx search "retry logic"      # semantic search, results grouped by topic
+nx taxonomy status           # see auto-discovered topics and coverage
+nx taxonomy review           # curate topic labels interactively (optional)
 ```
+
+After indexing, Nexus automatically discovers topics across your codebase and groups search results by them. If the `claude` CLI is available, topics are also auto-labeled with human-readable names. Run `nx taxonomy status` to see what was discovered.
 
 ### Scratch — ephemeral inter-agent context (T1)
 
@@ -152,6 +155,8 @@ nx search "API changelog" --corpus docs
 nx search "database pool" --hybrid       # semantic + keyword matching
 ```
 
+Topics are discovered and labeled automatically after indexing. Search results are grouped and boosted by topic. Check `nx taxonomy status` to see the topic map for each collection.
+
 Common flags: `-n 20` (result count), `--json`, `--files` (paths only), `-c` (show matched text). `--hybrid` requires [ripgrep](https://github.com/BurntSushi/ripgrep).
 
 ### Upgrade local embedding quality (optional)
@@ -163,6 +168,18 @@ uv tool install conexus --with "conexus[local]" --force
 ```
 
 To force local mode even when cloud credentials exist: `NX_LOCAL=1`.
+
+### Taxonomy config (optional)
+
+Auto-labeling is on by default (`taxonomy.auto_label: true` in `.nexus.yml`). To turn it off, or to exclude specific collections (e.g., code collections when running locally):
+
+```yaml
+# .nexus.yml
+taxonomy:
+  auto_label: false                          # disable AI label generation
+  local_exclude_collections:                 # skip these in local mode
+    - code__myrepo
+```
 
 ## Troubleshooting
 
@@ -189,10 +206,17 @@ Note: `uv tool update` reuses the existing environment's Python — it won't swi
 
 **`nx search` returns no results** — Run `nx doctor` to verify connectivity. If indexing was interrupted, re-run `nx index repo .` to resume.
 
+**Upgrading from an earlier version — topics missing from search** — Topic discovery runs automatically on new indexes. To populate topics for collections indexed before this feature was added, run:
+
+```bash
+nx taxonomy discover --all
+```
+
 ## Next steps
 
 - [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) — every command, every flag
 - [Storage Tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md) — T1, T2, T3 architecture
 - [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) — file classification, chunking, frecency
 - [Configuration](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md) — config keys, environment variables, tuning
+- [Taxonomy](https://github.com/Hellblazer/nexus/blob/main/docs/taxonomy.md) — topic discovery, auto-labeling, and search clustering
 - [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md) — decision tracking with Research-Design-Review

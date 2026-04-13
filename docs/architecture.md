@@ -23,8 +23,15 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     pdf:   auto-detect routing (Docling → MinerU → PyMuPDF) → table/formula detection → bib enrichment → voyage-context-3 → docs__<corpus>
     │     skip:  .xml/.json/.yml/.html/.css/.lock/etc → silently ignored
     │
-    ├── Search: query → retrieve → rerank → format
+    ├── Search: query → retrieve → rerank → topic-boost → group → format
     │     semantic, hybrid (+ frecency + ripgrep)
+    │     topic boost: same-topic -0.1, linked-topic -0.05 distance adjustment
+    │     topic grouping: T2 assignments (>50% coverage) → fallback Ward clustering
+    │
+    ├── Taxonomy: T3 embeddings → HDBSCAN → T2 topics → centroid ANN → incremental assign
+    │     discover: nx index repo (auto) or nx taxonomy discover (manual)
+    │     assign: taxonomy_assign_hook fires on every store_put
+    │     boost+group: search_engine.py reads db.taxonomy per search call
     │
     ├── Catalog: JSONL truth → SQLite cache → typed link graph
     │     documents: tumbler addressing (1.owner.doc), FTS5 search
@@ -83,6 +90,105 @@ Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of st
 `catalog_link_query` returns all links including orphans — useful for admin/audit.
 
 **CCE single-chunk note**: For CCE collections (`docs__*`, `rdr__*`, `knowledge__*`), documents with only one chunk are embedded via `contextualized_embed(inputs=[[chunk]])`.
+
+## Taxonomy
+
+The taxonomy feature (RDR-070) builds a browsable topic hierarchy over T3 collections
+without re-embedding. Topics are discovered using the embeddings already stored in ChromaDB
+(Voyage AI on cloud, MiniLM on local).
+
+### Data Flow
+
+```
+nx index repo / nx taxonomy discover
+  │
+  ▼
+discover_for_collection()          # taxonomy_cmd.py
+  │  fetch ids + texts + embeddings from T3 (page_size=250)
+  │  fall back to MiniLM re-embed only when T3 embeddings absent
+  ▼
+CatalogTaxonomy.discover_topics()  # db/t2/catalog_taxonomy.py
+  │  sklearn HDBSCAN on N×D float32
+  │  c-TF-IDF labels (CountVectorizer + TfidfTransformer)
+  │  persist: topics, topic_assignments → T2 SQLite
+  │  upsert cluster centroids → ChromaDB taxonomy__centroids (cosine/HNSW)
+  ▼
+taxonomy_assign_hook()             # mcp_infra.py  (fires on every store_put)
+  │  fetch new doc's T3 embedding
+  │  CatalogTaxonomy.assign_single(): ANN query against taxonomy__centroids
+  │  nearest centroid → topic_id → INSERT OR IGNORE topic_assignments
+  ▼
+search_cross_corpus()              # search_engine.py
+  │  get_assignments_for_docs(result_ids) → topic_assignments dict
+  │  apply_topic_boost(): distance -= 0.1 (same topic), -= 0.05 (linked topic)
+  │  topic grouping when assignment coverage >50%
+  │  otherwise fall back to Ward hierarchical clustering
+```
+
+`nx index repo` auto-triggers `discover_for_collection` after indexing and optionally
+runs Claude haiku auto-labeling (`taxonomy.auto_label` config, default on). In local
+mode, `code__*` collections are excluded by default (`taxonomy.local_exclude_collections`)
+because MiniLM clusters code poorly; cloud mode uses voyage-code-3 and is unaffected.
+
+### Storage
+
+**T2 SQLite tables** (owned by `CatalogTaxonomy`):
+
+| Table | Purpose |
+|-------|---------|
+| `topics` | One row per discovered topic: label, collection, centroid_hash, doc_count, review_status, terms |
+| `topic_assignments` | doc_id → topic_id mapping, assigned_by (hdbscan or centroid) |
+| `taxonomy_meta` | Per-collection discover stats (last_discover_at, last_discover_doc_count) |
+| `topic_links` | Aggregated inter-topic link counts derived from catalog link graph |
+
+**T3 ChromaDB collection** — `taxonomy__centroids`:
+- Created with `embedding_function=None` (pre-computed vectors) and `hnsw:space=cosine`
+- One entry per topic: centroid vector, collection, topic_id, label metadata
+- Used exclusively by `assign_single()` for ANN nearest-neighbor lookup
+- Never touches `t3.get_or_create_collection()` — that would inject the wrong EF + L2
+
+### Centroid Lifecycle
+
+- **Discover**: creates centroids for all topics in a collection
+- **Rebuild** (`nx taxonomy rebuild` / `--force`): reads old centroids + labels, runs
+  HDBSCAN on updated embeddings, matches new centroids to old via cosine similarity
+  (`_merge_labels`), transfers operator labels and `accepted` review statuses — manual
+  labels survive re-clustering
+- **Split** (`nx taxonomy split`): replaces the parent centroid with two child centroids
+- **Delete/Merge**: removes orphaned centroid entries
+
+### Connection to the Catalog Link Graph
+
+`nx taxonomy links --collection <col>` calls `compute_topic_links()`, which reads the
+catalog link graph and aggregates which topics are connected via document-level links.
+Results are stored in `topic_links`. The search engine reads `topic_links` via
+`get_topic_link_map()` to apply the linked-topic distance boost (-0.05).
+
+### CLI — `nx taxonomy`
+
+12 subcommands:
+
+| Command | Purpose |
+|---------|---------|
+| `status` | Health overview: collections, coverage, review state |
+| `discover` | Run HDBSCAN on a collection (auto or manual) |
+| `rebuild` | Re-discover with merge strategy (preserves labels) |
+| `list` | List topics with doc counts and review status |
+| `show` | Detail for a single topic: terms, docs, links |
+| `review` | Interactive accept/reject workflow |
+| `label` | Claude haiku auto-labeling for a collection |
+| `assign` | Manually assign a doc to a topic |
+| `rename` | Rename a topic label |
+| `merge` | Merge two topics into one |
+| `split` | Split a topic on a keyword pivot |
+| `links` | Compute and persist inter-topic links from catalog |
+
+### Config Keys (`taxonomy` section in `.nexus.yml`)
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `auto_label` | `true` | Run Claude haiku labeling after `discover` |
+| `local_exclude_collections` | `["code__*"]` | Skip these collections in local mode |
 
 ## T2 Domain Stores
 
@@ -176,7 +282,8 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | **Storage** | `db/t1.py`, `db/t2/`, `db/t3.py` | Tier implementations. T2 is a package split into four domain stores (see § T2 Domain Stores). Plans table has `ttl` column for auto-expiry |
 | **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py`, `pipeline_buffer.py`, `pipeline_stages.py`, `checkpoint.py` | Repo indexing pipeline (decomposed per RDR-032). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` auto-detects math-heavy PDFs via FormulaItem counting and routes to MinerU (optional `conexus[mineru]` extra) for superior LaTeX extraction, falling back through enriched Docling to PyMuPDF normalized. MinerU processes large PDFs in 5-page subprocess batches for memory isolation (prevents OOM on formula-dense documents). Chunk metadata includes `has_formulas` boolean. `pipeline_buffer.py` provides a WAL-mode SQLite buffer for the three-stage streaming pipeline (RDR-048); `pipeline_stages.py` implements the concurrent extractor/chunker/uploader stages and orchestrator; `checkpoint.py` handles batch-path crash recovery for smaller documents (RDR-047) |
 | **Export** | `exporter.py` | Collection export/import for T3 backup and migration (.nxexp format) |
-| **Search** | `search_engine.py`, `search_clusterer.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py`, `filters.py` | Query, rank, rerank, Ward hierarchical clustering, shared where-filter parsing |
+| **Search** | `search_engine.py`, `search_clusterer.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py`, `filters.py` | Query, rank, rerank. `scoring.py` applies topic boost (`apply_topic_boost`: same-topic -0.1, linked-topic -0.05). `search_engine.py` does topic grouping (T2 assignments when >50% coverage) with fallback to Ward hierarchical clustering |
+| **Taxonomy** | `db/t2/catalog_taxonomy.py`, `commands/taxonomy_cmd.py` | HDBSCAN topic discovery from T3 embeddings (RDR-070). T2 tables: `topics`, `topic_assignments`, `taxonomy_meta`, `topic_links`. ChromaDB `taxonomy__centroids` (cosine/HNSW) for centroid ANN. `discover_for_collection()` is the shared entry point for CLI and `nx index repo`. `taxonomy_assign_hook` in `mcp_infra.py` fires on every `store_put` for incremental assignment |
 | **Hooks** | `commands/hooks.py` | Git hook install/uninstall/status, sentinel-bounded stanza management |
 | **Verification** | `config.py` (verification section), `nx/hooks/scripts/stop_verification_hook.sh`, `nx/hooks/scripts/pre_close_verification_hook.sh`, `nx/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Configuration — Verification](configuration.md#verification) |
 | **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Dual-server FastMCP architecture (RDR-062). **Core server (`nexus`, 15 tools)**: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`. **Catalog server (`nexus-catalog`, 10 tools)**: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` (short names — the `catalog_` prefix is dropped since the server namespace already provides context). **Demoted to CLI-only (6 tools)**: `store_delete`, `collection_info`, `collection_verify`, `catalog_unlink`, `catalog_link_audit`, `catalog_link_bulk`. Backward-compat shim at `mcp_server.py` re-exports all 30 functions. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth). Singletons and test injection in `mcp_infra.py` |

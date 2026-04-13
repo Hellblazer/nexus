@@ -258,6 +258,14 @@ When you index a repo, every classified file is automatically registered in the 
 
 This means `nx catalog search` and `nx catalog links` work immediately after indexing — no separate setup step needed (assuming `nx catalog setup` was run once).
 
+## Taxonomy Auto-Discovery
+
+After indexing completes, `nx index repo` automatically runs topic discovery on the new or updated collections. HDBSCAN clusters the collection's embeddings to find natural topic groupings, and each cluster is labeled with a short descriptive phrase using Claude Haiku (when an Anthropic API key is available). The results are stored in T2 and surfaced by `nx search` as topic filters.
+
+To skip this step, pass `--no-taxonomy`. This is useful for fast incremental updates or in CI pipelines where the additional API calls are not wanted.
+
+In **local mode** (ONNX MiniLM embeddings), code collections are excluded from taxonomy discovery by default — MiniLM's 384-dimension general-purpose embeddings produce poorly separated clusters on code. Prose, RDR, and knowledge collections are still discovered. In **cloud mode** (Voyage AI), all collection types including code are included, since `voyage-code-3` embeddings produce well-separated clusters.
+
 ## Searching Indexed Repos
 
 ```bash
