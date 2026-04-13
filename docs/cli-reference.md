@@ -652,15 +652,15 @@ nx context show
 | Subcommand | Description |
 |------------|-------------|
 | `refresh` | Regenerate the L1 context cache from current taxonomy topics |
-| `show` | Display the current cached context (prints nothing if no cache exists) |
+| `show` | Display the current cached context for the current repo. Prints guidance if no cache exists |
 
 **`refresh` flags:**
 
 | Flag | Description |
 |------|-------------|
-| `--global` | Generate a single global cache instead of per-repo |
+| `--global` | Generate a single global cache (all collections) instead of per-repo |
 
-The context cache is stored at `~/.config/nexus/context_l1_<repo>-<hash>.txt` (per-repo) or `~/.config/nexus/context_l1.txt` (global fallback). It is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
+The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The global cache (via `--global`) is at `~/.config/nexus/context_l1.txt`. Both `show` and the SessionStart/SubagentStart hooks resolve the per-repo path first, falling back to global. The cache is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
 
 ---
 

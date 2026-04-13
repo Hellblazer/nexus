@@ -31,9 +31,12 @@ def refresh_cmd(global_: bool) -> None:
 @context.command("show")
 def show_cmd() -> None:
     """Show the current L1 context cache content."""
-    from nexus.context import CONTEXT_L1_PATH
+    from pathlib import Path
 
-    if CONTEXT_L1_PATH.exists():
-        click.echo(CONTEXT_L1_PATH.read_text())
+    from nexus.context import _context_path_for_repo
+
+    path = _context_path_for_repo(Path.cwd())
+    if path.exists():
+        click.echo(path.read_text())
     else:
         click.echo("No context cache. Run `nx context refresh` to generate.")
