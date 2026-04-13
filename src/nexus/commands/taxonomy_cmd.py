@@ -758,45 +758,60 @@ def _claude_available() -> bool:
     return shutil.which("claude") is not None
 
 
-def _generate_label_llm(terms: list[str], sample_doc_ids: list[str]) -> str | None:
-    """Generate a human-readable topic label via claude -p --model haiku.
+def _generate_labels_batch(
+    items: list[tuple[list[str], list[str]]],
+) -> list[str | None]:
+    """Generate labels for a batch of topics in one claude -p call.
 
-    Returns None on failure (claude not available, timeout, etc.).
+    Each item is (terms, sample_doc_ids). Returns a list of labels
+    (same length as items, None for failures). One subprocess call
+    for the whole batch instead of one per topic.
     """
+    import re
     import subprocess
 
-    doc_names = []
-    for did in sample_doc_ids[:5]:
-        base = did.split(":")[0]
-        name = base.split("/")[-1]
-        doc_names.append(name)
+    if not items:
+        return []
+
+    lines = []
+    for i, (terms, doc_ids) in enumerate(items, 1):
+        doc_names = [d.split("/")[-1].split(":")[0][:25] for d in doc_ids[:3]]
+        lines.append(
+            f"{i}. terms=[{', '.join(terms[:5])}] docs=[{', '.join(doc_names)}]"
+        )
 
     prompt = (
-        f"Name this topic in 3-5 words. "
-        f"Terms: {', '.join(terms[:7])}. "
-        f"Sample docs: {', '.join(doc_names)}. "
-        f"Reply with ONLY the label, nothing else."
+        "Label each topic in 3-5 words. "
+        "Output: numbered labels only, one per line.\n\n"
+        + "\n".join(lines)
     )
 
+    results: list[str | None] = [None] * len(items)
     try:
-        result = subprocess.run(
-            ["claude", "-p", "--model", "haiku"],
+        proc = subprocess.run(
+            ["claude", "-p", "--model", "haiku",
+             "--system-prompt", "You are a topic labeler. Output only numbered labels.",
+             "--no-session-persistence"],
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            label = result.stdout.strip().strip('"').strip("'")
-            # Sanity: reject if too long or contains prompt leakage
-            if 3 <= len(label) <= 60 and "terms:" not in label.lower():
-                return label
-            _log.debug("label_rejected", label=label, reason="sanity_check")
-        elif result.returncode != 0:
-            _log.debug("claude_label_failed", rc=result.returncode, stderr=result.stderr[:200])
+        if proc.returncode != 0:
+            return results
+
+        for line in proc.stdout.strip().splitlines():
+            line = line.strip()
+            m = re.match(r"^(\d+)\.\s*(.+)$", line)
+            if m:
+                idx = int(m.group(1)) - 1
+                label = m.group(2).strip().strip('"').strip("'")
+                if 0 <= idx < len(items) and 3 <= len(label) <= 60:
+                    results[idx] = label
     except Exception:
         pass
-    return None
+
+    return results
 
 
 def relabel_topics(
@@ -804,19 +819,20 @@ def relabel_topics(
     *,
     collection: str = "",
     only_pending: bool = True,
+    batch_size: int = 20,
     workers: int = 4,
 ) -> int:
-    """Relabel topics using claude -p --model haiku, parallelized.
+    """Relabel topics using batched claude -p calls with parallel workers.
 
-    Dispatches up to ``workers`` concurrent subprocess calls. Each
-    call is independent (read-only on topic data, write is a single
-    rename_topic per result). Returns number of topics relabeled.
+    Sends batches of ``batch_size`` topics per claude -p call (amortizes
+    startup + system prompt overhead). Runs ``workers`` batches concurrently.
+    Returns number of topics relabeled.
     """
     import json
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     if only_pending:
-        topics = taxonomy.get_unreviewed_topics(collection=collection, limit=1000)
+        topics = taxonomy.get_unreviewed_topics(collection=collection, limit=5000)
     else:
         topics = taxonomy.get_topics_for_collection(collection) if collection else taxonomy.get_topics()
 
@@ -824,7 +840,7 @@ def relabel_topics(
         return 0
 
     # Prepare work items: (topic_id, terms, doc_ids)
-    work = []
+    work: list[tuple[int, str, list[str], list[str]]] = []
     for topic in topics:
         terms = json.loads(topic["terms"]) if topic.get("terms") else []
         if not terms:
@@ -835,25 +851,30 @@ def relabel_topics(
     if not work:
         return 0
 
-    _progress(f"    labeling {len(work)} topics ({workers} workers)...")
+    # Split into batches
+    batches: list[list[tuple[int, str, list[str], list[str]]]] = []
+    for i in range(0, len(work), batch_size):
+        batches.append(work[i : i + batch_size])
+
+    _progress(f"    labeling {len(work)} topics ({len(batches)} batches, {workers} workers)")
 
     count = 0
-    done = 0
+    batches_done = 0
 
-    def _label_one(item: tuple) -> tuple[int, str | None]:
-        tid, _, terms, doc_ids = item
-        return tid, _generate_label_llm(terms, doc_ids)
+    def _label_batch(batch: list) -> list[tuple[int, str | None]]:
+        items = [(w[2], w[3]) for w in batch]  # (terms, doc_ids)
+        labels = _generate_labels_batch(items)
+        return [(w[0], lbl) for w, lbl in zip(batch, labels)]
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_label_one, w): w for w in work}
+        futures = {pool.submit(_label_batch, b): b for b in batches}
         for future in as_completed(futures):
-            done += 1
-            tid, label = future.result()
-            if label:
-                taxonomy.rename_topic(tid, label)
-                count += 1
-            if done % 25 == 0 or done == len(work):
-                _progress(f"    labeled {done}/{len(work)} ({count} renamed)")
+            batches_done += 1
+            for tid, label in future.result():
+                if label:
+                    taxonomy.rename_topic(tid, label)
+                    count += 1
+            _progress(f"    batch {batches_done}/{len(batches)} done ({count} renamed)")
 
     return count
 
