@@ -129,7 +129,7 @@ def test_assign_topic_idempotent(db: T2Database) -> None:
 def test_rebuild_taxonomy_clears_and_rediscovers(
     db: T2Database, chroma_client: chromadb.ClientAPI,
 ) -> None:
-    """rebuild_taxonomy deletes old topics, then re-discovers."""
+    """rebuild_taxonomy deletes old topics, then re-discovers fresh ones."""
     rng = np.random.default_rng(42)
     embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
@@ -143,11 +143,29 @@ def test_rebuild_taxonomy_clears_and_rediscovers(
     count1 = db.taxonomy.rebuild_taxonomy(
         "test__coll", doc_ids, embeddings, texts, chroma_client,
     )
+    ids_after_first = {
+        t["id"] for t in db.taxonomy.get_topics()
+        if t.get("collection") == "test__coll"
+    }
+
     count2 = db.taxonomy.rebuild_taxonomy(
         "test__coll", doc_ids, embeddings, texts, chroma_client,
     )
+    ids_after_second = {
+        t["id"] for t in db.taxonomy.get_topics()
+        if t.get("collection") == "test__coll"
+    }
+
     assert count1 >= 2
     assert count2 >= 2
+    # Topic count should match the second run, not be doubled (no accumulation)
+    assert len(ids_after_second) == count2
+    # Total assignments should be consistent — not doubled
+    total_assignments = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id IN "
+        "(SELECT id FROM topics WHERE collection = 'test__coll')"
+    ).fetchone()[0]
+    assert total_assignments <= 60, "rebuild should replace, not accumulate"
 
 
 def test_get_topics_filtered_by_parent(db: T2Database) -> None:
@@ -531,24 +549,39 @@ def test_memory_delete_by_id_cascades(db: T2Database) -> None:
     assert ta_count == 0
 
 
-def test_cli_taxonomy_list(db: T2Database) -> None:
-    """CLI taxonomy list outputs topic labels."""
+def test_cli_taxonomy_list(tmp_path: Path) -> None:
+    """CLI taxonomy list outputs topic labels and doc counts."""
+    from unittest.mock import patch
+
     from click.testing import CliRunner
+
     from nexus.commands.taxonomy_cmd import taxonomy
 
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("Search Methods", "proj", 5, "2026-01-01T00:00:00Z"),
-    )
-    db.taxonomy.conn.commit()
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("Search Methods", "proj", 5, "2026-01-01T00:00:00Z"),
+        )
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("Database Queries", "proj", 3, "2026-01-01T00:00:00Z"),
+        )
+        db.taxonomy.conn.commit()
 
     runner = CliRunner()
-    # Patch default_db_path to point at our test db — not needed for unit test
-    # since we're testing the output format, not the real DB path
-    result = runner.invoke(taxonomy, ["list"])
-    # The command uses its own DB; for a true integration test we'd need to
-    # inject the fixture DB. Here we just verify the command doesn't crash.
-    assert result.exit_code == 0
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["list"])
+
+    assert result.exit_code == 0, result.output
+    assert "Search Methods" in result.output
+    assert "Database Queries" in result.output
+    assert "5 docs" in result.output
+    assert "3 docs" in result.output
 
 
 # ── discover_for_collection + CLI (RDR-070, nexus-2dq) ──────────────────────
@@ -585,7 +618,7 @@ def test_discover_for_collection(
 def test_discover_for_collection_force(
     db: T2Database, chroma_client: chromadb.ClientAPI,
 ) -> None:
-    """force=True clears existing topics before re-discovering."""
+    """force=True clears existing topics before re-discovering fresh ones."""
     from nexus.commands.taxonomy_cmd import discover_for_collection
     from nexus.db.local_ef import LocalEmbeddingFunction
 
@@ -604,11 +637,29 @@ def test_discover_for_collection_force(
     count1 = discover_for_collection(
         "test__force", db.taxonomy, chroma_client, force=False,
     )
+    ids_after_first = {
+        t["id"] for t in db.taxonomy.get_topics()
+        if t.get("collection") == "test__force"
+    }
+
     count2 = discover_for_collection(
         "test__force", db.taxonomy, chroma_client, force=True,
     )
+    ids_after_second = {
+        t["id"] for t in db.taxonomy.get_topics()
+        if t.get("collection") == "test__force"
+    }
+
     assert count1 >= 2
     assert count2 >= 2
+    # force=True should replace topics, not accumulate
+    assert len(ids_after_second) == count2
+    # Assignments should be consistent — not doubled
+    total_assignments = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id IN "
+        "(SELECT id FROM topics WHERE collection = 'test__force')"
+    ).fetchone()[0]
+    assert total_assignments <= 60, "force rebuild should replace, not accumulate"
 
 
 def test_discover_cli_invocation() -> None:
@@ -793,7 +844,7 @@ class TestMiniLMTopicQuality:
         )
         if total > 0:
             agreement_rate = agreements / total
-            assert agreement_rate >= 0.5, (
+            assert agreement_rate >= 0.8, (
                 f"Domain coherence too low: {agreements}/{total} = {agreement_rate:.0%}"
             )
 
@@ -1740,7 +1791,7 @@ class TestManualOpsCLI:
             assert {r[0] for r in docs} == {"doc-a", "doc-b"}
 
     def test_split_cli(self, tmp_path: Path) -> None:
-        """nx taxonomy split creates child topics."""
+        """nx taxonomy split invokes split_topic with correct args."""
         from unittest.mock import MagicMock, patch
 
         from click.testing import CliRunner
@@ -1765,6 +1816,7 @@ class TestManualOpsCLI:
             db.taxonomy.conn.commit()
 
         mock_t3 = MagicMock()
+        mock_split = MagicMock(return_value=2)
         runner = CliRunner()
         with (
             patch(
@@ -1777,7 +1829,7 @@ class TestManualOpsCLI:
             ),
             patch(
                 "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.split_topic",
-                return_value=2,
+                mock_split,
             ),
         ):
             result = runner.invoke(
@@ -1786,7 +1838,11 @@ class TestManualOpsCLI:
             )
 
         assert result.exit_code == 0, result.output
-        assert "2" in result.output
+        assert "2 sub-topics" in result.output
+        # Verify split_topic was called with correct topic_id and k
+        mock_split.assert_called_once()
+        call_args = mock_split.call_args
+        assert call_args[1]["k"] == 2 or call_args[0][1] == 2
 
 
 # ── Rebalance trigger + merge strategy (RDR-070, nexus-1im) ───────────────

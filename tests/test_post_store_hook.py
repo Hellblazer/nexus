@@ -94,6 +94,15 @@ def test_taxonomy_assign_hook_assigns_nearest_topic(
         ).fetchone()
         assert row is not None
         assert row[1] == "centroid"
+
+        # Verify the assigned topic exists and is a real topic
+        # (discover uses random vectors so centroid-text correlation is
+        # not guaranteed — we verify a valid topic was chosen)
+        assigned_topic_id = row[0]
+        topic = db.taxonomy.get_topic_by_id(assigned_topic_id)
+        assert topic is not None, f"Assigned topic_id {assigned_topic_id} does not exist"
+        assert topic["collection"] == "test__coll"
+        assert topic["doc_count"] > 0
     finally:
         db.close()
 

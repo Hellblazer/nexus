@@ -2,6 +2,7 @@
 """Tests for cluster-aware search integration (RDR-056 Phase 2c)."""
 from __future__ import annotations
 
+import unittest.mock
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -271,9 +272,15 @@ class TestClusterBySemantic:
 
 
 class TestConfigDefault:
-    def test_cluster_by_default_is_none(self) -> None:
-        from nexus.config import load_config
-        cfg = load_config()
+    def test_cluster_by_not_in_default_config(self, tmp_path) -> None:
+        """Default config has no cluster_by key — code default 'semantic' applies."""
+        import os
+
+        # Isolate from user's real config by pointing to empty dir
+        env_patch = {"NEXUS_CONFIG_DIR": str(tmp_path)}
+        with unittest.mock.patch.dict(os.environ, env_patch, clear=False):
+            from nexus.config import load_config
+            cfg = load_config()
         assert cfg.get("search", {}).get("cluster_by") is None
 
 
@@ -328,7 +335,7 @@ class TestTopicGrouping:
     def test_ward_fallback_when_few_assignments(self) -> None:
         """Falls back to Ward clustering when <=50% have topic assignments."""
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 6)})
-        # Only 2 of 6 assigned (33% < 50%)
+        # Only 1 of 6 assigned (17% < 50%)
         assignments = {"code__test-0": 1}
         topics = {1: "http handlers"}
         tax = self._make_taxonomy(assignments, topics)
@@ -338,9 +345,9 @@ class TestTopicGrouping:
             cluster_by="semantic", taxonomy=tax,
         )
         assert len(results) == 6
-        # Ward clustering adds _cluster_label, not _topic_label
+        # Ward clustering adds _cluster_label to ALL results
         labeled = [r for r in results if "_cluster_label" in r.metadata]
-        assert len(labeled) >= 1
+        assert len(labeled) == 6
 
     def test_ward_fallback_when_no_taxonomy(self) -> None:
         """Falls back to Ward when taxonomy is None."""
@@ -350,9 +357,9 @@ class TestTopicGrouping:
             cluster_by="semantic", taxonomy=None,
         )
         assert len(results) == 5
-        # Ward clustering should have run
+        # Ward clustering should label ALL results
         labeled = [r for r in results if "_cluster_label" in r.metadata]
-        assert len(labeled) >= 1
+        assert len(labeled) == 5
 
     def test_explicit_none_disables_all_clustering(self) -> None:
         """cluster_by=None disables both topic and Ward clustering."""
