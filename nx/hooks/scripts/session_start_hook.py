@@ -110,6 +110,18 @@ def main() -> None:
     output_lines.append("MCP tool prefix: `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_nexus__search`, `mcp__plugin_nx_nexus__query`)")
     output_lines.append("")
 
+    # --- L1 Knowledge Map (RDR-072) — cached topic labels for instant orientation ---
+    context_l1_path = os.path.join(os.path.expanduser("~"), ".config", "nexus", "context_l1.txt")
+    try:
+        if os.path.exists(context_l1_path):
+            with open(context_l1_path) as f:
+                context_l1 = f.read().strip()
+            if context_l1:
+                output_lines.append(context_l1)
+                output_lines.append("")
+    except Exception:
+        pass  # Non-fatal — hook must never fail
+
     if output_lines:
         print("\n".join(output_lines))
 

@@ -206,6 +206,12 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                             )
                 except Exception:
                     pass  # Non-fatal
+                # Refresh L1 context cache
+                try:
+                    from nexus.context import generate_context_l1
+                    generate_context_l1(db.taxonomy)
+                except Exception:
+                    pass  # Non-fatal
         except Exception:
             _log.debug("taxonomy_discover_failed", exc_info=True)
 
