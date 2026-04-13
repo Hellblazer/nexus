@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-04-13
+
+### Added
+
+- **Query sanitizer** (RDR-071): `sanitize_query()` strips LLM prompt contamination (system prompts, tool preambles, chain-of-thought artifacts) from search queries before embedding. Wired into MCP `search` and `query` tools automatically — no user action needed. 24 TDD tests.
+- **Progressive context loading** (RDR-072): generates a ~200 token topic map from taxonomy and caches it as a flat file. Injected at session start via the SessionStart hook so agents have project context before the first search query.
+- `nx context refresh` CLI command to manually regenerate the context cache
+- `nx context show` to display the current cached context
+- Auto-refresh hooks: context cache regenerated automatically after `nx taxonomy discover` and `nx index repo`
+- Per-repo context cache files (`context_l1_<repo>-<hash>.txt`) for multi-project support
+
+### Fixed
+
+- `reset_singletons` no longer clears module-level hook registrations (affected test isolation)
+
+### Docs
+
+- Added `nx context` section to CLI reference
+- Added Context module to architecture.md module map
+- Noted query sanitizer in architecture.md Search area description
+
 ## [4.0.3] - 2026-04-13
 
 ### Changed

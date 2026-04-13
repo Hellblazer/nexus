@@ -139,6 +139,7 @@ The `nx` command provides direct access to all storage tiers, indexing, and sear
 | `nx hooks` | Install git hooks for automatic re-indexing on commit |
 | `nx catalog` | Document registry — search, link, audit the catalog metadata layer |
 | `nx taxonomy` | Topic taxonomy — review, rename, merge, and split auto-discovered topic clusters |
+| `nx context` | Project context cache — topic map for agent cold-start acceleration |
 | `nx mineru` | MinerU server lifecycle (start/stop/status) for PDF extraction |
 
 Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md).

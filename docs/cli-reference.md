@@ -640,6 +640,30 @@ Starts a foreground FastAPI/uvicorn server. The PID file is written to `~/.confi
 
 ---
 
+## nx context
+
+Project context cache for agent cold-start acceleration. Generates a compact topic map (~200 tokens) from taxonomy data and caches it for injection at session start.
+
+```
+nx context refresh
+nx context show
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `refresh` | Regenerate the L1 context cache from current taxonomy topics |
+| `show` | Display the current cached context (prints nothing if no cache exists) |
+
+**`refresh` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--global` | Generate a single global cache instead of per-repo |
+
+The context cache is stored at `~/.config/nexus/context_l1_<repo>-<hash>.txt` (per-repo) or `~/.config/nexus/context_l1.txt` (global fallback). It is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
+
+---
+
 ## nx mineru
 
 MinerU server lifecycle management for PDF extraction. Requires `conexus[mineru]` extra.

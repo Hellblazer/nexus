@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-04-13
+
+### Added
+
+- SessionStart hook injects L1 project knowledge map (topic summary) at session start
+- Subagent start hook injects per-repo L1 context into child agents
+- Query sanitizer active on MCP `search` and `query` tools (transparent — no plugin config needed)
+
 ## [4.0.3] - 2026-04-13
 
 Plugin version aligned with Nexus CLI 4.0.3. No plugin-level functional changes.
