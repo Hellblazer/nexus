@@ -75,10 +75,15 @@ def discover_for_collection(
             limit=page_size,
             offset=offset,
         )
-        all_ids.extend(page["ids"])
-        all_texts.extend(page["documents"] or [])
-        offset += len(page["ids"])
-        if len(page["ids"]) < page_size:
+        page_ids = page["ids"]
+        page_docs = page["documents"] or []
+        # Filter out entries with None text (stored without content)
+        for pid, pdoc in zip(page_ids, page_docs):
+            if pdoc is not None:
+                all_ids.append(pid)
+                all_texts.append(pdoc)
+        offset += len(page_ids)
+        if len(page_ids) < page_size:
             break
 
     # Re-embed with local MiniLM 384d — T3 may use Voyage (1024d)

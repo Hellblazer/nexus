@@ -270,7 +270,7 @@ def search_cross_corpus(
             if assignments:
                 all_results = apply_topic_boost(all_results, assignments)
         except Exception:
-            pass  # Non-fatal: topic boost is a ranking refinement
+            _log.debug("topic_boost_failed", exc_info=True)
 
     # Fetch embeddings once if either contradiction detection OR clustering
     # needs them — avoids double fetching (F1 fix). Per-collection failures

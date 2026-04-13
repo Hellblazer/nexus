@@ -718,6 +718,15 @@ class CatalogTaxonomy:
         if old_centroids.shape[0] == 0:
             return result
 
+        # Dimensionality mismatch guard (model upgrade scenario)
+        if old_centroids.shape[1] != new_centroids.shape[1]:
+            _log.warning(
+                "centroid_dimension_mismatch",
+                old_dim=old_centroids.shape[1],
+                new_dim=new_centroids.shape[1],
+            )
+            return result
+
         # Cosine similarity matrix: (n_new, n_old)
         sims = cosine_similarity(new_centroids, old_centroids)
 

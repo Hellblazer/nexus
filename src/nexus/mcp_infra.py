@@ -261,8 +261,6 @@ def taxonomy_assign_hook(
     Keyword args ``taxonomy`` and ``chroma_client`` are injection points
     for testing; production path resolves them from singletons.
     """
-    from nexus.db.local_ef import LocalEmbeddingFunction
-
     if taxonomy is None:
         with t2_ctx() as db:
             taxonomy = db.taxonomy

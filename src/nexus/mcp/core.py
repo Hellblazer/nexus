@@ -96,19 +96,17 @@ def search(
         # Fetch enough to fill the requested page
         fetch_n = offset + limit
         clustered = bool(cluster_by)
-        # Topic-scoped search (RDR-070): pass taxonomy for pre-filtering.
-        # Uses _t2_ctx() singleton to avoid connection leak per search call.
-        taxonomy = None
-        if topic:
-            taxonomy = _t2_ctx().taxonomy
-        results = search_cross_corpus(
-            query, target, n_results=fetch_n, t3=t3, where=where_dict,
-            cluster_by=cluster_by or None,
-            catalog=_get_catalog(),
-            link_boost=False,
-            taxonomy=taxonomy,
-            topic=topic or None,
-        )
+        # Always pass taxonomy for topic grouping + topic boost (RDR-070).
+        # Wrapped in context manager to avoid connection leak.
+        with _t2_ctx() as _t2_db:
+            results = search_cross_corpus(
+                query, target, n_results=fetch_n, t3=t3, where=where_dict,
+                cluster_by=cluster_by or None,
+                catalog=_get_catalog(),
+                link_boost=False,
+                taxonomy=_t2_db.taxonomy,
+                topic=topic or None,
+            )
         # Only sort by distance for flat (non-clustered) results.
         # Clustered results arrive in cluster-grouped order from search_engine.
         if not clustered:

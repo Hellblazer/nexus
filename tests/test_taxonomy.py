@@ -2229,3 +2229,229 @@ class TestTopicLinksCLI:
         assert result.exit_code == 0
         assert "api" in result.output
         assert "database" in result.output
+
+
+# ── Coverage gap tests (deep review, nexus-kwx) ──────────────────────────────
+
+
+class TestQueryMethodCoverage:
+    """Direct unit tests for query methods on CatalogTaxonomy."""
+
+    def test_get_doc_ids_for_topic(self, db: T2Database) -> None:
+        """get_doc_ids_for_topic resolves label -> doc_ids via JOIN."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("search-methods", "proj", 3, "2026-01-01T00:00:00Z"),
+        )
+        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("doc-x", tid), ("doc-y", tid), ("doc-z", tid)],
+        )
+        db.taxonomy.conn.commit()
+
+        result = db.taxonomy.get_doc_ids_for_topic("search-methods")
+        assert set(result) == {"doc-x", "doc-y", "doc-z"}
+
+    def test_get_doc_ids_for_topic_unknown_label(self, db: T2Database) -> None:
+        """get_doc_ids_for_topic returns empty list for unknown label."""
+        assert db.taxonomy.get_doc_ids_for_topic("nonexistent") == []
+
+    def test_get_assignments_for_docs(self, db: T2Database) -> None:
+        """get_assignments_for_docs returns {doc_id: topic_id} mapping."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("topic-a", "proj", 2, "2026-01-01T00:00:00Z"),
+        )
+        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("doc-1", tid), ("doc-2", tid)],
+        )
+        db.taxonomy.conn.commit()
+
+        result = db.taxonomy.get_assignments_for_docs(["doc-1", "doc-2", "doc-3"])
+        assert result == {"doc-1": tid, "doc-2": tid}
+
+    def test_get_assignments_for_docs_empty(self, db: T2Database) -> None:
+        """get_assignments_for_docs with empty list returns empty dict."""
+        assert db.taxonomy.get_assignments_for_docs([]) == {}
+
+    def test_get_labels_for_ids(self, db: T2Database) -> None:
+        """get_labels_for_ids returns scoped {id: label} map."""
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("alpha", "proj", 1, "2026-01-01T00:00:00Z"),
+                ("beta", "proj", 1, "2026-01-01T00:00:00Z"),
+                ("gamma", "proj", 1, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+        all_ids = [
+            r[0] for r in db.taxonomy.conn.execute("SELECT id FROM topics").fetchall()
+        ]
+
+        result = db.taxonomy.get_labels_for_ids(all_ids[:2])
+        assert len(result) == 2
+        assert set(result.values()) <= {"alpha", "beta", "gamma"}
+
+    def test_get_labels_for_ids_empty(self, db: T2Database) -> None:
+        """get_labels_for_ids with empty list returns empty dict."""
+        assert db.taxonomy.get_labels_for_ids([]) == {}
+
+    def test_get_all_topic_doc_ids(self, db: T2Database) -> None:
+        """get_all_topic_doc_ids returns all assigned doc_ids without limit."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("big-topic", "proj", 10, "2026-01-01T00:00:00Z"),
+        )
+        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for i in range(10):
+            db.taxonomy.conn.execute(
+                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                (f"doc-{i}", tid),
+            )
+        db.taxonomy.conn.commit()
+
+        result = db.taxonomy.get_all_topic_doc_ids(tid)
+        assert len(result) == 10
+
+
+class TestEdgeCases:
+    """Edge cases identified in deep review."""
+
+    def test_discover_topics_below_minimum(self, db: T2Database) -> None:
+        """discover_topics with n < 5 returns 0 without crashing."""
+        rng = np.random.default_rng(42)
+        embeddings = rng.standard_normal((3, 384)).astype(np.float32)
+        doc_ids = ["doc-0", "doc-1", "doc-2"]
+        texts = ["hello world", "foo bar", "baz qux"]
+        chroma = chromadb.EphemeralClient()
+
+        result = db.taxonomy.discover_topics(
+            "tiny__coll", doc_ids, embeddings, texts, chroma,
+        )
+        assert result == 0
+
+    def test_rebuild_with_few_docs_clears_and_records(
+        self, db: T2Database,
+    ) -> None:
+        """Rebuild with n < 5 clears old topics and records the count."""
+        chroma = chromadb.EphemeralClient()
+
+        # Seed existing topics for the collection
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("old-topic", "shrunk__coll", 50, "2026-01-01T00:00:00Z"),
+        )
+        db.taxonomy.conn.commit()
+
+        rng = np.random.default_rng(42)
+        embeddings = rng.standard_normal((3, 384)).astype(np.float32)
+
+        result = db.taxonomy.rebuild_taxonomy(
+            "shrunk__coll",
+            ["doc-0", "doc-1", "doc-2"],
+            embeddings,
+            ["a", "b", "c"],
+            chroma,
+        )
+        assert result == 0
+
+        # Old topics should be cleared
+        count = db.taxonomy.conn.execute(
+            "SELECT COUNT(*) FROM topics WHERE collection = 'shrunk__coll'"
+        ).fetchone()[0]
+        assert count == 0
+
+        # Doc count should be recorded
+        assert db.taxonomy.needs_rebalance("shrunk__coll", current_count=2) is False
+
+    def test_split_topic_collection_not_found(self, db: T2Database) -> None:
+        """split_topic returns 0 when T3 collection doesn't exist."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("orphan", "nonexistent__coll", 5, "2026-01-01T00:00:00Z"),
+        )
+        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for i in range(5):
+            db.taxonomy.conn.execute(
+                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                (f"doc-{i}", tid),
+            )
+        db.taxonomy.conn.commit()
+
+        chroma = chromadb.EphemeralClient()
+        result = db.taxonomy.split_topic(tid, k=2, chroma_client=chroma)
+        assert result == 0
+
+    def test_discover_skip_existing_topics(self, db: T2Database) -> None:
+        """discover_topics skips if topics already exist for collection."""
+        chroma = chromadb.EphemeralClient()
+        rng = np.random.default_rng(42)
+        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings[:30, 0] += 3.0
+        embeddings[30:, 1] += 3.0
+        doc_ids = [f"doc-{i}" for i in range(60)]
+        texts = (
+            [f"machine learning {i}" for i in range(30)]
+            + [f"database query {i}" for i in range(30)]
+        )
+
+        # First discover succeeds
+        count1 = db.taxonomy.discover_topics(
+            "dup__coll", doc_ids, embeddings, texts, chroma,
+        )
+        assert count1 >= 2
+
+        # Second discover skips (returns 0, doesn't duplicate)
+        count2 = db.taxonomy.discover_topics(
+            "dup__coll", doc_ids, embeddings, texts, chroma,
+        )
+        assert count2 == 0
+
+        # Still only the original topics
+        topics = [
+            t for t in db.taxonomy.get_topics()
+            if t.get("collection") == "dup__coll"
+        ]
+        assert len(topics) == count1
+
+    def test_show_cmd(self, tmp_path: Path) -> None:
+        """nx taxonomy show <id> displays documents."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("test-topic", "proj", 2, "2026-01-01T00:00:00Z"),
+            )
+            tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            db.taxonomy.conn.executemany(
+                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                [("doc-a", tid), ("doc-b", tid)],
+            )
+            db.taxonomy.conn.commit()
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(taxonomy, ["show", str(tid)])
+
+        assert result.exit_code == 0, result.output
+        assert "doc-a" in result.output
+        assert "doc-b" in result.output
