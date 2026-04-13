@@ -431,22 +431,46 @@ class CatalogTaxonomy:
             )
             self.conn.commit()
 
-    def delete_topic(self, topic_id: int) -> None:
-        """Delete a topic and all its assignments."""
+    def delete_topic(self, topic_id: int, *, chroma_client: Any = None) -> None:
+        """Delete a topic, its assignments, and its centroid."""
+        # Read collection before deleting the row
         with self._lock:
+            row = self.conn.execute(
+                "SELECT collection FROM topics WHERE id = ?", (topic_id,),
+            ).fetchone()
+            collection = row[0] if row else None
             self.conn.execute(
                 "DELETE FROM topic_assignments WHERE topic_id = ?", (topic_id,),
             )
             self.conn.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
             self.conn.commit()
+        # Clean up centroid outside the lock
+        if chroma_client and collection:
+            try:
+                coll = chroma_client.get_collection(
+                    "taxonomy__centroids", embedding_function=None,
+                )
+                coll.delete(ids=[f"{collection}:{topic_id}"])
+            except Exception:
+                pass
 
-    def merge_topics(self, source_id: int, target_id: int) -> None:
+    def merge_topics(
+        self, source_id: int, target_id: int, *, chroma_client: Any = None,
+    ) -> None:
         """Move all assignments from source to target, delete source.
 
         Uses INSERT OR IGNORE to handle docs assigned to both topics
         (dedup). Updates target's doc_count to the actual assignment count.
+        Cleans up source centroid from ChromaDB when chroma_client provided.
         """
+        if source_id == target_id:
+            return  # Self-merge is a no-op
         with self._lock:
+            # Read collection before deleting
+            row = self.conn.execute(
+                "SELECT collection FROM topics WHERE id = ?", (source_id,),
+            ).fetchone()
+            collection = row[0] if row else None
             # Move assignments (ignore duplicates)
             self.conn.execute(
                 "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id, assigned_by) "
@@ -469,6 +493,15 @@ class CatalogTaxonomy:
             # Delete source topic
             self.conn.execute("DELETE FROM topics WHERE id = ?", (source_id,))
             self.conn.commit()
+        # Clean up source centroid outside the lock
+        if chroma_client and collection:
+            try:
+                coll = chroma_client.get_collection(
+                    "taxonomy__centroids", embedding_function=None,
+                )
+                coll.delete(ids=[f"{collection}:{source_id}"])
+            except Exception:
+                pass
 
     def get_topic_by_id(self, topic_id: int) -> dict[str, Any] | None:
         """Return a single topic dict by ID, or None."""
@@ -544,6 +577,9 @@ class CatalogTaxonomy:
         created, or 0 if too few docs.
         """
         from nexus.db.local_ef import LocalEmbeddingFunction
+
+        if k < 2:
+            return 0
 
         topic = self.get_topic_by_id(topic_id)
         if topic is None:
@@ -914,11 +950,14 @@ class CatalogTaxonomy:
         if centroid_coll.count() == 0:
             return None
 
-        results = centroid_coll.query(
-            query_embeddings=[embedding.tolist()],
-            n_results=1,
-            where={"collection": collection_name},
-        )
+        try:
+            results = centroid_coll.query(
+                query_embeddings=[embedding.tolist()],
+                n_results=1,
+                where={"collection": collection_name},
+            )
+        except Exception:
+            return None  # No centroids match the collection filter
 
         if not results["ids"] or not results["ids"][0]:
             return None
@@ -1091,6 +1130,12 @@ class CatalogTaxonomy:
 
         real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
         if not real_labels:
+            _log.warning(
+                "rebuild_all_noise",
+                collection=collection_name,
+                n_docs=n,
+            )
+            self.record_discover_count(collection_name, n)
             return 0
 
         # c-TF-IDF

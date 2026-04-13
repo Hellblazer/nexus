@@ -284,11 +284,15 @@ def review_cmd(collection: str, limit: int) -> None:
         for i, topic in enumerate(topics, 1):
             _display_topic(topic, i, len(topics), db.taxonomy)
 
-            action = click.prompt(
-                "Action",
-                type=click.Choice(["a", "r", "m", "d", "S"], case_sensitive=True),
-                default="S",
-            )
+            try:
+                action = click.prompt(
+                    "Action",
+                    type=click.Choice(["a", "r", "m", "d", "S"], case_sensitive=True),
+                    default="S",
+                )
+            except (click.Abort, EOFError):
+                click.echo("\n  Aborted.")
+                break
 
             if action == "a":
                 db.taxonomy.mark_topic_reviewed(topic["id"], "accepted")

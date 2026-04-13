@@ -257,20 +257,14 @@ def search_cross_corpus(
         from nexus.scoring import apply_link_boost
         all_results = apply_link_boost(all_results, catalog)
 
-    # Topic boost (RDR-070, nexus-aym)
-    # NOTE: topic_links not yet wired — linked-topic boost path is inert.
-    # Same-topic boost (+0.1) is active; linked-topic boost (+0.05) requires
-    # computing topic pair links at query time (future work).
+    # Compute topic assignments once for both boost and grouping (RDR-070)
+    _topic_assignments: dict[str, int] | None = None
     if all_results and taxonomy is not None:
         try:
-            from nexus.scoring import apply_topic_boost
-
             result_ids = [r.id for r in all_results]
-            assignments = taxonomy.get_assignments_for_docs(result_ids)
-            if assignments:
-                all_results = apply_topic_boost(all_results, assignments)
+            _topic_assignments = taxonomy.get_assignments_for_docs(result_ids)
         except Exception:
-            _log.debug("topic_boost_failed", exc_info=True)
+            _log.debug("topic_assignments_failed", exc_info=True)
 
     # Fetch embeddings once if either contradiction detection OR clustering
     # needs them — avoids double fetching (F1 fix). Per-collection failures
@@ -291,10 +285,9 @@ def search_cross_corpus(
     if cluster_by == "semantic" and all_results:
         topic_grouped = False
         # Try topic-based grouping first (RDR-070, nexus-y8f)
-        if taxonomy is not None:
+        if taxonomy is not None and _topic_assignments:
             try:
-                doc_ids = [r.id for r in all_results]
-                assignments = taxonomy.get_assignments_for_docs(doc_ids)
+                assignments = _topic_assignments
                 coverage = len(assignments) / len(all_results) if all_results else 0
                 if coverage > 0.5:
                     all_results = _apply_topic_grouping(all_results, assignments, taxonomy)
@@ -320,6 +313,17 @@ def search_cross_corpus(
                     total_results=len(all_results),
                     reason="cannot partially cluster — some collection fetches failed",
                 )
+
+    # Topic boost (RDR-070, nexus-aym) — applied AFTER grouping so
+    # distance-based group ordering is not contaminated by the boost.
+    # NOTE: topic_links not yet wired — linked-topic boost path is inert.
+    if _topic_assignments and all_results:
+        try:
+            from nexus.scoring import apply_topic_boost
+
+            all_results = apply_topic_boost(all_results, _topic_assignments)
+        except Exception:
+            _log.debug("topic_boost_failed", exc_info=True)
 
     return all_results
 

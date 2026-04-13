@@ -240,7 +240,7 @@ def fire_post_store_hooks(doc_id: str, collection: str, content: str) -> None:
         try:
             hook(doc_id, collection, content)
         except Exception:
-            _hook_log.debug("post_store_hook_failed", hook=getattr(hook, "__name__", "?"), exc_info=True)
+            _hook_log.warning("post_store_hook_failed", hook=getattr(hook, "__name__", "?"), exc_info=True)
 
 
 def taxonomy_assign_hook(
