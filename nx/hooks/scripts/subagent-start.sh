@@ -150,9 +150,9 @@ Plan library (T2):
     plan_save(query="...", plan_json="...", project="...", tags="...", ttl=30)
 
 Routing: T1 for sibling sharing → T2 for project persistence → T3 for semantic knowledge.
+NXTOOLS
 
-$(
-# L1 Knowledge Map (per-repo, RDR-072)
+# L1 Knowledge Map (per-repo, RDR-072) — outside quoted heredoc so $(…) expands
 CONTEXT_DIR="$HOME/.config/nexus/context"
 REPO_HASH=$(echo -n "$(pwd -P)" | shasum -a 1 | cut -c1-8)
 REPO_NAME=$(basename "$(pwd -P)")
@@ -161,10 +161,9 @@ if [ ! -f "$CONTEXT_FILE" ]; then
   CONTEXT_FILE="$HOME/.config/nexus/context_l1.txt"
 fi
 if [ -f "$CONTEXT_FILE" ]; then
+  echo ""
   cat "$CONTEXT_FILE"
 fi
-)
-NXTOOLS
 fi
 
 cat <<'SEQTHINK'

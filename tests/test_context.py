@@ -179,6 +179,114 @@ class TestGenerateContextL1:
         assert "Other Repo Topic" not in content
 
 
+class TestSubagentHookInjection:
+    """Verify the SubagentStart hook expands the L1 context cache."""
+
+    HOOK_PATH = Path(__file__).parent.parent / "nx" / "hooks" / "scripts" / "subagent-start.sh"
+
+    def test_hook_emits_knowledge_map(self, tmp_path: Path) -> None:
+        """SubagentStart hook outputs the cached knowledge map content."""
+        import subprocess
+
+        # Write a fake context cache
+        context_dir = tmp_path / ".config" / "nexus" / "context"
+        context_dir.mkdir(parents=True)
+        # The hook uses $(pwd -P) to compute the repo hash — we override HOME
+        # so it reads from our temp dir, and run from a known cwd so the hash
+        # is deterministic.
+        repo_dir = tmp_path / "fakerepo"
+        repo_dir.mkdir()
+
+        # Compute expected filename the same way the hook does
+        import hashlib
+        repo_hash = hashlib.sha1(str(repo_dir.resolve()).encode()).hexdigest()[:8]
+        cache_file = context_dir / f"fakerepo-{repo_hash}.txt"
+        cache_file.write_text("## Knowledge Map\n\ncode: Test Topic (42)\n")
+
+        result = subprocess.run(
+            ["bash", str(self.HOOK_PATH)],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(repo_dir),
+            env={**__import__("os").environ, "HOME": str(tmp_path)},
+        )
+
+        assert "## Knowledge Map" in result.stdout, (
+            f"Hook did not emit Knowledge Map. stdout={result.stdout[:500]}"
+        )
+        assert "Test Topic (42)" in result.stdout
+
+    def test_hook_silent_when_no_cache(self, tmp_path: Path) -> None:
+        """Hook doesn't error when no cache file exists."""
+        import subprocess
+
+        repo_dir = tmp_path / "norepo"
+        repo_dir.mkdir()
+
+        result = subprocess.run(
+            ["bash", str(self.HOOK_PATH)],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(repo_dir),
+            env={**__import__("os").environ, "HOME": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert "Knowledge Map" not in result.stdout
+
+    def test_hook_falls_back_to_global(self, tmp_path: Path) -> None:
+        """Hook uses global context_l1.txt when no per-repo file exists."""
+        import subprocess
+
+        # Write only the global fallback
+        config_dir = tmp_path / ".config" / "nexus"
+        config_dir.mkdir(parents=True)
+        (config_dir / "context_l1.txt").write_text(
+            "## Knowledge Map\n\ncode: Global Topic (99)\n"
+        )
+
+        repo_dir = tmp_path / "noperrepo"
+        repo_dir.mkdir()
+
+        result = subprocess.run(
+            ["bash", str(self.HOOK_PATH)],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(repo_dir),
+            env={**__import__("os").environ, "HOME": str(tmp_path)},
+        )
+
+        assert "Global Topic (99)" in result.stdout
+
+
+class TestSessionHookInjection:
+    """Verify the SessionStart hook reads the L1 context cache."""
+
+    HOOK_PATH = Path(__file__).parent.parent / "nx" / "hooks" / "scripts" / "session_start_hook.py"
+
+    def test_hook_emits_knowledge_map(self, tmp_path: Path) -> None:
+        """SessionStart hook outputs the cached knowledge map content."""
+        import hashlib
+        import subprocess
+
+        repo_dir = tmp_path / "fakerepo"
+        repo_dir.mkdir()
+
+        context_dir = tmp_path / ".config" / "nexus" / "context"
+        context_dir.mkdir(parents=True)
+        repo_hash = hashlib.sha1(str(repo_dir.resolve()).encode()).hexdigest()[:8]
+        cache_file = context_dir / f"fakerepo-{repo_hash}.txt"
+        cache_file.write_text("## Knowledge Map\n\ncode: Session Topic (77)\n")
+
+        result = subprocess.run(
+            ["python3", str(self.HOOK_PATH)],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(repo_dir),
+            env={**__import__("os").environ, "HOME": str(tmp_path)},
+        )
+
+        assert "Session Topic (77)" in result.stdout, (
+            f"SessionStart hook did not emit Knowledge Map. stdout={result.stdout[:500]}"
+        )
+
+
 class TestRefreshContextL1:
     """Convenience wrapper that opens T2 and delegates."""
 

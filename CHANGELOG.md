@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.1.2] - 2026-04-13
+
+### Fixed
+
+- SubagentStart hook emitted literal `$(...)` bash code instead of the L1 knowledge map — the command substitution was inside a single-quoted heredoc (`<<'NXTOOLS'`) which suppresses expansion
+- Added 4 integration tests verifying both SessionStart and SubagentStart hooks actually emit cached context
+
 ## [4.1.1] - 2026-04-13
 
 ### Fixed
