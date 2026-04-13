@@ -285,8 +285,10 @@ class TestIndexPdfFileGitMetadata:
 
         assert metadatas, "Expected at least one chunk to be upserted"
         for meta in metadatas:
-            assert meta["git_commit_hash"] == ""
-            assert meta["git_branch"] == ""
+            # Empty git fields are filtered out by _index_pdf_file to stay
+            # under ChromaDB's 32-key metadata limit. Verify absent or empty.
+            assert meta.get("git_commit_hash", "") == ""
+            assert meta.get("git_branch", "") == ""
 
 
 # ── RDR-021: Docling single-tier regression guard ────────────────────────────
