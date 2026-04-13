@@ -110,9 +110,17 @@ def main() -> None:
     output_lines.append("MCP tool prefix: `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_nexus__search`, `mcp__plugin_nx_nexus__query`)")
     output_lines.append("")
 
-    # --- L1 Knowledge Map (RDR-072) — cached topic labels for instant orientation ---
-    context_l1_path = os.path.join(os.path.expanduser("~"), ".config", "nexus", "context_l1.txt")
+    # --- L1 Knowledge Map (RDR-072) — per-repo cached topic labels ---
     try:
+        import hashlib
+        cwd = os.getcwd()
+        repo_hash = hashlib.sha1(os.path.realpath(cwd).encode()).hexdigest()[:8]
+        repo_name = os.path.basename(os.path.realpath(cwd))
+        context_dir = os.path.join(os.path.expanduser("~"), ".config", "nexus", "context")
+        context_l1_path = os.path.join(context_dir, f"{repo_name}-{repo_hash}.txt")
+        # Fallback to legacy global file
+        if not os.path.exists(context_l1_path):
+            context_l1_path = os.path.join(os.path.expanduser("~"), ".config", "nexus", "context_l1.txt")
         if os.path.exists(context_l1_path):
             with open(context_l1_path) as f:
                 context_l1 = f.read().strip()

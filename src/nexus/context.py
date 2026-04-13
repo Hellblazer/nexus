@@ -18,7 +18,18 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+CONTEXT_L1_DIR = Path.home() / ".config" / "nexus" / "context"
+# Legacy single-file path (kept for backward compat)
 CONTEXT_L1_PATH = Path.home() / ".config" / "nexus" / "context_l1.txt"
+
+
+def _context_path_for_repo(repo_path: Path | None) -> Path:
+    """Return per-repo cache file path, or global fallback."""
+    if repo_path is None:
+        return CONTEXT_L1_PATH
+    import hashlib
+    repo_hash = hashlib.sha1(str(repo_path.resolve()).encode()).hexdigest()[:8]
+    return CONTEXT_L1_DIR / f"{repo_path.name}-{repo_hash}.txt"
 _TOPICS_PER_PREFIX = 5
 
 
@@ -68,7 +79,7 @@ def generate_context_l1(
 
     Returns the output path, or None if no topics exist.
     """
-    output_path = output_path or CONTEXT_L1_PATH
+    output_path = output_path or _context_path_for_repo(repo_path)
     allowed = _repo_collections(repo_path)
 
     # Query root topics only (excludes children from split)
@@ -124,6 +135,17 @@ def generate_context_l1(
         path=str(output_path),
     )
     return output_path
+
+
+def read_context_l1(repo_path: Path | None = None) -> str:
+    """Read the cached L1 context for a repo. Returns empty string if missing."""
+    path = _context_path_for_repo(repo_path)
+    if path.exists():
+        return path.read_text().strip()
+    # Fallback to legacy global file
+    if CONTEXT_L1_PATH.exists():
+        return CONTEXT_L1_PATH.read_text().strip()
+    return ""
 
 
 def refresh_context_l1(
