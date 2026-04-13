@@ -87,6 +87,23 @@ No schema changes needed. The flag lives in ChromaDB metadata alongside existing
 - SC-3: `store_put(permanent=True)` entries survive TTL expiry and consolidation
 - SC-4: `memory_consolidate find-overlaps` still shows permanent entries (visibility, not immunity)
 
+### RF-071-4: Voyage AI resilience (measured 2026-04-13)
+
+Tested on `knowledge__delos` with "byzantine fault tolerant consensus":
+- Clean (34 chars): avg distance 0.478
+- Moderate contamination (302 chars): avg distance 0.413, **80% top-5 overlap**
+- Extreme contamination (2646 chars): avg distance 0.443, **80% top-5 overlap**
+
+Voyage AI (1024d) maintains 80% result overlap even with 75x query inflation. Cloud mode is resilient. The sanitizer is defense-in-depth for cloud, critical for local.
+
+### RF-071-5: MiniLM contamination confirmed (measured 2026-04-13)
+
+Local MiniLM (384d) on 5-doc test corpus:
+- Clean: top result d=0.151, all 3 results BFT-relevant
+- Contaminated (1274 chars): top result d=0.775 (5x worse), **database indexing intrudes as #2**
+
+With nexus distance thresholds (knowledge=0.65), contaminated results would be filtered as noise, returning 0 results. **Local mode users are fully exposed to silent search failure.**
+
 ## Open Questions
 
 1. Should the sanitizer log when it activates? (Proposed: yes, structured log at debug level)
