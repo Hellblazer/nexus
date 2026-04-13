@@ -6,6 +6,59 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-04-13
+
+### Added
+
+- **Topic taxonomy** (RDR-070): automatic topic discovery across T3 collections using HDBSCAN clustering on native embeddings (Voyage 1024d on cloud, MiniLM 384d on local). Topics are auto-labeled with Claude Haiku when the `claude` CLI is available. Search results are grouped by topic and boosted for relevance.
+- `nx taxonomy discover --all` discovers topics for all eligible T3 collections in one command
+- `nx taxonomy status` shows topic health: collections, coverage, review state
+- `nx taxonomy review` interactive review: accept, rename, merge, delete, skip
+- `nx taxonomy label` batch-relabels topics with Claude Haiku
+- `nx taxonomy assign/rename/merge/split/links` manual curation commands
+- `nx taxonomy rebuild` full re-cluster with merge strategy preserving operator labels
+- Topic boost in search: same-topic results get -0.1 distance, linked-topic -0.05
+- Topic grouping: `cluster_by="semantic"` groups results by topic label when >50% assigned
+- Topic-scoped search: `search(query="...", topic="Label")` pre-filters to a topic cluster
+- Incremental assignment: `store_put` auto-assigns new docs to nearest topic via centroid ANN
+- `taxonomy.auto_label` config (default: true) controls Claude Haiku auto-labeling
+- `taxonomy.local_exclude_collections` config (default: `["code__*"]`) skips code in local mode (MiniLM clusters poorly on code; cloud Voyage handles it well)
+- Live smoke test script: `scripts/smoke-test-taxonomy.py`
+- 15 E2E integration tests with real ChromaDB and MiniLM (no mocks)
+- `docs/taxonomy.md` dedicated user guide
+
+### Changed
+
+- **Breaking**: `nx taxonomy rebuild` now takes `--collection` instead of `--project`. The old `--project` flag still works with a deprecation notice.
+- **Breaking**: `cluster_and_persist()` and `rebuild_taxonomy()` in `nexus.taxonomy` now emit `DeprecationWarning` and return 0. Use `db.taxonomy.discover_topics()` or `nx taxonomy discover`.
+- `search()` and `query()` MCP tools now pass taxonomy for topic boost and grouping on all searches
+- `discover_for_collection` uses native T3 embeddings instead of re-embedding with MiniLM
+- PDF metadata filtering: empty values dropped before ChromaDB upsert to stay under 32-key limit, fixing `git_project_name` loss on PDF chunks
+
+### Fixed
+
+- 30+ bugs found across 5 review rounds (substantive critique, deep review, 4x parallel sweep)
+- Connection leak in MCP search when using topic filter
+- Orphaned centroids after merge/delete/split operations
+- Silent data loss on rebuild when HDBSCAN produces all noise
+- Topic boost was writing to `hybrid_score` (overwritten by reranker) instead of `distance`
+- Self-merge destroying a topic instead of no-op
+- Double `get_assignments_for_docs` call per search
+- `review_cmd` crash on EOF/Ctrl-C in interactive prompts
+- Cloud quota violation: pagination reduced from 5000 to 250 per request
+- Concurrency p95 threshold bumped 4.0x to 5.0x for CI noise tolerance
+
+### Docs
+
+- All user-facing docs source-verified by 6 parallel audit agents
+- `docs/taxonomy.md` new dedicated taxonomy guide
+- `docs/querying-guide.md` topic-aware search section
+- `docs/cli-reference.md` all 12 taxonomy subcommands
+- `docs/architecture.md` module map updated (10 missing files added)
+- `CLAUDE.md` source layout expanded (18+ files added)
+- `docs/configuration.md` 4 missing config keys documented
+- BERTopic references removed (never used; sklearn HDBSCAN only)
+
 ## [3.9.3] - 2026-04-11
 
 ### Fixed
