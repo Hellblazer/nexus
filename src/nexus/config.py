@@ -286,6 +286,12 @@ _DEFAULTS: dict[str, Any] = {
         "mineru_table_enable": False,
         "mineru_page_batch": 1,
     },
+    "taxonomy": {
+        # Glob patterns for collections to exclude from auto-discover.
+        # Code collections use MiniLM which clusters poorly on source code.
+        # Set to [] to enable taxonomy for all collections.
+        "exclude_collections": ["code__*"],
+    },
     "search": {
         "hybrid_default": False,
         "hnsw_ef": 256,

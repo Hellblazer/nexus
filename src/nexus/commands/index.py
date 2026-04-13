@@ -140,17 +140,22 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     # Auto-discover taxonomy topics (RDR-070, nexus-0bg)
     if not frecency_only and not no_taxonomy and stats:
         try:
+            from fnmatch import fnmatch
+
+            from nexus.config import load_config as _load_cfg
             from nexus.db import make_t3
             from nexus.db.t2 import T2Database
             from nexus.commands._helpers import default_db_path
 
             t3 = make_t3()
             info = reg.get(path) or {}
+            cfg = _load_cfg()
+            exclude_patterns = cfg.get("taxonomy", {}).get("exclude_collections", [])
             collections = []
-            if info.get("collection"):
-                collections.append(info["collection"])
-            if info.get("docs_collection"):
-                collections.append(info["docs_collection"])
+            for key in ("collection", "docs_collection"):
+                col = info.get(key)
+                if col and not any(fnmatch(col, pat) for pat in exclude_patterns):
+                    collections.append(col)
 
             total_topics = 0
             with T2Database(default_db_path()) as db:

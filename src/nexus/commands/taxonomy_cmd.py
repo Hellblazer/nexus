@@ -171,7 +171,18 @@ def show_cmd(topic_id: int, limit: int) -> None:
 @click.option("--force", is_flag=True, help="Delete existing topics before re-discovering")
 def discover_cmd(collection: str, force: bool) -> None:
     """Discover topics from a T3 collection using HDBSCAN clustering."""
+    from fnmatch import fnmatch
+
+    from nexus.config import load_config
     from nexus.db import make_t3
+
+    cfg = load_config()
+    exclude = cfg.get("taxonomy", {}).get("exclude_collections", [])
+    if any(fnmatch(collection, pat) for pat in exclude):
+        click.echo(
+            f"Warning: {collection!r} matches taxonomy.exclude_collections "
+            f"({exclude}). MiniLM clusters poorly on code. Proceeding anyway."
+        )
 
     with T2Database(_default_db_path()) as db:
         t3 = make_t3()
