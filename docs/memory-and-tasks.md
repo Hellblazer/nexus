@@ -33,6 +33,10 @@ the counter update may be skipped. See
 [Storage Tiers — Heat-Weighted Expiry](storage-tiers.md#t2----memory-bank) for the
 full explanation.
 
+## Taxonomy cascade on delete
+
+When a memory entry is deleted (`memory_delete` MCP tool or `nx memory delete`), the T2 facade also calls `CatalogTaxonomy.purge_assignments_for_doc(project, title)`. This removes any topic assignments that reference the deleted entry and drops any topics left empty by the deletion. The cascade is handled by the T2 facade — `MemoryStore` itself has no knowledge of taxonomy tables. If the delete is by numeric id rather than `(project, title)`, the facade resolves the row's project and title first.
+
 ## Consolidation (RDR-061 E6)
 
 T2 grows with every note an agent writes. Over time, near-duplicate entries

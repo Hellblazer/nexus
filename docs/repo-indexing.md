@@ -17,9 +17,9 @@ Every file is classified into one of four categories:
   that receive line-based chunking
 - **PDF**: `.pdf` files are extracted and chunked separately, then stored in `docs__`.
 - **PROSE**: `.md`, `.markdown`, and any extension not in CODE, PDF, or SKIP.
-- **SKIP** (18 extensions — not indexed): `.xml`, `.json`, `.yml`, `.yaml`, `.toml`,
+- **SKIP** (23 extensions — not indexed): `.xml`, `.json`, `.yml`, `.yaml`, `.toml`,
   `.properties`, `.ini`, `.cfg`, `.conf`, `.gradle`, `.html`, `.htm`, `.css`, `.svg`,
-  `.cmd`, `.bat`, `.ps1`, `.lock`
+  `.cmd`, `.bat`, `.ps1`, `.lock`, `.txt`, `.csv`, `.tsv`, `.dat`, `.log`
 
 **Extensionless files** (e.g., `Makefile`, `LICENSE`): if the first two bytes are `#!`
 (shebang), the file is classified as CODE; otherwise SKIP.
@@ -32,12 +32,13 @@ respecting `.gitignore`, `.git/info/exclude`, and the global gitignore. Hidden d
 Classification is overridable via `.nexus.yml` (see [Per-Repo Configuration](#nexusyml-per-repo-configuration)).
 `prose_extensions` config takes priority over all built-in classifications including SKIP.
 
-> **Important**: Because `.yml`, `.yaml`, `.xml`, `.json`, and `.toml` are in the SKIP list,
-> **CI workflow files, Maven POMs, `package.json`, and similar config files are not searchable
-> via `nx search`**. Changes to these files are still tracked by git hooks (the indexer scans
-> them for staleness) but no embeddings are generated. Use `Grep` or `Glob` for config file
-> searches. To override this for a specific repo, add the extension to `prose_extensions` in
-> `.nexus.yml` — but note this captures *all* files with that extension, not just specific ones.
+> **Important**: Because `.yml`, `.yaml`, `.xml`, `.json`, `.toml`, `.txt`, `.csv`, and `.log`
+> are in the SKIP list, **CI workflow files, Maven POMs, `package.json`, plain text files, and
+> similar config and data files are not searchable via `nx search`**. Changes to these files are
+> still tracked by git hooks (the indexer scans them for staleness) but no embeddings are
+> generated. Use `Grep` or `Glob` for config and data file searches. To override this for a
+> specific repo, add the extension to `prose_extensions` in `.nexus.yml`. Note that this
+> captures *all* files with that extension, not just specific ones.
 
 ## Dual-Collection Architecture
 

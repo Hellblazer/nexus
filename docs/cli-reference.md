@@ -65,6 +65,7 @@ nx index repo ./my-project
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
 | `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
 | `--on-locked {skip,wait}` | Behavior when another process holds the repo lock: `skip` exits immediately, `wait` blocks (default: `wait`) |
+| `--no-taxonomy` | Skip automatic topic discovery after indexing |
 
 **`pdf` and `md` flags:**
 
@@ -76,6 +77,7 @@ nx index repo ./my-project
 
 | Flag | Description |
 |------|-------------|
+| `--dir DIR` | Index all PDFs in a directory (mutually exclusive with `PATH`) |
 | `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich <collection>` for bulk backfill |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
@@ -173,7 +175,7 @@ On a new machine with an existing catalog remote: `nx catalog setup --remote <ur
 ### nx catalog search
 
 ```
-nx catalog search QUERY [--limit N] [--json]
+nx catalog search QUERY [--limit N] [--offset N] [--json]
 ```
 
 Find documents by title, author, corpus, or file path. Returns tumbler, content type, and title.
@@ -189,7 +191,7 @@ Full document metadata, physical collection, and all links in and out. Accepts t
 ### nx catalog links
 
 ```
-nx catalog links [TUMBLER] [--from TEXT] [--to TEXT] [--type TEXT] [--created-by TEXT] [--direction in|out|both] [--depth N] [--limit N] [--json]
+nx catalog links [TUMBLER] [--from TEXT] [--to TEXT] [--type TEXT] [--created-by TEXT] [--direction in|out|both] [--depth N] [--limit N] [--offset N] [--json]
 ```
 
 With a positional tumbler/title: BFS graph traversal. Without: flat filter query across all links.
@@ -200,7 +202,7 @@ With a positional tumbler/title: BFS graph traversal. Without: flat filter query
 nx catalog link FROM TO --type TYPE [--from-span SPAN] [--to-span SPAN]
 ```
 
-Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`.
+Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`, `formalizes`.
 
 Span formats: `line-line` (positional), `chunk:char-char` (positional), `chash:<sha256hex>` (whole chunk, content-addressed), or `chash:<sha256hex>:<start>-<end>` (character range within a chunk). Content-hash spans survive re-indexing; positional spans may become stale.
 
@@ -235,7 +237,7 @@ Find catalog entries with zero incoming and outgoing links. Useful for identifyi
 nx catalog coverage [--owner OWNER_PREFIX]
 ```
 
-Per content-type report showing what percentage of catalog entries have at least one link. Use `--owner 1.1` to scope to a specific repo.
+Per content-type report showing what percentage of catalog entries have at least one link. Use `--owner 1.1` to scope to a specific owner prefix.
 
 ### nx catalog suggest-links
 
@@ -267,7 +269,25 @@ Show linked RDRs for recently git-modified files. Default: last 24 hours. Useful
 nx catalog link-generate [--dry-run]
 ```
 
-Run all link generators over the full catalog (batch O(n×m) scan). Use for initial setup or after bulk imports. Normal index runs are incremental.
+Run the RDR filepath link generator over the full catalog. Use for initial setup or after bulk imports. Normal index runs are incremental. For citation links too, use `nx catalog generate-links`.
+
+### nx catalog generate-links
+
+```
+nx catalog generate-links [--citations/--no-citations] [--filepath/--no-filepath] [--dry-run]
+```
+
+Auto-generate typed links from metadata cross-matching. `--citations` generates citation links from bibliographic metadata. `--filepath` generates RDR-to-code links by file path matching. Both default to enabled.
+
+### nx catalog update
+
+```
+nx catalog update [TUMBLER] [--title TEXT] [--author TEXT] [--year N] [--corpus TEXT] [--meta JSON]
+nx catalog update --owner PREFIX --corpus TEXT    # batch update all entries under an owner
+nx catalog update --search QUERY --corpus TEXT    # batch update all entries matching search
+```
+
+Update catalog entry metadata. `TUMBLER` accepts a tumbler or title. Batch mode uses `--owner` or `--search` to update multiple entries at once.
 
 ### nx catalog gc
 
@@ -285,12 +305,9 @@ Standard catalog management. Run `nx catalog COMMAND --help` for details.
 
 ## nx taxonomy
 
-Topic taxonomy (RDR-070) — HDBSCAN clustering of T3 collection embeddings
-into topics for navigation, search grouping, and relevance boosting.
+Topic taxonomy — HDBSCAN clustering of T3 collection embeddings into topics for navigation, search grouping, and relevance boosting.
 
-Topics are auto-discovered after `nx index repo` and auto-labeled with
-Claude haiku when available. Search results are grouped by topic and
-boosted when results share a topic cluster.
+Topics are auto-discovered after `nx index repo` and auto-labeled with Claude haiku when available. Search results are grouped by topic and boosted when results share a topic cluster.
 
 ```
 nx taxonomy status                              # health: collections, coverage, review state
@@ -298,6 +315,7 @@ nx taxonomy discover --all                      # discover topics for all T3 col
 nx taxonomy discover -c docs__nexus             # discover for a single collection
 nx taxonomy discover -c docs__nexus --force     # re-discover (preserves operator labels)
 nx taxonomy list                                # topic tree
+nx taxonomy list -c docs__nexus                 # topic tree for one collection
 nx taxonomy show 5                              # docs assigned to topic 5
 nx taxonomy review                              # interactive: accept/rename/merge/delete/skip
 nx taxonomy label                               # batch-relabel with Claude haiku
@@ -306,23 +324,23 @@ nx taxonomy rename "old label" "new label"      # rename a topic
 nx taxonomy merge "source" "target"             # merge topics
 nx taxonomy split "label" --k 3                 # split into sub-topics
 nx taxonomy links                               # show inter-topic relationships
-nx taxonomy rebuild -c docs__nexus              # full rebuild with merge strategy
+nx taxonomy rebuild -c docs__nexus              # full rebuild
 ```
 
 | Subcommand | Description |
 |------------|-------------|
-| `status` | Collections, topic count, coverage, review state, rebalance status |
-| `discover` | Discover topics via HDBSCAN. `--all` for all collections, `--force` to re-cluster |
-| `list` | Topic tree with doc counts |
-| `show ID` | Documents assigned to a topic |
-| `review` | Interactive review: accept, rename, merge, delete, skip |
-| `label` | Batch-relabel topics with Claude haiku (`--all` for accepted too) |
-| `assign DOC LABEL` | Manually assign a doc to a topic by label |
-| `rename OLD NEW` | Rename a topic (marks as accepted) |
-| `merge SOURCE TARGET` | Merge source into target |
-| `split LABEL --k N` | Split into N sub-topics via KMeans |
-| `links` | Inter-topic link counts from catalog graph |
-| `rebuild` | Full re-cluster with merge strategy (preserves operator labels) |
+| `status` | Collections, topic count, coverage, review state |
+| `discover` | Discover topics via HDBSCAN. `--all` for all collections, `-c NAME` for one, `--force` to re-cluster |
+| `list` | Topic tree with doc counts. `-c NAME` filters by collection, `-d N` sets tree depth (default: 2) |
+| `show ID` | Documents assigned to a topic. `-n N` limits results (default: 20) |
+| `review` | Interactive review: accept, rename, merge, delete, skip. `-c NAME` to filter, `-n N` topics per session (default: 15) |
+| `label` | Batch-relabel topics with Claude haiku. `--all` relabels accepted topics too |
+| `assign DOC LABEL` | Manually assign a doc to a topic by label. `-c NAME` scopes label lookup |
+| `rename OLD NEW` | Rename a topic. `-c NAME` scopes label lookup |
+| `merge SOURCE TARGET` | Merge source into target. `-c NAME` scopes label lookup |
+| `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
+| `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
+| `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
 
 **Configuration** (in `.nexus.yml`):
 
@@ -370,6 +388,8 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 |------|-------------|
 | `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
 | `-n` / `--limit NUM` | Maximum entries to show (default: 200) |
+| `--offset N` | Skip this many entries (for pagination) |
+| `--docs` | Show unique documents instead of individual chunks |
 
 **`delete` flags:**
 
@@ -472,7 +492,9 @@ nx scratch put "hypothesis: cache invalidation is stale"
 
 **`flag` flags:** `-p` / `--project` / `-t` / `--title` (explicit T2 destination)
 
-**`promote` output and semantics (RDR-057):** `nx scratch promote` echoes the
+**`search` flags:** `--n N` (max results, default: 10)
+
+**`promote` output and semantics:** `nx scratch promote` echoes the
 promotion result as `Promoted <id> -> <project>/<title> (action=<ACTION>)`.
 Two actions are possible today:
 
@@ -601,6 +623,23 @@ The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing l
 
 ---
 
+## nx console
+
+Embedded web UI for monitoring agentic Nexus activity.
+
+```
+nx console [--port PORT] [--host HOST]
+```
+
+Starts a foreground FastAPI/uvicorn server. The PID file is written to `~/.config/nexus/console.<project>.pid` and removed on exit.
+
+| Flag | Description |
+|------|-------------|
+| `--port PORT` | Port for the console server (default: 8765) |
+| `--host HOST` | Host to bind to (default: `127.0.0.1`) |
+
+---
+
 ## nx mineru
 
 MinerU server lifecycle management for PDF extraction. Requires `conexus[mineru]` extra.
@@ -631,4 +670,4 @@ Stop the running MinerU server. Sends SIGTERM, waits up to 10s.
 nx mineru status
 ```
 
-Show server status: running/stopped, PID, port, uptime.
+Show server status: running/stopped, PID, port, active tasks, and completed tasks. Removes stale PID file if the server process is no longer running.

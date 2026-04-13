@@ -64,7 +64,11 @@ Used by `nx enrich` to fetch bibliographic metadata (year, venue, authors, citat
 | `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | Voyage reranker for multi-corpus merge |
 | `client.host` | `NX_CLIENT_HOST` | `localhost` | Override ChromaDB host URL |
 | `pdf.extractor` | — | `auto` | PDF extraction backend: `auto`, `docling`, or `mineru`. Set globally with `nx config set pdf.extractor=mineru` |
+| `pdf.mineru_server_url` | — | `http://127.0.0.1:8010` | MinerU API server URL. Auto-updated when `nx mineru start` binds a port |
+| `pdf.mineru_table_enable` | — | `false` | Enable table extraction in MinerU. Slower; use when PDFs contain structured tables |
+| `pdf.mineru_page_batch` | — | `1` | Pages per MinerU request. Increase for faster throughput at the cost of memory |
 | `voyageai.read_timeout_seconds` | `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` | `120` | Request timeout (seconds) for Voyage AI API calls. Increase for large PDF indexing |
+| `search.hybrid_default` | — | `false` | Default ripgrep hybrid search mode for `nx search`. Set `true` to always run hybrid |
 | `search.hnsw_ef` | — | `256` | HNSW `search_ef` parameter for local-mode collections. Higher values improve tail recall at the cost of query latency. Ignored in cloud mode (SPANN) |
 | `search.distance_threshold.code` | — | `0.45` | Maximum distance for code corpus results. Results above this are filtered as noise |
 | `search.distance_threshold.knowledge` | — | `0.65` | Maximum distance for knowledge corpus results |
@@ -72,7 +76,7 @@ Used by `nx enrich` to fetch bibliographic metadata (year, venue, authors, citat
 | `search.distance_threshold.rdr` | — | `0.65` | Maximum distance for RDR corpus results |
 | `search.distance_threshold.default` | — | `0.55` | Maximum distance for unknown corpus types |
 | `search.cluster_by` | — | `null` | Set to `semantic` to group search results by Ward hierarchical clustering. Disabled by default |
-| `search.contradiction_check` | — | `true` | JIT contradiction detection (RDR-057). Flags result pairs with high similarity but different `source_agent` provenance. Adds `[CONTRADICTS ANOTHER RESULT]` to search output. Set to `false` to disable — the check fetches embeddings for flagged candidates and adds a network round-trip per flagged collection |
+| `search.contradiction_check` | — | `true` | JIT contradiction detection (RDR-057). Flags result pairs with high similarity but different `source_agent` provenance. Adds `[CONTRADICTS ANOTHER RESULT]` to search output. Set to `false` to disable. The check fetches embeddings for flagged candidates and adds a network round-trip per flagged collection |
 
 Embedding models are selected automatically based on collection type (see [Storage Tiers](storage-tiers.md)): `voyage-code-3` for code, `voyage-context-3` (CCE) for docs/rdr/knowledge. All collections use the same model for both index and query.
 
@@ -90,15 +94,18 @@ Place `.nexus.yml` at repo root. It is gitignored by default.
 
 ```yaml
 indexing:
-  code_extensions: [".proto", ".thrift"]    # added to the built-in code set
-  prose_extensions: [".txt.j2", ".md.tmpl"] # forced to prose (wins over code)
-  rdr_paths: ["docs/rdr", "decisions"]      # directories indexed into rdr__ collection
-  include_untracked: true                   # also index untracked (but not .gitignored) files
+  code_extensions: [".proto", ".thrift"]    # added to the built-in code set (default: [])
+  prose_extensions: [".txt.j2", ".md.tmpl"] # forced to prose, wins over code (default: [])
+  rdr_paths: ["docs/rdr", "decisions"]      # directories indexed into rdr__ collection (default: ["docs/rdr"])
+  include_untracked: true                   # also index untracked (but not .gitignored) files (default: false)
 ```
 
 ```yaml
 pdf:
-  extractor: mineru   # auto | docling | mineru (default: auto)
+  extractor: mineru             # auto | docling | mineru (default: auto)
+  mineru_server_url: http://127.0.0.1:8010  # MinerU API endpoint (default)
+  mineru_table_enable: false    # enable table extraction (default: false)
+  mineru_page_batch: 1          # pages per MinerU request (default: 1)
 ```
 
 Or set via CLI: `nx config set pdf.extractor=mineru` (writes to global config). See [PDF Extraction Backends](cli-reference.md#pdf-extraction-backends) for details.
