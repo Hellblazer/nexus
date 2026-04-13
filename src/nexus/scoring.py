@@ -277,11 +277,15 @@ def apply_topic_boost(
     *,
     topic_links: dict[tuple[int, int], int] | None = None,
 ) -> list[SearchResult]:
-    """Boost hybrid_score for results that share or are linked by topic.
+    """Boost results that share or are linked by topic.
+
+    Reduces ``distance`` (lower = better) rather than modifying
+    ``hybrid_score``, because ``hybrid_score`` is populated later
+    by the reranker and would be overwritten.
 
     For each result with a topic assignment:
-    - If another result in the set shares the SAME topic: +_TOPIC_SAME_BOOST
-    - If another result is in a LINKED topic: +_TOPIC_LINKED_BOOST
+    - If another result in the set shares the SAME topic: -_TOPIC_SAME_BOOST distance
+    - If another result is in a LINKED topic: -_TOPIC_LINKED_BOOST distance
 
     Boost is applied once per relationship type (not per partner).
     """
@@ -313,7 +317,7 @@ def apply_topic_boost(
         # Same-topic boost: at least one other result in the same topic
         same_topic_peers = topic_to_indices.get(tid, [])
         if len(same_topic_peers) > 1:
-            r.hybrid_score += _TOPIC_SAME_BOOST
+            r.distance = max(0.0, r.distance - _TOPIC_SAME_BOOST)
 
         # Linked-topic boost: at least one result in a linked topic
         has_linked = False
@@ -324,7 +328,7 @@ def apply_topic_boost(
                 has_linked = True
                 break
         if has_linked:
-            r.hybrid_score += _TOPIC_LINKED_BOOST
+            r.distance = max(0.0, r.distance - _TOPIC_LINKED_BOOST)
 
     return results
 

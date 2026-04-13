@@ -124,9 +124,16 @@ def list_cmd(collection: str, depth: int) -> None:
         return
     for node in tree:
         _print_tree(node, indent=0)
-    total_docs = sum(n["doc_count"] for n in tree)
+    total_docs = sum(_tree_doc_count(n) for n in tree)
     if total_docs > total_assigned:
         click.echo(f"\nUncategorized: {total_docs - total_assigned} docs")
+
+
+def _tree_doc_count(node: dict) -> int:
+    """Recursively sum doc_count across a tree node and all its children."""
+    return node["doc_count"] + sum(
+        _tree_doc_count(c) for c in node.get("children", [])
+    )
 
 
 def _print_tree(node: dict, indent: int = 0) -> None:

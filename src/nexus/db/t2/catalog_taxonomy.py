@@ -742,10 +742,26 @@ class CatalogTaxonomy:
         collection for incremental assignment via :meth:`assign_single`.
 
         Returns number of topics created. Returns 0 if HDBSCAN assigns
-        all documents to noise (-1).
+        all documents to noise (-1), or if topics already exist for this
+        collection (use ``rebuild_taxonomy`` to re-discover).
         """
         n = len(doc_ids)
         if n < 5:
+            return 0
+
+        # Guard: skip if topics already exist for this collection.
+        # Use rebuild_taxonomy (--force) for re-discovery.
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT COUNT(*) FROM topics WHERE collection = ?",
+                (collection_name,),
+            ).fetchone()[0]
+        if existing > 0:
+            _log.info(
+                "discover_skip_existing",
+                collection=collection_name,
+                existing_topics=existing,
+            )
             return 0
 
         min_cluster_size = max(5, n // 15)
@@ -1134,6 +1150,15 @@ class CatalogTaxonomy:
                                 "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'manual')",
                                 (manual_doc, new_topic_ids[best_idx]),
                             )
+                            continue
+
+                    # Route 3: manual assignment could not be placed
+                    _log.warning(
+                        "manual_assignment_lost",
+                        doc_id=manual_doc,
+                        old_topic_id=old_topic_id,
+                        collection=collection_name,
+                    )
 
             self.conn.commit()
 

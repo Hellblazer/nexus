@@ -37,6 +37,11 @@ mcp = FastMCP("nexus")
 
 _DEFAULT_PAGE_SIZE = 10
 
+# ── Post-store hooks (register once at import) ──────────────────────────────
+
+from nexus.mcp_infra import register_post_store_hook, taxonomy_assign_hook
+
+register_post_store_hook(taxonomy_assign_hook)
 
 # ── Registered tools ─────────────────────────────────────────────────────────
 
@@ -91,12 +96,11 @@ def search(
         # Fetch enough to fill the requested page
         fetch_n = offset + limit
         clustered = bool(cluster_by)
-        # Topic-scoped search (RDR-070): pass taxonomy for pre-filtering
+        # Topic-scoped search (RDR-070): pass taxonomy for pre-filtering.
+        # Uses _t2_ctx() singleton to avoid connection leak per search call.
         taxonomy = None
         if topic:
-            from nexus.db.t2 import T2Database
-            from nexus.mcp_infra import default_db_path
-            taxonomy = T2Database(default_db_path()).taxonomy
+            taxonomy = _t2_ctx().taxonomy
         results = search_cross_corpus(
             query, target, n_results=fetch_n, t3=t3, where=where_dict,
             cluster_by=cluster_by or None,
