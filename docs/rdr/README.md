@@ -92,6 +92,9 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-068](rdr-068-dimensional-contracts-at-enrichment.md) | Dimensional Contracts at Enrichment | Process | Closed | 2026-04-11 |
 | [RDR-069](rdr-069-automatic-substantive-critic-at-close.md) | Automatic Substantive-Critic at Close | Process | Closed | 2026-04-11 |
 | [RDR-070](rdr-070-incremental-taxonomy-clustered-search.md) | Incremental Taxonomy & Clustered Search | Feature | Accepted | 2026-04-12 |
+| [RDR-071](rdr-071-query-sanitizer-permanence-mode.md) | Query Sanitizer + Permanence Mode | Feature | Draft | 2026-04-13 |
+| [RDR-072](rdr-072-progressive-context-loading.md) | Progressive Context Loading | Feature | Draft | 2026-04-13 |
+| [RDR-073](rdr-073-temporal-entity-knowledge-graph.md) | Temporal Entity Knowledge Graph | Feature | Draft | 2026-04-13 |
 
 ---
 
