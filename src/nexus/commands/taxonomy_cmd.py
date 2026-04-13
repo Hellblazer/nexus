@@ -784,13 +784,16 @@ def _generate_label_llm(terms: list[str], sample_doc_ids: list[str]) -> str | No
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=30,
         )
         if result.returncode == 0 and result.stdout.strip():
             label = result.stdout.strip().strip('"').strip("'")
             # Sanity: reject if too long or contains prompt leakage
             if 3 <= len(label) <= 60 and "terms:" not in label.lower():
                 return label
+            _log.debug("label_rejected", label=label, reason="sanity_check")
+        elif result.returncode != 0:
+            _log.debug("claude_label_failed", rc=result.returncode, stderr=result.stderr[:200])
     except Exception:
         pass
     return None
@@ -801,7 +804,7 @@ def relabel_topics(
     *,
     collection: str = "",
     only_pending: bool = True,
-    workers: int = 8,
+    workers: int = 4,
 ) -> int:
     """Relabel topics using claude -p --model haiku, parallelized.
 
