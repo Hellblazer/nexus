@@ -400,32 +400,13 @@ class TestLinkGenerate:
         assert result.exit_code == 0
         assert "0" in result.output
 
-    def test_link_generate_creates_heuristic_links(self, initialized_catalog, catalog_env):
-        """Command creates heuristic links for matching code-RDR pairs."""
-        runner = CliRunner()
-        cat = initialized_catalog
-        from nexus.catalog.tumbler import Tumbler
-        owner = Tumbler.parse("1.1")
-        cat.register(owner, "catalog module", content_type="code", file_path="src/nexus/catalog.py")
-        cat.register(owner, "RDR-001 catalog improvements", content_type="rdr", file_path="docs/rdr/rdr-001.md")
-        result = runner.invoke(main, ["catalog", "link-generate"])
-        assert result.exit_code == 0
-        # Output should show non-zero heuristic links
-        assert "1" in result.output
-
     def test_link_generate_idempotent(self, initialized_catalog, catalog_env):
         """Running twice produces 0 new links the second time."""
         runner = CliRunner()
-        cat = initialized_catalog
-        from nexus.catalog.tumbler import Tumbler
-        owner = Tumbler.parse("1.1")
-        cat.register(owner, "catalog module", content_type="code", file_path="src/nexus/catalog.py")
-        cat.register(owner, "RDR-001 catalog improvements", content_type="rdr", file_path="docs/rdr/rdr-001.md")
-        runner.invoke(main, ["catalog", "link-generate"])
+        result = runner.invoke(main, ["catalog", "link-generate"])
         result = runner.invoke(main, ["catalog", "link-generate"])
         assert result.exit_code == 0
-        # Second run should generate 0 new links
-        assert "0 heuristic + 0 filepath" in result.output
+        assert "0 filepath" in result.output
 
 
 class TestAgentIntegration:

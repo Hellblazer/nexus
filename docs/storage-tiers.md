@@ -89,7 +89,24 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 **Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry — not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
 
-**Domain split (RDR-063)**: T2 is implemented as four domain stores under `src/nexus/db/t2/` — `MemoryStore` (memory table), `PlanLibrary` (plans table), `CatalogTaxonomy` (topics + topic_assignments), and `Telemetry` (relevance_log). Each store opens its own `sqlite3.Connection` against the shared SQLite file in WAL mode with `busy_timeout=5000`, so reads in one domain are never blocked by writes in another. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls continue to work via method delegation, and new code can reach the domain stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
+**Domain split (RDR-063)**: T2 is implemented as four domain stores under `src/nexus/db/t2/` — `MemoryStore` (memory table), `PlanLibrary` (plans table), `CatalogTaxonomy` (topics + topic_assignments + taxonomy_meta + topic_links), and `Telemetry` (relevance_log). Each store opens its own `sqlite3.Connection` against the shared SQLite file in WAL mode with `busy_timeout=5000`, so reads in one domain are never blocked by writes in another. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls continue to work via method delegation, and new code can reach the domain stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
+
+**Topic taxonomy**: `CatalogTaxonomy` discovers topics from T3 collection embeddings using HDBSCAN, labels them automatically with Claude Haiku, and uses them for search grouping and relevance boosting. Topics are discovered automatically after `nx index repo`. Operator-curated labels are preserved across re-discovery runs. See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set and [taxonomy.md](taxonomy.md) for architecture details.
+
+The taxonomy spans two storage tiers:
+
+*T2 schema* — four tables in the shared `memory.db`:
+
+| Table | Purpose |
+|-------|---------|
+| `topics` | One row per discovered or manually-created topic, including label, parent, collection, curation state, and top keywords |
+| `topic_assignments` | Maps documents to topics; records whether assignment came from `hdbscan`, `manual`, `centroid`, `auto-matched`, or `split` |
+| `taxonomy_meta` | Per-collection watermark used to decide whether re-discovery is needed |
+| `topic_links` | Aggregated link counts between topics, derived from the catalog link graph |
+
+*T3 centroid collection* — `taxonomy__centroids` holds one embedding per live topic (cosine space). The vector is the cluster centroid computed during `discover_topics`. `discover_topics` creates the collection, `rebuild_taxonomy` clears and rebuilds it wholesale, and `split_topic` replaces one centroid with two.
+
+*Tier interaction*: Discovery reads embeddings from T3, clusters in memory, then writes topics to T2 and centroids back to T3. Incremental assignment (for new documents) queries centroids via ANN and writes a `topic_assignments` row to T2, without re-running the full clustering algorithm.
 
 ## T3 -- Permanent Knowledge
 

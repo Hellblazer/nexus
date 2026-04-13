@@ -146,15 +146,20 @@ def _prefilter_from_catalog(
 
 # ── Cross-corpus search ───────────────────────────────────────────────────────
 
+_CLUSTER_DEFAULT = "semantic"
+
+
 def search_cross_corpus(
     query: str,
     collections: list[str],
     n_results: int,
     t3: Any,
     where: dict | None = None,
-    cluster_by: str | None = None,
+    cluster_by: str | None = _CLUSTER_DEFAULT,
     catalog: Any | None = None,
     link_boost: bool = False,
+    taxonomy: Any | None = None,
+    topic: str | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -164,16 +169,39 @@ def search_cross_corpus(
     distance-threshold filtering that follows, ensuring enough survivors reach
     the caller's reranker.
 
-    When *cluster_by* is ``"semantic"``, results are grouped by Ward
-    hierarchical clustering and each result gets a ``_cluster_label`` metadata
-    key.  Requires one extra ``get_embeddings`` call per collection.
-    Disabled by default (``None``).
+    When *cluster_by* is ``"semantic"`` (default), results are grouped by
+    topic assignments from T2 taxonomy if >50% of results have assignments.
+    Otherwise falls back to Ward hierarchical clustering. Each grouped
+    result gets a ``_topic_label`` or ``_cluster_label`` metadata key.
 
-    *where* is an optional ChromaDB metadata filter forwarded to every collection.
+    Pass ``cluster_by=None`` to disable all clustering.
+
+    *taxonomy* is an optional :class:`CatalogTaxonomy` instance for topic
+    lookups. When ``None`` and ``cluster_by="semantic"``, falls back to
+    Ward clustering.
     """
     cfg = load_config()
-    if cluster_by is None:
-        cluster_by = cfg.get("search", {}).get("cluster_by")
+    # Config can override: search.cluster_by in .nexus.yml
+    cfg_cluster = cfg.get("search", {}).get("cluster_by")
+    if cfg_cluster is not None:
+        cluster_by = cfg_cluster
+
+    # Topic pre-filter (RDR-070, nexus-u2a): restrict to docs in a topic
+    topic_doc_ids: set[str] | None = None
+    if topic and taxonomy is not None:
+        try:
+            ids = taxonomy.get_doc_ids_for_topic(topic)
+            if not ids:
+                _log.info("topic_not_found", topic=topic)
+                return []
+            if len(ids) <= _MAX_PREFILTER_IDS:
+                topic_doc_ids = set(ids)
+            else:
+                # Too many — post-filter after search
+                topic_doc_ids = set(ids)
+                _log.debug("topic_prefilter_post_filter", topic=topic, n_ids=len(ids))
+        except Exception:
+            _log.debug("topic_prefilter_failed", exc_info=True)
 
     # Thresholds are calibrated for Voyage AI embeddings.
     # Skip filtering when Voyage is not in use (local mode, test injection).
@@ -220,10 +248,23 @@ def search_cross_corpus(
                 threshold=threshold,
             )
 
+    # Topic post-filter: keep only results in the requested topic
+    if topic_doc_ids is not None:
+        all_results = [r for r in all_results if r.id in topic_doc_ids]
+
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:
         from nexus.scoring import apply_link_boost
         all_results = apply_link_boost(all_results, catalog)
+
+    # Compute topic assignments once for both boost and grouping (RDR-070)
+    _topic_assignments: dict[str, int] | None = None
+    if all_results and taxonomy is not None:
+        try:
+            result_ids = [r.id for r in all_results]
+            _topic_assignments = taxonomy.get_assignments_for_docs(result_ids)
+        except Exception:
+            _log.debug("topic_assignments_failed", exc_info=True)
 
     # Fetch embeddings once if either contradiction detection OR clustering
     # needs them — avoids double fetching (F1 fix). Per-collection failures
@@ -241,19 +282,55 @@ def search_cross_corpus(
     if contradiction_enabled and all_results and fetched_embeddings is not None:
         all_results = _flag_contradictions(all_results, fetched_embeddings, failed_indices)
 
-    if cluster_by == "semantic" and all_results and fetched_embeddings is not None:
-        # Clustering cannot partially-cluster — if any collection fetch
-        # failed, fall through to unclustered results rather than corrupting
-        # the cluster assignment by excluding some results.
-        if not failed_indices:
-            all_results = _apply_clustering(all_results, fetched_embeddings)
-        else:
-            _log.warning(
-                "clustering_skipped_partial_failure",
-                failed_indices=len(failed_indices),
-                total_results=len(all_results),
-                reason="cannot partially cluster — some collection fetches failed",
+    if cluster_by == "semantic" and all_results:
+        topic_grouped = False
+        # Try topic-based grouping first (RDR-070, nexus-y8f)
+        if taxonomy is not None and _topic_assignments:
+            try:
+                assignments = _topic_assignments
+                coverage = len(assignments) / len(all_results) if all_results else 0
+                if coverage > 0.5:
+                    all_results = _apply_topic_grouping(all_results, assignments, taxonomy)
+                    topic_grouped = True
+                else:
+                    _log.debug(
+                        "topic_grouping_skipped_low_coverage",
+                        coverage=f"{coverage:.0%}",
+                        assigned=len(assignments),
+                        total=len(all_results),
+                    )
+            except Exception:
+                _log.debug("topic_grouping_failed", exc_info=True)
+
+        # Fall back to Ward clustering if topic grouping didn't fire
+        if not topic_grouped and fetched_embeddings is not None:
+            if not failed_indices:
+                all_results = _apply_clustering(all_results, fetched_embeddings)
+            else:
+                _log.warning(
+                    "clustering_skipped_partial_failure",
+                    failed_indices=len(failed_indices),
+                    total_results=len(all_results),
+                    reason="cannot partially cluster — some collection fetches failed",
+                )
+
+    # Topic boost (RDR-070, nexus-aym) — applied AFTER grouping so
+    # distance-based group ordering is not contaminated by the boost.
+    if _topic_assignments and all_results:
+        try:
+            from nexus.scoring import apply_topic_boost
+
+            # Read cached topic links for linked-topic boost
+            topic_links: dict[tuple[int, int], int] | None = None
+            if taxonomy is not None:
+                relevant_ids = list(set(_topic_assignments.values()))
+                topic_links = taxonomy.get_topic_link_pairs(relevant_ids) or None
+
+            all_results = apply_topic_boost(
+                all_results, _topic_assignments, topic_links=topic_links,
             )
+        except Exception:
+            _log.debug("topic_boost_failed", exc_info=True)
 
     return all_results
 
@@ -432,4 +509,48 @@ def _apply_clustering(
                 metadata=meta,
                 hybrid_score=rd.get("hybrid_score", 0.0),
             ))
+    return out
+
+
+def _apply_topic_grouping(
+    results: list[SearchResult],
+    assignments: dict[str, int],
+    taxonomy: Any,
+) -> list[SearchResult]:
+    """Group results by T2 topic assignment, sorted by topic then distance.
+
+    Results with assignments get a ``_topic_label`` metadata key.
+    Unassigned results are appended at the end.
+    """
+    # Build topic_id → label map (scoped query, not full table scan)
+    topic_ids = set(assignments.values())
+    id_to_label = taxonomy.get_labels_for_ids(list(topic_ids))
+
+    # Partition: assigned (grouped by topic) vs unassigned
+    grouped: dict[int, list[SearchResult]] = {}
+    unassigned: list[SearchResult] = []
+    for r in results:
+        tid = assignments.get(r.id)
+        if tid is not None and tid in id_to_label:
+            grouped.setdefault(tid, []).append(r)
+        else:
+            unassigned.append(r)
+
+    # Sort groups by best (lowest) distance, within group by distance
+    out: list[SearchResult] = []
+    for tid, group in sorted(grouped.items(), key=lambda kv: min(r.distance for r in kv[1])):
+        label = id_to_label[tid]
+        for r in sorted(group, key=lambda r: r.distance):
+            meta = dict(r.metadata)
+            meta["_topic_label"] = label
+            out.append(SearchResult(
+                id=r.id, content=r.content, distance=r.distance,
+                collection=r.collection, metadata=meta,
+                hybrid_score=r.hybrid_score,
+            ))
+
+    # Unassigned at the end, sorted by distance
+    for r in sorted(unassigned, key=lambda r: r.distance):
+        out.append(r)
+
     return out

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}{{ created_by }} — nx console{% endblock %}
+{% block content %}
+<hgroup>
+  <h2><code>{{ created_by }}</code></h2>
+  <p>{{ total_links }} links, {{ total_docs }} documents</p>
+</hgroup>
+
+<a href="/campaigns?scope={{ scope }}">&larr; Back to campaigns</a>
+
+{% if links_by_type %}
+<h3>Links by Type</h3>
+{% for link_type, type_links in links_by_type.items() %}
+<details {% if loop.first %}open{% endif %}>
+  <summary><code>{{ link_type }}</code> ({{ type_links | length }})</summary>
+  <table role="grid">
+    <thead><tr><th>From</th><th>To</th><th>Created</th></tr></thead>
+    <tbody>
+      {% for link in type_links[:50] %}
+      <tr>
+        <td><small>{{ link.get('from_t', '') }}</small></td>
+        <td><small>{{ link.get('to_t', '') }}</small></td>
+        <td><small>{{ link.get('created_at', '')[:19] }}</small></td>
+      </tr>
+      {% endfor %}
+      {% if type_links | length > 50 %}
+      <tr><td colspan="3"><em>... and {{ type_links | length - 50 }} more</em></td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</details>
+{% endfor %}
+{% endif %}
+
+{% if docs %}
+<h3>Documents ({{ docs | length }})</h3>
+<table role="grid">
+  <thead><tr><th>Tumbler</th><th>Title</th><th>Type</th><th>Indexed</th></tr></thead>
+  <tbody>
+    {% for doc in docs[:50] %}
+    <tr>
+      <td><small>{{ doc.get('tumbler', '') }}</small></td>
+      <td>{{ doc.get('title', '') }}</td>
+      <td><code>{{ doc.get('content_type', '') }}</code></td>
+      <td><small>{{ doc.get('indexed_at', '')[:19] }}</small></td>
+    </tr>
+    {% endfor %}
+    {% if docs | length > 50 %}
+    <tr><td colspan="4"><em>... and {{ docs | length - 50 }} more</em></td></tr>
+    {% endif %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

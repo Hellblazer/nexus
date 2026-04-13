@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-04-13
+
+### Added
+
+- `topic` parameter on `search` MCP tool for topic-scoped search
+- Topic boost and grouping active on both `search` and `query` MCP tools
+- `taxonomy_assign_hook` registered at server startup for incremental topic assignment
+- Agent context protocol updated with topic-scoped search examples
+- Session start hook mentions `topic=` parameter in search description
+- Subagent start hook documents `topic=` in search signature
+- Query planner skill includes topic-scoped routing option
+
+### Changed
+
+- `search` MCP tool description updated for topic grouping and boost
+- `query` MCP tool now passes taxonomy for boosted ranking
+- `store_put` triggers post-store hook for automatic topic assignment
+
 ## [3.9.3] - 2026-04-11
 
 Agent model defaults restored to v3.9.1 originals after clean eval

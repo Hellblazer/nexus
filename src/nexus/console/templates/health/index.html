@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Health — nx console{% endblock %}
+{% block content %}
+<div style="display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.5rem;">
+  <h2 style="margin:0;">Health</h2>
+  <span class="stat-label">{{ health_checks | length }} checks</span>
+  <button hx-get="/health/refresh?scope={{ scope }}" hx-target="#health-cards"
+          class="secondary outline"
+          style="margin-left: auto; padding: 0.15rem 0.5rem; font-size: 0.75rem;">Refresh</button>
+</div>
+
+<div id="health-cards">
+  {% include "health/_cards.html" %}
+</div>
+{% endblock %}

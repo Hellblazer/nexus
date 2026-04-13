@@ -26,6 +26,14 @@ def index() -> None:
     """Index repositories, PDFs, and Markdown into T3 collections."""
 
 
+def _discover_taxonomy(collection_name, taxonomy, chroma_client, *, force=False):
+    """Wrapper for discover_for_collection — importable for patching in tests."""
+    from nexus.commands.taxonomy_cmd import discover_for_collection
+    return discover_for_collection(
+        collection_name, taxonomy, chroma_client, force=force,
+    )
+
+
 @index.command("repo")
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
@@ -55,7 +63,9 @@ def index() -> None:
     show_default=True,
     help="Behaviour when another process holds the repo lock: skip exits immediately, wait blocks.",
 )
-def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, force_stale: bool, on_locked: str) -> None:
+@click.option("--no-taxonomy", is_flag=True, default=False,
+              help="Skip automatic topic discovery after indexing.")
+def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, force_stale: bool, on_locked: str, no_taxonomy: bool) -> None:
     """Register and immediately index a code repository at PATH.
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
@@ -127,6 +137,78 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
             if rdr_failed:
                 parts.append(f"{rdr_failed} failed")
             click.echo(f"  RDR documents: {', '.join(parts)} (collection rdr__)")
+    # Auto-discover taxonomy topics (RDR-070, nexus-0bg)
+    if not frecency_only and not no_taxonomy and stats:
+        try:
+            from fnmatch import fnmatch
+
+            from nexus.config import is_local_mode, load_config as _load_cfg
+            from nexus.db import make_t3
+            from nexus.db.t2 import T2Database
+            from nexus.commands._helpers import default_db_path
+
+            t3 = make_t3()
+            info = reg.get(path) or {}
+            cfg = _load_cfg()
+            exclude_patterns = (
+                cfg.get("taxonomy", {}).get("local_exclude_collections", [])
+                if is_local_mode() else []
+            )
+            collections = []
+            for key in ("collection", "docs_collection"):
+                col = info.get(key)
+                if col and not any(fnmatch(col, pat) for pat in exclude_patterns):
+                    collections.append(col)
+
+            total_topics = 0
+            with T2Database(default_db_path()) as db:
+                for col_name in collections:
+                    try:
+                        n = _discover_taxonomy(col_name, db.taxonomy, t3._client)
+                        total_topics += n
+                    except Exception:
+                        _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)
+            if total_topics:
+                click.echo(
+                    f"  Taxonomy: {total_topics} topics across {len(collections)} collections."
+                )
+                # Auto-label with Claude if available and enabled
+                auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
+                if auto_label:
+                    try:
+                        from nexus.commands.taxonomy_cmd import _claude_available, relabel_topics
+                        if _claude_available():
+                            labeled = 0
+                            for col_name in collections:
+                                labeled += relabel_topics(
+                                    db.taxonomy, collection=col_name, only_pending=True,
+                                )
+                            if labeled:
+                                click.echo(f"  Labels:   {labeled} topics labeled by Claude haiku.")
+                    except Exception:
+                        _log.debug("taxonomy_label_failed", exc_info=True)
+
+                # Count remaining unreviewed
+                unreviewed = len(db.taxonomy.get_unreviewed_topics())
+                if unreviewed:
+                    click.echo(
+                        f"  Review:   {unreviewed} topics pending. "
+                        f"Run `nx taxonomy review` to curate."
+                    )
+                # Auto-populate topic links if catalog available
+                try:
+                    from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links
+                    cat = _try_load_catalog()
+                    if cat:
+                        for col_name in collections:
+                            compute_topic_links(
+                                db.taxonomy, cat, collection=col_name, persist=True,
+                            )
+                except Exception:
+                    pass  # Non-fatal
+        except Exception:
+            _log.debug("taxonomy_discover_failed", exc_info=True)
+
     if not frecency_only:
         try:
             from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir

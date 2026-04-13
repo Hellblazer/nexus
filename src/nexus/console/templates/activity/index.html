@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Activity — nx console{% endblock %}
+{% block content %}
+<div x-data="{paused: false}">
+  <div style="display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.5rem;">
+    <h2 style="margin:0;">Activity</h2>
+    <span class="stat-label">{{ events | length }} recent events</span>
+    <button x-on:click="paused = !paused"
+            x-text="paused ? '▶ Resume' : '⏸ Pause'"
+            class="secondary outline"
+            style="margin-left: auto; padding: 0.15rem 0.5rem; font-size: 0.75rem;"></button>
+  </div>
+
+  <details style="margin-bottom: 0.5rem;">
+    <summary>Filters</summary>
+    <form hx-get="/activity/events?scope={{ scope }}" hx-trigger="input delay:300ms" hx-target="#event-rows">
+      <div class="grid">
+        <label><span class="stat-label">Actor</span>
+          <input type="text" name="created_by" placeholder="e.g. index_hook" style="margin-top:0.1rem;"></label>
+        <label><span class="stat-label">Content type</span>
+          <input type="text" name="content_type" placeholder="e.g. code" style="margin-top:0.1rem;"></label>
+        <label><span class="stat-label">Link type</span>
+          <input type="text" name="link_type" placeholder="e.g. implements" style="margin-top:0.1rem;"></label>
+      </div>
+    </form>
+  </details>
+
+  <table role="grid">
+    <thead>
+      <tr>
+        <th style="width:11rem;">Time</th>
+        <th style="width:10rem;">Actor</th>
+        <th style="width:10rem;">Action</th>
+        <th>Target</th>
+      </tr>
+    </thead>
+    <tbody id="event-rows">
+      {% include "activity/_stream.html" %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

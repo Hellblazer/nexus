@@ -45,7 +45,7 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 
 **Three storage tiers:**
 - T1: `chromadb.EphemeralClient` (or HTTP server via SessionStart hook) — session scratch (`nx scratch`)
-- T2: SQLite + FTS5 — persistent memory (`nx memory`) + plan library (`plan_save(ttl=30)`/`plan_search` MCP tools, 5 builtin templates seeded at `nx catalog setup`)
+- T2: SQLite + FTS5 — four domain stores: `MemoryStore` (persistent notes + FTS5), `PlanLibrary` (plan templates), `CatalogTaxonomy` (topic clustering + assignment), `Telemetry` (relevance log). Facade: `T2Database`. Plan tools: `plan_save(ttl=30)`/`plan_search` MCP tools, 5 builtin templates seeded at `nx catalog setup`.
 - T3: `chromadb.PersistentClient` + local ONNX embeddings (local mode, zero-config) OR `chromadb.CloudClient` + `VoyageAIEmbeddingFunction` (cloud mode) — permanent knowledge (`nx store`, `nx search`)
 
 **T3 ChromaDB database**: a single `chromadb.CloudClient` database (`CHROMA_DATABASE` value, e.g. `nexus`). All collection prefixes coexist in one database:
@@ -95,29 +95,67 @@ query("how does path resolution work", follow_links="implements", subtree="1.1")
 ```
 src/nexus/           # Core package
   cli.py             # Click entry point; registers all command groups
-  commands/          # One file per CLI command group (index, search, memory, scratch, store, collection, config, hooks, doctor, enrich, catalog, mineru)
+  commands/          # One file per CLI command group
+    index.py         # nx index (repo, pdf, rdr)
+    search_cmd.py    # nx search
+    memory.py        # nx memory
+    scratch.py       # nx scratch
+    store.py         # nx store
+    collection.py    # nx collection
+    config_cmd.py    # nx config
+    hooks.py         # nx hooks (user-facing hook management)
+    hook.py          # nx hook (hidden; git hook stanza management)
+    doctor.py        # nx doctor
+    enrich.py        # nx enrich
+    catalog.py       # nx catalog
+    mineru.py        # nx mineru
+    console.py       # nx console (embedded web UI server)
+    taxonomy_cmd.py  # nx taxonomy (topic browsing and discovery)
+    _helpers.py      # Shared CLI helpers (default_db_path)
+    _provision.py    # ChromaDB Cloud provisioning helpers
   catalog/           # Xanadu-inspired document catalog (JSONL truth + SQLite cache)
     catalog.py       # Core: link(), link_query(), graph(), delete_document(), link_audit(), descendants(), resolve_chunk()
     catalog_db.py    # SQLite schema + FTS5 + UNIQUE link constraint + descendants() SQL helper
     tumbler.py       # Hierarchical addresses (depth, ancestors, lca) + JSONL readers with resilience
-    auto_linker.py    # Storage-boundary auto-linking from T1 scratch link-context
+    auto_linker.py   # Storage-boundary auto-linking from T1 scratch link-context
     link_generator.py # Post-hoc batch linkers: citation, code-RDR heuristic, RDR file-path
-  db/                # t1.py, t2/ (package: memory/plans/taxonomy/telemetry domain stores), t3.py — tier implementations; local_ef.py — local ONNX embeddings
-  indexer.py         # Repo indexing pipeline (classify → chunk → embed → store)
+    consolidation.py # Collection consolidation: merge per-paper collections into corpus-level collections
+  console/           # Embedded web UI (FastAPI + HTMX)
+    app.py           # FastAPI app factory; mounts routes and static files
+    config.py        # Console-specific configuration
+    watchers.py      # File/event watchers for live UI updates
+    routes/          # FastAPI routers (activity, campaigns, health, partials)
+  db/                # Storage tier implementations
+    t1.py            # T1 ChromaDB client (ephemeral or HTTP)
+    t2/              # T2 SQLite package: MemoryStore, PlanLibrary, CatalogTaxonomy, Telemetry domain stores + T2Database facade
+    t3.py            # T3 ChromaDB client (persistent local or cloud)
+    local_ef.py      # Local ONNX embedding function (MiniLM, zero-config)
+    chroma_quotas.py # ChromaDB Cloud quota constants, error hierarchy, and validator (RDR-005)
+  mcp/               # MCP server split into two FastMCP servers
+    core.py          # nexus MCP server: search, store, memory, scratch, collections, plans (14 tools)
+    catalog.py       # nexus-catalog MCP server: catalog search/show/list/register/update/link/resolve/stats (10 tools)
+  indexer.py         # Repo indexing pipeline orchestrator (classify → dispatch → embed → store)
+  code_indexer.py    # Code file indexing: AST chunking, context extraction, Voyage AI embedding (extracted from indexer.py, RDR-032)
+  prose_indexer.py   # Prose file indexing: semantic markdown chunking, CCE embedding (extracted from indexer.py, RDR-032)
+  index_context.py   # IndexContext dataclass: shared indexing parameters replacing 12-parameter signatures
+  indexer_utils.py   # Shared indexing utilities: staleness checks, context-prefix building
   classifier.py      # File classification: CODE / PROSE / PDF / SKIP
   chunker.py         # Tree-sitter AST chunking (31 languages)
+  languages.py       # LANGUAGE_REGISTRY: unified extension→language map (single source of truth)
   md_chunker.py      # Semantic markdown splitter for prose
-  pdf_extractor.py   # Docling-based PDF extraction
+  pdf_extractor.py   # PDF extraction: auto-routing Docling→MinerU→PyMuPDF (RDR-044)
   pdf_chunker.py     # PDF → chunks
   bib_enricher.py    # Semantic Scholar bibliographic metadata lookup
-  doc_indexer.py     # Incremental doc indexer with hash-based dedup
+  doc_indexer.py     # Incremental doc indexer with hash-based dedup and CCE embedding
   pipeline_buffer.py # SQLite WAL buffer for streaming PDF pipeline (RDR-048)
   pipeline_stages.py # Concurrent extractor/chunker/uploader stages + orchestrator
   checkpoint.py      # Batch-path crash recovery (RDR-047)
-  search_engine.py   # Cross-corpus search with over-fetch, thresholds, and catalog pre-filtering
-  search_clusterer.py # Ward hierarchical clustering for search results (opt-in)
+  exporter.py        # Collection export/import (.nxexp format: gzip+msgpack, with embeddings)
+  health.py          # Health check data model and runner (shared by nx doctor and nx console)
+  search_engine.py   # Cross-corpus search: over-fetch, thresholds, topic pre-filter/boost/grouping, catalog pre-filtering
+  search_clusterer.py # Ward hierarchical clustering for search results (fallback when topic coverage <50%)
   frecency.py        # Git frecency scoring
-  scoring.py         # Reranking + quality_score (RDR-055 E2)
+  scoring.py         # Reranking + quality_score (RDR-055 E2) + apply_topic_boost() (RDR-070)
   filters.py         # Shared where-filter parsing (MCP + CLI)
   ripgrep_cache.py   # ripgrep integration for hybrid search
   session.py         # Session lifecycle (T1 server start/connect)
@@ -130,7 +168,10 @@ src/nexus/           # Core package
   retry.py           # Transient-error retry logic
   ttl.py             # TTL / expiry helpers
   hooks.py           # Git hook stanza management
-  mcp_infra.py       # MCP server infrastructure (singletons, caching, injection)
+  logging_setup.py   # Structured logging configuration (cli/console/mcp/hook modes, rotating file handler)
+  taxonomy.py        # Deprecation shim — imports forwarded to db.t2.catalog_taxonomy (RDR-070)
+  mcp_server.py      # Backward-compat shim — re-exports all MCP tools from nexus.mcp package
+  mcp_infra.py       # MCP server infrastructure: singletons, caching, test injection, taxonomy_assign_hook (post-store topic assignment)
 nx/                  # Claude Code plugin (skills, agents, hooks, slash commands)
 tests/               # pytest suite (unit + integration + e2e/)
 docs/                # Documentation (architecture.md is the module map)

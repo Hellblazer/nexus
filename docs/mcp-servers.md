@@ -46,9 +46,9 @@ Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.
 
 | Tool | Purpose |
 |---|---|
-| `search` | Semantic + hybrid chunk search over T3 knowledge collections |
-| `query` | Document-level catalog-aware retrieval (scope by `author`, `content_type`, `subtree`, `follow_links`, `depth`) |
-| `store_put` | Write a document into a T3 collection |
+| `search` | Semantic chunk search over T3 collections. Supports `topic` for topic-scoped search, `cluster_by="semantic"` for topic grouping, and automatic same-topic distance boost. |
+| `query` | Document-level catalog-aware retrieval (scope by `author`, `content_type`, `subtree`, `follow_links`, `depth`). Results ranked with both link-aware and topic-aware boosting. |
+| `store_put` | Write a document into a T3 collection. Triggers a post-store hook that auto-assigns the document to its nearest topic via centroid ANN lookup. |
 | `store_get` | Retrieve a document by id from a T3 collection |
 | `store_list` | Paginate documents in a T3 collection |
 
@@ -113,6 +113,7 @@ than agent convenience.
 | `nx catalog unlink` | Destructive edge removal |
 | `nx catalog link-audit` | Full-graph scan; expensive and human-oriented |
 | `nx catalog link-bulk-delete` (hidden) | Bulk link deletion by filter; high blast radius if misused |
+| `nx taxonomy *` | Topic discovery, review, merge, split, rename, rebuild. These are operator curation tasks, not agent tasks. Agents benefit from taxonomy via `search(topic=...)` and automatic topic boost on `search`/`query`. |
 
 The underlying Python functions still exist under the same names inside
 `src/nexus/mcp/core.py` and `src/nexus/mcp/catalog.py` — they're just no
@@ -157,6 +158,7 @@ permission boundaries, remove or narrow the matcher in
 | Task | Server | Tool |
 |---|---|---|
 | "Find code that handles retries" | `nexus` | `search` |
+| "Search within the PDF extraction topic" | `nexus` | `search` with `topic="Math-aware PDF Extraction"` |
 | "Summarize all papers by Fagin on schema mappings" | `nexus` | `query` with `author="Fagin"` |
 | "What RDRs cite this paper?" | `nexus-catalog` | `links` with `link_type="cites"` |
 | "What T3 collection is this paper in?" | `nexus-catalog` | `search` or `resolve` |

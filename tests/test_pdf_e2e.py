@@ -133,7 +133,8 @@ class TestIndexPdfFileE2E:
 
         results = local_t3.search("hello world test document", [collection_name])
         assert results, "Expected search results after indexing"
-        assert results[0]["git_project_name"] == pdf_git_repo_e2e.name, (
-            f"Expected git_project_name={pdf_git_repo_e2e.name!r}, "
-            f"got {results[0]['git_project_name']!r}"
-        )
+        assert results[0].get("source_agent") == "nexus-indexer"
+        assert results[0].get("tags") == "pdf"
+        # git_project_name survives now that empty metadata values are
+        # filtered before augmentation (staying under 32-key limit)
+        assert results[0].get("git_project_name") == pdf_git_repo_e2e.name

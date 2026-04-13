@@ -315,12 +315,11 @@ def _catalog_hook(
         if new_tumblers:
             _progress(f"  Catalog: linking {len(new_tumblers)} new entries…\r")
         try:
-            from nexus.catalog.link_generator import generate_code_rdr_links, generate_rdr_filepath_links
-            link_count = generate_code_rdr_links(cat, new_tumblers=new_tumblers)
+            from nexus.catalog.link_generator import generate_rdr_filepath_links
             fp_count = generate_rdr_filepath_links(cat, new_tumblers=new_tumblers)
-            links_created = link_count + fp_count
+            links_created = fp_count
             if links_created:
-                _log.info("catalog_links_generated", heuristic=link_count, filepath=fp_count, repo=repo_name)
+                _log.info("catalog_links_generated", filepath=fp_count, repo=repo_name)
         except Exception:
             _log.debug("catalog_link_generation_failed", exc_info=True)
 
@@ -709,20 +708,31 @@ def _index_pdf_file(
         prefix = "## " + "  ".join(prefix_parts)
         embed_texts_pdf.append(f"{prefix}\n\n{doc}")
 
-    # Augment metadata with repo-indexer fields
+    # Augment metadata with repo-indexer fields.
+    # Filter empty/zero values from _pdf_chunks to stay under ChromaDB's
+    # 32-key metadata limit. PDF chunks produce ~31 raw keys; augmentation
+    # adds ~12 more. Without filtering, the _write_batch trimmer silently
+    # drops keys by insertion order, losing git metadata.
+    _EMPTY_VALUES = ("", 0, False, None)
+    # Keys where empty/zero IS meaningful (TTL guard, required fields)
+    _KEEP_ALWAYS = {"expires_at", "ttl_days", "chunk_index", "page_number"}
     metadatas: list[dict] = []
     for m in metadatas_raw:
+        # Drop empty raw metadata values
+        cleaned = {
+            k: v for k, v in m.items()
+            if v not in _EMPTY_VALUES or k in _KEEP_ALWAYS
+        }
         augmented = {
-            **m,
+            **cleaned,
             "title": f"{file.relative_to(repo)}:page-{m.get('page_number', 0)}",
             "tags": "pdf",
             "category": "prose",
-            "session_id": "",
             "source_agent": "nexus-indexer",
             "expires_at": "",
             "ttl_days": 0,
             "frecency_score": float(score),
-            **git_meta,
+            **{k: v for k, v in git_meta.items() if v},
         }
         metadatas.append(augmented)
 

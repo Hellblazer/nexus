@@ -220,6 +220,102 @@ def resolve_tumbler_mcp(cat, value):
     return resolve_tumbler(cat, value)
 
 
+# ── Post-store hooks (RDR-070, nexus-7h2) ────────────────────────────────────
+# Synchronous hooks that fire after every store_put. Exceptions are caught per-
+# hook and logged, never propagated — same non-fatal pattern as auto_linker.
+
+_post_store_hooks: list = []
+
+
+def register_post_store_hook(fn) -> None:
+    """Register a callable(doc_id, collection, content) to fire after store_put."""
+    _post_store_hooks.append(fn)
+
+
+def fire_post_store_hooks(doc_id: str, collection: str, content: str) -> None:
+    """Invoke all registered post-store hooks. Exceptions logged, never raised."""
+    import structlog
+    _hook_log = structlog.get_logger()
+    for hook in _post_store_hooks:
+        try:
+            hook(doc_id, collection, content)
+        except Exception:
+            _hook_log.warning("post_store_hook_failed", hook=getattr(hook, "__name__", "?"), exc_info=True)
+
+
+def taxonomy_assign_hook(
+    doc_id: str,
+    collection: str,
+    content: str,
+    *,
+    taxonomy=None,
+    chroma_client=None,
+) -> None:
+    """Assign a newly stored document to its nearest topic via centroid ANN.
+
+    Re-embeds ``content`` with local MiniLM 384d, queries
+    ``taxonomy__centroids`` for the nearest cluster, and writes a
+    ``topic_assignments`` row with ``assigned_by='centroid'``.
+
+    No-op when centroids don't exist (no discover run yet), or when
+    the collection matches ``taxonomy.local_exclude_collections`` and
+    running in local mode (MiniLM clusters poorly on code).
+    Keyword args ``taxonomy`` and ``chroma_client`` are injection points
+    for testing; production path resolves them from singletons.
+    """
+    from fnmatch import fnmatch
+
+    from nexus.config import is_local_mode, load_config
+
+    if is_local_mode():
+        exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
+        if any(fnmatch(collection, pat) for pat in exclude):
+            return
+
+    if taxonomy is None:
+        with t2_ctx() as db:
+            taxonomy = db.taxonomy
+            _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client)
+            return
+
+    _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client)
+
+
+def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
+    """Inner logic for taxonomy_assign_hook (avoids double context-manager).
+
+    Fetches the doc's existing T3 embedding (Voyage on cloud, MiniLM on
+    local) rather than re-embedding with MiniLM. Falls back to MiniLM
+    if the T3 embedding isn't available (e.g., race condition).
+    """
+    import numpy as np
+
+    if chroma_client is None:
+        chroma_client = get_t3()._client
+
+    # Try to fetch the doc's existing T3 embedding (already stored by store_put)
+    embedding = None
+    try:
+        coll = chroma_client.get_collection(collection, embedding_function=None)
+        result = coll.get(ids=[doc_id], include=["embeddings"])
+        if result["embeddings"] is not None and len(result["embeddings"]) > 0:
+            emb = result["embeddings"][0]
+            if emb is not None and len(emb) > 0:
+                embedding = np.array(emb, dtype=np.float32)
+    except Exception:
+        pass  # Fall through to MiniLM
+
+    if embedding is None:
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        embedding = np.array(ef([content])[0], dtype=np.float32)
+
+    topic_id = taxonomy.assign_single(collection, embedding, chroma_client)
+    if topic_id is not None:
+        taxonomy.assign_topic(doc_id, topic_id, assigned_by="centroid")
+
+
 # ── Test injection ────────────────────────────────────────────────────────────
 
 
@@ -232,6 +328,7 @@ def reset_singletons():
     _collections_cache = ([], 0.0)
     _catalog_instance = None
     _catalog_mtime = 0.0
+    _post_store_hooks.clear()
     clear_search_traces()
 
 

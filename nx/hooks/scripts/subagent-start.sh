@@ -123,12 +123,12 @@ T2 memory — project-scoped, persistent:
 
 T3 knowledge — permanent, semantic search:
   Tool: mcp__plugin_nx_nexus__search
-    search(query="...", corpus="knowledge", limit=10, offset=0, where="bib_year>=2023", cluster_by="")
-    → where: section_type!=references filters noise. cluster_by="semantic" groups results
+    search(query="...", corpus="knowledge", limit=10, offset=0, where="bib_year>=2023", cluster_by="", topic="")
+    → where: section_type!=references filters noise. cluster_by="semantic" groups by topic. topic="Label" pre-filters to a topic cluster
   Tool: mcp__plugin_nx_nexus__query
     query(question="...", corpus="knowledge", where="bib_year>=2020", limit=10,
           author="", content_type="", follow_links="cites", depth=1, subtree="1.1")
-    → document-level results; catalog params scope search before vector query
+    → document-level results; catalog params scope search; taxonomy-boosted ranking
     → subtree: all descendants of tumbler prefix (e.g. "1.1" = all nexus docs)
     → follow_links: enrich results with linked docs (any link type)
   Tool: mcp__plugin_nx_nexus__store_list

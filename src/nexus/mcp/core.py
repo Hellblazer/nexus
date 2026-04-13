@@ -18,6 +18,7 @@ from nexus.db.t3 import verify_collection_deep
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
+    fire_post_store_hooks as _fire_post_store_hooks,
     get_catalog as _get_catalog,
     get_collection_names as _get_collection_names,
     get_recent_search_traces as _get_recent_search_traces,
@@ -36,6 +37,11 @@ mcp = FastMCP("nexus")
 
 _DEFAULT_PAGE_SIZE = 10
 
+# ── Post-store hooks (register once at import) ──────────────────────────────
+
+from nexus.mcp_infra import register_post_store_hook, taxonomy_assign_hook
+
+register_post_store_hook(taxonomy_assign_hook)
 
 # ── Registered tools ─────────────────────────────────────────────────────────
 
@@ -51,6 +57,7 @@ def search(
     offset: int = 0,
     where: str = "",
     cluster_by: str = "",
+    topic: str = "",
 ) -> str:
     """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
 
@@ -60,7 +67,8 @@ def search(
         limit: Page size (default 10)
         offset: Skip N results for pagination (default 0)
         where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
-        cluster_by: "semantic" for Ward hierarchical clustering, empty for flat ranked list
+        cluster_by: "semantic" for topic/Ward clustering (default), empty to disable
+        topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
     """
     try:
         from nexus.search_engine import search_cross_corpus
@@ -88,12 +96,17 @@ def search(
         # Fetch enough to fill the requested page
         fetch_n = offset + limit
         clustered = bool(cluster_by)
-        results = search_cross_corpus(
-            query, target, n_results=fetch_n, t3=t3, where=where_dict,
-            cluster_by=cluster_by or None,
-            catalog=_get_catalog(),
-            link_boost=False,
-        )
+        # Always pass taxonomy for topic grouping + topic boost (RDR-070).
+        # Wrapped in context manager to avoid connection leak.
+        with _t2_ctx() as _t2_db:
+            results = search_cross_corpus(
+                query, target, n_results=fetch_n, t3=t3, where=where_dict,
+                cluster_by=cluster_by or None,
+                catalog=_get_catalog(),
+                link_boost=False,
+                taxonomy=_t2_db.taxonomy,
+                topic=topic or None,
+            )
         # Only sort by distance for flat (non-clustered) results.
         # Clustered results arrive in cluster-grouped order from search_engine.
         if not clustered:
@@ -299,11 +312,13 @@ def query(
 
         # Over-fetch chunks to ensure good document coverage
         fetch_n = limit * 10
-        results = search_cross_corpus(
-            question, target, n_results=fetch_n, t3=t3, where=where_dict,
-            catalog=_get_catalog(),
-            link_boost=True,
-        )
+        with _t2_ctx() as _t2_db:
+            results = search_cross_corpus(
+                question, target, n_results=fetch_n, t3=t3, where=where_dict,
+                catalog=_get_catalog(),
+                link_boost=True,
+                taxonomy=_t2_db.taxonomy,
+            )
         results.sort(key=lambda r: r.distance)
         if not results:
             return "No documents found."
@@ -435,6 +450,8 @@ def store_put(
                 structlog.get_logger().debug("store_put_auto_linked", doc_id=doc_id, link_count=n)
         except Exception:
             pass  # auto-linking is non-fatal
+        # RDR-070: post-store hooks (taxonomy assignment, etc.)
+        _fire_post_store_hooks(doc_id, col_name, content)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.
@@ -1119,6 +1136,9 @@ def collection_verify(name: str) -> str:
 
 def main():
     """Run the core MCP server on stdio transport."""
+    from nexus.logging_setup import configure_logging
+
+    configure_logging("mcp")
     mcp.run(transport="stdio")
 
 

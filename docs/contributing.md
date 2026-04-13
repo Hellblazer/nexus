@@ -6,8 +6,8 @@
 git clone https://github.com/Hellblazer/nexus.git
 cd nexus
 uv sync
-uv tool install .
-nx hooks install    # auto-index this repo on every commit
+scripts/reinstall-tool.sh   # install nx CLI (preserves optional extras)
+nx hooks install             # auto-index this repo on every commit
 ```
 
 ## Running Tests

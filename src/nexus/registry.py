@@ -94,6 +94,10 @@ def _rdr_collection_name(repo: Path) -> str:
 class RepoRegistry:
     """Thread-safe registry of indexed repositories stored as JSON."""
 
+    # Paths matching these prefixes are never persisted — they come from test
+    # runs, worktrees, or accidental indexing of temp directories.
+    _EPHEMERAL_PREFIXES = ("/private/tmp", "/private/var", "/tmp", "/var/folders")
+
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = threading.RLock()
@@ -107,6 +111,7 @@ class RepoRegistry:
             if not isinstance(self._data.get("repos"), dict):
                 _log.warning("Registry has invalid structure; starting empty", path=str(path))
                 self._data = {"repos": {}}
+            self._prune_stale()
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -159,6 +164,26 @@ class RepoRegistry:
                 self._save()
 
     # ── internal ──────────────────────────────────────────────────────────────
+
+    @classmethod
+    def _is_ephemeral(cls, path: str) -> bool:
+        """Return True if *path* looks like a pytest temp dir or orphaned worktree."""
+        if "/pytest-" in path:
+            return True
+        if "/worktrees/" in path and not Path(path).exists():
+            return True
+        return False
+
+    def _prune_stale(self) -> None:
+        """Remove entries whose paths no longer exist on disk."""
+        repos = self._data.get("repos", {})
+        before = len(repos)
+        clean = {k: v for k, v in repos.items() if Path(k).exists()}
+        pruned = before - len(clean)
+        if pruned:
+            self._data["repos"] = clean
+            self._save()
+            _log.info("registry_pruned_stale", removed=pruned, remaining=len(clean))
 
     def _save(self) -> None:
         """Atomic write via mkstemp + os.replace(), safe against concurrent processes.

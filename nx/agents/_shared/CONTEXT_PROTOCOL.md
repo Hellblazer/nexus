@@ -126,6 +126,7 @@ Use the right search form for the task:
 | Search by content type | mcp__plugin_nx_nexus__query( `question="topic", content_type="rdr"` |
 | Follow citation links | mcp__plugin_nx_nexus__query( `question="topic", follow_links="cites", depth=1` |
 | Search document subtree | mcp__plugin_nx_nexus__query( `question="topic", subtree="1.1"` |
+| Search within a topic cluster | mcp__plugin_nx_nexus__search( `query="question", topic="PDF Extraction"` |
 | Cross-corpus research | Use query tool with `corpus="all"` or multiple query calls |
 | List documents in a collection | mcp__plugin_nx_nexus__store_list( `collection="knowledge__art", docs=true` |
 

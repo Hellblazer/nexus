@@ -207,7 +207,11 @@ def search_cmd(
         hybrid = config.get("search", {}).get("hybrid_default", False)
 
     def _retrieve(q: str) -> list[SearchResult]:
-        raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter, link_boost=False)
+        # Pass taxonomy for topic grouping + topic boost (RDR-070)
+        from nexus.commands._helpers import default_db_path as _db_path
+        from nexus.db.t2 import T2Database
+        with T2Database(_db_path()) as _t2:
+            raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter, link_boost=False, taxonomy=_t2.taxonomy)
         if hybrid:
             # Scope ripgrep to matching caches when a single corpus is targeted
             rg_corpus = target_collections[0] if len(target_collections) == 1 else None

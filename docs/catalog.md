@@ -84,7 +84,7 @@ You don't have to register documents manually. Every indexing pathway does it au
 
 | Command | What gets registered |
 |---------|---------------------|
-| `nx index repo .` | Code files, prose, RDRs — plus auto-generates code→RDR links |
+| `nx index repo .` | Code files, prose, RDRs — plus auto-generates code→RDR links and topic links |
 | `nx index pdf paper.pdf` | PDF with title, author, page count |
 | `nx index rdr .` | RDR documents with frontmatter titles |
 | `nx index md file.md` | Markdown documents |
@@ -92,6 +92,10 @@ You don't have to register documents manually. Every indexing pathway does it au
 | MCP `store_put` | Knowledge entries stored by agents |
 
 After `nx enrich`, run `nx catalog setup` again (or `nx catalog generate-links`) to create citation links from the newly fetched references.
+
+### Taxonomy and topic links
+
+After each `nx index repo` run, the indexer auto-triggers `compute_topic_links` (from `nexus.commands.taxonomy_cmd`) for each indexed collection. This computes inter-topic link edges — which topics co-occur in documents — and persists them to the `topic_links` T2 table. The search engine uses these edges for semantic clustering. No manual step needed; the catalog must be initialized for topic links to populate.
 
 ## Agent use
 
@@ -106,7 +110,7 @@ query(question="related work", follow_links="cites")         # citation-enriched
 
 For simple scoped queries, `query()` with catalog params is a single MCP call — no agent dispatch needed. For complex analytical queries (compare, extract, generate), the `/nx:query` skill orchestrates multi-step plans via three-path dispatch: Path 1 (single `query()` call) → Path 2 (template match) → Path 3 (planner agent).
 
-Individual catalog MCP tools (`search`, `links`, `resolve` on the `nexus-catalog` server — short names, no `catalog_` prefix since RDR-062) are still available for direct metadata inspection and graph traversal. Full tool names: `mcp__plugin_nx_nexus-catalog__search`, `mcp__plugin_nx_nexus-catalog__links`, etc.
+Individual catalog MCP tools on the `nexus-catalog` server use short names without the `catalog_` prefix (since RDR-062). The 10 registered tools are: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`. Full names follow the pattern `mcp__plugin_nx_nexus-catalog__<tool>` (e.g., `mcp__plugin_nx_nexus-catalog__search`). Three operations (`unlink`, `link_audit`, `link_bulk`) are demoted — they are plain Python functions not exposed on the MCP surface.
 
 Agents also create links during their work — the debugger creates `relates` links between findings, the developer creates `implements` links to RDRs, the knowledge-tidier creates `supersedes` links when consolidating documents.
 

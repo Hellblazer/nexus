@@ -98,8 +98,8 @@ def main() -> None:
     # --- Capabilities summary (AI-optimized, minimal tokens) ---
     output_lines.append("## nx Capabilities")
     output_lines.append("")
-    output_lines.append("Search: `search` MCP tool — `where=\"KEY>=VALUE\"` for metadata filtering, `cluster_by=\"semantic\"` for result grouping, `where=\"section_type!=references\"` to filter noise (results include `chunk_text_hash` metadata)")
-    output_lines.append("Document search: `query` MCP tool — document-level results with catalog-aware routing (`author`, `content_type`, `subtree`, `follow_links`, `depth`)")
+    output_lines.append("Search: `search` MCP tool — `where=\"KEY>=VALUE\"` for metadata filtering, `cluster_by=\"semantic\"` for result grouping, `topic=\"Label\"` for topic-scoped search, `where=\"section_type!=references\"` to filter noise (results include `chunk_text_hash` metadata)")
+    output_lines.append("Document search: `query` MCP tool — document-level results with catalog-aware routing (`author`, `content_type`, `subtree`, `follow_links`, `depth`), taxonomy-boosted ranking")
     output_lines.append("Analytical queries: `/nx:query` skill — multi-step retrieval and analysis")
     output_lines.append("Plan library: `plan_save`/`plan_search` MCP tools (T2, project-scoped)")
     output_lines.append("Scratch: `scratch` MCP tool — session-scoped, shared across agents")

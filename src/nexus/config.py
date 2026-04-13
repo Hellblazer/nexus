@@ -286,6 +286,16 @@ _DEFAULTS: dict[str, Any] = {
         "mineru_table_enable": False,
         "mineru_page_batch": 1,
     },
+    "taxonomy": {
+        # Glob patterns for collections to exclude from auto-discover
+        # in LOCAL MODE ONLY. Local mode uses MiniLM which clusters
+        # poorly on source code. Cloud mode uses voyage-code-3 and
+        # is unaffected. Set to [] to enable taxonomy for all collections.
+        "local_exclude_collections": ["code__*"],
+        # Auto-label topics with Claude haiku after discover.
+        # Requires `claude` CLI on PATH. Set False to keep c-TF-IDF labels.
+        "auto_label": True,
+    },
     "search": {
         "hybrid_default": False,
         "hnsw_ef": 256,
@@ -301,6 +311,7 @@ _DEFAULTS: dict[str, Any] = {
             "default": 0.55,
         },
         "cluster_by": None,
+        "contradiction_check": True,
     },
     "voyageai": {
         "read_timeout_seconds": 120,

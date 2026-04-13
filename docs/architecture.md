@@ -1,6 +1,6 @@
 # Architecture
 
-> When in doubt, check `src/nexus/` — the code is the ground truth.
+> When in doubt, check `src/nexus/` -- the code is the ground truth.
 
 ## How It Fits Together
 
@@ -23,14 +23,21 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     pdf:   auto-detect routing (Docling → MinerU → PyMuPDF) → table/formula detection → bib enrichment → voyage-context-3 → docs__<corpus>
     │     skip:  .xml/.json/.yml/.html/.css/.lock/etc → silently ignored
     │
-    ├── Search: query → retrieve → rerank → format
+    ├── Search: query → retrieve → rerank → topic-boost → group → format
     │     semantic, hybrid (+ frecency + ripgrep)
+    │     topic boost: same-topic -0.1, linked-topic -0.05 distance adjustment
+    │     topic grouping: T2 assignments (>50% coverage) → fallback Ward clustering
+    │
+    ├── Taxonomy: T3 embeddings → HDBSCAN → T2 topics → centroid ANN → incremental assign
+    │     discover: nx index repo (auto) or nx taxonomy discover (manual)
+    │     assign: taxonomy_assign_hook fires on every store_put
+    │     boost+group: search_engine.py reads db.taxonomy per search call
     │
     ├── Catalog: JSONL truth → SQLite cache → typed link graph
     │     documents: tumbler addressing (1.owner.doc), FTS5 search
     │     links: cites, implements-heuristic, supersedes, relates, formalizes
     │     auto-generate: citation links (bib metadata), code-RDR (heuristic)
-    │     MCP: nexus-catalog server — search, show, list, register, update,
+    │     MCP: nexus-catalog server -- search, show, list, register, update,
     │          link, links, link_query, resolve, stats (short names, RDR-062)
     │     CLI: nx catalog setup/search/show/links/link/unlink/stats
     │     Demoted to CLI-only: catalog_unlink, catalog_link_audit, catalog_link_bulk
@@ -63,26 +70,112 @@ metadata and enables citation link generation.
 and scoping semantic search to relevant collections instead of searching everything.
 
 **Link types in use**:
-- `cites` — citation relationships (auto-created by `nx enrich` from Semantic Scholar references)
-- `implements-heuristic` — code→RDR links (auto-created by indexer from title substring matching)
-- `supersedes` — created by RDR close and knowledge-tidier when documents are replaced
-- `relates` — created by agents (debugger, deep-analyst, codebase-analyzer) linking related findings
-- `implements`, `quotes`, `comments` — available for manual use
+- `cites` -- citation relationships (auto-created by `nx enrich` from Semantic Scholar references)
+- `implements-heuristic` -- code→RDR links (auto-created by indexer from title substring matching)
+- `supersedes` -- created by RDR close and knowledge-tidier when documents are replaced
+- `relates` -- created by agents (debugger, deep-analyst, codebase-analyzer) linking related findings
+- `implements`, `quotes`, `comments` -- available for manual use
 
 **Span formats** for sub-document link references:
-- `42-57` — line range (positional, may become stale on re-index)
-- `3:100-250` — chunk:char range (positional)
-- `chash:<sha256hex>` — content-addressed chunk identity (preferred, survives re-indexing)
-- `chash:<sha256hex>:<start>-<end>` — character range within a content-addressed chunk
+- `42-57` -- line range (positional, may become stale on re-index)
+- `3:100-250` -- chunk:char range (positional)
+- `chash:<sha256hex>` -- content-addressed chunk identity (preferred, survives re-indexing)
+- `chash:<sha256hex>:<start>-<end>` -- character range within a content-addressed chunk
 
 Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of stored chunk text). All 5 indexers (code, prose, doc PDF, doc markdown, streaming PDF pipeline) emit `chunk_text_hash` alongside the existing file-level `content_hash`. For existing collections, `nx catalog setup` or `nx collection backfill-hash` adds the field without re-embedding. `link_audit()` verifies chash spans resolve in T3.
 
-**Tumbler ordering**: Comparison operators (`<`, `<=`, `>`, `>=`) use -1 sentinel padding for cross-depth ordering — parent tumblers sort before their children. `Tumbler.spans_overlap()` detects positional span overlap using these operators.
+**Tumbler ordering**: Comparison operators (`<`, `<=`, `>`, `>=`) use -1 sentinel padding for cross-depth ordering -- parent tumblers sort before their children. `Tumbler.spans_overlap()` detects positional span overlap using these operators.
 
 **Two graph views**: `catalog_links` returns only links between live documents (deleted nodes excluded).
-`catalog_link_query` returns all links including orphans — useful for admin/audit.
+`catalog_link_query` returns all links including orphans -- useful for admin/audit.
 
 **CCE single-chunk note**: For CCE collections (`docs__*`, `rdr__*`, `knowledge__*`), documents with only one chunk are embedded via `contextualized_embed(inputs=[[chunk]])`.
+
+## Taxonomy
+
+Taxonomy (RDR-070) builds a topic hierarchy over T3 collections using existing embeddings, without re-embedding. HDBSCAN clusters the vectors already stored in ChromaDB, labels them with c-TF-IDF, and persists topic assignments to T2 SQLite. Every subsequent `store_put` call assigns the new document to the nearest centroid via ANN lookup. Search then uses these assignments to boost same-topic results and group output.
+
+In local mode, `code__*` collections are excluded by default because MiniLM clusters code poorly. Cloud mode uses `voyage-code-3` and is unaffected. `nx index repo` triggers discovery automatically after indexing.
+
+### Data Flow
+
+```
+nx index repo / nx taxonomy discover
+  │
+  ▼
+discover_for_collection()          # taxonomy_cmd.py
+  │  fetch ids + texts + embeddings from T3 (page_size=250)
+  │  fall back to MiniLM re-embed only when T3 embeddings absent
+  ▼
+CatalogTaxonomy.discover_topics()  # db/t2/catalog_taxonomy.py
+  │  sklearn HDBSCAN on N×D float32
+  │  c-TF-IDF labels (CountVectorizer + TfidfTransformer)
+  │  persist: topics, topic_assignments → T2 SQLite
+  │  upsert cluster centroids → ChromaDB taxonomy__centroids (cosine/HNSW)
+  ▼
+taxonomy_assign_hook()             # mcp_infra.py  (fires on every store_put)
+  │  fetch new doc's T3 embedding
+  │  CatalogTaxonomy.assign_single(): ANN query against taxonomy__centroids
+  │  nearest centroid → topic_id → INSERT OR IGNORE topic_assignments
+  ▼
+search_cross_corpus()              # search_engine.py
+  │  get_assignments_for_docs(result_ids) → topic_assignments dict
+  │  apply_topic_boost(): distance -= 0.1 (same topic), -= 0.05 (linked topic)
+  │  topic grouping when assignment coverage >50%
+  │  otherwise fall back to Ward hierarchical clustering
+```
+
+### Storage
+
+**T2 SQLite tables** (owned by `CatalogTaxonomy`):
+
+| Table | Purpose |
+|-------|---------|
+| `topics` | One row per discovered topic: label, collection, centroid_hash, doc_count, review_status, terms |
+| `topic_assignments` | doc_id → topic_id mapping, assigned_by (hdbscan or centroid) |
+| `taxonomy_meta` | Per-collection discover stats (last_discover_at, last_discover_doc_count) |
+| `topic_links` | Aggregated inter-topic link counts derived from catalog link graph |
+
+**T3 ChromaDB collection** (`taxonomy__centroids`): created with `embedding_function=None` and `hnsw:space=cosine`. One entry per topic holds the centroid vector, collection, topic_id, and label. Used exclusively by `assign_single()` for ANN lookup. Never goes through `t3.get_or_create_collection()` (that path would inject the wrong embedding function and L2 space).
+
+### Centroid Lifecycle
+
+| Operation | What happens |
+|-----------|-------------|
+| `discover` | Creates centroids for all topics in a collection |
+| `rebuild` (`--force`) | Runs HDBSCAN on updated embeddings, matches new centroids to old via cosine similarity (`_merge_labels`), transfers operator labels and `accepted` status |
+| `split` | Replaces the parent centroid with two child centroids |
+| `delete` / `merge` | Removes orphaned centroid entries |
+
+Manual labels survive rebuild via `_merge_labels`.
+
+### Connection to the Catalog Link Graph
+
+`nx taxonomy links --collection <col>` reads the catalog link graph and aggregates which topics are connected via document-level links. Results are stored in `topic_links` and read by the search engine via `get_topic_link_map()` to apply the linked-topic distance boost (-0.05).
+
+### CLI (`nx taxonomy`)
+
+| Command | Purpose |
+|---------|---------|
+| `status` | Health overview: collections, coverage, review state |
+| `discover` | Run HDBSCAN on a collection (auto or manual) |
+| `rebuild` | Re-discover with merge strategy (preserves labels) |
+| `list` | List topics with doc counts and review status |
+| `show` | Detail for a single topic: terms, docs, links |
+| `review` | Interactive accept/reject workflow |
+| `label` | Claude haiku auto-labeling for a collection |
+| `assign` | Manually assign a doc to a topic |
+| `rename` | Rename a topic label |
+| `merge` | Merge two topics into one |
+| `split` | Split a topic on a keyword pivot |
+| `links` | Compute and persist inter-topic links from catalog |
+
+### Config (`taxonomy` section in `.nexus.yml`)
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `auto_label` | `true` | Run Claude haiku labeling after `discover` |
+| `local_exclude_collections` | `["code__*"]` | Skip these collections in local mode |
 
 ## T2 Domain Stores
 
@@ -98,14 +191,14 @@ brief contention without raising `OperationalError`.
 |------------|-------------------|-----------------|----------------------------------------------------------------------------|
 | Memory     | `MemoryStore`     | `db.memory`     | Persistent notes, project context, FTS5 search, access tracking, TTL       |
 | Plans      | `PlanLibrary`     | `db.plans`      | Plan templates, plan search, plan TTL                                      |
-| Taxonomy   | `CatalogTaxonomy` | `db.taxonomy`   | Topic clustering, topic assignment                                         |
+| Taxonomy   | `CatalogTaxonomy` | `db.taxonomy`   | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow (RDR-070) |
 | Telemetry  | `Telemetry`       | `db.telemetry`  | Relevance log (query/chunk/action triples), retention-based expiry         |
 
 `T2Database` is a composing facade: it constructs the four stores in
 order (memory → plans → taxonomy → telemetry), re-exposes their public
 methods as thin delegates for backward compatibility, and runs
 cross-domain operations like `expire()` over all of them. The facade
-holds no database connection of its own — every SQL statement runs
+holds no database connection of its own -- every SQL statement runs
 through a specific domain store.
 
 **Preferred call style for new code**:
@@ -118,7 +211,7 @@ db.telemetry.log_relevance(query, ...)             # domain method
 ```
 
 Existing call sites that use `db.search(...)`, `db.save_plan(...)`,
-etc. continue to work via facade delegation — no migration required.
+etc. continue to work via facade delegation -- no migration required.
 
 ### Concurrency Model (RDR-063 Phase 2)
 
@@ -140,13 +233,13 @@ Phase 2 consequences:
 - **Telemetry no longer interferes with search**: MCP relevance-log
   writes run on the telemetry connection, so `memory_search` is not
   blocked by access-tracking hooks.
-- **Cluster rebuilds don't freeze memory**: `taxonomy.cluster_and_persist`
-  runs on the taxonomy connection; the long numpy clustering phase holds
+- **Cluster rebuilds don't freeze memory**: `CatalogTaxonomy.discover_topics`
+  runs on the taxonomy connection. The long numpy clustering phase holds
   no T2 locks, so interactive memory operations continue during the
-  bulk of the rebuild. (The initial `memory.get_all()` snapshot read
-  still briefly acquires `memory`'s lock, as any read does.)
+  bulk of the rebuild. (The initial embedding-fetch snapshot still briefly
+  acquires the taxonomy connection's lock, as any read does.)
 - **Parallel writes to the same store are serialized** by that store's
-  own `threading.Lock` plus the SQLite file-level write lock — callers
+  own `threading.Lock` plus the SQLite file-level write lock -- callers
   never see `OperationalError: database is locked`.
 
 **Migrations**: Each store owns its schema-migration guards and runs
@@ -154,12 +247,12 @@ them the first time it opens a given database path. The guards are
 per-domain, so concurrent `T2Database` constructors on the same path
 can each reach their own `_init_schema` without coordinating through a
 single global migration lock. (`T2Database.__init__` itself constructs
-the four stores sequentially in dependency order — the per-domain
+the four stores sequentially in dependency order -- the per-domain
 guard matters for multi-process / multi-constructor races, not for the
 sequential initialization inside a single `T2Database`.)
 
 **In-memory SQLite**: Tests that want an ephemeral database should use
-a temp file path, not `":memory:"` — `:memory:` databases are
+a temp file path, not `":memory:"` -- `:memory:` databases are
 per-connection, so the four stores would each see a distinct empty
 database and `test_t2_concurrency.py` would no longer exercise the
 cross-domain WAL path.
@@ -172,24 +265,27 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | Area | Files | What they do |
 |------|-------|-------------|
 | **Entry** | `cli.py`, `commands/` | Click CLI, one file per command group |
-| **Catalog** | `catalog/catalog.py`, `catalog_db.py`, `tumbler.py`, `link_generator.py`, `auto_linker.py` | Git-backed document registry + typed link graph (JSONL + SQLite). Tumbler addressing, `descendants()`/`ancestors()`/`lca()` hierarchy helpers, `resolve_chunk()` ghost element resolution, idempotent link upsert, composable query, bulk ops, audit. Auto-linker creates links from T1 link-context on every `store_put` |
-| **Storage** | `db/t1.py`, `db/t2/`, `db/t3.py` | Tier implementations. T2 is a package split into four domain stores (see § T2 Domain Stores). Plans table has `ttl` column for auto-expiry |
+| **Catalog** | `catalog/catalog.py`, `catalog/catalog_db.py`, `catalog/tumbler.py`, `catalog/link_generator.py`, `catalog/auto_linker.py`, `catalog/consolidation.py` | Git-backed document registry + typed link graph (JSONL + SQLite). Tumbler addressing, `descendants()`/`ancestors()`/`lca()` hierarchy helpers, `resolve_chunk()` ghost element resolution, idempotent link upsert, composable query, bulk ops, audit. Auto-linker creates links from T1 link-context on every `store_put`. `consolidation.py` merges per-paper collections into corpus-level collections |
+| **Storage** | `db/t1.py`, `db/t2/`, `db/t3.py`, `db/chroma_quotas.py`, `db/local_ef.py` | Tier implementations. T2 is a package split into four domain stores (see § T2 Domain Stores). Plans table has `ttl` column for auto-expiry. `chroma_quotas.py` is the single source of truth for ChromaDB Cloud quota constants and validators. `local_ef.py` provides the local ONNX embedding function |
 | **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py`, `pipeline_buffer.py`, `pipeline_stages.py`, `checkpoint.py` | Repo indexing pipeline (decomposed per RDR-032). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` auto-detects math-heavy PDFs via FormulaItem counting and routes to MinerU (optional `conexus[mineru]` extra) for superior LaTeX extraction, falling back through enriched Docling to PyMuPDF normalized. MinerU processes large PDFs in 5-page subprocess batches for memory isolation (prevents OOM on formula-dense documents). Chunk metadata includes `has_formulas` boolean. `pipeline_buffer.py` provides a WAL-mode SQLite buffer for the three-stage streaming pipeline (RDR-048); `pipeline_stages.py` implements the concurrent extractor/chunker/uploader stages and orchestrator; `checkpoint.py` handles batch-path crash recovery for smaller documents (RDR-047) |
 | **Export** | `exporter.py` | Collection export/import for T3 backup and migration (.nxexp format) |
-| **Search** | `search_engine.py`, `search_clusterer.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py`, `filters.py` | Query, rank, rerank, Ward hierarchical clustering, shared where-filter parsing |
-| **Hooks** | `commands/hooks.py` | Git hook install/uninstall/status, sentinel-bounded stanza management |
-| **Verification** | `config.py` (verification section), `nx/hooks/scripts/stop_verification_hook.sh`, `nx/hooks/scripts/pre_close_verification_hook.sh`, `nx/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Configuration — Verification](configuration.md#verification) |
-| **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Dual-server FastMCP architecture (RDR-062). **Core server (`nexus`, 15 tools)**: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`. **Catalog server (`nexus-catalog`, 10 tools)**: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` (short names — the `catalog_` prefix is dropped since the server namespace already provides context). **Demoted to CLI-only (6 tools)**: `store_delete`, `collection_info`, `collection_verify`, `catalog_unlink`, `catalog_link_audit`, `catalog_link_bulk`. Backward-compat shim at `mcp_server.py` re-exports all 30 functions. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth). Singletons and test injection in `mcp_infra.py` |
+| **Console** | `console/` (`app.py`, `watchers.py`, `config.py`, `routes/`), `commands/console.py` | Embedded web UI for monitoring agentic Nexus activity (`nx console`). FastAPI/uvicorn server with live-updating routes for activity, campaigns, health, and partials. `commands/console.py` handles start/stop lifecycle and PID file management |
+| **Search** | `search_engine.py`, `search_clusterer.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py`, `filters.py` | Query, rank, rerank. `scoring.py` applies topic boost (`apply_topic_boost`: same-topic -0.1, linked-topic -0.05). `search_engine.py` does topic grouping (T2 assignments when >50% coverage) with fallback to Ward hierarchical clustering |
+| **Taxonomy** | `db/t2/catalog_taxonomy.py`, `commands/taxonomy_cmd.py`, `taxonomy.py` (shim) | HDBSCAN topic discovery from T3 embeddings (RDR-070). T2 tables: `topics`, `topic_assignments`, `taxonomy_meta`, `topic_links`. ChromaDB `taxonomy__centroids` (cosine/HNSW) for centroid ANN. `discover_for_collection()` is the shared entry point for CLI and `nx index repo`. `taxonomy_assign_hook` in `mcp_infra.py` fires on every `store_put` for incremental assignment. `taxonomy.py` is a backward-compatibility shim that forwards old call sites to `db.taxonomy` |
+| **Hooks** | `commands/hooks.py`, `commands/hook.py` | `hooks.py`: Git hook install/uninstall/status, sentinel-bounded stanza management. `hook.py`: Claude Code SessionStart/SessionEnd lifecycle runners |
+| **Verification** | `config.py` (verification section), `nx/hooks/scripts/stop_verification_hook.sh`, `nx/hooks/scripts/pre_close_verification_hook.sh`, `nx/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Verification config](configuration.md#verification) |
+| **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Dual-server FastMCP architecture (RDR-062). **Core server (`nexus`, 15 tools)**: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`. **Catalog server (`nexus-catalog`, 10 tools)**: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` (short names -- the `catalog_` prefix is dropped since the server namespace already provides context). **Demoted to CLI-only (6 tools)**: `store_delete`, `collection_info`, `collection_verify`, `catalog_unlink`, `catalog_link_audit`, `catalog_link_bulk`. Backward-compat shim at `mcp_server.py` re-exports all 30 functions. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth). Singletons and test injection in `mcp_infra.py` |
 | **Enrichment** | `bib_enricher.py`, `commands/enrich.py` | Semantic Scholar bibliographic metadata lookup + `nx enrich` CLI backfill command |
-| **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py` | Configuration, naming, formatting, session lifecycle, transient-error retry |
+| **Health** | `health.py`, `logging_setup.py` | `health.py`: health check data model and runner used by `nx doctor` and `nx console`. `logging_setup.py`: structured logging configuration for CLI, console, MCP, and hook entry points (stderr + rotating file handler) |
+| **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py`, `commands/_helpers.py`, `commands/_provision.py` | Configuration, naming, formatting, session lifecycle, transient-error retry. `_helpers.py`: shared CLI helpers (e.g. `default_db_path()`). `_provision.py`: ChromaDB Cloud database provisioning (tenant resolution, database creation) |
 
 ## Design Decisions
 
-1. **Protocols over ABCs** — `typing.Protocol` for structural subtyping, no inheritance coupling.
-2. **No ORM** — Direct `sqlite3` for T2. Schema is simple; WAL + FTS5 are stdlib.
-3. **Constructor injection** — Dependencies via constructor, no global singletons.
-4. **Ported, not imported** — SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
-5. **PPID-chain session propagation** — The `SessionStart` hook starts a per-session ChromaDB HTTP server (using the `chroma` entry-point co-installed with the package) and writes its address to `~/.config/nexus/sessions/{ppid}.session`, keyed by the Claude Code process PID. Child agents walk the OS PPID chain to find the nearest ancestor session file and connect to the same server, sharing T1 scratch across the entire agent tree. Concurrent independent windows stay isolated via disjoint process trees. Falls back to `EphemeralClient` when the server cannot start or the PPID chain yields no record.
+1. **Protocols over ABCs** -- `typing.Protocol` for structural subtyping, no inheritance coupling.
+2. **No ORM** -- Direct `sqlite3` for T2. Schema is simple; WAL + FTS5 are stdlib.
+3. **Constructor injection** -- Dependencies via constructor, no global singletons.
+4. **Ported, not imported** -- SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
+5. **PPID-chain session propagation** -- The `SessionStart` hook starts a per-session ChromaDB HTTP server (using the `chroma` entry-point co-installed with the package) and writes its address to `~/.config/nexus/sessions/{ppid}.session`, keyed by the Claude Code process PID. Child agents walk the OS PPID chain to find the nearest ancestor session file and connect to the same server, sharing T1 scratch across the entire agent tree. Concurrent independent windows stay isolated via disjoint process trees. Falls back to `EphemeralClient` when the server cannot start or the PPID chain yields no record.
 
 ## Heritage
 

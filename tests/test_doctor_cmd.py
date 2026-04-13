@@ -30,25 +30,25 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
             cloud_client=None, extra_patches=None):
     patches = [
         patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
+        patch("nexus.registry.RepoRegistry", return_value=mock_reg),
     ]
     if callable(cred):
-        patches.append(patch("nexus.commands.doctor.get_credential",
+        patches.append(patch("nexus.config.get_credential",
                              side_effect=cred))
     else:
-        patches.append(patch("nexus.commands.doctor.get_credential",
+        patches.append(patch("nexus.config.get_credential",
                              return_value=cred))
     if callable(which):
-        patches.append(patch("nexus.commands.doctor.shutil.which",
+        patches.append(patch("nexus.health.shutil.which",
                              side_effect=which))
     else:
-        patches.append(patch("nexus.commands.doctor.shutil.which",
+        patches.append(patch("nexus.health.shutil.which",
                              return_value=which))
     if cloud_client is not None:
-        patches.append(patch("nexus.commands.doctor.chromadb.CloudClient",
+        patches.append(patch("nexus.health.chromadb.CloudClient",
                              **cloud_client))
     elif cred and not callable(cred):
-        patches.append(patch("nexus.commands.doctor.chromadb.CloudClient",
+        patches.append(patch("nexus.health.chromadb.CloudClient",
                              return_value=MagicMock()))
     patches.extend(extra_patches or [])
     with contextlib.ExitStack() as stack:
@@ -154,7 +154,7 @@ def test_doctor_missing_bd_output(runner, mock_reg):
 
 def test_doctor_python_version_too_old_fails(runner, mock_reg):
     result = _invoke(runner, mock_reg, extra_patches=[
-        patch("nexus.commands.doctor._python_ok", return_value=(False, "3.11.0")),
+        patch("nexus.health._python_ok", return_value=(False, "3.11.0")),
     ])
     assert result.exit_code == 1
     assert "\u2717" in result.output
@@ -181,7 +181,7 @@ def test_doctor_hooks_installed(runner):
             (hooks_dir / name).write_text(
                 f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
         result = _invoke(runner, reg, extra_patches=[
-            patch("nexus.commands.doctor._effective_hooks_dir",
+            patch("nexus.commands.hooks._effective_hooks_dir",
                   return_value=hooks_dir),
         ])
     assert result.exit_code == 0
@@ -195,7 +195,7 @@ def test_doctor_hooks_not_installed(runner):
     reg.all.return_value = ["/some/repo"]
     with tempfile.TemporaryDirectory() as td:
         result = _invoke(runner, reg, extra_patches=[
-            patch("nexus.commands.doctor._effective_hooks_dir",
+            patch("nexus.commands.hooks._effective_hooks_dir",
                   return_value=Path(td)),
         ])
     assert result.exit_code == 0
@@ -209,7 +209,7 @@ def test_doctor_hooks_exception_does_not_propagate(runner):
     reg = MagicMock()
     reg.all.return_value = ["/some/repo"]
     result = _invoke(runner, reg, extra_patches=[
-        patch("nexus.commands.doctor._effective_hooks_dir",
+        patch("nexus.commands.hooks._effective_hooks_dir",
               side_effect=RuntimeError("git error")),
     ])
     assert result.exit_code == 0
@@ -284,8 +284,8 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config._default_local_path", return_value=tmp_path / "chroma"),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
+        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        patch("nexus.registry.RepoRegistry", return_value=mock_reg),
     ):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
@@ -307,8 +307,8 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config._default_local_path", return_value=chroma_path),
-        patch("nexus.commands.doctor.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.commands.doctor.RepoRegistry", return_value=mock_reg),
+        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        patch("nexus.registry.RepoRegistry", return_value=mock_reg),
     ):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
