@@ -357,7 +357,7 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
                 f"  [{i}/{n}] {src}: "
                 f"{result.get('total_chunks', 0)} chunks, "
                 f"{len(result.get('matched_topics', []))} matches, "
-                f"{len(assignments)} assignments ({elapsed:.1f}s)",
+                f"{len(assignments)} attempted ({elapsed:.1f}s)",
                 file=sys.stderr,
             )
         except Exception as e:
@@ -376,9 +376,14 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
         print("  Co-occurrence link generation: SKIPPED", file=sys.stderr)
 
     total_elapsed = time.monotonic() - total_start
+    # Count actual rows written (INSERT OR IGNORE deduplicates; the per-call
+    # 'attempted' counts may exceed actual writes).
+    actual_written = taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'"
+    ).fetchone()[0]
     print(
-        f"  Backfill complete: {total_assigned} total assignments in "
-        f"{total_elapsed:.1f}s across {n} collections.",
+        f"  Backfill complete: {actual_written} projection assignments stored "
+        f"({total_assigned} attempted) in {total_elapsed:.1f}s across {n} collections.",
         file=sys.stderr,
     )
     log.info("backfill_projection_complete",
