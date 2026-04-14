@@ -1089,6 +1089,10 @@ class CatalogTaxonomy:
         if not pairs:
             return 0
 
+        # Two-lock split is intentional: the SQL fetch and the write are
+        # separated to avoid holding the lock during the full self-join read.
+        # Stale counts between the two windows are acceptable for this batch
+        # analytics use case — co-occurrence links are regenerated on each run.
         with self._lock:
             self.conn.executemany(
                 "INSERT OR REPLACE INTO topic_links "

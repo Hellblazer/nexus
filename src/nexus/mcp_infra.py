@@ -358,10 +358,17 @@ def taxonomy_assign_batch(
                 collection, doc_ids, embeddings, chroma_client,
             )
             # Cross-collection projection (RDR-075 SC-6)
-            db.taxonomy.assign_batch(
+            cross_assigned = db.taxonomy.assign_batch(
                 collection, doc_ids, embeddings, chroma_client,
                 cross_collection=True,
             )
+            if cross_assigned:
+                import structlog
+                structlog.get_logger().debug(
+                    "taxonomy_cross_collection_batch",
+                    collection=collection,
+                    cross_assigned=cross_assigned,
+                )
             return assigned
     except Exception:
         import structlog

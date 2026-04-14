@@ -375,7 +375,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                     if cooc:
                         click.echo(f"  Links:      {cooc} co-occurrence topic links")
             except Exception:
-                _log.debug("discover_projection_failed", exc_info=True)
+                _log.warning("discover_projection_failed", exc_info=True)
 
         # Refresh L1 context cache after discovery
         if total_topics:
