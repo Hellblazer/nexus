@@ -304,9 +304,58 @@ class T3UpgradeStep:
     fn: Callable  # Callable[[T3Database, CatalogTaxonomy], None]
 
 
+def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
+    """Backfill cross-collection projection for all existing collections.
+
+    For each collection with existing topics, projects against all other
+    collections' centroids and stores assignments with ``assigned_by='projection'``.
+    Then generates co-occurrence topic links.
+
+    RDR-075 RF-11.  Idempotent via ``INSERT OR IGNORE`` in ``assign_topic``.
+    """
+    import structlog
+
+    log = structlog.get_logger()
+
+    # Find all collections with existing topics
+    rows = taxonomy.conn.execute(
+        "SELECT DISTINCT collection FROM topics"
+    ).fetchall()
+    collections = [r[0] for r in rows]
+
+    if not collections:
+        log.info("backfill_projection_skip", reason="no topics discovered yet")
+        return
+
+    log.info("backfill_projection_start", collections=len(collections))
+    total_assigned = 0
+
+    for src in collections:
+        targets = [c for c in collections if c != src]
+        if not targets:
+            continue
+        try:
+            result = taxonomy.project_against(
+                src, targets, t3_db._client, threshold=0.85,
+            )
+            assignments = result.get("chunk_assignments", [])
+            for doc_id, topic_id in assignments:
+                taxonomy.assign_topic(doc_id, topic_id, assigned_by="projection")
+            total_assigned += len(assignments)
+        except Exception:
+            log.debug("backfill_projection_collection_failed", collection=src, exc_info=True)
+
+    # Generate co-occurrence links from the new projection assignments
+    try:
+        taxonomy.generate_cooccurrence_links()
+    except Exception:
+        log.debug("backfill_cooccurrence_failed", exc_info=True)
+
+    log.info("backfill_projection_complete", total_assigned=total_assigned)
+
+
 T3_UPGRADES: list[T3UpgradeStep] = [
-    # Future T3 upgrades append here
-    # T3UpgradeStep("4.2.0", "Backfill cross-collection projection", backfill_projection),
+    T3UpgradeStep("4.2.0", "Backfill cross-collection projection", backfill_projection),
 ]
 
 
