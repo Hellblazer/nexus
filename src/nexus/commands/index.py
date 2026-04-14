@@ -195,6 +195,20 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                         f"  Review:   {unreviewed} topics pending. "
                         f"Run `nx taxonomy review` to curate."
                     )
+                # Cross-collection projection pass (RDR-075 SC-7)
+                try:
+                    for col_name in collections:
+                        others = [c for c in collections if c != col_name]
+                        if others:
+                            result = db.taxonomy.project_against(
+                                col_name, others, t3._client, threshold=0.85,
+                            )
+                            if result.get("chunk_assignments"):
+                                from nexus.commands.taxonomy_cmd import _persist_assignments
+                                _persist_assignments(db.taxonomy, result["chunk_assignments"])
+                except Exception:
+                    _log.debug("taxonomy_projection_failed", exc_info=True)
+
                 # Auto-populate topic links if catalog available
                 try:
                     from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links

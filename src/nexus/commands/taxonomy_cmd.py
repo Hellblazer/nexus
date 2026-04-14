@@ -354,6 +354,25 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
             else:
                 click.echo(f"  {col_name}: skipped")
 
+        # Cross-collection projection pass (RDR-075 SC-7)
+        if total_topics and len(targets) > 1:
+            try:
+                proj_count = 0
+                for col_name in targets:
+                    others = [c for c in targets if c != col_name]
+                    if others:
+                        result = db.taxonomy.project_against(
+                            col_name, others, t3._client, threshold=0.85,
+                        )
+                        assignments = result.get("chunk_assignments", [])
+                        if assignments:
+                            _persist_assignments(db.taxonomy, assignments)
+                            proj_count += len(assignments)
+                if proj_count:
+                    click.echo(f"  Projection: {proj_count} cross-collection assignments")
+            except Exception:
+                _log.debug("discover_projection_failed", exc_info=True)
+
         # Refresh L1 context cache after discovery
         if total_topics:
             try:
