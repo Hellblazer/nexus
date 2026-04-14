@@ -1052,6 +1052,63 @@ class CatalogTaxonomy:
 
         return count
 
+    # ── Cross-collection co-occurrence links (RDR-075 Phase 4, SC-5) ─
+
+    def generate_cooccurrence_links(self) -> int:
+        """Generate topic_links from cross-collection projection co-occurrence.
+
+        For each doc_id assigned to topics in multiple collections,
+        creates a ``topic_links`` entry between each cross-collection
+        topic pair, weighted by co-occurrence count.
+
+        Uses ``INSERT OR REPLACE`` to merge with existing projection
+        links from ``_discover_cross_links``.
+
+        Returns count of links generated.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT ta.doc_id, ta.topic_id, t.collection "
+                "FROM topic_assignments ta "
+                "JOIN topics t ON ta.topic_id = t.id"
+            ).fetchall()
+
+        # Group by doc_id
+        doc_topics: dict[str, list[tuple[int, str]]] = {}
+        for doc_id, topic_id, collection in rows:
+            doc_topics.setdefault(doc_id, []).append((topic_id, collection))
+
+        # For each doc with topics in multiple collections, generate pairs
+        link_counts: dict[tuple[int, int], int] = {}
+        for assignments in doc_topics.values():
+            collections = {coll for _, coll in assignments}
+            if len(collections) < 2:
+                continue
+            for i, (tid_a, coll_a) in enumerate(assignments):
+                for tid_b, coll_b in assignments[i + 1:]:
+                    if coll_a == coll_b:
+                        continue
+                    pair = (min(tid_a, tid_b), max(tid_a, tid_b))
+                    link_counts[pair] = link_counts.get(pair, 0) + 1
+
+        if not link_counts:
+            return 0
+
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO topic_links "
+                "(from_topic_id, to_topic_id, link_count, link_types) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    (a, b, count, '["cooccurrence"]')
+                    for (a, b), count in link_counts.items()
+                ],
+            )
+            self.conn.commit()
+
+        _log.info("cooccurrence_links", count=len(link_counts))
+        return len(link_counts)
+
     # ── Cross-collection centroid linking (RDR-075 Phase 3) ─────────
 
     _PROJECTION_THRESHOLD = 0.85

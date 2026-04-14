@@ -2461,6 +2461,73 @@ class TestComputeTopicLinks:
         assert set(result[0]["link_types"]) == {"cites", "implements"}
 
 
+class TestCooccurrenceLinks:
+    """Tests for generate_cooccurrence_links (RDR-075 SC-5)."""
+
+    def test_cross_collection_cooccurrence(self, db: T2Database) -> None:
+        """Docs assigned to topics in different collections generate links."""
+        # Create topics in two collections
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("neural-nets", "coll_A", 5, "2026-01-01T00:00:00Z"),
+                ("databases", "coll_B", 5, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        t1 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'neural-nets'"
+        ).fetchone()[0]
+        t2 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'databases'"
+        ).fetchone()[0]
+
+        # Assign one doc to topics in both collections
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+            "VALUES (?, ?, ?)",
+            [
+                ("doc-shared", t1, "centroid"),
+                ("doc-shared", t2, "projection"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+
+        count = db.taxonomy.generate_cooccurrence_links()
+        assert count == 1
+
+        rows = db.taxonomy.conn.execute(
+            "SELECT from_topic_id, to_topic_id, link_count FROM topic_links"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][2] == 1  # link_count
+
+    def test_same_collection_no_links(self, db: T2Database) -> None:
+        """Docs assigned to topics in the SAME collection don't generate links."""
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("topic-x", "same_coll", 5, "2026-01-01T00:00:00Z"),
+                ("topic-y", "same_coll", 5, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        t1 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'topic-x'"
+        ).fetchone()[0]
+        t2 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'topic-y'"
+        ).fetchone()[0]
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("doc-same", t1), ("doc-same", t2)],
+        )
+        db.taxonomy.conn.commit()
+
+        count = db.taxonomy.generate_cooccurrence_links()
+        assert count == 0
+
+
 class TestTopicLinksCLI:
     """CLI tests for nx taxonomy links."""
 
