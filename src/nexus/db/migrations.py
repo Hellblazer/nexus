@@ -318,10 +318,7 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
     log = structlog.get_logger()
 
     # Find all collections with existing topics
-    rows = taxonomy.conn.execute(
-        "SELECT DISTINCT collection FROM topics"
-    ).fetchall()
-    collections = [r[0] for r in rows]
+    collections = taxonomy.get_distinct_collections()
 
     if not collections:
         log.info("backfill_projection_skip", reason="no topics discovered yet")

@@ -303,7 +303,8 @@ def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
             if emb is not None and len(emb) > 0:
                 embedding = np.array(emb, dtype=np.float32)
     except Exception:
-        pass  # Fall through to MiniLM
+        import structlog
+        structlog.get_logger().debug("taxonomy_t3_embedding_fetch_failed", doc_id=doc_id, exc_info=True)
 
     if embedding is None:
         from nexus.db.local_ef import LocalEmbeddingFunction
@@ -352,9 +353,16 @@ def taxonomy_assign_batch(
     try:
         with t2_ctx() as db:
             chroma_client = get_t3()._client
-            return db.taxonomy.assign_batch(
+            # Same-collection assignment
+            assigned = db.taxonomy.assign_batch(
                 collection, doc_ids, embeddings, chroma_client,
             )
+            # Cross-collection projection (RDR-075 SC-6)
+            db.taxonomy.assign_batch(
+                collection, doc_ids, embeddings, chroma_client,
+                cross_collection=True,
+            )
+            return assigned
     except Exception:
         import structlog
         structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)

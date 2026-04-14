@@ -539,6 +539,14 @@ class CatalogTaxonomy:
             ).fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def get_distinct_collections(self) -> list[str]:
+        """Return sorted list of collections that have at least one topic."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT collection FROM topics ORDER BY collection"
+            ).fetchall()
+        return [r[0] for r in rows]
+
     def get_topics_for_collection(
         self,
         collection: str,
@@ -1057,9 +1065,9 @@ class CatalogTaxonomy:
     def generate_cooccurrence_links(self) -> int:
         """Generate topic_links from cross-collection projection co-occurrence.
 
-        For each doc_id assigned to topics in multiple collections,
-        creates a ``topic_links`` entry between each cross-collection
-        topic pair, weighted by co-occurrence count.
+        Uses a SQL self-join to find topic pairs sharing docs across
+        different collections, avoiding loading the full assignment
+        table into Python memory.
 
         Uses ``INSERT OR REPLACE`` to merge with existing projection
         links from ``_discover_cross_links``.
@@ -1067,31 +1075,18 @@ class CatalogTaxonomy:
         Returns count of links generated.
         """
         with self._lock:
-            rows = self.conn.execute(
-                "SELECT ta.doc_id, ta.topic_id, t.collection "
-                "FROM topic_assignments ta "
-                "JOIN topics t ON ta.topic_id = t.id"
+            pairs = self.conn.execute(
+                "SELECT MIN(a.topic_id, b.topic_id), MAX(a.topic_id, b.topic_id), "
+                "       COUNT(*) "
+                "FROM topic_assignments a "
+                "JOIN topic_assignments b ON a.doc_id = b.doc_id "
+                "JOIN topics ta ON a.topic_id = ta.id "
+                "JOIN topics tb ON b.topic_id = tb.id "
+                "WHERE a.topic_id < b.topic_id AND ta.collection != tb.collection "
+                "GROUP BY MIN(a.topic_id, b.topic_id), MAX(a.topic_id, b.topic_id)"
             ).fetchall()
 
-        # Group by doc_id
-        doc_topics: dict[str, list[tuple[int, str]]] = {}
-        for doc_id, topic_id, collection in rows:
-            doc_topics.setdefault(doc_id, []).append((topic_id, collection))
-
-        # For each doc with topics in multiple collections, generate pairs
-        link_counts: dict[tuple[int, int], int] = {}
-        for assignments in doc_topics.values():
-            collections = {coll for _, coll in assignments}
-            if len(collections) < 2:
-                continue
-            for i, (tid_a, coll_a) in enumerate(assignments):
-                for tid_b, coll_b in assignments[i + 1:]:
-                    if coll_a == coll_b:
-                        continue
-                    pair = (min(tid_a, tid_b), max(tid_a, tid_b))
-                    link_counts[pair] = link_counts.get(pair, 0) + 1
-
-        if not link_counts:
+        if not pairs:
             return 0
 
         with self._lock:
@@ -1099,15 +1094,12 @@ class CatalogTaxonomy:
                 "INSERT OR REPLACE INTO topic_links "
                 "(from_topic_id, to_topic_id, link_count, link_types) "
                 "VALUES (?, ?, ?, ?)",
-                [
-                    (a, b, count, '["cooccurrence"]')
-                    for (a, b), count in link_counts.items()
-                ],
+                [(a, b, count, '["cooccurrence"]') for a, b, count in pairs],
             )
             self.conn.commit()
 
-        _log.info("cooccurrence_links", count=len(link_counts))
-        return len(link_counts)
+        _log.info("cooccurrence_links", count=len(pairs))
+        return len(pairs)
 
     # ── Cross-collection centroid linking (RDR-075 Phase 3) ─────────
 
@@ -1273,21 +1265,25 @@ class CatalogTaxonomy:
         else:
             base_kwargs["where"] = {"collection": collection_name}
 
+        # Batch query — single ChromaDB round-trip for all embeddings
+        emb_list = [
+            emb if isinstance(emb, list) else emb.tolist()
+            for emb in embeddings
+        ]
+        try:
+            results = centroid_coll.query(
+                query_embeddings=emb_list,
+                **base_kwargs,
+            )
+        except Exception:
+            return 0
+
+        by = "projection" if cross_collection else "centroid"
         assigned = 0
-        for doc_id, emb in zip(doc_ids, embeddings):
-            try:
-                results = centroid_coll.query(
-                    query_embeddings=[emb if isinstance(emb, list) else emb.tolist()],
-                    **base_kwargs,
-                )
-            except Exception:
+        for i, doc_id in enumerate(doc_ids):
+            if not results["ids"][i]:
                 continue
-
-            if not results["ids"] or not results["ids"][0]:
-                continue
-
-            topic_id = int(results["metadatas"][0][0]["topic_id"])
-            by = "projection" if cross_collection else "centroid"
+            topic_id = int(results["metadatas"][i][0]["topic_id"])
             self.assign_topic(doc_id, topic_id, assigned_by=by)
             assigned += 1
 
@@ -1327,17 +1323,31 @@ class CatalogTaxonomy:
                 "total_centroids": 0,
             }
 
-        src_data = src_coll.get(include=["embeddings"])
-        src_ids = src_data.get("ids", [])
-        src_raw = src_data.get("embeddings")
-        if not src_ids or src_raw is None:
+        # Paginated fetch to avoid OOM on large collections
+        _PAGE = 2000
+        src_ids: list[str] = []
+        src_emb_pages: list[np.ndarray] = []
+        offset = 0
+        while True:
+            page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
+            page_ids = page.get("ids", [])
+            page_embs = page.get("embeddings")
+            if not page_ids or page_embs is None:
+                break
+            src_ids.extend(page_ids)
+            src_emb_pages.append(np.array(page_embs, dtype=np.float32))
+            if len(page_ids) < _PAGE:
+                break
+            offset += _PAGE
+
+        if not src_ids:
             return {
                 "matched_topics": [],
                 "novel_chunks": [],
                 "total_chunks": 0,
                 "total_centroids": 0,
             }
-        src_embs = np.array(src_raw, dtype=np.float32)
+        src_embs = np.concatenate(src_emb_pages)
 
         # 2. Fetch target centroids
         try:

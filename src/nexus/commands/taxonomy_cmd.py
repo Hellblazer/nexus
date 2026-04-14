@@ -997,11 +997,10 @@ def project_cmd(
             targets = list_sibling_collections(source_collection, t3._client)
             if not targets:
                 # Fall back to all collections with topics
-                rows = db.taxonomy.conn.execute(
-                    "SELECT DISTINCT collection FROM topics WHERE collection != ?",
-                    (source_collection,),
-                ).fetchall()
-                targets = [r[0] for r in rows]
+                targets = [
+                    c for c in db.taxonomy.get_distinct_collections()
+                    if c != source_collection
+                ]
             if not targets:
                 click.echo("No other collections have topics. Run 'nx taxonomy discover' first.")
                 return
@@ -1070,10 +1069,7 @@ def _run_backfill(
     persist: bool = False,
 ) -> None:
     """Project all collections against each other."""
-    rows = taxonomy.conn.execute(
-        "SELECT DISTINCT collection FROM topics"
-    ).fetchall()
-    collections = [r[0] for r in rows]
+    collections = taxonomy.get_distinct_collections()
 
     if not collections:
         click.echo("No collections with topics found. Run 'nx taxonomy discover' first.")
