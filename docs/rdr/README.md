@@ -98,6 +98,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-074](rdr-074-permanence-mode.md) | Permanence Mode | Feature | Deferred | 2026-04-13 |
 | [RDR-075](rdr-075-cross-collection-topic-projection.md) | Cross-Collection Topic Projection | Feature | Closed (implemented) | 2026-04-13 |
 | [RDR-076](rdr-076-idempotent-upgrade-mechanism.md) | Idempotent Upgrade Mechanism | Architecture | Closed (implemented) | 2026-04-13 |
+| [RDR-077](rdr-077-projection-quality-similarity-icf.md) | Projection Quality — Similarity Scores and ICF Hub Detection | Feature | Accepted | 2026-04-14 |
 
 ---
 

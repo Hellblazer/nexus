@@ -255,6 +255,58 @@ def migrate_assigned_by(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _add_projection_quality_columns(conn: sqlite3.Connection) -> None:
+    """Add ``similarity``, ``assigned_at``, ``source_collection`` columns + index.
+
+    RDR-077 Phase 1 (nexus-nsh). New columns are all NULL-able — pre-migration
+    rows keep NULLs; re-projection populates them later (no backfill here).
+
+    The composite index on ``(source_collection, assigned_by)`` supports the
+    ICF aggregation query in Phase 3 and the ``nx taxonomy audit`` /
+    ``hubs`` filters in Phases 5-6.
+
+    Idempotent: guarded by ``PRAGMA table_info`` for columns and
+    ``CREATE INDEX IF NOT EXISTS`` for the index. No-op when
+    ``topic_assignments`` does not yet exist (fresh installs create it via
+    ``_TAXONOMY_SCHEMA_SQL`` before any migrations run; this guard only
+    protects against being called on a DB without the taxonomy schema at all).
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='topic_assignments'"
+    ).fetchone()
+    if not has_table:
+        return
+
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(topic_assignments)").fetchall()
+    }
+    changed = False
+    if "similarity" not in cols:
+        _log.info("Migrating topic_assignments: adding similarity column")
+        conn.execute("ALTER TABLE topic_assignments ADD COLUMN similarity REAL")
+        changed = True
+    if "assigned_at" not in cols:
+        _log.info("Migrating topic_assignments: adding assigned_at column")
+        conn.execute("ALTER TABLE topic_assignments ADD COLUMN assigned_at TEXT")
+        changed = True
+    if "source_collection" not in cols:
+        _log.info("Migrating topic_assignments: adding source_collection column")
+        conn.execute(
+            "ALTER TABLE topic_assignments ADD COLUMN source_collection TEXT"
+        )
+        changed = True
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_topic_assignments_source "
+        "ON topic_assignments(source_collection, assigned_by)"
+    )
+
+    if changed:
+        conn.commit()
+
+
 def migrate_review_columns(conn: sqlite3.Connection) -> None:
     """Add ``review_status`` and ``terms`` columns to ``topics`` if missing."""
     cols = {
@@ -289,6 +341,11 @@ MIGRATIONS: list[Migration] = [
     Migration("3.8.0", "Add plan ttl column", migrate_plan_ttl),
     Migration("4.0.0", "Add assigned_by column", migrate_assigned_by),
     Migration("4.0.0", "Add review columns", migrate_review_columns),
+    Migration(
+        "4.3.0",
+        "Add projection-quality columns (similarity, assigned_at, source_collection)",
+        _add_projection_quality_columns,
+    ),
 ]
 
 # ── T3 upgrade steps ────────────────────────────────────────────────────────
