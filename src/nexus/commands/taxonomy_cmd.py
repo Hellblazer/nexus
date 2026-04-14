@@ -166,8 +166,21 @@ def taxonomy() -> None:
 
 
 @taxonomy.command("status")
-def status_cmd() -> None:
-    """Show taxonomy health: collections, coverage, review state."""
+@click.option("--collection", "-c", default="", help="Show only this collection")
+@click.option("--limit", "-n", default=0, type=int, help="Show only top N collections by doc count (0 = all)")
+@click.option("--summary", is_flag=True, help="Show only the totals line")
+@click.option("--needs-review", is_flag=True, help="Show only collections with pending topics")
+def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -> None:
+    """Show taxonomy health: collections, coverage, review state.
+
+    \b
+    Examples:
+      nx taxonomy status                              # all collections
+      nx taxonomy status --summary                    # totals line only
+      nx taxonomy status -c docs__nexus               # one collection
+      nx taxonomy status -n 10                        # top 10 by docs
+      nx taxonomy status --needs-review               # pending review only
+    """
     with _T2Database(_default_db_path()) as db:
         # Get all topics grouped by collection
         all_topics = db.taxonomy.conn.execute(
@@ -181,45 +194,59 @@ def status_cmd() -> None:
             click.echo("No taxonomy data. Run `nx index repo` or `nx taxonomy discover`.")
             return
 
-        total_topics = 0
-        total_assigned = 0
-        total_pending = 0
+        # Compute totals across ALL topics (independent of filters)
+        total_topics = sum(r[1] for r in all_topics)
+        total_assigned = sum(r[2] for r in all_topics)
+        total_pending = sum(r[3] for r in all_topics)
 
-        click.echo("Taxonomy Status\n")
-        for coll, n_topics, n_docs, n_pending, n_accepted in all_topics:
-            total_topics += n_topics
-            total_assigned += n_docs
-            total_pending += n_pending
-
-            # Check rebalance
-            meta = db.taxonomy.conn.execute(
-                "SELECT last_discover_doc_count, last_discover_at "
-                "FROM taxonomy_meta WHERE collection = ?",
-                (coll,),
-            ).fetchone()
-
-            rebal = ""
-            if meta:
-                last_count, last_at = meta
-                if last_at:
-                    rebal = f"  discovered {last_at[:10]}"
-
-            status_parts = []
-            if n_accepted:
-                status_parts.append(f"{n_accepted} accepted")
-            if n_pending:
-                status_parts.append(f"{n_pending} pending")
-            status_str = ", ".join(status_parts) if status_parts else "all pending"
-
-            click.echo(f"  {coll}")
-            click.echo(f"    {n_topics} topics, {n_docs} docs assigned ({status_str}){rebal}")
-
-        # Topic links
         link_count = db.taxonomy.conn.execute(
             "SELECT COUNT(*) FROM topic_links"
         ).fetchone()[0]
 
-        click.echo(f"\nTotal: {total_topics} topics, {total_assigned} docs assigned, {link_count} topic links")
+        # Apply filters
+        rows = all_topics
+        if collection:
+            rows = [r for r in rows if r[0] == collection]
+            if not rows:
+                click.echo(f"No taxonomy data for collection '{collection}'.")
+                return
+        if needs_review:
+            rows = [r for r in rows if r[3] > 0]
+        if limit > 0:
+            rows = rows[:limit]
+
+        if not summary:
+            click.echo("Taxonomy Status\n")
+            for coll, n_topics, n_docs, n_pending, n_accepted in rows:
+                # Check rebalance
+                meta = db.taxonomy.conn.execute(
+                    "SELECT last_discover_doc_count, last_discover_at "
+                    "FROM taxonomy_meta WHERE collection = ?",
+                    (coll,),
+                ).fetchone()
+
+                rebal = ""
+                if meta:
+                    _, last_at = meta
+                    if last_at:
+                        rebal = f"  discovered {last_at[:10]}"
+
+                status_parts = []
+                if n_accepted:
+                    status_parts.append(f"{n_accepted} accepted")
+                if n_pending:
+                    status_parts.append(f"{n_pending} pending")
+                status_str = ", ".join(status_parts) if status_parts else "all pending"
+
+                click.echo(f"  {coll}")
+                click.echo(f"    {n_topics} topics, {n_docs} docs assigned ({status_str}){rebal}")
+
+            click.echo("")
+
+        click.echo(
+            f"Total: {len(all_topics)} collections, {total_topics} topics, "
+            f"{total_assigned} docs assigned, {link_count} topic links"
+        )
         if total_pending:
             click.echo(f"Action: {total_pending} topics need review. Run `nx taxonomy review`.")
 
