@@ -1014,19 +1014,32 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
     help="Comma-separated target collections (omit for all other collections with topics)",
 )
 @click.option(
-    "--threshold", "-t", default=0.85, type=float, show_default=True,
-    help="Cosine similarity threshold. 0.85 is borrowed from centroid merge; calibrate empirically (SC-9).",
+    "--threshold", "-t", default=None, type=float,
+    help=(
+        "Cosine similarity threshold. When omitted, per-corpus-type "
+        "defaults apply: code__* → 0.70, knowledge__* → 0.50, "
+        "docs__*/rdr__* → 0.55. See docs/taxonomy-projection-tuning.md."
+    ),
 )
 @click.option("--top-k", default=3, type=int, show_default=True, help="Top-k centroids per chunk")
 @click.option("--persist", is_flag=True, help="Write projection assignments (assigned_by='projection')")
 @click.option("--backfill", is_flag=True, help="Project all collections against each other")
+@click.option(
+    "--use-icf", "use_icf", is_flag=True,
+    help=(
+        "Apply ICF (Inverse Collection Frequency) weighting — suppresses "
+        "ubiquitous hub topics before threshold + top-k ranking. Stored "
+        "similarity remains raw cosine (RDR-077 RF-8)."
+    ),
+)
 def project_cmd(
     source_collection: str,
     against: str,
-    threshold: float,
+    threshold: float | None,
     top_k: int,
     persist: bool,
     backfill: bool,
+    use_icf: bool,
 ) -> None:
     """Project source collection chunks against target collection centroids.
 
@@ -1035,19 +1048,34 @@ def project_cmd(
     projection assignments to topic_assignments.
 
     \b
+    Threshold resolution (RDR-077 Phase 4a):
+      explicit --threshold → fallback to prefix default → 0.70
+    \b
     Examples:
       nx taxonomy project docs__art-architecture --against knowledge__art
       nx taxonomy project code__nexus --threshold 0.80 --persist
+      nx taxonomy project code__nexus --use-icf --persist
       nx taxonomy project --backfill --persist
     """
+    from nexus.corpus import default_projection_threshold
     from nexus.db import make_t3
 
     db = _T2Database(_default_db_path())
     t3 = make_t3()
 
+    # Resolve threshold: explicit flag wins; otherwise per-corpus default
+    # (defaults applied at the per-source level inside _run_backfill).
+    resolved_threshold = threshold
+    if resolved_threshold is None and source_collection:
+        resolved_threshold = default_projection_threshold(source_collection)
+
     try:
         if backfill:
-            _run_backfill(db.taxonomy, t3._client, threshold=threshold, top_k=top_k, persist=persist)
+            _run_backfill(
+                db.taxonomy, t3._client,
+                threshold=threshold, top_k=top_k, persist=persist,
+                use_icf=use_icf,
+            )
             return
 
         if not source_collection:
@@ -1071,12 +1099,24 @@ def project_cmd(
                 click.echo("No other collections have topics. Run 'nx taxonomy discover' first.")
                 return
 
-        _progress(f"Projecting {source_collection} against {len(targets)} collection(s)...")
+        _progress(
+            f"Projecting {source_collection} against {len(targets)} "
+            f"collection(s) at threshold {resolved_threshold}"
+            + (" with ICF weighting" if use_icf else "")
+            + "..."
+        )
 
+        icf_map = (
+            db.taxonomy.compute_icf_map(use_cache=True) if use_icf else None
+        )
         result = db.taxonomy.project_against(
             source_collection, targets, t3._client,
-            threshold=threshold, top_k=top_k,
+            threshold=resolved_threshold, top_k=top_k,
+            icf_map=icf_map,
         )
+        # Fall through: display logic uses `threshold` local — rebind
+        # to the resolved value so messages reflect what was applied.
+        threshold = resolved_threshold
 
         # Display results
         matched = result["matched_topics"]
@@ -1143,11 +1183,19 @@ def _run_backfill(
     taxonomy: "CatalogTaxonomy",
     chroma_client: Any,
     *,
-    threshold: float = 0.85,
+    threshold: float | None = None,
     top_k: int = 3,
     persist: bool = False,
+    use_icf: bool = False,
 ) -> None:
-    """Project all collections against each other."""
+    """Project all collections against each other.
+
+    When *threshold* is None, applies the RDR-077 per-corpus-type default
+    for each source collection (``default_projection_threshold``). An
+    explicit *threshold* short-circuits that and applies uniformly.
+    """
+    from nexus.corpus import default_projection_threshold
+
     collections = taxonomy.get_distinct_collections()
 
     if not collections:
@@ -1156,17 +1204,28 @@ def _run_backfill(
 
     click.echo(f"Backfilling {len(collections)} collection(s)...")
 
+    # ICF map computed once per backfill invocation (per RDR-077 caching).
+    icf_map = taxonomy.compute_icf_map(use_cache=True) if use_icf else None
+
     total_assigned = 0
     total_novel = 0
     for i, src in enumerate(collections, 1):
         targets = [c for c in collections if c != src]
         if not targets:
             continue
-        _progress(f"  [{i}/{len(collections)}] {src} → {len(targets)} target(s)...")
+        per_src_threshold = (
+            threshold if threshold is not None
+            else default_projection_threshold(src)
+        )
+        _progress(
+            f"  [{i}/{len(collections)}] {src} → {len(targets)} target(s) "
+            f"@ threshold {per_src_threshold}..."
+        )
         try:
             result = taxonomy.project_against(
                 src, targets, chroma_client,
-                threshold=threshold, top_k=top_k,
+                threshold=per_src_threshold, top_k=top_k,
+                icf_map=icf_map,
             )
             matched = len(result["matched_topics"])
             novel = len(result["novel_chunks"])

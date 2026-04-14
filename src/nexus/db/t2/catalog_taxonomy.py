@@ -1564,6 +1564,7 @@ class CatalogTaxonomy:
         *,
         threshold: float = 0.85,
         top_k: int = 3,
+        icf_map: dict[int, float] | None = None,
     ) -> dict[str, Any]:
         """Project source collection chunks against target collection centroids.
 
@@ -1572,6 +1573,18 @@ class CatalogTaxonomy:
 
         Returns a dict with ``matched_topics``, ``novel_chunks``,
         ``total_chunks``, and ``total_centroids``.
+
+        When *icf_map* is provided (RDR-077 Phase 4a), each raw cosine is
+        multiplied by ``icf_map[target_topic_id]`` (default 1.0 when the
+        topic is missing — e.g., a freshly created topic not yet in the
+        ICF map) before the threshold filter and top-K ranking. This
+        suppresses ubiquitous "hub" topics that carry generic signal.
+
+        **Raw-cosine-storage invariant**: the ``similarity`` component of
+        each ``chunk_assignments`` tuple is ALWAYS the raw cosine — ICF is
+        applied only for filtering and ranking, never stored. Callers may
+        recompute adjusted scores at query time from the raw value plus a
+        fresh ICF map.
 
         Raises ``ValueError`` on embedding dimension mismatch.
         """
@@ -1669,26 +1682,43 @@ class CatalogTaxonomy:
         # 5. Similarity matrix: (N, M) — values in [-1, 1]
         sim = src_norm @ ctr_norm.T
 
-        # 6. Aggregate matched topics and collect per-chunk assignments
+        # 5b. Adjusted matrix for filter + ranking (RDR-077 Phase 4a).
+        # Raw `sim` is preserved for storage; `filter_sim` is what we
+        # compare against *threshold* and use to pick top-K.
+        if icf_map:
+            # Build a (1, M) vector of per-centroid ICF weights, defaulting
+            # to 1.0 for topics not present in the map (new topics or
+            # N_effective<2 fallbacks).
+            icf_weights = np.array(
+                [icf_map.get(int(m["topic_id"]), 1.0) for m in ctr_metas],
+                dtype=np.float32,
+            )
+            filter_sim = sim * icf_weights  # broadcasts over rows
+        else:
+            filter_sim = sim
+
+        # 6. Aggregate matched topics and collect per-chunk assignments.
         topic_stats: dict[int, dict[str, Any]] = {}
         novel_chunks: list[str] = []
-        # RDR-077 RF-3: 3-tuple (doc_id, topic_id, raw_cosine_similarity)
+        # RDR-077 RF-3 + Phase 4a: 3-tuple stores RAW cosine similarity.
         chunk_assignments: list[tuple[str, int, float]] = []
 
         for i, doc_id in enumerate(src_ids):
-            row_max = float(sim[i].max())
+            row_max = float(filter_sim[i].max())
             if row_max < threshold:
                 novel_chunks.append(doc_id)
                 continue
 
-            # Top-k centroids above threshold
-            top_indices = np.argsort(-sim[i])[:top_k]
+            # Top-k centroids above threshold — ranked by adjusted score
+            # when ICF is active, else raw.
+            top_indices = np.argsort(-filter_sim[i])[:top_k]
             for idx in top_indices:
-                if float(sim[i, idx]) < threshold:
+                if float(filter_sim[i, idx]) < threshold:
                     break
                 meta = ctr_metas[idx]
                 tid = int(meta["topic_id"])
-                chunk_assignments.append((doc_id, tid, float(sim[i, idx])))
+                raw_sim = float(sim[i, idx])
+                chunk_assignments.append((doc_id, tid, raw_sim))
                 if tid not in topic_stats:
                     topic_stats[tid] = {
                         "topic_id": tid,
@@ -1698,7 +1728,7 @@ class CatalogTaxonomy:
                         "total_similarity": 0.0,
                     }
                 topic_stats[tid]["chunk_count"] += 1
-                topic_stats[tid]["total_similarity"] += float(sim[i, idx])
+                topic_stats[tid]["total_similarity"] += raw_sim
 
         matched_topics = [
             {

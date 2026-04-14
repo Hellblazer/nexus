@@ -587,3 +587,150 @@ class TestICF:
         assert row_zero[0] is None
         row_neg = db.taxonomy.conn.execute("SELECT log2(-1.0)").fetchone()
         assert row_neg[0] is None
+
+
+# ── Phase 4a (nexus-jt1) — ICF-weighted projection + CLI defaults ───────────
+
+
+class TestDefaultProjectionThreshold:
+    """RDR-077 Phase 4a: per-corpus-type threshold defaults."""
+
+    def test_default_threshold_code_prefix(self) -> None:
+        from nexus.corpus import default_projection_threshold
+        assert default_projection_threshold("code__foo") == 0.70
+
+    def test_default_threshold_knowledge_prefix(self) -> None:
+        from nexus.corpus import default_projection_threshold
+        assert default_projection_threshold("knowledge__bar") == 0.50
+
+    def test_default_threshold_docs_and_rdr(self) -> None:
+        from nexus.corpus import default_projection_threshold
+        assert default_projection_threshold("docs__mix") == 0.55
+        assert default_projection_threshold("rdr__alpha") == 0.55
+
+    def test_default_threshold_unknown_prefix_fallback(self) -> None:
+        from nexus.corpus import default_projection_threshold
+        # Unknown prefix → safe under-match bias at 0.70.
+        assert default_projection_threshold("other__weird") == 0.70
+
+
+class TestProjectAgainstIcf:
+    """``project_against(icf_map=...)`` — weighting at filter time only."""
+
+    def _seed_two_corpora(
+        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+    ) -> None:
+        rng = np.random.default_rng(42)
+        for name in ("code__icfA", "code__icfB"):
+            embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+            embs[:30, 0] += 3.0
+            embs[30:, 1] += 3.0
+            doc_ids = [f"{name}-d{i}" for i in range(60)]
+            texts = [f"text {name} {i}" for i in range(60)]
+            db.taxonomy.discover_topics(
+                name, doc_ids, embs, texts, chroma_client,
+            )
+            src_coll = chroma_client.get_or_create_collection(
+                name, embedding_function=None,
+            )
+            src_coll.add(
+                ids=doc_ids,
+                embeddings=embs.tolist(),
+                documents=texts,
+            )
+
+    def test_icf_suppresses_hub_topics_below_threshold(
+        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+    ) -> None:
+        """A topic with ICF=0 must fail threshold regardless of raw cosine."""
+        self._seed_two_corpora(db, chroma_client)
+        # Without ICF: at low threshold we get matches.
+        baseline = db.taxonomy.project_against(
+            "code__icfA", ["code__icfB"], chroma_client, threshold=0.1,
+        )
+        assert baseline["chunk_assignments"], "baseline should match"
+
+        # Craft an ICF map that zeros out every target topic — equivalent
+        # to every topic being ubiquitous. Filter drops everything.
+        zero_icf = {
+            m["topic_id"]: 0.0 for m in baseline["matched_topics"]
+        }
+        result = db.taxonomy.project_against(
+            "code__icfA", ["code__icfB"], chroma_client,
+            threshold=0.1, icf_map=zero_icf,
+        )
+        assert not result["chunk_assignments"], (
+            "zero-ICF topics must be filtered out before persistence"
+        )
+        assert len(result["novel_chunks"]) == result["total_chunks"]
+
+    def test_stored_similarity_is_raw_cosine_even_with_icf(
+        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+    ) -> None:
+        """Raw cosine stored; ICF only affects what gets through the filter."""
+        self._seed_two_corpora(db, chroma_client)
+        baseline = db.taxonomy.project_against(
+            "code__icfA", ["code__icfB"], chroma_client, threshold=0.1,
+        )
+        raw_lookup = {(d, t): s for d, t, s in baseline["chunk_assignments"]}
+
+        # High-ICF map (2.0 everywhere) — doubles the adjusted score but the
+        # raw cosine returned in chunk_assignments must be unchanged.
+        high_icf = {m["topic_id"]: 2.0 for m in baseline["matched_topics"]}
+        weighted = db.taxonomy.project_against(
+            "code__icfA", ["code__icfB"], chroma_client,
+            threshold=0.1, icf_map=high_icf,
+        )
+        for d, t, s in weighted["chunk_assignments"]:
+            if (d, t) in raw_lookup:
+                assert s == pytest.approx(raw_lookup[(d, t)]), (
+                    "icf_map must not mutate stored raw cosine"
+                )
+
+    def test_missing_topic_in_icf_map_defaults_to_one(
+        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+    ) -> None:
+        """ICF map lookup missing entries → weight 1.0 (no suppression)."""
+        self._seed_two_corpora(db, chroma_client)
+        # Empty ICF map — every target topic defaults to 1.0, result matches
+        # the baseline no-icf case.
+        baseline = db.taxonomy.project_against(
+            "code__icfA", ["code__icfB"], chroma_client, threshold=0.1,
+        )
+        with_empty_icf = db.taxonomy.project_against(
+            "code__icfA", ["code__icfB"], chroma_client,
+            threshold=0.1, icf_map={},
+        )
+        assert (
+            len(baseline["chunk_assignments"])
+            == len(with_empty_icf["chunk_assignments"])
+        )
+
+
+class TestProjectCmdFlag:
+    """CLI flag wiring for ``nx taxonomy project --use-icf``."""
+
+    def test_project_cmd_has_use_icf_flag(self) -> None:
+        from click.testing import CliRunner
+
+        from nexus.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["taxonomy", "project", "--help"])
+        assert result.exit_code == 0
+        assert "--use-icf" in result.output
+        assert "ICF" in result.output
+
+    def test_project_cmd_help_mentions_corpus_defaults(self) -> None:
+        from click.testing import CliRunner
+
+        from nexus.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["taxonomy", "project", "--help"])
+        assert "code__*" in result.output or "0.70" in result.output
+        assert "knowledge__*" in result.output or "0.50" in result.output
+        # Reference to tuning doc for operators. Click wraps at hyphens,
+        # inserting "- " breaks, so normalise before the containment check.
+        collapsed = " ".join(result.output.split()).replace("- ", "-")
+        assert "taxonomy-projection-tuning.md" in collapsed
