@@ -100,7 +100,7 @@ The taxonomy spans two storage tiers:
 | Table | Purpose |
 |-------|---------|
 | `topics` | One row per discovered or manually-created topic, including label, parent, collection, curation state, and top keywords |
-| `topic_assignments` | Maps documents to topics; records whether assignment came from `hdbscan`, `manual`, `centroid`, `auto-matched`, or `split` |
+| `topic_assignments` | Maps documents to topics. Columns: `doc_id`, `topic_id`, `assigned_by` (`hdbscan` / `manual` / `centroid` / `projection` / `auto-matched` / `split`). Projection rows (RDR-077) additionally carry `similarity` (raw cosine — ICF is applied at query time, never stored), `assigned_at` (ISO-8601), and `source_collection` (origin of the projected chunk; required for ICF aggregation). Projection rows use a prefer-higher UPSERT; other provenance keeps `INSERT OR IGNORE` idempotency. See [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md). |
 | `taxonomy_meta` | Per-collection watermark used to decide whether re-discovery is needed |
 | `topic_links` | Aggregated link counts between topics, derived from the catalog link graph |
 

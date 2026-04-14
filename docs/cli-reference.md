@@ -327,6 +327,7 @@ nx taxonomy links                               # show inter-topic relationships
 nx taxonomy rebuild -c docs__nexus              # full rebuild
 nx taxonomy project code__nexus                 # project against sibling collections
 nx taxonomy project code__nexus --against knowledge__art  # explicit targets
+nx taxonomy project code__nexus --use-icf --persist  # suppress hub topics (RDR-077)
 nx taxonomy project --backfill --persist        # project all collections
 ```
 
@@ -344,7 +345,7 @@ nx taxonomy project --backfill --persist        # project all collections
 | `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
 | `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
-| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (default 0.85). `--persist` to write assignments. `--backfill` to project all collections against each other |
+| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md)). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
 
 **Configuration** (in `.nexus.yml`):
 
