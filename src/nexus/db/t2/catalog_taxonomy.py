@@ -120,6 +120,47 @@ class AssignResult(NamedTuple):
     similarity: float
 
 
+class HubRow(NamedTuple):
+    """One hub row emitted by :meth:`CatalogTaxonomy.detect_hubs`.
+
+    RDR-077 Phase 5 (nexus-84v).
+    """
+
+    topic_id: int
+    label: str
+    collection: str
+    distinct_source_collections: int
+    total_chunks: int
+    icf: float
+    score: float
+    matched_stopwords: tuple[str, ...]
+    source_collections: tuple[str, ...]
+    last_assigned_at: str | None
+    # --warn-stale output (populated only when requested; None otherwise)
+    max_last_discover_at: str | None
+    never_discovered_count: int
+    is_stale: bool
+
+
+# RDR-077 Phase 5 PQ-3: default stopword tokens for generic-pattern detection.
+# A hub's label that *contains* any of these (case-insensitive substring) is
+# flagged. Ops can surface these in `--explain` so operators can accept or
+# suppress. Extending this list is a future RDR (PQ-3 open).
+DEFAULT_HUB_STOPWORDS: tuple[str, ...] = (
+    "assert",
+    "junit",
+    "builder",
+    "class",
+    "import",
+    "exception",
+    "getter",
+    "setter",
+    "variable",
+    "declaration",
+    "operator",
+)
+
+
 # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────────────────
 
 
@@ -321,6 +362,139 @@ class CatalogTaxonomy:
         """Drop the cached ICF map so the next ``compute_icf_map(use_cache=True)``
         recomputes from current ``topic_assignments`` state."""
         self._icf_cache = None
+
+    # RDR-077 Phase 5 (nexus-84v): generic-pattern hub detection. Surfaces
+    # topics that span many source collections with low ICF and/or
+    # stopword-containing labels — the practical signal that a topic is a
+    # generic code/prose pattern rather than a specific domain concept.
+
+    def detect_hubs(
+        self,
+        *,
+        min_collections: int = 2,
+        max_icf: float | None = None,
+        stopwords: tuple[str, ...] = DEFAULT_HUB_STOPWORDS,
+        warn_stale: bool = False,
+    ) -> list[HubRow]:
+        """Return candidate hub topics, sorted by ``chunks × (1 - ICF)`` desc.
+
+        A hub is any projection topic that meets ALL configured filters:
+
+        - ``DF(topic) >= min_collections`` (distinct source_collections).
+        - ``ICF(topic) <= max_icf`` when ``max_icf`` is set.
+
+        ``stopwords`` is an advisory list: matching tokens are reported in
+        the row's ``matched_stopwords`` field for ``--explain`` output, but
+        they do NOT filter rows — a topic with a clean label can still be a
+        hub by DF/ICF alone.
+
+        When *warn_stale* is True, the row carries ``max_last_discover_at``
+        (the latest ``taxonomy_meta.last_discover_at`` across every source
+        collection contributing to the hub — RDR-077 C-2 correctness fix),
+        the count of never-discovered source collections, and
+        ``is_stale`` set when any source collection's last discover predates
+        the hub's latest assignment. NULL ``last_discover_at`` rows are
+        excluded from MAX per SQLite aggregation semantics (RDR-077 O-3);
+        never-discovered collections surface via ``never_discovered_count``.
+        """
+        icf_map = self.compute_icf_map()
+        lowered_stopwords = tuple(s.lower() for s in stopwords)
+
+        with self._lock:
+            # Per-topic DF, total chunk count, label/collection, source set,
+            # latest assigned_at — all from projection rows only.
+            rows = self.conn.execute(
+                """
+                SELECT
+                    t.id,
+                    t.label,
+                    t.collection,
+                    COUNT(DISTINCT ta.source_collection) AS df,
+                    COUNT(*)                              AS total,
+                    MAX(ta.assigned_at)                   AS last_assigned_at
+                FROM topic_assignments ta
+                JOIN topics t ON t.id = ta.topic_id
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection IS NOT NULL
+                GROUP BY t.id, t.label, t.collection
+                HAVING df >= ?
+                ORDER BY total DESC
+                """,
+                (min_collections,),
+            ).fetchall()
+
+            hubs: list[HubRow] = []
+            for topic_id, label, collection, df, total, last_at in rows:
+                icf_value = float(icf_map.get(int(topic_id), 1.0))
+                if max_icf is not None and icf_value > max_icf:
+                    continue
+
+                sources = tuple(
+                    r[0] for r in self.conn.execute(
+                        "SELECT DISTINCT source_collection "
+                        "FROM topic_assignments "
+                        "WHERE topic_id = ? AND assigned_by = 'projection' "
+                        "AND source_collection IS NOT NULL "
+                        "ORDER BY source_collection",
+                        (int(topic_id),),
+                    ).fetchall()
+                )
+
+                lower_label = (label or "").lower()
+                matched = tuple(
+                    s for s in lowered_stopwords if s in lower_label
+                )
+
+                max_discover: str | None = None
+                never_count = 0
+                is_stale = False
+                if warn_stale and sources:
+                    placeholders = ",".join("?" * len(sources))
+                    stale_row = self.conn.execute(
+                        f"""
+                        SELECT
+                            MAX(last_discover_at),
+                            SUM(CASE WHEN last_discover_at IS NULL
+                                     THEN 1 ELSE 0 END),
+                            COUNT(*)
+                        FROM taxonomy_meta
+                        WHERE collection IN ({placeholders})
+                        """,
+                        sources,
+                    ).fetchone()
+                    max_discover = stale_row[0]
+                    seen = int(stale_row[2] or 0)
+                    nulls = int(stale_row[1] or 0)
+                    # Any contributing collection that has no taxonomy_meta
+                    # row at all is also "never discovered" from the
+                    # perspective of this command.
+                    never_count = nulls + (len(sources) - seen)
+                    # "Stale" when the hub has data newer than the latest
+                    # discover (lexicographic ISO-8601 comparison).
+                    if last_at and max_discover and last_at > max_discover:
+                        is_stale = True
+                    if never_count > 0:
+                        is_stale = True
+
+                score = float(total) * (1.0 - icf_value)
+                hubs.append(HubRow(
+                    topic_id=int(topic_id),
+                    label=label or "",
+                    collection=collection or "",
+                    distinct_source_collections=int(df),
+                    total_chunks=int(total),
+                    icf=icf_value,
+                    score=score,
+                    matched_stopwords=matched,
+                    source_collections=sources,
+                    last_assigned_at=last_at,
+                    max_last_discover_at=max_discover,
+                    never_discovered_count=never_count,
+                    is_stale=is_stale,
+                ))
+
+        hubs.sort(key=lambda h: h.score, reverse=True)
+        return hubs
 
     def get_topics(
         self,

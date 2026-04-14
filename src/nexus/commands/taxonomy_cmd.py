@@ -1246,3 +1246,106 @@ def _run_backfill(
         f"Backfill complete: {total_assigned} assignments, {total_novel} novel chunks "
         f"across {len(collections)} collections."
     )
+
+
+@taxonomy.command("hubs")
+@click.option(
+    "--min-collections", "-m", default=2, type=int, show_default=True,
+    help="Minimum distinct source collections (DF) required to flag a hub.",
+)
+@click.option(
+    "--max-icf", default=None, type=float,
+    help=(
+        "Only flag topics with ICF at or below this value. Lower ICF "
+        "= more ubiquitous = stronger hub signal. Omit to skip ICF filter."
+    ),
+)
+@click.option(
+    "--warn-stale", is_flag=True,
+    help=(
+        "Flag hubs whose latest projection assignment post-dates the newest "
+        "`last_discover_at` across contributing source collections (any hub "
+        "with a never-discovered source is treated as stale)."
+    ),
+)
+@click.option(
+    "--explain", is_flag=True,
+    help="Show why each row was flagged: DF, ICF, matched stopword tokens.",
+)
+def hubs_cmd(
+    min_collections: int,
+    max_icf: float | None,
+    warn_stale: bool,
+    explain: bool,
+) -> None:
+    """List topics that look like cross-collection hubs (RDR-077 Phase 5).
+
+    A hub is a topic whose projection assignments span many source
+    collections with low Inverse Collection Frequency — the
+    taxonomic analogue of an English stopword. Output sorted by
+    `chunks × (1 - ICF)` descending (worst offenders first).
+
+    \b
+    Examples:
+      nx taxonomy hubs --min-collections 5 --max-icf 1.2
+      nx taxonomy hubs --warn-stale --explain
+
+    See docs/taxonomy-projection-tuning.md for guidance on interpreting
+    the output and acting on flagged topics.
+    """
+    db = _T2Database(_default_db_path())
+    try:
+        rows = db.taxonomy.detect_hubs(
+            min_collections=min_collections,
+            max_icf=max_icf,
+            warn_stale=warn_stale,
+        )
+        if not rows:
+            click.echo("No hubs above the configured thresholds.")
+            return
+
+        click.echo(
+            "TOPIC                                       DF   CHUNKS   ICF   SCORE"
+        )
+        click.echo("-" * 76)
+        for row in rows:
+            label = (row.label or f"topic-{row.topic_id}")[:38]
+            click.echo(
+                f"[{row.topic_id:>5}] {label:<38}"
+                f"{row.distinct_source_collections:>4} {row.total_chunks:>7} "
+                f"{row.icf:>5.2f} {row.score:>7.2f}"
+            )
+            if explain:
+                parts: list[str] = [
+                    f"DF={row.distinct_source_collections}",
+                    f"ICF={row.icf:.3f}",
+                ]
+                if row.matched_stopwords:
+                    parts.append(
+                        "stopwords=" + ",".join(row.matched_stopwords)
+                    )
+                if row.source_collections:
+                    parts.append(
+                        "sources=" + ",".join(row.source_collections)
+                    )
+                click.echo("         " + " | ".join(parts))
+            if warn_stale and row.is_stale:
+                bits: list[str] = []
+                if row.max_last_discover_at and row.last_assigned_at and (
+                    row.last_assigned_at > row.max_last_discover_at
+                ):
+                    bits.append(
+                        f"last_assigned_at={row.last_assigned_at} > "
+                        f"max_last_discover_at={row.max_last_discover_at}"
+                    )
+                if row.never_discovered_count:
+                    bits.append(
+                        f"{row.never_discovered_count} never-discovered source(s)"
+                    )
+                click.echo(
+                    "         STALE: " + "; ".join(bits)
+                    if bits
+                    else "         STALE"
+                )
+    finally:
+        db.close()

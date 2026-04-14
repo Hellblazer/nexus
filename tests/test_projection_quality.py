@@ -734,3 +734,185 @@ class TestProjectCmdFlag:
         # inserting "- " breaks, so normalise before the containment check.
         collapsed = " ".join(result.output.split()).replace("- ", "-")
         assert "taxonomy-projection-tuning.md" in collapsed
+
+
+# ── Phase 5 (nexus-84v) — nx taxonomy hubs ──────────────────────────────────
+
+
+@pytest.fixture()
+def fixture_hub_synthetic(db: T2Database) -> T2Database:
+    """5 collections × 100 docs — half assigned to a stopword-labeled hub,
+    half spread across 5 distinct domain topics (one per collection).
+
+    Deterministic: fixed doc_ids and assigned_at values so tests don't
+    depend on wall-clock drift.
+    """
+    topics = [
+        (1, "assert helpers",            "code__c0", "2026-04-01"),
+        (2, "ingest-pipeline",           "code__c0", "2026-04-01"),
+        (3, "member-proposal-workflow",  "code__c1", "2026-04-01"),
+        (4, "payroll-audit",             "code__c2", "2026-04-01"),
+        (5, "ballot-scanner",            "code__c3", "2026-04-01"),
+        (6, "treasury-reconciliation",   "code__c4", "2026-04-01"),
+    ]
+    for tid, label, collection, created in topics:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (id, label, collection, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (tid, label, collection, created),
+        )
+
+    # Hub topic 1: 50 docs from every one of 5 collections.
+    for col_idx in range(5):
+        col = f"code__c{col_idx}"
+        for d in range(50):
+            db.taxonomy.assign_topic(
+                f"{col}-hub-d{d}", 1,
+                assigned_by="projection",
+                similarity=0.85,
+                source_collection=col,
+                assigned_at=f"2026-04-10T12:{col_idx:02d}:00",
+            )
+    # Five domain topics: topic 2..6 each gets 50 docs from one collection.
+    for col_idx, tid in enumerate((2, 3, 4, 5, 6)):
+        col = f"code__c{col_idx}"
+        for d in range(50):
+            db.taxonomy.assign_topic(
+                f"{col}-dom-d{d}", tid,
+                assigned_by="projection",
+                similarity=0.82,
+                source_collection=col,
+                assigned_at=f"2026-04-10T13:{col_idx:02d}:00",
+            )
+    db.taxonomy.clear_icf_cache()
+    return db
+
+
+class TestHubs:
+    def test_hubs_detects_stopword_topic(
+        self, fixture_hub_synthetic: T2Database,
+    ) -> None:
+        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(min_collections=2)
+        topic_ids = [h.topic_id for h in hubs]
+        # Only topic 1 spans all 5 collections.
+        assert 1 in topic_ids
+        assert hubs[0].topic_id == 1  # sorted by score desc
+        assert "assert" in hubs[0].matched_stopwords
+
+    def test_hubs_excludes_single_collection_domain_topics(
+        self, fixture_hub_synthetic: T2Database,
+    ) -> None:
+        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(min_collections=2)
+        topic_ids = {h.topic_id for h in hubs}
+        # Domain topics each live in a single source collection → DF=1,
+        # excluded by min_collections=2.
+        for domain_topic in (2, 3, 4, 5, 6):
+            assert domain_topic not in topic_ids
+
+    def test_hubs_max_icf_threshold(
+        self, fixture_hub_synthetic: T2Database,
+    ) -> None:
+        # With N_effective=5 and the hub topic at DF=5, ICF=log2(1)=0.
+        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(
+            min_collections=2, max_icf=0.5,
+        )
+        assert [h.topic_id for h in hubs] == [1]
+
+        # No ICF filter ever, but also no label stopword filter — so every
+        # DF≥2 topic shows up. In this fixture only topic 1 has DF≥2.
+        hubs_none = fixture_hub_synthetic.taxonomy.detect_hubs(
+            min_collections=2, max_icf=None,
+        )
+        assert [h.topic_id for h in hubs_none] == [1]
+
+    def test_hubs_min_collections_threshold(
+        self, fixture_hub_synthetic: T2Database,
+    ) -> None:
+        # Asking for DF>=6 → nothing (we only have 5 collections).
+        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(min_collections=6)
+        assert hubs == []
+
+    def test_hubs_warn_stale_compares_to_last_discover(
+        self, fixture_hub_synthetic: T2Database,
+    ) -> None:
+        """MAX(last_discover_at) across source collections, not single row."""
+        # Mark each source collection as discovered BEFORE the hub's latest
+        # assignment → stale should fire.
+        for col_idx in range(5):
+            fixture_hub_synthetic.taxonomy.conn.execute(
+                "INSERT INTO taxonomy_meta "
+                "(collection, last_discover_doc_count, last_discover_at) "
+                "VALUES (?, 100, ?)",
+                (f"code__c{col_idx}", "2026-04-09T00:00:00"),
+            )
+        fixture_hub_synthetic.taxonomy.conn.commit()
+
+        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(
+            min_collections=2, warn_stale=True,
+        )
+        assert hubs[0].is_stale is True
+        # The MAX across all 5 rows is the largest of the identical values.
+        assert hubs[0].max_last_discover_at == "2026-04-09T00:00:00"
+
+        # Now update ONE collection to post-date the hub's latest
+        # assigned_at. MAX() aggregation must pick that up across ALL
+        # contributing collections (C-2 correctness), not stay stuck on a
+        # single-row lookup.
+        fixture_hub_synthetic.taxonomy.conn.execute(
+            "UPDATE taxonomy_meta SET last_discover_at = ? "
+            "WHERE collection = 'code__c0'",
+            ("2026-04-11T00:00:00",),
+        )
+        fixture_hub_synthetic.taxonomy.conn.commit()
+
+        hubs2 = fixture_hub_synthetic.taxonomy.detect_hubs(
+            min_collections=2, warn_stale=True,
+        )
+        # Hub's latest assigned_at is 2026-04-10T13:04:00 (<
+        # 2026-04-11T00:00:00 after the update). Not stale anymore.
+        assert hubs2[0].is_stale is False
+        assert hubs2[0].max_last_discover_at == "2026-04-11T00:00:00"
+
+    def test_hubs_warn_stale_null_handling(
+        self, fixture_hub_synthetic: T2Database,
+    ) -> None:
+        """Never-discovered collections count as stale via never_discovered_count."""
+        # Insert NULL rows for some collections; leave others absent entirely.
+        for col_idx in range(3):
+            fixture_hub_synthetic.taxonomy.conn.execute(
+                "INSERT INTO taxonomy_meta "
+                "(collection, last_discover_doc_count, last_discover_at) "
+                "VALUES (?, 100, NULL)",
+                (f"code__c{col_idx}",),
+            )
+        fixture_hub_synthetic.taxonomy.conn.commit()
+
+        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(
+            min_collections=2, warn_stale=True,
+        )
+        # 3 explicit NULL rows + 2 collections with no taxonomy_meta row at
+        # all = 5 never-discovered source collections.
+        assert hubs[0].never_discovered_count == 5
+        assert hubs[0].max_last_discover_at is None
+        assert hubs[0].is_stale is True
+
+    def test_hubs_warn_stale_without_flag_leaves_fields_default(
+        self, fixture_hub_synthetic: T2Database,
+    ) -> None:
+        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(min_collections=2)
+        assert hubs[0].max_last_discover_at is None
+        assert hubs[0].never_discovered_count == 0
+        assert hubs[0].is_stale is False
+
+    def test_hubs_cli_flag_wiring(self) -> None:
+        from click.testing import CliRunner
+
+        from nexus.cli import main
+
+        result = CliRunner().invoke(main, ["taxonomy", "hubs", "--help"])
+        assert result.exit_code == 0
+        for flag in ("--min-collections", "--max-icf", "--warn-stale", "--explain"):
+            assert flag in result.output
+        # Points the operator at the tuning doc.
+        collapsed = " ".join(result.output.split()).replace("- ", "-")
+        assert "taxonomy-projection-tuning.md" in collapsed

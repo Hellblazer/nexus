@@ -34,6 +34,7 @@ nx taxonomy label                 # batch re-label with Claude haiku
 | `nx taxonomy links` | Show inter-topic relationships from catalog link graph |
 | `nx taxonomy rebuild -c NAME` | Full rebuild with merge strategy (preserves operator labels) |
 | `nx taxonomy project SRC` | Cross-collection projection — match chunks against other collections' topic centroids. Per-corpus-type default thresholds; `--use-icf` suppresses ubiquitous hubs. See [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md). |
+| `nx taxonomy hubs` | Detect generic-pattern hub topics via DF + ICF. `--warn-stale` flags hubs older than the latest discover; `--explain` shows why each row fired. Advisory — users decide. |
 
 ## Cross-collection projection (RDR-075, RDR-077)
 

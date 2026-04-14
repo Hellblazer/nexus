@@ -329,6 +329,7 @@ nx taxonomy project code__nexus                 # project against sibling collec
 nx taxonomy project code__nexus --against knowledge__art  # explicit targets
 nx taxonomy project code__nexus --use-icf --persist  # suppress hub topics (RDR-077)
 nx taxonomy project --backfill --persist        # project all collections
+nx taxonomy hubs --min-collections 5 --max-icf 1.2 --explain  # hub detector (RDR-077)
 ```
 
 | Subcommand | Description |
@@ -346,6 +347,7 @@ nx taxonomy project --backfill --persist        # project all collections
 | `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
 | `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md)). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
+| `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
 
 **Configuration** (in `.nexus.yml`):
 
