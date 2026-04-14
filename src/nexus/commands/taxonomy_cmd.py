@@ -988,11 +988,16 @@ def project_cmd(
         if against:
             targets = [c.strip() for c in against.split(",") if c.strip()]
         else:
-            rows = db.taxonomy.conn.execute(
-                "SELECT DISTINCT collection FROM topics WHERE collection != ?",
-                (source_collection,),
-            ).fetchall()
-            targets = [r[0] for r in rows]
+            # Try sibling collections first (same repo, different prefix)
+            from nexus.registry import list_sibling_collections
+            targets = list_sibling_collections(source_collection, t3._client)
+            if not targets:
+                # Fall back to all collections with topics
+                rows = db.taxonomy.conn.execute(
+                    "SELECT DISTINCT collection FROM topics WHERE collection != ?",
+                    (source_collection,),
+                ).fetchall()
+                targets = [r[0] for r in rows]
             if not targets:
                 click.echo("No other collections have topics. Run 'nx taxonomy discover' first.")
                 return
