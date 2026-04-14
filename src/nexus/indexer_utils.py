@@ -9,12 +9,76 @@ Leaf-ish module: imports from nexus.retry and nexus.errors only.
 """
 from __future__ import annotations
 
+import fnmatch
+import subprocess
+from pathlib import Path
+
 import structlog
 
 from nexus.errors import CredentialsMissingError
 from nexus.retry import _chroma_with_retry
 
 _log = structlog.get_logger(__name__)
+
+# Patterns always ignored (mirrors indexer.DEFAULT_IGNORE).
+_DEFAULT_IGNORE: list[str] = [
+    "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", ".git",
+    "*.lock", "go.sum",
+]
+
+
+def find_repo_root(path: Path) -> Path | None:
+    """Return the git repository root containing *path*, or None.
+
+    Uses ``git rev-parse --show-toplevel`` so it works from any subdirectory.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=path if path.is_dir() else path.parent,
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def should_ignore(rel_path: Path, patterns: list[str]) -> bool:
+    """Return True if any component of *rel_path* matches any of *patterns*."""
+    for part in rel_path.parts:
+        for pattern in patterns:
+            if fnmatch.fnmatch(part, pattern):
+                return True
+    return False
+
+
+def load_ignore_patterns(repo_root: Path | None = None) -> list[str]:
+    """Return merged ignore patterns from defaults + ``.nexus.yml``.
+
+    When *repo_root* is provided, picks up the per-repo config.
+    """
+    from nexus.config import load_config
+    cfg = load_config(repo_root=repo_root)
+    cfg_patterns: list[str] = cfg.get("server", {}).get("ignorePatterns", [])
+    return list(dict.fromkeys(_DEFAULT_IGNORE + cfg_patterns))
+
+
+def is_gitignored(path: Path, repo_root: Path) -> bool:
+    """Return True if *path* is ignored by git in *repo_root*.
+
+    Uses ``git check-ignore`` for an authoritative answer that respects
+    ``.gitignore``, ``.git/info/exclude``, and global gitignore config.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", str(path)],
+            cwd=repo_root, capture_output=True, timeout=10,
+        )
+        return result.returncode == 0  # 0 = ignored, 1 = not ignored
+    except Exception:
+        return False
 
 
 def check_staleness(

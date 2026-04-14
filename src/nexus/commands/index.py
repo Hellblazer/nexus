@@ -310,13 +310,45 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     # ── Batch mode (--dir) ──────────────────────────────────────────────
     if dir_path is not None:
-        pdfs = sorted(
-            p for p in dir_path.iterdir()
+        from nexus.indexer_utils import (
+            find_repo_root,
+            is_gitignored,
+            load_ignore_patterns,
+            should_ignore,
+        )
+
+        dir_path = dir_path.resolve()
+        repo_root = find_repo_root(dir_path)
+
+        # Collect PDFs and filter: resolve paths, respect git + .nexus.yml
+        ignore_patterns = load_ignore_patterns(repo_root)
+        raw_pdfs = sorted(
+            p.resolve() for p in dir_path.iterdir()
             if p.is_file() and p.suffix.lower() == ".pdf"
         )
+        pdfs: list[Path] = []
+        for p in raw_pdfs:
+            # Skip hidden files
+            if p.name.startswith("."):
+                continue
+            # Apply .nexus.yml ignore patterns (relative to repo or dir)
+            rel = p.relative_to(repo_root) if repo_root else p.relative_to(dir_path)
+            if should_ignore(rel, ignore_patterns):
+                _log.debug("skipping_ignored_pdf", path=str(p), pattern="ignore_patterns")
+                continue
+            # Respect .gitignore when inside a repository
+            if repo_root and is_gitignored(p, repo_root):
+                _log.debug("skipping_gitignored_pdf", path=str(p))
+                continue
+            pdfs.append(p)
+
         if not pdfs:
             click.echo(f"No PDF files found in {dir_path}")
             return
+
+        skipped = len(raw_pdfs) - len(pdfs)
+        if skipped:
+            click.echo(f"Filtered {skipped} PDF(s) via gitignore/.nexus.yml patterns")
 
         if collection is not None:
             collection = t3_collection_name(collection)

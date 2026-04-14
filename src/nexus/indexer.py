@@ -18,7 +18,6 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
 """
 import errno
 import fcntl
-import fnmatch
 import os
 import subprocess
 import time
@@ -31,7 +30,13 @@ import structlog
 from nexus.corpus import index_model_for_collection
 from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
-from nexus.indexer_utils import check_credentials, check_local_path_writable, check_staleness
+from nexus.indexer_utils import (
+    check_credentials,
+    check_local_path_writable,
+    check_staleness,
+    should_ignore as _should_ignore,  # shared implementation
+    _DEFAULT_IGNORE,
+)
 
 # Re-exports from nexus.code_indexer for backward compatibility with tests that
 # import these names directly from nexus.indexer.
@@ -49,12 +54,8 @@ if TYPE_CHECKING:
     from nexus.catalog.tumbler import Tumbler
     from nexus.registry import RepoRegistry
 
-DEFAULT_IGNORE: list[str] = [
-    "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", ".git",
-    # Dependency lock / checksum files: auto-generated, not semantically useful,
-    # and can produce chunks that exceed storage per-document size limits.
-    "*.lock", "go.sum",
-]
+# Re-export from indexer_utils for backward compatibility (tests import from here).
+DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
 
 
 # Pipeline version: bump when indexing changes invalidate existing embeddings.
@@ -111,13 +112,8 @@ def _git_metadata(repo: Path) -> dict:
     }
 
 
-def _should_ignore(rel_path: Path, patterns: list[str]) -> bool:
-    """Return True if any component of *rel_path* matches any of *patterns*."""
-    for part in rel_path.parts:
-        for pattern in patterns:
-            if fnmatch.fnmatch(part, pattern):
-                return True
-    return False
+# _should_ignore is imported from indexer_utils (as `should_ignore`) above.
+# The local name `_should_ignore` is preserved for backward compatibility.
 
 
 def _git_ls_files(repo: Path, *, include_untracked: bool = False) -> list[Path]:
@@ -752,6 +748,14 @@ def _index_pdf_file(
         embeddings=embeddings,
         metadatas=metadatas,
     )
+
+    # Incremental taxonomy: assign chunks to nearest existing topics.
+    try:
+        from nexus.mcp_infra import taxonomy_assign_batch
+        taxonomy_assign_batch(ids, collection_name, embeddings)
+    except Exception:
+        _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+
     return len(prepared)
 
 
