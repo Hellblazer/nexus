@@ -396,6 +396,21 @@ class TestMigrateReviewColumns:
         migrate_review_columns(conn)
         migrate_review_columns(conn)
 
+    def test_partial_column_missing_commits(self) -> None:
+        """Only terms missing (review_status present) → still commits."""
+        from nexus.db.migrations import migrate_review_columns
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE topics (id INTEGER PRIMARY KEY, label TEXT, "
+            "review_status TEXT NOT NULL DEFAULT 'pending')"
+        )
+        migrate_review_columns(conn)
+
+        # Verify terms column was added and committed
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(topics)").fetchall()}
+        assert "terms" in cols
+
 
 # ── apply_pending tests ─────────────────────────────────────────────────────
 
@@ -472,6 +487,35 @@ class TestApplyPending:
         ).fetchone()
         assert row is not None
         assert row[0] == "4.1.2"
+        conn.close()
+
+    def test_existing_db_empty_memory_seeds_pre_registry(self, tmp_path: Path) -> None:
+        """Existing install with empty memory table → still seeds PRE_REGISTRY_VERSION.
+
+        Regression test: the bootstrap heuristic must detect the pre-existing
+        memory table structurally (not by row count), so an existing install
+        with zero memory entries is correctly identified.
+        """
+        from nexus.db.migrations import PRE_REGISTRY_VERSION, apply_pending
+
+        db_path = tmp_path / "test.db"
+        conn = sqlite3.connect(str(db_path))
+        # Create memory table (no data) to simulate existing install
+        conn.execute(
+            "CREATE TABLE memory ("
+            "id INTEGER PRIMARY KEY, project TEXT NOT NULL, title TEXT NOT NULL, "
+            "session TEXT, agent TEXT, content TEXT NOT NULL, tags TEXT, "
+            "timestamp TEXT NOT NULL, ttl INTEGER, "
+            "access_count INTEGER DEFAULT 0 NOT NULL, last_accessed TEXT DEFAULT '')"
+        )
+        conn.commit()
+
+        apply_pending(conn, PRE_REGISTRY_VERSION)
+
+        row = conn.execute(
+            "SELECT value FROM _nexus_version WHERE key='cli_version'"
+        ).fetchone()
+        assert row[0] == PRE_REGISTRY_VERSION
         conn.close()
 
     def test_already_current_version_noop(self, tmp_path: Path) -> None:

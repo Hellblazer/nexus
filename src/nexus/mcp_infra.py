@@ -389,8 +389,9 @@ def check_version_compatibility() -> None:
 
         cli_t = _parse_version(cli_ver)
         stored_t = _parse_version(stored_ver)
-        # Warn on minor or major divergence, not patch
-        if len(cli_t) >= 2 and len(stored_t) >= 2 and cli_t[:2] != stored_t[:2]:
+        # Warn on minor or major divergence, not patch.
+        # Tuple slicing is safe for short tuples — (4,)[:2] == (4,).
+        if cli_t[:2] != stored_t[:2]:
             log.warning(
                 "version_mismatch",
                 cli_version=cli_ver,

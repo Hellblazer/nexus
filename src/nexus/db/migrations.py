@@ -229,15 +229,18 @@ def migrate_review_columns(conn: sqlite3.Connection) -> None:
     cols = {
         row[1] for row in conn.execute("PRAGMA table_info(topics)").fetchall()
     }
+    changed = False
     if "review_status" not in cols:
         _log.info("Migrating topics: adding review_status column")
         conn.execute(
             "ALTER TABLE topics ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'"
         )
+        changed = True
     if "terms" not in cols:
         _log.info("Migrating topics: adding terms column")
         conn.execute("ALTER TABLE topics ADD COLUMN terms TEXT")
-    if "review_status" not in cols or "terms" not in cols:
+        changed = True
+    if changed:
         conn.commit()
 
 
@@ -318,6 +321,11 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     if path_key in _upgrade_done:
         return
 
+    # Pre-step: detect whether this is an existing install BEFORE
+    # _create_base_tables runs (which would create the memory table,
+    # making it impossible to distinguish fresh from existing).
+    _pre_existing = _is_existing_install(conn)
+
     # Step 1: ensure all base tables exist so migration guards can PRAGMA safely
     _create_base_tables(conn)
 
@@ -336,9 +344,7 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
             "SELECT value FROM _nexus_version WHERE key='cli_version'"
         ).fetchone()
         if row is None:
-            # Detect existing install: memory table has data?
-            count = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
-            seed = PRE_REGISTRY_VERSION if count > 0 else "0.0.0"
+            seed = PRE_REGISTRY_VERSION if _pre_existing else "0.0.0"
             conn.execute(
                 "INSERT OR IGNORE INTO _nexus_version (key, value) VALUES ('cli_version', ?)",
                 (seed,),
@@ -373,13 +379,27 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
 def _connection_path_key(conn: sqlite3.Connection) -> str:
     """Extract a stable key for the connection's database file.
 
-    For ``:memory:`` connections, returns ``':memory:'``.  For file-based
-    connections, returns the ``database`` pragma value.
+    For ``:memory:`` connections, returns a unique key per connection
+    (avoids collisions when multiple in-memory DBs exist in the same
+    process).  For file-based connections, returns the database path.
     """
     row = conn.execute("PRAGMA database_list").fetchone()
     if row and row[2]:
         return row[2]
-    return ":memory:"
+    return f":memory:{id(conn)}"
+
+
+def _is_existing_install(conn: sqlite3.Connection) -> bool:
+    """Check if domain tables already exist (before _create_base_tables).
+
+    Must be called BEFORE _create_base_tables, which creates all tables
+    via CREATE TABLE IF NOT EXISTS.  An existing install has at least the
+    ``memory`` table from a prior domain store constructor.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory'"
+    ).fetchone()
+    return row is not None
 
 
 def _create_base_tables(conn: sqlite3.Connection) -> None:
