@@ -1236,9 +1236,10 @@ class CatalogTaxonomy:
         # 5. Similarity matrix: (N, M) — values in [-1, 1]
         sim = src_norm @ ctr_norm.T
 
-        # 6. Aggregate matched topics
+        # 6. Aggregate matched topics and collect per-chunk assignments
         topic_stats: dict[int, dict[str, Any]] = {}
         novel_chunks: list[str] = []
+        chunk_assignments: list[tuple[str, int]] = []
 
         for i, doc_id in enumerate(src_ids):
             row_max = float(sim[i].max())
@@ -1253,6 +1254,7 @@ class CatalogTaxonomy:
                     break
                 meta = ctr_metas[idx]
                 tid = int(meta["topic_id"])
+                chunk_assignments.append((doc_id, tid))
                 if tid not in topic_stats:
                     topic_stats[tid] = {
                         "topic_id": tid,
@@ -1278,6 +1280,7 @@ class CatalogTaxonomy:
         return {
             "matched_topics": matched_topics,
             "novel_chunks": novel_chunks,
+            "chunk_assignments": chunk_assignments,
             "total_chunks": len(src_ids),
             "total_centroids": len(ctr_metas),
         }

@@ -428,10 +428,16 @@ def test_project_against_basic(
 
     assert "matched_topics" in result
     assert "novel_chunks" in result
+    assert "chunk_assignments" in result
     assert "total_chunks" in result
     assert result["total_chunks"] == 20
     # With threshold=0.5 and clearly separated clusters, most chunks should match
     assert len(result["matched_topics"]) > 0
+    # Invariant: novel + covered == total
+    covered = result["total_chunks"] - len(result["novel_chunks"])
+    assert covered + len(result["novel_chunks"]) == result["total_chunks"]
+    # chunk_assignments has entries for covered chunks
+    assert len(result["chunk_assignments"]) > 0
 
 
 def test_project_against_empty_target(
