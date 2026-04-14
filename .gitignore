@@ -30,4 +30,6 @@ tests/fixtures/*.pdf
 .beads/.beads-credential-key
 .beads/backup/
 .claude/continuation-*
+.claude/scratch/
+.claude/scheduled_tasks.lock
 .serena/
