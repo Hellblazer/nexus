@@ -108,9 +108,13 @@ Additive. No deprecation. No breakage.
 
 **The output-granularity distinction remains the one reason to pick one tool over the other:** `search` for "where are the matching pieces," `query` for "which documents match." Every other retrieval constraint works on both.
 
-### Phase 3: Scenario skills
+### Phase 3: Scenario skills + session/subagent priming
 
-Five `nx` plugin skills, one markdown file each. Each teaches the agent exactly which `search()` / `query()` shape to use for one of the five scenarios the user identified. These are triggers + templates, not new code.
+A skill that nobody invokes is dead markdown. Phase 3 has three surfaces: the skills themselves, the session-start hook that primes the main agent, and the subagent-start hook + per-agent system prompts that prime spawned agents for the five scenarios.
+
+#### 3a: Five scenario skills
+
+One markdown file each under `nx/skills/`. Each teaches the agent exactly which `search()` / `query()` shape fits one of the scenarios the user identified. Triggers + templates, not new code.
 
 | Skill | Scenario | Trigger | Core instruction |
 |---|---|---|---|
@@ -120,7 +124,57 @@ Five `nx` plugin skills, one markdown file each. Each teaches the agent exactly 
 | `nx:debug-context` | Dev / debug | User asks why code looks a certain way, what an error means, how a subsystem works | `catalog links-for-file <path>` → RDRs explaining *why*; Serena for symbol navigation covers *what*. |
 | `nx:doc-scope` | Documentation | User asks what code a doc should reference, what docs a code file needs | `query(question=..., follow_links="cites,documented-by", depth=1)` for existing references; `catalog suggest-links` for candidates. |
 
-Each skill is ~50 lines of markdown with a triggering-condition block, the `query` / `search` / `catalog` invocation template, and a short rationale. The query-planner agent stays for analytical pipelines; these skills cover the 80% design/review/analyze workflows that don't need one.
+Each skill is ~50 lines of markdown with triggering-condition block, invocation template, rationale. Query-planner stays for analytical pipelines; these cover the 80% workflow that doesn't need decomposition.
+
+#### 3b: Session-start priming (`nx/hooks/scripts/session_start_hook.py`)
+
+The current "## nx Capabilities" block injected at session start lists `search`, `query`, `/nx:query`, plan library, scratch, catalog, enrichment. Extend with a new **"## Scenario Retrieval"** block listing each scenario skill with a one-line trigger keyword set, so the main agent reaches for the skill reflexively when a request fits the pattern. Example line:
+
+> `nx:research-plan` — triggers on "plan", "design", "extend", "implement RDR". Invokes `query(follow_links="semantic-implements", depth=2)` before writing.
+
+No new tokens-per-session beyond ~6 lines. The point is to put the skill names into the session context so the `using-nx-skills` trigger gate can fire on them.
+
+#### 3c: Subagent priming (`nx/hooks/scripts/subagent-start.sh` + agent system prompts)
+
+Two touch points per scenario agent:
+
+- The grep-dispatched context-injection block in `subagent-start.sh` for the relevant agent gets a "Knowledge-graph-first preamble" — one paragraph telling the agent its first action on a new task is to walk the catalog/topic graph via `query(follow_links=..., depth=2, topic=..., subtree=...)` before reading files.
+- The agent's own `nx/agents/<name>.md` frontmatter + opening instruction are edited to cite the same pattern — so the behavior survives when the hook context is trimmed.
+
+Target agents (mapped to scenarios):
+
+| Agent | Scenario served | Edit |
+|---|---|---|
+| `strategic-planner` | Design / plan (3a: `research-plan`) | "Before decomposing, call `query(follow_links=semantic-implements, depth=2)` to surface prior art + linked code." |
+| `architect-planner` | Architecture | Same pattern, scoped to module-level `subtree`. |
+| `code-review-expert` | Review (3a: `review-context`) | "Before reviewing, call `catalog links-for-file` on changed paths to load authoring RDRs and prior related decisions." |
+| `substantive-critic` | Critique (3a: `review-context`) | Same as code-review-expert plus `follow_links=supersedes` to trace decision evolution. |
+| `deep-analyst` | Deep analysis | "Before analysis, walk the graph: `query(follow_links=cites,depth=2, topic=...)`." |
+| `deep-research-synthesizer` | Research (3a: `analyze-corpus`) | "First pass is graph-walk + topic pre-filter, not web search." |
+| `debugger` | Debug (3a: `debug-context`) | "Before hypothesizing, `catalog links-for-file` on the failing module to load the RDR that shaped its design." |
+| `plan-auditor` | Plan review | "Before auditing the plan, walk `follow_links=implements,supersedes` to confirm the plan respects existing decisions." |
+
+Agents not listed (indexer-internal, pdf-processor, etc.) are out of scope — they're not retrieval-shaped.
+
+#### 3d: Plan-library seeding (`plan_save` MCP tool)
+
+Nexus already ships a plan library: `plan_save`/`plan_search` MCP tools over a T2 `plans` table, 5 builtin templates seeded at `nx catalog setup`. It's the right substrate for canonical `query()`/`search()`/`catalog` invocation patterns — tool-agnostic JSON describing retrieval steps, project-scoped, searchable by tags.
+
+Seed one plan per scenario skill — **same names as the skills so `plan_search(scenario_key)` and the skill both resolve to the same pattern**. Each plan is a 2–4 step sequence:
+
+| Plan name | Tags | Steps (abbreviated) |
+|---|---|---|
+| `research-plan` | `scenario,design,planning,rdr` | 1. `query(follow_links="semantic-implements", depth=2, subtree=<module>)` for prior art. 2. `search(topic=<topic>, corpus="rdr")` for related decisions. 3. `catalog suggest-links` for unlinked candidates. |
+| `review-context` | `scenario,review,critique,audit` | 1. `catalog links-for-file` on changed paths. 2. `query(follow_links="implements,semantic-implements,supersedes", depth=2)` on each authoring RDR. 3. `search(topic=<area>, corpus="rdr")` for related incidents. |
+| `analyze-corpus` | `scenario,analysis,synthesis,research` | 1. `query(topic=<topic>, follow_links="cites", depth=2, subtree=<scope>)` for the citation network. 2. If multi-step extract/compare needed, dispatch `nx:query` planner. |
+| `debug-context` | `scenario,debug,dev` | 1. `catalog links-for-file <failing-path>` for the RDR that shaped the design. 2. Serena `jet_brains_find_symbol` on the offending symbol. 3. `search(topic=<error-domain>, corpus="code")` for sibling implementations. |
+| `doc-scope` | `scenario,documentation` | 1. `query(follow_links="cites,documented-by", depth=1)` for existing references. 2. `catalog suggest-links` for unlinked candidates. |
+
+Each plan's steps are the canonical multi-tool sequence — including when to fall through to `nx:query` for decomposition or Serena for symbol-level navigation. Plans are **project-scoped** (`project="nexus"` defaults; overridden per-repo) so per-project overrides can refine the `subtree` or corpus scope.
+
+The `query-planner` agent already consumes `few_shot_plans` from the library (per its relay contract). Seeding these scenario plans makes them available as priors for the planner's decomposition, so even the "novel analytical pipeline" path benefits from the scenario patterns.
+
+One seeding script under `src/nexus/mcp_infra.py` or a new `src/nexus/catalog/scenario_plans.py`, run by `nx catalog setup` alongside the existing 5 builtin seeds. Upgrade-safe — reseed is idempotent via `plan_save` prefer-latest semantics.
 
 ## Success Criteria
 
@@ -134,6 +188,8 @@ Each skill is ~50 lines of markdown with a triggering-condition block, the `quer
 - **SC-8** — RDR-002 ART live re-demo: `query(question="vision language priming", follow_links="semantic-implements", depth=2, subtree="1.11")` returns RDR-002 **plus** `LanguagePrimingSignal.java`, `LanguageToVisionPipeline.java`, and `Phase4CrossModalPrimingTest.java` in one call. Current live result: RDR-002 and one test file.
 - **SC-9** — Prefer-higher UPSERT on `semantic-implements` edges preserved across re-runs. Lowering the ICF gate threshold does not delete existing higher-confidence edges.
 - **SC-10** — Zero regressions: full test suite green before tagging v4.4.0.
+- **SC-11** — Session and subagent hooks prime the scenario skills. The `session_start_hook.py` "## Scenario Retrieval" block lists all five skills with triggers. The `subagent-start.sh` grep dispatch injects a knowledge-graph-first preamble for each of the 8 target agents (strategic-planner, architect-planner, code-review-expert, substantive-critic, deep-analyst, deep-research-synthesizer, debugger, plan-auditor). Each target agent's `nx/agents/<name>.md` opening instruction cites the pattern independently of the hook — verifiable by grep.
+- **SC-12** — Five scenario plans land in the plan library via a seeding script run by `nx catalog setup`. `plan_search(scenario_key)` resolves each of `research-plan`, `review-context`, `analyze-corpus`, `debug-context`, `doc-scope` to a canonical multi-tool invocation sequence. Plans are project-scoped (default `nexus`) and reseed is idempotent. The `query-planner` agent consumes them as `few_shot_plans` priors.
 
 ## Research Findings
 
