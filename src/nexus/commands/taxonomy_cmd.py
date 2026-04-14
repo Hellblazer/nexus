@@ -1113,6 +1113,7 @@ def project_cmd(
             source_collection, targets, t3._client,
             threshold=resolved_threshold, top_k=top_k,
             icf_map=icf_map,
+            progress=True,
         )
         # Fall through: display logic uses `threshold` local — rebind
         # to the resolved value so messages reflect what was applied.
@@ -1226,6 +1227,7 @@ def _run_backfill(
                 src, targets, chroma_client,
                 threshold=per_src_threshold, top_k=top_k,
                 icf_map=icf_map,
+                progress=True,
             )
             matched = len(result["matched_topics"])
             novel = len(result["novel_chunks"])

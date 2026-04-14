@@ -1880,6 +1880,7 @@ class CatalogTaxonomy:
         threshold: float = 0.85,
         top_k: int = 3,
         icf_map: dict[int, float] | None = None,
+        progress: bool = False,
     ) -> dict[str, Any]:
         """Project source collection chunks against target collection centroids.
 
@@ -1902,7 +1903,20 @@ class CatalogTaxonomy:
         fresh ICF map.
 
         Raises ``ValueError`` on embedding dimension mismatch.
+
+        When *progress* is True, key stages emit one-line progress messages
+        to stderr (source fetch per page, centroid fetch, similarity
+        compute, per-row aggregation, final counts). The CLI
+        (``nx taxonomy project``) sets this to True by default so long-
+        running projections are observable; test callers leave it False.
         """
+        import sys
+        import time
+
+        def _emit(msg: str) -> None:
+            if progress:
+                print(f"  {msg}", file=sys.stderr, flush=True)
+
         # 1. Fetch source embeddings
         try:
             src_coll = chroma_client.get_collection(
@@ -1921,6 +1935,7 @@ class CatalogTaxonomy:
         src_ids: list[str] = []
         src_emb_pages: list[np.ndarray] = []
         offset = 0
+        t0 = time.monotonic()
         while True:
             page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
             page_ids = page.get("ids", [])
@@ -1929,6 +1944,11 @@ class CatalogTaxonomy:
                 break
             src_ids.extend(page_ids)
             src_emb_pages.append(np.array(page_embs, dtype=np.float32))
+            if len(src_ids) % 3000 == 0 or len(page_ids) < _PAGE:
+                _emit(
+                    f"fetching source {source_collection}: "
+                    f"{len(src_ids)} chunks ({time.monotonic() - t0:.1f}s)"
+                )
             if len(page_ids) < _PAGE:
                 break
             offset += _PAGE
@@ -1941,6 +1961,10 @@ class CatalogTaxonomy:
                 "total_centroids": 0,
             }
         src_embs = np.concatenate(src_emb_pages)
+        _emit(
+            f"source fetch complete: {len(src_ids)} chunks, "
+            f"{src_embs.shape[1]}d ({time.monotonic() - t0:.1f}s)"
+        )
 
         # 2. Fetch target centroids
         try:
@@ -1977,6 +2001,10 @@ class CatalogTaxonomy:
                 "total_centroids": 0,
             }
         ctr_embs = np.array(ctr_raw, dtype=np.float32)
+        _emit(
+            f"centroids fetched: {len(ctr_metas)} topics across "
+            f"{len(target_collections)} target collection(s)"
+        )
 
         # 3. Dimension check
         if src_embs.shape[1] != ctr_embs.shape[1]:
@@ -1995,7 +2023,12 @@ class CatalogTaxonomy:
         ctr_norm = ctr_embs / ctr_norms
 
         # 5. Similarity matrix: (N, M) — values in [-1, 1]
+        t_sim = time.monotonic()
         sim = src_norm @ ctr_norm.T
+        _emit(
+            f"similarity matrix computed: ({len(src_ids)}x{len(ctr_metas)}) "
+            f"in {time.monotonic() - t_sim:.1f}s"
+        )
 
         # 5b. Adjusted matrix for filter + ranking (RDR-077 Phase 4a).
         # Raw `sim` is preserved for storage; `filter_sim` is what we
@@ -2018,7 +2051,14 @@ class CatalogTaxonomy:
         # RDR-077 RF-3 + Phase 4a: 3-tuple stores RAW cosine similarity.
         chunk_assignments: list[tuple[str, int, float]] = []
 
+        t_agg = time.monotonic()
         for i, doc_id in enumerate(src_ids):
+            if progress and i and i % 5000 == 0:
+                _emit(
+                    f"aggregating: {i}/{len(src_ids)} chunks "
+                    f"({len(chunk_assignments)} matched so far, "
+                    f"{time.monotonic() - t_agg:.1f}s)"
+                )
             row_max = float(filter_sim[i].max())
             if row_max < threshold:
                 novel_chunks.append(doc_id)
