@@ -370,6 +370,10 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                             proj_count += len(assignments)
                 if proj_count:
                     click.echo(f"  Projection: {proj_count} cross-collection assignments")
+                    # Co-occurrence topic links (SC-5, SC-7)
+                    cooc = db.taxonomy.generate_cooccurrence_links()
+                    if cooc:
+                        click.echo(f"  Links:      {cooc} co-occurrence topic links")
             except Exception:
                 _log.debug("discover_projection_failed", exc_info=True)
 

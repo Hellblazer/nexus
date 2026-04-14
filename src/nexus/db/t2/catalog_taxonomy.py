@@ -1287,7 +1287,8 @@ class CatalogTaxonomy:
                 continue
 
             topic_id = int(results["metadatas"][0][0]["topic_id"])
-            self.assign_topic(doc_id, topic_id, assigned_by="centroid")
+            by = "projection" if cross_collection else "centroid"
+            self.assign_topic(doc_id, topic_id, assigned_by=by)
             assigned += 1
 
         return assigned
