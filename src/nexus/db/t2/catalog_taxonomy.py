@@ -33,7 +33,7 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import structlog
@@ -105,6 +105,20 @@ _TOPIC_COLUMNS = (
     "review_status",
     "terms",
 )
+
+# ── Assignment result shape (RDR-077 nexus-uti) ─────────────────────────────
+
+
+class AssignResult(NamedTuple):
+    """Return shape for :meth:`CatalogTaxonomy.assign_single`.
+
+    Carries the nearest ``topic_id`` and the raw cosine ``similarity``
+    (``1.0 - distance``). ICF weighting is applied at query time, not here.
+    """
+
+    topic_id: int
+    similarity: float
+
 
 # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────────────────
 
@@ -242,13 +256,74 @@ class CatalogTaxonomy:
         return [dict(zip(_TOPIC_COLUMNS, row)) for row in rows]
 
     def assign_topic(
-        self, doc_id: str, topic_id: int, *, assigned_by: str = "hdbscan",
+        self,
+        doc_id: str,
+        topic_id: int,
+        *,
+        assigned_by: str = "hdbscan",
+        similarity: float | None = None,
+        source_collection: str | None = None,
+        assigned_at: str | None = None,
     ) -> None:
-        """Assign a document to a topic (idempotent via INSERT OR IGNORE)."""
+        """Assign a document to a topic.
+
+        For ``assigned_by='projection'`` rows (RDR-077), emits a prefer-higher
+        UPSERT: if a row already exists, ``similarity`` is set to the max of
+        the stored and incoming values, and ``assigned_at`` /
+        ``source_collection`` are refreshed only when the incoming similarity
+        wins. ``COALESCE(-1.0)`` handles legacy NULL rows pre-migration.
+
+        HDBSCAN / centroid / manual rows keep ``INSERT OR IGNORE`` idempotency
+        — similarity is NULL for those paths (no ANN distance available).
+
+        Args:
+            doc_id: opaque per-collection document identifier.
+            topic_id: target topic row id.
+            assigned_by: provenance tag (``hdbscan`` / ``centroid`` /
+                ``projection`` / ``manual``).
+            similarity: raw cosine (``1.0 - distance``) when known;
+                stored only for ``assigned_by='projection'``.
+            source_collection: the collection the doc was fetched from
+                (required for projection ICF aggregation in Phase 3).
+            assigned_at: ISO-8601 timestamp; defaults to ``datetime.now(UTC)``
+                when ``assigned_by='projection'``.
+        """
+        if assigned_by == "projection":
+            ts = assigned_at or datetime.now(UTC).isoformat()
+            with self._lock:
+                self.conn.execute(
+                    """
+                    INSERT INTO topic_assignments
+                        (doc_id, topic_id, assigned_by,
+                         similarity, assigned_at, source_collection)
+                    VALUES (?, ?, 'projection', ?, ?, ?)
+                    ON CONFLICT(doc_id, topic_id) DO UPDATE SET
+                        similarity =
+                            MAX(COALESCE(topic_assignments.similarity, -1.0),
+                                excluded.similarity),
+                        assigned_at = CASE
+                            WHEN excluded.similarity
+                                 > COALESCE(topic_assignments.similarity, -1.0)
+                            THEN excluded.assigned_at
+                            ELSE topic_assignments.assigned_at
+                        END,
+                        source_collection = CASE
+                            WHEN excluded.similarity
+                                 > COALESCE(topic_assignments.similarity, -1.0)
+                            THEN excluded.source_collection
+                            ELSE topic_assignments.source_collection
+                        END,
+                        assigned_by = 'projection'
+                    """,
+                    (doc_id, topic_id, similarity, ts, source_collection),
+                )
+                self.conn.commit()
+            return
+
         with self._lock:
             self.conn.execute(
-                "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id, assigned_by) "
-                "VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO topic_assignments "
+                "(doc_id, topic_id, assigned_by) VALUES (?, ?, ?)",
                 (doc_id, topic_id, assigned_by),
             )
             self.conn.commit()
@@ -1254,13 +1329,17 @@ class CatalogTaxonomy:
         chroma_client: Any,
         *,
         cross_collection: bool = False,
-    ) -> int | None:
-        """Return the nearest topic_id for a single embedding.
+    ) -> AssignResult | None:
+        """Return the nearest topic_id + raw cosine similarity for one embedding.
 
         When *cross_collection* is False (default), queries only centroids
         for *collection_name*.  When True, queries only FOREIGN centroids
         (``$ne collection_name``) — used for cross-collection projection
         (RDR-075 SC-6).
+
+        The returned :class:`AssignResult` carries the raw cosine similarity
+        (``1.0 - distance``) from ChromaDB. Callers apply ICF weighting at
+        query time; the write path stores the raw value only (RDR-077 RF-8).
 
         Returns ``None`` when the centroid collection does not exist, is
         empty, or dimensions mismatch (SC-10).
@@ -1296,7 +1375,11 @@ class CatalogTaxonomy:
         if not results["ids"] or not results["ids"][0]:
             return None
 
-        return int(results["metadatas"][0][0]["topic_id"])
+        topic_id = int(results["metadatas"][0][0]["topic_id"])
+        # ChromaDB returns cosine *distance* as a list-of-lists (one row per
+        # input embedding). We get a single row here (n_results=1).
+        distance = float(results["distances"][0][0])
+        return AssignResult(topic_id=topic_id, similarity=1.0 - distance)
 
     def assign_batch(
         self,
@@ -1355,12 +1438,24 @@ class CatalogTaxonomy:
             return 0
 
         by = "projection" if cross_collection else "centroid"
+        # RDR-077 C-1: capture per-row distance → similarity; source_collection
+        # is the caller's *collection_name* (that's where the doc lives).
         assigned = 0
         for i, doc_id in enumerate(doc_ids):
             if not results["ids"][i]:
                 continue
             topic_id = int(results["metadatas"][i][0]["topic_id"])
-            self.assign_topic(doc_id, topic_id, assigned_by=by)
+            if by == "projection":
+                distance = float(results["distances"][i][0])
+                self.assign_topic(
+                    doc_id,
+                    topic_id,
+                    assigned_by=by,
+                    similarity=1.0 - distance,
+                    source_collection=collection_name,
+                )
+            else:
+                self.assign_topic(doc_id, topic_id, assigned_by=by)
             assigned += 1
 
         return assigned
@@ -1483,7 +1578,8 @@ class CatalogTaxonomy:
         # 6. Aggregate matched topics and collect per-chunk assignments
         topic_stats: dict[int, dict[str, Any]] = {}
         novel_chunks: list[str] = []
-        chunk_assignments: list[tuple[str, int]] = []
+        # RDR-077 RF-3: 3-tuple (doc_id, topic_id, raw_cosine_similarity)
+        chunk_assignments: list[tuple[str, int, float]] = []
 
         for i, doc_id in enumerate(src_ids):
             row_max = float(sim[i].max())
@@ -1498,7 +1594,7 @@ class CatalogTaxonomy:
                     break
                 meta = ctr_metas[idx]
                 tid = int(meta["topic_id"])
-                chunk_assignments.append((doc_id, tid))
+                chunk_assignments.append((doc_id, tid, float(sim[i, idx])))
                 if tid not in topic_stats:
                     topic_stats[tid] = {
                         "topic_id": tid,

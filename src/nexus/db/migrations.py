@@ -406,8 +406,15 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
                 src, targets, t3_db._client, threshold=0.85,
             )
             assignments = result.get("chunk_assignments", [])
-            for doc_id, topic_id in assignments:
-                taxonomy.assign_topic(doc_id, topic_id, assigned_by="projection")
+            # RDR-077 RF-3: 3-tuple (doc_id, topic_id, raw_cosine_similarity).
+            for doc_id, topic_id, similarity in assignments:
+                taxonomy.assign_topic(
+                    doc_id,
+                    topic_id,
+                    assigned_by="projection",
+                    similarity=similarity,
+                    source_collection=src,
+                )
             total_assigned += len(assignments)
             elapsed = time.monotonic() - t0
             print(

@@ -393,7 +393,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                         )
                         assignments = result.get("chunk_assignments", [])
                         if assignments:
-                            _persist_assignments(db.taxonomy, assignments, quiet=True)
+                            _persist_assignments(
+                                db.taxonomy, assignments, col_name, quiet=True,
+                            )
                             proj_count += len(assignments)
                 if proj_count:
                     click.echo(f"  Projection: {proj_count} cross-collection assignments")
@@ -1096,7 +1098,9 @@ def project_cmd(
         click.echo(f"Total: {len(matched)} matched topics, {covered}/{total} chunks covered")
 
         if persist and result.get("chunk_assignments"):
-            _persist_assignments(db.taxonomy, result["chunk_assignments"])
+            _persist_assignments(
+                db.taxonomy, result["chunk_assignments"], source_collection,
+            )
         elif matched and not persist:
             click.echo("\nRun with --persist to write assignments to topic_assignments.")
 
@@ -1108,17 +1112,28 @@ def project_cmd(
 
 def _persist_assignments(
     taxonomy: "CatalogTaxonomy",
-    chunk_assignments: list[tuple[str, int]],
+    chunk_assignments: list[tuple[str, int, float]],
+    source_collection: str,
     *,
     quiet: bool = False,
 ) -> int:
-    """Write per-chunk projection assignments from project_against results.
+    """Write per-chunk projection assignments from ``project_against`` results.
 
-    Returns the number of assignments written.  Set *quiet* to suppress
-    CLI output (used when called from pipeline context).
+    Each tuple is ``(doc_id, topic_id, raw_cosine_similarity)`` per RDR-077
+    RF-3. *source_collection* identifies the origin of these chunks (used
+    later for ICF hub detection).
+
+    Returns the number of assignments written. Set *quiet* to suppress CLI
+    output (used when called from pipeline context).
     """
-    for doc_id, topic_id in chunk_assignments:
-        taxonomy.assign_topic(doc_id, topic_id, assigned_by="projection")
+    for doc_id, topic_id, similarity in chunk_assignments:
+        taxonomy.assign_topic(
+            doc_id,
+            topic_id,
+            assigned_by="projection",
+            similarity=similarity,
+            source_collection=source_collection,
+        )
     if not quiet:
         click.echo(f"Persisted {len(chunk_assignments)} projection assignment(s).")
     return len(chunk_assignments)
@@ -1163,7 +1178,7 @@ def _run_backfill(
             total_novel += novel
 
             if persist and result.get("chunk_assignments"):
-                _persist_assignments(taxonomy, result["chunk_assignments"])
+                _persist_assignments(taxonomy, result["chunk_assignments"], src)
                 total_assigned += len(result["chunk_assignments"])
         except Exception as e:
             click.echo(f"    Skipped: {e}")

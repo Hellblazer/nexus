@@ -136,10 +136,11 @@ class TestFullPipelineEphemeral:
             new_text = "def handle_post_request(request): data = request.json(); return created(data)"
             new_emb = np.array(ef([new_text])[0], dtype=np.float32)
 
-            topic_id = db.taxonomy.assign_single(
+            result = db.taxonomy.assign_single(
                 "code__e2e", new_emb, ephemeral_chroma,
             )
-            assert topic_id is not None
+            assert result is not None
+            topic_id = result.topic_id
 
             # Check that the assigned topic's docs are mostly HTTP
             topic_docs = db.taxonomy.get_all_topic_doc_ids(topic_id)
@@ -391,10 +392,10 @@ class TestFullPipelinePersistent:
             new_text = "cursor.execute('SELECT * FROM orders WHERE total > 100')"
             new_emb = np.array(ef([new_text])[0], dtype=np.float32)
 
-            topic_id = db.taxonomy.assign_single(
+            result = db.taxonomy.assign_single(
                 "code__e2e", new_emb, persistent_chroma,
             )
-            assert topic_id is not None
+            assert result is not None
 
             # Verify centroid collection uses cosine space
             centroid_coll = persistent_chroma.get_collection(

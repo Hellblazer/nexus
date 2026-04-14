@@ -271,14 +271,16 @@ def test_assign_single_returns_nearest_topic(
     new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
     new_emb[0] += 3.0
 
-    topic_id = db.taxonomy.assign_single("test__coll", new_emb, chroma_client)
-    assert topic_id is not None
-    assert isinstance(topic_id, int)
+    result = db.taxonomy.assign_single("test__coll", new_emb, chroma_client)
+    assert result is not None
+    # RDR-077: AssignResult(topic_id, similarity)
+    assert isinstance(result.topic_id, int)
+    assert 0.0 <= result.similarity <= 1.0
 
     # Verify it's assigned to a real topic in T2
     topics = db.taxonomy.get_topics()
     topic_ids = {t["id"] for t in topics}
-    assert topic_id in topic_ids
+    assert result.topic_id in topic_ids
 
 
 def test_assign_single_no_centroids_returns_none(
@@ -1063,11 +1065,12 @@ class TestMiniLMTopicQuality:
         for idx in holdout_indices:
             if full_labels[idx] < 0:
                 continue  # skip noise in full batch
-            topic_id = db.taxonomy.assign_single(
+            result = db.taxonomy.assign_single(
                 "code__agreement", embeddings[idx], chroma,
             )
-            if topic_id is None:
+            if result is None:
                 continue
+            topic_id = result.topic_id
             total += 1
 
             # Check domain coherence: get docs assigned to this topic
