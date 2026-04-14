@@ -122,6 +122,19 @@ class TestUpgradeCommand:
         assert result.exit_code == 0
         assert len(t3_called) == 0
 
+    def test_dry_run_unresolvable_version(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--dry-run with unresolvable CLI version emits distinct message."""
+        db_path = tmp_path / "memory.db"
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade._current_version", return_value="0.0.0"),
+        ):
+            result = runner.invoke(main, ["upgrade", "--dry-run"])
+        assert result.exit_code == 0
+        assert "cannot determine" in result.output.lower()
+
     def test_upgrade_up_to_date(self, runner: CliRunner, tmp_path: Path) -> None:
         """When already current, reports up to date."""
         db_path = tmp_path / "memory.db"

@@ -118,9 +118,9 @@ class T2Database:
                 current_version = "0.0.0"
 
             conn = sqlite3.connect(str(path), check_same_thread=False)
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA journal_mode=WAL")
             try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA journal_mode=WAL")
                 apply_pending(conn, current_version)
             finally:
                 conn.close()

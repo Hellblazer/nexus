@@ -329,10 +329,12 @@ Distinct from per-domain ``_migrated_paths`` sets in each store.
 """
 
 _upgrade_lock = threading.Lock()
-"""Serialises the check-then-enter on ``_upgrade_done``.
+"""Serialises the check-then-add on ``_upgrade_done``.
 
-Prevents concurrent ``T2Database`` constructors from both passing the
-fast-path check and running ``apply_pending`` simultaneously.
+The first thread adds its ``path_key`` under the lock; any concurrent
+thread sees it already present and returns early before calling
+``bootstrap_version``.  The lock does NOT wrap migration execution
+itself — serialisation relies on the set membership check.
 """
 
 _bootstrap_lock = threading.Lock()
@@ -353,8 +355,8 @@ def bootstrap_version(conn: sqlite3.Connection) -> str:
     """Ensure base tables and ``_nexus_version`` exist, returning the stored version.
 
     Creates base tables, the version tracking table, and seeds the version
-    row for existing vs fresh installs.  Idempotent — safe to call multiple
-    times on the same connection.
+    row for existing vs fresh installs.  Idempotent per-connection and
+    per-thread — do not share a single connection across threads.
 
     Used by both ``apply_pending`` and ``nx upgrade --dry-run`` to get an
     accurate last-seen version without duplicating bootstrap logic.
@@ -426,8 +428,11 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
             )
             conn.commit()
     except Exception:
-        # On failure, remove from set so the next call retries.
-        _upgrade_done.discard(path_key)
+        # On failure, remove from set under lock so the next call retries.
+        # Must hold _upgrade_lock to prevent a concurrent thread from
+        # seeing a stale _upgrade_done state mid-discard.
+        with _upgrade_lock:
+            _upgrade_done.discard(path_key)
         raise
 
 

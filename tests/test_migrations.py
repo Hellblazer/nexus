@@ -290,7 +290,9 @@ class TestMigrateTopics:
             ).fetchall()
         }
         assert "topics" in tables
+        assert "taxonomy_meta" in tables
         assert "topic_assignments" in tables
+        assert "topic_links" in tables
 
     def test_idempotent(self) -> None:
         from nexus.db.migrations import migrate_topics
@@ -706,7 +708,8 @@ class TestApplyPending:
             t2.join(timeout=10)
 
         assert not errors, f"Concurrent apply_pending failed: {errors}"
-        # _upgrade_lock ensures only one thread enters bootstrap_version
+        # First thread adds path_key under _upgrade_lock; the second sees
+        # it already present and returns early before calling bootstrap_version.
         assert call_count["n"] == 1
 
     def test_prerelease_version_not_stored(self, tmp_path: Path) -> None:

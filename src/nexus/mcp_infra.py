@@ -392,11 +392,15 @@ def check_version_compatibility() -> None:
         # Warn on minor or major divergence, not patch.
         # Tuple slicing is safe for short tuples — (4,)[:2] == (4,).
         if cli_t[:2] != stored_t[:2]:
+            if cli_t > stored_t:
+                hint = "run 'nx upgrade' to apply pending migrations"
+            else:
+                hint = "DB was upgraded by a newer CLI version"
             log.warning(
                 "version_mismatch",
                 cli_version=cli_ver,
                 stored_version=stored_ver,
-                hint="run 'nx upgrade' to apply pending migrations",
+                hint=hint,
             )
     except Exception:
         pass  # never block MCP startup

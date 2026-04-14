@@ -60,6 +60,13 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool) -> None:
     current = _current_version()
     current_t = _parse_version(current)
 
+    if current_t == (0, 0, 0) and dry_run:
+        click.echo(
+            "Cannot determine pending migrations — CLI version is "
+            "unresolvable (pre-release or dev install). Run 'nx upgrade' directly."
+        )
+        return
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA busy_timeout=5000")
