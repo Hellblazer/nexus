@@ -460,3 +460,130 @@ class TestProjectAgainst3Tuple:
             assert isinstance(doc_id, str)
             assert isinstance(topic_id, int)
             assert isinstance(similarity, float)
+
+
+# ── Phase 3 (nexus-qab) — ICF computation ───────────────────────────────────
+
+
+def _seed_projection_rows(
+    db: T2Database, rows: list[tuple[str, int, str]],
+) -> None:
+    """Seed projection topic_assignments with ``(doc_id, topic_id, source_collection)``.
+
+    Creates referenced ``topics`` rows on demand so FKs resolve.
+    """
+    topic_ids = {tid for _, tid, _ in rows}
+    for tid in topic_ids:
+        db.taxonomy.conn.execute(
+            "INSERT OR IGNORE INTO topics (id, label, collection, created_at) "
+            "VALUES (?, 'seed', 'code__any', '2026-04-14')",
+            (tid,),
+        )
+    for doc_id, tid, src in rows:
+        db.taxonomy.assign_topic(
+            doc_id, tid, assigned_by="projection",
+            similarity=0.9, source_collection=src,
+            assigned_at="2026-04-14T00:00:00",
+        )
+    db.taxonomy.clear_icf_cache()
+
+
+class TestICF:
+    """RDR-077 Phase 3 — ``compute_icf_map`` SC-3 + SC-8."""
+
+    def test_icf_log2_base(self, db: T2Database) -> None:
+        """N=4, DF=2 → ICF = log2(4/2) = 1.0 exactly."""
+        import math
+
+        # Topic 1 appears in 2 of 4 collections; topics 2-4 each in 1.
+        _seed_projection_rows(db, [
+            ("docA", 1, "code__c1"),
+            ("docB", 1, "code__c2"),
+            ("docC", 2, "code__c1"),
+            ("docD", 3, "code__c3"),
+            ("docE", 4, "code__c4"),
+        ])
+        icf = db.taxonomy.compute_icf_map()
+        # N_effective = 4 distinct source_collections.
+        assert icf[1] == pytest.approx(math.log2(4 / 2))
+        assert icf[2] == pytest.approx(math.log2(4 / 1))
+        assert icf[3] == pytest.approx(math.log2(4 / 1))
+        assert icf[4] == pytest.approx(math.log2(4 / 1))
+
+    def test_icf_df_equals_n_yields_zero(self, db: T2Database) -> None:
+        """Ubiquitous topic (appears in every collection) → ICF = 0."""
+        _seed_projection_rows(db, [
+            ("docA", 1, "code__c1"),
+            ("docB", 1, "code__c2"),
+            ("docC", 1, "code__c3"),
+        ])
+        icf = db.taxonomy.compute_icf_map()
+        assert icf[1] == pytest.approx(0.0)
+
+    def test_icf_n_effective_excludes_null_source(self, db: T2Database) -> None:
+        """Legacy NULL ``source_collection`` rows don't inflate N or DF."""
+        _seed_projection_rows(db, [
+            ("docA", 1, "code__c1"),
+            ("docB", 1, "code__c2"),
+            ("docC", 2, "code__c1"),
+        ])
+        # Insert a legacy NULL row directly (simulate pre-migration state).
+        db.taxonomy.conn.execute(
+            "INSERT OR IGNORE INTO topics (id, label, collection, created_at) "
+            "VALUES (99, 'legacy', 'code__any', '2026-04-14')"
+        )
+        db.taxonomy.conn.execute(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+            "VALUES ('docLegacy', 99, 'projection')"
+        )
+        db.taxonomy.conn.commit()
+        db.taxonomy.clear_icf_cache()
+
+        icf = db.taxonomy.compute_icf_map()
+        # Legacy NULL row excluded: N_effective stays 2 (c1, c2); topic 99 absent.
+        assert 99 not in icf
+        # Topic 1 in both collections → ICF = 0.
+        assert icf[1] == pytest.approx(0.0)
+
+    def test_icf_disabled_when_n_lt_2(self, db: T2Database) -> None:
+        """Single-collection corpus → empty map (ICF undefined)."""
+        _seed_projection_rows(db, [
+            ("docA", 1, "code__only"),
+            ("docB", 2, "code__only"),
+        ])
+        icf = db.taxonomy.compute_icf_map()
+        assert icf == {}
+
+    def test_icf_disabled_when_no_projection_rows(self, db: T2Database) -> None:
+        """Empty taxonomy → empty map, no SQL error."""
+        icf = db.taxonomy.compute_icf_map()
+        assert icf == {}
+
+    def test_icf_cache_lifecycle(self, db: T2Database) -> None:
+        """Cache populated once, survives multiple calls, cleared on demand."""
+        _seed_projection_rows(db, [
+            ("docA", 1, "code__c1"),
+            ("docB", 1, "code__c2"),
+            ("docC", 2, "code__c1"),
+        ])
+
+        first = db.taxonomy.compute_icf_map(use_cache=True)
+        assert first, "expected populated ICF map"
+        second = db.taxonomy.compute_icf_map(use_cache=True)
+        assert second is first, "cached object identity preserved"
+
+        # Mutating the DB does not invalidate the cache until we ask it to.
+        _seed_projection_rows(db, [("docX", 1, "code__c3")])
+        # _seed_projection_rows already calls clear_icf_cache — verify that.
+        third = db.taxonomy.compute_icf_map(use_cache=True)
+        assert third is not first, "cache must refresh after clear_icf_cache"
+
+    def test_icf_log2_scalar_registered(self, db: T2Database) -> None:
+        """``log2`` is available to arbitrary SQL on CatalogTaxonomy.conn."""
+        row = db.taxonomy.conn.execute("SELECT log2(8.0)").fetchone()
+        assert row[0] == pytest.approx(3.0)
+        # Null-safe: non-positive input → NULL (prevents ValueError).
+        row_zero = db.taxonomy.conn.execute("SELECT log2(0)").fetchone()
+        assert row_zero[0] is None
+        row_neg = db.taxonomy.conn.execute("SELECT log2(-1.0)").fetchone()
+        assert row_neg[0] is None

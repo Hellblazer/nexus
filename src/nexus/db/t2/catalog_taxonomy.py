@@ -165,10 +165,25 @@ class CatalogTaxonomy:
     """
 
     def __init__(self, path: Path, memory: "MemoryStore") -> None:
+        import math
+
         self._memory = memory
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.execute("PRAGMA busy_timeout=5000")
+        # RDR-077 Phase 3 (nexus-qab): register `log2` as a SQLite scalar
+        # function so the ICF aggregation query can use LOG2() inline.
+        # Null-safe: returns NULL when x is NULL, 0, or negative.
+        self.conn.create_function(
+            "log2",
+            1,
+            lambda x: math.log2(x) if x is not None and x > 0 else None,
+            deterministic=True,
+        )
+        # RDR-077 Phase 3: command-scoped ICF cache. Populated by callers
+        # that want per-command reuse (bulk projection, hubs, audit). The
+        # single-doc assignment hook path leaves this as None and recomputes.
+        self._icf_cache: dict[int, float] | None = None
         try:
             canonical_key = str(path.resolve())
         except OSError:
@@ -227,6 +242,85 @@ class CatalogTaxonomy:
         migrate_review_columns(self.conn)
 
     # ── Public API ────────────────────────────────────────────────────────
+
+    # RDR-077 Phase 3 (nexus-qab): Inverse Collection Frequency for hub
+    # suppression. Topics that appear across many source collections carry
+    # less specific signal (generic patterns, stopword labels) and should
+    # be down-weighted at query time. ICF never mutates the write path —
+    # the `similarity` column holds raw cosine; ICF is applied by callers
+    # that want weighted ranking.
+
+    def compute_icf_map(
+        self, *, use_cache: bool = False,
+    ) -> dict[int, float]:
+        """Return ``{topic_id: icf}`` where ``icf = log2(N_effective / DF)``.
+
+        - ``N_effective`` — count of distinct ``source_collection`` values
+          over projection rows (``assigned_by='projection'`` and
+          ``source_collection IS NOT NULL``).
+        - ``DF(topic)`` — count of distinct source collections that have
+          assigned any chunk to this topic via projection.
+
+        Guards:
+        - ``N_effective < 2`` → ICF cannot discriminate; returns ``{}``.
+          Callers should treat an empty map as "fall back to raw similarity".
+        - ``DF = N_effective`` → ``log2(1) = 0`` — ubiquitous topics are
+          suppressed to zero weight by design.
+        - Legacy rows (NULL ``source_collection``, pre-RDR-077) are
+          excluded from both numerator and denominator via ``IS NOT NULL``.
+
+        The SQL uses the ``log2`` scalar registered in ``__init__``
+        (SQLite has no native LOG/LOG2). ``log2`` returns NULL for
+        non-positive inputs, so no runtime math error can escape.
+
+        *use_cache*: when True, returns the cached map from
+        ``self._icf_cache`` if present, else computes and caches. Callers
+        driving a bulk command (``nx taxonomy project --persist``, hubs,
+        audit) set this; the single-doc assignment hook leaves it False
+        and recomputes per call.
+        """
+        if use_cache and self._icf_cache is not None:
+            return self._icf_cache
+
+        with self._lock:
+            n_row = self.conn.execute(
+                "SELECT COUNT(DISTINCT source_collection) "
+                "FROM topic_assignments "
+                "WHERE assigned_by = 'projection' "
+                "AND source_collection IS NOT NULL"
+            ).fetchone()
+            n_effective = int(n_row[0]) if n_row and n_row[0] else 0
+
+            if n_effective < 2:
+                result: dict[int, float] = {}
+                if use_cache:
+                    self._icf_cache = result
+                return result
+
+            rows = self.conn.execute(
+                """
+                SELECT
+                    ta.topic_id,
+                    log2(CAST(? AS REAL)
+                         / COUNT(DISTINCT ta.source_collection)) AS icf
+                FROM topic_assignments ta
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection IS NOT NULL
+                GROUP BY ta.topic_id
+                HAVING COUNT(DISTINCT ta.source_collection) > 0
+                """,
+                (n_effective,),
+            ).fetchall()
+
+        result = {int(tid): float(icf) for tid, icf in rows if icf is not None}
+        if use_cache:
+            self._icf_cache = result
+        return result
+
+    def clear_icf_cache(self) -> None:
+        """Drop the cached ICF map so the next ``compute_icf_map(use_cache=True)``
+        recomputes from current ``topic_assignments`` state."""
+        self._icf_cache = None
 
     def get_topics(
         self,
