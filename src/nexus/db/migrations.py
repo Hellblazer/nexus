@@ -374,7 +374,7 @@ Checked by ``T2Database.__init__()`` before opening any connection.
 Distinct from per-domain ``_migrated_paths`` sets in each store.
 """
 
-_upgrade_lock = threading.Lock()
+_upgrade_lock = threading.RLock()
 """Serialises the check-then-add on ``_upgrade_done``.
 
 The first thread adds its ``path_key`` under the lock; any concurrent

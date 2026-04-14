@@ -102,28 +102,31 @@ class T2Database:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # ── Transient connection: run pending migrations (RDR-076) ────
-        from nexus.db.migrations import _upgrade_done, apply_pending
+        from nexus.db.migrations import _upgrade_done, _upgrade_lock, apply_pending
 
         try:
             path_key = str(path.resolve())
         except OSError:
             path_key = str(path)
 
-        if path_key not in _upgrade_done:
-            try:
-                from importlib.metadata import version as _pkg_version
+        # Serialise the check-then-migrate to prevent concurrent
+        # transient connections racing the WAL write lock.
+        with _upgrade_lock:
+            if path_key not in _upgrade_done:
+                try:
+                    from importlib.metadata import version as _pkg_version
 
-                current_version = _pkg_version("conexus")
-            except Exception:
-                current_version = "0.0.0"
+                    current_version = _pkg_version("conexus")
+                except Exception:
+                    current_version = "0.0.0"
 
-            conn = sqlite3.connect(str(path), check_same_thread=False)
-            try:
-                conn.execute("PRAGMA busy_timeout=5000")
-                conn.execute("PRAGMA journal_mode=WAL")
-                apply_pending(conn, current_version)
-            finally:
-                conn.close()
+                conn = sqlite3.connect(str(path), check_same_thread=False)
+                try:
+                    conn.execute("PRAGMA busy_timeout=5000")
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    apply_pending(conn, current_version)
+                finally:
+                    conn.close()
 
         # ── Construct domain stores ───────────────────────────────────
         self.memory: MemoryStore = MemoryStore(path)
