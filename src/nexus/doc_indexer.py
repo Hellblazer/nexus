@@ -300,6 +300,9 @@ def _index_document(
     if embed_fn is None and not _has_credentials():
         return 0
 
+    # Normalize to absolute so staleness checks are path-form-independent.
+    file_path = file_path.resolve()
+
     sp = source_key if source_key is not None else str(file_path)
     content_hash = _sha256(file_path)
     if collection_name is None:
@@ -344,6 +347,13 @@ def _index_document(
         for m in metadatas:
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+
+    # Incremental taxonomy: assign chunks to nearest existing topics.
+    try:
+        from nexus.mcp_infra import taxonomy_assign_batch
+        taxonomy_assign_batch(ids, collection_name, embeddings)
+    except Exception:
+        _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
 
     # Prune stale chunks from a previous (larger) version of this file.
     # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
@@ -437,6 +447,13 @@ def _index_pdf_incremental(
 
         # Upsert
         t3.upsert_chunks_with_embeddings(collection_name, batch_ids, batch_docs, embeddings, batch_metas)
+
+        # Incremental taxonomy: assign this batch to nearest existing topics.
+        try:
+            from nexus.mcp_infra import taxonomy_assign_batch
+            taxonomy_assign_batch(batch_ids, collection_name, embeddings)
+        except Exception:
+            _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
 
         # Checkpoint
         write_checkpoint(CheckpointData(
@@ -663,6 +680,9 @@ def index_pdf(
     if embed_fn is None and not _has_credentials():
         return _empty_meta if return_metadata else 0
 
+    # Normalize to absolute so staleness checks are path-form-independent.
+    pdf_path = pdf_path.resolve()
+
     content_hash = _sha256(pdf_path)
     col_name = collection_name if collection_name is not None else f"docs__{corpus}"
     db = t3 if t3 is not None else make_t3()  # T3Database instance (not PipelineDB)
@@ -784,6 +804,13 @@ def index_pdf(
         for m in metadatas_list:
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(col_name, ids, documents, embeddings, metadatas_list)
+
+    # Incremental taxonomy: assign chunks to nearest existing topics.
+    try:
+        from nexus.mcp_infra import taxonomy_assign_batch
+        taxonomy_assign_batch(ids, col_name, embeddings)
+    except Exception:
+        _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
 
     # Prune stale chunks
     current_ids_set = set(ids)
@@ -914,6 +941,9 @@ def index_markdown(
     from functools import partial
 
     from nexus.catalog.catalog import make_relative
+
+    # Normalize to absolute so staleness checks are path-form-independent.
+    md_path = md_path.resolve()
 
     col_name = collection_name if collection_name is not None else f"docs__{corpus}"
     chunk_fn = partial(_markdown_chunks, base_path=base_path) if base_path else _markdown_chunks
