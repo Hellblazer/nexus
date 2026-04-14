@@ -916,3 +916,221 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
             only_pending=not relabel_all,
         )
         click.echo(f"Relabeled {count}/{len(target)} topics.")
+
+
+@taxonomy.command("project")
+@click.argument("source_collection", default="")
+@click.option(
+    "--against", "-a", default="",
+    help="Comma-separated target collections (omit for all other collections with topics)",
+)
+@click.option(
+    "--threshold", "-t", default=0.85, type=float, show_default=True,
+    help="Cosine similarity threshold. 0.85 is borrowed from centroid merge; calibrate empirically (SC-9).",
+)
+@click.option("--top-k", default=3, type=int, show_default=True, help="Top-k centroids per chunk")
+@click.option("--persist", is_flag=True, help="Write projection assignments (assigned_by='projection')")
+@click.option("--backfill", is_flag=True, help="Project all collections against each other")
+def project_cmd(
+    source_collection: str,
+    against: str,
+    threshold: float,
+    top_k: int,
+    persist: bool,
+    backfill: bool,
+) -> None:
+    """Project source collection chunks against target collection centroids.
+
+    Reports matched topics with chunk counts and average similarity,
+    plus novel chunks below the threshold.  Use --persist to write
+    projection assignments to topic_assignments.
+
+    \b
+    Examples:
+      nx taxonomy project docs__art-architecture --against knowledge__art
+      nx taxonomy project code__nexus --threshold 0.80 --persist
+      nx taxonomy project --backfill --persist
+    """
+    from nexus.db import make_t3
+
+    db = _T2Database(_default_db_path())
+    t3 = make_t3()
+
+    if backfill:
+        _run_backfill(db.taxonomy, t3._client, threshold=threshold, top_k=top_k, persist=persist)
+        db.close()
+        return
+
+    if not source_collection:
+        click.echo("Specify a source collection or use --backfill.")
+        db.close()
+        return
+
+    # Determine target collections
+    if against:
+        targets = [c.strip() for c in against.split(",") if c.strip()]
+    else:
+        # All other collections with existing topics
+        rows = db.taxonomy.conn.execute(
+            "SELECT DISTINCT collection FROM topics WHERE collection != ?",
+            (source_collection,),
+        ).fetchall()
+        targets = [r[0] for r in rows]
+        if not targets:
+            click.echo("No other collections have topics. Run 'nx taxonomy discover' first.")
+            db.close()
+            return
+
+    _progress(f"Projecting {source_collection} against {len(targets)} collection(s)...")
+
+    try:
+        result = db.taxonomy.project_against(
+            source_collection, targets, t3._client,
+            threshold=threshold, top_k=top_k,
+        )
+    except ValueError as e:
+        click.echo(f"Error: {e}")
+        db.close()
+        return
+
+    # Display results
+    matched = result["matched_topics"]
+    novel = result["novel_chunks"]
+    total = result["total_chunks"]
+
+    if matched:
+        click.echo(f"\nMatched topics (threshold {threshold}):")
+        for m in matched:
+            click.echo(
+                f"  [{m['topic_id']}] {m['label']} ({m['collection']}) "
+                f"— {m['chunk_count']} chunks, avg sim {m['avg_similarity']:.2f}"
+            )
+    else:
+        click.echo("\nNo matched topics above threshold.")
+
+    click.echo(f"\nNovel chunks: {len(novel)} (no centroid match >= {threshold})")
+    covered = total - len(novel)
+    click.echo(f"Total: {len(matched)} matched topics, {covered}/{total} chunks covered")
+
+    if persist and matched:
+        count = 0
+        for m in matched:
+            # Re-project to get per-chunk assignments (project_against aggregates)
+            # Use assign_topic directly for each match
+            pass
+        # For persist, re-run with per-chunk granularity
+        _persist_projections(
+            db.taxonomy, source_collection, targets, t3._client,
+            threshold=threshold, top_k=top_k,
+        )
+    elif matched and not persist:
+        click.echo("\nRun with --persist to write assignments to topic_assignments.")
+
+    db.close()
+
+
+def _persist_projections(
+    taxonomy: "CatalogTaxonomy",
+    source_collection: str,
+    target_collections: list[str],
+    chroma_client: Any,
+    *,
+    threshold: float = 0.85,
+    top_k: int = 3,
+) -> None:
+    """Write projection assignments to topic_assignments."""
+    # Re-fetch and compute to get per-chunk → topic mappings
+    try:
+        src_coll = chroma_client.get_collection(source_collection, embedding_function=None)
+    except Exception:
+        return
+
+    src_data = src_coll.get(include=["embeddings"])
+    src_ids = src_data.get("ids", [])
+    src_raw = src_data.get("embeddings")
+    if not src_ids or src_raw is None:
+        return
+
+    src_embs = np.array(src_raw, dtype=np.float32)
+
+    try:
+        centroid_coll = chroma_client.get_collection("taxonomy__centroids", embedding_function=None)
+    except Exception:
+        return
+
+    ctr_data = centroid_coll.get(
+        where={"collection": {"$in": target_collections}},
+        include=["embeddings", "metadatas"],
+    )
+    ctr_raw = ctr_data.get("embeddings")
+    ctr_metas = ctr_data.get("metadatas", [])
+    if ctr_raw is None or len(ctr_raw) == 0:
+        return
+
+    ctr_embs = np.array(ctr_raw, dtype=np.float32)
+    if src_embs.shape[1] != ctr_embs.shape[1]:
+        return
+
+    # Normalize
+    src_norms = np.linalg.norm(src_embs, axis=1, keepdims=True)
+    src_norms[src_norms == 0] = 1.0
+    ctr_norms = np.linalg.norm(ctr_embs, axis=1, keepdims=True)
+    ctr_norms[ctr_norms == 0] = 1.0
+    sim = (src_embs / src_norms) @ (ctr_embs / ctr_norms).T
+
+    count = 0
+    for i, doc_id in enumerate(src_ids):
+        top_indices = np.argsort(-sim[i])[:top_k]
+        for idx in top_indices:
+            if float(sim[i, idx]) < threshold:
+                break
+            topic_id = int(ctr_metas[idx]["topic_id"])
+            taxonomy.assign_topic(doc_id, topic_id, assigned_by="projection")
+            count += 1
+
+    click.echo(f"Persisted {count} projection assignment(s).")
+
+
+def _run_backfill(
+    taxonomy: "CatalogTaxonomy",
+    chroma_client: Any,
+    *,
+    threshold: float = 0.85,
+    top_k: int = 3,
+    persist: bool = False,
+) -> None:
+    """Project all collections against each other."""
+    rows = taxonomy.conn.execute(
+        "SELECT DISTINCT collection FROM topics"
+    ).fetchall()
+    collections = [r[0] for r in rows]
+
+    if not collections:
+        click.echo("No collections with topics found. Run 'nx taxonomy discover' first.")
+        return
+
+    click.echo(f"Backfilling {len(collections)} collection(s)...")
+
+    for src in collections:
+        targets = [c for c in collections if c != src]
+        if not targets:
+            continue
+        _progress(f"  {src} → {len(targets)} target(s)...")
+        try:
+            result = taxonomy.project_against(
+                src, targets, chroma_client,
+                threshold=threshold, top_k=top_k,
+            )
+            matched = len(result["matched_topics"])
+            novel = len(result["novel_chunks"])
+            click.echo(f"    {matched} matched topics, {novel} novel chunks")
+
+            if persist and result["matched_topics"]:
+                _persist_projections(
+                    taxonomy, src, targets, chroma_client,
+                    threshold=threshold, top_k=top_k,
+                )
+        except ValueError as e:
+            click.echo(f"    Skipped: {e}")
+
+    click.echo("Backfill complete.")
