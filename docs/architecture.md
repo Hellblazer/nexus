@@ -242,14 +242,25 @@ Phase 2 consequences:
   own `threading.Lock` plus the SQLite file-level write lock -- callers
   never see `OperationalError: database is locked`.
 
-**Migrations**: Each store owns its schema-migration guards and runs
-them the first time it opens a given database path. The guards are
-per-domain, so concurrent `T2Database` constructors on the same path
-can each reach their own `_init_schema` without coordinating through a
-single global migration lock. (`T2Database.__init__` itself constructs
-the four stores sequentially in dependency order -- the per-domain
-guard matters for multi-process / multi-constructor races, not for the
-sequential initialization inside a single `T2Database`.)
+**Migration Registry** (RDR-076): All T2 schema migrations are centralised in
+`src/nexus/db/migrations.py`. The `MIGRATIONS` list contains version-tagged
+`Migration(introduced, name, fn)` entries. `apply_pending(conn, current_version)`
+runs migrations between the last-seen version (stored in `_nexus_version` table)
+and the current CLI version. Each migration function is idempotent via
+`PRAGMA table_info()` or `sqlite_master` guards.
+
+`T2Database.__init__()` opens a transient connection, calls `apply_pending()`,
+closes it, then constructs the four domain stores. The `_upgrade_done` set
+(guarded by `_upgrade_lock`) provides a process-level fast path — subsequent
+constructions skip all DB access. Domain stores retain their own
+`_migrated_paths` guards for standalone construction outside `T2Database`.
+
+**T3 Upgrade Steps**: `T3UpgradeStep(introduced, name, fn)` entries in the
+`T3_UPGRADES` list handle ChromaDB operations (backfills, re-indexing) that
+require a `T3Database` client. These run via `nx upgrade` (not `--auto` mode).
+
+**Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook,
+applying T2 migrations silently. T3 steps are skipped in auto mode.
 
 **In-memory SQLite**: Tests that want an ephemeral database should use
 a temp file path, not `":memory:"` -- `:memory:` databases are

@@ -135,10 +135,11 @@ The `nx` command provides direct access to all storage tiers, indexing, and sear
 | `nx scratch` | Inter-agent session context (in-memory, no API keys) |
 | `nx collection` | Inspect and manage cloud collections |
 | `nx config` | Credentials and settings |
-| `nx doctor` | Health check — verifies dependencies, credentials, connectivity |
+| `nx upgrade` | Run pending database migrations and T3 upgrade steps |
+| `nx doctor` | Health check — verifies dependencies, credentials, connectivity, schema |
 | `nx hooks` | Install git hooks for automatic re-indexing on commit |
 | `nx catalog` | Document registry — search, link, audit the catalog metadata layer |
-| `nx taxonomy` | Topic taxonomy — review, rename, merge, and split auto-discovered topic clusters |
+| `nx taxonomy` | Topic taxonomy — discover, project across collections, review, merge, split |
 | `nx context` | Project context cache — topic map for agent cold-start acceleration |
 | `nx mineru` | MinerU server lifecycle (start/stop/status) for PDF extraction |
 
