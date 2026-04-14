@@ -35,14 +35,20 @@ class TestUpgradeCommand:
     def test_upgrade_default(self, runner: CliRunner, tmp_path: Path) -> None:
         """Default invocation runs pending migrations and reports results."""
         db_path = tmp_path / "memory.db"
-        with patch("nexus.commands.upgrade._db_path", return_value=db_path):
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),  # avoid cloud call
+        ):
             result = runner.invoke(main, ["upgrade"])
         assert result.exit_code == 0
 
     def test_upgrade_dry_run(self, runner: CliRunner, tmp_path: Path) -> None:
         """--dry-run lists pending migrations without executing."""
         db_path = tmp_path / "memory.db"
-        with patch("nexus.commands.upgrade._db_path", return_value=db_path):
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        ):
             result = runner.invoke(main, ["upgrade", "--dry-run"])
         assert result.exit_code == 0
         assert "dry-run" in result.output.lower() or "pending" in result.output.lower()
@@ -50,7 +56,10 @@ class TestUpgradeCommand:
     def test_upgrade_force(self, runner: CliRunner, tmp_path: Path) -> None:
         """--force resets version gate to 0.0.0 and re-runs."""
         db_path = tmp_path / "memory.db"
-        with patch("nexus.commands.upgrade._db_path", return_value=db_path):
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        ):
             # First run to set up version
             runner.invoke(main, ["upgrade"])
 
@@ -77,7 +86,10 @@ class TestUpgradeCommand:
     ) -> None:
         """--force --dry-run shows all migrations as pending."""
         db_path = tmp_path / "memory.db"
-        with patch("nexus.commands.upgrade._db_path", return_value=db_path):
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        ):
             # First run to apply everything
             runner.invoke(main, ["upgrade"])
 
@@ -130,6 +142,7 @@ class TestUpgradeCommand:
         with (
             patch("nexus.commands.upgrade._db_path", return_value=db_path),
             patch("nexus.commands.upgrade._current_version", return_value="0.0.0"),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
         ):
             result = runner.invoke(main, ["upgrade", "--dry-run"])
         assert result.exit_code == 0
@@ -138,7 +151,10 @@ class TestUpgradeCommand:
     def test_upgrade_up_to_date(self, runner: CliRunner, tmp_path: Path) -> None:
         """When already current, reports up to date."""
         db_path = tmp_path / "memory.db"
-        with patch("nexus.commands.upgrade._db_path", return_value=db_path):
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        ):
             # First run applies everything
             runner.invoke(main, ["upgrade"])
 

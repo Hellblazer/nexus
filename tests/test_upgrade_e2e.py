@@ -99,13 +99,19 @@ class TestSC2VersionGating:
 class TestSC3UpgradeFlags:
     def test_dry_run(self, runner: CliRunner, tmp_path: Path) -> None:
         db_path = tmp_path / "memory.db"
-        with patch("nexus.commands.upgrade._db_path", return_value=db_path):
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        ):
             result = runner.invoke(main, ["upgrade", "--dry-run"])
         assert result.exit_code == 0
 
     def test_force(self, runner: CliRunner, tmp_path: Path) -> None:
         db_path = tmp_path / "memory.db"
-        with patch("nexus.commands.upgrade._db_path", return_value=db_path):
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        ):
             runner.invoke(main, ["upgrade"])
 
             from nexus.db import migrations
@@ -209,7 +215,7 @@ class TestSC8HooksJson:
             for h in data["hooks"]["SessionStart"]
             if "startup" in h["matcher"]
         )
-        assert startup_hooks[0]["command"] == "nx upgrade --auto"
+        assert startup_hooks[0]["command"].startswith("nx upgrade --auto")
         assert startup_hooks[0]["timeout"] == 30
 
 

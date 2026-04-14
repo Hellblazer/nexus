@@ -756,27 +756,64 @@ def compute_topic_links(
 
 @taxonomy.command("links")
 @click.option("--collection", "-c", default="", help="Filter by collection")
-def links_cmd(collection: str) -> None:
-    """Show inter-topic relationships derived from catalog links."""
-    with _T2Database(_default_db_path()) as db:
-        catalog = _try_load_catalog()
-        if catalog is None:
-            click.echo("No catalog initialized. Run `nx catalog setup` first.")
-            return
+@click.option(
+    "--refresh", is_flag=True,
+    help="Recompute catalog-derived links before displaying (requires catalog).",
+)
+def links_cmd(collection: str, refresh: bool) -> None:
+    """Show all inter-topic relationships in topic_links.
 
-        result = compute_topic_links(
-            db.taxonomy, catalog, collection=collection, persist=True,
-        )
-        if not result:
+    Includes cross-collection projection links from RDR-075 (link_types
+    contains 'projection' or 'cooccurrence') AND catalog-derived links
+    from compute_topic_links (link_types contains 'cites', 'implements',
+    etc.).  Use --refresh to recompute catalog-derived links first.
+    """
+    with _T2Database(_default_db_path()) as db:
+        if refresh:
+            catalog = _try_load_catalog()
+            if catalog is None:
+                click.echo("No catalog initialized — skipping --refresh.")
+            else:
+                compute_topic_links(
+                    db.taxonomy, catalog, collection=collection, persist=True,
+                )
+
+        # Display all rows in topic_links, joined with topic labels
+        if collection:
+            rows = db.taxonomy.conn.execute(
+                "SELECT t1.label, t1.collection, t2.label, t2.collection, "
+                "       tl.link_count, tl.link_types "
+                "FROM topic_links tl "
+                "JOIN topics t1 ON tl.from_topic_id = t1.id "
+                "JOIN topics t2 ON tl.to_topic_id = t2.id "
+                "WHERE t1.collection = ? OR t2.collection = ? "
+                "ORDER BY tl.link_count DESC",
+                (collection, collection),
+            ).fetchall()
+        else:
+            rows = db.taxonomy.conn.execute(
+                "SELECT t1.label, t1.collection, t2.label, t2.collection, "
+                "       tl.link_count, tl.link_types "
+                "FROM topic_links tl "
+                "JOIN topics t1 ON tl.from_topic_id = t1.id "
+                "JOIN topics t2 ON tl.to_topic_id = t2.id "
+                "ORDER BY tl.link_count DESC"
+            ).fetchall()
+
+        if not rows:
             click.echo("No topic links found.")
             return
 
-        click.echo(f"Topic relationships ({len(result)} pairs):\n")
-        for pair in result:
-            types_str = ", ".join(pair["link_types"])
+        click.echo(f"Topic relationships ({len(rows)} pairs):\n")
+        for from_label, from_coll, to_label, to_coll, count, types_json in rows:
+            try:
+                import json as _json
+                types_str = ", ".join(_json.loads(types_json))
+            except Exception:
+                types_str = types_json
             click.echo(
-                f"  {pair['from_topic']} <-> {pair['to_topic']}"
-                f"  ({pair['link_count']} links: {types_str})"
+                f"  [{from_coll}] {from_label} <-> [{to_coll}] {to_label}"
+                f"  ({count} links: {types_str})"
             )
 
 

@@ -2558,40 +2558,34 @@ class TestTopicLinksCLI:
         assert "no topic links" in result.output.lower() or "catalog" in result.output.lower()
 
     def test_links_with_data(self, tmp_path: Path) -> None:
-        """Links command shows topic relationships."""
-        from unittest.mock import MagicMock, patch
+        """Links command shows topic relationships from topic_links table."""
+        from unittest.mock import patch
 
         from click.testing import CliRunner
 
         from nexus.commands.taxonomy_cmd import taxonomy
 
         db_path = tmp_path / "memory.db"
-        with T2Database(db_path):
-            pass
-
-        mock_result = [
-            {
-                "from_topic": "api",
-                "to_topic": "database",
-                "link_count": 5,
-                "link_types": ["cites", "implements"],
-            },
-        ]
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.executemany(
+                "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (1, "api", "code__test", 5, "2026-01-01T00:00:00Z"),
+                    (2, "database", "code__test", 5, "2026-01-01T00:00:00Z"),
+                ],
+            )
+            db.taxonomy.conn.execute(
+                "INSERT INTO topic_links "
+                "(from_topic_id, to_topic_id, link_count, link_types) "
+                "VALUES (1, 2, 5, '[\"cites\", \"implements\"]')"
+            )
+            db.taxonomy.conn.commit()
 
         runner = CliRunner()
-        with (
-            patch(
-                "nexus.commands.taxonomy_cmd._default_db_path",
-                return_value=db_path,
-            ),
-            patch(
-                "nexus.commands.taxonomy_cmd.compute_topic_links",
-                return_value=mock_result,
-            ),
-            patch(
-                "nexus.commands.taxonomy_cmd._try_load_catalog",
-                return_value=MagicMock(),
-            ),
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path",
+            return_value=db_path,
         ):
             result = runner.invoke(taxonomy, ["links"])
 
