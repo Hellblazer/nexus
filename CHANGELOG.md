@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-04-14
+
+### Added
+
+- **`nx doctor` PyPI version check**: `_check_cli_version` queries https://pypi.org/pypi/conexus/json (3-second timeout) and reports current vs latest. When behind, suggests `uv tool upgrade conexus`. Network failures are silent (offline-tolerant).
+
+### Fixed
+
+- **Plugin/CLI version mismatch UX**: when the nx plugin is upgraded but the conexus CLI is not, the `nx upgrade --auto` SessionStart hook would print a cryptic Click error. Now prints a helpful message: `nx plugin requires conexus >= 4.2.0 — run: uv tool upgrade conexus`.
+
 ## [4.2.0] - 2026-04-14
 
 ### Added

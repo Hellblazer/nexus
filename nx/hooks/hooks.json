@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nx upgrade --auto",
+            "command": "nx upgrade --auto 2>/dev/null || echo 'nx plugin requires conexus >= 4.2.0 — run: uv tool upgrade conexus' >&2",
             "timeout": 30
           },
           {

@@ -104,6 +104,64 @@ def _check_python() -> list[HealthResult]:
     return [r]
 
 
+def _check_cli_version() -> list[HealthResult]:
+    """Check whether a newer conexus version is available on PyPI."""
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        current = _pkg_version("conexus")
+    except Exception:
+        return []  # silent — installed version unknown
+
+    # Check PyPI for latest (3-second timeout, network-tolerant)
+    import json
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            "https://pypi.org/pypi/conexus/json",
+            headers={"User-Agent": f"nx-doctor/{current}"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        latest = data["info"]["version"]
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError, TimeoutError):
+        return [HealthResult(
+            label="conexus version",
+            ok=True,
+            detail=f"{current} (PyPI check skipped — offline?)",
+        )]
+
+    # Compare via tuple parsing
+    def _parse(v: str) -> tuple[int, ...]:
+        try:
+            parts = tuple(int(x) for x in v.split(".")[:3])
+            return parts + (0,) * (3 - len(parts))
+        except ValueError:
+            return (0, 0, 0)
+
+    cur_t = _parse(current)
+    latest_t = _parse(latest)
+
+    if cur_t >= latest_t:
+        return [HealthResult(
+            label="conexus version",
+            ok=True,
+            detail=f"{current} (latest)",
+        )]
+
+    r = HealthResult(
+        label="conexus version",
+        ok=True,  # not fatal — just informational
+        detail=f"{current} → {latest} available",
+    )
+    r.fix_suggestions = [
+        f"uv tool upgrade conexus    # → {latest}",
+    ]
+    return [r]
+
+
 def _check_t3_local() -> list[HealthResult]:
     from nexus.config import _default_local_path
 
@@ -637,6 +695,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results: list[HealthResult] = []
 
     results.extend(_check_python())
+    results.extend(_check_cli_version())
 
     _local = is_local_mode()
     if _local:

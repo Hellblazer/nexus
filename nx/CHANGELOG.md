@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-04-14
+
+### Fixed
+
+- **SessionStart hook fallback for old CLI**: when `nx upgrade --auto` fails (CLI < 4.2.0 doesn't have the upgrade command), the hook now prints `nx plugin requires conexus >= 4.2.0 — run: uv tool upgrade conexus` to stderr instead of the raw Click error.
+
 ## [4.2.0] - 2026-04-14
 
 ### Added
