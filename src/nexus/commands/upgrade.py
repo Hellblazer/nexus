@@ -42,10 +42,11 @@ def _current_version() -> str:
 @click.option("--dry-run", is_flag=True, help="List pending migrations without executing (creates base tables if absent).")
 @click.option("--force", is_flag=True, help="Reset version gate and re-run all migrations.")
 @click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (T2 only, exit 0 always).")
-def upgrade(dry_run: bool, force: bool, auto_mode: bool) -> None:
+@click.option("--skip-t3", is_flag=True, help="Skip T3 upgrade steps (e.g., cross-collection projection backfill). Useful for fast T2-only migrations.")
+def upgrade(dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool) -> None:
     """Run pending database migrations and upgrade steps."""
     try:
-        _run_upgrade(dry_run=dry_run, force=force, auto_mode=auto_mode)
+        _run_upgrade(dry_run=dry_run, force=force, auto_mode=auto_mode, skip_t3=skip_t3)
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
@@ -53,7 +54,7 @@ def upgrade(dry_run: bool, force: bool, auto_mode: bool) -> None:
         raise
 
 
-def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool) -> None:
+def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool = False) -> None:
     from pathlib import Path
 
     db_path = _db_path()
@@ -90,9 +91,9 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool) -> None:
             and _parse_version(m.introduced) <= current_t
         ]
 
-        # Compute pending T3 steps (skip in auto mode)
+        # Compute pending T3 steps (skip in auto mode or when --skip-t3)
         pending_t3 = []
-        if not auto_mode:
+        if not auto_mode and not skip_t3:
             pending_t3 = [
                 s
                 for s in T3_UPGRADES
@@ -109,7 +110,7 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool) -> None:
             for m in pending_t2:
                 click.echo(f"  T2: [{m.introduced}] {m.name}")
             for s in pending_t3:
-                click.echo(f"  T3: [{s.introduced}] {s.name}")
+                click.echo(f"  T3: [{s.introduced}] {s.name} (heavy — skip with --skip-t3)")
             return
 
         # Execute T2 migrations

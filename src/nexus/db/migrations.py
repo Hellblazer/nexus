@@ -311,26 +311,39 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
     collections' centroids and stores assignments with ``assigned_by='projection'``.
     Then generates co-occurrence topic links.
 
+    **Heavy operation** — scales O(collections²) with each pair requiring
+    paginated ChromaDB fetches.  For a repo with N collections, expect
+    N*(N-1) projection calls.  Prints per-collection progress to stderr.
+
     RDR-075 RF-11.  Idempotent via ``INSERT OR IGNORE`` in ``assign_topic``.
     """
+    import sys
+    import time
+
     import structlog
 
     log = structlog.get_logger()
 
-    # Find all collections with existing topics
     collections = taxonomy.get_distinct_collections()
-
     if not collections:
         log.info("backfill_projection_skip", reason="no topics discovered yet")
         return
 
-    log.info("backfill_projection_start", collections=len(collections))
+    n = len(collections)
+    print(
+        f"  Backfilling projection across {n} collections "
+        f"(~{n * (n - 1)} projection calls).",
+        file=sys.stderr,
+    )
+    log.info("backfill_projection_start", collections=n)
     total_assigned = 0
+    total_start = time.monotonic()
 
-    for src in collections:
+    for i, src in enumerate(collections, 1):
         targets = [c for c in collections if c != src]
         if not targets:
             continue
+        t0 = time.monotonic()
         try:
             result = taxonomy.project_against(
                 src, targets, t3_db._client, threshold=0.85,
@@ -339,16 +352,37 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
             for doc_id, topic_id in assignments:
                 taxonomy.assign_topic(doc_id, topic_id, assigned_by="projection")
             total_assigned += len(assignments)
-        except Exception:
-            log.debug("backfill_projection_collection_failed", collection=src, exc_info=True)
+            elapsed = time.monotonic() - t0
+            print(
+                f"  [{i}/{n}] {src}: "
+                f"{result.get('total_chunks', 0)} chunks, "
+                f"{len(result.get('matched_topics', []))} matches, "
+                f"{len(assignments)} assignments ({elapsed:.1f}s)",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            log.warning("backfill_projection_collection_failed",
+                        collection=src, exc_info=True)
+            print(f"  [{i}/{n}] {src}: SKIPPED ({type(e).__name__})",
+                  file=sys.stderr)
 
     # Generate co-occurrence links from the new projection assignments
+    print("  Generating co-occurrence topic links...", file=sys.stderr)
     try:
-        taxonomy.generate_cooccurrence_links()
+        link_count = taxonomy.generate_cooccurrence_links()
+        print(f"  Generated {link_count} co-occurrence links.", file=sys.stderr)
     except Exception:
-        log.debug("backfill_cooccurrence_failed", exc_info=True)
+        log.warning("backfill_cooccurrence_failed", exc_info=True)
+        print("  Co-occurrence link generation: SKIPPED", file=sys.stderr)
 
-    log.info("backfill_projection_complete", total_assigned=total_assigned)
+    total_elapsed = time.monotonic() - total_start
+    print(
+        f"  Backfill complete: {total_assigned} total assignments in "
+        f"{total_elapsed:.1f}s across {n} collections.",
+        file=sys.stderr,
+    )
+    log.info("backfill_projection_complete",
+             total_assigned=total_assigned, elapsed_s=round(total_elapsed, 1))
 
 
 T3_UPGRADES: list[T3UpgradeStep] = [
