@@ -106,6 +106,34 @@ _TOPIC_COLUMNS = (
     "terms",
 )
 
+# ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────────────────
+
+
+def _check_centroid_dimension(embedding: "np.ndarray", centroid_coll: Any) -> bool:
+    """Return True if embedding dimension matches stored centroids.
+
+    Logs a structured warning and returns False on mismatch.
+    Returns True (optimistic) if centroid collection is empty or
+    dimension cannot be determined.
+    """
+    try:
+        peek = centroid_coll.peek(1)
+        if not peek.get("embeddings") or peek["embeddings"][0] is None:
+            return True
+        stored_dim = len(peek["embeddings"][0])
+        query_dim = len(embedding)
+        if query_dim != stored_dim:
+            _log.warning(
+                "centroid_dimension_mismatch",
+                query_dim=query_dim,
+                stored_dim=stored_dim,
+            )
+            return False
+    except Exception:
+        return True
+    return True
+
+
 # ── CatalogTaxonomy ───────────────────────────────────────────────────────────
 
 
@@ -1013,6 +1041,8 @@ class CatalogTaxonomy:
 
         return count
 
+    # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────
+
     def assign_single(
         self,
         collection_name: str,
@@ -1021,9 +1051,9 @@ class CatalogTaxonomy:
     ) -> int | None:
         """Return the nearest topic_id for a single embedding.
 
-        Queries ``taxonomy__centroids`` with unconditional nearest-centroid
+        Queries ``taxonomy__centroids`` with collection-scoped nearest-centroid
         assignment (RF-070-7). Returns ``None`` when the centroid collection
-        does not exist or is empty.
+        does not exist, is empty, or dimensions mismatch (SC-10).
         """
         try:
             centroid_coll = chroma_client.get_collection(
@@ -1034,6 +1064,9 @@ class CatalogTaxonomy:
             return None
 
         if centroid_coll.count() == 0:
+            return None
+
+        if not _check_centroid_dimension(embedding, centroid_coll):
             return None
 
         try:
@@ -1076,6 +1109,13 @@ class CatalogTaxonomy:
         if centroid_coll.count() == 0:
             return 0
 
+        # Dimension check once for the batch (all embeddings share dimension)
+        if embeddings:
+            first_emb = embeddings[0]
+            sample = np.array(first_emb) if not isinstance(first_emb, np.ndarray) else first_emb
+            if not _check_centroid_dimension(sample, centroid_coll):
+                return 0
+
         assigned = 0
         for doc_id, emb in zip(doc_ids, embeddings):
             try:
@@ -1095,6 +1135,152 @@ class CatalogTaxonomy:
             assigned += 1
 
         return assigned
+
+    # ── Cross-collection projection (RDR-075 Phase 2) ──────────────
+
+    def project_against(
+        self,
+        source_collection: str,
+        target_collections: list[str],
+        chroma_client: Any,
+        *,
+        threshold: float = 0.85,
+        top_k: int = 3,
+    ) -> dict[str, Any]:
+        """Project source collection chunks against target collection centroids.
+
+        Computes cosine similarity between all source chunk embeddings and
+        all target centroid embeddings via a single matrix multiply.
+
+        Returns a dict with ``matched_topics``, ``novel_chunks``,
+        ``total_chunks``, and ``total_centroids``.
+
+        Raises ``ValueError`` on embedding dimension mismatch.
+        """
+        # 1. Fetch source embeddings
+        try:
+            src_coll = chroma_client.get_collection(
+                source_collection, embedding_function=None,
+            )
+        except Exception:
+            return {
+                "matched_topics": [],
+                "novel_chunks": [],
+                "total_chunks": 0,
+                "total_centroids": 0,
+            }
+
+        src_data = src_coll.get(include=["embeddings"])
+        src_ids = src_data.get("ids", [])
+        src_raw = src_data.get("embeddings")
+        if not src_ids or src_raw is None:
+            return {
+                "matched_topics": [],
+                "novel_chunks": [],
+                "total_chunks": 0,
+                "total_centroids": 0,
+            }
+        src_embs = np.array(src_raw, dtype=np.float32)
+
+        # 2. Fetch target centroids
+        try:
+            centroid_coll = self._create_centroid_collection(chroma_client)
+        except Exception:
+            return {
+                "matched_topics": [],
+                "novel_chunks": list(src_ids),
+                "total_chunks": len(src_ids),
+                "total_centroids": 0,
+            }
+
+        if centroid_coll.count() == 0:
+            return {
+                "matched_topics": [],
+                "novel_chunks": list(src_ids),
+                "total_chunks": len(src_ids),
+                "total_centroids": 0,
+            }
+
+        # Filter centroids to target collections
+        ctr_data = centroid_coll.get(
+            where={"collection": {"$in": target_collections}},
+            include=["embeddings", "metadatas"],
+        )
+        ctr_raw = ctr_data.get("embeddings")
+        ctr_metas = ctr_data.get("metadatas", [])
+        if ctr_raw is None or len(ctr_raw) == 0 or not ctr_metas:
+            return {
+                "matched_topics": [],
+                "novel_chunks": list(src_ids),
+                "total_chunks": len(src_ids),
+                "total_centroids": 0,
+            }
+        ctr_embs = np.array(ctr_raw, dtype=np.float32)
+
+        # 3. Dimension check
+        if src_embs.shape[1] != ctr_embs.shape[1]:
+            raise ValueError(
+                f"Dimension mismatch: source embeddings {src_embs.shape[1]}d, "
+                f"centroids {ctr_embs.shape[1]}d"
+            )
+
+        # 4. Normalize for cosine similarity via dot product
+        src_norms = np.linalg.norm(src_embs, axis=1, keepdims=True)
+        src_norms[src_norms == 0] = 1.0
+        src_norm = src_embs / src_norms
+
+        ctr_norms = np.linalg.norm(ctr_embs, axis=1, keepdims=True)
+        ctr_norms[ctr_norms == 0] = 1.0
+        ctr_norm = ctr_embs / ctr_norms
+
+        # 5. Similarity matrix: (N, M) — values in [-1, 1]
+        sim = src_norm @ ctr_norm.T
+
+        # 6. Aggregate matched topics
+        topic_stats: dict[int, dict[str, Any]] = {}
+        novel_chunks: list[str] = []
+
+        for i, doc_id in enumerate(src_ids):
+            row_max = float(sim[i].max())
+            if row_max < threshold:
+                novel_chunks.append(doc_id)
+                continue
+
+            # Top-k centroids above threshold
+            top_indices = np.argsort(-sim[i])[:top_k]
+            for idx in top_indices:
+                if float(sim[i, idx]) < threshold:
+                    break
+                meta = ctr_metas[idx]
+                tid = int(meta["topic_id"])
+                if tid not in topic_stats:
+                    topic_stats[tid] = {
+                        "topic_id": tid,
+                        "label": meta.get("label", ""),
+                        "collection": meta.get("collection", ""),
+                        "chunk_count": 0,
+                        "total_similarity": 0.0,
+                    }
+                topic_stats[tid]["chunk_count"] += 1
+                topic_stats[tid]["total_similarity"] += float(sim[i, idx])
+
+        matched_topics = [
+            {
+                "topic_id": s["topic_id"],
+                "label": s["label"],
+                "collection": s["collection"],
+                "chunk_count": s["chunk_count"],
+                "avg_similarity": s["total_similarity"] / s["chunk_count"],
+            }
+            for s in sorted(topic_stats.values(), key=lambda x: x["chunk_count"], reverse=True)
+        ]
+
+        return {
+            "matched_topics": matched_topics,
+            "novel_chunks": novel_chunks,
+            "total_chunks": len(src_ids),
+            "total_centroids": len(ctr_metas),
+        }
 
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove topic_assignments for a deleted memory entry, empty topics.

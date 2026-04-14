@@ -311,6 +311,178 @@ def test_assign_single_cross_collection_isolation(
     assert result is None, "assign_single must not cross collection boundaries"
 
 
+def test_assign_batch_assigns_multiple_docs(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_batch assigns multiple new docs to nearest topics."""
+    rng = np.random.default_rng(42)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural {i}" for i in range(30)]
+        + [f"database query sql {i}" for i in range(30)]
+    )
+
+    db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
+
+    # New batch: 3 docs near cluster A, 2 near cluster B
+    new_embs = rng.standard_normal((5, 384)).astype(np.float32) * 0.1
+    new_embs[:3, 0] += 3.0  # near cluster A
+    new_embs[3:, 1] += 3.0  # near cluster B
+    new_ids = [f"new-doc-{i}" for i in range(5)]
+
+    assigned = db.taxonomy.assign_batch(
+        "test__coll", new_ids, new_embs.tolist(), chroma_client,
+    )
+    assert assigned == 5
+
+    # Verify assignments exist in T2
+    rows = db.taxonomy.conn.execute(
+        "SELECT doc_id, assigned_by FROM topic_assignments WHERE doc_id LIKE 'new-doc-%'"
+    ).fetchall()
+    assert len(rows) == 5
+    assert all(r[1] == "centroid" for r in rows)
+
+
+def test_assign_batch_no_centroids_returns_zero(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_batch returns 0 when no centroids exist."""
+    embs = np.random.default_rng(42).standard_normal((3, 384)).astype(np.float32)
+    result = db.taxonomy.assign_batch(
+        "nonexistent__coll", ["a", "b", "c"], embs.tolist(), chroma_client,
+    )
+    assert result == 0
+
+
+def test_assign_single_dimension_mismatch(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_single returns None with warning on embedding dimension mismatch."""
+    rng = np.random.default_rng(42)
+    # Create centroids with 384d embeddings
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = [f"text {i}" for i in range(60)]
+    db.taxonomy.discover_topics("dim__coll", doc_ids, embeddings, texts, chroma_client)
+
+    # Query with 1024d embedding — dimension mismatch
+    wrong_dim_emb = rng.standard_normal(1024).astype(np.float32)
+    result = db.taxonomy.assign_single("dim__coll", wrong_dim_emb, chroma_client)
+    assert result is None
+
+
+def test_assign_batch_dimension_mismatch(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_batch returns 0 on embedding dimension mismatch."""
+    rng = np.random.default_rng(42)
+    # Create centroids with 384d
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = [f"text {i}" for i in range(60)]
+    db.taxonomy.discover_topics("dimbatch__coll", doc_ids, embeddings, texts, chroma_client)
+
+    # Query with 1024d embeddings — dimension mismatch
+    wrong_embs = rng.standard_normal((3, 1024)).astype(np.float32)
+    result = db.taxonomy.assign_batch(
+        "dimbatch__coll", ["a", "b", "c"], wrong_embs.tolist(), chroma_client,
+    )
+    assert result == 0
+
+
+def test_project_against_basic(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """project_against returns matched topics and novel chunks."""
+    rng = np.random.default_rng(42)
+    # Create source collection with 20 chunks in two clusters
+    src_embs = rng.standard_normal((20, 384)).astype(np.float32) * 0.1
+    src_embs[:10, 0] += 3.0  # cluster A
+    src_embs[10:, 1] += 3.0  # cluster B
+    src_ids = [f"src-{i}" for i in range(20)]
+
+    # Create target collection and discover topics (creates centroids)
+    tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    tgt_embs[:30, 0] += 3.0  # similar to source cluster A
+    tgt_embs[30:, 1] += 3.0  # similar to source cluster B
+    tgt_ids = [f"tgt-{i}" for i in range(60)]
+    tgt_texts = [f"text {i}" for i in range(60)]
+    db.taxonomy.discover_topics("target__coll", tgt_ids, tgt_embs, tgt_texts, chroma_client)
+
+    # Store source embeddings in a ChromaDB collection
+    src_coll = chroma_client.get_or_create_collection(
+        "source__coll", embedding_function=None, metadata={"hnsw:space": "cosine"},
+    )
+    src_coll.upsert(ids=src_ids, embeddings=src_embs.tolist())
+
+    result = db.taxonomy.project_against(
+        "source__coll", ["target__coll"], chroma_client, threshold=0.5,
+    )
+
+    assert "matched_topics" in result
+    assert "novel_chunks" in result
+    assert "total_chunks" in result
+    assert result["total_chunks"] == 20
+    # With threshold=0.5 and clearly separated clusters, most chunks should match
+    assert len(result["matched_topics"]) > 0
+
+
+def test_project_against_empty_target(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """project_against with no target centroids returns all chunks as novel."""
+    rng = np.random.default_rng(42)
+    src_embs = rng.standard_normal((5, 384)).astype(np.float32)
+    src_ids = [f"src-{i}" for i in range(5)]
+
+    src_coll = chroma_client.get_or_create_collection(
+        "empty_src__coll", embedding_function=None, metadata={"hnsw:space": "cosine"},
+    )
+    src_coll.upsert(ids=src_ids, embeddings=src_embs.tolist())
+
+    result = db.taxonomy.project_against(
+        "empty_src__coll", ["nonexistent__coll"], chroma_client,
+    )
+
+    assert result["total_chunks"] == 5
+    assert len(result["novel_chunks"]) == 5
+    assert len(result["matched_topics"]) == 0
+
+
+def test_project_against_dimension_mismatch(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """project_against raises ValueError on dimension mismatch."""
+    rng = np.random.default_rng(42)
+    # Create target centroids with 384d
+    tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    tgt_embs[:30, 0] += 3.0
+    tgt_embs[30:, 1] += 3.0
+    tgt_ids = [f"tgt-{i}" for i in range(60)]
+    tgt_texts = [f"text {i}" for i in range(60)]
+    db.taxonomy.discover_topics("dimtgt__coll", tgt_ids, tgt_embs, tgt_texts, chroma_client)
+
+    # Source collection with 1024d — dimension mismatch
+    src_embs_1024 = rng.standard_normal((5, 1024)).astype(np.float32)
+    src_ids = [f"src-{i}" for i in range(5)]
+    src_coll = chroma_client.get_or_create_collection(
+        "dimsrc__coll", embedding_function=None, metadata={"hnsw:space": "cosine"},
+    )
+    src_coll.upsert(ids=src_ids, embeddings=src_embs_1024.tolist())
+
+    with pytest.raises(ValueError, match="Dimension mismatch"):
+        db.taxonomy.project_against(
+            "dimsrc__coll", ["dimtgt__coll"], chroma_client,
+        )
+
+
 def test_assigned_by_column_populated(
     db: T2Database, chroma_client: chromadb.ClientAPI,
 ) -> None:
@@ -2643,3 +2815,101 @@ class TestGetTopicsForCollection:
         labels = {t["label"] for t in result}
         assert "exclude-me" not in labels
         assert len(result) == 2
+
+
+# ── project CLI tests (RDR-075 SC-2, SC-3, SC-9) ───────────────────────────
+
+
+class TestProjectCmd:
+    """Tests for nx taxonomy project CLI command."""
+
+    def test_project_cmd_output(
+        self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
+    ) -> None:
+        """project command shows matched topics and novel chunks."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        rng = np.random.default_rng(42)
+
+        # Create target topics
+        tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        tgt_embs[:30, 0] += 3.0
+        tgt_embs[30:, 1] += 3.0
+        db.taxonomy.discover_topics(
+            "tgt__coll",
+            [f"t-{i}" for i in range(60)],
+            tgt_embs,
+            [f"text {i}" for i in range(60)],
+            chroma_client,
+        )
+
+        # Create source collection
+        src_embs = rng.standard_normal((10, 384)).astype(np.float32) * 0.1
+        src_embs[:5, 0] += 3.0
+        src_coll = chroma_client.get_or_create_collection(
+            "src__coll", embedding_function=None, metadata={"hnsw:space": "cosine"},
+        )
+        src_coll.upsert(ids=[f"s-{i}" for i in range(10)], embeddings=src_embs.tolist())
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=tmp_path / "memory.db"),
+            patch("nexus.commands.taxonomy_cmd._T2Database", return_value=db),
+            patch("nexus.db.make_t3") as mock_t3,
+        ):
+            mock_t3.return_value._client = chroma_client
+            result = runner.invoke(taxonomy, [
+                "project", "src__coll", "--against", "tgt__coll", "--threshold", "0.5",
+            ])
+
+        assert result.exit_code == 0
+        assert "matched topics" in result.output.lower() or "novel chunks" in result.output.lower()
+
+    def test_project_cmd_persist(
+        self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
+    ) -> None:
+        """--persist writes assignments with assigned_by='projection'."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        rng = np.random.default_rng(42)
+
+        tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        tgt_embs[:30, 0] += 3.0
+        tgt_embs[30:, 1] += 3.0
+        db.taxonomy.discover_topics(
+            "ptgt__coll",
+            [f"t-{i}" for i in range(60)],
+            tgt_embs,
+            [f"text {i}" for i in range(60)],
+            chroma_client,
+        )
+
+        src_embs = rng.standard_normal((10, 384)).astype(np.float32) * 0.1
+        src_embs[:5, 0] += 3.0
+        src_coll = chroma_client.get_or_create_collection(
+            "psrc__coll", embedding_function=None, metadata={"hnsw:space": "cosine"},
+        )
+        src_coll.upsert(ids=[f"ps-{i}" for i in range(10)], embeddings=src_embs.tolist())
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=tmp_path / "memory.db"),
+            patch("nexus.commands.taxonomy_cmd._T2Database", return_value=db),
+            patch("nexus.db.make_t3") as mock_t3,
+        ):
+            mock_t3.return_value._client = chroma_client
+            result = runner.invoke(taxonomy, [
+                "project", "psrc__coll", "--against", "ptgt__coll",
+                "--threshold", "0.5", "--persist",
+            ])
+
+        assert result.exit_code == 0
+        assert "persisted" in result.output.lower()
