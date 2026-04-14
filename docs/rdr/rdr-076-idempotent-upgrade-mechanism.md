@@ -1,10 +1,12 @@
 ---
 title: "RDR-076: Idempotent Upgrade Mechanism"
-status: accepted
+status: closed
+close_reason: implemented
 type: architecture
 priority: P1
 created: 2026-04-13
 accepted_date: 2026-04-14
+closed_date: 2026-04-14
 reviewed-by: self
 ---
 
