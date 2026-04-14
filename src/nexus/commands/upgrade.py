@@ -74,9 +74,6 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool) -> None:
         if force:
             last_seen = "0.0.0"
             last_seen_t = (0, 0, 0)
-            # Clear process-level fast path so apply_pending actually runs
-            path_key = str(Path(db_path).resolve())
-            _upgrade_done.discard(path_key)
 
         # Compute pending T2 migrations
         pending_t2 = [

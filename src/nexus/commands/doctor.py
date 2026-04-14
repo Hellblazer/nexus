@@ -51,6 +51,7 @@ def _run_check_schema() -> None:
         return
 
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=2000")
     lines: list[str] = []
     all_ok = True
 

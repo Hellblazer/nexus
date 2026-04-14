@@ -303,6 +303,13 @@ Checked by ``T2Database.__init__()`` before opening any connection.
 Distinct from per-domain ``_migrated_paths`` sets in each store.
 """
 
+_upgrade_lock = threading.Lock()
+"""Serialises the check-then-enter on ``_upgrade_done``.
+
+Prevents concurrent ``T2Database`` constructors from both passing the
+fast-path check and running ``apply_pending`` simultaneously.
+"""
+
 _bootstrap_lock = threading.Lock()
 """Guards the bootstrap check in apply_pending (read + conditional insert).
 
@@ -361,28 +368,37 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     Idempotent — every migration function has column/table-existence guards.
     """
     path_key = _connection_path_key(conn)
-    if path_key in _upgrade_done:
-        return
+    with _upgrade_lock:
+        if path_key in _upgrade_done:
+            return
+        # Reserve the slot under lock — prevents concurrent entry.
+        _upgrade_done.add(path_key)
 
-    last_seen = bootstrap_version(conn)
-    last_seen_t = _parse_version(last_seen)
-    current_t = _parse_version(current_version)
+    try:
+        last_seen = bootstrap_version(conn)
+        last_seen_t = _parse_version(last_seen)
+        current_t = _parse_version(current_version)
 
-    # Step 5: filter and execute
-    for m in MIGRATIONS:
-        m_ver = _parse_version(m.introduced)
-        if m_ver > last_seen_t and m_ver <= current_t:
-            _log.info("Running migration", name=m.name, introduced=m.introduced)
-            m.fn(conn)
+        # Filter and execute eligible migrations
+        for m in MIGRATIONS:
+            m_ver = _parse_version(m.introduced)
+            if m_ver > last_seen_t and m_ver <= current_t:
+                _log.info("Running migration", name=m.name, introduced=m.introduced)
+                m.fn(conn)
 
-    # Step 6: update stored version
-    conn.execute(
-        "UPDATE _nexus_version SET value=? WHERE key='cli_version'",
-        (current_version,),
-    )
-    conn.commit()
-
-    _upgrade_done.add(path_key)
+        # Update stored version (skip if pre-release/unparseable —
+        # storing (0,0,0) would cause all migrations to re-run on next
+        # proper release).
+        if current_t > (0, 0, 0):
+            conn.execute(
+                "UPDATE _nexus_version SET value=? WHERE key='cli_version'",
+                (current_version,),
+            )
+            conn.commit()
+    except Exception:
+        # On failure, remove from set so the next call retries.
+        _upgrade_done.discard(path_key)
+        raise
 
 
 def _connection_path_key(conn: sqlite3.Connection) -> str:
