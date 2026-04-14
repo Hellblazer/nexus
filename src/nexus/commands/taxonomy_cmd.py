@@ -1349,3 +1349,82 @@ def hubs_cmd(
                 )
     finally:
         db.close()
+
+
+@taxonomy.command("audit")
+@click.option(
+    "--collection", "-c", required=True,
+    help="Source collection to audit (e.g. code__nexus).",
+)
+@click.option(
+    "--threshold", "-t", default=None, type=float,
+    help=(
+        "Count projections whose raw cosine similarity falls below this "
+        "value. Defaults to the per-corpus-type value "
+        "(code__* 0.70, knowledge__* 0.50, docs__*/rdr__* 0.55). See "
+        "docs/taxonomy-projection-tuning.md."
+    ),
+)
+@click.option(
+    "--top-n", "-n", default=5, type=int, show_default=True,
+    help="Number of receiving hub topics to display.",
+)
+def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
+    """Report projection-quality diagnostics for one source collection.
+
+    Output:
+      * total projection assignments originating from this collection;
+      * p10 / p50 / p90 of raw cosine similarity;
+      * count of assignments below threshold (candidates for re-projection);
+      * top receiving topics (where this collection's chunks land);
+      * pattern-pollution: receiving topics whose labels contain generic
+        stopword tokens (`assert`, `class`, `exception`, ...).
+
+    See docs/taxonomy-projection-tuning.md for interpretation guidance.
+    """
+    db = _T2Database(_default_db_path())
+    try:
+        report = db.taxonomy.audit_collection(
+            collection, threshold=threshold, top_n=top_n,
+        )
+        click.echo(f"Audit — {report.collection}")
+        click.echo("-" * 60)
+        if report.total_assignments == 0:
+            click.echo("No projection data for this collection yet.")
+            click.echo(
+                "Run 'nx taxonomy project "
+                f"{report.collection} --persist' to populate."
+            )
+            return
+
+        click.echo(f"Projection assignments: {report.total_assignments}")
+        click.echo(
+            "Similarity quantiles (raw cosine): "
+            f"p10={report.p10:.3f}  p50={report.p50:.3f}  p90={report.p90:.3f}"
+        )
+        click.echo(
+            f"Below threshold {report.threshold}: "
+            f"{report.below_threshold_count} assignment(s) — re-projection candidates"
+        )
+
+        click.echo("")
+        click.echo("Top receiving topics:")
+        if not report.top_receiving_hubs:
+            click.echo("  (none)")
+        for h in report.top_receiving_hubs:
+            label = h.label or f"topic-{h.topic_id}"
+            click.echo(
+                f"  [{h.topic_id}] {label}  "
+                f"(chunks={h.chunk_count}, icf={h.icf:.3f})"
+            )
+
+        if report.pattern_pollution:
+            click.echo("")
+            click.echo("Pattern-pollution (hub stopword labels):")
+            for h in report.pattern_pollution:
+                click.echo(
+                    f"  [{h.topic_id}] {h.label} — matched: "
+                    + ",".join(h.matched_stopwords)
+                )
+    finally:
+        db.close()

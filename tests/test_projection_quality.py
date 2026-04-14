@@ -916,3 +916,113 @@ class TestHubs:
         # Points the operator at the tuning doc.
         collapsed = " ".join(result.output.split()).replace("- ", "-")
         assert "taxonomy-projection-tuning.md" in collapsed
+
+
+# ── Phase 6 (nexus-w4k) — nx taxonomy audit ─────────────────────────────────
+
+
+class TestAudit:
+    @pytest.fixture()
+    def audit_db(self, db: T2Database) -> T2Database:
+        """Seed a collection with a known similarity distribution."""
+        topics = [
+            (1, "assert helpers",   "code__auditC0", "2026-04-01"),
+            (2, "ingest-pipeline",  "code__auditC0", "2026-04-01"),
+            (3, "payroll-audit",    "code__auditC0", "2026-04-01"),
+            # Cross-collection participant so ICF has N_effective >= 2.
+            (4, "ballot-scanner",   "code__peer",    "2026-04-01"),
+        ]
+        for tid, label, coll, created in topics:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (id, label, collection, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (tid, label, coll, created),
+            )
+
+        db.taxonomy.assign_topic(
+            "peer-doc-1", 4,
+            assigned_by="projection", similarity=0.80,
+            source_collection="code__peer",
+            assigned_at="2026-04-05T00:00:00",
+        )
+
+        # code__auditC0 projects 11 rows; 6 → topic 1 (hub), 3 → 2, 2 → 3.
+        sims = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 0.98]
+        topic_per_row = [1, 1, 1, 1, 1, 1, 2, 2, 2, 3, 3]
+        for i, (sim, tid) in enumerate(zip(sims, topic_per_row)):
+            db.taxonomy.assign_topic(
+                f"auditC0-d{i}", tid,
+                assigned_by="projection", similarity=sim,
+                source_collection="code__auditC0",
+                assigned_at=f"2026-04-10T12:{i:02d}:00",
+            )
+        # HDBSCAN row that must NOT be counted.
+        db.taxonomy.assign_topic("hdbscan-doc", 1, assigned_by="hdbscan")
+        db.taxonomy.clear_icf_cache()
+        return db
+
+    def test_audit_quantiles(self, audit_db: T2Database) -> None:
+        report = audit_db.taxonomy.audit_collection("code__auditC0")
+        # Sorted 0.10..0.98, 11 rows → nearest-rank p10=0.20, p50=0.60, p90=0.95.
+        assert report.total_assignments == 11
+        assert report.p10 == pytest.approx(0.20)
+        assert report.p50 == pytest.approx(0.60)
+        assert report.p90 == pytest.approx(0.95)
+
+    def test_audit_below_threshold_count(self, audit_db: T2Database) -> None:
+        report = audit_db.taxonomy.audit_collection(
+            "code__auditC0", threshold=0.50,
+        )
+        assert report.threshold == 0.50
+        # Rows below 0.50: 0.10 / 0.20 / 0.30 / 0.40 = 4.
+        assert report.below_threshold_count == 4
+
+    def test_audit_uses_per_corpus_default_threshold(
+        self, audit_db: T2Database,
+    ) -> None:
+        report = audit_db.taxonomy.audit_collection("code__auditC0")
+        # code__* default → 0.70; 6 rows below (0.10..0.60).
+        assert report.threshold == 0.70
+        assert report.below_threshold_count == 6
+
+    def test_audit_top_receiving_hubs(self, audit_db: T2Database) -> None:
+        report = audit_db.taxonomy.audit_collection(
+            "code__auditC0", top_n=5,
+        )
+        ids = [h.topic_id for h in report.top_receiving_hubs]
+        assert ids == [1, 2, 3]
+
+    def test_audit_pattern_pollution_flags(self, audit_db: T2Database) -> None:
+        report = audit_db.taxonomy.audit_collection("code__auditC0")
+        polluted_ids = [h.topic_id for h in report.pattern_pollution]
+        assert 1 in polluted_ids  # "assert helpers" matches 'assert'
+        assert 2 not in polluted_ids
+        assert 3 not in polluted_ids
+
+    def test_audit_excludes_hdbscan_rows(self, audit_db: T2Database) -> None:
+        report = audit_db.taxonomy.audit_collection("code__auditC0")
+        # 11 projection rows only — the hdbscan row is ignored.
+        assert report.total_assignments == 11
+
+    def test_audit_handles_empty_projection(self, db: T2Database) -> None:
+        report = db.taxonomy.audit_collection("code__none")
+        assert report.total_assignments == 0
+        assert report.p10 is None
+        assert report.p50 is None
+        assert report.p90 is None
+        assert report.below_threshold_count == 0
+        assert report.top_receiving_hubs == []
+        assert report.pattern_pollution == []
+
+    def test_audit_cli_flag_wiring(self) -> None:
+        from click.testing import CliRunner
+
+        from nexus.cli import main
+
+        result = CliRunner().invoke(main, ["taxonomy", "audit", "--help"])
+        assert result.exit_code == 0
+        assert "--collection" in result.output
+        assert "--threshold" in result.output
+        assert "--top-n" in result.output
+        collapsed = " ".join(result.output.split()).replace("- ", "-")
+        assert "taxonomy-projection-tuning.md" in collapsed

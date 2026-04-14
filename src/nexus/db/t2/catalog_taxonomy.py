@@ -142,6 +142,34 @@ class HubRow(NamedTuple):
     is_stale: bool
 
 
+class AuditReport(NamedTuple):
+    """Summary of projection quality for a single source collection.
+
+    Returned by :meth:`CatalogTaxonomy.audit_collection`. RDR-077 Phase 6
+    (nexus-w4k).
+    """
+
+    collection: str
+    total_assignments: int  # projection rows with source_collection = this
+    p10: float | None
+    p50: float | None
+    p90: float | None
+    below_threshold_count: int
+    threshold: float
+    top_receiving_hubs: list["AuditHub"]
+    pattern_pollution: list["AuditHub"]
+
+
+class AuditHub(NamedTuple):
+    """One receiving-topic row inside an :class:`AuditReport`."""
+
+    topic_id: int
+    label: str
+    chunk_count: int
+    icf: float
+    matched_stopwords: tuple[str, ...]
+
+
 # RDR-077 Phase 5 PQ-3: default stopword tokens for generic-pattern detection.
 # A hub's label that *contains* any of these (case-insensitive substring) is
 # flagged. Ops can surface these in `--explain` so operators can accept or
@@ -495,6 +523,119 @@ class CatalogTaxonomy:
 
         hubs.sort(key=lambda h: h.score, reverse=True)
         return hubs
+
+    # RDR-077 Phase 6 (nexus-w4k): per-collection projection-quality audit.
+    # Reports the similarity distribution, the count below threshold,
+    # receiving hubs (topics this collection's chunks project into), and
+    # pattern-pollution — hubs flagged by the Phase 5 stopword heuristic.
+
+    def audit_collection(
+        self,
+        collection: str,
+        *,
+        threshold: float | None = None,
+        top_n: int = 5,
+        stopwords: tuple[str, ...] = DEFAULT_HUB_STOPWORDS,
+    ) -> AuditReport:
+        """Summarise projection quality for *collection*.
+
+        - ``total_assignments``: projection rows where
+          ``source_collection = collection``.
+        - ``p10`` / ``p50`` / ``p90``: quantiles of ``similarity`` on those
+          rows (computed Python-side — SQLite has no
+          ``percentile_cont``). ``None`` when the collection has no
+          projection data.
+        - ``below_threshold_count``: rows with ``similarity < threshold``.
+          Defaults to the per-corpus-type threshold from
+          :func:`nexus.corpus.default_projection_threshold` when not
+          specified.
+        - ``top_receiving_hubs``: topics this collection's chunks project
+          into, sorted by chunk count descending, limited to *top_n*.
+        - ``pattern_pollution``: subset of receiving hubs whose labels
+          contain any of *stopwords* (case-insensitive substring match).
+
+        Raw ``similarity`` column values are used; ICF is applied only for
+        the receiving-hub ICF reporting, never to mutate stored rows.
+        """
+        from nexus.corpus import default_projection_threshold
+
+        resolved_threshold = (
+            threshold if threshold is not None
+            else default_projection_threshold(collection)
+        )
+        icf_map = self.compute_icf_map()
+        lowered_stopwords = tuple(s.lower() for s in stopwords)
+
+        with self._lock:
+            sims = [
+                float(r[0]) for r in self.conn.execute(
+                    "SELECT similarity FROM topic_assignments "
+                    "WHERE assigned_by = 'projection' "
+                    "AND source_collection = ? AND similarity IS NOT NULL "
+                    "ORDER BY similarity ASC",
+                    (collection,),
+                ).fetchall()
+            ]
+            below_threshold = self.conn.execute(
+                "SELECT COUNT(*) FROM topic_assignments "
+                "WHERE assigned_by = 'projection' "
+                "AND source_collection = ? "
+                "AND similarity IS NOT NULL AND similarity < ?",
+                (collection, resolved_threshold),
+            ).fetchone()[0]
+
+            hub_rows = self.conn.execute(
+                """
+                SELECT ta.topic_id, t.label, COUNT(*) AS chunks
+                FROM topic_assignments ta
+                JOIN topics t ON t.id = ta.topic_id
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection = ?
+                GROUP BY ta.topic_id, t.label
+                ORDER BY chunks DESC
+                LIMIT ?
+                """,
+                (collection, top_n),
+            ).fetchall()
+
+        total = len(sims)
+        if total:
+            def _quantile(q: float) -> float:
+                # Nearest-rank index; matches numpy's `interpolation='nearest'`
+                # for small samples and is deterministic for fixtures.
+                idx = min(total - 1, max(0, int(round(q * (total - 1)))))
+                return sims[idx]
+
+            p10 = _quantile(0.10)
+            p50 = _quantile(0.50)
+            p90 = _quantile(0.90)
+        else:
+            p10 = p50 = p90 = None
+
+        top_hubs: list[AuditHub] = []
+        for topic_id, label, chunks in hub_rows:
+            lower_label = (label or "").lower()
+            matched = tuple(s for s in lowered_stopwords if s in lower_label)
+            top_hubs.append(AuditHub(
+                topic_id=int(topic_id),
+                label=label or "",
+                chunk_count=int(chunks),
+                icf=float(icf_map.get(int(topic_id), 1.0)),
+                matched_stopwords=matched,
+            ))
+        pattern_pollution = [h for h in top_hubs if h.matched_stopwords]
+
+        return AuditReport(
+            collection=collection,
+            total_assignments=total,
+            p10=p10,
+            p50=p50,
+            p90=p90,
+            below_threshold_count=int(below_threshold or 0),
+            threshold=resolved_threshold,
+            top_receiving_hubs=top_hubs,
+            pattern_pollution=pattern_pollution,
+        )
 
     def get_topics(
         self,
