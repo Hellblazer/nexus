@@ -332,6 +332,13 @@ class TestMigratePlanTtl:
 class TestMigrateAssignedBy:
     """migrate_assigned_by: adds assigned_by column to topic_assignments."""
 
+    def test_noop_when_table_missing(self) -> None:
+        """No topic_assignments table → no-op (not crash)."""
+        from nexus.db.migrations import migrate_assigned_by
+
+        conn = sqlite3.connect(":memory:")
+        migrate_assigned_by(conn)  # should not raise
+
     def test_noop_when_column_present(self) -> None:
         from nexus.db.migrations import migrate_assigned_by
 
@@ -368,6 +375,13 @@ class TestMigrateAssignedBy:
 
 class TestMigrateReviewColumns:
     """migrate_review_columns: adds review_status and terms to topics."""
+
+    def test_noop_when_table_missing(self) -> None:
+        """No topics table → no-op (not crash)."""
+        from nexus.db.migrations import migrate_review_columns
+
+        conn = sqlite3.connect(":memory:")
+        migrate_review_columns(conn)  # should not raise
 
     def test_noop_when_columns_present(self) -> None:
         from nexus.db.migrations import migrate_review_columns

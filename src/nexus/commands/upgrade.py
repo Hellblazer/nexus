@@ -17,6 +17,7 @@ from nexus.db.migrations import (
     _parse_version,
     _upgrade_done,
     apply_pending,
+    bootstrap_version,
 )
 
 _log = structlog.get_logger()
@@ -35,54 +36,6 @@ def _current_version() -> str:
         return _pkg_version("conexus")
     except Exception:
         return "0.0.0"
-
-
-def _get_bootstrapped_version(conn: sqlite3.Connection) -> str:
-    """Read the stored version after ensuring bootstrap has run.
-
-    Runs the bootstrap step from apply_pending (create _nexus_version,
-    detect existing vs fresh install, seed version) so the returned
-    version is accurate for pending-migration computation.
-    """
-    from nexus.db.migrations import (
-        PRE_REGISTRY_VERSION,
-        _bootstrap_lock,
-        _is_existing_install,
-    )
-
-    # Detect existing install before creating base tables
-    pre_existing = _is_existing_install(conn)
-
-    # Create base tables + version table (idempotent)
-    from nexus.db.migrations import _create_base_tables
-
-    _create_base_tables(conn)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS _nexus_version ("
-        "    key   TEXT PRIMARY KEY,"
-        "    value TEXT NOT NULL"
-        ")"
-    )
-    conn.commit()
-
-    # Bootstrap if needed
-    with _bootstrap_lock:
-        row = conn.execute(
-            "SELECT value FROM _nexus_version WHERE key='cli_version'"
-        ).fetchone()
-        if row is None:
-            seed = PRE_REGISTRY_VERSION if pre_existing else "0.0.0"
-            conn.execute(
-                "INSERT OR IGNORE INTO _nexus_version (key, value) "
-                "VALUES ('cli_version', ?)",
-                (seed,),
-            )
-            conn.commit()
-
-    row = conn.execute(
-        "SELECT value FROM _nexus_version WHERE key='cli_version'"
-    ).fetchone()
-    return row[0] if row else "0.0.0"
 
 
 @click.command("upgrade")
@@ -113,8 +66,9 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
 
     try:
-        # Read last-seen version (after bootstrap, so it's accurate)
-        last_seen = _get_bootstrapped_version(conn)
+        # Read last-seen version (bootstrap_version handles base tables,
+        # version table creation, and existing-vs-fresh detection).
+        last_seen = bootstrap_version(conn)
         last_seen_t = _parse_version(last_seen)
 
         if force:

@@ -39,7 +39,13 @@ def _parse_version(ver: str) -> tuple[int, ...]:
 
 @dataclass(frozen=True)
 class Migration:
-    """A single T2 schema migration, tagged with the version that introduced it."""
+    """A single T2 schema migration, tagged with the version that introduced it.
+
+    **Idempotency contract**: every ``fn`` MUST be idempotent — guarded by
+    ``PRAGMA table_info()`` or ``sqlite_master`` checks so re-running on a
+    DB that already has the migration applied is a no-op.  The retry-on-failure
+    design of ``apply_pending`` depends on this invariant.
+    """
 
     introduced: str  # package version that introduced this migration
     name: str  # human-readable description
@@ -215,7 +221,7 @@ def migrate_assigned_by(conn: sqlite3.Connection) -> None:
         row[1]
         for row in conn.execute("PRAGMA table_info(topic_assignments)").fetchall()
     }
-    if "assigned_by" in cols:
+    if not cols or "assigned_by" in cols:
         return
     _log.info("Migrating topic_assignments: adding assigned_by column")
     conn.execute(
@@ -229,6 +235,8 @@ def migrate_review_columns(conn: sqlite3.Connection) -> None:
     cols = {
         row[1] for row in conn.execute("PRAGMA table_info(topics)").fetchall()
     }
+    if not cols:
+        return
     changed = False
     if "review_status" not in cols:
         _log.info("Migrating topics: adding review_status column")
@@ -306,30 +314,21 @@ plus SQLite WAL serialisation.
 # ── Runner ──────────────────────────────────────────────────────────────────
 
 
-def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
-    """Run all migrations introduced between last-seen and *current_version*.
+def bootstrap_version(conn: sqlite3.Connection) -> str:
+    """Ensure base tables and ``_nexus_version`` exist, returning the stored version.
 
-    Steps:
-      1. Create base tables (lazy import from stores) via CREATE TABLE IF NOT EXISTS
-      2. Create ``_nexus_version`` table if absent
-      3. Bootstrap: detect existing vs fresh install, seed version accordingly
-      4. Read last-seen version
-      5. Filter and execute eligible migrations
-      6. Update ``_nexus_version`` to *current_version*
+    Creates base tables, the version tracking table, and seeds the version
+    row for existing vs fresh installs.  Idempotent — safe to call multiple
+    times on the same connection.
+
+    Used by both ``apply_pending`` and ``nx upgrade --dry-run`` to get an
+    accurate last-seen version without duplicating bootstrap logic.
     """
-    path_key = _connection_path_key(conn)
-    if path_key in _upgrade_done:
-        return
-
-    # Pre-step: detect whether this is an existing install BEFORE
-    # _create_base_tables runs (which would create the memory table,
-    # making it impossible to distinguish fresh from existing).
+    # Detect existing install BEFORE _create_base_tables runs
     _pre_existing = _is_existing_install(conn)
 
-    # Step 1: ensure all base tables exist so migration guards can PRAGMA safely
     _create_base_tables(conn)
 
-    # Step 2: version tracking table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _nexus_version ("
         "    key   TEXT PRIMARY KEY,"
@@ -338,7 +337,6 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     )
     conn.commit()
 
-    # Step 3: bootstrap (under lock for concurrent-constructor safety)
     with _bootstrap_lock:
         row = conn.execute(
             "SELECT value FROM _nexus_version WHERE key='cli_version'"
@@ -351,11 +349,22 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
             )
             conn.commit()
 
-    # Step 4: read last-seen version
     row = conn.execute(
         "SELECT value FROM _nexus_version WHERE key='cli_version'"
     ).fetchone()
-    last_seen = row[0] if row else "0.0.0"
+    return row[0] if row else "0.0.0"
+
+
+def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
+    """Run all migrations introduced between last-seen and *current_version*.
+
+    Idempotent — every migration function has column/table-existence guards.
+    """
+    path_key = _connection_path_key(conn)
+    if path_key in _upgrade_done:
+        return
+
+    last_seen = bootstrap_version(conn)
     last_seen_t = _parse_version(last_seen)
     current_t = _parse_version(current_version)
 
@@ -381,11 +390,18 @@ def _connection_path_key(conn: sqlite3.Connection) -> str:
 
     For ``:memory:`` connections, returns a unique key per connection
     (avoids collisions when multiple in-memory DBs exist in the same
-    process).  For file-based connections, returns the database path.
+    process).  For file-based connections, resolves symlinks via
+    ``Path.resolve()`` to match the canonicalisation used by
+    ``T2Database.__init__()`` and ``_run_upgrade()``.
     """
+    from pathlib import Path
+
     row = conn.execute("PRAGMA database_list").fetchone()
     if row and row[2]:
-        return row[2]
+        try:
+            return str(Path(row[2]).resolve())
+        except OSError:
+            return row[2]
     return f":memory:{id(conn)}"
 
 
