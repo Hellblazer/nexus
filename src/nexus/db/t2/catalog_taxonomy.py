@@ -1448,6 +1448,18 @@ class CatalogTaxonomy:
             for s in sorted(topic_stats.values(), key=lambda x: x["chunk_count"], reverse=True)
         ]
 
+        _log.info(
+            "project_against",
+            source=source_collection,
+            targets=len(target_collections),
+            chunks=len(src_ids),
+            centroids=len(ctr_metas),
+            matched_topics=len(matched_topics),
+            novel=len(novel_chunks),
+            assignments=len(chunk_assignments),
+            threshold=threshold,
+        )
+
         return {
             "matched_topics": matched_topics,
             "novel_chunks": novel_chunks,

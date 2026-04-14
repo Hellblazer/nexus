@@ -197,15 +197,20 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                     )
                 # Cross-collection projection pass (RDR-075 SC-7)
                 try:
+                    proj_total = 0
                     for col_name in collections:
                         others = [c for c in collections if c != col_name]
                         if others:
                             result = db.taxonomy.project_against(
                                 col_name, others, t3._client, threshold=0.85,
                             )
-                            if result.get("chunk_assignments"):
+                            assignments = result.get("chunk_assignments", [])
+                            if assignments:
                                 from nexus.commands.taxonomy_cmd import _persist_assignments
-                                _persist_assignments(db.taxonomy, result["chunk_assignments"], quiet=True)
+                                _persist_assignments(db.taxonomy, assignments, quiet=True)
+                                proj_total += len(assignments)
+                    if proj_total:
+                        click.echo(f"  Project:  {proj_total} cross-collection assignments.")
                 except Exception:
                     _log.debug("taxonomy_projection_failed", exc_info=True)
 

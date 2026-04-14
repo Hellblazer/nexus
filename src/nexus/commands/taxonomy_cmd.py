@@ -1077,11 +1077,13 @@ def _run_backfill(
 
     click.echo(f"Backfilling {len(collections)} collection(s)...")
 
-    for src in collections:
+    total_assigned = 0
+    total_novel = 0
+    for i, src in enumerate(collections, 1):
         targets = [c for c in collections if c != src]
         if not targets:
             continue
-        _progress(f"  {src} → {len(targets)} target(s)...")
+        _progress(f"  [{i}/{len(collections)}] {src} → {len(targets)} target(s)...")
         try:
             result = taxonomy.project_against(
                 src, targets, chroma_client,
@@ -1089,11 +1091,20 @@ def _run_backfill(
             )
             matched = len(result["matched_topics"])
             novel = len(result["novel_chunks"])
-            click.echo(f"    {matched} matched topics, {novel} novel chunks")
+            chunks = result["total_chunks"]
+            click.echo(
+                f"    {matched} matched topics, {novel} novel, "
+                f"{chunks} chunks, {len(result.get('chunk_assignments', []))} assignments"
+            )
+            total_novel += novel
 
             if persist and result.get("chunk_assignments"):
                 _persist_assignments(taxonomy, result["chunk_assignments"])
+                total_assigned += len(result["chunk_assignments"])
         except Exception as e:
             click.echo(f"    Skipped: {e}")
 
-    click.echo("Backfill complete.")
+    click.echo(
+        f"Backfill complete: {total_assigned} assignments, {total_novel} novel chunks "
+        f"across {len(collections)} collections."
+    )
