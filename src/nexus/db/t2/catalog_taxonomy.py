@@ -1036,10 +1036,87 @@ class CatalogTaxonomy:
         if c_ids_out:
             centroid_coll.upsert(ids=c_ids_out, embeddings=c_embs, metadatas=c_metas)
 
+        # Cross-collection post-pass: find topic links to other collections'
+        # centroids (RDR-075 SC-6, Phase 3).  Lightweight: only new centroids
+        # × existing centroids from other collections.
+        if c_embs:
+            try:
+                self._discover_cross_links(
+                    collection_name, c_embs, c_metas, centroid_coll,
+                )
+            except Exception:
+                _log.debug("discover_cross_links_failed", exc_info=True)
+
         # Record doc count for rebalance tracking
         self.record_discover_count(collection_name, n)
 
         return count
+
+    # ── Cross-collection centroid linking (RDR-075 Phase 3) ─────────
+
+    _PROJECTION_THRESHOLD = 0.85
+
+    def _discover_cross_links(
+        self,
+        collection_name: str,
+        new_centroids: list[list[float]],
+        new_metas: list[dict[str, Any]],
+        centroid_coll: Any,
+    ) -> None:
+        """Find topic links between new centroids and other collections'.
+
+        After discover creates centroids for *collection_name*, query
+        existing centroids from all OTHER collections. Store matches
+        above ``_PROJECTION_THRESHOLD`` as ``topic_links`` entries.
+        """
+        # Fetch all centroids NOT in this collection
+        try:
+            other = centroid_coll.get(
+                where={"collection": {"$ne": collection_name}},
+                include=["embeddings", "metadatas"],
+            )
+        except Exception:
+            return
+
+        other_embs_raw = other.get("embeddings")
+        other_metas = other.get("metadatas", [])
+        if other_embs_raw is None or len(other_embs_raw) == 0:
+            return
+
+        other_embs = np.array(other_embs_raw, dtype=np.float32)
+        new_embs = np.array(new_centroids, dtype=np.float32)
+
+        if new_embs.shape[1] != other_embs.shape[1]:
+            return
+
+        # Cosine similarity: new centroids × other centroids
+        n_norms = np.linalg.norm(new_embs, axis=1, keepdims=True)
+        n_norms[n_norms == 0] = 1.0
+        o_norms = np.linalg.norm(other_embs, axis=1, keepdims=True)
+        o_norms[o_norms == 0] = 1.0
+        sim = (new_embs / n_norms) @ (other_embs / o_norms).T
+
+        links_added = 0
+        with self._lock:
+            for i, meta in enumerate(new_metas):
+                new_tid = int(meta["topic_id"])
+                for j in range(sim.shape[1]):
+                    if float(sim[i, j]) >= self._PROJECTION_THRESHOLD:
+                        other_tid = int(other_metas[j]["topic_id"])
+                        self.conn.execute(
+                            "INSERT OR REPLACE INTO topic_links "
+                            "(from_topic_id, to_topic_id, link_count, link_types) "
+                            "VALUES (?, ?, ?, ?)",
+                            (new_tid, other_tid, 1, '["projection"]'),
+                        )
+                        links_added += 1
+            if links_added:
+                self.conn.commit()
+                _log.info(
+                    "discover_cross_links",
+                    collection=collection_name,
+                    links=links_added,
+                )
 
     # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────
 

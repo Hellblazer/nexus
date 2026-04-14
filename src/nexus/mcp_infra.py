@@ -311,9 +311,17 @@ def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
         ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
         embedding = np.array(ef([content])[0], dtype=np.float32)
 
+    # Same-collection assignment (existing behavior)
     topic_id = taxonomy.assign_single(collection, embedding, chroma_client)
     if topic_id is not None:
         taxonomy.assign_topic(doc_id, topic_id, assigned_by="centroid")
+
+    # Cross-collection projection (RDR-075 SC-4, SC-6)
+    cross_topic_id = taxonomy.assign_single(
+        collection, embedding, chroma_client, cross_collection=True,
+    )
+    if cross_topic_id is not None and cross_topic_id != topic_id:
+        taxonomy.assign_topic(doc_id, cross_topic_id, assigned_by="projection")
 
 
 def taxonomy_assign_batch(
