@@ -254,6 +254,7 @@ Every step below is **required**. Missing any one of them has caused problems in
 | `docs/configuration.md` | new config keys or tuning parameters |
 | `docs/storage-tiers.md` | new storage capabilities |
 | `README.md` | high-level feature descriptions |
+| `src/nexus/db/migrations.py` | verify `PRE_REGISTRY_VERSION` matches previous release; new T2 migrations in `MIGRATIONS` list; new T3 steps in `T3_UPGRADES` |
 
 ### Pre-push release checklist
 

@@ -134,8 +134,25 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool) -> None:
             else:
                 click.echo(f"Up to date (v{current}).")
 
-        # T3 steps (skipped in auto mode)
-        # TODO: implement T3 step execution when T3_UPGRADES is populated
+        # T3 steps (skipped in auto mode — require ChromaDB, may exceed hook timeout)
+        if not auto_mode and pending_t3:
+            from nexus.commands._helpers import default_db_path
+            from nexus.db import make_t3
+            from nexus.db.t2 import T2Database
+
+            try:
+                t3_db = make_t3()
+                t2_db = T2Database(default_db_path())
+                try:
+                    for step in pending_t3:
+                        click.echo(f"  T3: [{step.introduced}] {step.name}")
+                        step.fn(t3_db, t2_db.taxonomy)
+                    click.echo(f"Applied {len(pending_t3)} T3 upgrade step(s).")
+                finally:
+                    t2_db.close()
+            except Exception:
+                _log.warning("t3_upgrade_failed", exc_info=True)
+                click.echo("T3 upgrade step failed (see log for details).")
 
     finally:
         conn.close()

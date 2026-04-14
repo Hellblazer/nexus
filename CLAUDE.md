@@ -105,12 +105,13 @@ src/nexus/           # Core package
     config_cmd.py    # nx config
     hooks.py         # nx hooks (user-facing hook management)
     hook.py          # nx hook (hidden; git hook stanza management)
-    doctor.py        # nx doctor
+    doctor.py        # nx doctor (includes --check-schema for T2 validation, RDR-076)
+    upgrade.py       # nx upgrade (--dry-run, --force, --auto; T2 migrations + T3 upgrade steps, RDR-076)
     enrich.py        # nx enrich
     catalog.py       # nx catalog
     mineru.py        # nx mineru
     console.py       # nx console (embedded web UI server)
-    taxonomy_cmd.py  # nx taxonomy (topic browsing and discovery)
+    taxonomy_cmd.py  # nx taxonomy (topic browsing, discovery, cross-collection projection via project subcommand)
     _helpers.py      # Shared CLI helpers (default_db_path)
     _provision.py    # ChromaDB Cloud provisioning helpers
   catalog/           # Xanadu-inspired document catalog (JSONL truth + SQLite cache)
@@ -126,6 +127,7 @@ src/nexus/           # Core package
     watchers.py      # File/event watchers for live UI updates
     routes/          # FastAPI routers (activity, campaigns, health, partials)
   db/                # Storage tier implementations
+    migrations.py    # Centralised T2 migration registry: Migration dataclass, apply_pending(), T3UpgradeStep, version tracking (RDR-076)
     t1.py            # T1 ChromaDB client (ephemeral or HTTP)
     t2/              # T2 SQLite package: MemoryStore, PlanLibrary, CatalogTaxonomy, Telemetry domain stores + T2Database facade
     t3.py            # T3 ChromaDB client (persistent local or cloud)
@@ -138,7 +140,7 @@ src/nexus/           # Core package
   code_indexer.py    # Code file indexing: AST chunking, context extraction, Voyage AI embedding (extracted from indexer.py, RDR-032)
   prose_indexer.py   # Prose file indexing: semantic markdown chunking, CCE embedding (extracted from indexer.py, RDR-032)
   index_context.py   # IndexContext dataclass: shared indexing parameters replacing 12-parameter signatures
-  indexer_utils.py   # Shared indexing utilities: staleness checks, context-prefix building
+  indexer_utils.py   # Shared indexing utilities: staleness checks, context-prefix building, gitignore/repo-root helpers
   classifier.py      # File classification: CODE / PROSE / PDF / SKIP
   chunker.py         # Tree-sitter AST chunking (31 languages)
   languages.py       # LANGUAGE_REGISTRY: unified extension→language map (single source of truth)
@@ -160,7 +162,7 @@ src/nexus/           # Core package
   ripgrep_cache.py   # ripgrep integration for hybrid search
   session.py         # Session lifecycle (T1 server start/connect)
   config.py          # Config hierarchy + .nexus.yml
-  registry.py        # Collection → database routing
+  registry.py        # Collection → database routing + list_sibling_collections() for cross-collection scoping (RDR-075)
   corpus.py          # Corpus naming utilities
   formatters.py      # Result display formatting
   types.py           # Shared type definitions
@@ -171,7 +173,7 @@ src/nexus/           # Core package
   logging_setup.py   # Structured logging configuration (cli/console/mcp/hook modes, rotating file handler)
   taxonomy.py        # Deprecation shim — imports forwarded to db.t2.catalog_taxonomy (RDR-070)
   mcp_server.py      # Backward-compat shim — re-exports all MCP tools from nexus.mcp package
-  mcp_infra.py       # MCP server infrastructure: singletons, caching, test injection, taxonomy_assign_hook (post-store topic assignment)
+  mcp_infra.py       # MCP server infrastructure: singletons, caching, test injection, taxonomy_assign_hook (post-store topic assignment + cross-collection projection), check_version_compatibility (RDR-076)
 nx/                  # Claude Code plugin (skills, agents, hooks, slash commands)
 tests/               # pytest suite (unit + integration + e2e/)
 docs/                # Documentation (architecture.md is the module map)

@@ -539,6 +539,14 @@ class CatalogTaxonomy:
             ).fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def get_distinct_collections(self) -> list[str]:
+        """Return sorted list of collections that have at least one topic."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT collection FROM topics ORDER BY collection"
+            ).fetchall()
+        return [r[0] for r in rows]
+
     def get_topics_for_collection(
         self,
         collection: str,
@@ -590,13 +598,13 @@ class CatalogTaxonomy:
         """Persist inter-topic link pairs from ``compute_topic_links``.
 
         Each dict has from_topic_id, to_topic_id, link_count, link_types.
+        Uses INSERT OR REPLACE — preserves projection links written by
+        ``_discover_cross_links`` (only overwrites matching PK pairs).
         Returns number of rows upserted.
         """
         if not links:
             return 0
         with self._lock:
-            # Clear existing links
-            self.conn.execute("DELETE FROM topic_links")
             for link in links:
                 self.conn.execute(
                     "INSERT OR REPLACE INTO topic_links "
@@ -1036,10 +1044,134 @@ class CatalogTaxonomy:
         if c_ids_out:
             centroid_coll.upsert(ids=c_ids_out, embeddings=c_embs, metadatas=c_metas)
 
+        # Cross-collection post-pass: find topic links to other collections'
+        # centroids (RDR-075 SC-6, Phase 3).  Lightweight: only new centroids
+        # × existing centroids from other collections.
+        if c_embs:
+            try:
+                self._discover_cross_links(
+                    collection_name, c_embs, c_metas, centroid_coll,
+                )
+            except Exception:
+                _log.debug("discover_cross_links_failed", exc_info=True)
+
         # Record doc count for rebalance tracking
         self.record_discover_count(collection_name, n)
 
         return count
+
+    # ── Cross-collection co-occurrence links (RDR-075 Phase 4, SC-5) ─
+
+    def generate_cooccurrence_links(self) -> int:
+        """Generate topic_links from cross-collection projection co-occurrence.
+
+        Uses a SQL self-join to find topic pairs sharing docs across
+        different collections, avoiding loading the full assignment
+        table into Python memory.
+
+        Uses ``INSERT OR REPLACE`` to merge with existing projection
+        links from ``_discover_cross_links``.
+
+        Returns count of links generated.
+        """
+        with self._lock:
+            pairs = self.conn.execute(
+                "SELECT MIN(a.topic_id, b.topic_id), MAX(a.topic_id, b.topic_id), "
+                "       COUNT(*) "
+                "FROM topic_assignments a "
+                "JOIN topic_assignments b ON a.doc_id = b.doc_id "
+                "JOIN topics ta ON a.topic_id = ta.id "
+                "JOIN topics tb ON b.topic_id = tb.id "
+                "WHERE a.topic_id < b.topic_id AND ta.collection != tb.collection "
+                "GROUP BY MIN(a.topic_id, b.topic_id), MAX(a.topic_id, b.topic_id)"
+            ).fetchall()
+
+        if not pairs:
+            return 0
+
+        # Two-lock split is intentional: the SQL fetch and the write are
+        # separated to avoid holding the lock during the full self-join read.
+        # Stale counts between the two windows are acceptable for this batch
+        # analytics use case — co-occurrence links are regenerated on each run.
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO topic_links "
+                "(from_topic_id, to_topic_id, link_count, link_types) "
+                "VALUES (?, ?, ?, ?)",
+                [(a, b, count, '["cooccurrence"]') for a, b, count in pairs],
+            )
+            self.conn.commit()
+
+        _log.info("cooccurrence_links", count=len(pairs))
+        return len(pairs)
+
+    # ── Cross-collection centroid linking (RDR-075 Phase 3) ─────────
+
+    _PROJECTION_THRESHOLD = 0.85
+
+    def _discover_cross_links(
+        self,
+        collection_name: str,
+        new_centroids: list[list[float]],
+        new_metas: list[dict[str, Any]],
+        centroid_coll: Any,
+    ) -> None:
+        """Find topic links between new centroids and other collections'.
+
+        After discover creates centroids for *collection_name*, query
+        existing centroids from all OTHER collections. Store matches
+        above ``_PROJECTION_THRESHOLD`` as ``topic_links`` entries.
+        """
+        # Fetch all centroids NOT in this collection
+        try:
+            other = centroid_coll.get(
+                where={"collection": {"$ne": collection_name}},
+                include=["embeddings", "metadatas"],
+            )
+        except Exception:
+            return
+
+        other_embs_raw = other.get("embeddings")
+        other_metas = other.get("metadatas", [])
+        if other_embs_raw is None or len(other_embs_raw) == 0:
+            return
+
+        other_embs = np.array(other_embs_raw, dtype=np.float32)
+        new_embs = np.array(new_centroids, dtype=np.float32)
+
+        if new_embs.shape[1] != other_embs.shape[1]:
+            return
+
+        # Cosine similarity: new centroids × other centroids
+        n_norms = np.linalg.norm(new_embs, axis=1, keepdims=True)
+        n_norms[n_norms == 0] = 1.0
+        o_norms = np.linalg.norm(other_embs, axis=1, keepdims=True)
+        o_norms[o_norms == 0] = 1.0
+        sim = (new_embs / n_norms) @ (other_embs / o_norms).T
+
+        # Collect pairs outside the lock (numpy work, no DB access)
+        pairs: list[tuple[int, int]] = []
+        for i, meta in enumerate(new_metas):
+            new_tid = int(meta["topic_id"])
+            for j in range(sim.shape[1]):
+                if float(sim[i, j]) >= self._PROJECTION_THRESHOLD:
+                    other_tid = int(other_metas[j]["topic_id"])
+                    pairs.append((new_tid, other_tid))
+
+        if pairs:
+            with self._lock:
+                self.conn.executemany(
+                    "INSERT OR REPLACE INTO topic_links "
+                    "(from_topic_id, to_topic_id, link_count, link_types) "
+                    "VALUES (?, ?, 1, ?)",
+                    [(a, b, '["projection"]') for a, b in pairs],
+                )
+                self.conn.commit()
+            _log.info(
+                "discover_cross_links",
+                collection=collection_name,
+                links=len(pairs),
+            )
 
     # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────
 
@@ -1048,12 +1180,18 @@ class CatalogTaxonomy:
         collection_name: str,
         embedding: np.ndarray,
         chroma_client: Any,
+        *,
+        cross_collection: bool = False,
     ) -> int | None:
         """Return the nearest topic_id for a single embedding.
 
-        Queries ``taxonomy__centroids`` with collection-scoped nearest-centroid
-        assignment (RF-070-7). Returns ``None`` when the centroid collection
-        does not exist, is empty, or dimensions mismatch (SC-10).
+        When *cross_collection* is False (default), queries only centroids
+        for *collection_name*.  When True, queries only FOREIGN centroids
+        (``$ne collection_name``) — used for cross-collection projection
+        (RDR-075 SC-6).
+
+        Returns ``None`` when the centroid collection does not exist, is
+        empty, or dimensions mismatch (SC-10).
         """
         try:
             centroid_coll = chroma_client.get_collection(
@@ -1069,14 +1207,19 @@ class CatalogTaxonomy:
         if not _check_centroid_dimension(embedding, centroid_coll):
             return None
 
+        query_kwargs: dict[str, Any] = {
+            "query_embeddings": [embedding.tolist()],
+            "n_results": 1,
+        }
+        if cross_collection:
+            query_kwargs["where"] = {"collection": {"$ne": collection_name}}
+        else:
+            query_kwargs["where"] = {"collection": collection_name}
+
         try:
-            results = centroid_coll.query(
-                query_embeddings=[embedding.tolist()],
-                n_results=1,
-                where={"collection": collection_name},
-            )
+            results = centroid_coll.query(**query_kwargs)
         except Exception:
-            return None  # No centroids match the collection filter
+            return None  # No centroids match the filter
 
         if not results["ids"] or not results["ids"][0]:
             return None
@@ -1089,14 +1232,18 @@ class CatalogTaxonomy:
         doc_ids: list[str],
         embeddings: list[list[float]],
         chroma_client: Any,
+        *,
+        cross_collection: bool = False,
     ) -> int:
         """Assign multiple docs to their nearest topics via centroid ANN.
 
-        Queries ``taxonomy__centroids`` once for each embedding and bulk-inserts
-        assignments.  Returns the number of docs successfully assigned.
+        When *cross_collection* is False (default), queries only centroids
+        for *collection_name*.  When True, queries only FOREIGN centroids
+        (``$ne collection_name``) — used for cross-collection projection
+        (RDR-075 SC-6).
 
-        No-op (returns 0) when centroids don't exist or the collection has no
-        centroid entries — callers need not guard.
+        Returns the number of docs successfully assigned.  No-op (returns 0)
+        when centroids don't exist or dimensions mismatch.
         """
         try:
             centroid_coll = chroma_client.get_collection(
@@ -1116,22 +1263,32 @@ class CatalogTaxonomy:
             if not _check_centroid_dimension(sample, centroid_coll):
                 return 0
 
+        base_kwargs: dict[str, Any] = {"n_results": 1}
+        if cross_collection:
+            base_kwargs["where"] = {"collection": {"$ne": collection_name}}
+        else:
+            base_kwargs["where"] = {"collection": collection_name}
+
+        # Batch query — single ChromaDB round-trip for all embeddings
+        emb_list = [
+            emb if isinstance(emb, list) else emb.tolist()
+            for emb in embeddings
+        ]
+        try:
+            results = centroid_coll.query(
+                query_embeddings=emb_list,
+                **base_kwargs,
+            )
+        except Exception:
+            return 0
+
+        by = "projection" if cross_collection else "centroid"
         assigned = 0
-        for doc_id, emb in zip(doc_ids, embeddings):
-            try:
-                results = centroid_coll.query(
-                    query_embeddings=[emb if isinstance(emb, list) else emb.tolist()],
-                    n_results=1,
-                    where={"collection": collection_name},
-                )
-            except Exception:
+        for i, doc_id in enumerate(doc_ids):
+            if not results["ids"][i]:
                 continue
-
-            if not results["ids"] or not results["ids"][0]:
-                continue
-
-            topic_id = int(results["metadatas"][0][0]["topic_id"])
-            self.assign_topic(doc_id, topic_id, assigned_by="centroid")
+            topic_id = int(results["metadatas"][i][0]["topic_id"])
+            self.assign_topic(doc_id, topic_id, assigned_by=by)
             assigned += 1
 
         return assigned
@@ -1170,17 +1327,31 @@ class CatalogTaxonomy:
                 "total_centroids": 0,
             }
 
-        src_data = src_coll.get(include=["embeddings"])
-        src_ids = src_data.get("ids", [])
-        src_raw = src_data.get("embeddings")
-        if not src_ids or src_raw is None:
+        # Paginated fetch to avoid OOM on large collections
+        _PAGE = 2000
+        src_ids: list[str] = []
+        src_emb_pages: list[np.ndarray] = []
+        offset = 0
+        while True:
+            page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
+            page_ids = page.get("ids", [])
+            page_embs = page.get("embeddings")
+            if not page_ids or page_embs is None:
+                break
+            src_ids.extend(page_ids)
+            src_emb_pages.append(np.array(page_embs, dtype=np.float32))
+            if len(page_ids) < _PAGE:
+                break
+            offset += _PAGE
+
+        if not src_ids:
             return {
                 "matched_topics": [],
                 "novel_chunks": [],
                 "total_chunks": 0,
                 "total_centroids": 0,
             }
-        src_embs = np.array(src_raw, dtype=np.float32)
+        src_embs = np.concatenate(src_emb_pages)
 
         # 2. Fetch target centroids
         try:
@@ -1236,9 +1407,10 @@ class CatalogTaxonomy:
         # 5. Similarity matrix: (N, M) — values in [-1, 1]
         sim = src_norm @ ctr_norm.T
 
-        # 6. Aggregate matched topics
+        # 6. Aggregate matched topics and collect per-chunk assignments
         topic_stats: dict[int, dict[str, Any]] = {}
         novel_chunks: list[str] = []
+        chunk_assignments: list[tuple[str, int]] = []
 
         for i, doc_id in enumerate(src_ids):
             row_max = float(sim[i].max())
@@ -1253,6 +1425,7 @@ class CatalogTaxonomy:
                     break
                 meta = ctr_metas[idx]
                 tid = int(meta["topic_id"])
+                chunk_assignments.append((doc_id, tid))
                 if tid not in topic_stats:
                     topic_stats[tid] = {
                         "topic_id": tid,
@@ -1275,9 +1448,22 @@ class CatalogTaxonomy:
             for s in sorted(topic_stats.values(), key=lambda x: x["chunk_count"], reverse=True)
         ]
 
+        _log.info(
+            "project_against",
+            source=source_collection,
+            targets=len(target_collections),
+            chunks=len(src_ids),
+            centroids=len(ctr_metas),
+            matched_topics=len(matched_topics),
+            novel=len(novel_chunks),
+            assignments=len(chunk_assignments),
+            threshold=threshold,
+        )
+
         return {
             "matched_topics": matched_topics,
             "novel_chunks": novel_chunks,
+            "chunk_assignments": chunk_assignments,
             "total_chunks": len(src_ids),
             "total_centroids": len(ctr_metas),
         }

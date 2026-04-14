@@ -1,10 +1,12 @@
 ---
 title: "RDR-075: Cross-Collection Topic Projection"
-status: accepted
+status: closed
+close_reason: implemented
 type: feature
 priority: P2
 created: 2026-04-13
 accepted_date: 2026-04-14
+closed_date: 2026-04-14
 github_issue: 154
 reviewed-by: self
 ---

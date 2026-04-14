@@ -354,6 +354,29 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
             else:
                 click.echo(f"  {col_name}: skipped")
 
+        # Cross-collection projection pass (RDR-075 SC-7)
+        if total_topics and len(targets) > 1:
+            try:
+                proj_count = 0
+                for col_name in targets:
+                    others = [c for c in targets if c != col_name]
+                    if others:
+                        result = db.taxonomy.project_against(
+                            col_name, others, t3._client, threshold=0.85,
+                        )
+                        assignments = result.get("chunk_assignments", [])
+                        if assignments:
+                            _persist_assignments(db.taxonomy, assignments, quiet=True)
+                            proj_count += len(assignments)
+                if proj_count:
+                    click.echo(f"  Projection: {proj_count} cross-collection assignments")
+                    # Co-occurrence topic links (SC-5, SC-7)
+                    cooc = db.taxonomy.generate_cooccurrence_links()
+                    if cooc:
+                        click.echo(f"  Links:      {cooc} co-occurrence topic links")
+            except Exception:
+                _log.warning("discover_projection_failed", exc_info=True)
+
         # Refresh L1 context cache after discovery
         if total_topics:
             try:
@@ -956,139 +979,85 @@ def project_cmd(
     db = _T2Database(_default_db_path())
     t3 = make_t3()
 
-    if backfill:
-        _run_backfill(db.taxonomy, t3._client, threshold=threshold, top_k=top_k, persist=persist)
-        db.close()
-        return
-
-    if not source_collection:
-        click.echo("Specify a source collection or use --backfill.")
-        db.close()
-        return
-
-    # Determine target collections
-    if against:
-        targets = [c.strip() for c in against.split(",") if c.strip()]
-    else:
-        # All other collections with existing topics
-        rows = db.taxonomy.conn.execute(
-            "SELECT DISTINCT collection FROM topics WHERE collection != ?",
-            (source_collection,),
-        ).fetchall()
-        targets = [r[0] for r in rows]
-        if not targets:
-            click.echo("No other collections have topics. Run 'nx taxonomy discover' first.")
-            db.close()
+    try:
+        if backfill:
+            _run_backfill(db.taxonomy, t3._client, threshold=threshold, top_k=top_k, persist=persist)
             return
 
-    _progress(f"Projecting {source_collection} against {len(targets)} collection(s)...")
+        if not source_collection:
+            click.echo("Specify a source collection or use --backfill.")
+            return
 
-    try:
+        # Determine target collections
+        if against:
+            targets = [c.strip() for c in against.split(",") if c.strip()]
+        else:
+            # Try sibling collections first (same repo, different prefix)
+            from nexus.registry import list_sibling_collections
+            targets = list_sibling_collections(source_collection, t3._client)
+            if not targets:
+                # Fall back to all collections with topics
+                targets = [
+                    c for c in db.taxonomy.get_distinct_collections()
+                    if c != source_collection
+                ]
+            if not targets:
+                click.echo("No other collections have topics. Run 'nx taxonomy discover' first.")
+                return
+
+        _progress(f"Projecting {source_collection} against {len(targets)} collection(s)...")
+
         result = db.taxonomy.project_against(
             source_collection, targets, t3._client,
             threshold=threshold, top_k=top_k,
         )
+
+        # Display results
+        matched = result["matched_topics"]
+        novel = result["novel_chunks"]
+        total = result["total_chunks"]
+
+        if matched:
+            click.echo(f"\nMatched topics (threshold {threshold}):")
+            for m in matched:
+                click.echo(
+                    f"  [{m['topic_id']}] {m['label']} ({m['collection']}) "
+                    f"— {m['chunk_count']} chunks, avg sim {m['avg_similarity']:.2f}"
+                )
+        else:
+            click.echo("\nNo matched topics above threshold.")
+
+        click.echo(f"\nNovel chunks: {len(novel)} (no centroid match >= {threshold})")
+        covered = total - len(novel)
+        click.echo(f"Total: {len(matched)} matched topics, {covered}/{total} chunks covered")
+
+        if persist and result.get("chunk_assignments"):
+            _persist_assignments(db.taxonomy, result["chunk_assignments"])
+        elif matched and not persist:
+            click.echo("\nRun with --persist to write assignments to topic_assignments.")
+
     except ValueError as e:
         click.echo(f"Error: {e}")
+    finally:
         db.close()
-        return
-
-    # Display results
-    matched = result["matched_topics"]
-    novel = result["novel_chunks"]
-    total = result["total_chunks"]
-
-    if matched:
-        click.echo(f"\nMatched topics (threshold {threshold}):")
-        for m in matched:
-            click.echo(
-                f"  [{m['topic_id']}] {m['label']} ({m['collection']}) "
-                f"— {m['chunk_count']} chunks, avg sim {m['avg_similarity']:.2f}"
-            )
-    else:
-        click.echo("\nNo matched topics above threshold.")
-
-    click.echo(f"\nNovel chunks: {len(novel)} (no centroid match >= {threshold})")
-    covered = total - len(novel)
-    click.echo(f"Total: {len(matched)} matched topics, {covered}/{total} chunks covered")
-
-    if persist and matched:
-        count = 0
-        for m in matched:
-            # Re-project to get per-chunk assignments (project_against aggregates)
-            # Use assign_topic directly for each match
-            pass
-        # For persist, re-run with per-chunk granularity
-        _persist_projections(
-            db.taxonomy, source_collection, targets, t3._client,
-            threshold=threshold, top_k=top_k,
-        )
-    elif matched and not persist:
-        click.echo("\nRun with --persist to write assignments to topic_assignments.")
-
-    db.close()
 
 
-def _persist_projections(
+def _persist_assignments(
     taxonomy: "CatalogTaxonomy",
-    source_collection: str,
-    target_collections: list[str],
-    chroma_client: Any,
+    chunk_assignments: list[tuple[str, int]],
     *,
-    threshold: float = 0.85,
-    top_k: int = 3,
-) -> None:
-    """Write projection assignments to topic_assignments."""
-    # Re-fetch and compute to get per-chunk → topic mappings
-    try:
-        src_coll = chroma_client.get_collection(source_collection, embedding_function=None)
-    except Exception:
-        return
+    quiet: bool = False,
+) -> int:
+    """Write per-chunk projection assignments from project_against results.
 
-    src_data = src_coll.get(include=["embeddings"])
-    src_ids = src_data.get("ids", [])
-    src_raw = src_data.get("embeddings")
-    if not src_ids or src_raw is None:
-        return
-
-    src_embs = np.array(src_raw, dtype=np.float32)
-
-    try:
-        centroid_coll = chroma_client.get_collection("taxonomy__centroids", embedding_function=None)
-    except Exception:
-        return
-
-    ctr_data = centroid_coll.get(
-        where={"collection": {"$in": target_collections}},
-        include=["embeddings", "metadatas"],
-    )
-    ctr_raw = ctr_data.get("embeddings")
-    ctr_metas = ctr_data.get("metadatas", [])
-    if ctr_raw is None or len(ctr_raw) == 0:
-        return
-
-    ctr_embs = np.array(ctr_raw, dtype=np.float32)
-    if src_embs.shape[1] != ctr_embs.shape[1]:
-        return
-
-    # Normalize
-    src_norms = np.linalg.norm(src_embs, axis=1, keepdims=True)
-    src_norms[src_norms == 0] = 1.0
-    ctr_norms = np.linalg.norm(ctr_embs, axis=1, keepdims=True)
-    ctr_norms[ctr_norms == 0] = 1.0
-    sim = (src_embs / src_norms) @ (ctr_embs / ctr_norms).T
-
-    count = 0
-    for i, doc_id in enumerate(src_ids):
-        top_indices = np.argsort(-sim[i])[:top_k]
-        for idx in top_indices:
-            if float(sim[i, idx]) < threshold:
-                break
-            topic_id = int(ctr_metas[idx]["topic_id"])
-            taxonomy.assign_topic(doc_id, topic_id, assigned_by="projection")
-            count += 1
-
-    click.echo(f"Persisted {count} projection assignment(s).")
+    Returns the number of assignments written.  Set *quiet* to suppress
+    CLI output (used when called from pipeline context).
+    """
+    for doc_id, topic_id in chunk_assignments:
+        taxonomy.assign_topic(doc_id, topic_id, assigned_by="projection")
+    if not quiet:
+        click.echo(f"Persisted {len(chunk_assignments)} projection assignment(s).")
+    return len(chunk_assignments)
 
 
 def _run_backfill(
@@ -1100,10 +1069,7 @@ def _run_backfill(
     persist: bool = False,
 ) -> None:
     """Project all collections against each other."""
-    rows = taxonomy.conn.execute(
-        "SELECT DISTINCT collection FROM topics"
-    ).fetchall()
-    collections = [r[0] for r in rows]
+    collections = taxonomy.get_distinct_collections()
 
     if not collections:
         click.echo("No collections with topics found. Run 'nx taxonomy discover' first.")
@@ -1111,11 +1077,13 @@ def _run_backfill(
 
     click.echo(f"Backfilling {len(collections)} collection(s)...")
 
-    for src in collections:
+    total_assigned = 0
+    total_novel = 0
+    for i, src in enumerate(collections, 1):
         targets = [c for c in collections if c != src]
         if not targets:
             continue
-        _progress(f"  {src} → {len(targets)} target(s)...")
+        _progress(f"  [{i}/{len(collections)}] {src} → {len(targets)} target(s)...")
         try:
             result = taxonomy.project_against(
                 src, targets, chroma_client,
@@ -1123,14 +1091,20 @@ def _run_backfill(
             )
             matched = len(result["matched_topics"])
             novel = len(result["novel_chunks"])
-            click.echo(f"    {matched} matched topics, {novel} novel chunks")
+            chunks = result["total_chunks"]
+            click.echo(
+                f"    {matched} matched topics, {novel} novel, "
+                f"{chunks} chunks, {len(result.get('chunk_assignments', []))} assignments"
+            )
+            total_novel += novel
 
-            if persist and result["matched_topics"]:
-                _persist_projections(
-                    taxonomy, src, targets, chroma_client,
-                    threshold=threshold, top_k=top_k,
-                )
-        except ValueError as e:
+            if persist and result.get("chunk_assignments"):
+                _persist_assignments(taxonomy, result["chunk_assignments"])
+                total_assigned += len(result["chunk_assignments"])
+        except Exception as e:
             click.echo(f"    Skipped: {e}")
 
-    click.echo("Backfill complete.")
+    click.echo(
+        f"Backfill complete: {total_assigned} assignments, {total_novel} novel chunks "
+        f"across {len(collections)} collections."
+    )

@@ -311,6 +311,69 @@ def test_assign_single_cross_collection_isolation(
     assert result is None, "assign_single must not cross collection boundaries"
 
 
+def test_assign_single_cross_collection_finds_foreign_topic(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_single with cross_collection=True returns topics from other collections."""
+    rng = np.random.default_rng(42)
+    # Create topics in collection A
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = [f"text {i}" for i in range(60)]
+    db.taxonomy.discover_topics("coll_A_xc", doc_ids, embeddings, texts, chroma_client)
+
+    # Query from collection B with cross_collection=True — should find A's topics
+    new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
+    new_emb[0] += 3.0
+    result = db.taxonomy.assign_single(
+        "coll_B_xc", new_emb, chroma_client, cross_collection=True,
+    )
+    assert result is not None, "cross_collection=True should find topics from other collections"
+
+    # Confirm default (False) still isolates
+    result_isolated = db.taxonomy.assign_single(
+        "coll_B_xc", new_emb, chroma_client, cross_collection=False,
+    )
+    assert result_isolated is None, "cross_collection=False must not cross boundaries"
+
+
+def test_assign_batch_cross_collection(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_batch with cross_collection=True assigns from foreign centroids."""
+    rng = np.random.default_rng(42)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    db.taxonomy.discover_topics(
+        "batch_A_xc",
+        [f"doc-{i}" for i in range(60)],
+        embeddings,
+        [f"text {i}" for i in range(60)],
+        chroma_client,
+    )
+
+    # New batch from collection B
+    new_embs = rng.standard_normal((3, 384)).astype(np.float32) * 0.1
+    new_embs[:, 0] += 3.0
+    new_ids = ["xc-0", "xc-1", "xc-2"]
+
+    assigned = db.taxonomy.assign_batch(
+        "batch_B_xc", new_ids, new_embs.tolist(), chroma_client,
+        cross_collection=True,
+    )
+    assert assigned == 3
+
+    # Default should assign 0 (no centroids for batch_B_xc)
+    assigned_isolated = db.taxonomy.assign_batch(
+        "batch_B_xc", ["iso-0"], new_embs[:1].tolist(), chroma_client,
+        cross_collection=False,
+    )
+    assert assigned_isolated == 0
+
+
 def test_assign_batch_assigns_multiple_docs(
     db: T2Database, chroma_client: chromadb.ClientAPI,
 ) -> None:
@@ -428,10 +491,16 @@ def test_project_against_basic(
 
     assert "matched_topics" in result
     assert "novel_chunks" in result
+    assert "chunk_assignments" in result
     assert "total_chunks" in result
     assert result["total_chunks"] == 20
     # With threshold=0.5 and clearly separated clusters, most chunks should match
     assert len(result["matched_topics"]) > 0
+    # Invariant: novel + covered == total
+    covered = result["total_chunks"] - len(result["novel_chunks"])
+    assert covered + len(result["novel_chunks"]) == result["total_chunks"]
+    # chunk_assignments has entries for covered chunks
+    assert len(result["chunk_assignments"]) > 0
 
 
 def test_project_against_empty_target(
@@ -2392,6 +2461,73 @@ class TestComputeTopicLinks:
         assert set(result[0]["link_types"]) == {"cites", "implements"}
 
 
+class TestCooccurrenceLinks:
+    """Tests for generate_cooccurrence_links (RDR-075 SC-5)."""
+
+    def test_cross_collection_cooccurrence(self, db: T2Database) -> None:
+        """Docs assigned to topics in different collections generate links."""
+        # Create topics in two collections
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("neural-nets", "coll_A", 5, "2026-01-01T00:00:00Z"),
+                ("databases", "coll_B", 5, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        t1 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'neural-nets'"
+        ).fetchone()[0]
+        t2 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'databases'"
+        ).fetchone()[0]
+
+        # Assign one doc to topics in both collections
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+            "VALUES (?, ?, ?)",
+            [
+                ("doc-shared", t1, "centroid"),
+                ("doc-shared", t2, "projection"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+
+        count = db.taxonomy.generate_cooccurrence_links()
+        assert count == 1
+
+        rows = db.taxonomy.conn.execute(
+            "SELECT from_topic_id, to_topic_id, link_count FROM topic_links"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][2] == 1  # link_count
+
+    def test_same_collection_no_links(self, db: T2Database) -> None:
+        """Docs assigned to topics in the SAME collection don't generate links."""
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("topic-x", "same_coll", 5, "2026-01-01T00:00:00Z"),
+                ("topic-y", "same_coll", 5, "2026-01-01T00:00:00Z"),
+            ],
+        )
+        t1 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'topic-x'"
+        ).fetchone()[0]
+        t2 = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label = 'topic-y'"
+        ).fetchone()[0]
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("doc-same", t1), ("doc-same", t2)],
+        )
+        db.taxonomy.conn.commit()
+
+        count = db.taxonomy.generate_cooccurrence_links()
+        assert count == 0
+
+
 class TestTopicLinksCLI:
     """CLI tests for nx taxonomy links."""
 
@@ -2913,3 +3049,37 @@ class TestProjectCmd:
 
         assert result.exit_code == 0
         assert "persisted" in result.output.lower()
+
+
+class TestListSiblingCollections:
+    """Tests for list_sibling_collections (RDR-075 SC-8)."""
+
+    def test_finds_siblings_by_hash8(self, chroma_client: chromadb.ClientAPI) -> None:
+        from nexus.registry import list_sibling_collections
+
+        # Create collections with shared hash suffix
+        chroma_client.get_or_create_collection("code__myrepo-abc12345")
+        chroma_client.get_or_create_collection("docs__myrepo-abc12345")
+        chroma_client.get_or_create_collection("rdr__myrepo-abc12345")
+        chroma_client.get_or_create_collection("code__other-def67890")
+
+        siblings = list_sibling_collections("code__myrepo-abc12345", chroma_client)
+        assert "docs__myrepo-abc12345" in siblings
+        assert "rdr__myrepo-abc12345" in siblings
+        assert "code__myrepo-abc12345" not in siblings  # excludes self
+        assert "code__other-def67890" not in siblings  # different hash
+
+    def test_excludes_taxonomy_collections(self, chroma_client: chromadb.ClientAPI) -> None:
+        from nexus.registry import list_sibling_collections
+
+        chroma_client.get_or_create_collection("code__repo-aaa11111")
+        chroma_client.get_or_create_collection("taxonomy__centroids-aaa11111")
+
+        siblings = list_sibling_collections("code__repo-aaa11111", chroma_client)
+        assert not any(s.startswith("taxonomy__") for s in siblings)
+
+    def test_no_hash_suffix_returns_empty(self, chroma_client: chromadb.ClientAPI) -> None:
+        from nexus.registry import list_sibling_collections
+
+        siblings = list_sibling_collections("knowledge__art", chroma_client)
+        assert siblings == []

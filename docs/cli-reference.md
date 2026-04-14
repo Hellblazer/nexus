@@ -325,6 +325,9 @@ nx taxonomy merge "source" "target"             # merge topics
 nx taxonomy split "label" --k 3                 # split into sub-topics
 nx taxonomy links                               # show inter-topic relationships
 nx taxonomy rebuild -c docs__nexus              # full rebuild
+nx taxonomy project code__nexus                 # project against sibling collections
+nx taxonomy project code__nexus --against knowledge__art  # explicit targets
+nx taxonomy project --backfill --persist        # project all collections
 ```
 
 | Subcommand | Description |
@@ -341,6 +344,7 @@ nx taxonomy rebuild -c docs__nexus              # full rebuild
 | `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
 | `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
+| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (default 0.85). `--persist` to write assignments. `--backfill` to project all collections against each other |
 
 **Configuration** (in `.nexus.yml`):
 
@@ -350,7 +354,7 @@ taxonomy:
   local_exclude_collections: []       # default: ["code__*"] — MiniLM clusters poorly on code
 ```
 
-**Upgrade path**: Run `nx taxonomy discover --all` once after upgrading to populate topics for existing collections.
+**Upgrade path**: Run `nx upgrade` after upgrading to apply pending migrations and T3 upgrade steps (including cross-collection projection backfill). Run `nx taxonomy discover --all` to populate topics for new collections.
 
 ---
 
@@ -620,6 +624,35 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 ```
 
 The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
+
+```
+nx doctor --check-schema          # Validate T2 database schema and report pending migrations
+```
+
+---
+
+## nx upgrade
+
+Run pending database migrations and T3 upgrade steps.
+
+```
+nx upgrade                        # Apply all pending T2 + T3 migrations
+nx upgrade --dry-run              # List pending migrations without executing
+nx upgrade --force                # Reset version gate and re-run all migrations
+nx upgrade --auto                 # Quiet mode for hook invocation (T2 only, exit 0 always)
+```
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | List pending migrations without executing (creates base tables if absent) |
+| `--force` | Reset version gate to 0.0.0 and re-run all migrations. Per-migration idempotency guards still apply |
+| `--auto` | Quiet mode for SessionStart hook. T2 migrations only (T3 skipped — may exceed hook timeout). Exit 0 always |
+
+**How it works**: The CLI version (`importlib.metadata.version("conexus")`) is compared against the last-seen version stored in T2 (`_nexus_version` table). Migrations tagged with versions between last-seen and current are executed. Each migration is idempotent via `PRAGMA table_info()` / `sqlite_master` guards.
+
+**Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin. T2 migrations apply silently on every session start. T3 upgrade steps (e.g., cross-collection projection backfill) run only via explicit `nx upgrade`.
+
+**Adding new migrations**: Append a `Migration("x.y.z", "description", fn)` entry to the `MIGRATIONS` list in `src/nexus/db/migrations.py`. For T3 operations, use `T3UpgradeStep`.
 
 ---
 

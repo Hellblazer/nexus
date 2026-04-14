@@ -303,7 +303,8 @@ def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
             if emb is not None and len(emb) > 0:
                 embedding = np.array(emb, dtype=np.float32)
     except Exception:
-        pass  # Fall through to MiniLM
+        import structlog
+        structlog.get_logger().debug("taxonomy_t3_embedding_fetch_failed", doc_id=doc_id, exc_info=True)
 
     if embedding is None:
         from nexus.db.local_ef import LocalEmbeddingFunction
@@ -311,9 +312,17 @@ def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
         ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
         embedding = np.array(ef([content])[0], dtype=np.float32)
 
+    # Same-collection assignment (existing behavior)
     topic_id = taxonomy.assign_single(collection, embedding, chroma_client)
     if topic_id is not None:
         taxonomy.assign_topic(doc_id, topic_id, assigned_by="centroid")
+
+    # Cross-collection projection (RDR-075 SC-4, SC-6)
+    cross_topic_id = taxonomy.assign_single(
+        collection, embedding, chroma_client, cross_collection=True,
+    )
+    if cross_topic_id is not None and cross_topic_id != topic_id:
+        taxonomy.assign_topic(doc_id, cross_topic_id, assigned_by="projection")
 
 
 def taxonomy_assign_batch(
@@ -344,9 +353,23 @@ def taxonomy_assign_batch(
     try:
         with t2_ctx() as db:
             chroma_client = get_t3()._client
-            return db.taxonomy.assign_batch(
+            # Same-collection assignment
+            assigned = db.taxonomy.assign_batch(
                 collection, doc_ids, embeddings, chroma_client,
             )
+            # Cross-collection projection (RDR-075 SC-6)
+            cross_assigned = db.taxonomy.assign_batch(
+                collection, doc_ids, embeddings, chroma_client,
+                cross_collection=True,
+            )
+            if cross_assigned:
+                import structlog
+                structlog.get_logger().debug(
+                    "taxonomy_cross_collection_batch",
+                    collection=collection,
+                    cross_assigned=cross_assigned,
+                )
+            return assigned
     except Exception:
         import structlog
         structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
