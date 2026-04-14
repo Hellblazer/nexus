@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-04-14
+
+### Added
+
+- **`nx upgrade --auto` SessionStart hook**: runs T2 schema migrations silently on every Claude Code session start (RDR-076)
+- **RDR close gate heading normalization**: the close-time gap gate now accepts both `## Problem` and `## Problem Statement` heading variants; gap regex broadened to `^#{3,5} Gap \d+:` (accepts h3–h5)
+- **`nx:rdr-create` skill** documents both heading variants and broadened gap regex format
+
+### Changed
+
+- **`nx:rdr-gate` SKILL.md**: Layer 1 structural validation now lists heading variants with `/` separator (`Problem / Problem Statement`, `Proposed Solution / Proposed Design / Decision`, `Implementation Plan / Approach / Steps / Phases`, `Finalization Gate / Success Criteria`) and includes explicit "do NOT silently skip" instruction
+
 ## [4.1.2] - 2026-04-13
 
 ### Fixed

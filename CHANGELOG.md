@@ -6,6 +6,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-04-14
+
+### Added
+
+- **Idempotent upgrade mechanism** (RDR-076): centralised T2 schema migration registry in `src/nexus/db/migrations.py` with version-gated `Migration(introduced, name, fn)` entries. `apply_pending(conn, current_version)` runs migrations between last-seen version (stored in `_nexus_version` table) and current CLI version. Each migration is idempotent via `PRAGMA table_info()` / `sqlite_master` guards.
+- **`nx upgrade` CLI command** with `--dry-run`, `--force`, `--auto` flags for applying pending T2 migrations and T3 upgrade steps.
+- **Auto-upgrade on SessionStart**: `nx upgrade --auto` runs as the first SessionStart hook — T2 migrations apply silently on every session start.
+- **`T3UpgradeStep` typed interface** for ChromaDB operations (backfills, re-indexing) that require a `T3Database` client.
+- **`nx doctor --check-schema`** validates T2 database schema and reports pending migrations.
+- **MCP version compatibility check**: synchronous check in MCP `main()` that warns on major/minor version divergence between CLI and stored version.
+- **Cross-collection topic projection** (RDR-075): `nx taxonomy project SOURCE` command computes cosine similarity between source chunk embeddings and target collection centroids via normalized matrix multiply. Flags: `--against TARGETS`, `--threshold N` (default 0.85), `--top-k N`, `--persist`, `--backfill`.
+- **Automatic cross-collection projection** in `taxonomy_assign_hook`: every `store_put` now projects against foreign collection centroids in addition to same-collection assignment. New rows use `assigned_by='projection'`.
+- **Cross-collection topic links**: `_discover_cross_links` (centroid-level similarity at discover time) and `generate_cooccurrence_links` (SQL self-join on shared doc co-assignments) populate the `topic_links` table with `link_types=["projection"]` or `["cooccurrence"]`.
+- **`list_sibling_collections()`** in `registry.py` auto-detects related collections from the `{prefix}{name}-{hash8}` naming scheme. Used as the default `--against` target for `nx taxonomy project`.
+- **T3 projection backfill**: `T3UpgradeStep("4.2.0", "Backfill cross-collection projection", ...)` runs via `nx upgrade` (not `--auto`) to populate cross-collection assignments and links for existing installs.
+- **`cross_collection` parameter** on `assign_single` and `assign_batch` — when True, queries only foreign centroids (`$ne collection_name` filter) for cross-collection projection.
+- **Incremental taxonomy assignment during indexing** (RDR-070): `taxonomy_assign_batch` wired into `code_indexer`, `prose_indexer`, `pipeline_stages` uploader, and `doc_indexer`. Chunks assigned to nearest topics immediately after upsert.
+- **`indexer_utils`** gitignore/repo-root helpers: `find_repo_root()`, `should_ignore()`, `load_ignore_patterns()`, `is_gitignored()`. PDF batch mode now respects `.nexusignore`.
+
+### Fixed
+
+- RDR close gate heading normalization: `_extract_section` now accepts both `## Problem` and `## Problem Statement` heading variants; gap regex broadened from `^#### Gap \d+:` to `^#{3,5} Gap \d+:` (accepts h3–h5).
+- `doctor --check-schema` uses `PRAGMA busy_timeout=2000` to prevent `database is locked` during concurrent upgrades.
+- `upsert_topic_links` no longer deletes all rows before inserting — preserves projection links from `_discover_cross_links`.
+- `_parse_version` normalizes to 3-component tuples (`(3, 7)` → `(3, 7, 0)`) to avoid unexpected ordering.
+
+### Changed
+
+- `assign_batch` batches all embeddings into a single ChromaDB query (was N individual queries).
+- `project_against` paginates source collection fetch (2000-chunk pages) to prevent OOM on large collections.
+- `generate_cooccurrence_links` uses a SQL self-join on `topic_assignments` instead of loading the full table into Python memory.
+- Domain store `_migrate_*_if_needed()` methods now delegate to the centralised migration registry.
+
+### Docs
+
+- Full `nx upgrade` section added to `docs/cli-reference.md`
+- `nx taxonomy project` subcommand documented in `docs/cli-reference.md`
+- Migration Registry section added to `docs/architecture.md` replacing old ad-hoc migration paragraph
+- Source Layout in `CLAUDE.md` updated with `migrations.py`, `upgrade.py`, and updated descriptions
+- Release checklist in `docs/contributing.md` now includes `migrations.py` verification
+
 ## [4.1.2] - 2026-04-13
 
 ### Fixed
