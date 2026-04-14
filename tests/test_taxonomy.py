@@ -311,6 +311,92 @@ def test_assign_single_cross_collection_isolation(
     assert result is None, "assign_single must not cross collection boundaries"
 
 
+def test_assign_batch_assigns_multiple_docs(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_batch assigns multiple new docs to nearest topics."""
+    rng = np.random.default_rng(42)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural {i}" for i in range(30)]
+        + [f"database query sql {i}" for i in range(30)]
+    )
+
+    db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
+
+    # New batch: 3 docs near cluster A, 2 near cluster B
+    new_embs = rng.standard_normal((5, 384)).astype(np.float32) * 0.1
+    new_embs[:3, 0] += 3.0  # near cluster A
+    new_embs[3:, 1] += 3.0  # near cluster B
+    new_ids = [f"new-doc-{i}" for i in range(5)]
+
+    assigned = db.taxonomy.assign_batch(
+        "test__coll", new_ids, new_embs.tolist(), chroma_client,
+    )
+    assert assigned == 5
+
+    # Verify assignments exist in T2
+    rows = db.taxonomy.conn.execute(
+        "SELECT doc_id, assigned_by FROM topic_assignments WHERE doc_id LIKE 'new-doc-%'"
+    ).fetchall()
+    assert len(rows) == 5
+    assert all(r[1] == "centroid" for r in rows)
+
+
+def test_assign_batch_no_centroids_returns_zero(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_batch returns 0 when no centroids exist."""
+    embs = np.random.default_rng(42).standard_normal((3, 384)).astype(np.float32)
+    result = db.taxonomy.assign_batch(
+        "nonexistent__coll", ["a", "b", "c"], embs.tolist(), chroma_client,
+    )
+    assert result == 0
+
+
+def test_assign_single_dimension_mismatch(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_single returns None with warning on embedding dimension mismatch."""
+    rng = np.random.default_rng(42)
+    # Create centroids with 384d embeddings
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = [f"text {i}" for i in range(60)]
+    db.taxonomy.discover_topics("dim__coll", doc_ids, embeddings, texts, chroma_client)
+
+    # Query with 1024d embedding — dimension mismatch
+    wrong_dim_emb = rng.standard_normal(1024).astype(np.float32)
+    result = db.taxonomy.assign_single("dim__coll", wrong_dim_emb, chroma_client)
+    assert result is None
+
+
+def test_assign_batch_dimension_mismatch(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_batch returns 0 on embedding dimension mismatch."""
+    rng = np.random.default_rng(42)
+    # Create centroids with 384d
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = [f"text {i}" for i in range(60)]
+    db.taxonomy.discover_topics("dimbatch__coll", doc_ids, embeddings, texts, chroma_client)
+
+    # Query with 1024d embeddings — dimension mismatch
+    wrong_embs = rng.standard_normal((3, 1024)).astype(np.float32)
+    result = db.taxonomy.assign_batch(
+        "dimbatch__coll", ["a", "b", "c"], wrong_embs.tolist(), chroma_client,
+    )
+    assert result == 0
+
+
 def test_assigned_by_column_populated(
     db: T2Database, chroma_client: chromadb.ClientAPI,
 ) -> None:

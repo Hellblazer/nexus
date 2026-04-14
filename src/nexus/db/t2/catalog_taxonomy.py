@@ -106,6 +106,34 @@ _TOPIC_COLUMNS = (
     "terms",
 )
 
+# ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────────────────
+
+
+def _check_centroid_dimension(embedding: "np.ndarray", centroid_coll: Any) -> bool:
+    """Return True if embedding dimension matches stored centroids.
+
+    Logs a structured warning and returns False on mismatch.
+    Returns True (optimistic) if centroid collection is empty or
+    dimension cannot be determined.
+    """
+    try:
+        peek = centroid_coll.peek(1)
+        if not peek.get("embeddings") or peek["embeddings"][0] is None:
+            return True
+        stored_dim = len(peek["embeddings"][0])
+        query_dim = len(embedding)
+        if query_dim != stored_dim:
+            _log.warning(
+                "centroid_dimension_mismatch",
+                query_dim=query_dim,
+                stored_dim=stored_dim,
+            )
+            return False
+    except Exception:
+        return True
+    return True
+
+
 # ── CatalogTaxonomy ───────────────────────────────────────────────────────────
 
 
@@ -1013,6 +1041,8 @@ class CatalogTaxonomy:
 
         return count
 
+    # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────
+
     def assign_single(
         self,
         collection_name: str,
@@ -1021,9 +1051,9 @@ class CatalogTaxonomy:
     ) -> int | None:
         """Return the nearest topic_id for a single embedding.
 
-        Queries ``taxonomy__centroids`` with unconditional nearest-centroid
+        Queries ``taxonomy__centroids`` with collection-scoped nearest-centroid
         assignment (RF-070-7). Returns ``None`` when the centroid collection
-        does not exist or is empty.
+        does not exist, is empty, or dimensions mismatch (SC-10).
         """
         try:
             centroid_coll = chroma_client.get_collection(
@@ -1034,6 +1064,9 @@ class CatalogTaxonomy:
             return None
 
         if centroid_coll.count() == 0:
+            return None
+
+        if not _check_centroid_dimension(embedding, centroid_coll):
             return None
 
         try:
@@ -1075,6 +1108,13 @@ class CatalogTaxonomy:
 
         if centroid_coll.count() == 0:
             return 0
+
+        # Dimension check once for the batch (all embeddings share dimension)
+        if embeddings:
+            first_emb = embeddings[0]
+            sample = np.array(first_emb) if not isinstance(first_emb, np.ndarray) else first_emb
+            if not _check_centroid_dimension(sample, centroid_coll):
+                return 0
 
         assigned = 0
         for doc_id, emb in zip(doc_ids, embeddings):
