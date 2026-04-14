@@ -196,13 +196,15 @@ if current_status.lower() not in ('accepted', 'final'):
 # per-gap file:line pointers. Grandfathering is ID-based (rdr_id_int < 65), never
 # date-based — see CA-4 in docs/rdr/rdr-065-close-time-funnel-hardening.md.
 if (close_reason or '').lower() == 'implemented':
-    def _extract_section(doc, heading):
-        idx = doc.find(heading)
-        if idx == -1:
-            return ''
-        rest = doc[idx + len(heading):]
-        nxt = re.search(r'\n## ', rest)
-        return rest[:nxt.start()] if nxt else rest
+    def _extract_section(doc, *headings):
+        """Extract content under the first matching heading variant."""
+        for heading in headings:
+            idx = doc.find(heading)
+            if idx != -1:
+                rest = doc[idx + len(heading):]
+                nxt = re.search(r'\n## ', rest)
+                return rest[:nxt.start()] if nxt else rest
+        return ''
 
     def _parse_pointers(s):
         out = {}
@@ -218,10 +220,12 @@ if (close_reason or '').lower() == 'implemented':
     except ValueError:
         rdr_id_int = -1
     rdr_id_label = t2_key
-    problem_stmt = _extract_section(text, '## Problem Statement')
+    # Search for both heading variants — RDRs use either form.
+    problem_stmt = _extract_section(text, '## Problem Statement', '## Problem')
     # Regex permits parenthetical context between number and colon
     # (e.g., `#### Gap 4 (prerequisite for Gap 1): <title>`) — author convenience.
-    gap_matches = re.findall(r'^#### Gap (\d+)([^\n:]*):\s*(.*)$', problem_stmt, re.MULTILINE)
+    # Also matches `###` (3 hashes) and `#####` (5 hashes) for resilience.
+    gap_matches = re.findall(r'^#{3,5} Gap (\d+)([^\n:]*):\s*(.*)$', problem_stmt, re.MULTILINE)
     gap_count = len(gap_matches)
 
     if rdr_id_int < 65 and gap_count == 0:
@@ -230,8 +234,8 @@ if (close_reason or '').lower() == 'implemented':
         print()
     elif rdr_id_int >= 65 and gap_count == 0:
         # MALFORMED-NEW: post-policy RDR is missing the required gap headings — block.
-        print(f"> **ERROR**: RDR-{rdr_id_label} has no `#### Gap N: <title>` headings in `## Problem Statement`.")
-        print(r"> Expected format: `#### Gap 1: <gap title>` (regex: `^#### Gap \d+:`)")
+        print(f"> **ERROR**: RDR-{rdr_id_label} has no `#### Gap N: <title>` headings in `## Problem Statement` or `## Problem`.")
+        print(r"> Expected format: `#### Gap 1: <gap title>` (regex: `^#{3,5} Gap \d+:`)")
         print()
         sys.exit(0)
     elif gap_count > 0 and not pointers_arg:
