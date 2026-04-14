@@ -388,6 +388,13 @@ def uploader_loop(
 
                 t3.upsert_chunks_with_embeddings(collection, ids, documents, embeddings, metadatas)
 
+                # Incremental taxonomy: assign chunks to nearest existing topics.
+                try:
+                    from nexus.mcp_infra import taxonomy_assign_batch
+                    taxonomy_assign_batch(ids, collection, embeddings)
+                except Exception:
+                    pass  # non-fatal; logging handled inside
+
                 indices = [row["chunk_index"] for row in batch]
                 db.mark_uploaded(content_hash, indices)
                 total_uploaded += len(batch)
@@ -510,6 +517,9 @@ def pipeline_index_pdf(
 
     if db is None:
         db = PipelineDB(PIPELINE_DB_PATH)
+
+    # Normalize to absolute so staleness checks are path-form-independent.
+    pdf_path = pdf_path.resolve()
 
     # Pre-flight: check if pipeline should run before resolving credentials.
     result = db.create_pipeline(content_hash, str(pdf_path), collection)

@@ -183,4 +183,12 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         embeddings=embeddings,
         metadatas=metadatas,
     )
+
+    # Incremental taxonomy: assign chunks to nearest existing topics.
+    try:
+        from nexus.mcp_infra import taxonomy_assign_batch
+        taxonomy_assign_batch(ids, ctx.corpus, embeddings)
+    except Exception:
+        _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+
     return len(ids)
