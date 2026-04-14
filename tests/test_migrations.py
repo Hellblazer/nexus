@@ -38,15 +38,15 @@ class TestParseVersion:
 
         assert _parse_version("") == (0, 0, 0)
 
-    def test_two_part_version(self) -> None:
+    def test_two_part_version_normalized(self) -> None:
         from nexus.db.migrations import _parse_version
 
-        assert _parse_version("3.7") == (3, 7)
+        assert _parse_version("3.7") == (3, 7, 0)
 
-    def test_single_part_version(self) -> None:
+    def test_single_part_version_normalized(self) -> None:
         from nexus.db.migrations import _parse_version
 
-        assert _parse_version("5") == (5,)
+        assert _parse_version("5") == (5, 0, 0)
 
     def test_ordering(self) -> None:
         from nexus.db.migrations import _parse_version
@@ -662,6 +662,93 @@ class TestApplyPending:
         ).fetchall()
         assert len(rows) == 1
         assert rows[0][0] == "4.1.2"
+        conn.close()
+
+    def test_concurrent_apply_pending_runs_once(self, tmp_path: Path) -> None:
+        """_upgrade_lock prevents concurrent apply_pending double-execution."""
+        from unittest.mock import patch as _patch
+
+        from nexus.db.migrations import apply_pending
+
+        db_path = tmp_path / "test.db"
+        call_count = {"n": 0}
+        original_bootstrap = None
+
+        # Lazy capture of the real bootstrap_version
+        from nexus.db import migrations
+
+        original_bootstrap = migrations.bootstrap_version
+
+        def counting_bootstrap(conn):
+            call_count["n"] += 1
+            return original_bootstrap(conn)
+
+        migrations._upgrade_done.clear()
+        errors: list[Exception] = []
+        barrier = threading.Barrier(2, timeout=5)
+
+        def worker() -> None:
+            try:
+                conn = sqlite3.connect(str(db_path))
+                conn.execute("PRAGMA busy_timeout=5000")
+                barrier.wait()
+                apply_pending(conn, "4.1.2")
+                conn.close()
+            except Exception as e:
+                errors.append(e)
+
+        with _patch.object(migrations, "bootstrap_version", counting_bootstrap):
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=worker)
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+        assert not errors, f"Concurrent apply_pending failed: {errors}"
+        # _upgrade_lock ensures only one thread enters bootstrap_version
+        assert call_count["n"] == 1
+
+    def test_prerelease_version_not_stored(self, tmp_path: Path) -> None:
+        """Pre-release versions (parsed as (0,0,0)) must not be stored."""
+        from nexus.db.migrations import apply_pending
+
+        db_path = tmp_path / "test.db"
+        conn = sqlite3.connect(str(db_path))
+        # First: seed with a proper version
+        apply_pending(conn, "4.1.2")
+
+        from nexus.db import migrations
+
+        migrations._upgrade_done.clear()
+
+        # Now call with a pre-release — should NOT downgrade stored version
+        apply_pending(conn, "4.2.0rc1")
+
+        row = conn.execute(
+            "SELECT value FROM _nexus_version WHERE key='cli_version'"
+        ).fetchone()
+        assert row[0] == "4.1.2"  # unchanged
+        conn.close()
+
+    def test_version_downgrade_not_stored(self, tmp_path: Path) -> None:
+        """Calling apply_pending with a lower version must not lower stored version."""
+        from nexus.db.migrations import apply_pending
+
+        db_path = tmp_path / "test.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, "4.1.2")
+
+        from nexus.db import migrations
+
+        migrations._upgrade_done.clear()
+
+        apply_pending(conn, "3.0.0")
+
+        row = conn.execute(
+            "SELECT value FROM _nexus_version WHERE key='cli_version'"
+        ).fetchone()
+        assert row[0] == "4.1.2"  # unchanged
         conn.close()
 
 

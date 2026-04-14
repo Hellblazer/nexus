@@ -103,6 +103,34 @@ class TestMcpVersionCheck:
         ):
             check_version_compatibility()  # patch only — no warning
 
+    def test_minor_version_divergence_warns(self, tmp_path: Path) -> None:
+        """Minor version mismatch should emit a structured warning."""
+        import structlog
+
+        from nexus.mcp_infra import check_version_compatibility
+
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE _nexus_version (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO _nexus_version VALUES ('cli_version', '4.1.2')"
+        )
+        conn.commit()
+        conn.close()
+
+        with (
+            patch("nexus.mcp_infra.default_db_path", return_value=db_path),
+            patch("importlib.metadata.version", return_value="4.2.0"),
+            patch("structlog.get_logger") as mock_get_logger,
+        ):
+            mock_log = mock_get_logger.return_value
+            check_version_compatibility()
+            mock_log.warning.assert_called_once()
+            call_kwargs = mock_log.warning.call_args
+            assert "version_mismatch" in str(call_kwargs)
+
     def test_exception_does_not_block(self) -> None:
         from nexus.mcp_infra import check_version_compatibility
 

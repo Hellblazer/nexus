@@ -62,6 +62,34 @@ class TestUpgradeCommand:
             result = runner.invoke(main, ["upgrade", "--force"])
         assert result.exit_code == 0
 
+        # Verify stored version is current after --force
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT value FROM _nexus_version WHERE key='cli_version'"
+        ).fetchone()
+        assert row is not None
+        conn.close()
+
+    def test_force_dry_run_shows_all_pending(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--force --dry-run shows all migrations as pending."""
+        db_path = tmp_path / "memory.db"
+        with patch("nexus.commands.upgrade._db_path", return_value=db_path):
+            # First run to apply everything
+            runner.invoke(main, ["upgrade"])
+
+            from nexus.db import migrations
+
+            migrations._upgrade_done.clear()
+
+            # Force dry-run — should list migrations
+            result = runner.invoke(main, ["upgrade", "--force", "--dry-run"])
+        assert result.exit_code == 0
+        assert "dry-run" in result.output.lower() or "pending" in result.output.lower()
+
     def test_upgrade_auto_exits_zero_on_error(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:

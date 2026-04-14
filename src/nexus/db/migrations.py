@@ -24,12 +24,15 @@ _log = structlog.get_logger()
 
 
 def _parse_version(ver: str) -> tuple[int, ...]:
-    """Parse a dotted version string into a comparable tuple.
+    """Parse a dotted version string into a comparable 3-component tuple.
 
-    Falls back to ``(0, 0, 0)`` for pre-release tags or malformed input.
+    Normalises to exactly 3 components so ``(3, 7)`` doesn't compare
+    less than ``(3, 7, 0)``.  Falls back to ``(0, 0, 0)`` for
+    pre-release tags or malformed input.
     """
     try:
-        return tuple(int(x) for x in ver.split("."))
+        parts = tuple(int(x) for x in ver.split(".")[:3])
+        return parts + (0,) * (3 - len(parts))
     except ValueError:
         return (0, 0, 0)
 
@@ -62,6 +65,12 @@ def migrate_memory_fts(conn: sqlite3.Connection) -> None:
 
     Uses ``sqlite_master`` guard — NOT PRAGMA (FTS5 virtual tables are not
     visible to ``PRAGMA table_info``).
+
+    **Precondition**: ``_create_base_tables`` (or ``_MEMORY_SCHEMA_SQL``)
+    must run before this function.  If ``memory_fts`` was dropped by a
+    prior partial failure, ``_create_base_tables`` heals it via
+    ``CREATE VIRTUAL TABLE IF NOT EXISTS`` with the ``title`` column,
+    making the ``row is None`` early-return correct.
     """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
@@ -122,6 +131,8 @@ def migrate_plan_project(conn: sqlite3.Connection) -> None:
 
     _log.info("Migrating plans table to add project column")
     conn.execute("ALTER TABLE plans ADD COLUMN project TEXT NOT NULL DEFAULT ''")
+    # executescript implicitly commits the preceding ALTER TABLE before
+    # running the DROP/CREATE script below.
     conn.executescript(
         """\
         DROP TRIGGER IF EXISTS plans_ai;
@@ -172,9 +183,11 @@ def migrate_access_tracking(conn: sqlite3.Connection) -> None:
 
 
 def migrate_topics(conn: sqlite3.Connection) -> None:
-    """Create ``topics`` and ``topic_assignments`` tables if missing.
+    """Create topic-related tables if missing.
 
-    Uses ``sqlite_master`` guard — NOT PRAGMA.
+    Uses ``sqlite_master`` guard — NOT PRAGMA.  Creates all four
+    taxonomy tables (matching ``_TAXONOMY_SCHEMA_SQL``) so standalone
+    callers don't end up with a partial schema.
     """
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"
@@ -193,10 +206,22 @@ def migrate_topics(conn: sqlite3.Connection) -> None:
             doc_count     INTEGER NOT NULL DEFAULT 0,
             created_at    TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS taxonomy_meta (
+            collection              TEXT PRIMARY KEY,
+            last_discover_doc_count INTEGER NOT NULL DEFAULT 0,
+            last_discover_at        TEXT
+        );
         CREATE TABLE IF NOT EXISTS topic_assignments (
             doc_id    TEXT NOT NULL,
             topic_id  INTEGER NOT NULL REFERENCES topics(id),
             PRIMARY KEY (doc_id, topic_id)
+        );
+        CREATE TABLE IF NOT EXISTS topic_links (
+            from_topic_id INTEGER NOT NULL REFERENCES topics(id),
+            to_topic_id   INTEGER NOT NULL REFERENCES topics(id),
+            link_count    INTEGER NOT NULL DEFAULT 0,
+            link_types    TEXT NOT NULL DEFAULT '[]',
+            PRIMARY KEY (from_topic_id, to_topic_id)
         );
     """
     )
@@ -313,8 +338,11 @@ fast-path check and running ``apply_pending`` simultaneously.
 _bootstrap_lock = threading.Lock()
 """Guards the bootstrap check in apply_pending (read + conditional insert).
 
-Process-level only — cross-process safety relies on INSERT OR IGNORE
-plus SQLite WAL serialisation.
+Process-level only — cross-process safety relies on ``INSERT OR IGNORE``
+plus SQLite WAL serialisation.  If two processes race the bootstrap,
+whichever writes first determines the seed value; the loser's
+``INSERT OR IGNORE`` is silently discarded.  This is correct because
+all migrations are idempotent regardless of seed.
 """
 
 
@@ -386,10 +414,12 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
                 _log.info("Running migration", name=m.name, introduced=m.introduced)
                 m.fn(conn)
 
-        # Update stored version (skip if pre-release/unparseable —
-        # storing (0,0,0) would cause all migrations to re-run on next
-        # proper release).
-        if current_t > (0, 0, 0):
+        # Update stored version.  Guards:
+        # - Skip pre-release/unparseable versions ((0,0,0)) to prevent
+        #   spurious re-run of all migrations on next proper release.
+        # - Skip downgrade (current < last_seen) to prevent a rolled-back
+        #   CLI from lowering the stored version.
+        if current_t > (0, 0, 0) and current_t >= last_seen_t:
             conn.execute(
                 "UPDATE _nexus_version SET value=? WHERE key='cli_version'",
                 (current_version,),

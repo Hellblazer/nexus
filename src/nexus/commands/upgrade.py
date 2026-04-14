@@ -39,7 +39,7 @@ def _current_version() -> str:
 
 
 @click.command("upgrade")
-@click.option("--dry-run", is_flag=True, help="List pending migrations without executing.")
+@click.option("--dry-run", is_flag=True, help="List pending migrations without executing (creates base tables if absent).")
 @click.option("--force", is_flag=True, help="Reset version gate and re-run all migrations.")
 @click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (T2 only, exit 0 always).")
 def upgrade(dry_run: bool, force: bool, auto_mode: bool) -> None:
