@@ -6,7 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [4.2.1] - 2026-04-14
+## [4.2.2] - 2026-04-14
+
+(v4.2.1 was tagged but never published due to a CLI test failure. v4.2.2 supersedes it.)
 
 ### Fixed
 

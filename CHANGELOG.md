@@ -6,14 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [4.2.1] - 2026-04-14
+## [4.2.2] - 2026-04-14
+
+(Note: v4.2.1 was tagged but never published due to a test failure. v4.2.2 supersedes it and includes all 4.2.1 changes plus the ChromaDB Cloud quota audit and observability improvements found during a live shakeout.)
 
 ### Added
 
 - **`nx doctor` PyPI version check**: `_check_cli_version` queries https://pypi.org/pypi/conexus/json (3-second timeout) and reports current vs latest. When behind, suggests `uv tool upgrade conexus`. Network failures are silent (offline-tolerant).
+- **`nx upgrade --skip-t3` flag**: skip T3 upgrade steps (e.g., heavy cross-collection projection backfill) for fast T2-only migrations.
+- **`backfill_projection` per-collection progress**: prints `[i/N] collection: chunks, matches, attempted (elapsed)` to stderr during the T3 backfill, plus a final summary with total time and actual rows stored. Previously the backfill was silent for many minutes on large repos.
+- **`CatalogTaxonomy._paginated_get`** + **`_batched_upsert`** helpers: wrap ChromaDB calls with the 300-record per-call cap (`MAX_QUERY_RESULTS` / `MAX_RECORDS_PER_WRITE`).
+- **CLAUDE.md "External Service Limits" section**: documents ChromaDB Cloud + Voyage AI quotas with a reference table. Mandatory consult before any new ChromaDB call.
 
 ### Fixed
 
+- **`project_against` paginated `coll.get()`**: `_PAGE = 2000` exceeded the ChromaDB Cloud Get quota of 300, causing `nx taxonomy project` to fail on real cloud collections. Now `_PAGE = 300` with paginated source-collection fetch via `_paginated_get`.
+- **4 unbounded `coll.get()` calls** in `catalog_taxonomy.py` (`_discover_cross_links`, `project_against` centroid filter, `rebuild_taxonomy` rebuild + cleanup paths) wrapped in `_paginated_get` to avoid OOM and quota errors at scale.
+- **3 `centroid_coll.upsert()` sites** wrapped in `_batched_upsert` (defensive against `MAX_RECORDS_PER_WRITE = 300`).
+- **`rebuild_taxonomy` cleanup**: paginated GET + batched DELETE so collections with >300 centroids don't fail rebuild.
+- **`nx taxonomy links` invisible cross-collection links**: command queried `compute_topic_links` (catalog-derived only) and ignored the `topic_links` table. Cross-collection projection links written by `_discover_cross_links` and `generate_cooccurrence_links` were invisible. Now displays all rows in `topic_links` with `[collection]` prefix on each topic. New `--refresh` flag re-runs catalog-derived computation explicitly.
+- **`backfill_projection` misleading count**: reported "X assignments" using the per-call attempt count, but `INSERT OR IGNORE` deduplicates. Now reports "X stored (Y attempted)" using `COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'`.
 - **Plugin/CLI version mismatch UX**: when the nx plugin is upgraded but the conexus CLI is not, the `nx upgrade --auto` SessionStart hook would print a cryptic Click error. Now prints a helpful message: `nx plugin requires conexus >= 4.2.0 — run: uv tool upgrade conexus`.
 
 ## [4.2.0] - 2026-04-14
