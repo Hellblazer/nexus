@@ -179,6 +179,28 @@ tests/               # pytest suite (unit + integration + e2e/)
 docs/                # Documentation (architecture.md is the module map)
 ```
 
+## External Service Limits — CHECK BEFORE EVERY CALL
+
+**ALWAYS** consult `src/nexus/db/chroma_quotas.py` (the `QUOTAS` dataclass and `QuotaValidator`) before writing any ChromaDB call. Violating these at runtime produces `ChromaError: Quota exceeded` — costly to debug, embarrassing in release.
+
+**ChromaDB Cloud free-tier caps** (single source of truth: `chroma_quotas.py`):
+
+| Operation | Limit | Notes |
+|-----------|-------|-------|
+| `coll.get(limit=N)` | N ≤ 300 | Same cap as queries. `_PAGE = 300` max for pagination |
+| `coll.query(n_results=N)` | N ≤ 300 | `MAX_QUERY_RESULTS` |
+| `coll.upsert/add(ids=[...])` | ≤ 300 records | `MAX_RECORDS_PER_WRITE` |
+| Concurrent reads per coll | ≤ 10 | `MAX_CONCURRENT_READS` |
+| Concurrent writes per coll | ≤ 10 | `MAX_CONCURRENT_WRITES` |
+| Document size | ≤ 16384 bytes | `MAX_DOCUMENT_BYTES` (use `SAFE_CHUNK_BYTES = 12288`) |
+| Query string | ≤ 256 chars | `MAX_QUERY_STRING_CHARS` |
+| `where` predicates | ≤ 8 top-level | `MAX_WHERE_PREDICATES` |
+| Embedding dims | ≤ 4096 | `MAX_EMBEDDING_DIMENSIONS` |
+
+**Voyage AI**: `voyage-3` / `voyage-code-3` / `voyage-context-3` = 1024 dims, 32k tokens/request. Batch requests up to 128 inputs. Use `nexus.retry._voyage_with_retry` for transient failure handling.
+
+**Rule of thumb**: paginating through a large ChromaDB collection requires `limit ≤ 300` per call. When fetching N documents, use `offset += 300` in a loop. `MAX_RECORDS_PER_WRITE = 300` means upsert batches must also be capped.
+
 ## Development Conventions
 
 - **Python 3.12+**: use `match/case`, `tomllib`, `typing.Protocol`, walrus operator freely

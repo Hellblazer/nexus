@@ -773,7 +773,7 @@ class CatalogTaxonomy:
         except Exception:
             pass  # Parent centroid may not exist
         if c_ids:
-            centroid_coll.upsert(ids=c_ids, embeddings=c_embs, metadatas=c_metas)
+            self._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
 
         return child_count
 
@@ -1040,9 +1040,9 @@ class CatalogTaxonomy:
 
             self.conn.commit()
 
-        # Upsert centroids outside the lock
+        # Upsert centroids outside the lock (batched at 300 per write)
         if c_ids_out:
-            centroid_coll.upsert(ids=c_ids_out, embeddings=c_embs, metadatas=c_metas)
+            self._batched_upsert(centroid_coll, c_ids_out, c_embs, c_metas)
 
         # Cross-collection post-pass: find topic links to other collections'
         # centroids (RDR-075 SC-6, Phase 3).  Lightweight: only new centroids
@@ -1109,6 +1109,77 @@ class CatalogTaxonomy:
 
     _PROJECTION_THRESHOLD = 0.85
 
+    @staticmethod
+    def _batched_upsert(
+        coll: Any,
+        ids: list[str],
+        embeddings: list,
+        metadatas: list[dict],
+        *,
+        batch_size: int = 300,
+    ) -> None:
+        """Batched wrapper for ``coll.upsert()`` — caps at ChromaDB Cloud's
+        300-record per-write limit (MAX_RECORDS_PER_WRITE).
+        """
+        for i in range(0, len(ids), batch_size):
+            j = i + batch_size
+            coll.upsert(
+                ids=ids[i:j],
+                embeddings=embeddings[i:j],
+                metadatas=metadatas[i:j],
+            )
+
+    @staticmethod
+    def _paginated_get(
+        coll: Any,
+        *,
+        where: dict | None = None,
+        include: list[str] | None = None,
+        page_size: int = 300,
+    ) -> dict[str, list]:
+        """Paginated wrapper for ``coll.get()`` — caps at ChromaDB Cloud's
+        300-record limit per call (MAX_QUERY_RESULTS).
+
+        Returns a dict with the same shape as ``coll.get()`` (keys: ids,
+        embeddings, metadatas, documents) but with ALL pages concatenated.
+        """
+        ids: list[str] = []
+        embeddings: list[Any] = []
+        metadatas: list[Any] = []
+        documents: list[Any] = []
+        offset = 0
+        while True:
+            kwargs: dict[str, Any] = {"limit": page_size, "offset": offset}
+            if where is not None:
+                kwargs["where"] = where
+            if include is not None:
+                kwargs["include"] = include
+            page = coll.get(**kwargs)
+            page_ids = page.get("ids") or []
+            if not page_ids:
+                break
+            ids.extend(page_ids)
+            if "embeddings" in (include or []):
+                page_embs = page.get("embeddings")
+                if page_embs is not None:
+                    embeddings.extend(page_embs)
+            if "metadatas" in (include or []):
+                metadatas.extend(page.get("metadatas") or [])
+            if "documents" in (include or []):
+                documents.extend(page.get("documents") or [])
+            if len(page_ids) < page_size:
+                break
+            offset += page_size
+
+        result: dict[str, list] = {"ids": ids}
+        if "embeddings" in (include or []):
+            result["embeddings"] = embeddings
+        if "metadatas" in (include or []):
+            result["metadatas"] = metadatas
+        if "documents" in (include or []):
+            result["documents"] = documents
+        return result
+
     def _discover_cross_links(
         self,
         collection_name: str,
@@ -1122,9 +1193,10 @@ class CatalogTaxonomy:
         existing centroids from all OTHER collections. Store matches
         above ``_PROJECTION_THRESHOLD`` as ``topic_links`` entries.
         """
-        # Fetch all centroids NOT in this collection
+        # Fetch all centroids NOT in this collection (paginated, ChromaDB cap = 300)
         try:
-            other = centroid_coll.get(
+            other = self._paginated_get(
+                centroid_coll,
                 where={"collection": {"$ne": collection_name}},
                 include=["embeddings", "metadatas"],
             )
@@ -1327,8 +1399,8 @@ class CatalogTaxonomy:
                 "total_centroids": 0,
             }
 
-        # Paginated fetch to avoid OOM on large collections
-        _PAGE = 2000
+        # Paginated fetch — ChromaDB Cloud caps Get at 300 (MAX_QUERY_RESULTS)
+        _PAGE = 300
         src_ids: list[str] = []
         src_emb_pages: list[np.ndarray] = []
         offset = 0
@@ -1372,8 +1444,9 @@ class CatalogTaxonomy:
                 "total_centroids": 0,
             }
 
-        # Filter centroids to target collections
-        ctr_data = centroid_coll.get(
+        # Filter centroids to target collections (paginated, ChromaDB cap = 300)
+        ctr_data = self._paginated_get(
+            centroid_coll,
             where={"collection": {"$in": target_collections}},
             include=["embeddings", "metadatas"],
         )
@@ -1569,9 +1642,11 @@ class CatalogTaxonomy:
         }
 
         # Read old centroids from ChromaDB, resolve labels from T2
+        # (paginated, ChromaDB cap = 300)
         old_centroid_topic_ids: list[int] = []  # old topic_id per centroid index
         try:
-            old_data = centroid_coll.get(
+            old_data = self._paginated_get(
+                centroid_coll,
                 where={"collection": collection_name},
                 include=["embeddings", "metadatas"],
             )
@@ -1611,12 +1686,14 @@ class CatalogTaxonomy:
             )
             self.conn.commit()
 
-        # Clear old centroids from ChromaDB
-        old_centroid_ids = centroid_coll.get(
+        # Clear old centroids from ChromaDB.  Paginated GET (cap 300) +
+        # batched DELETE (MAX_RECORDS_PER_WRITE = 300).
+        old_centroid_ids = self._paginated_get(
+            centroid_coll,
             where={"collection": collection_name},
         ).get("ids", [])
-        if old_centroid_ids:
-            centroid_coll.delete(ids=old_centroid_ids)
+        for i in range(0, len(old_centroid_ids), 300):
+            centroid_coll.delete(ids=old_centroid_ids[i:i + 300])
 
         # ── Step 3: HDBSCAN ──────────────────────────────────────────
         n = len(doc_ids)
@@ -1757,9 +1834,9 @@ class CatalogTaxonomy:
 
             self.conn.commit()
 
-        # Upsert new centroids
+        # Upsert new centroids (batched at 300 per write)
         if c_ids:
-            centroid_coll.upsert(ids=c_ids, embeddings=c_embs, metadatas=c_metas)
+            self._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
 
         # Record doc count for rebalance tracking
         self.record_discover_count(collection_name, n)

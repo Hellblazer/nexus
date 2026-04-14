@@ -45,7 +45,9 @@ class TestHooksJson:
             for h in data["hooks"]["SessionStart"]
             if "startup" in h["matcher"]
         )
-        assert startup_hooks[0]["command"] == "nx upgrade --auto"
+        # The first hook must start with `nx upgrade --auto`.  The 4.2.1
+        # fallback appends a helpful error message for older CLIs.
+        assert startup_hooks[0]["command"].startswith("nx upgrade --auto")
         assert startup_hooks[0]["timeout"] == 30
 
 

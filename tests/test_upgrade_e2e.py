@@ -209,7 +209,7 @@ class TestSC8HooksJson:
             for h in data["hooks"]["SessionStart"]
             if "startup" in h["matcher"]
         )
-        assert startup_hooks[0]["command"] == "nx upgrade --auto"
+        assert startup_hooks[0]["command"].startswith("nx upgrade --auto")
         assert startup_hooks[0]["timeout"] == 30
 
 
