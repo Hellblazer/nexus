@@ -57,6 +57,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import sqlite3
+
 import structlog
 
 from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
@@ -98,13 +100,32 @@ class T2Database:
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Order matters for WAL setup: MemoryStore runs first and
-        # transitions the SQLite file into WAL mode. Subsequent stores
-        # re-issue ``PRAGMA journal_mode=WAL`` on their own connections,
-        # which is a no-op once the file is already in WAL. The
-        # per-store ``busy_timeout=5000`` absorbs the brief write-lock
-        # contention that can occur while four connections race through
-        # their initial CREATE TABLE IF NOT EXISTS scripts.
+
+        # ── Transient connection: run pending migrations (RDR-076) ────
+        from nexus.db.migrations import _upgrade_done, apply_pending
+
+        try:
+            path_key = str(path.resolve())
+        except OSError:
+            path_key = str(path)
+
+        if path_key not in _upgrade_done:
+            try:
+                from importlib.metadata import version as _pkg_version
+
+                current_version = _pkg_version("conexus")
+            except Exception:
+                current_version = "0.0.0"
+
+            conn = sqlite3.connect(str(path), check_same_thread=False)
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA journal_mode=WAL")
+                apply_pending(conn, current_version)
+            finally:
+                conn.close()
+
+        # ── Construct domain stores ───────────────────────────────────
         self.memory: MemoryStore = MemoryStore(path)
         self.plans: PlanLibrary = PlanLibrary(path)
         # CatalogTaxonomy takes a MemoryStore reference for the

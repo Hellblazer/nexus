@@ -137,7 +137,7 @@ The audit entries are the measurement surface for CA-4: if `nexus_rdr/*-close-ov
 
 Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. Populate:
 
-- **RDR Summary**: Extract from the RDR's Problem Statement
+- **RDR Summary**: Extract from the RDR's Problem Statement (or Problem) section
 - **Implementation Status**: "Implemented"
 - **What Diverged**: User's divergence notes
 - **Drift Classification**: Prompt user to classify each divergence into categories:

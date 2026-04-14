@@ -53,7 +53,7 @@ If `$RDR_DIR` does not exist:
 
 If `$CLAUDE_PLUGIN_ROOT` is not available, use the templates inline (they are embedded below in the Templates section).
 
-> **Gap convention**: the Problem Statement section must use `#### Gap N: <title>` headings (regex: `^#### Gap \d+:`). The close skill uses this format to enumerate gaps and require per-gap closure pointers when `--reason implemented` is passed. Authors must fill in concrete gap headings before the RDR is accepted.
+> **Gap convention**: the Problem / Problem Statement section must use `#### Gap N: <title>` headings (regex: `^#{3,5} Gap \d+:`). The close skill uses this format to enumerate gaps and require per-gap closure pointers when `--reason implemented` is passed. Authors must fill in concrete gap headings before the RDR is accepted. Both `## Problem` and `## Problem Statement` are accepted as the section heading.
 
 ### Step 2: Assign ID
 

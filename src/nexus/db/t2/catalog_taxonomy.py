@@ -158,74 +158,31 @@ class CatalogTaxonomy:
         """Add topics and topic_assignments tables if missing.
 
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
-        Kept as a separate migration path distinct from the base
-        ``_TAXONOMY_SCHEMA_SQL`` script because some pre-RDR-061
-        databases predate the topics tables and the migration log
-        emits a structured event when it fires.
+        Delegates to module-level function in migrations.py (RDR-076).
         """
-        row = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"
-        ).fetchone()
-        if row is not None:
-            return
-        _log.info("Migrating T2 schema to add topics tables")
-        self.conn.executescript(
-            """\
-            CREATE TABLE IF NOT EXISTS topics (
-                id            INTEGER PRIMARY KEY,
-                label         TEXT NOT NULL,
-                parent_id     INTEGER REFERENCES topics(id),
-                collection    TEXT NOT NULL,
-                centroid_hash TEXT,
-                doc_count     INTEGER NOT NULL DEFAULT 0,
-                created_at    TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS topic_assignments (
-                doc_id    TEXT NOT NULL,
-                topic_id  INTEGER NOT NULL REFERENCES topics(id),
-                PRIMARY KEY (doc_id, topic_id)
-            );
-        """
-        )
-        self.conn.commit()
-        _log.info("topics migration complete")
+        from nexus.db.migrations import migrate_topics
+
+        migrate_topics(self.conn)
 
     def _migrate_assigned_by_if_needed(self) -> None:
         """Add ``assigned_by`` column to ``topic_assignments`` if missing.
 
         RDR-070 (nexus-9k5). Lock-naive: caller must hold both locks.
+        Delegates to module-level function in migrations.py (RDR-076).
         """
-        cols = {
-            row[1]
-            for row in self.conn.execute("PRAGMA table_info(topic_assignments)").fetchall()
-        }
-        if "assigned_by" in cols:
-            return
-        _log.info("Migrating topic_assignments: adding assigned_by column")
-        self.conn.execute(
-            "ALTER TABLE topic_assignments ADD COLUMN assigned_by TEXT NOT NULL DEFAULT 'hdbscan'"
-        )
-        self.conn.commit()
+        from nexus.db.migrations import migrate_assigned_by
+
+        migrate_assigned_by(self.conn)
 
     def _migrate_review_columns_if_needed(self) -> None:
         """Add ``review_status`` and ``terms`` columns if missing.
 
         RDR-070 (nexus-lbu). Lock-naive: caller must hold both locks.
+        Delegates to module-level function in migrations.py (RDR-076).
         """
-        cols = {
-            row[1]
-            for row in self.conn.execute("PRAGMA table_info(topics)").fetchall()
-        }
-        if "review_status" not in cols:
-            _log.info("Migrating topics: adding review_status column")
-            self.conn.execute(
-                "ALTER TABLE topics ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'"
-            )
-        if "terms" not in cols:
-            _log.info("Migrating topics: adding terms column")
-            self.conn.execute("ALTER TABLE topics ADD COLUMN terms TEXT")
-        if "review_status" not in cols or "terms" not in cols:
-            self.conn.commit()
+        from nexus.db.migrations import migrate_review_columns
+
+        migrate_review_columns(self.conn)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -1092,6 +1049,52 @@ class CatalogTaxonomy:
             return None
 
         return int(results["metadatas"][0][0]["topic_id"])
+
+    def assign_batch(
+        self,
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: list[list[float]],
+        chroma_client: Any,
+    ) -> int:
+        """Assign multiple docs to their nearest topics via centroid ANN.
+
+        Queries ``taxonomy__centroids`` once for each embedding and bulk-inserts
+        assignments.  Returns the number of docs successfully assigned.
+
+        No-op (returns 0) when centroids don't exist or the collection has no
+        centroid entries — callers need not guard.
+        """
+        try:
+            centroid_coll = chroma_client.get_collection(
+                "taxonomy__centroids",
+                embedding_function=None,
+            )
+        except Exception:
+            return 0
+
+        if centroid_coll.count() == 0:
+            return 0
+
+        assigned = 0
+        for doc_id, emb in zip(doc_ids, embeddings):
+            try:
+                results = centroid_coll.query(
+                    query_embeddings=[emb if isinstance(emb, list) else emb.tolist()],
+                    n_results=1,
+                    where={"collection": collection_name},
+                )
+            except Exception:
+                continue
+
+            if not results["ids"] or not results["ids"][0]:
+                continue
+
+            topic_id = int(results["metadatas"][0][0]["topic_id"])
+            self.assign_topic(doc_id, topic_id, assigned_by="centroid")
+            assigned += 1
+
+        return assigned
 
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove topic_assignments for a deleted memory entry, empty topics.

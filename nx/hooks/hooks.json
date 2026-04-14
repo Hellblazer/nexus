@@ -6,6 +6,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "nx upgrade --auto",
+            "timeout": 30
+          },
+          {
+            "type": "command",
             "command": "nx hook session-start",
             "timeout": 10
           },

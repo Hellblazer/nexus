@@ -38,6 +38,88 @@ def _check(label: str, ok: bool, detail: str = "") -> str:
     return _check_line(label, ok, detail)
 
 
+def _run_check_schema() -> None:
+    """Validate T2 database schema and report pending migrations (RDR-076)."""
+    import sqlite3
+
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.migrations import MIGRATIONS, _parse_version
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo("T2 database not found — nothing to check.")
+        return
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=2000")
+    lines: list[str] = []
+    all_ok = True
+
+    # Check expected tables
+    tables = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    for tbl in ("memory", "plans", "topics", "topic_assignments", "taxonomy_meta", "topic_links", "relevance_log"):
+        ok = tbl in tables
+        lines.append(_check_line(f"Table {tbl}", ok))
+        if not ok:
+            all_ok = False
+
+    # Check _nexus_version
+    has_ver = "_nexus_version" in tables
+    lines.append(_check_line("Version tracking table", has_ver))
+
+    if has_ver:
+        row = conn.execute(
+            "SELECT value FROM _nexus_version WHERE key='cli_version'"
+        ).fetchone()
+        if row:
+            stored = row[0]
+            try:
+                from importlib.metadata import version as _pkg_version
+
+                cli_ver = _pkg_version("conexus")
+            except Exception:
+                cli_ver = "0.0.0"
+            stored_t = _parse_version(stored)
+            cli_t = _parse_version(cli_ver)
+            pending = [
+                m
+                for m in MIGRATIONS
+                if _parse_version(m.introduced) > stored_t
+                and _parse_version(m.introduced) <= cli_t
+            ]
+            if pending:
+                all_ok = False
+                lines.append(
+                    _check_line(
+                        "Pending migrations",
+                        False,
+                        f"{len(pending)} pending (stored: v{stored}, CLI: v{cli_ver})",
+                    )
+                )
+                lines.append("    Fix: run 'nx upgrade'")
+            else:
+                lines.append(_check_line("Schema version", True, f"v{stored}"))
+        else:
+            all_ok = False
+            lines.append(_check_line("Version row", False, "missing"))
+    else:
+        all_ok = False
+        lines.append("    Fix: run 'nx upgrade'")
+
+    conn.close()
+
+    click.echo("T2 Schema Check:")
+    for line in lines:
+        click.echo(line)
+    if all_ok:
+        click.echo("\nAll checks passed.")
+
+
 @click.command("doctor")
 @click.option(
     "--clean-checkpoints",
@@ -69,9 +151,19 @@ def _check(label: str, ok: bool, detail: str = "") -> str:
     default=False,
     help="Report affected entries without writing changes (use with --fix-paths).",
 )
+@click.option(
+    "--check-schema",
+    is_flag=True,
+    default=False,
+    help="Validate T2 database schema and report pending migrations.",
+)
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
-               fix_paths: bool, dry_run: bool) -> None:
+               fix_paths: bool, dry_run: bool, check_schema: bool) -> None:
     """Verify that all required services and credentials are available."""
+    if check_schema:
+        _run_check_schema()
+        return
+
     if fix:
         from nexus.config import is_local_mode, _default_local_path
         from nexus.db.t3 import T3Database, apply_hnsw_ef
