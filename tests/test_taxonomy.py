@@ -311,6 +311,69 @@ def test_assign_single_cross_collection_isolation(
     assert result is None, "assign_single must not cross collection boundaries"
 
 
+def test_assign_single_cross_collection_finds_foreign_topic(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_single with cross_collection=True returns topics from other collections."""
+    rng = np.random.default_rng(42)
+    # Create topics in collection A
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"doc-{i}" for i in range(60)]
+    texts = [f"text {i}" for i in range(60)]
+    db.taxonomy.discover_topics("coll_A_xc", doc_ids, embeddings, texts, chroma_client)
+
+    # Query from collection B with cross_collection=True — should find A's topics
+    new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
+    new_emb[0] += 3.0
+    result = db.taxonomy.assign_single(
+        "coll_B_xc", new_emb, chroma_client, cross_collection=True,
+    )
+    assert result is not None, "cross_collection=True should find topics from other collections"
+
+    # Confirm default (False) still isolates
+    result_isolated = db.taxonomy.assign_single(
+        "coll_B_xc", new_emb, chroma_client, cross_collection=False,
+    )
+    assert result_isolated is None, "cross_collection=False must not cross boundaries"
+
+
+def test_assign_batch_cross_collection(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """assign_batch with cross_collection=True assigns from foreign centroids."""
+    rng = np.random.default_rng(42)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    db.taxonomy.discover_topics(
+        "batch_A_xc",
+        [f"doc-{i}" for i in range(60)],
+        embeddings,
+        [f"text {i}" for i in range(60)],
+        chroma_client,
+    )
+
+    # New batch from collection B
+    new_embs = rng.standard_normal((3, 384)).astype(np.float32) * 0.1
+    new_embs[:, 0] += 3.0
+    new_ids = ["xc-0", "xc-1", "xc-2"]
+
+    assigned = db.taxonomy.assign_batch(
+        "batch_B_xc", new_ids, new_embs.tolist(), chroma_client,
+        cross_collection=True,
+    )
+    assert assigned == 3
+
+    # Default should assign 0 (no centroids for batch_B_xc)
+    assigned_isolated = db.taxonomy.assign_batch(
+        "batch_B_xc", ["iso-0"], new_embs[:1].tolist(), chroma_client,
+        cross_collection=False,
+    )
+    assert assigned_isolated == 0
+
+
 def test_assign_batch_assigns_multiple_docs(
     db: T2Database, chroma_client: chromadb.ClientAPI,
 ) -> None:

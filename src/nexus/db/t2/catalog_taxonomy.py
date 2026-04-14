@@ -1048,12 +1048,17 @@ class CatalogTaxonomy:
         collection_name: str,
         embedding: np.ndarray,
         chroma_client: Any,
+        *,
+        cross_collection: bool = False,
     ) -> int | None:
         """Return the nearest topic_id for a single embedding.
 
-        Queries ``taxonomy__centroids`` with collection-scoped nearest-centroid
-        assignment (RF-070-7). Returns ``None`` when the centroid collection
-        does not exist, is empty, or dimensions mismatch (SC-10).
+        When *cross_collection* is False (default), queries only centroids
+        for *collection_name*.  When True, queries all centroids regardless
+        of collection — used for cross-collection projection (RDR-075 SC-6).
+
+        Returns ``None`` when the centroid collection does not exist, is
+        empty, or dimensions mismatch (SC-10).
         """
         try:
             centroid_coll = chroma_client.get_collection(
@@ -1069,14 +1074,17 @@ class CatalogTaxonomy:
         if not _check_centroid_dimension(embedding, centroid_coll):
             return None
 
+        query_kwargs: dict[str, Any] = {
+            "query_embeddings": [embedding.tolist()],
+            "n_results": 1,
+        }
+        if not cross_collection:
+            query_kwargs["where"] = {"collection": collection_name}
+
         try:
-            results = centroid_coll.query(
-                query_embeddings=[embedding.tolist()],
-                n_results=1,
-                where={"collection": collection_name},
-            )
+            results = centroid_coll.query(**query_kwargs)
         except Exception:
-            return None  # No centroids match the collection filter
+            return None  # No centroids match the filter
 
         if not results["ids"] or not results["ids"][0]:
             return None
@@ -1089,14 +1097,17 @@ class CatalogTaxonomy:
         doc_ids: list[str],
         embeddings: list[list[float]],
         chroma_client: Any,
+        *,
+        cross_collection: bool = False,
     ) -> int:
         """Assign multiple docs to their nearest topics via centroid ANN.
 
-        Queries ``taxonomy__centroids`` once for each embedding and bulk-inserts
-        assignments.  Returns the number of docs successfully assigned.
+        When *cross_collection* is False (default), queries only centroids
+        for *collection_name*.  When True, queries all centroids — used for
+        cross-collection projection (RDR-075 SC-6).
 
-        No-op (returns 0) when centroids don't exist or the collection has no
-        centroid entries — callers need not guard.
+        Returns the number of docs successfully assigned.  No-op (returns 0)
+        when centroids don't exist or dimensions mismatch.
         """
         try:
             centroid_coll = chroma_client.get_collection(
@@ -1116,13 +1127,16 @@ class CatalogTaxonomy:
             if not _check_centroid_dimension(sample, centroid_coll):
                 return 0
 
+        base_kwargs: dict[str, Any] = {"n_results": 1}
+        if not cross_collection:
+            base_kwargs["where"] = {"collection": collection_name}
+
         assigned = 0
         for doc_id, emb in zip(doc_ids, embeddings):
             try:
                 results = centroid_coll.query(
                     query_embeddings=[emb if isinstance(emb, list) else emb.tolist()],
-                    n_results=1,
-                    where={"collection": collection_name},
+                    **base_kwargs,
                 )
             except Exception:
                 continue
