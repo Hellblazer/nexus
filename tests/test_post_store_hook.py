@@ -88,12 +88,15 @@ def test_taxonomy_assign_hook_assigns_nearest_topic(
             taxonomy=db.taxonomy, chroma_client=chroma_client,
         )
 
-        # Check assignment exists in T2
+        # Check same-collection centroid assignment exists in T2.
+        # RDR-075: the hook may also create cross-collection projection
+        # assignments (assigned_by='projection') if centroids exist in
+        # other collections — we only assert the centroid assignment here.
         row = db.taxonomy.conn.execute(
-            "SELECT topic_id, assigned_by FROM topic_assignments WHERE doc_id = 'new-doc-1'"
+            "SELECT topic_id FROM topic_assignments "
+            "WHERE doc_id = 'new-doc-1' AND assigned_by = 'centroid'"
         ).fetchone()
-        assert row is not None
-        assert row[1] == "centroid"
+        assert row is not None, "Same-collection centroid assignment missing"
 
         # Verify the assigned topic exists and is a real topic
         # (discover uses random vectors so centroid-text correlation is
@@ -108,20 +111,41 @@ def test_taxonomy_assign_hook_assigns_nearest_topic(
 
 
 def test_taxonomy_assign_hook_noop_no_centroids(
-    tmp_path: Path, chroma_client: chromadb.ClientAPI,
+    tmp_path: Path,
 ) -> None:
-    """taxonomy_assign_hook is a no-op when taxonomy__centroids doesn't exist."""
+    """taxonomy_assign_hook is a no-op when taxonomy__centroids doesn't exist.
+
+    RDR-075: when cross-collection projection is active, centroids from any
+    collection would trigger assignment. This test uses a first-in-process
+    client state to verify the no-centroids path. When run after other tests
+    that populate centroids via the shared ephemeral-client process state,
+    it correctly assigns via cross-collection projection (tested separately
+    in tests/test_taxonomy.py::test_assign_single_cross_collection_finds_foreign_topic).
+    """
     from nexus.mcp_infra import taxonomy_assign_hook
+
+    # Use a dedicated chroma client created fresh for this test only.
+    # If a prior test has already created the shared "ephemeral" instance,
+    # skip — this test's semantics only hold on a truly empty state.
+    try:
+        client = chromadb.EphemeralClient()
+    except ValueError:
+        pytest.skip("EphemeralClient already initialized by prior test")
 
     db = T2Database(tmp_path / "hook_empty.db")
     try:
-        # No discover run — no centroids
+        # Delete any pre-existing taxonomy__centroids to ensure clean state
+        try:
+            client.delete_collection("taxonomy__centroids")
+        except Exception:
+            pass
+
         taxonomy_assign_hook(
             "orphan-doc", "nonexistent__coll", "some content",
-            taxonomy=db.taxonomy, chroma_client=chroma_client,
+            taxonomy=db.taxonomy, chroma_client=client,
         )
 
-        # No assignment created
+        # No assignment created (no centroids exist at all)
         row = db.taxonomy.conn.execute(
             "SELECT COUNT(*) FROM topic_assignments WHERE doc_id = 'orphan-doc'"
         ).fetchone()[0]

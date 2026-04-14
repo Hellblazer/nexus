@@ -78,7 +78,12 @@ def test_discover_topics_creates_topics_and_centroids(
     centroid_coll = chroma_client.get_collection(
         "taxonomy__centroids", embedding_function=None,
     )
-    result = centroid_coll.get(include=["metadatas", "embeddings"])
+    # Filter to this collection's centroids (shared EphemeralClient may
+    # carry centroids from other tests in the same process).
+    result = centroid_coll.get(
+        where={"collection": "test__coll"},
+        include=["metadatas", "embeddings"],
+    )
     assert len(result["ids"]) >= 2
     # Centroid embeddings are 384d
     assert len(result["embeddings"][0]) == 384
