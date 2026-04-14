@@ -91,6 +91,42 @@ def _rdr_collection_name(repo: Path) -> str:
     return _safe_collection("rdr__", name, path_hash)
 
 
+def list_sibling_collections(
+    collection_name: str,
+    t3_client: Any,
+) -> list[str]:
+    """Return all T3 collections sharing the same repo identity suffix.
+
+    For ``docs__art-architecture-8c2e74c0``, returns all collections whose
+    name ends with ``-8c2e74c0``, excluding the input and ``taxonomy__*``.
+
+    Limitation: ``knowledge__*`` collections without a ``{hash8}`` suffix
+    are not detected — use explicit ``--against`` for those.
+    """
+    # Extract hash8 suffix: last 8 chars after the final hyphen
+    parts = collection_name.rsplit("-", 1)
+    if len(parts) != 2 or len(parts[1]) != 8:
+        return []
+    hash8 = parts[1]
+
+    try:
+        all_colls = t3_client.list_collections()
+    except Exception:
+        return []
+
+    siblings = []
+    for coll in all_colls:
+        name = coll.name if hasattr(coll, "name") else str(coll)
+        if name == collection_name:
+            continue
+        if name.startswith("taxonomy__"):
+            continue
+        if name.endswith(f"-{hash8}"):
+            siblings.append(name)
+
+    return sorted(siblings)
+
+
 class RepoRegistry:
     """Thread-safe registry of indexed repositories stored as JSON."""
 

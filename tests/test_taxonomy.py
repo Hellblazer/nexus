@@ -3049,3 +3049,37 @@ class TestProjectCmd:
 
         assert result.exit_code == 0
         assert "persisted" in result.output.lower()
+
+
+class TestListSiblingCollections:
+    """Tests for list_sibling_collections (RDR-075 SC-8)."""
+
+    def test_finds_siblings_by_hash8(self, chroma_client: chromadb.ClientAPI) -> None:
+        from nexus.registry import list_sibling_collections
+
+        # Create collections with shared hash suffix
+        chroma_client.get_or_create_collection("code__myrepo-abc12345")
+        chroma_client.get_or_create_collection("docs__myrepo-abc12345")
+        chroma_client.get_or_create_collection("rdr__myrepo-abc12345")
+        chroma_client.get_or_create_collection("code__other-def67890")
+
+        siblings = list_sibling_collections("code__myrepo-abc12345", chroma_client)
+        assert "docs__myrepo-abc12345" in siblings
+        assert "rdr__myrepo-abc12345" in siblings
+        assert "code__myrepo-abc12345" not in siblings  # excludes self
+        assert "code__other-def67890" not in siblings  # different hash
+
+    def test_excludes_taxonomy_collections(self, chroma_client: chromadb.ClientAPI) -> None:
+        from nexus.registry import list_sibling_collections
+
+        chroma_client.get_or_create_collection("code__repo-aaa11111")
+        chroma_client.get_or_create_collection("taxonomy__centroids-aaa11111")
+
+        siblings = list_sibling_collections("code__repo-aaa11111", chroma_client)
+        assert not any(s.startswith("taxonomy__") for s in siblings)
+
+    def test_no_hash_suffix_returns_empty(self, chroma_client: chromadb.ClientAPI) -> None:
+        from nexus.registry import list_sibling_collections
+
+        siblings = list_sibling_collections("knowledge__art", chroma_client)
+        assert siblings == []
