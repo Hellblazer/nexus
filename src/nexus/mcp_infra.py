@@ -316,6 +316,91 @@ def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
         taxonomy.assign_topic(doc_id, topic_id, assigned_by="centroid")
 
 
+def taxonomy_assign_batch(
+    doc_ids: list[str],
+    collection: str,
+    embeddings: list[list[float]],
+) -> int:
+    """Assign a batch of indexed docs to their nearest topics.
+
+    Called by CLI indexing paths after chunk upsert.  Uses existing T3
+    embeddings (already in *embeddings*) — no re-fetch or re-embed needed.
+
+    Returns the number of docs assigned, or 0 when centroids don't exist
+    (no discover run yet) or the collection is excluded.
+    """
+    from fnmatch import fnmatch
+
+    from nexus.config import is_local_mode, load_config
+
+    if not doc_ids or not embeddings:
+        return 0
+
+    if is_local_mode():
+        exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
+        if any(fnmatch(collection, pat) for pat in exclude):
+            return 0
+
+    try:
+        with t2_ctx() as db:
+            chroma_client = get_t3()._client
+            return db.taxonomy.assign_batch(
+                collection, doc_ids, embeddings, chroma_client,
+            )
+    except Exception:
+        import structlog
+        structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
+        return 0
+
+
+# ── Version compatibility check (RDR-076) ─────────────────────────────────────
+
+
+def check_version_compatibility() -> None:
+    """Synchronous check: warn if CLI version diverges from stored version.
+
+    Called from MCP ``main()`` before ``mcp.run()``.  Never blocks startup.
+    """
+    import sqlite3
+
+    import structlog
+
+    log = structlog.get_logger()
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        cli_ver = _pkg_version("conexus")
+        db_path = default_db_path()
+        if not db_path.exists():
+            return
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT value FROM _nexus_version WHERE key='cli_version'"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return  # table doesn't exist yet
+        finally:
+            conn.close()
+        if row is None:
+            return
+        stored_ver = row[0]
+        from nexus.db.migrations import _parse_version
+
+        cli_t = _parse_version(cli_ver)
+        stored_t = _parse_version(stored_ver)
+        # Warn on minor or major divergence, not patch
+        if len(cli_t) >= 2 and len(stored_t) >= 2 and cli_t[:2] != stored_t[:2]:
+            log.warning(
+                "version_mismatch",
+                cli_version=cli_ver,
+                stored_version=stored_ver,
+                hint="run 'nx upgrade' to apply pending migrations",
+            )
+    except Exception:
+        pass  # never block MCP startup
+
+
 # ── Test injection ────────────────────────────────────────────────────────────
 
 

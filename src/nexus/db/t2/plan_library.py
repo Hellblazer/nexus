@@ -136,61 +136,22 @@ class PlanLibrary:
     def _migrate_plans_if_needed(self) -> None:
         """Add 'project' column to plans table if missing (v2.8.0 schema change).
 
-        Safe to call multiple times — no-op when 'project' is already present
-        or when the plans table doesn't exist yet.
-
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
+        Delegates to module-level function in migrations.py (RDR-076).
         """
-        row = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='plans'"
-        ).fetchone()
-        if row is None or "project" in row[0]:
-            return
+        from nexus.db.migrations import migrate_plan_project
 
-        _log.info("Migrating plans table to add project column")
-        self.conn.execute("ALTER TABLE plans ADD COLUMN project TEXT NOT NULL DEFAULT ''")
-        # Recreate FTS + triggers with project column
-        self.conn.executescript(
-            """\
-            DROP TRIGGER IF EXISTS plans_ai;
-            DROP TRIGGER IF EXISTS plans_ad;
-            DROP TRIGGER IF EXISTS plans_au;
-            DROP TABLE  IF EXISTS plans_fts;
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
-                query, tags, project, content=plans, content_rowid='id'
-            );
-
-            CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
-                INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-            END;
-            CREATE TRIGGER IF NOT EXISTS plans_ad AFTER DELETE ON plans BEGIN
-                INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-                    VALUES ('delete', old.id, old.query, old.tags, old.project);
-            END;
-            CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
-                INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-                    VALUES ('delete', old.id, old.query, old.tags, old.project);
-                INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
-            END;
-        """
-        )
-        self.conn.execute("INSERT INTO plans_fts(plans_fts) VALUES('rebuild')")
-        self.conn.commit()
-        _log.info("plans migration complete (added project column)")
+        migrate_plan_project(self.conn)
 
     def _migrate_plans_ttl_if_needed(self) -> None:
         """Add 'ttl' column to plans table if missing.
 
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
+        Delegates to module-level function in migrations.py (RDR-076).
         """
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(plans)").fetchall()}
-        if not cols or "ttl" in cols:
-            return
-        _log.info("Migrating plans table to add ttl column")
-        self.conn.execute("ALTER TABLE plans ADD COLUMN ttl INTEGER")
-        self.conn.commit()
-        _log.info("plans ttl migration complete")
+        from nexus.db.migrations import migrate_plan_ttl
+
+        migrate_plan_ttl(self.conn)
 
     # ── Public API ────────────────────────────────────────────────────────
 

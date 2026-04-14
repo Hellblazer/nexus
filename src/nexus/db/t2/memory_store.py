@@ -298,56 +298,22 @@ class MemoryStore:
     def _migrate_fts_if_needed(self) -> None:
         """Upgrade FTS5 index to include 'title' column if the DB uses the old schema.
 
-        Safe to call multiple times — no-op when 'title' is already present.
-        FTS5 content tables are pure indexes; the authoritative data lives in
-        the ``memory`` table and is unaffected by dropping/recreating the FTS table.
-
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
+        Delegates to module-level function in migrations.py (RDR-076).
         """
-        row = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
-        ).fetchone()
-        if row is None or "title" in row[0]:
-            # Table missing (fresh DB handled by _MEMORY_SCHEMA_SQL) or already up to date
-            return
+        from nexus.db.migrations import migrate_memory_fts
 
-        _log.info("Migrating memory_fts to include title column")
-        # Drop old triggers first (they reference the old column list)
-        self.conn.executescript(
-            """\
-            DROP TRIGGER IF EXISTS memory_ai;
-            DROP TRIGGER IF EXISTS memory_ad;
-            DROP TRIGGER IF EXISTS memory_au;
-            DROP TABLE  IF EXISTS memory_fts;
-        """
-        )
-        # Recreate with new schema + triggers
-        self.conn.executescript(_FTS_REBUILD_SQL)
-        # Rebuild the FTS index from the authoritative memory table
-        self.conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
-        self.conn.commit()
-        _log.info("memory_fts migration complete")
+        migrate_memory_fts(self.conn)
 
     def _migrate_access_tracking_if_needed(self) -> None:
         """Add access_count and last_accessed columns to memory if missing.
 
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
+        Delegates to module-level function in migrations.py (RDR-076).
         """
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(memory)").fetchall()}
-        changed = False
-        if "access_count" not in cols:
-            self.conn.execute(
-                "ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0 NOT NULL"
-            )
-            changed = True
-        if "last_accessed" not in cols:
-            self.conn.execute(
-                "ALTER TABLE memory ADD COLUMN last_accessed TEXT DEFAULT ''"
-            )
-            changed = True
-        if changed:
-            self.conn.commit()
-            _log.info("access_tracking migration complete")
+        from nexus.db.migrations import migrate_access_tracking
+
+        migrate_access_tracking(self.conn)
 
     # ── Write ─────────────────────────────────────────────────────────────
 

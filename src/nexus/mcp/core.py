@@ -1151,8 +1151,10 @@ def collection_verify(name: str) -> str:
 def main():
     """Run the core MCP server on stdio transport."""
     from nexus.logging_setup import configure_logging
+    from nexus.mcp_infra import check_version_compatibility
 
     configure_logging("mcp")
+    check_version_compatibility()
     mcp.run(transport="stdio")
 
 
