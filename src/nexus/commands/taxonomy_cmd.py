@@ -366,7 +366,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                         )
                         assignments = result.get("chunk_assignments", [])
                         if assignments:
-                            _persist_assignments(db.taxonomy, assignments)
+                            _persist_assignments(db.taxonomy, assignments, quiet=True)
                             proj_count += len(assignments)
                 if proj_count:
                     click.echo(f"  Projection: {proj_count} cross-collection assignments")
@@ -1037,11 +1037,19 @@ def project_cmd(
 def _persist_assignments(
     taxonomy: "CatalogTaxonomy",
     chunk_assignments: list[tuple[str, int]],
-) -> None:
-    """Write per-chunk projection assignments from project_against results."""
+    *,
+    quiet: bool = False,
+) -> int:
+    """Write per-chunk projection assignments from project_against results.
+
+    Returns the number of assignments written.  Set *quiet* to suppress
+    CLI output (used when called from pipeline context).
+    """
     for doc_id, topic_id in chunk_assignments:
         taxonomy.assign_topic(doc_id, topic_id, assigned_by="projection")
-    click.echo(f"Persisted {len(chunk_assignments)} projection assignment(s).")
+    if not quiet:
+        click.echo(f"Persisted {len(chunk_assignments)} projection assignment(s).")
+    return len(chunk_assignments)
 
 
 def _run_backfill(
@@ -1080,7 +1088,7 @@ def _run_backfill(
 
             if persist and result.get("chunk_assignments"):
                 _persist_assignments(taxonomy, result["chunk_assignments"])
-        except (ValueError, Exception) as e:
+        except Exception as e:
             click.echo(f"    Skipped: {e}")
 
     click.echo("Backfill complete.")

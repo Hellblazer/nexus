@@ -590,13 +590,13 @@ class CatalogTaxonomy:
         """Persist inter-topic link pairs from ``compute_topic_links``.
 
         Each dict has from_topic_id, to_topic_id, link_count, link_types.
+        Uses INSERT OR REPLACE — preserves projection links written by
+        ``_discover_cross_links`` (only overwrites matching PK pairs).
         Returns number of rows upserted.
         """
         if not links:
             return 0
         with self._lock:
-            # Clear existing links
-            self.conn.execute("DELETE FROM topic_links")
             for link in links:
                 self.conn.execute(
                     "INSERT OR REPLACE INTO topic_links "
@@ -1096,27 +1096,29 @@ class CatalogTaxonomy:
         o_norms[o_norms == 0] = 1.0
         sim = (new_embs / n_norms) @ (other_embs / o_norms).T
 
-        links_added = 0
-        with self._lock:
-            for i, meta in enumerate(new_metas):
-                new_tid = int(meta["topic_id"])
-                for j in range(sim.shape[1]):
-                    if float(sim[i, j]) >= self._PROJECTION_THRESHOLD:
-                        other_tid = int(other_metas[j]["topic_id"])
-                        self.conn.execute(
-                            "INSERT OR REPLACE INTO topic_links "
-                            "(from_topic_id, to_topic_id, link_count, link_types) "
-                            "VALUES (?, ?, ?, ?)",
-                            (new_tid, other_tid, 1, '["projection"]'),
-                        )
-                        links_added += 1
-            if links_added:
-                self.conn.commit()
-                _log.info(
-                    "discover_cross_links",
-                    collection=collection_name,
-                    links=links_added,
+        # Collect pairs outside the lock (numpy work, no DB access)
+        pairs: list[tuple[int, int]] = []
+        for i, meta in enumerate(new_metas):
+            new_tid = int(meta["topic_id"])
+            for j in range(sim.shape[1]):
+                if float(sim[i, j]) >= self._PROJECTION_THRESHOLD:
+                    other_tid = int(other_metas[j]["topic_id"])
+                    pairs.append((new_tid, other_tid))
+
+        if pairs:
+            with self._lock:
+                self.conn.executemany(
+                    "INSERT OR REPLACE INTO topic_links "
+                    "(from_topic_id, to_topic_id, link_count, link_types) "
+                    "VALUES (?, ?, 1, ?)",
+                    [(a, b, '["projection"]') for a, b in pairs],
                 )
+                self.conn.commit()
+            _log.info(
+                "discover_cross_links",
+                collection=collection_name,
+                links=len(pairs),
+            )
 
     # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────
 
@@ -1131,8 +1133,9 @@ class CatalogTaxonomy:
         """Return the nearest topic_id for a single embedding.
 
         When *cross_collection* is False (default), queries only centroids
-        for *collection_name*.  When True, queries all centroids regardless
-        of collection — used for cross-collection projection (RDR-075 SC-6).
+        for *collection_name*.  When True, queries only FOREIGN centroids
+        (``$ne collection_name``) — used for cross-collection projection
+        (RDR-075 SC-6).
 
         Returns ``None`` when the centroid collection does not exist, is
         empty, or dimensions mismatch (SC-10).
@@ -1155,7 +1158,9 @@ class CatalogTaxonomy:
             "query_embeddings": [embedding.tolist()],
             "n_results": 1,
         }
-        if not cross_collection:
+        if cross_collection:
+            query_kwargs["where"] = {"collection": {"$ne": collection_name}}
+        else:
             query_kwargs["where"] = {"collection": collection_name}
 
         try:
@@ -1180,8 +1185,9 @@ class CatalogTaxonomy:
         """Assign multiple docs to their nearest topics via centroid ANN.
 
         When *cross_collection* is False (default), queries only centroids
-        for *collection_name*.  When True, queries all centroids — used for
-        cross-collection projection (RDR-075 SC-6).
+        for *collection_name*.  When True, queries only FOREIGN centroids
+        (``$ne collection_name``) — used for cross-collection projection
+        (RDR-075 SC-6).
 
         Returns the number of docs successfully assigned.  No-op (returns 0)
         when centroids don't exist or dimensions mismatch.
@@ -1205,7 +1211,9 @@ class CatalogTaxonomy:
                 return 0
 
         base_kwargs: dict[str, Any] = {"n_results": 1}
-        if not cross_collection:
+        if cross_collection:
+            base_kwargs["where"] = {"collection": {"$ne": collection_name}}
+        else:
             base_kwargs["where"] = {"collection": collection_name}
 
         assigned = 0

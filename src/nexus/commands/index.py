@@ -205,7 +205,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                             )
                             if result.get("chunk_assignments"):
                                 from nexus.commands.taxonomy_cmd import _persist_assignments
-                                _persist_assignments(db.taxonomy, result["chunk_assignments"])
+                                _persist_assignments(db.taxonomy, result["chunk_assignments"], quiet=True)
                 except Exception:
                     _log.debug("taxonomy_projection_failed", exc_info=True)
 
